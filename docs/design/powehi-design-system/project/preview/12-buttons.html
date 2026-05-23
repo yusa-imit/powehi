@@ -1,0 +1,23 @@
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  html,body{margin:0;background:var(--bg-void);color:var(--fg-1);padding:28px;font-family:var(--font-sans)}
+  .wrap{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
+  .btn{display:inline-flex;align-items:center;gap:8px;font-family:var(--font-sans);font-weight:500;font-size:14px;border-radius:10px;padding:10px 16px;cursor:pointer;border:1px solid transparent;transition:all 200ms cubic-bezier(0.22,1,0.36,1)}
+  .primary{background:linear-gradient(180deg,#FF9E52,#FF7A2B);color:#2A0A00;box-shadow:0 0 0 1px rgba(255,138,61,0.35), 0 0 18px rgba(255,138,61,0.25), inset 0 1px 0 rgba(255,255,255,0.25)}
+  .secondary{background:var(--bg-elevated);color:var(--fg-1);border-color:var(--border-soft)}
+  .ghost{background:transparent;color:var(--fg-2)}
+  .danger{background:transparent;color:#FF9999;border-color:rgba(255,122,122,0.3)}
+  .photon{background:rgba(168,200,255,0.10);color:#C8DCFF;border-color:rgba(168,200,255,0.3)}
+  .icon{width:14px;height:14px;border-radius:50%;border:1.5px solid currentColor}
+  .lbl{font-size:11px;text-transform:uppercase;letter-spacing:0.14em;color:var(--fg-3);font-weight:500;margin-bottom:8px}
+</style></head><body>
+<div class="lbl">Buttons</div>
+<div class="wrap">
+  <button class="btn primary"><span class="icon" style="background:#2A0A00;border-color:#2A0A00"></span>Send securely</button>
+  <button class="btn secondary">New chat</button>
+  <button class="btn ghost">Cancel</button>
+  <button class="btn photon">Verify keys</button>
+  <button class="btn danger">Delete chat</button>
+</div>
+</body></html>

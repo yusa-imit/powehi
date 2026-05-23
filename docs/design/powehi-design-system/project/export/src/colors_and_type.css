@@ -1,0 +1,207 @@
+/* ============================================================
+   POWEHI · DESIGN TOKENS  (v2 — dual-light)
+   Pōwehi (warm accretion) × Gargantua (cool photon ring).
+   End-to-end encrypted messaging. Past the horizon, only you.
+   ============================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap');
+
+:root {
+  /* ---------- BACKGROUND SYSTEM — cool-tinted blacks ---------- */
+  --bg-void:     #040408;   /* deepest — page bg, cosmic black */
+  --bg-surface:  #0C0C14;   /* cards, panels */
+  --bg-elevated: #16161F;   /* hover, raised */
+  --bg-overlay:  #20202D;   /* menus, popovers */
+  --bg-input:    #08080F;   /* input wells, slightly darker than page */
+
+  /* ---------- ACCRETION — primary warm (Pōwehi/M87) ---------- */
+  --accretion-50:  #FFEFCC;     /* hotspot peak */
+  --accretion-100: #FFD78A;     /* bright disk */
+  --accretion-200: #FFB155;     /* warm rim */
+  --accretion-300: #FF9E52;
+  --accretion-400: #FF8A3D;     /* PRIMARY — disk body */
+  --accretion-500: #E5681F;     /* hot inner edge */
+  --accretion-600: #B14507;     /* ember */
+  --accretion-700: #6E2700;
+  --accretion-800: #2A0A00;     /* horizon shadow */
+
+  /* ---------- PHOTON RING — secondary cool (Gargantua lensing) ---------- */
+  --photon-50:  #F4F8FF;        /* lensed bright */
+  --photon-100: #E8F0FF;        /* photon edge */
+  --photon-200: #C8DCFF;
+  --photon-300: #A8C8FF;        /* SECONDARY — encryption signal */
+  --photon-400: #88B0F0;
+  --photon-500: #6688CC;
+  --photon-600: #445C99;
+  --photon-700: #2A3866;
+
+  /* ---------- STATUS ---------- */
+  --plasma:        #5EE6A8;     /* online · success (cooler green) */
+  --plasma-soft:   rgba(94,230,168,0.14);
+  --flare:         #FF7A7A;     /* danger (warmer red, won't fight orange) */
+  --flare-soft:    rgba(255,122,122,0.14);
+  --warn:          #FFB347;     /* warning */
+
+  /* ---------- TEXT — cream on cosmic black ---------- */
+  --fg-1: #F2EDE3;     /* primary */
+  --fg-2: #BDBDC9;     /* secondary */
+  --fg-3: #898998;     /* tertiary, captions */
+  --fg-4: #54546A;     /* disabled, faint */
+  --fg-inverse: #06060C;
+
+  /* ---------- BORDERS — cream at low alpha ---------- */
+  --border-faint:  rgba(242,237,227,0.05);
+  --border-soft:   rgba(242,237,227,0.09);
+  --border-strong: rgba(242,237,227,0.16);
+  /* Encryption-tinted border (used on lock cards) */
+  --border-photon: rgba(168,200,255,0.22);
+
+  /* ---------- TYPOGRAPHY ---------- */
+  --font-sans:  'Geist', system-ui, -apple-system, sans-serif;
+  --font-mono:  'Geist Mono', ui-monospace, 'SF Mono', monospace;
+  --font-serif: 'Instrument Serif', 'Times New Roman', serif;
+
+  --text-xs:   11px;
+  --text-sm:   13px;
+  --text-base: 15px;
+  --text-md:   17px;
+  --text-lg:   20px;
+  --text-xl:   24px;
+  --text-2xl:  32px;
+  --text-3xl:  44px;
+  --text-4xl:  64px;
+  --text-display: 96px;
+
+  --lh-tight:  1.1;
+  --lh-snug:   1.25;
+  --lh-normal: 1.45;
+  --lh-loose:  1.6;
+
+  --tracking-tight:   -0.02em;
+  --tracking-snug:    -0.01em;
+  --tracking-normal:   0;
+  --tracking-wide:     0.04em;
+  --tracking-eyebrow:  0.16em;
+
+  /* ---------- SPACING (4-px grid) ---------- */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  20px;
+  --space-6:  24px;
+  --space-7:  32px;
+  --space-8:  40px;
+  --space-9:  48px;
+  --space-10: 64px;
+  --space-11: 96px;
+
+  /* ---------- RADII ---------- */
+  --radius-xs:  4px;
+  --radius-sm:  8px;
+  --radius-md:  12px;
+  --radius-lg:  16px;
+  --radius-xl:  24px;
+  --radius-2xl: 32px;
+  --radius-pill: 9999px;
+
+  /* ---------- SHADOWS & GLOWS ---------- */
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.6);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.6), 0 1px 2px rgba(0,0,0,0.65);
+  --shadow-lg: 0 12px 32px rgba(0,0,0,0.65), 0 4px 8px rgba(0,0,0,0.55);
+  --shadow-xl: 0 24px 64px rgba(0,0,0,0.75), 0 8px 16px rgba(0,0,0,0.55);
+
+  /* Warm glow — for primary actions */
+  --glow-accretion:      0 0 0 1px rgba(255,138,61,0.4), 0 0 22px rgba(255,138,61,0.28);
+  --glow-accretion-soft: 0 0 32px rgba(255,138,61,0.16);
+  /* Cool glow — for encryption / verified */
+  --glow-photon:         0 0 0 1px rgba(168,200,255,0.4), 0 0 18px rgba(168,200,255,0.22);
+  --glow-photon-soft:    0 0 24px rgba(168,200,255,0.16);
+
+  /* Input wells (inset) */
+  --inset-well: inset 0 1px 2px rgba(0,0,0,0.55);
+
+  /* ---------- MOTION ---------- */
+  --ease-orbit:   cubic-bezier(0.22, 1, 0.36, 1);      /* gentle settle */
+  --ease-fall:    cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-horizon: cubic-bezier(0.65, 0, 0.35, 1);      /* slow-fast-slow */
+  --dur-fast:  120ms;
+  --dur-base:  200ms;
+  --dur-slow:  380ms;
+  --dur-orbit: 800ms;
+
+  /* ---------- LAYOUT ---------- */
+  --sidebar-w:  320px;
+  --infopane-w: 340px;
+  --topbar-h:   64px;
+  --max-content: 720px;
+}
+
+/* ===== Light mode — exists in tokens, not used in app ===== */
+[data-theme="light"] {
+  --bg-void:     #F5F2EA;
+  --bg-surface:  #FFFFFF;
+  --bg-elevated: #FBF7EF;
+  --bg-overlay:  #FFFFFF;
+  --bg-input:    #FBF7EF;
+  --fg-1: #06060C;
+  --fg-2: #34343F;
+  --fg-3: #5F5F6E;
+  --fg-4: #A8A8B8;
+  --border-faint:  rgba(6,6,12,0.05);
+  --border-soft:   rgba(6,6,12,0.08);
+  --border-strong: rgba(6,6,12,0.14);
+}
+
+/* ============================================================
+   SEMANTIC TYPE CLASSES
+   ============================================================ */
+
+.t-display {
+  font-family: var(--font-serif);
+  font-weight: 400; font-style: italic;
+  font-size: var(--text-display); line-height: var(--lh-tight);
+  letter-spacing: var(--tracking-tight); color: var(--fg-1);
+}
+
+.t-h1 { font: 600 var(--text-3xl)/1.1 var(--font-sans); letter-spacing: var(--tracking-tight); color: var(--fg-1); }
+.t-h2 { font: 600 var(--text-2xl)/1.25 var(--font-sans); letter-spacing: var(--tracking-snug); color: var(--fg-1); }
+.t-h3 { font: 600 var(--text-xl)/1.25 var(--font-sans); color: var(--fg-1); }
+.t-h4 { font: 500 var(--text-lg)/1.25 var(--font-sans); color: var(--fg-1); }
+
+.t-body    { font: 400 var(--text-base)/1.45 var(--font-sans); color: var(--fg-1); }
+.t-body-sm { font: 400 var(--text-sm)/1.45 var(--font-sans); color: var(--fg-2); }
+.t-caption { font: 400 var(--text-xs)/1.45 var(--font-sans); color: var(--fg-3); }
+
+.t-eyebrow {
+  font: 500 var(--text-xs)/1.4 var(--font-sans);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-eyebrow);
+  color: var(--fg-3);
+}
+
+.t-mono {
+  font: 400 var(--text-sm)/1.4 var(--font-mono);
+  color: var(--fg-2);
+}
+
+.t-quote {
+  font: italic 400 var(--text-2xl)/1.25 var(--font-serif);
+  color: var(--fg-1);
+}
+
+/* ===== Base ===== */
+body {
+  background: var(--bg-void);
+  color: var(--fg-1);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--lh-normal);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: rgba(255,138,61,0.35);
+  color: var(--fg-1);
+}

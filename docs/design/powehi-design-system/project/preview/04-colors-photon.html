@@ -1,0 +1,59 @@
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  html,body{margin:0;background:var(--bg-void);font-family:var(--font-sans);color:var(--fg-1);overflow:hidden}
+  .wrap{padding:18px 22px;display:flex;gap:24px;align-items:center;height:100%;box-sizing:border-box}
+  .ring-stage{width:160px;height:160px;flex:none;position:relative;display:flex;align-items:center;justify-content:center}
+  .sphere{
+    width:100px;height:100px;border-radius:50%;
+    background:radial-gradient(circle at 42% 42%, #0A0814, #000 70%);
+    box-shadow:
+      0 0 0 1.5px #E8F0FF,
+      0 0 0 4px rgba(168,200,255,0.55),
+      0 0 0 7px rgba(168,200,255,0.18),
+      0 0 40px rgba(168,200,255,0.20);
+    position:relative;
+  }
+  .arc{
+    position:absolute;width:160px;height:80px;
+    border:6px solid transparent;border-top:6px solid rgba(168,200,255,0.4);
+    border-radius:50%;top:8px;
+    filter:blur(0.5px);
+  }
+  .dot{position:absolute;width:8px;height:8px;border-radius:50%;border:1.5px solid rgba(0,0,0,0.5);box-shadow:0 0 0 1px rgba(255,255,255,0.5)}
+  .scale{flex:1;display:flex;flex-direction:column;gap:5px;min-width:0}
+  .header{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px}
+  .eyebrow{font-size:10px;text-transform:uppercase;letter-spacing:0.16em;color:var(--fg-3);font-weight:500}
+  .src{font-family:var(--font-mono);font-size:10px;color:var(--fg-4)}
+  .row{display:flex;align-items:center;gap:10px}
+  .chip{width:28px;height:18px;border-radius:4px;flex:none}
+  .num{font-family:var(--font-mono);font-size:11px;color:var(--fg-3);width:26px}
+  .hex{font-family:var(--font-mono);font-size:11px;color:var(--fg-2);min-width:70px}
+  .note{font-size:11px;color:var(--fg-3);flex:1}
+  .tag{display:inline-block;font-size:9px;font-weight:600;letter-spacing:0.08em;
+    background:#A8C8FF;color:#06060C;padding:1px 5px;border-radius:3px;margin-left:6px}
+</style></head><body>
+<div class="wrap">
+  <div class="ring-stage">
+    <div class="sphere"></div>
+    <div class="dot" style="top:50%;left:18%;background:#E8F0FF"></div>
+    <div class="dot" style="top:26%;left:32%;background:#A8C8FF"></div>
+    <div class="dot" style="top:20%;left:68%;background:#88B0F0"></div>
+    <div class="dot" style="top:62%;left:80%;background:#6688CC"></div>
+  </div>
+  <div class="scale">
+    <div class="header">
+      <div class="eyebrow">Photon ring · cool</div>
+      <div class="src">lensed · Gargantua</div>
+    </div>
+    <div class="row"><div class="num">50</div><div class="chip" style="background:#F4F8FF"></div><div class="hex">#F4F8FF</div><div class="note">lensed bright</div></div>
+    <div class="row"><div class="num">100</div><div class="chip" style="background:#E8F0FF"></div><div class="hex">#E8F0FF</div><div class="note">photon edge</div></div>
+    <div class="row"><div class="num">200</div><div class="chip" style="background:#C8DCFF"></div><div class="hex">#C8DCFF</div><div class="note">halo</div></div>
+    <div class="row"><div class="num">300</div><div class="chip" style="background:#A8C8FF;outline:1px solid rgba(255,255,255,0.3);outline-offset:1px"></div><div class="hex">#A8C8FF</div><div class="note">encryption signal<span class="tag">SECONDARY</span></div></div>
+    <div class="row"><div class="num">400</div><div class="chip" style="background:#88B0F0"></div><div class="hex">#88B0F0</div><div class="note">verified state</div></div>
+    <div class="row"><div class="num">500</div><div class="chip" style="background:#6688CC"></div><div class="hex">#6688CC</div><div class="note">deep blue</div></div>
+    <div class="row"><div class="num">600</div><div class="chip" style="background:#445C99"></div><div class="hex">#445C99</div><div class="note">muted lens</div></div>
+    <div class="row"><div class="num">700</div><div class="chip" style="background:#2A3866"></div><div class="hex">#2A3866</div><div class="note">far rim</div></div>
+  </div>
+</div>
+</body></html>

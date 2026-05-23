@@ -1,0 +1,66 @@
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  html,body{margin:0;background:var(--bg-void);font-family:var(--font-sans);color:var(--fg-1);overflow:hidden}
+  .wrap{padding:18px 22px;height:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:10px}
+  .eyebrow{font-size:10px;text-transform:uppercase;letter-spacing:0.16em;color:var(--fg-3);font-weight:500;display:flex;align-items:center;gap:10px}
+  .eyebrow .anchor{
+    display:inline-flex;align-items:center;gap:8px;color:var(--fg-4);
+    padding-left:10px;border-left:1px solid var(--border-soft);
+    font-weight:400;letter-spacing:0.04em;text-transform:none;font-size:11px;
+  }
+  .anchor .sw{width:10px;height:10px;border-radius:2px;background:#FF8A3D}
+  .anchor .sw2{width:10px;height:10px;border-radius:2px;background:#A8C8FF}
+  .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;flex:1}
+  .card{border-radius:12px;padding:14px;display:flex;flex-direction:column;position:relative;overflow:hidden;border:1px solid var(--border-faint)}
+  .pill{display:inline-flex;align-items:center;gap:6px;align-self:flex-start;padding:4px 9px;border-radius:9999px;font-size:11px;font-weight:500;letter-spacing:0.04em}
+  .pill .dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+  .name{font-size:14px;font-weight:500;margin-top:auto;color:var(--fg-1)}
+  .role{font-size:11px;color:var(--fg-3);margin-top:2px}
+  .hex{font-family:var(--font-mono);font-size:10px;color:var(--fg-4);margin-top:6px;letter-spacing:0.02em}
+  .accretion{background:linear-gradient(135deg, rgba(255,138,61,0.12), rgba(255,138,61,0.02))}
+  .accretion .pill{background:rgba(255,138,61,0.16);color:#FF9E52;border:1px solid rgba(255,138,61,0.3)}
+  .photon{background:linear-gradient(135deg, rgba(168,200,255,0.10), rgba(168,200,255,0.02))}
+  .photon .pill{background:rgba(168,200,255,0.16);color:#C8DCFF;border:1px solid rgba(168,200,255,0.3)}
+  .plasma{background:linear-gradient(135deg, rgba(94,230,168,0.08), rgba(94,230,168,0.02))}
+  .plasma .pill{background:rgba(94,230,168,0.14);color:#5EE6A8;border:1px solid rgba(94,230,168,0.3)}
+  .flare{background:linear-gradient(135deg, rgba(255,122,122,0.10), rgba(255,122,122,0.02))}
+  .flare .pill{background:rgba(255,122,122,0.14);color:#FF9999;border:1px solid rgba(255,122,122,0.3)}
+</style></head><body>
+<div class="wrap">
+  <div class="eyebrow">
+    Semantic accents
+    <span class="anchor"><span class="sw"></span>warm<span class="sw2"></span>cool · dual-light</span>
+  </div>
+  <div class="grid">
+    <div class="card accretion">
+      <span class="pill"><span class="dot"></span>Accretion</span>
+      <div style="flex:1"></div>
+      <div class="name">Primary · action</div>
+      <div class="role">CTAs · your message · unread</div>
+      <div class="hex">#FF8A3D</div>
+    </div>
+    <div class="card photon">
+      <span class="pill"><span class="dot"></span>Photon</span>
+      <div style="flex:1"></div>
+      <div class="name">Encryption</div>
+      <div class="role">lock · fingerprint · verified</div>
+      <div class="hex">#A8C8FF</div>
+    </div>
+    <div class="card plasma">
+      <span class="pill"><span class="dot"></span>Plasma</span>
+      <div style="flex:1"></div>
+      <div class="name">Online · success</div>
+      <div class="role">delivered · presence dot</div>
+      <div class="hex">#5EE6A8</div>
+    </div>
+    <div class="card flare">
+      <span class="pill"><span class="dot"></span>Flare</span>
+      <div style="flex:1"></div>
+      <div class="name">Danger</div>
+      <div class="role">errors · keys changed · destructive</div>
+      <div class="hex">#FF7A7A</div>
+    </div>
+  </div>
+</div>
+</body></html>

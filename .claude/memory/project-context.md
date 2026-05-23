@@ -19,7 +19,8 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 
 ## Current state (2026-05-23)
 - Planning docs complete: `docs/prd.md` (v3), `docs/orchestration.md`, `docs/decisions/` (ADR-0001, 0002).
-- Agent infra complete: `.claude/agents` (22), `skills` (6), `rules` (6), `commands` (4), `hooks` (5).
+- Agent infra complete: `.claude/agents` (22), `skills` (7), `rules` (6), `commands` (4), `hooks` (5).
+- Design system available: `DESIGN.md` + `docs/design/powehi-design-system/` + `/powehi-design` skill — read before any UI work.
 - **NO application code yet.** Next action: bootstrap Phase 1.
 - Build/test (once code exists):
   - `cargo build --workspace`
@@ -47,6 +48,7 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 
 ### Phase 4 — Frontend & Integration
 - [ ] Login/Chat UI; Dexie encrypted storage; crypto worker; Service Worker push; Playwright E2E; bundle budget (<200KB init, <800KB WASM)
+- UI MUST follow the design system — invoke `/powehi-design` or read `DESIGN.md` first. Brand non-negotiables (dark-first, cream text, dual-light orange=action / photon-blue=encryption, lock always photon-blue) are hard rules. Map `colors_and_type.css` → Tailwind v4 OKLCH.
 
 ### Phase 5 — Hardening
 - [ ] SLSA L3 reproducible builds; cosign + Rekor; threat-model-checker pass; load test; observability; PQ migration doc

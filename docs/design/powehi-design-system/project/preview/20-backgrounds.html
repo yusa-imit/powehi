@@ -1,0 +1,28 @@
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  html,body{margin:0;background:var(--bg-void);color:var(--fg-1);padding:24px;font-family:var(--font-sans);overflow:hidden}
+  .stage{display:flex;gap:18px;height:170px}
+  .col{flex:1;border-radius:14px;display:flex;flex-direction:column;justify-content:flex-end;padding:18px;position:relative;overflow:hidden}
+  .lbl{font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--fg-3);font-weight:500}
+  .title{font-size:15px;font-weight:500;color:var(--fg-1);margin-top:4px}
+  .void{background:#040408}
+  .horizon{background:radial-gradient(ellipse 80% 50% at 50% 100%, rgba(255,138,61,0.5), rgba(255,138,61,0.1) 40%, transparent 70%), #040408}
+  .lensing{
+    background:
+      radial-gradient(ellipse 90% 30% at 50% 50%, rgba(255,138,61,0.45), transparent 50%),
+      radial-gradient(ellipse 80% 20% at 50% 20%, rgba(255,138,61,0.20), transparent 60%),
+      #040408;
+    position:relative;
+  }
+  .lensing::after{content:"";position:absolute;left:50%;top:50%;width:50px;height:50px;border-radius:50%;background:#000;transform:translate(-50%,-50%);box-shadow:0 0 0 1.2px #E8F0FF, 0 0 0 4px rgba(168,200,255,0.4)}
+  .stars{background:#040408;position:relative}
+  .stars::after{content:"";position:absolute;inset:0;background-image:radial-gradient(rgba(232,240,255,0.3) 0.5px,transparent 0.7px);background-size:14px 14px;opacity:0.6;pointer-events:none}
+</style></head><body>
+<div class="stage">
+  <div class="col void"><div class="lbl">Background</div><div class="title">Void · cosmic black</div></div>
+  <div class="col horizon"><div class="lbl">Background</div><div class="title">Horizon · bottom glow</div></div>
+  <div class="col lensing"><div class="lbl" style="color:#FFD78A">Featured</div><div class="title" style="position:relative;z-index:1">Lensing · disk + sphere</div></div>
+  <div class="col stars"><div class="lbl">Texture</div><div class="title">Star dust</div></div>
+</div>
+</body></html>

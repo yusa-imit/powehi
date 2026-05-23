@@ -1,0 +1,31 @@
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  html,body{margin:0;background:var(--bg-void);color:var(--fg-1);padding:24px;font-family:var(--font-sans)}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+  .b{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:9999px;font-size:11px;font-weight:500;letter-spacing:0.04em}
+  .encrypted{background:rgba(168,200,255,0.12);color:#C8DCFF;border:1px solid rgba(168,200,255,0.3)}
+  .online{background:rgba(94,230,168,0.12);color:#5EE6A8;border:1px solid rgba(94,230,168,0.3)}
+  .unread{background:#FF8A3D;color:#2A0A00;font-weight:600;border-radius:9999px;padding:2px 8px;font-size:11px;font-variant-numeric:tabular-nums}
+  .mute{background:transparent;color:var(--fg-3);border:1px solid var(--border-soft)}
+  .typing{background:var(--bg-elevated);color:var(--fg-3);border:1px solid var(--border-soft)}
+  .pill{background:rgba(255,138,61,0.12);color:#FF9E52;border:1px solid rgba(255,138,61,0.3)}
+  .dot{width:6px;height:6px;border-radius:50%;background:currentColor;display:inline-block}
+  .lbl{font-size:10px;text-transform:uppercase;letter-spacing:0.14em;color:var(--fg-3);font-weight:500;margin-bottom:8px}
+</style></head><body>
+<div class="lbl">Status</div>
+<div class="row">
+  <span class="b encrypted"><span class="dot"></span>End-to-end</span>
+  <span class="b online"><span class="dot"></span>Online</span>
+  <span class="b mute">Muted</span>
+  <span class="b typing">… typing</span>
+  <span class="b pill">Pinned</span>
+</div>
+<div class="lbl">Counts</div>
+<div class="row">
+  <span class="unread">1</span>
+  <span class="unread">3</span>
+  <span class="unread">12</span>
+  <span class="unread">99+</span>
+</div>
+</body></html>

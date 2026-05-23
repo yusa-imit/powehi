@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 200" fill="none">
+  <defs>
+    <radialGradient id="h2" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#FFB155"></stop>
+      <stop offset="30%" stop-color="#FF8A3D"></stop>
+      <stop offset="60%" stop-color="#C75612" stop-opacity="0.7"></stop>
+      <stop offset="100%" stop-color="#3A1A06" stop-opacity="0"></stop>
+    </radialGradient>
+  </defs>
+  <g transform="translate(8 -28) scale(0.92)">
+    <ellipse cx="128" cy="128" rx="124" ry="84" fill="url(#h2)"></ellipse>
+    <circle cx="128" cy="128" r="46" fill="#000"></circle>
+    <circle cx="128" cy="128" r="46" fill="none" stroke="#E8F0FF" stroke-width="1.4"></circle>
+  </g>
+  <text x="240" y="125" font-family="Geist, system-ui, sans-serif" font-weight="600" font-size="88" letter-spacing="-3" fill="#F2EDE3">powehi</text>
+</svg>

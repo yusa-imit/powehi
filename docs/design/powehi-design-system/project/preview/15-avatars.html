@@ -1,0 +1,29 @@
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  html,body{margin:0;background:var(--bg-void);color:var(--fg-1);padding:24px;font-family:var(--font-sans)}
+  .row{display:flex;gap:18px;align-items:center}
+  .a{width:48px;height:48px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:600;font-size:18px;flex:none;position:relative;color:#fff}
+  .a.p1{background:linear-gradient(135deg,#A8C8FF,#445C99);color:#06060C}
+  .a.p2{background:linear-gradient(135deg,#FF8A3D,#6E2700)}
+  .a.p3{background:linear-gradient(135deg,#5EE6A8,#1F6B4C);color:#06200F}
+  .a.p4{background:linear-gradient(135deg,#FFD78A,#B14507);color:#2A0A00}
+  .dot{position:absolute;bottom:-1px;right:-1px;width:14px;height:14px;border-radius:50%;background:#5EE6A8;border:3px solid var(--bg-void);box-shadow:0 0 8px rgba(94,230,168,0.45)}
+  .dot.off{background:var(--fg-4);box-shadow:none}
+  .sz{display:flex;align-items:flex-end;gap:10px}
+  .col{display:flex;flex-direction:column;align-items:center;gap:6px}
+  .lbl{font-family:var(--font-mono);font-size:10px;color:var(--fg-3)}
+</style></head><body>
+<div class="row">
+  <div class="a p1">M<div class="dot"></div></div>
+  <div class="a p2">J</div>
+  <div class="a p3">A<div class="dot off"></div></div>
+  <div class="a p4">+3</div>
+  <div class="sz">
+    <div class="col"><div class="a p1" style="width:24px;height:24px;font-size:11px">M</div><div class="lbl">24</div></div>
+    <div class="col"><div class="a p1" style="width:32px;height:32px;font-size:13px">M</div><div class="lbl">32</div></div>
+    <div class="col"><div class="a p1" style="width:48px;height:48px;font-size:18px">M</div><div class="lbl">48</div></div>
+    <div class="col"><div class="a p1" style="width:64px;height:64px;font-size:24px">M</div><div class="lbl">64</div></div>
+  </div>
+</div>
+</body></html>

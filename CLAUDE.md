@@ -21,6 +21,7 @@ See `/docs/prd.md` for full architecture. See `/docs/orchestration.md` for agent
 - WASM Crypto: `/crates/powehi-crypto/` compiled to wasm32-unknown-unknown
 - Infra: Terraform at `/infra/terraform/`, Helm at `/infra/helm/`
 - Protocols: MLS (RFC 9420), OPAQUE (RFC 9807), Web Push (RFC 8291)
+- Design system: `DESIGN.md` → `docs/design/powehi-design-system/` + `/powehi-design` skill (read before any UI work; brand rules are hard)
 
 ## Non-negotiables
 - Server NEVER sees plaintext message content

@@ -1,0 +1,32 @@
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  html,body{margin:0;background:var(--bg-void);color:var(--fg-1);padding:28px;font-family:var(--font-sans)}
+  .stack{display:flex;flex-direction:column;gap:8px;max-width:520px}
+  .row{display:flex;align-items:flex-end;gap:8px}
+  .row.me{justify-content:flex-end}
+  .av{width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,#A8C8FF,#445C99);flex:none;color:#06060C;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600}
+  .bubble{padding:10px 14px;border-radius:18px;max-width:75%;font-size:14px;line-height:1.4}
+  .them{background:var(--bg-elevated);color:var(--fg-1);border-bottom-left-radius:6px;border:1px solid var(--border-faint)}
+  .mine{background:linear-gradient(135deg,#FF9E52,#F26F1F);color:#2A1100;border-bottom-right-radius:6px;box-shadow:0 0 18px rgba(255,138,61,0.18)}
+  .meta{font-size:10px;color:var(--fg-3);font-family:var(--font-mono);padding:0 6px;display:flex;align-items:center;gap:4px}
+  .lock{color:#A8C8FF}
+</style></head><body>
+<div class="stack">
+  <div class="row">
+    <div class="av">M</div>
+    <div class="bubble them">Are you still up for tomorrow?</div>
+  </div>
+  <div class="row me">
+    <div class="bubble mine">Yeah, 9am at the corner.</div>
+  </div>
+  <div class="row me">
+    <div class="bubble mine">Bringing the notebook.</div>
+    <div class="meta"><span class="lock">●</span>encrypted · sent</div>
+  </div>
+  <div class="row">
+    <div class="av">M</div>
+    <div class="bubble them">perfect 🌒</div>
+  </div>
+</div>
+</body></html>

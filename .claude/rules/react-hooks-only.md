@@ -28,3 +28,8 @@ paths:
 - NO localStorage for anything sensitive
 - Dexie (IndexedDB) with encryption layer for persistence
 - Zustand in-memory for ephemeral state
+
+## Design system
+- Read `DESIGN.md` / invoke `/powehi-design` before building or restyling UI.
+- Map tokens in `docs/design/powehi-design-system/project/colors_and_type.css` to Tailwind v4 OKLCH; reuse the `ui_kits/web` & `ui_kits/mobile` components (rebuild logic for our stack).
+- Brand non-negotiables (hard): dark-first (`#040408`), cream text (`#F2EDE3`), dual-light (accretion orange `#FF8A3D` = action; photon blue `#A8C8FF` = encryption only), lock icon always photon blue, no emoji in chrome, no motion bounces.

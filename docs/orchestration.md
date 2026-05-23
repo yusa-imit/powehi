@@ -971,7 +971,9 @@ powehi/
 │   │   │   └── SKILL.md
 │   │   ├── threat-model-update/
 │   │   │   └── SKILL.md
-│   │   └── infra-test/                # 인프라 정적 검증 (terraform/helm)
+│   │   ├── infra-test/                # 인프라 정적 검증 (terraform/helm)
+│   │   │   └── SKILL.md
+│   │   └── powehi-design/             # Claude Design 핸드오프 → 브랜드 UI 구현
 │   │       └── SKILL.md
 │   │
 │   └── commands/                      # 슬래시 명령

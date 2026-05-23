@@ -1,0 +1,38 @@
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  html,body{margin:0;background:var(--bg-void);color:var(--fg-1);padding:20px;font-family:var(--font-sans)}
+  .card{background:var(--bg-surface);border:1px solid var(--border-photon);border-radius:16px;padding:18px 20px;display:flex;gap:16px;align-items:center;box-shadow:0 4px 12px rgba(0,0,0,0.6), 0 0 24px rgba(168,200,255,0.05)}
+  .icon{
+    width:46px;height:46px;border-radius:14px;
+    background:rgba(168,200,255,0.10);
+    border:1px solid rgba(168,200,255,0.3);
+    display:flex;align-items:center;justify-content:center;flex:none;position:relative;
+  }
+  .ring{
+    width:26px;height:26px;border-radius:50%;
+    background:radial-gradient(circle at 42% 42%, #0A0814, #000 70%);
+    box-shadow:0 0 0 1.2px #E8F0FF, 0 0 0 3px rgba(168,200,255,0.5), 0 0 8px rgba(168,200,255,0.4);
+    position:relative;
+  }
+  .ring::before{
+    content:"";position:absolute;left:-7px;right:-7px;top:50%;height:2px;
+    transform:translateY(-50%);
+    background:linear-gradient(90deg, transparent, #FF8A3D, transparent);
+    border-radius:2px;
+  }
+  .body{flex:1}
+  .title{font-size:14px;font-weight:600;color:var(--fg-1);margin-bottom:3px;display:flex;align-items:center;gap:8px}
+  .pill{background:rgba(168,200,255,0.14);color:#C8DCFF;border:1px solid rgba(168,200,255,0.3);padding:2px 8px;border-radius:9999px;font-size:10px;letter-spacing:0.04em;font-weight:500}
+  .sub{font-size:13px;color:var(--fg-3);line-height:1.45}
+  .fp{font-family:var(--font-mono);font-size:11px;color:var(--fg-2);background:var(--bg-input);border:1px solid var(--border-faint);border-radius:6px;padding:5px 9px;letter-spacing:0.02em}
+</style></head><body>
+<div class="card">
+  <div class="icon"><div class="ring"></div></div>
+  <div class="body">
+    <div class="title">End-to-end with Maya <span class="pill">VERIFIED</span></div>
+    <div class="sub">Only your two devices can read these messages. Powehi never holds the keys.</div>
+  </div>
+  <div class="fp">A3:5F · 91:CC · 7E:08</div>
+</div>
+</body></html>
