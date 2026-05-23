@@ -1,0 +1,11 @@
+[package]
+name = "powehi-telemetry"
+description = "OpenTelemetry + tracing initialisation."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }

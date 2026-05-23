@@ -1,0 +1,13 @@
+[package]
+name = "powehi-opaque"
+description = "OPAQUE (RFC 9807) authentication adapter using opaque-ke."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+powehi-domain = { workspace = true }
+opaque-ke = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

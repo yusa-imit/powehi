@@ -1,0 +1,16 @@
+[package]
+name = "powehi-application"
+description = "Use-case implementations. Depends only on domain + port traits."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+powehi-domain = { workspace = true }
+powehi-port-inbound = { workspace = true }
+powehi-port-outbound = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }

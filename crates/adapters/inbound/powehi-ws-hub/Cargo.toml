@@ -1,0 +1,13 @@
+[package]
+name = "powehi-ws-hub"
+description = "WebSocket hub inbound adapter stub."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+powehi-domain = { workspace = true }
+powehi-port-inbound = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

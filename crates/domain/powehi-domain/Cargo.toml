@@ -1,0 +1,13 @@
+[package]
+name = "powehi-domain"
+description = "Pure domain: entities, value objects, events. Zero external deps."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+bytes = { workspace = true }

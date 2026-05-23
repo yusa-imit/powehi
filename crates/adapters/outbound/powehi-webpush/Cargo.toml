@@ -1,0 +1,12 @@
+[package]
+name = "powehi-webpush"
+description = "Web Push (RFC 8291) outbound adapter stub."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+powehi-domain = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

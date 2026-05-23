@@ -1,0 +1,13 @@
+[package]
+name = "powehi-mls"
+description = "OpenMLS server-side adapter (delivery service, KeyPackage store)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+powehi-domain = { workspace = true }
+openmls = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

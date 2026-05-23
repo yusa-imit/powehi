@@ -1,0 +1,10 @@
+[package]
+name = "powehi-proto"
+description = "Protobuf definitions + prost-generated types stub."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+prost = { workspace = true }
+serde = { workspace = true }

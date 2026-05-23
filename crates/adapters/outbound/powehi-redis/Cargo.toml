@@ -1,0 +1,14 @@
+[package]
+name = "powehi-redis"
+description = "Redis cache/event-bus outbound adapter stub."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+powehi-domain = { workspace = true }
+powehi-port-outbound = { workspace = true }
+redis = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

@@ -1,0 +1,13 @@
+[package]
+name = "powehi-r2"
+description = "Cloudflare R2 / S3-compatible media storage adapter stub."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+powehi-domain = { workspace = true }
+powehi-port-outbound = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

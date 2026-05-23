@@ -1,0 +1,16 @@
+[package]
+name = "powehi-postgres"
+description = "Postgres outbound adapter (sqlx)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+powehi-domain = { workspace = true }
+powehi-port-outbound = { workspace = true }
+sqlx = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
