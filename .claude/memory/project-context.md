@@ -17,11 +17,12 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-05-23)
+## Current state (2026-05-24)
 - Planning docs complete: `docs/prd.md` (v3), `docs/orchestration.md`, `docs/decisions/` (ADR-0001, 0002).
 - Agent infra complete: `.claude/agents` (22), `skills` (7), `rules` (6), `commands` (4), `hooks` (5).
 - Design system available: `DESIGN.md` + `docs/design/powehi-design-system/` + `/powehi-design` skill — read before any UI work.
-- **NO application code yet.** Next action: bootstrap Phase 1.
+- **Phase 1 in progress.** Workspace skeleton bootstrapped (commit 940a065): 18 crates compile, tests green, clippy clean.
+- Next action: React 19 + Vite 6 scaffold under `/app`.
 - Build/test (once code exists):
   - `cargo build --workspace`
   - `cargo nextest run --workspace` (fallback `cargo test --workspace` if nextest absent)
@@ -32,8 +33,8 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 ## Phase checklist (prd.md §15.4; per-phase DoD in docs/phases/phase-N/STATUS.md)
 
 ### Phase 1 — Foundation & DevOps Skeleton  ← ACTIVE
-- [ ] Cargo workspace + hexagonal crate skeleton (domain → ports → application → adapters → bin), prd.md §6.1
-- [ ] powehi-domain (zero external deps) + powehi-port-inbound/outbound trait stubs
+- [x] Cargo workspace + hexagonal crate skeleton (domain → ports → application → adapters → bin), prd.md §6.1 — commit 940a065
+- [x] powehi-domain (zero external deps) + powehi-port-inbound/outbound trait stubs — commit 940a065
 - [ ] React 19 + Vite 6 scaffold under `/app`
 - [ ] WASM build pipeline (empty `powehi-crypto-wasm` compiles to wasm32-unknown-unknown)
 - [ ] CI: GitHub Actions (fmt, clippy, nextest, biome) — delegate to ci-pipeline-author
