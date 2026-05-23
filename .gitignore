@@ -1,0 +1,30 @@
+# Claude Code local settings (personal overrides, not shared)
+.claude/settings.local.json
+CLAUDE.local.md
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Rust (future)
+target/
+**/*.rs.bk
+
+# Node (future)
+node_modules/
+dist/
+.turbo/
+
+# WASM build artifacts (future)
+pkg/

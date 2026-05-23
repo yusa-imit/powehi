@@ -1,0 +1,17 @@
+{
+  "_comment": "Copy this file to settings.local.json for personal overrides. This file is gitignored.",
+  "permissions": {
+    "allow": [
+      "Bash(cargo *)",
+      "Bash(pnpm *)",
+      "Bash(git status*)",
+      "Bash(git log*)",
+      "Bash(git diff*)",
+      "Bash(git branch*)"
+    ]
+  },
+  "env": {
+    "GITHUB_TOKEN": "",
+    "LINEAR_API_KEY": ""
+  }
+}
