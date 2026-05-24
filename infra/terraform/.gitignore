@@ -1,0 +1,22 @@
+# Terraform / OpenTofu generated directories
+.terraform/
+
+# State files — never commit real state
+*.tfstate
+*.tfstate.backup
+
+# Variable files with real values — only *.tfvars.example is committed
+*.tfvars
+
+# Crash logs
+crash.log
+crash.*.log
+
+# Override files (local developer overrides)
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Plan files may contain secrets
+*.tfplan
