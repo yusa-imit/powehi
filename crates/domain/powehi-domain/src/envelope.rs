@@ -74,3 +74,56 @@ impl Envelope {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::DeviceId;
+    use crate::group::GroupId;
+
+    #[test]
+    fn envelope_id_is_unique() {
+        assert_ne!(EnvelopeId::new(), EnvelopeId::new());
+    }
+
+    #[test]
+    fn new_envelope_has_no_epoch_or_expiry() {
+        let env = Envelope::new(
+            GroupId::new(),
+            DeviceId::new(),
+            None,
+            MessageType::Application,
+            vec![0xde, 0xad, 0xbe, 0xef],
+        );
+        assert!(env.epoch.is_none());
+        assert!(env.expires_at.is_none());
+        assert!(env.recipient.is_none());
+    }
+
+    #[test]
+    fn ciphertext_is_stored_verbatim() {
+        let ct = vec![1u8, 2, 3, 4, 5];
+        let env = Envelope::new(
+            GroupId::new(),
+            DeviceId::new(),
+            None,
+            MessageType::Application,
+            ct.clone(),
+        );
+        assert_eq!(env.ciphertext, ct);
+    }
+
+    #[test]
+    fn welcome_message_can_have_recipient() {
+        let recipient = DeviceId::new();
+        let env = Envelope::new(
+            GroupId::new(),
+            DeviceId::new(),
+            Some(recipient.clone()),
+            MessageType::Welcome,
+            vec![0u8; 8],
+        );
+        assert_eq!(env.recipient, Some(recipient));
+        assert_eq!(env.message_type, MessageType::Welcome);
+    }
+}

@@ -61,3 +61,22 @@ jobs:
 
       - name: cargo nextest run
         run: cargo nextest run --workspace
+
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: cargo audit
+        # RUSTSEC-2023-0071 (rsa): in Cargo.lock via sqlx-macros-core → sqlx-mysql
+        # but NOT compiled (cargo tree -i rsa is empty); see audit.toml for analysis.
+        # No upstream fix available as of 2026-05.
+        run: cargo audit --ignore RUSTSEC-2023-0071

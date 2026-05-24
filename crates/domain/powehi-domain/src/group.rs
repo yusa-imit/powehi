@@ -57,3 +57,33 @@ impl Group {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::region::RegionId;
+
+    #[test]
+    fn group_id_is_unique() {
+        assert_ne!(GroupId::new(), GroupId::new());
+    }
+
+    #[test]
+    fn group_starts_at_epoch_zero() {
+        let g = Group::new(GroupId::new(), RegionId::new("eu-central"));
+        assert_eq!(g.epoch, Epoch(0));
+    }
+
+    #[test]
+    fn epoch_ordering() {
+        assert!(Epoch(1) > Epoch(0));
+        assert!(Epoch(100) > Epoch(99));
+    }
+
+    #[test]
+    fn group_id_display_is_uuid() {
+        let id = GroupId::new();
+        let s = id.to_string();
+        assert!(uuid::Uuid::parse_str(&s).is_ok());
+    }
+}

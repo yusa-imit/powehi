@@ -41,3 +41,27 @@ impl KeyPackage {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::DeviceId;
+
+    #[test]
+    fn key_package_starts_unconsumed() {
+        let kp = KeyPackage::new(DeviceId::new(), vec![0u8; 32]);
+        assert!(!kp.consumed);
+    }
+
+    #[test]
+    fn key_package_id_is_unique() {
+        assert_ne!(KeyPackageId::new(), KeyPackageId::new());
+    }
+
+    #[test]
+    fn key_package_data_is_stored_verbatim() {
+        let data = (0u8..=255).collect::<Vec<_>>();
+        let kp = KeyPackage::new(DeviceId::new(), data.clone());
+        assert_eq!(kp.data, data);
+    }
+}
