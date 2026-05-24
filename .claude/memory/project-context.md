@@ -24,7 +24,8 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - **Phase 1 in progress.** Workspace skeleton bootstrapped (commit 940a065): 18 crates compile, tests green, clippy clean.
 - React 19 + Vite 6 scaffold complete (commit 312864d): pnpm workspace, Vitest 2/2 green, Biome clean, TypeScript strict.
 - WASM build pipeline complete (commit f498ae1): openmls 0.8 + js feature, wasm-pack --target web, pnpm build:wasm, bulk-memory wasm-opt flag.
-- Next action: CI GitHub Actions (fmt, clippy, nextest, biome) — delegate to ci-pipeline-author.
+- CI complete (commit 35ac5b9): ci-rust.yml (fmt→clippy+nextest) + ci-frontend.yml (biome+vitest); all local gates pass.
+- Next action: Terraform base skeleton (Hetzner k3s) — delegate to terraform-author.
 - Build/test (once code exists):
   - `cargo build --workspace`
   - `cargo nextest run --workspace` (fallback `cargo test --workspace` if nextest absent)
@@ -39,7 +40,7 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - [x] powehi-domain (zero external deps) + powehi-port-inbound/outbound trait stubs — commit 940a065
 - [x] React 19 + Vite 6 scaffold under `/app` — commit 312864d (pnpm workspace, Tailwind v4, Vitest, Biome, design tokens)
 - [x] WASM build pipeline (empty `powehi-crypto-wasm` compiles to wasm32-unknown-unknown) — commit f498ae1
-- [ ] CI: GitHub Actions (fmt, clippy, nextest, biome) — delegate to ci-pipeline-author
+- [x] CI: GitHub Actions (fmt, clippy, nextest, biome) — commit 35ac5b9
 - [ ] Terraform base (Hetzner k3s) skeleton — delegate to terraform-author
 - [ ] `cargo nextest` 100% on skeleton; hexagonal dependency direction holds
 
