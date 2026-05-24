@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.1.0",
   "packageManager": "pnpm@10.28.2",
+  "scripts": {
+    "build:wasm": "wasm-pack build crates/client/powehi-crypto-wasm --target web --out-dir pkg"
+  },
   "pnpm": {
     "onlyBuiltDependencies": ["@biomejs/biome", "esbuild"]
   }

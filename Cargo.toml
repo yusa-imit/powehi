@@ -58,7 +58,7 @@ redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 tonic = "0.12"
 prost = "0.13"
 # crypto — no homegrown crypto; only these three
-openmls = { version = "0.6", default-features = false }
+openmls = { version = "0.8", default-features = false }
 opaque-ke = "3"
 sha2 = "0.10"
 # config
