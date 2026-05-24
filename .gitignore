@@ -21,7 +21,7 @@ Thumbs.db
 target/
 **/*.rs.bk
 
-# Node (future)
+# Node / pnpm
 node_modules/
 dist/
 .turbo/

@@ -1,0 +1,83 @@
+@import "tailwindcss";
+@import url("https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap");
+
+/* ============================================================
+   POWEHI · DESIGN TOKENS  (v2 — dual-light)
+   Pōwehi (warm accretion) × Gargantua (cool photon ring).
+   ============================================================ */
+
+:root {
+	/* ---------- BACKGROUND SYSTEM ---------- */
+	--bg-void: #040408;
+	--bg-surface: #0c0c14;
+	--bg-elevated: #16161f;
+	--bg-overlay: #20202d;
+	--bg-input: #08080f;
+
+	/* ---------- ACCRETION — action / presence ---------- */
+	--accretion-50: #ffefcc;
+	--accretion-100: #ffd78a;
+	--accretion-200: #ffb155;
+	--accretion-300: #ff9e52;
+	--accretion-400: #ff8a3d;
+	--accretion-500: #e5681f;
+	--accretion-600: #b14507;
+	--accretion-700: #6e2700;
+	--accretion-800: #2a0a00;
+
+	/* ---------- PHOTON RING — encryption only ---------- */
+	--photon-50: #f4f8ff;
+	--photon-100: #e8f0ff;
+	--photon-200: #c8dcff;
+	--photon-300: #a8c8ff;
+	--photon-400: #88b0f0;
+	--photon-500: #6688cc;
+	--photon-600: #445c99;
+	--photon-700: #2a3866;
+
+	/* ---------- STATUS ---------- */
+	--plasma: #5ee6a8;
+	--plasma-soft: rgba(94, 230, 168, 0.14);
+	--flare: #ff7a7a;
+	--flare-soft: rgba(255, 122, 122, 0.14);
+	--warn: #ffb347;
+
+	/* ---------- TEXT ---------- */
+	--fg-1: #f2ede3;
+	--fg-2: #bdbdc9;
+	--fg-3: #898998;
+	--fg-4: #54546a;
+	--fg-inverse: #06060c;
+
+	/* ---------- BORDERS ---------- */
+	--border-faint: rgba(242, 237, 227, 0.05);
+	--border-soft: rgba(242, 237, 227, 0.09);
+	--border-strong: rgba(242, 237, 227, 0.16);
+	--border-photon: rgba(168, 200, 255, 0.22);
+
+	/* ---------- TYPOGRAPHY ---------- */
+	--font-sans: "Geist", system-ui, -apple-system, sans-serif;
+	--font-mono: "Geist Mono", ui-monospace, "SF Mono", monospace;
+	--font-serif: "Instrument Serif", "Times New Roman", serif;
+}
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+	height: 100%;
+}
+
+body {
+	margin: 0;
+	background-color: var(--bg-void);
+	color: var(--fg-1);
+	font-family: var(--font-sans);
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
+}
