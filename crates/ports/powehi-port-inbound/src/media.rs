@@ -11,19 +11,9 @@ pub trait MediaUseCase: Send + Sync {
         size_bytes: u64,
     ) -> Result<(MediaId, String), DomainError>;
 
-    async fn confirm_upload(
-        &self,
-        media_id: &MediaId,
-    ) -> Result<(), DomainError>;
+    async fn confirm_upload(&self, media_id: &MediaId) -> Result<(), DomainError>;
 
-    async fn get_download_url(
-        &self,
-        media_id: &MediaId,
-    ) -> Result<String, DomainError>;
+    async fn get_download_url(&self, media_id: &MediaId) -> Result<String, DomainError>;
 
-    async fn delete(
-        &self,
-        media_id: &MediaId,
-        requestor: &UserId,
-    ) -> Result<(), DomainError>;
+    async fn delete(&self, media_id: &MediaId, requestor: &UserId) -> Result<(), DomainError>;
 }

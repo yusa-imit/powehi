@@ -40,7 +40,13 @@ pub struct Device {
 
 impl Device {
     pub fn new(id: DeviceId, user_id: UserId, mls_credential: Vec<u8>) -> Self {
-        Self { id, user_id, mls_credential, created_at: Utc::now(), last_seen_at: None }
+        Self {
+            id,
+            user_id,
+            mls_credential,
+            created_at: Utc::now(),
+            last_seen_at: None,
+        }
     }
 }
 

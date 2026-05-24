@@ -28,7 +28,11 @@ impl MessagingService {
         group_repo: Arc<dyn GroupRepository>,
         event_bus: Arc<dyn DomainEventBus>,
     ) -> Self {
-        Self { envelope_repo, group_repo, event_bus }
+        Self {
+            envelope_repo,
+            group_repo,
+            event_bus,
+        }
     }
 }
 

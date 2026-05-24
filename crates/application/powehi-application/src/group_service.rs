@@ -18,21 +18,24 @@ pub struct GroupService {
 
 impl GroupService {
     pub fn new(group_repo: Arc<dyn GroupRepository>, local_region: RegionId) -> Self {
-        Self { group_repo, local_region }
+        Self {
+            group_repo,
+            local_region,
+        }
     }
 }
 
 #[async_trait]
 impl GroupUseCase for GroupService {
     #[instrument(skip(self), fields(creator = %creator, group_id = %group_id))]
-    async fn create_group(
-        &self,
-        creator: &DeviceId,
-        group_id: GroupId,
-    ) -> Result<(), DomainError> {
+    async fn create_group(&self, creator: &DeviceId, group_id: GroupId) -> Result<(), DomainError> {
         let group = Group::new(group_id.clone(), self.local_region.clone());
         self.group_repo.save(&group).await?;
-        let member = GroupMember { group_id, device_id: creator.clone(), joined_at_epoch: Epoch(0) };
+        let member = GroupMember {
+            group_id,
+            device_id: creator.clone(),
+            joined_at_epoch: Epoch(0),
+        };
         self.group_repo.add_member(&member).await
     }
 

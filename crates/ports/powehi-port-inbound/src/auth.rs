@@ -55,18 +55,9 @@ pub trait AuthUseCase: Send + Sync {
         &self,
         req: RegistrationInitRequest,
     ) -> Result<RegistrationInitResponse, DomainError>;
-    async fn register_finish(
-        &self,
-        req: RegistrationFinishRequest,
-    ) -> Result<UserId, DomainError>;
-    async fn login_init(
-        &self,
-        req: LoginInitRequest,
-    ) -> Result<LoginInitResponse, DomainError>;
-    async fn login_finish(
-        &self,
-        req: LoginFinishRequest,
-    ) -> Result<SessionToken, DomainError>;
+    async fn register_finish(&self, req: RegistrationFinishRequest) -> Result<UserId, DomainError>;
+    async fn login_init(&self, req: LoginInitRequest) -> Result<LoginInitResponse, DomainError>;
+    async fn login_finish(&self, req: LoginFinishRequest) -> Result<SessionToken, DomainError>;
     async fn register_device(
         &self,
         user_id: &UserId,

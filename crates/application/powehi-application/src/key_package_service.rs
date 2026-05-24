@@ -40,10 +40,7 @@ impl KeyPackageUseCase for KeyPackageService {
     }
 
     #[instrument(skip(self), fields(target_device_id = %target_device_id))]
-    async fn fetch_one(
-        &self,
-        target_device_id: &DeviceId,
-    ) -> Result<Bytes, DomainError> {
+    async fn fetch_one(&self, target_device_id: &DeviceId) -> Result<Bytes, DomainError> {
         let kp = self
             .kp_repo
             .fetch_one(target_device_id)
@@ -53,10 +50,7 @@ impl KeyPackageUseCase for KeyPackageService {
     }
 
     #[instrument(skip(self), fields(device_id = %device_id))]
-    async fn count(
-        &self,
-        device_id: &DeviceId,
-    ) -> Result<u64, DomainError> {
+    async fn count(&self, device_id: &DeviceId) -> Result<u64, DomainError> {
         self.kp_repo.count_available(device_id).await
     }
 }

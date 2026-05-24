@@ -20,11 +20,11 @@ pub struct AuthService {
 }
 
 impl AuthService {
-    pub fn new(
-        user_repo: Arc<dyn UserRepository>,
-        device_repo: Arc<dyn DeviceRepository>,
-    ) -> Self {
-        Self { user_repo, device_repo }
+    pub fn new(user_repo: Arc<dyn UserRepository>, device_repo: Arc<dyn DeviceRepository>) -> Self {
+        Self {
+            user_repo,
+            device_repo,
+        }
     }
 }
 
@@ -45,33 +45,27 @@ impl AuthUseCase for AuthService {
     }
 
     #[instrument(skip(self, req), fields(user_id = %req.user_id))]
-    async fn register_finish(
-        &self,
-        req: RegistrationFinishRequest,
-    ) -> Result<UserId, DomainError> {
+    async fn register_finish(&self, req: RegistrationFinishRequest) -> Result<UserId, DomainError> {
         let user = User::new(req.user_id.clone(), vec![]);
         self.user_repo.save(&user).await?;
         Ok(req.user_id)
     }
 
     #[instrument(skip(self, req), fields(handle_hash_len = req.handle_hash.len()))]
-    async fn login_init(
-        &self,
-        req: LoginInitRequest,
-    ) -> Result<LoginInitResponse, DomainError> {
+    async fn login_init(&self, req: LoginInitRequest) -> Result<LoginInitResponse, DomainError> {
         let user = self
             .user_repo
             .find_by_handle_hash(&req.handle_hash)
             .await?
             .ok_or_else(|| DomainError::NotFound("user".into()))?;
-        Ok(LoginInitResponse { user_id: user.id, opaque_ke2: req.opaque_ke1 })
+        Ok(LoginInitResponse {
+            user_id: user.id,
+            opaque_ke2: req.opaque_ke1,
+        })
     }
 
     #[instrument(skip(self, req), fields(user_id = %req.user_id))]
-    async fn login_finish(
-        &self,
-        req: LoginFinishRequest,
-    ) -> Result<SessionToken, DomainError> {
+    async fn login_finish(&self, req: LoginFinishRequest) -> Result<SessionToken, DomainError> {
         // Session token generation handled by adapter layer; stub returns placeholder.
         Ok(SessionToken(format!("session:{}", req.user_id)))
     }

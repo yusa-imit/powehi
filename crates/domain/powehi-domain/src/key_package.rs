@@ -32,6 +32,12 @@ pub struct KeyPackage {
 
 impl KeyPackage {
     pub fn new(device_id: DeviceId, data: Vec<u8>) -> Self {
-        Self { id: KeyPackageId::new(), device_id, data, uploaded_at: Utc::now(), consumed: false }
+        Self {
+            id: KeyPackageId::new(),
+            device_id,
+            data,
+            uploaded_at: Utc::now(),
+            consumed: false,
+        }
     }
 }

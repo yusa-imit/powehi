@@ -40,35 +40,33 @@ impl MediaUseCase for MediaService {
         };
         let id = blob.id.clone();
         self.media_repo.save(&blob).await?;
-        let url = self.media_repo.presigned_upload_url(&id, content_type).await?;
+        let url = self
+            .media_repo
+            .presigned_upload_url(&id, content_type)
+            .await?;
         Ok((id, url))
     }
 
     #[instrument(skip(self), fields(media_id = %media_id))]
-    async fn confirm_upload(
-        &self,
-        media_id: &MediaId,
-    ) -> Result<(), DomainError> {
-        self.media_repo.find_by_id(media_id).await?
+    async fn confirm_upload(&self, media_id: &MediaId) -> Result<(), DomainError> {
+        self.media_repo
+            .find_by_id(media_id)
+            .await?
             .ok_or_else(|| DomainError::NotFound("media".into()))?;
         Ok(())
     }
 
     #[instrument(skip(self), fields(media_id = %media_id))]
-    async fn get_download_url(
-        &self,
-        media_id: &MediaId,
-    ) -> Result<String, DomainError> {
+    async fn get_download_url(&self, media_id: &MediaId) -> Result<String, DomainError> {
         self.media_repo.presigned_download_url(media_id).await
     }
 
     #[instrument(skip(self), fields(media_id = %media_id, requestor = %requestor))]
-    async fn delete(
-        &self,
-        media_id: &MediaId,
-        requestor: &UserId,
-    ) -> Result<(), DomainError> {
-        let blob = self.media_repo.find_by_id(media_id).await?
+    async fn delete(&self, media_id: &MediaId, requestor: &UserId) -> Result<(), DomainError> {
+        let blob = self
+            .media_repo
+            .find_by_id(media_id)
+            .await?
             .ok_or_else(|| DomainError::NotFound("media".into()))?;
         if &blob.uploader != requestor {
             return Err(DomainError::Unauthorized);

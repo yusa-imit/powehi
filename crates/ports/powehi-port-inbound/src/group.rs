@@ -7,11 +7,7 @@ use powehi_domain::{
 
 #[async_trait]
 pub trait GroupUseCase: Send + Sync {
-    async fn create_group(
-        &self,
-        creator: &DeviceId,
-        group_id: GroupId,
-    ) -> Result<(), DomainError>;
+    async fn create_group(&self, creator: &DeviceId, group_id: GroupId) -> Result<(), DomainError>;
 
     async fn add_member(
         &self,

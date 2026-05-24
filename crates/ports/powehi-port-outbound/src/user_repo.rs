@@ -1,5 +1,8 @@
 use async_trait::async_trait;
-use powehi_domain::{error::DomainError, user::{User, UserId}};
+use powehi_domain::{
+    error::DomainError,
+    user::{User, UserId},
+};
 
 #[async_trait]
 pub trait UserRepository: Send + Sync {

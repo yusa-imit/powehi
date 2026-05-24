@@ -49,6 +49,11 @@ pub struct GroupMember {
 
 impl Group {
     pub fn new(id: GroupId, home_region: RegionId) -> Self {
-        Self { id, home_region, epoch: Epoch(0), created_at: Utc::now() }
+        Self {
+            id,
+            home_region,
+            epoch: Epoch(0),
+            created_at: Utc::now(),
+        }
     }
 }

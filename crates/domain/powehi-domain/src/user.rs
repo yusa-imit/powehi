@@ -39,7 +39,12 @@ pub struct User {
 impl User {
     pub fn new(id: UserId, handle_hash: Vec<u8>) -> Self {
         let now = Utc::now();
-        Self { id, handle_hash, created_at: now, updated_at: now }
+        Self {
+            id,
+            handle_hash,
+            created_at: now,
+            updated_at: now,
+        }
     }
 }
 
