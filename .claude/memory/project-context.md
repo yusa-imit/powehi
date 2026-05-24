@@ -27,7 +27,7 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - CI complete (commit 35ac5b9): ci-rust.yml (fmt→clippy+nextest) + ci-frontend.yml (biome+vitest); all local gates pass.
 - Stabilization cycle 5 (commit 69891fa): pnpm version fix in ci-frontend.yml (9→10.28.2), cargo-audit CI gate added, RUSTSEC-2023-0071 (rsa, not compiled) acknowledged in audit.toml, 21 domain unit tests green (19 new: group, envelope, key_package, region, error).
 - Stabilization cycle 6 (commit 3bf58b1): CI — Rust was red (cargo-binstall nextest install failing silently → exit 101); fixed by replacing binstall approach with `taiki-e/install-action@nextest`, the nextest-recommended CI installation method. All 21 tests + clippy + cargo-audit pass locally.
-- Next action: Terraform base skeleton (Hetzner k3s) — delegate to terraform-author.
+- Next action: `cargo nextest` 100% on skeleton; hexagonal dependency direction verification — delegate to backend-lead or test-author.
 - Build/test (once code exists):
   - `cargo build --workspace`
   - `cargo nextest run --workspace` (fallback `cargo test --workspace` if nextest absent)
@@ -43,7 +43,7 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - [x] React 19 + Vite 6 scaffold under `/app` — commit 312864d (pnpm workspace, Tailwind v4, Vitest, Biome, design tokens)
 - [x] WASM build pipeline (empty `powehi-crypto-wasm` compiles to wasm32-unknown-unknown) — commit f498ae1
 - [x] CI: GitHub Actions (fmt, clippy, nextest, biome) — commit 35ac5b9
-- [ ] Terraform base (Hetzner k3s) skeleton — delegate to terraform-author
+- [x] Terraform base (Hetzner k3s) skeleton — commit d87891f (modules/hetzner-k3s, envs/{dev,prod-eu,cloudflare}, infra-test manual pass)
 - [ ] `cargo nextest` 100% on skeleton; hexagonal dependency direction holds
 
 ### Phase 2 — Crypto Core MVP
