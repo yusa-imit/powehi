@@ -22,7 +22,8 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - Agent infra complete: `.claude/agents` (22), `skills` (7), `rules` (6), `commands` (4), `hooks` (5).
 - Design system available: `DESIGN.md` + `docs/design/powehi-design-system/` + `/powehi-design` skill — read before any UI work.
 - **Phase 1 in progress.** Workspace skeleton bootstrapped (commit 940a065): 18 crates compile, tests green, clippy clean.
-- Next action: React 19 + Vite 6 scaffold under `/app`.
+- React 19 + Vite 6 scaffold complete (commit 312864d): pnpm workspace, Vitest 2/2 green, Biome clean, TypeScript strict.
+- Next action: WASM build pipeline (empty `powehi-crypto-wasm` compiles to wasm32-unknown-unknown).
 - Build/test (once code exists):
   - `cargo build --workspace`
   - `cargo nextest run --workspace` (fallback `cargo test --workspace` if nextest absent)
@@ -35,7 +36,7 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 ### Phase 1 — Foundation & DevOps Skeleton  ← ACTIVE
 - [x] Cargo workspace + hexagonal crate skeleton (domain → ports → application → adapters → bin), prd.md §6.1 — commit 940a065
 - [x] powehi-domain (zero external deps) + powehi-port-inbound/outbound trait stubs — commit 940a065
-- [ ] React 19 + Vite 6 scaffold under `/app`
+- [x] React 19 + Vite 6 scaffold under `/app` — commit 312864d (pnpm workspace, Tailwind v4, Vitest, Biome, design tokens)
 - [ ] WASM build pipeline (empty `powehi-crypto-wasm` compiles to wasm32-unknown-unknown)
 - [ ] CI: GitHub Actions (fmt, clippy, nextest, biome) — delegate to ci-pipeline-author
 - [ ] Terraform base (Hetzner k3s) skeleton — delegate to terraform-author
