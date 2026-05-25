@@ -31,6 +31,12 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
     - middleware: AuthenticatedDevice extractor — valid UUID, missing header, non-UUID, wrong scheme, empty (all 401)
   - cargo audit: clean (instant unmaintained warning via openmls is pre-existing waiver)
   - CI fix: committed pre-formatted code; lesson: always run `cargo fmt --all` before committing
+- **Stabilization cycle 15 (commit 23e92ac):**
+  - CI: green. cargo audit: clean. clippy -D warnings: clean.
+  - Added 14 new tests (total workspace: 87 passing — was 73):
+    - powehi-rest-api: 11 handler-level tests using success/NotFound mocks: send_message 200, poll 200 empty, poll with since, ack 204, ack invalid id 400, send_welcome 204, send_commit epoch, upload 200 ids, fetch_one 200 data, count 200, fetch_one 404. Total rest-api: 26.
+    - powehi-config: 3 unit tests: region() wraps region_id, roundtrips, load() defaults. Total config: 3.
+  - GroupId/DeviceId JSON serialization confirmed (newtype struct → UUID string)
 - React 19 + Vite 6 scaffold complete (commit 312864d): pnpm workspace, Vitest 2/2 green, Biome clean, TypeScript strict.
 - WASM build pipeline complete (commit f498ae1): openmls 0.8 + js feature, wasm-pack --target web, pnpm build:wasm, bulk-memory wasm-opt flag.
 - CI complete (commit 35ac5b9): ci-rust.yml (fmt→clippy+nextest) + ci-frontend.yml (biome+vitest); all local gates pass.
