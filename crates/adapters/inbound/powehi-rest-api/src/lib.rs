@@ -291,4 +291,351 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
+
+    // --- Success mocks for handler-level tests ---
+
+    struct MockMessagingSuccess;
+    #[async_trait]
+    impl MessagingUseCase for MockMessagingSuccess {
+        async fn send_message(
+            &self,
+            _sender: &DeviceId,
+            _group_id: &GroupId,
+            _ciphertext: Bytes,
+        ) -> Result<EnvelopeId, DomainError> {
+            Ok(EnvelopeId::new())
+        }
+        async fn send_welcome(
+            &self,
+            _sender: &DeviceId,
+            _group_id: &GroupId,
+            _welcome: Bytes,
+            _target: &DeviceId,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn send_commit(
+            &self,
+            _sender: &DeviceId,
+            _group_id: &GroupId,
+            _commit: Bytes,
+        ) -> Result<Epoch, DomainError> {
+            Ok(Epoch(42))
+        }
+        async fn poll_envelopes(
+            &self,
+            _device_id: &DeviceId,
+            _since: Option<DateTime<Utc>>,
+        ) -> Result<Vec<Envelope>, DomainError> {
+            Ok(vec![])
+        }
+        async fn ack_envelope(
+            &self,
+            _device_id: &DeviceId,
+            _envelope_id: &EnvelopeId,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+    }
+
+    struct MockKeyPackageSuccess;
+    #[async_trait]
+    impl KeyPackageUseCase for MockKeyPackageSuccess {
+        async fn upload(
+            &self,
+            _device_id: &DeviceId,
+            packages: Vec<Bytes>,
+        ) -> Result<Vec<KeyPackageId>, DomainError> {
+            Ok(packages.iter().map(|_| KeyPackageId::new()).collect())
+        }
+        async fn fetch_one(&self, _target_device_id: &DeviceId) -> Result<Bytes, DomainError> {
+            Ok(Bytes::from_static(b"kp_bytes"))
+        }
+        async fn count(&self, _device_id: &DeviceId) -> Result<u64, DomainError> {
+            Ok(3)
+        }
+    }
+
+    struct MockKeyPackageNotFound;
+    #[async_trait]
+    impl KeyPackageUseCase for MockKeyPackageNotFound {
+        async fn upload(
+            &self,
+            _device_id: &DeviceId,
+            _packages: Vec<Bytes>,
+        ) -> Result<Vec<KeyPackageId>, DomainError> {
+            unimplemented!()
+        }
+        async fn fetch_one(&self, _target_device_id: &DeviceId) -> Result<Bytes, DomainError> {
+            Err(DomainError::NotFound("no key package".into()))
+        }
+        async fn count(&self, _device_id: &DeviceId) -> Result<u64, DomainError> {
+            unimplemented!()
+        }
+    }
+
+    fn messaging_router() -> Router {
+        router(AppState {
+            auth: Arc::new(MockAuth),
+            messaging: Arc::new(MockMessagingSuccess),
+            key_package: Arc::new(MockKeyPackage),
+        })
+    }
+
+    fn key_package_router() -> Router {
+        router(AppState {
+            auth: Arc::new(MockAuth),
+            messaging: Arc::new(MockMessaging),
+            key_package: Arc::new(MockKeyPackageSuccess),
+        })
+    }
+
+    fn key_package_not_found_router() -> Router {
+        router(AppState {
+            auth: Arc::new(MockAuth),
+            messaging: Arc::new(MockMessaging),
+            key_package: Arc::new(MockKeyPackageNotFound),
+        })
+    }
+
+    fn bearer(device: &DeviceId) -> String {
+        format!("Bearer {device}")
+    }
+
+    async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    // --- Messaging handler tests ---
+
+    #[tokio::test]
+    async fn send_message_authenticated_returns_200() {
+        let device = DeviceId::new();
+        let group = GroupId::new();
+        let body = serde_json::json!({
+            "group_id": group.to_string(),
+            "ciphertext": [1u8, 2, 3]
+        });
+        let resp = messaging_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("authorization", bearer(&device))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["envelope_id"].is_string());
+    }
+
+    #[tokio::test]
+    async fn poll_authenticated_returns_empty_list() {
+        let device = DeviceId::new();
+        let resp = messaging_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/messages")
+                    .header("authorization", bearer(&device))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn poll_with_since_param_returns_200() {
+        let device = DeviceId::new();
+        let resp = messaging_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/messages?since=1000000")
+                    .header("authorization", bearer(&device))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn ack_valid_envelope_returns_204() {
+        let device = DeviceId::new();
+        let envelope_id = EnvelopeId::new();
+        let resp = messaging_router()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/messages/{envelope_id}"))
+                    .header("authorization", bearer(&device))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn ack_invalid_id_returns_400() {
+        let device = DeviceId::new();
+        let resp = messaging_router()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/v1/messages/not-a-uuid")
+                    .header("authorization", bearer(&device))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn send_welcome_returns_204() {
+        let device = DeviceId::new();
+        let target = DeviceId::new();
+        let group = GroupId::new();
+        let body = serde_json::json!({
+            "group_id": group.to_string(),
+            "welcome": [4u8, 5, 6],
+            "target_device_id": target.to_string()
+        });
+        let resp = messaging_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages/welcome")
+                    .header("authorization", bearer(&device))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn send_commit_returns_epoch() {
+        let device = DeviceId::new();
+        let group = GroupId::new();
+        let body = serde_json::json!({
+            "group_id": group.to_string(),
+            "commit": [7u8, 8, 9]
+        });
+        let resp = messaging_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages/commit")
+                    .header("authorization", bearer(&device))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["epoch"], 42u64);
+    }
+
+    // --- Key-package handler tests ---
+
+    #[tokio::test]
+    async fn upload_key_packages_returns_ids() {
+        let caller = DeviceId::new();
+        let device = DeviceId::new();
+        let body = serde_json::json!({ "packages": [[1u8, 2], [3u8, 4]] });
+        let resp = key_package_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/key-packages/{device}"))
+                    .header("authorization", bearer(&caller))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ids"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn fetch_one_key_package_returns_data() {
+        let caller = DeviceId::new();
+        let device = DeviceId::new();
+        let resp = key_package_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/key-packages/{device}"))
+                    .header("authorization", bearer(&caller))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["data"].is_array());
+    }
+
+    #[tokio::test]
+    async fn count_key_packages_returns_count() {
+        let caller = DeviceId::new();
+        let device = DeviceId::new();
+        let resp = key_package_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/key-packages/{device}/count"))
+                    .header("authorization", bearer(&caller))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["count"], 3u64);
+    }
+
+    #[tokio::test]
+    async fn fetch_one_not_found_returns_404() {
+        let caller = DeviceId::new();
+        let device = DeviceId::new();
+        let resp = key_package_not_found_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/key-packages/{device}"))
+                    .header("authorization", bearer(&caller))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
 }
