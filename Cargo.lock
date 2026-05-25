@@ -2386,9 +2386,11 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
+ "futures",
  "powehi-domain",
  "powehi-port-inbound",
  "powehi-port-outbound",
+ "tokio",
  "tracing",
  "uuid",
 ]
