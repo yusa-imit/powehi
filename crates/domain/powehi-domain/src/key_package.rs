@@ -19,6 +19,18 @@ impl Default for KeyPackageId {
     }
 }
 
+impl KeyPackageId {
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl From<Uuid> for KeyPackageId {
+    fn from(id: Uuid) -> Self {
+        Self(id)
+    }
+}
+
 /// MLS KeyPackage — opaque bytes stored by the server; consumed exactly once.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyPackage {

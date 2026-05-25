@@ -2534,9 +2534,12 @@ name = "powehi-redis"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures-core",
  "powehi-domain",
  "powehi-port-outbound",
  "redis",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]
@@ -2571,6 +2574,8 @@ dependencies = [
  "powehi-domain",
  "powehi-port-inbound",
  "powehi-port-outbound",
+ "powehi-postgres",
+ "powehi-redis",
  "powehi-rest-api",
  "powehi-telemetry",
  "powehi-ws-hub",

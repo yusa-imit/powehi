@@ -18,6 +18,8 @@ powehi-config = { workspace = true }
 powehi-telemetry = { workspace = true }
 powehi-rest-api = { workspace = true }
 powehi-ws-hub = { workspace = true }
+powehi-postgres = { workspace = true }
+powehi-redis = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

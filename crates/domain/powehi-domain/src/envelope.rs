@@ -20,6 +20,18 @@ impl Default for EnvelopeId {
     }
 }
 
+impl EnvelopeId {
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl From<Uuid> for EnvelopeId {
+    fn from(id: Uuid) -> Self {
+        Self(id)
+    }
+}
+
 impl std::fmt::Display for EnvelopeId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)

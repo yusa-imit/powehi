@@ -23,6 +23,12 @@ impl Default for GroupId {
     }
 }
 
+impl From<Uuid> for GroupId {
+    fn from(id: Uuid) -> Self {
+        Self(id)
+    }
+}
+
 impl std::fmt::Display for GroupId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
