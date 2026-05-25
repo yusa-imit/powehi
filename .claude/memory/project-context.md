@@ -27,7 +27,10 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - CI complete (commit 35ac5b9): ci-rust.yml (fmt→clippy+nextest) + ci-frontend.yml (biome+vitest); all local gates pass.
 - Stabilization cycle 5 (commit 69891fa): pnpm version fix in ci-frontend.yml (9→10.28.2), cargo-audit CI gate added, RUSTSEC-2023-0071 (rsa, not compiled) acknowledged in audit.toml, 21 domain unit tests green (19 new: group, envelope, key_package, region, error).
 - Stabilization cycle 6 (commit 3bf58b1): CI — Rust was red (cargo-binstall nextest install failing silently → exit 101); fixed by replacing binstall approach with `taiki-e/install-action@nextest`, the nextest-recommended CI installation method. All 21 tests + clippy + cargo-audit pass locally.
-- Next action: `cargo nextest` 100% on skeleton; hexagonal dependency direction verification — delegate to backend-lead or test-author.
+- Phase 1 COMPLETE (cycle 8). Phase 2 in progress.
+- Next action: Comlink worker + wasm-bindgen exports for OPAQUE/MLS; WASM compilation test (wasm-pack --target web); then crypto-reviewer pass on WASM bindings.
+- Follow-up (crypto-reviewer WARNING 1/9): upgrade opaque-ke from 3.0 (draft-16) to 4.x (RFC 9807) — pending availability; or amend crypto-libraries-pinned.md rule.
+- Workspace deps added in cycle 8: openmls_rust_crypto, openmls_basic_credential, openmls_traits, argon2 (all in workspace Cargo.toml).
 - Build/test (once code exists):
   - `cargo build --workspace`
   - `cargo nextest run --workspace` (fallback `cargo test --workspace` if nextest absent)
@@ -44,10 +47,15 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - [x] WASM build pipeline (empty `powehi-crypto-wasm` compiles to wasm32-unknown-unknown) — commit f498ae1
 - [x] CI: GitHub Actions (fmt, clippy, nextest, biome) — commit 35ac5b9
 - [x] Terraform base (Hetzner k3s) skeleton — commit d87891f (modules/hetzner-k3s, envs/{dev,prod-eu,cloudflare}, infra-test manual pass)
-- [ ] `cargo nextest` 100% on skeleton; hexagonal dependency direction holds
+- [x] `cargo nextest` 100% on skeleton; hexagonal dependency direction holds — cycle 8 (verified: 21/21 domain tests pass; domain←ports←application; adapters→ports only, NOT application)
 
 ### Phase 2 — Crypto Core MVP
 - [ ] `powehi-crypto-wasm` w/ openmls; OPAQUE register/login; MLS group round-trip; Comlink worker; forward-secrecy invariant test; crypto-reviewer pass
+  - [x] OPAQUE registration/login (opaque-ke 3.0, draft-irtf-cfrg-opaque-16): registration_start/finish + login_start/finish/full; 2 tests green — cycle 8
+  - [x] MLS group create/encrypt/decrypt (openmls 0.8.1 + openmls_rust_crypto): roundtrip + forward-secrecy invariant; 2 tests green — cycle 8
+  - [x] Crypto-reviewer: YELLOW (no RED). Warnings: opaque-ke 3.x vs rule 4.x (follow-up needed), max_past_epochs(0) now explicit, identity binding documented — cycle 8
+  - [ ] Comlink worker / wasm-bindgen exports
+  - [ ] WASM compilation test (wasm-pack --target web)
 
 ### Phase 3 — Backend Services & API
 - [ ] MLS Delivery Service; KeyPackage Service; Auth (OPAQUE); WS hub; Media (R2); rate limiting; security-auditor pass
