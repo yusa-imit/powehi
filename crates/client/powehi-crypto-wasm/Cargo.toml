@@ -14,12 +14,27 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde-wasm-bindgen = "0.6"
 thiserror = { workspace = true }
+sha2 = { workspace = true }
+# OPAQUE (RFC 9807) — pure Rust, compiles on native + wasm32. No homegrown crypto.
+opaque-ke = { workspace = true, features = ["ristretto255-voprf", "argon2", "serde", "std"] }
+# Argon2 KSF type used in the OPAQUE ciphersuite definition.
+argon2 = { workspace = true }
 
+# MLS (RFC 9420) on native: use the audited OpenMLS RustCrypto provider so the
+# crate builds and tests on the host target (not just wasm32).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+openmls = { workspace = true }
+openmls_rust_crypto = { workspace = true }
+openmls_basic_credential = { workspace = true }
+openmls_traits = { workspace = true }
+
+# MLS on wasm32: openmls `js` feature wires WASM-safe time/rng shims.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
-# js feature enables WASM-safe time/rng shims required by openmls on wasm32
 openmls = { workspace = true, features = ["js"] }
-opaque-ke = { workspace = true }
+openmls_rust_crypto = { workspace = true }
+openmls_basic_credential = { workspace = true }
+openmls_traits = { workspace = true }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

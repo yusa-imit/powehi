@@ -57,9 +57,15 @@ redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 # gRPC
 tonic = "0.12"
 prost = "0.13"
-# crypto — no homegrown crypto; only these three
+# crypto — no homegrown crypto; only audited libraries
 openmls = { version = "0.8", default-features = false }
+# OpenMLS native Rust crypto backend + basic credential helper (versions tracked by openmls 0.8.1)
+openmls_rust_crypto = "0.5"
+openmls_basic_credential = "0.5"
+openmls_traits = "0.5"
 opaque-ke = "3"
+# argon2 KSF for OPAQUE (matches opaque-ke 3.0 argon2 feature dep range)
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 sha2 = "0.10"
 # config
 config = "0.14"
