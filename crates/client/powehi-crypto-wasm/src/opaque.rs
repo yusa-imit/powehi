@@ -145,11 +145,7 @@ pub fn login_finish_full(
 ) -> Result<ClientLoginFinishResult<DefaultCipherSuite>, OpaqueError> {
     let response = CredentialResponse::<DefaultCipherSuite>::deserialize(server_message)
         .map_err(|_| OpaqueError::Deserialize)?;
-    let result = client_login.finish(
-        password,
-        response,
-        ClientLoginFinishParameters::default(),
-    )?;
+    let result = client_login.finish(password, response, ClientLoginFinishParameters::default())?;
     Ok(result)
 }
 

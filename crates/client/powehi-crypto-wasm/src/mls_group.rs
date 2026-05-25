@@ -15,8 +15,7 @@ use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 
 /// MVP ciphersuite. Migration to a PQ-hybrid suite happens here in Phase B.
-pub const CIPHERSUITE: Ciphersuite =
-    Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
+pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
 /// Convenience alias for the native provider. On both native and wasm32 the
 /// RustCrypto provider is used; the wasm32 difference is purely openmls's `js`
@@ -153,8 +152,7 @@ pub fn decrypt_message(
     ciphertext: &[u8],
     provider: &impl OpenMlsProvider,
 ) -> Result<Vec<u8>, MlsError> {
-    let message =
-        MlsMessageIn::tls_deserialize_exact(ciphertext).map_err(|_| MlsError::Codec)?;
+    let message = MlsMessageIn::tls_deserialize_exact(ciphertext).map_err(|_| MlsError::Codec)?;
     let protocol_message: ProtocolMessage = message
         .try_into_protocol_message()
         .map_err(|_| MlsError::Codec)?;
@@ -203,7 +201,9 @@ pub fn join_group(
     };
     let staged = StagedWelcome::new_from_welcome(provider, &config, welcome, None)
         .map_err(|_| MlsError::Membership)?;
-    staged.into_group(provider).map_err(|_| MlsError::Membership)
+    staged
+        .into_group(provider)
+        .map_err(|_| MlsError::Membership)
 }
 
 #[cfg(test)]
@@ -291,7 +291,11 @@ mod tests {
         // processes the same commit so his group also moves to the new epoch.
         let charlie_kp = generate_key_package(&charlie, &charlie_provider).unwrap();
         let (commit, _welcome2, _gi) = alice_group
-            .add_members(&alice_provider, &alice.signer, &[charlie_kp.key_package().clone()])
+            .add_members(
+                &alice_provider,
+                &alice.signer,
+                &[charlie_kp.key_package().clone()],
+            )
             .unwrap();
         alice_group.merge_pending_commit(&alice_provider).unwrap();
 
@@ -300,7 +304,9 @@ mod tests {
         let commit_pm: ProtocolMessage = commit_in.try_into_protocol_message().unwrap();
         let processed = bob_group.process_message(&bob_provider, commit_pm).unwrap();
         if let ProcessedMessageContent::StagedCommitMessage(staged) = processed.into_content() {
-            bob_group.merge_staged_commit(&bob_provider, *staged).unwrap();
+            bob_group
+                .merge_staged_commit(&bob_provider, *staged)
+                .unwrap();
         } else {
             panic!("expected a staged commit message");
         }

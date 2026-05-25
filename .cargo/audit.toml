@@ -1,0 +1,14 @@
+[advisories]
+# RUSTSEC-2023-0071: rsa 0.9.10 — Marvin Attack timing side-channel
+# Impact: rsa is pulled transitively via sqlx-macros-core → sqlx-mysql.
+# We only enable the "postgres" feature; `cargo tree -i rsa` produces no output —
+# rsa is NOT compiled into any Powehi binary.
+# No upstream fix available. Revisit when sqlx removes the sqlx-mysql transitive dep.
+#
+# RUSTSEC-2026-0124: libcrux-chacha20poly1305 0.0.7 — Potential Panic on Overlong Ciphertext Buffer
+# Impact: panic/DoS only — does NOT leak plaintext, keys, or ciphertext.
+# Powehi non-negotiable (server never sees plaintext) is NOT violated.
+# Transitively pulled via openmls_rust_crypto 0.5.1 → libcrux-aead 0.0.7.
+# openmls_rust_crypto 0.5.1 is the latest; cannot upgrade to libcrux >=0.0.8 within
+# the current dep graph.  Revisit when openmls_rust_crypto releases a new version.
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0124"]
