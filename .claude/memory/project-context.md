@@ -28,8 +28,9 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - Stabilization cycle 5 (commit 69891fa): pnpm version fix in ci-frontend.yml (9→10.28.2), cargo-audit CI gate added, RUSTSEC-2023-0071 (rsa, not compiled) acknowledged in audit.toml, 21 domain unit tests green (19 new: group, envelope, key_package, region, error).
 - Stabilization cycle 6 (commit 3bf58b1): CI — Rust was red (cargo-binstall nextest install failing silently → exit 101); fixed by replacing binstall approach with `taiki-e/install-action@nextest`, the nextest-recommended CI installation method. All 21 tests + clippy + cargo-audit pass locally.
 - Phase 1 COMPLETE (cycle 8). Phase 2 in progress.
-- Next action: Comlink worker + wasm-bindgen exports for OPAQUE/MLS; WASM compilation test (wasm-pack --target web); then crypto-reviewer pass on WASM bindings.
-- Follow-up (crypto-reviewer WARNING 1/9): upgrade opaque-ke from 3.0 (draft-16) to 4.x (RFC 9807) — pending availability; or amend crypto-libraries-pinned.md rule.
+- Comlink worker + wasm-bindgen exports DONE (cycle 10). crypto-reviewer YELLOW, both findings addressed.
+- Next action: WASM compilation test (wasm-pack --target web) — install wasm-pack + run `wasm-pack build --target web`; then flip last Phase 2 checklist item.
+- Follow-up (crypto-reviewer Finding 1): upgrade opaque-ke from 3.0 (draft-16) to stable 4.x (RFC 9807) when stable version ships (currently only 4.1.0-pre.2 available). Waiver recorded in .claude/rules/crypto-libraries-pinned.md.
 - Workspace deps added in cycle 8: openmls_rust_crypto, openmls_basic_credential, openmls_traits, argon2 (all in workspace Cargo.toml).
 - Build/test (once code exists):
   - `cargo build --workspace`
@@ -54,7 +55,7 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
   - [x] OPAQUE registration/login (opaque-ke 3.0, draft-irtf-cfrg-opaque-16): registration_start/finish + login_start/finish/full; 2 tests green — cycle 8
   - [x] MLS group create/encrypt/decrypt (openmls 0.8.1 + openmls_rust_crypto): roundtrip + forward-secrecy invariant; 2 tests green — cycle 8
   - [x] Crypto-reviewer: YELLOW (no RED). Warnings: opaque-ke 3.x vs rule 4.x (follow-up needed), max_past_epochs(0) now explicit, identity binding documented — cycle 8
-  - [ ] Comlink worker / wasm-bindgen exports
+  - [x] Comlink worker / wasm-bindgen exports — cycle 10 (commit b5c58b0): wasm_exports.rs + crypto.worker.ts; zeroize on export_key; Biome fixed; 30/30 tests green; crypto-reviewer YELLOW (waiver for opaque-ke 3.x recorded in crypto-libraries-pinned.md)
   - [ ] WASM compilation test (wasm-pack --target web)
 
 ### Phase 3 — Backend Services & API
