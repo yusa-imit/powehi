@@ -162,6 +162,9 @@ pub async fn ack(
         envelope_id = %envelope_id,
         "messaging.ack"
     );
-    state.messaging.ack_envelope(&device_id, &envelope_id).await?;
+    state
+        .messaging
+        .ack_envelope(&device_id, &envelope_id)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }

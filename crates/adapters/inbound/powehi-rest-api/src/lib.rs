@@ -51,7 +51,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/messages",
             post(routes::messaging::send_message).get(routes::messaging::poll),
         )
-        .route("/v1/messages/welcome", post(routes::messaging::send_welcome))
+        .route(
+            "/v1/messages/welcome",
+            post(routes::messaging::send_welcome),
+        )
         .route("/v1/messages/commit", post(routes::messaging::send_commit))
         .route("/v1/messages/:id", delete(routes::messaging::ack))
         // key packages (authenticated)

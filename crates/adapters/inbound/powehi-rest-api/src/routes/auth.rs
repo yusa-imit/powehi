@@ -18,7 +18,10 @@ pub async fn register_init(
     State(state): State<AppState>,
     Json(req): Json<RegistrationInitRequest>,
 ) -> Result<Json<RegistrationInitResponse>, ApiError> {
-    tracing::info!(handle_hash_len = req.handle_hash.len(), "auth.register_init");
+    tracing::info!(
+        handle_hash_len = req.handle_hash.len(),
+        "auth.register_init"
+    );
     let resp = state.auth.register_init(req).await?;
     Ok(Json(resp))
 }

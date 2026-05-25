@@ -72,7 +72,11 @@ mod tests {
 
     #[tokio::test]
     async fn epoch_mismatch_maps_to_409() {
-        let (status, body) = body_of(DomainError::EpochMismatch { expected: 5, got: 3 }).await;
+        let (status, body) = body_of(DomainError::EpochMismatch {
+            expected: 5,
+            got: 3,
+        })
+        .await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body, r#"{"code":"epoch_mismatch"}"#);
         assert!(!body.contains('5') && !body.contains('3'));
@@ -90,7 +94,8 @@ mod tests {
 
     #[tokio::test]
     async fn internal_maps_to_500_without_detail() {
-        let (status, body) = body_of(DomainError::Internal("db connection string leaked".into())).await;
+        let (status, body) =
+            body_of(DomainError::Internal("db connection string leaked".into())).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert!(!body.contains("db connection"));
         assert_eq!(body, r#"{"code":"internal"}"#);
