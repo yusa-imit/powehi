@@ -5,11 +5,13 @@ on:
     branches: [main]
     paths:
       - 'app/**'
+      - 'crates/client/powehi-crypto-wasm/**'
       - '.github/workflows/ci-frontend.yml'
   pull_request:
     branches: [main]
     paths:
       - 'app/**'
+      - 'crates/client/powehi-crypto-wasm/**'
       - '.github/workflows/ci-frontend.yml'
 
 concurrency:
@@ -58,3 +60,21 @@ jobs:
 
       - name: Run Vitest
         run: pnpm --filter app test --run
+
+  wasm-build:
+    name: WASM compilation (wasm-pack)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: wasm-pack build (--target web)
+        run: wasm-pack build crates/client/powehi-crypto-wasm --target web
