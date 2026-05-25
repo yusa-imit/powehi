@@ -10,11 +10,14 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 wasm-bindgen = "0.2"
+js-sys = "0.3"
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde-wasm-bindgen = "0.6"
+serde_bytes = "0.11"
 thiserror = { workspace = true }
 sha2 = { workspace = true }
+zeroize = { workspace = true }
 # OPAQUE (RFC 9807) — pure Rust, compiles on native + wasm32. No homegrown crypto.
 opaque-ke = { workspace = true, features = ["ristretto255-voprf", "argon2", "serde", "std"] }
 # Argon2 KSF type used in the OPAQUE ciphersuite definition.
@@ -40,7 +43,7 @@ openmls_traits = { workspace = true }
 wasm-bindgen-test = "0.3"
 
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = ["-O", "--enable-bulk-memory"]
+wasm-opt = ["-O", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]
 
 [package.metadata.wasm-pack.profile.dev]
 wasm-opt = false

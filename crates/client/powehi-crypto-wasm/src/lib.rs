@@ -9,6 +9,7 @@ use wasm_bindgen::prelude::*;
 
 pub mod mls_group;
 pub mod opaque;
+pub mod wasm_exports;
 
 #[wasm_bindgen]
 pub fn version() -> String {
