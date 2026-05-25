@@ -47,7 +47,8 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
   - DefaultBodyLimit::max(512KB) global cap
   - 10 tests green: health, auth-bypass ×3, 413 body limit, error-mapping ×5
   - security-auditor: PASS (YELLOW-1 body limit fixed; YELLOW-2 stub auth documented; YELLOW-3 app-layer auth deferred)
-- Next action (Phase 3): wire outbound adapters in bin/powehi-server composition root — Postgres + Redis connection, DI wiring AppState, or implement WS hub for real-time push.
+- **Phase 3 cycle 14 (commit c46eec3):** Composition root: powehi-postgres (5 sqlx repos: User/Device/Envelope/Group/KeyPackage + 0001_initial.sql migration + atomic KP fetch via SELECT FOR UPDATE SKIP LOCKED), powehi-redis (RedisCache CachePort + RedisEventBus DomainEventBus), bin/powehi-server full DI wiring; domain From<Uuid>/as_uuid() added to 4 ID types; 73 tests pass; security-auditor GREEN.
+- Next action (Phase 3): WS hub for real-time push (envelope delivery notifications via WebSocket).
 - Follow-up (crypto-reviewer Finding 1): upgrade opaque-ke from 3.0 (draft-16) to stable 4.x (RFC 9807) when stable version ships (currently only 4.1.0-pre.2 available). Waiver recorded in .claude/rules/crypto-libraries-pinned.md.
 - Workspace deps added in cycle 8: openmls_rust_crypto, openmls_basic_credential, openmls_traits, argon2 (all in workspace Cargo.toml).
 - Build/test (once code exists):
@@ -78,7 +79,7 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 
 ### Phase 3 — Backend Services & API  ← ACTIVE
 - [x] REST API axum adapter: AppState, auth/messaging/key-package routes, AuthenticatedDevice extractor, ApiError, 512KB body limit, 10 tests — cycle 12 (commit a31ff1a); security-auditor PASS
-- [ ] Composition root: wire Postgres + Redis outbound adapters into bin/powehi-server; DI wiring for AppState
+- [x] Composition root: wire Postgres + Redis outbound adapters into bin/powehi-server; DI wiring for AppState — cycle 14 (commit c46eec3); security-auditor GREEN
 - [ ] WS hub: real-time push via WebSocket (envelope delivery notifications)
 - [ ] OPAQUE auth adapter: real opaque-ke server-side register/login in powehi-opaque
 - [ ] Rate limiting (tower middleware or governor)
