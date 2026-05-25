@@ -28,6 +28,20 @@ impl std::fmt::Display for DeviceId {
     }
 }
 
+impl From<Uuid> for DeviceId {
+    fn from(id: Uuid) -> Self {
+        Self(id)
+    }
+}
+
+impl std::str::FromStr for DeviceId {
+    type Err = uuid::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(Uuid::parse_str(s)?))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Device {
     pub id: DeviceId,
@@ -57,5 +71,24 @@ mod tests {
     #[test]
     fn device_id_is_unique() {
         assert_ne!(DeviceId::new(), DeviceId::new());
+    }
+
+    #[test]
+    fn device_id_from_uuid_roundtrips() {
+        let u = Uuid::new_v4();
+        let id = DeviceId::from(u);
+        assert_eq!(id.as_uuid(), u);
+    }
+
+    #[test]
+    fn device_id_from_str_parses_uuid() {
+        let u = Uuid::new_v4();
+        let parsed: DeviceId = u.to_string().parse().unwrap();
+        assert_eq!(parsed.as_uuid(), u);
+    }
+
+    #[test]
+    fn device_id_from_str_rejects_garbage() {
+        assert!("not-a-uuid".parse::<DeviceId>().is_err());
     }
 }

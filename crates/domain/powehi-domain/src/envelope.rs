@@ -26,6 +26,14 @@ impl std::fmt::Display for EnvelopeId {
     }
 }
 
+impl std::str::FromStr for EnvelopeId {
+    type Err = uuid::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(Uuid::parse_str(s)?))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageType {
     /// MLS application message (fully encrypted, server cannot read).
@@ -84,6 +92,18 @@ mod tests {
     #[test]
     fn envelope_id_is_unique() {
         assert_ne!(EnvelopeId::new(), EnvelopeId::new());
+    }
+
+    #[test]
+    fn envelope_id_from_str_roundtrips() {
+        let id = EnvelopeId::new();
+        let parsed: EnvelopeId = id.to_string().parse().unwrap();
+        assert_eq!(parsed, id);
+    }
+
+    #[test]
+    fn envelope_id_from_str_rejects_garbage() {
+        assert!("not-a-uuid".parse::<EnvelopeId>().is_err());
     }
 
     #[test]
