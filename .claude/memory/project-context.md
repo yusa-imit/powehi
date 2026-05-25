@@ -17,11 +17,20 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-05-25)
+## Current state (2026-05-26)
 - Planning docs complete: `docs/prd.md` (v3), `docs/orchestration.md`, `docs/decisions/` (ADR-0001, 0002).
 - Agent infra complete: `.claude/agents` (22), `skills` (7), `rules` (6), `commands` (4), `hooks` (5).
 - Design system available: `DESIGN.md` + `docs/design/powehi-design-system/` + `/powehi-design` skill — read before any UI work.
 - **Phase 1 COMPLETE. Phase 2 COMPLETE (cycle 11). Phase 3 ACTIVE (cycle 12).**
+- **Stabilization cycle 13 (commits 19b1551 + 8e266c8):**
+  - Fixed red CI: cycle-12 code was missing `cargo fmt` — rustfmt diff in error.rs/lib.rs/auth.rs/messaging.rs fixed.
+  - Added 21 new unit tests (total workspace: 51 passing):
+    - AuthService: register_finish, login_init (known/unknown), register_device, revoke_device (3 cases)
+    - KeyPackageService: upload, fetch_one, fetch_one empty→NotFound, count lifecycle
+    - MessagingService: send_message, send_commit epoch-advance, send_commit unknown group, poll filter, ack delete
+    - middleware: AuthenticatedDevice extractor — valid UUID, missing header, non-UUID, wrong scheme, empty (all 401)
+  - cargo audit: clean (instant unmaintained warning via openmls is pre-existing waiver)
+  - CI fix: committed pre-formatted code; lesson: always run `cargo fmt --all` before committing
 - React 19 + Vite 6 scaffold complete (commit 312864d): pnpm workspace, Vitest 2/2 green, Biome clean, TypeScript strict.
 - WASM build pipeline complete (commit f498ae1): openmls 0.8 + js feature, wasm-pack --target web, pnpm build:wasm, bulk-memory wasm-opt flag.
 - CI complete (commit 35ac5b9): ci-rust.yml (fmt→clippy+nextest) + ci-frontend.yml (biome+vitest); all local gates pass.
