@@ -21,7 +21,7 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - Planning docs complete: `docs/prd.md` (v3), `docs/orchestration.md`, `docs/decisions/` (ADR-0001, 0002).
 - Agent infra complete: `.claude/agents` (22), `skills` (7), `rules` (6), `commands` (4), `hooks` (5).
 - Design system available: `DESIGN.md` + `docs/design/powehi-design-system/` + `/powehi-design` skill — read before any UI work.
-- **Phase 1 in progress.** Workspace skeleton bootstrapped (commit 940a065): 18 crates compile, tests green, clippy clean.
+- **Phase 1 COMPLETE. Phase 2 COMPLETE (cycle 11). Phase 3 ACTIVE.**
 - React 19 + Vite 6 scaffold complete (commit 312864d): pnpm workspace, Vitest 2/2 green, Biome clean, TypeScript strict.
 - WASM build pipeline complete (commit f498ae1): openmls 0.8 + js feature, wasm-pack --target web, pnpm build:wasm, bulk-memory wasm-opt flag.
 - CI complete (commit 35ac5b9): ci-rust.yml (fmt→clippy+nextest) + ci-frontend.yml (biome+vitest); all local gates pass.
@@ -29,7 +29,8 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - Stabilization cycle 6 (commit 3bf58b1): CI — Rust was red (cargo-binstall nextest install failing silently → exit 101); fixed by replacing binstall approach with `taiki-e/install-action@nextest`, the nextest-recommended CI installation method. All 21 tests + clippy + cargo-audit pass locally.
 - Phase 1 COMPLETE (cycle 8). Phase 2 in progress.
 - Comlink worker + wasm-bindgen exports DONE (cycle 10). crypto-reviewer YELLOW, both findings addressed.
-- Next action: WASM compilation test (wasm-pack --target web) — install wasm-pack + run `wasm-pack build --target web`; then flip last Phase 2 checklist item.
+- **Phase 2 COMPLETE (cycle 11).** All crypto core items done. Phase 3 begins next cycle.
+- Next action (Phase 3): MLS Delivery Service crate skeleton + OPAQUE auth adapter stubs — use `backend-lead` + `new-api-endpoint` skill.
 - Follow-up (crypto-reviewer Finding 1): upgrade opaque-ke from 3.0 (draft-16) to stable 4.x (RFC 9807) when stable version ships (currently only 4.1.0-pre.2 available). Waiver recorded in .claude/rules/crypto-libraries-pinned.md.
 - Workspace deps added in cycle 8: openmls_rust_crypto, openmls_basic_credential, openmls_traits, argon2 (all in workspace Cargo.toml).
 - Build/test (once code exists):
@@ -50,15 +51,15 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - [x] Terraform base (Hetzner k3s) skeleton — commit d87891f (modules/hetzner-k3s, envs/{dev,prod-eu,cloudflare}, infra-test manual pass)
 - [x] `cargo nextest` 100% on skeleton; hexagonal dependency direction holds — cycle 8 (verified: 21/21 domain tests pass; domain←ports←application; adapters→ports only, NOT application)
 
-### Phase 2 — Crypto Core MVP
-- [ ] `powehi-crypto-wasm` w/ openmls; OPAQUE register/login; MLS group round-trip; Comlink worker; forward-secrecy invariant test; crypto-reviewer pass
+### Phase 2 — Crypto Core MVP  ← COMPLETE (cycle 11)
+- [x] `powehi-crypto-wasm` w/ openmls; OPAQUE register/login; MLS group round-trip; Comlink worker; forward-secrecy invariant test; crypto-reviewer pass
   - [x] OPAQUE registration/login (opaque-ke 3.0, draft-irtf-cfrg-opaque-16): registration_start/finish + login_start/finish/full; 2 tests green — cycle 8
   - [x] MLS group create/encrypt/decrypt (openmls 0.8.1 + openmls_rust_crypto): roundtrip + forward-secrecy invariant; 2 tests green — cycle 8
   - [x] Crypto-reviewer: YELLOW (no RED). Warnings: opaque-ke 3.x vs rule 4.x (follow-up needed), max_past_epochs(0) now explicit, identity binding documented — cycle 8
   - [x] Comlink worker / wasm-bindgen exports — cycle 10 (commit b5c58b0): wasm_exports.rs + crypto.worker.ts; zeroize on export_key; Biome fixed; 30/30 tests green; crypto-reviewer YELLOW (waiver for opaque-ke 3.x recorded in crypto-libraries-pinned.md)
-  - [ ] WASM compilation test (wasm-pack --target web)
+  - [x] WASM compilation test (wasm-pack --target web) — cycle 11: wasm-pack 0.15 success, 1.5MB binary, CI job added to ci-frontend.yml
 
-### Phase 3 — Backend Services & API
+### Phase 3 — Backend Services & API  ← ACTIVE
 - [ ] MLS Delivery Service; KeyPackage Service; Auth (OPAQUE); WS hub; Media (R2); rate limiting; security-auditor pass
 
 ### Phase 4 — Frontend & Integration
