@@ -710,14 +710,22 @@ mod tests {
         let tight = rate_limit::tight_governor();
         let app = router_for_test(minimal_state(), tight.clone(), rate_limit::api_governor());
 
-        let r1 = app.clone().oneshot(auth_req_with_ip("10.0.0.1")).await.unwrap();
+        let r1 = app
+            .clone()
+            .oneshot(auth_req_with_ip("10.0.0.1"))
+            .await
+            .unwrap();
         assert_ne!(
             r1.status(),
             StatusCode::TOO_MANY_REQUESTS,
             "first request should not be rate-limited"
         );
 
-        let r2 = app.clone().oneshot(auth_req_with_ip("10.0.0.1")).await.unwrap();
+        let r2 = app
+            .clone()
+            .oneshot(auth_req_with_ip("10.0.0.1"))
+            .await
+            .unwrap();
         assert_eq!(
             r2.status(),
             StatusCode::TOO_MANY_REQUESTS,
@@ -730,10 +738,18 @@ mod tests {
         let tight = rate_limit::tight_governor();
         let app = router_for_test(minimal_state(), rate_limit::auth_governor(), tight);
 
-        let r1 = app.clone().oneshot(api_req_with_ip("10.0.0.2")).await.unwrap();
+        let r1 = app
+            .clone()
+            .oneshot(api_req_with_ip("10.0.0.2"))
+            .await
+            .unwrap();
         assert_ne!(r1.status(), StatusCode::TOO_MANY_REQUESTS);
 
-        let r2 = app.clone().oneshot(api_req_with_ip("10.0.0.2")).await.unwrap();
+        let r2 = app
+            .clone()
+            .oneshot(api_req_with_ip("10.0.0.2"))
+            .await
+            .unwrap();
         assert_eq!(r2.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
@@ -743,12 +759,24 @@ mod tests {
         let app = router_for_test(minimal_state(), tight, rate_limit::api_governor());
 
         // exhaust the 1-token bucket for IP A
-        let _ = app.clone().oneshot(auth_req_with_ip("10.1.0.1")).await.unwrap();
-        let r_a_limited = app.clone().oneshot(auth_req_with_ip("10.1.0.1")).await.unwrap();
+        let _ = app
+            .clone()
+            .oneshot(auth_req_with_ip("10.1.0.1"))
+            .await
+            .unwrap();
+        let r_a_limited = app
+            .clone()
+            .oneshot(auth_req_with_ip("10.1.0.1"))
+            .await
+            .unwrap();
         assert_eq!(r_a_limited.status(), StatusCode::TOO_MANY_REQUESTS);
 
         // IP B still has its own full bucket
-        let r_b = app.clone().oneshot(auth_req_with_ip("10.1.0.2")).await.unwrap();
+        let r_b = app
+            .clone()
+            .oneshot(auth_req_with_ip("10.1.0.2"))
+            .await
+            .unwrap();
         assert_ne!(
             r_b.status(),
             StatusCode::TOO_MANY_REQUESTS,

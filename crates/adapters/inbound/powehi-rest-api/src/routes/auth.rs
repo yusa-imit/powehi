@@ -30,8 +30,8 @@ pub async fn register_finish(
     State(state): State<AppState>,
     Json(req): Json<RegistrationFinishRequest>,
 ) -> Result<Json<UserId>, ApiError> {
-    tracing::info!(user_id = %req.user_id, "auth.register_finish");
     let user_id = state.auth.register_finish(req).await?;
+    tracing::info!(user_id = %user_id, "auth.register_finish");
     Ok(Json(user_id))
 }
 
@@ -48,7 +48,7 @@ pub async fn login_finish(
     State(state): State<AppState>,
     Json(req): Json<LoginFinishRequest>,
 ) -> Result<Json<SessionToken>, ApiError> {
-    tracing::info!(user_id = %req.user_id, "auth.login_finish");
     let token = state.auth.login_finish(req).await?;
+    tracing::info!("auth.login_finish");
     Ok(Json(token))
 }

@@ -5,10 +5,9 @@ use std::{
     sync::Arc,
 };
 use tower_governor::{
-    GovernorError,
     governor::{GovernorConfig, GovernorConfigBuilder},
     key_extractor::KeyExtractor,
-    GovernorLayer,
+    GovernorError, GovernorLayer,
 };
 
 /// Rate-limit key extractor with layered trust:
@@ -93,4 +92,97 @@ pub fn api_governor() -> IpGovernorLayer {
 #[cfg(test)]
 pub(crate) fn tight_governor() -> IpGovernorLayer {
     make_layer(3600, 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::Request;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn extract(req: Request<()>) -> IpAddr {
+        TrustedProxyKeyExtractor.extract(&req).unwrap()
+    }
+
+    fn req_with_headers<F: Fn(http::request::Builder) -> http::request::Builder>(
+        f: F,
+    ) -> Request<()> {
+        f(Request::builder().method("GET").uri("/"))
+            .body(())
+            .unwrap()
+    }
+
+    /// CF-Connecting-IP must win over any XFF or X-Real-IP value.
+    #[test]
+    fn cf_connecting_ip_takes_precedence_over_xff() {
+        let req = req_with_headers(|b| {
+            b.header("cf-connecting-ip", "1.2.3.4")
+                .header("x-forwarded-for", "9.9.9.9, 8.8.8.8")
+                .header("x-real-ip", "7.7.7.7")
+        });
+        assert_eq!(extract(req), "1.2.3.4".parse::<IpAddr>().unwrap());
+    }
+
+    /// Rightmost XFF token is used, not leftmost (prevents client IP spoofing).
+    #[test]
+    fn rightmost_xff_is_used_not_leftmost() {
+        let req = req_with_headers(|b| {
+            // Leftmost is the attacker-supplied spoof; rightmost is the proxy-observed IP.
+            b.header("x-forwarded-for", "10.0.0.1, 10.0.0.2, 192.0.2.1")
+        });
+        // Must be the rightmost: 192.0.2.1
+        assert_eq!(extract(req), "192.0.2.1".parse::<IpAddr>().unwrap());
+    }
+
+    /// Single-token XFF (no commas) is parsed correctly.
+    #[test]
+    fn xff_single_ip_works() {
+        let req = req_with_headers(|b| b.header("x-forwarded-for", "203.0.113.5"));
+        assert_eq!(extract(req), "203.0.113.5".parse::<IpAddr>().unwrap());
+    }
+
+    /// X-Real-IP is used when CF and XFF headers are absent.
+    #[test]
+    fn x_real_ip_used_when_no_cf_or_xff() {
+        let req = req_with_headers(|b| b.header("x-real-ip", "198.51.100.7"));
+        assert_eq!(extract(req), "198.51.100.7".parse::<IpAddr>().unwrap());
+    }
+
+    /// Global-bucket fallback (0.0.0.0) when no trusted header is present.
+    #[test]
+    fn global_bucket_fallback_when_no_headers() {
+        let req = req_with_headers(|b| b);
+        assert_eq!(
+            extract(req),
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            "should fall back to 0.0.0.0"
+        );
+    }
+
+    /// Malformed CF-Connecting-IP falls through to XFF.
+    #[test]
+    fn malformed_cf_header_falls_through_to_xff() {
+        let req = req_with_headers(|b| {
+            b.header("cf-connecting-ip", "not-an-ip")
+                .header("x-forwarded-for", "10.1.2.3")
+        });
+        assert_eq!(extract(req), "10.1.2.3".parse::<IpAddr>().unwrap());
+    }
+
+    /// All-malformed XFF tokens fall through to X-Real-IP.
+    #[test]
+    fn malformed_xff_falls_through_to_x_real_ip() {
+        let req = req_with_headers(|b| {
+            b.header("x-forwarded-for", "not-an-ip, also-bad")
+                .header("x-real-ip", "172.16.0.1")
+        });
+        assert_eq!(extract(req), "172.16.0.1".parse::<IpAddr>().unwrap());
+    }
+
+    /// XFF with trailing whitespace around IPs is parsed correctly.
+    #[test]
+    fn xff_ignores_whitespace_around_ip() {
+        let req = req_with_headers(|b| b.header("x-forwarded-for", " 10.0.0.5 , 10.0.0.6 "));
+        assert_eq!(extract(req), "10.0.0.6".parse::<IpAddr>().unwrap());
+    }
 }

@@ -75,7 +75,8 @@ async fn main() -> Result<()> {
         key_package,
     };
 
-    let app = powehi_rest_api::router(state).merge(powehi_ws_hub::router(ws_hub));
+    let ws_rl = powehi_rest_api::rate_limit::api_governor();
+    let app = powehi_rest_api::router(state).merge(powehi_ws_hub::router(ws_hub).layer(ws_rl));
 
     let addr = format!("{}:{}", cfg.host, cfg.port);
     info!(addr = %addr, "listening");
