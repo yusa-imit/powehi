@@ -17,7 +17,7 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-05-26, cycle 18 — FEATURE)
+## Current state (2026-05-26, cycle 19 — FEATURE)
 - Planning docs complete: `docs/prd.md` (v3), `docs/orchestration.md`, `docs/decisions/` (ADR-0001, 0002).
 - Agent infra complete: `.claude/agents` (22), `skills` (7), `rules` (6), `commands` (4), `hooks` (5).
 - Design system available: `DESIGN.md` + `docs/design/powehi-design-system/` + `/powehi-design` skill — read before any UI work.
@@ -71,6 +71,16 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
   - cargo audit: clean (RUSTSEC-2024-0384 `instant` via openmls is existing waiver).
   - gh issues: none open.
   - clippy --workspace -D warnings: CLEAN.
+- **Phase 3 cycle 19 (commit 0a738e6):** Rate limiting implemented:
+  - `rate_limit` module in powehi-rest-api: `TrustedProxyKeyExtractor` (CF-Connecting-IP → rightmost XFF → X-Real-IP → 0.0.0.0 fallback)
+  - Auth endpoints: burst=5, 1 token/6s (brute-force guard)
+  - API endpoints: burst=60, 1 token/2s (general throttle)
+  - Router split into auth + api sub-routers via `router_inner`; `/health` unrated
+  - `tower_governor = "0.4"` + `governor = "0.6"` added to powehi-rest-api
+  - 3 new rate-limit tests (per-IP isolation, auth 429, api 429)
+  - Total tests: 132 passing; clippy clean
+  - security-auditor: YELLOW (R1 leftmost-XFF spoofing fixed → rightmost; Y1 global-bucket/Y2 per-handle throttle deferred Phase 5; Y3 tracing feature comment added)
+  - Deferred (Phase 5 hardening): per-handle_hash bucket for credential stuffing; ingress XFF stripping config; CF-Connecting-IP as primary in prod
 - **Phase 3 cycle 18 (commit 7c2a429):** OPAQUE auth adapter implemented:
   - `OpaqueServerPort` trait + `OpaqueServer` adapter: registration_start/finish, login_start/finish
   - login_start: nonce-keyed pending map (R-1/R-2), synthetic KE2 for unknown users (R-3)
@@ -83,7 +93,7 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
   - 111 tests passing (was 100)
   - Crypto-reviewer: YELLOW (all RED findings addressed; deferred: ServerSetup persistence/Y-2, identifier binding/Y-4)
   - Security-auditor: WARN → findings #1 (server-bound session subject) + #5 (delete-after-save) addressed; deferred: rate limiting, per-field input bounds
-- Next action (Phase 3): Rate limiting (tower middleware or governor)
+- Next action (Phase 3): Media (R2 upload/download via powehi-r2 adapter)
 - Follow-up (crypto-reviewer Finding 1): upgrade opaque-ke from 3.0 (draft-16) to stable 4.x (RFC 9807) when stable version ships (currently only 4.1.0-pre.2 available). Waiver recorded in .claude/rules/crypto-libraries-pinned.md.
 - Workspace deps added in cycle 8: openmls_rust_crypto, openmls_basic_credential, openmls_traits, argon2 (all in workspace Cargo.toml).
 - Build/test (once code exists):
@@ -117,7 +127,7 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - [x] Composition root: wire Postgres + Redis outbound adapters into bin/powehi-server; DI wiring for AppState — cycle 14 (commit c46eec3); security-auditor GREEN
 - [x] WS hub: real-time push via WebSocket (envelope delivery notifications) — cycle 16 (commit 9c9d886); security-auditor PASS
 - [x] OPAQUE auth adapter: real opaque-ke server-side register/login in powehi-opaque — cycle 18 (commit 7c2a429)
-- [ ] Rate limiting (tower middleware or governor)
+- [x] Rate limiting (tower_governor 0.4 + governor 0.6, TrustedProxyKeyExtractor) — cycle 19 (commit 0a738e6)
 - [ ] Media (R2 upload/download via powehi-r2 adapter)
 
 ### Phase 4 — Frontend & Integration
