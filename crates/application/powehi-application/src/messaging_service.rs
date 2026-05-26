@@ -7,6 +7,7 @@ use powehi_domain::{
     device::DeviceId,
     envelope::{Envelope, EnvelopeId, MessageType},
     error::DomainError,
+    event::DomainEvent,
     group::{Epoch, GroupId},
 };
 use powehi_port_inbound::messaging::MessagingUseCase;
@@ -18,7 +19,6 @@ use tracing::instrument;
 pub struct MessagingService {
     envelope_repo: Arc<dyn EnvelopeRepository>,
     group_repo: Arc<dyn GroupRepository>,
-    #[allow(dead_code)]
     event_bus: Arc<dyn DomainEventBus>,
 }
 
@@ -54,6 +54,14 @@ impl MessagingUseCase for MessagingService {
         );
         let id = envelope.id.clone();
         self.envelope_repo.save(&envelope).await?;
+        let _ = self
+            .event_bus
+            .publish(DomainEvent::EnvelopeReceived {
+                envelope_id: id.clone(),
+                group_id: group_id.clone(),
+                at: chrono::Utc::now(),
+            })
+            .await;
         Ok(id)
     }
 
@@ -72,7 +80,17 @@ impl MessagingUseCase for MessagingService {
             MessageType::Welcome,
             welcome.to_vec(),
         );
-        self.envelope_repo.save(&envelope).await
+        let id = envelope.id.clone();
+        self.envelope_repo.save(&envelope).await?;
+        let _ = self
+            .event_bus
+            .publish(DomainEvent::EnvelopeReceived {
+                envelope_id: id,
+                group_id: group_id.clone(),
+                at: chrono::Utc::now(),
+            })
+            .await;
+        Ok(())
     }
 
     #[instrument(skip(self, commit), fields(sender = %sender, group_id = %group_id))]
@@ -99,6 +117,14 @@ impl MessagingUseCase for MessagingService {
         );
         envelope.epoch = Some(new_epoch);
         self.envelope_repo.save(&envelope).await?;
+        let _ = self
+            .event_bus
+            .publish(DomainEvent::EpochAdvanced {
+                group_id: group_id.clone(),
+                new_epoch,
+                at: chrono::Utc::now(),
+            })
+            .await;
         Ok(new_epoch)
     }
 

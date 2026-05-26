@@ -1,13 +1,19 @@
 [package]
 name = "powehi-ws-hub"
-description = "WebSocket hub inbound adapter stub."
+description = "WebSocket hub inbound adapter — real-time envelope delivery notifications."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 powehi-domain = { workspace = true }
-powehi-port-inbound = { workspace = true }
+powehi-port-outbound = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
 tracing = { workspace = true }
+chrono = { workspace = true }
+futures-util = "0.3"
