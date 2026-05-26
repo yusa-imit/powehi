@@ -17,7 +17,7 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-05-26)
+## Current state (2026-05-26, cycle 16)
 - Planning docs complete: `docs/prd.md` (v3), `docs/orchestration.md`, `docs/decisions/` (ADR-0001, 0002).
 - Agent infra complete: `.claude/agents` (22), `skills` (7), `rules` (6), `commands` (4), `hooks` (5).
 - Design system available: `DESIGN.md` + `docs/design/powehi-design-system/` + `/powehi-design` skill — read before any UI work.
@@ -54,7 +54,13 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
   - 10 tests green: health, auth-bypass ×3, 413 body limit, error-mapping ×5
   - security-auditor: PASS (YELLOW-1 body limit fixed; YELLOW-2 stub auth documented; YELLOW-3 app-layer auth deferred)
 - **Phase 3 cycle 14 (commit c46eec3):** Composition root: powehi-postgres (5 sqlx repos: User/Device/Envelope/Group/KeyPackage + 0001_initial.sql migration + atomic KP fetch via SELECT FOR UPDATE SKIP LOCKED), powehi-redis (RedisCache CachePort + RedisEventBus DomainEventBus), bin/powehi-server full DI wiring; domain From<Uuid>/as_uuid() added to 4 ID types; 73 tests pass; security-auditor GREEN.
-- Next action (Phase 3): WS hub for real-time push (envelope delivery notifications via WebSocket).
+- **Phase 3 cycle 16 (commit 9c9d886):** WS hub implemented:
+  - `powehi-ws-hub`: WsHub (tokio::sync::broadcast fan-out, 512-capacity ring), WsNotification enum (envelope_received/epoch_advanced/member_added/member_removed — no ciphertext, only opaque UUIDs), ws_handler (Bearer auth before upgrade → 401 before 101, ping/pong, Lagged skip), WsEventBus (composes RedisEventBus + WsHub dispatch).
+  - MessagingService: now publishes EnvelopeReceived/EpochAdvanced events after save (removed dead_code attr).
+  - Server main.rs: WsHub + WsEventBus wired; GET /v1/ws mounted alongside REST.
+  - Design: global broadcast (all devices get wake-up signal, filter by polling REST) — narrows to group/device targeting in Phase 5.
+  - 87 → 95 tests; clippy clean; security-auditor PASS (YELLOW-1: auth stub same as REST, YELLOW-2: no WS rate limit yet — both deferred to rate-limit work).
+- Next action (Phase 3): OPAQUE auth adapter (real opaque-ke server-side register/login in powehi-opaque).
 - Follow-up (crypto-reviewer Finding 1): upgrade opaque-ke from 3.0 (draft-16) to stable 4.x (RFC 9807) when stable version ships (currently only 4.1.0-pre.2 available). Waiver recorded in .claude/rules/crypto-libraries-pinned.md.
 - Workspace deps added in cycle 8: openmls_rust_crypto, openmls_basic_credential, openmls_traits, argon2 (all in workspace Cargo.toml).
 - Build/test (once code exists):
@@ -86,7 +92,7 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 ### Phase 3 — Backend Services & API  ← ACTIVE
 - [x] REST API axum adapter: AppState, auth/messaging/key-package routes, AuthenticatedDevice extractor, ApiError, 512KB body limit, 10 tests — cycle 12 (commit a31ff1a); security-auditor PASS
 - [x] Composition root: wire Postgres + Redis outbound adapters into bin/powehi-server; DI wiring for AppState — cycle 14 (commit c46eec3); security-auditor GREEN
-- [ ] WS hub: real-time push via WebSocket (envelope delivery notifications)
+- [x] WS hub: real-time push via WebSocket (envelope delivery notifications) — cycle 16 (commit 9c9d886); security-auditor PASS
 - [ ] OPAQUE auth adapter: real opaque-ke server-side register/login in powehi-opaque
 - [ ] Rate limiting (tower middleware or governor)
 - [ ] Media (R2 upload/download via powehi-r2 adapter)
