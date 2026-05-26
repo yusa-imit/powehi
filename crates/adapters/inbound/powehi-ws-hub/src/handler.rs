@@ -57,14 +57,13 @@ async fn handle_socket(
             biased;
             // Incoming client frame (close / ping / etc.)
             msg = socket.recv() => {
-                match msg {
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Ok(Message::Ping(data))) => {
-                        if socket.send(Message::Pong(data)).await.is_err() {
-                            break;
-                        }
-                    }
-                    _ => {}
+                let should_break = match msg {
+                    Some(Ok(Message::Close(_))) | None => true,
+                    Some(Ok(Message::Ping(data))) => socket.send(Message::Pong(data)).await.is_err(),
+                    _ => false,
+                };
+                if should_break {
+                    break;
                 }
             }
             // Outgoing notification
