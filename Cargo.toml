@@ -71,7 +71,10 @@ zeroize = { version = "1", features = ["derive"] }
 # config
 config = "0.14"
 # AWS SDK for Cloudflare R2 (S3-compatible) presigned URLs
-aws-sdk-s3 = { version = "1", features = ["behavior-version-latest"] }
+# default-features = false drops the legacy `rustls` feature (→ rustls 0.21 → rustls-webpki 0.101.x;
+# RUSTSEC-2026-0098/0099/0104). We explicitly re-add all needed defaults except `rustls`.
+# `default-https-client` (→ aws-smithy-http-client/rustls-aws-lc → rustls 0.23) remains.
+aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "sigv4a", "http-1x", "default-https-client", "rt-tokio"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-credential-types = "1"
 # workspace crates
