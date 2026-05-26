@@ -21,6 +21,7 @@ powehi-ws-hub = { workspace = true }
 powehi-postgres = { workspace = true }
 powehi-redis = { workspace = true }
 powehi-opaque = { workspace = true }
+powehi-r2 = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

@@ -70,6 +70,10 @@ sha2 = "0.10"
 zeroize = { version = "1", features = ["derive"] }
 # config
 config = "0.14"
+# AWS SDK for Cloudflare R2 (S3-compatible) presigned URLs
+aws-sdk-s3 = { version = "1", features = ["behavior-version-latest"] }
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-credential-types = "1"
 # workspace crates
 powehi-domain = { path = "crates/domain/powehi-domain" }
 powehi-port-inbound = { path = "crates/ports/powehi-port-inbound" }
@@ -80,6 +84,7 @@ powehi-telemetry = { path = "crates/infra/powehi-telemetry" }
 powehi-postgres = { path = "crates/adapters/outbound/powehi-postgres" }
 powehi-redis = { path = "crates/adapters/outbound/powehi-redis" }
 powehi-opaque = { path = "crates/adapters/outbound/powehi-opaque" }
+powehi-r2 = { path = "crates/adapters/outbound/powehi-r2" }
 powehi-rest-api = { path = "crates/adapters/inbound/powehi-rest-api" }
 powehi-ws-hub = { path = "crates/adapters/inbound/powehi-ws-hub" }
 

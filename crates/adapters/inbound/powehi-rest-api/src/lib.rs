@@ -21,7 +21,8 @@ use axum::{
     Router,
 };
 use powehi_port_inbound::{
-    auth::AuthUseCase, key_package::KeyPackageUseCase, messaging::MessagingUseCase,
+    auth::AuthUseCase, key_package::KeyPackageUseCase, media::MediaUseCase,
+    messaging::MessagingUseCase,
 };
 use tower_http::trace::TraceLayer;
 
@@ -34,6 +35,7 @@ pub struct AppState {
     pub auth: Arc<dyn AuthUseCase>,
     pub messaging: Arc<dyn MessagingUseCase>,
     pub key_package: Arc<dyn KeyPackageUseCase>,
+    pub media: Arc<dyn MediaUseCase>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -89,6 +91,13 @@ fn router_inner(
             "/v1/key-packages/:device_id/count",
             get(routes::key_package::count),
         )
+        .route("/v1/media/upload-url", post(routes::media::request_upload))
+        .route("/v1/media/:id/confirm", post(routes::media::confirm_upload))
+        .route(
+            "/v1/media/:id/download-url",
+            get(routes::media::get_download_url),
+        )
+        .route("/v1/media/:id", delete(routes::media::delete_media))
         .layer(api_layer);
 
     Router::new()
@@ -114,6 +123,7 @@ mod tests {
     };
     use bytes::Bytes;
     use chrono::{DateTime, Utc};
+    use powehi_domain::media::MediaId;
     use powehi_domain::{
         device::DeviceId,
         envelope::{Envelope, EnvelopeId},
@@ -126,6 +136,7 @@ mod tests {
         DeviceRegistrationRequest, LoginFinishRequest, LoginInitRequest, LoginInitResponse,
         RegistrationFinishRequest, RegistrationInitRequest, RegistrationInitResponse, SessionToken,
     };
+    use powehi_port_inbound::media::MediaUseCase;
     use tower::ServiceExt; // for `oneshot`
 
     struct MockAuth;
@@ -233,11 +244,38 @@ mod tests {
         }
     }
 
+    struct MockMedia;
+    #[async_trait]
+    impl MediaUseCase for MockMedia {
+        async fn request_upload(
+            &self,
+            _device: &DeviceId,
+            _content_type: &str,
+            _size_bytes: u64,
+        ) -> Result<(MediaId, String), DomainError> {
+            unimplemented!()
+        }
+        async fn confirm_upload(&self, _id: &MediaId) -> Result<(), DomainError> {
+            unimplemented!()
+        }
+        async fn get_download_url(
+            &self,
+            _id: &MediaId,
+            _device: &DeviceId,
+        ) -> Result<String, DomainError> {
+            unimplemented!()
+        }
+        async fn delete(&self, _id: &MediaId, _device: &DeviceId) -> Result<(), DomainError> {
+            unimplemented!()
+        }
+    }
+
     fn test_router() -> Router {
         router(AppState {
             auth: Arc::new(MockAuth),
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackage),
+            media: Arc::new(MockMedia),
         })
     }
 
@@ -408,6 +446,7 @@ mod tests {
             auth: Arc::new(MockAuth),
             messaging: Arc::new(MockMessagingSuccess),
             key_package: Arc::new(MockKeyPackage),
+            media: Arc::new(MockMedia),
         })
     }
 
@@ -416,6 +455,7 @@ mod tests {
             auth: Arc::new(MockAuth),
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackageSuccess),
+            media: Arc::new(MockMedia),
         })
     }
 
@@ -424,6 +464,42 @@ mod tests {
             auth: Arc::new(MockAuth),
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackageNotFound),
+            media: Arc::new(MockMedia),
+        })
+    }
+
+    struct MockMediaSuccess;
+    #[async_trait]
+    impl MediaUseCase for MockMediaSuccess {
+        async fn request_upload(
+            &self,
+            _device: &DeviceId,
+            _content_type: &str,
+            _size_bytes: u64,
+        ) -> Result<(MediaId, String), DomainError> {
+            Ok((MediaId::new(), "https://r2.example/presigned-put".into()))
+        }
+        async fn confirm_upload(&self, _id: &MediaId) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn get_download_url(
+            &self,
+            _id: &MediaId,
+            _device: &DeviceId,
+        ) -> Result<String, DomainError> {
+            Ok("https://r2.example/presigned-get".into())
+        }
+        async fn delete(&self, _id: &MediaId, _device: &DeviceId) -> Result<(), DomainError> {
+            Ok(())
+        }
+    }
+
+    fn media_router() -> Router {
+        router(AppState {
+            auth: Arc::new(MockAuth),
+            messaging: Arc::new(MockMessaging),
+            key_package: Arc::new(MockKeyPackage),
+            media: Arc::new(MockMediaSuccess),
         })
     }
 
@@ -668,6 +744,132 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
+    // --- Media handler tests ---
+
+    #[tokio::test]
+    async fn request_upload_url_authenticated_returns_200_with_url() {
+        let device = DeviceId::new();
+        let body = serde_json::json!({
+            "content_type": "image/jpeg",
+            "size_bytes": 4096u64
+        });
+        let resp = media_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/media/upload-url")
+                    .header("authorization", bearer(&device))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["media_id"].is_string());
+        assert_eq!(json["upload_url"], "https://r2.example/presigned-put");
+    }
+
+    #[tokio::test]
+    async fn media_upload_url_without_token_returns_401() {
+        let body = serde_json::json!({ "content_type": "image/jpeg", "size_bytes": 512u64 });
+        let resp = media_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/media/upload-url")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn confirm_upload_returns_204() {
+        let device = DeviceId::new();
+        let media_id = uuid::Uuid::new_v4();
+        let resp = media_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/media/{media_id}/confirm"))
+                    .header("authorization", bearer(&device))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn get_download_url_returns_200_with_url() {
+        let device = DeviceId::new();
+        let media_id = uuid::Uuid::new_v4();
+        let resp = media_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/media/{media_id}/download-url"))
+                    .header("authorization", bearer(&device))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["download_url"], "https://r2.example/presigned-get");
+    }
+
+    #[tokio::test]
+    async fn delete_media_returns_204() {
+        let device = DeviceId::new();
+        let media_id = uuid::Uuid::new_v4();
+        let resp = media_router()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/media/{media_id}"))
+                    .header("authorization", bearer(&device))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn media_endpoints_without_token_return_401() {
+        let media_id = uuid::Uuid::new_v4();
+        for (method, uri) in &[
+            ("GET", format!("/v1/media/{media_id}/download-url")),
+            ("POST", format!("/v1/media/{media_id}/confirm")),
+            ("DELETE", format!("/v1/media/{media_id}")),
+        ] {
+            let resp = media_router()
+                .oneshot(
+                    Request::builder()
+                        .method(*method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri} without token should be 401"
+            );
+        }
+    }
+
     // --- Rate-limit tests ---
     //
     // SmartIpKeyExtractor checks X-Forwarded-For first. Tests inject a fake IP
@@ -678,6 +880,7 @@ mod tests {
             auth: Arc::new(MockAuth),
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackage),
+            media: Arc::new(MockMedia),
         }
     }
 
