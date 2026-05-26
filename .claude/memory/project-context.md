@@ -17,6 +17,19 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-27, cycle 23 — FEATURE: Phase 4 Login/Chat UI)
+- **Phase 4 cycle 23 (commit 786cf6f):** Login/Chat UI + Dexie encrypted storage:
+  - `src/index.css`: Geist + Instrument Serif Google Fonts; all design tokens from DESIGN.md as CSS vars
+  - `src/components/Login.tsx`: OPAQUE username/password form — cosmic radial-gradient bg, glassmorphism card, Instrument Serif tagline, accretion-orange CTA, photon-blue lock icon footer
+  - `src/components/ChatLayout.tsx`: 3-pane layout (Sidebar 320px + Conversation flex + InfoPanel 340px toggle); mock seed chats; orange/surface message bubbles; composer
+  - `src/components/Icon.tsx`: 19 inline SVG icons (lucide-style) — lock always photon blue (#A8C8FF)
+  - `src/db/schema.ts`: PowehiDb (Dexie v4) — MessageRow (ciphertextB64, no plaintext), GroupRow, LocalIdentity; no-plaintext-content invariant by type
+  - `src/store/auth.ts`: Zustand store — phase (login|app) + deviceId
+  - `src/hooks/useCryptoWorker.ts`: module-level Comlink singleton, graceful import error for missing WASM
+  - `fake-indexeddb` moved to devDependencies; `dexie` + `zustand` in prod deps
+  - 12 frontend tests green (5 Dexie schema, 7 App); biome clean; 139 backend tests unaffected
+  - Next: Service Worker push + Playwright E2E (Phase 4 remaining items)
+
 ## Current state (2026-05-27, cycle 22 — STABILIZATION: rustls security fix)
 - **Cycle 22 (commit 6112530):** RED CI fixed — 3 new RUSTSEC vulns in rustls-webpki 0.101.7:
   - RUSTSEC-2026-0098/0099 (upgrade to >=0.103.12) + RUSTSEC-2026-0104 (upgrade to >=0.103.13)
@@ -162,7 +175,8 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - [x] Media (R2 upload/download via powehi-r2 adapter) — cycle 21 (commit 2527650)
 
 ### Phase 4 — Frontend & Integration
-- [ ] Login/Chat UI; Dexie encrypted storage; crypto worker; Service Worker push; Playwright E2E; bundle budget (<200KB init, <800KB WASM)
+- [x] Login/Chat UI; Dexie encrypted storage; crypto worker hook — cycle 23 (commit 786cf6f)
+- [ ] Service Worker push; Playwright E2E; bundle budget (<200KB init, <800KB WASM)
 - UI MUST follow the design system — invoke `/powehi-design` or read `DESIGN.md` first. Brand non-negotiables (dark-first, cream text, dual-light orange=action / photon-blue=encryption, lock always photon-blue) are hard rules. Map `colors_and_type.css` → Tailwind v4 OKLCH.
 
 ### Phase 5 — Hardening
