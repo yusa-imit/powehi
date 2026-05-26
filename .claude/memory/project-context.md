@@ -17,7 +17,7 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-05-26, cycle 16)
+## Current state (2026-05-26, cycle 17 — STABILIZATION)
 - Planning docs complete: `docs/prd.md` (v3), `docs/orchestration.md`, `docs/decisions/` (ADR-0001, 0002).
 - Agent infra complete: `.claude/agents` (22), `skills` (7), `rules` (6), `commands` (4), `hooks` (5).
 - Design system available: `DESIGN.md` + `docs/design/powehi-design-system/` + `/powehi-design` skill — read before any UI work.
@@ -60,6 +60,17 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
   - Server main.rs: WsHub + WsEventBus wired; GET /v1/ws mounted alongside REST.
   - Design: global broadcast (all devices get wake-up signal, filter by polling REST) — narrows to group/device targeting in Phase 5.
   - 87 → 95 tests; clippy clean; security-auditor PASS (YELLOW-1: auth stub same as REST, YELLOW-2: no WS rate limit yet — both deferred to rate-limit work).
+- **Stabilization cycle 17 (commits 166cb01 + 253c55d):**
+  - Fixed RED CI: clippy::collapsible_match in powehi-ws-hub/handler.rs — async match guard not allowed; restructured to `should_break` bool pattern.
+  - Added 5 auth-invariant unit tests to handler.rs (total ws-hub: 13, workspace: 100 passing — was 95).
+  - Security hardening from security-auditor review (YELLOW findings addressed):
+    - `max_message_size(4096)` on WebSocketUpgrade (finding 6: Ping amplification)
+    - 10s send timeout on all `socket.send` calls (finding 8: slowloris hold)
+    - Disconnect on unexpected client frames Text/Binary (finding 7: DoS vector)
+    - Documented global-broadcast as known-deferred Phase 5 decision (finding 4)
+  - cargo audit: clean (RUSTSEC-2024-0384 `instant` via openmls is existing waiver).
+  - gh issues: none open.
+  - clippy --workspace -D warnings: CLEAN.
 - Next action (Phase 3): OPAQUE auth adapter (real opaque-ke server-side register/login in powehi-opaque).
 - Follow-up (crypto-reviewer Finding 1): upgrade opaque-ke from 3.0 (draft-16) to stable 4.x (RFC 9807) when stable version ships (currently only 4.1.0-pre.2 available). Waiver recorded in .claude/rules/crypto-libraries-pinned.md.
 - Workspace deps added in cycle 8: openmls_rust_crypto, openmls_basic_credential, openmls_traits, argon2 (all in workspace Cargo.toml).
