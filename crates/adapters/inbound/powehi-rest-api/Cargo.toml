@@ -19,6 +19,11 @@ bytes = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 async-trait = { workspace = true }
+# SECURITY: do NOT add the "tracing" feature — it logs raw client IPs via
+# key_name() which violates the no-plaintext-logging rule.
+tower_governor = { version = "0.4", features = ["axum"] }
+governor = "0.6"
+http = "1"
 
 [dev-dependencies]
 # `oneshot` lives behind tower's `util` feature; enable it for the router tests.

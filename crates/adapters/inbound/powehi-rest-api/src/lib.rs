@@ -10,6 +10,7 @@
 
 pub mod error;
 pub mod middleware;
+pub mod rate_limit;
 pub mod routes;
 
 use std::sync::Arc;
@@ -36,9 +37,29 @@ pub struct AppState {
 }
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/health", get(health))
-        // auth (public)
+    router_inner(
+        state,
+        rate_limit::auth_governor(),
+        rate_limit::api_governor(),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn router_for_test(
+    state: AppState,
+    auth_layer: rate_limit::IpGovernorLayer,
+    api_layer: rate_limit::IpGovernorLayer,
+) -> Router {
+    router_inner(state, auth_layer, api_layer)
+}
+
+fn router_inner(
+    state: AppState,
+    auth_layer: rate_limit::IpGovernorLayer,
+    api_layer: rate_limit::IpGovernorLayer,
+) -> Router {
+    // Auth endpoints — public, strict per-IP rate limit.
+    let auth_routes = Router::new()
         .route("/v1/auth/register/init", post(routes::auth::register_init))
         .route(
             "/v1/auth/register/finish",
@@ -46,7 +67,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/auth/login/init", post(routes::auth::login_init))
         .route("/v1/auth/login/finish", post(routes::auth::login_finish))
-        // messaging (authenticated via AuthenticatedDevice extractor)
+        .layer(auth_layer);
+
+    // Authenticated API endpoints — general per-IP rate limit.
+    let api_routes = Router::new()
         .route(
             "/v1/messages",
             post(routes::messaging::send_message).get(routes::messaging::poll),
@@ -57,7 +81,6 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/messages/commit", post(routes::messaging::send_commit))
         .route("/v1/messages/:id", delete(routes::messaging::ack))
-        // key packages (authenticated)
         .route(
             "/v1/key-packages/:device_id",
             post(routes::key_package::upload).get(routes::key_package::fetch_one),
@@ -66,6 +89,12 @@ pub fn router(state: AppState) -> Router {
             "/v1/key-packages/:device_id/count",
             get(routes::key_package::count),
         )
+        .layer(api_layer);
+
+    Router::new()
+        .route("/health", get(health))
+        .merge(auth_routes)
+        .merge(api_routes)
         .with_state(state)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
@@ -637,5 +666,93 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // --- Rate-limit tests ---
+    //
+    // SmartIpKeyExtractor checks X-Forwarded-For first. Tests inject a fake IP
+    // via that header so the key extractor has a stable key without a real TCP socket.
+
+    fn minimal_state() -> AppState {
+        AppState {
+            auth: Arc::new(MockAuth),
+            messaging: Arc::new(MockMessaging),
+            key_package: Arc::new(MockKeyPackage),
+        }
+    }
+
+    fn auth_req_with_ip(ip: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/auth/login/init")
+            .header("x-forwarded-for", ip)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap()
+    }
+
+    fn api_req_with_ip(ip: &str) -> Request<Body> {
+        // DELETE /v1/messages/not-a-uuid: goes through api_governor, auth extractor
+        // validates the Bearer UUID, then the handler rejects "not-a-uuid" with 400
+        // before ever calling the (unimplemented) mock use case.
+        Request::builder()
+            .method("DELETE")
+            .uri("/v1/messages/not-a-uuid")
+            .header("authorization", format!("Bearer {}", uuid::Uuid::new_v4()))
+            .header("x-forwarded-for", ip)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn auth_rate_limit_blocks_on_second_request() {
+        // burst=1 → first request passes, second is immediately rate-limited.
+        let tight = rate_limit::tight_governor();
+        let app = router_for_test(minimal_state(), tight.clone(), rate_limit::api_governor());
+
+        let r1 = app.clone().oneshot(auth_req_with_ip("10.0.0.1")).await.unwrap();
+        assert_ne!(
+            r1.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "first request should not be rate-limited"
+        );
+
+        let r2 = app.clone().oneshot(auth_req_with_ip("10.0.0.1")).await.unwrap();
+        assert_eq!(
+            r2.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "second immediate request should be rate-limited"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_rate_limit_blocks_on_second_request() {
+        let tight = rate_limit::tight_governor();
+        let app = router_for_test(minimal_state(), rate_limit::auth_governor(), tight);
+
+        let r1 = app.clone().oneshot(api_req_with_ip("10.0.0.2")).await.unwrap();
+        assert_ne!(r1.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let r2 = app.clone().oneshot(api_req_with_ip("10.0.0.2")).await.unwrap();
+        assert_eq!(r2.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn different_ips_are_rate_limited_independently() {
+        let tight = rate_limit::tight_governor();
+        let app = router_for_test(minimal_state(), tight, rate_limit::api_governor());
+
+        // exhaust the 1-token bucket for IP A
+        let _ = app.clone().oneshot(auth_req_with_ip("10.1.0.1")).await.unwrap();
+        let r_a_limited = app.clone().oneshot(auth_req_with_ip("10.1.0.1")).await.unwrap();
+        assert_eq!(r_a_limited.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // IP B still has its own full bucket
+        let r_b = app.clone().oneshot(auth_req_with_ip("10.1.0.2")).await.unwrap();
+        assert_ne!(
+            r_b.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "different IP must not be affected by sibling's rate limit"
+        );
     }
 }
