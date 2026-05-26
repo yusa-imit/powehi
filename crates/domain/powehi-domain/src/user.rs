@@ -38,16 +38,33 @@ pub struct User {
     pub id: UserId,
     /// SHA-256 of the plaintext handle; server never stores the handle itself.
     pub handle_hash: Vec<u8>,
+    /// OPAQUE password file (ServerRegistration serialized bytes). Empty until
+    /// register_finish completes. Server MUST NOT inspect or log these bytes.
+    pub opaque_password_file: Vec<u8>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 impl User {
+    /// Stub / test constructor — opaque_password_file is empty.
     pub fn new(id: UserId, handle_hash: Vec<u8>) -> Self {
         let now = Utc::now();
         Self {
             id,
             handle_hash,
+            opaque_password_file: vec![],
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// Production constructor — created after OPAQUE register_finish.
+    pub fn registered(id: UserId, handle_hash: Vec<u8>, opaque_password_file: Vec<u8>) -> Self {
+        let now = Utc::now();
+        Self {
+            id,
+            handle_hash,
+            opaque_password_file,
             created_at: now,
             updated_at: now,
         }

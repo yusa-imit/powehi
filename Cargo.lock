@@ -2467,10 +2467,10 @@ dependencies = [
 name = "powehi-opaque"
 version = "0.1.0"
 dependencies = [
- "async-trait",
+ "argon2",
  "opaque-ke",
  "powehi-domain",
- "tokio",
+ "powehi-port-outbound",
  "tracing",
 ]
 
@@ -2572,6 +2572,7 @@ dependencies = [
  "powehi-application",
  "powehi-config",
  "powehi-domain",
+ "powehi-opaque",
  "powehi-port-inbound",
  "powehi-port-outbound",
  "powehi-postgres",

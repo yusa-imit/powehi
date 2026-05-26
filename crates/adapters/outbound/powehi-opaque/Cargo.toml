@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 powehi-domain = { workspace = true }
+powehi-port-outbound = { workspace = true }
 opaque-ke = { workspace = true }
-async-trait = { workspace = true }
-tokio = { workspace = true }
+argon2 = { workspace = true }
 tracing = { workspace = true }

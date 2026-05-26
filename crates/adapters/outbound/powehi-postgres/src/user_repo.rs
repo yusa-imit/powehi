@@ -14,6 +14,7 @@ use crate::map_err;
 struct UserRow {
     id: Uuid,
     handle_hash: Vec<u8>,
+    opaque_password_file: Vec<u8>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -23,6 +24,7 @@ impl From<UserRow> for User {
         User {
             id: UserId::from(r.id),
             handle_hash: r.handle_hash,
+            opaque_password_file: r.opaque_password_file,
             created_at: r.created_at,
             updated_at: r.updated_at,
         }
@@ -43,14 +45,16 @@ impl PgUserRepository {
 impl UserRepository for PgUserRepository {
     async fn save(&self, user: &User) -> Result<(), DomainError> {
         sqlx::query(
-            "INSERT INTO users (id, handle_hash, created_at, updated_at)
-             VALUES ($1, $2, $3, $4)
+            "INSERT INTO users (id, handle_hash, opaque_password_file, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (id) DO UPDATE
-               SET handle_hash = EXCLUDED.handle_hash,
-                   updated_at  = EXCLUDED.updated_at",
+               SET handle_hash          = EXCLUDED.handle_hash,
+                   opaque_password_file = EXCLUDED.opaque_password_file,
+                   updated_at           = EXCLUDED.updated_at",
         )
         .bind(user.id.as_uuid())
         .bind(&user.handle_hash)
+        .bind(&user.opaque_password_file)
         .bind(user.created_at)
         .bind(user.updated_at)
         .execute(&self.pool)
@@ -61,7 +65,8 @@ impl UserRepository for PgUserRepository {
 
     async fn find_by_id(&self, id: &UserId) -> Result<Option<User>, DomainError> {
         let row = sqlx::query_as::<_, UserRow>(
-            "SELECT id, handle_hash, created_at, updated_at FROM users WHERE id = $1",
+            "SELECT id, handle_hash, opaque_password_file, created_at, updated_at
+             FROM users WHERE id = $1",
         )
         .bind(id.as_uuid())
         .fetch_optional(&self.pool)
@@ -72,7 +77,8 @@ impl UserRepository for PgUserRepository {
 
     async fn find_by_handle_hash(&self, hash: &[u8]) -> Result<Option<User>, DomainError> {
         let row = sqlx::query_as::<_, UserRow>(
-            "SELECT id, handle_hash, created_at, updated_at FROM users WHERE handle_hash = $1",
+            "SELECT id, handle_hash, opaque_password_file, created_at, updated_at
+             FROM users WHERE handle_hash = $1",
         )
         .bind(hash)
         .fetch_optional(&self.pool)

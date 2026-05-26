@@ -33,12 +33,18 @@ pub struct LoginInitRequest {
 pub struct LoginInitResponse {
     pub user_id: UserId,
     pub opaque_ke2: Vec<u8>,
+    /// Server-issued single-use nonce. Client MUST return it in LoginFinishRequest.
+    /// Binds the ke1→ke3 handshake to this server-side pending state; prevents
+    /// cross-session hijack (see OpaqueServer pending map, keyed by nonce).
+    pub login_nonce: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoginFinishRequest {
     pub user_id: UserId,
     pub opaque_ke3: Vec<u8>,
+    /// Must match the `login_nonce` returned by `login_init`.
+    pub login_nonce: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

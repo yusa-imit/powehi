@@ -5,5 +5,6 @@ pub mod event_bus;
 pub mod group_repo;
 pub mod key_package_repo;
 pub mod media_repo;
+pub mod opaque;
 pub mod region_router;
 pub mod user_repo;

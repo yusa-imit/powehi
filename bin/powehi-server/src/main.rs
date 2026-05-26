@@ -6,6 +6,7 @@ use powehi_application::{
     auth_service::AuthService, key_package_service::KeyPackageService,
     messaging_service::MessagingService,
 };
+use powehi_opaque::OpaqueServer;
 use powehi_postgres::{
     connect as pg_connect, run_migrations, PgDeviceRepository, PgEnvelopeRepository,
     PgGroupRepository, PgKeyPackageRepository, PgUserRepository,
@@ -27,7 +28,7 @@ async fn main() -> Result<()> {
         .context("connect postgres")?;
     run_migrations(&pool).await.context("run db migrations")?;
 
-    let _cache = Arc::new(
+    let cache: Arc<dyn powehi_port_outbound::cache::CachePort> = Arc::new(
         RedisCache::new(&cfg.redis_url)
             .await
             .context("connect redis cache")?,
@@ -54,8 +55,11 @@ async fn main() -> Result<()> {
 
     // ── Application services ────────────────────────────────────────────────
 
+    let opaque: Arc<dyn powehi_port_outbound::opaque::OpaqueServerPort> =
+        Arc::new(OpaqueServer::new());
+
     let auth: Arc<dyn powehi_port_inbound::auth::AuthUseCase> =
-        Arc::new(AuthService::new(user_repo, device_repo));
+        Arc::new(AuthService::new(user_repo, device_repo, opaque, cache));
 
     let messaging: Arc<dyn powehi_port_inbound::messaging::MessagingUseCase> =
         Arc::new(MessagingService::new(envelope_repo, group_repo, event_bus));
