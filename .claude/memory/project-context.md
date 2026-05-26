@@ -17,6 +17,20 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-27, cycle 21 — FEATURE: Phase 3 Media R2)
+- **Phase 3 cycle 21 (commit 2527650):** R2 media adapter implemented:
+  - `powehi-r2` crate: `R2MediaAdapter` (aws-sdk-s3 v1 + sqlx); content-type allowlist (8 types);
+    presigned PUT (upload, 900s TTL) + GET (download, 300s TTL); no ciphertext proxied
+  - `powehi-domain`: `MediaId.as_uuid()` + `From<Uuid>`; `MediaBlob.uploader` → `uploader_device: DeviceId`
+  - `powehi-port-inbound`: `MediaUseCase` updated — `get_download_url` takes `requestor_device`
+  - `powehi-application`: `MediaService` — download ACL (uploader-only, Phase 4 → group-member); `size_bucket` tracing
+  - DB migration `0003_media_blobs.sql`: metadata table with FK to `devices`
+  - `powehi-rest-api`: 4 media routes; `size_bytes` [1, 100MB] enforced in handler
+  - `powehi-config`: R2 fields; credentials have no defaults (operator must inject)
+  - 139 tests passing (was 122); clippy clean; security-auditor R1+R2 addressed
+  - Deferred (Phase 4): group-member ACL for download URL; pre-signed URL size binding (Y2); confirm_upload HeadObject check (Y3); SSRF r2_endpoint validation (Y5); orphan row GC (Y6)
+- Next action (Phase 4): Login/Chat UI + Dexie encrypted storage + crypto worker integration
+
 ## Current state (2026-05-26, cycle 20 — STABILIZATION)
 - Planning docs complete: `docs/prd.md` (v3), `docs/orchestration.md`, `docs/decisions/` (ADR-0001, 0002).
 - Agent infra complete: `.claude/agents` (22), `skills` (7), `rules` (6), `commands` (4), `hooks` (5).
@@ -134,7 +148,7 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - [x] WS hub: real-time push via WebSocket (envelope delivery notifications) — cycle 16 (commit 9c9d886); security-auditor PASS
 - [x] OPAQUE auth adapter: real opaque-ke server-side register/login in powehi-opaque — cycle 18 (commit 7c2a429)
 - [x] Rate limiting (tower_governor 0.4 + governor 0.6, TrustedProxyKeyExtractor) — cycle 19 (commit 0a738e6)
-- [ ] Media (R2 upload/download via powehi-r2 adapter)
+- [x] Media (R2 upload/download via powehi-r2 adapter) — cycle 21 (commit 2527650)
 
 ### Phase 4 — Frontend & Integration
 - [ ] Login/Chat UI; Dexie encrypted storage; crypto worker; Service Worker push; Playwright E2E; bundle budget (<200KB init, <800KB WASM)
