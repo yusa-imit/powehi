@@ -17,6 +17,17 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-27, cycle 22 — STABILIZATION: rustls security fix)
+- **Cycle 22 (commit 6112530):** RED CI fixed — 3 new RUSTSEC vulns in rustls-webpki 0.101.7:
+  - RUSTSEC-2026-0098/0099 (upgrade to >=0.103.12) + RUSTSEC-2026-0104 (upgrade to >=0.103.13)
+  - Root cause: `aws-sdk-s3` default features included `rustls` (legacy path → aws-smithy-http-client/
+    legacy-rustls-ring → hyper-rustls 0.24.2 → rustls 0.21.12 → rustls-webpki 0.101.7)
+  - Fix: `aws-sdk-s3 = { default-features = false, features = [...all except rustls...] }`
+  - Dropped: rustls 0.21.12, rustls-webpki 0.101.7, hyper-rustls 0.24.2, tokio-rustls 0.24.1 (+5 deps)
+  - Remaining TLS: only rustls 0.23.40 + rustls-webpki 0.103.13 (safe) via default-https-client path
+  - cargo audit: only RUSTSEC-2024-0384 (existing waiver for openmls instant dep)
+  - 139 tests passing, clippy clean, rustfmt clean
+
 ## Current state (2026-05-27, cycle 21 — FEATURE: Phase 3 Media R2)
 - **Phase 3 cycle 21 (commit 2527650):** R2 media adapter implemented:
   - `powehi-r2` crate: `R2MediaAdapter` (aws-sdk-s3 v1 + sqlx); content-type allowlist (8 types);
