@@ -17,6 +17,22 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-28, cycle 30 — STABILIZATION: test coverage + Biome fix)
+- **Cycle 30 (commit 06bc0d4):** Stabilization — test gap closure + Biome artifact fix:
+  - **powehi-redis**: 12 new pure unit tests (total: 14 was 2):
+    - `event_topic` routing for all 7 DomainEvent variants
+    - Serde round-trips for `UserRegistered`, `EnvelopeReceived`, `EpochAdvanced`
+    - Security invariant: `EnvelopeReceived` JSON contains only opaque UUIDs, no `content`/`ciphertext`/`plaintext` keys
+    - `EmptyStream::poll_next` returns `Poll::Ready(None)`
+  - **ChatLayout.test.tsx**: 9 new component tests (security + UX invariants):
+    - Encryption banner renders; E2EE notice in message area; composer placeholder says "encrypted"
+    - Search filter; empty-query no-match; send message appends; info panel opens; conversation switching
+  - **Biome fix**: `app/biome.json` now excludes `test-results/**` and `playwright-report/**` — eliminates spurious format errors from Playwright artifacts
+  - **gitignore**: `app/test-results/` and `app/playwright-report/` added to root `.gitignore`
+  - CI: green. `cargo audit`: only RUSTSEC-2024-0384 existing waiver. clippy: clean. biome: clean.
+  - **156 Rust tests** (was 142); **33 frontend tests** (was 24)
+  - Next: Phase 6 — gRPC mesh + mTLS; AP-Seoul Tier 1; cross-region p99 <200ms; failover; KeyPackage replication; data residency; infra-test gate
+
 ## Current state (2026-05-28, cycle 29 — FEATURE: Phase 5 SLSA L3 + cosign/Rekor + load test + PQ ADR)
 - **Phase 5 cycle 29 (commit 75e6c6f):** Supply-chain hardening + load test + PQ migration doc:
   - `Dockerfile`: multi-stage `rust:1.83.0-bookworm` → `debian:bookworm-20250317-slim`; non-root `powehi` uid 1000; `SOURCE_DATE_EPOCH=0` + `--locked` for byte-reproducible builds; exposes 8080 (public) + 9090 (admin/metrics)
