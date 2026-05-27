@@ -17,6 +17,24 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-28, cycle 29 — FEATURE: Phase 5 SLSA L3 + cosign/Rekor + load test + PQ ADR)
+- **Phase 5 cycle 29 (commit 75e6c6f):** Supply-chain hardening + load test + PQ migration doc:
+  - `Dockerfile`: multi-stage `rust:1.83.0-bookworm` → `debian:bookworm-20250317-slim`; non-root `powehi` uid 1000; `SOURCE_DATE_EPOCH=0` + `--locked` for byte-reproducible builds; exposes 8080 (public) + 9090 (admin/metrics)
+  - `.dockerignore`: excludes `target/`, `app/`, `node_modules/`, `.git/`, `.env*`, `*.pem`, `*.key`, `app/test-results/`
+  - `.github/workflows/release.yml`: 4-job SLSA L3 pipeline triggered on `v*.*.*` tags:
+    - `build-binary` → computes SHA-256 base64 subjects
+    - `binary-provenance` → `generator_generic_slsa3.yml@v2.0.0` (Rekor + .intoto.jsonl on GitHub release)
+    - `build-push-container` → ghcr.io push + `cosign sign --yes` keyless → Rekor; `id-token: write` (security-auditor RED fix)
+    - `container-provenance` → `generator_container_slsa3.yml@v2.0.0` (OCI attestation + Rekor)
+    - `dtolnay/rust-toolchain@1.83.0` (not `@stable`); `--locked`; `concurrency` block; `github.repository_owner`
+  - `load-tests/ws-10k.js`: k6 script ramp 0→10k concurrent WS; thresholds `ws_connecting p95<500ms`, `error_rate<1%`; asserts notifications have no `content`/`ciphertext` fields (zero-knowledge guard)
+  - `docs/decisions/0003-pq-migration.md`: ADR for ML-KEM-768+ML-DSA-65 in 3 phases; OPAQUE PQ path tracked
+  - Threat-model-checker: GREEN (T3 reproducible builds + T6 PQ strengthened)
+  - Security-auditor: RED fix (`id-token: write`), all critical YELLOWs addressed; SHA action pins + base-image digest pins noted as follow-up (not blocking)
+  - 142 tests pass; clippy clean
+  - **Phase 5 COMPLETE — all checklist items done**
+  - Next: Phase 6 — gRPC mesh + mTLS; AP-Seoul Tier 1; cross-region p99 <200ms; infra-test gate
+
 ## Current state (2026-05-27, cycle 28 — FEATURE: Phase 5 Prometheus metrics observability)
 - **Phase 5 cycle 28 (commit 457435c):** Prometheus metrics endpoint (zero-knowledge observability):
   - `powehi-telemetry`: `install_prometheus() -> anyhow::Result<PrometheusHandle>` — no `expect()` in lib code (crates-naming.md)
@@ -234,7 +252,7 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 
 ### Phase 5 — Hardening
 - [x] Observability: Prometheus metrics on internal admin port (127.0.0.1:9090); zero-knowledge counters; security-auditor PASS — cycle 28
-- [ ] SLSA L3 reproducible builds; cosign + Rekor; threat-model-checker pass; load test (10k concurrent WS); PQ migration doc
+- [x] SLSA L3 reproducible builds; cosign + Rekor; threat-model-checker pass; load test (10k concurrent WS); PQ migration doc — cycle 29 (commit 75e6c6f)
 
 ### Phase 6 — Global Infrastructure
 - [ ] gRPC mesh + mTLS; AP-Seoul Tier 1; cross-region p99 <200ms; failover; KeyPackage replication; data residency; infra-test gate
