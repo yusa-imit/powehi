@@ -17,6 +17,19 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-28, cycle 31 — STABILIZATION: CI red fix + test gap closure)
+- **Cycle 31 (commit 7402476):** CI was RED (rustfmt format check failed on powehi-redis tests added in cycle 30):
+  - **Root cause**: 3 struct literals in `serde_round_trip_*` tests exceeded rustfmt's line-width limit:
+    - `DomainEvent::UserRegistered { ... }` → expanded to multi-line
+    - `DomainEvent::EnvelopeReceived { envelope_id, group_id, .. }` → expanded + `} = rt {` pattern
+    - `DomainEvent::EpochAdvanced { ... }` → expanded to multi-line
+  - **Fix**: expanded all 3 struct literals in `powehi-redis/src/lib.rs` to match rustfmt output
+  - **Test gaps closed**:
+    - `powehi-r2`: +5 tests (all 8 allowed content types via loop, 8 disallowed types, expires_at Some, storage_key verbatim) — total: 7 (was 3)
+    - `powehi-telemetry`: +3 tests (install_prometheus_succeeds, valid text format, no user identifiers in output) — total: 3 (was 0)
+  - CI: green (rustfmt clean). 161 Rust tests (was 156). clippy: clean. cargo audit: only RUSTSEC-2024-0384 waiver.
+  - Next: Phase 6 — gRPC mesh + mTLS; AP-Seoul Tier 1; cross-region p99 <200ms; failover; KeyPackage replication; data residency; infra-test gate
+
 ## Current state (2026-05-28, cycle 30 — STABILIZATION: test coverage + Biome fix)
 - **Cycle 30 (commit 06bc0d4):** Stabilization — test gap closure + Biome artifact fix:
   - **powehi-redis**: 12 new pure unit tests (total: 14 was 2):
