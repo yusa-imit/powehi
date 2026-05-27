@@ -17,6 +17,17 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-27, cycle 25 — STABILIZATION: CI red fix + security audit + test gap closure)
+- **Cycle 25 (commits 93e393d + 19a79b2):** 3 frontend CI failures fixed + security RED patched:
+  - **CI fix 1 (Biome):** `check-bundle-budget.mjs` — merged duplicate node:fs imports, removed unused `brotliCompressSync`, collapsed multiline filter; `sw.js` — collapsed `clients.matchAll().then()` chain; all biome errors resolved
+  - **CI fix 2 (bundle-build/TS2307):** `vite-env.d.ts` — added wildcard ambient module declaration `declare module "*powehi_crypto_wasm.js"` so tsc resolves the dynamic WASM import in CI without wasm-pack artifact
+  - **CI fix 3 (Playwright):** `Login.tsx` button text "Send" → "Sign in" (Playwright tests were timing out on `getByRole('button', {name:/sign in/i})`); h1 heading added with SR-only "Powehi" span for heading role assertion; `App.test.tsx` matcher updated /send/i → /sign in/i
+  - **Security RED fixed:** `key_package.rs` upload handler — added ownership check `caller == device_id` preventing MLS key substitution (IDOR where any device could upload KPs under another identity); new 401 test `upload_key_packages_cross_device_returns_401`
+  - **Test gaps closed:** `src/store/auth.test.ts` (5 Zustand tests: login/logout transitions), `src/components/Login.test.tsx` (7 tests incl. security invariants: empty handle → rejected before crypto call)
+  - YELLOW findings deferred to Phase 5: confirm_upload cross-device check, content_type allowlist, stub bearer auth, WS connection cap
+  - 44 Rust rest-api tests (was 43); 24 Vitest tests (was 12); Biome clean; clippy clean; cargo audit clean (RUSTSEC-2024-0384 waiver)
+  - Next: Phase 5 — SLSA L3 reproducible builds + cosign + Rekor + load test + observability
+
 ## Current state (2026-05-27, cycle 24 — FEATURE: Phase 4 Service Worker + Playwright + bundle budget)
 - **Phase 4 cycle 24 (commit 600c2b3):** Service Worker push + Playwright E2E + bundle budget:
   - `app/public/sw.js`: Web Push RFC 8291 wake-up handler; notification body is constant "New encrypted message" (no content); groupId validated as UUID v4 regex before use (security-auditor YELLOW-1/2 addressed); open-window uses literal "/" only
