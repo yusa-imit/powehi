@@ -17,6 +17,15 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-27, cycle 26 — STABILIZATION: CI red fix — WASM stub Vite plugin)
+- **Cycle 26 (commit 80511b7):** Two CI failures fixed; CI was red → auto-switched to STABILIZATION:
+  - **Root cause:** `vite:worker-import-meta-url` plugin ignores `/* @vite-ignore */` when bundling workers; tries to resolve `../wasm/powehi_crypto_wasm.js` which doesn't exist in CI (gitignored with `*`)
+  - **Fix 1 (Bundle budget / build):** Added `powehiWasmStub` Vite plugin to `vite.config.ts` — hooks `resolveId`/`load`, redirects any `powehi_crypto_wasm` import to a no-op virtual module (`export default async function init() {}`) when wasm-pack artifact is absent; plugin registered in both `plugins[]` AND `worker.plugins()` (worker-build context is separate)
+  - **Fix 2 (Playwright E2E):** Vite dev server was sending error overlay via HMR WebSocket when worker fetched the missing WASM; `<vite-error-overlay>` intercepted all button clicks; same stub plugin prevents the error
+  - **Fix 3 (bundle budget regex):** `/index-[a-zA-Z0-9]+\.js$/` → `/index-[\w-]+\.js$/` — Rollup hashes with underscores (`C7__kd29`) were silently missed
+  - 24 Vitest + biome clean; 140 Rust tests green; both Vite build paths verified locally
+  - Next: Phase 5 — SLSA L3 reproducible builds + cosign + Rekor + load test + observability
+
 ## Current state (2026-05-27, cycle 25 — STABILIZATION: CI red fix + security audit + test gap closure)
 - **Cycle 25 (commits 93e393d + 19a79b2):** 3 frontend CI failures fixed + security RED patched:
   - **CI fix 1 (Biome):** `check-bundle-budget.mjs` — merged duplicate node:fs imports, removed unused `brotliCompressSync`, collapsed multiline filter; `sw.js` — collapsed `clients.matchAll().then()` chain; all biome errors resolved
