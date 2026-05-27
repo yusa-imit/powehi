@@ -15,7 +15,7 @@ test.describe("Login screen", () => {
 
 		await page.getByRole("button", { name: /sign in/i }).click();
 
-		await expect(page.getByText(/handle/i)).toBeVisible();
+		await expect(page.getByText(/are required/i)).toBeVisible();
 	});
 
 	test("transitions to chat layout after successful login", async ({ page }) => {
