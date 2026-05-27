@@ -17,6 +17,18 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-27, cycle 28 — FEATURE: Phase 5 Prometheus metrics observability)
+- **Phase 5 cycle 28 (commit 457435c):** Prometheus metrics endpoint (zero-knowledge observability):
+  - `powehi-telemetry`: `install_prometheus() -> anyhow::Result<PrometheusHandle>` — no `expect()` in lib code (crates-naming.md)
+  - `powehi-rest-api`: `admin_router(handle)` — serves GET `/metrics` with Prometheus text format; `metrics_response()` uses `HeaderValue::from_static` (no panic)
+  - Zero-knowledge counters: `auth_register_total{result}`, `auth_login_total{result}`, `messages_sent_total{kind}`, `key_packages_uploaded_total`, `key_packages_fetched_total` — all labels are static strings, no user/device IDs
+  - `powehi-config`: `admin_port` (default 9090, `POWEHI__ADMIN_PORT` env var)
+  - `bin/powehi-server`: admin server bound to `127.0.0.1:admin_port` via `tokio::try_join!`; `/metrics` never exposed on public port (security-auditor RED finding addressed)
+  - Tests: `metrics_endpoint_returns_200_with_prometheus_content_type`, `metrics_output_is_prometheus_text_format` — UUID-label leak detection
+  - Security-auditor YELLOW deferred: traffic-analysis risk from aggregate counters (acceptable internal-only), future path normalization for axum metrics middleware
+  - 142 tests pass (was 140); clippy + rustfmt clean
+  - Next: remaining Phase 5 items — SLSA L3, cosign+Rekor, load test (10k concurrent WS), PQ migration doc
+
 ## Current state (2026-05-27, cycle 27 — STABILIZATION: CI red fix — @types/node + Playwright locator)
 - **Cycle 27 (commit d2a7abb):** Two frontend CI failures fixed; CI was red → auto-switched to STABILIZATION:
   - **Fix 1 (TS2307/TS2693/TS2339):** `vite.config.ts` imports `node:fs`, `node:path`, `node:url`, uses `URL` and `import.meta.url` — all fail `tsc` without `@types/node`; added `@types/node ^25.9.1` to app devDependencies
@@ -221,7 +233,8 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - UI MUST follow the design system — invoke `/powehi-design` or read `DESIGN.md` first. Brand non-negotiables (dark-first, cream text, dual-light orange=action / photon-blue=encryption, lock always photon-blue) are hard rules. Map `colors_and_type.css` → Tailwind v4 OKLCH.
 
 ### Phase 5 — Hardening
-- [ ] SLSA L3 reproducible builds; cosign + Rekor; threat-model-checker pass; load test; observability; PQ migration doc
+- [x] Observability: Prometheus metrics on internal admin port (127.0.0.1:9090); zero-knowledge counters; security-auditor PASS — cycle 28
+- [ ] SLSA L3 reproducible builds; cosign + Rekor; threat-model-checker pass; load test (10k concurrent WS); PQ migration doc
 
 ### Phase 6 — Global Infrastructure
 - [ ] gRPC mesh + mTLS; AP-Seoul Tier 1; cross-region p99 <200ms; failover; KeyPackage replication; data residency; infra-test gate
