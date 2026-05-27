@@ -11,7 +11,8 @@
 		"test": "vitest run",
 		"test:watch": "vitest",
 		"e2e": "playwright test",
-		"check": "biome check src"
+		"check": "biome check src",
+		"budget": "node scripts/check-bundle-budget.mjs"
 	},
 	"dependencies": {
 		"comlink": "^4.4.2",
@@ -21,8 +22,8 @@
 		"zustand": "^5.0.13"
 	},
 	"devDependencies": {
-		"fake-indexeddb": "^6.2.5",
 		"@biomejs/biome": "^1.9.4",
+		"@playwright/test": "^1.60.0",
 		"@tailwindcss/vite": "^4.1.7",
 		"@testing-library/jest-dom": "^6.6.3",
 		"@testing-library/react": "^16.3.0",
@@ -30,6 +31,7 @@
 		"@types/react": "^19.1.5",
 		"@types/react-dom": "^19.1.5",
 		"@vitejs/plugin-react": "^4.5.0",
+		"fake-indexeddb": "^6.2.5",
 		"jsdom": "^26.1.0",
 		"tailwindcss": "^4.1.7",
 		"typescript": "^5.8.3",

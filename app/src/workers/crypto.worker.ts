@@ -63,7 +63,7 @@ async function getWasm(): Promise<WasmModule> {
 	const mod = (await import(
 		/* @vite-ignore */
 		"../wasm/powehi_crypto_wasm.js"
-	)) as WasmModule;
+	)) as unknown as WasmModule;
 	// Run the wasm-bindgen init function (fetches + compiles the .wasm binary).
 	await mod.default();
 	wasmModule = mod;

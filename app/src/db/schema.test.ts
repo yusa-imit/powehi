@@ -12,14 +12,6 @@ describe("PowehiDb", () => {
 	});
 
 	it("inserts and retrieves a MessageRow", async () => {
-		const row: MessageRow = {
-			id: "test-uuid-1",
-			groupId: "group-uuid-1",
-			ciphertextB64: "dGVzdC1jaXBoZXJ0ZXh0",
-			senderDeviceId: "device-abc",
-			epochSeq: (1n << 32n) as unknown as number | 1,
-			receivedAt: Date.now(),
-		};
 		// epochSeq is a regular number in practice (epoch<<32 | seq).
 		const row2: MessageRow = {
 			id: "test-uuid-1",

@@ -61,6 +61,54 @@ jobs:
       - name: Run Vitest
         run: pnpm --filter app test --run
 
+  playwright:
+    name: Playwright E2E
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: pnpm --filter app exec playwright install chromium --with-deps
+
+      - name: Run Playwright E2E
+        run: pnpm --filter app e2e
+
+  bundle-budget:
+    name: Bundle budget check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm --filter app build
+
+      - name: Check bundle budget
+        run: pnpm --filter app budget
+
   wasm-build:
     name: WASM compilation (wasm-pack)
     runs-on: ubuntu-latest
