@@ -19,6 +19,8 @@ use powehi_ws_hub::{event_bus::WsEventBus, WsHub};
 #[tokio::main]
 async fn main() -> Result<()> {
     powehi_telemetry::init();
+    let metrics_handle =
+        powehi_telemetry::install_prometheus().context("install prometheus recorder")?;
 
     let cfg = powehi_config::load().context("load config")?;
 
@@ -92,11 +94,28 @@ async fn main() -> Result<()> {
     let ws_rl = powehi_rest_api::rate_limit::api_governor();
     let app = powehi_rest_api::router(state).merge(powehi_ws_hub::router(ws_hub).layer(ws_rl));
 
+    // Admin server: internal-only, Prometheus scrape target.
+    // Bound to 127.0.0.1 so it is never reachable from outside the pod.
+    let admin_app = powehi_rest_api::admin_router(metrics_handle);
+    let admin_addr = format!("127.0.0.1:{}", cfg.admin_port);
+    info!(admin_addr = %admin_addr, "admin (metrics) listening");
+    let admin_listener = tokio::net::TcpListener::bind(&admin_addr)
+        .await
+        .with_context(|| format!("bind admin {admin_addr}"))?;
+
     let addr = format!("{}:{}", cfg.host, cfg.port);
     info!(addr = %addr, "listening");
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .with_context(|| format!("bind {addr}"))?;
-    axum::serve(listener, app).await?;
+
+    tokio::try_join!(
+        async { axum::serve(listener, app).await.context("public server") },
+        async {
+            axum::serve(admin_listener, admin_app)
+                .await
+                .context("admin server")
+        },
+    )?;
     Ok(())
 }

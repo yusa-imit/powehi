@@ -27,6 +27,11 @@ pub struct AppConfig {
     /// Pre-signed download URL TTL in seconds (default 300 = 5 min).
     #[serde(default = "default_presign_download_ttl")]
     pub r2_presign_download_ttl_secs: u64,
+    /// Internal admin port for Prometheus metrics scraping.
+    /// Bound to 127.0.0.1 only — MUST NOT be exposed via the public ingress.
+    /// Prometheus scrapes from within the cluster (k8s pod-to-pod).
+    #[serde(default = "default_admin_port")]
+    pub admin_port: u16,
 }
 
 fn default_presign_upload_ttl() -> u64 {
@@ -34,6 +39,9 @@ fn default_presign_upload_ttl() -> u64 {
 }
 fn default_presign_download_ttl() -> u64 {
     300
+}
+fn default_admin_port() -> u16 {
+    9090
 }
 
 impl AppConfig {
@@ -51,6 +59,7 @@ pub fn load() -> Result<AppConfig, ConfigError> {
         .set_default("tier", "Tier1")?
         .set_default("r2_endpoint", "http://localhost:9000")?
         .set_default("r2_bucket", "powehi-media")?
+        .set_default("admin_port", 9090)?
         // No defaults for credentials — POWEHI__R2_ACCESS_KEY_ID and
         // POWEHI__R2_SECRET_ACCESS_KEY must be injected by the operator.
         .set_default("r2_access_key_id", "")?
@@ -78,6 +87,7 @@ mod tests {
             r2_secret_access_key: "dev-test-secret".into(),
             r2_presign_upload_ttl_secs: 900,
             r2_presign_download_ttl_secs: 300,
+            admin_port: 9090,
         }
     }
 

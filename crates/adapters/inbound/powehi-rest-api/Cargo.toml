@@ -24,6 +24,8 @@ async-trait = { workspace = true }
 tower_governor = { version = "0.4", features = ["axum"] }
 governor = "0.6"
 http = "1"
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 
 [dev-dependencies]
 # `oneshot` lives behind tower's `util` feature; enable it for the router tests.

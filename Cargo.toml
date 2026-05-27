@@ -46,6 +46,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# metrics / observability — zero-knowledge: labels carry only aggregate counts, no user PII
+metrics = "0.23"
+metrics-exporter-prometheus = "0.15"
 # web framework
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.4"

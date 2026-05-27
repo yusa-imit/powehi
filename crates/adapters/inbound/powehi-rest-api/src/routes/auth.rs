@@ -6,6 +6,7 @@
 //! hash length and opaque internal IDs (rule: `no-plaintext-logging`).
 
 use axum::{extract::State, Json};
+use metrics::counter;
 use powehi_domain::user::UserId;
 use powehi_port_inbound::auth::{
     LoginFinishRequest, LoginInitRequest, LoginInitResponse, RegistrationFinishRequest,
@@ -30,9 +31,17 @@ pub async fn register_finish(
     State(state): State<AppState>,
     Json(req): Json<RegistrationFinishRequest>,
 ) -> Result<Json<UserId>, ApiError> {
-    let user_id = state.auth.register_finish(req).await?;
-    tracing::info!(user_id = %user_id, "auth.register_finish");
-    Ok(Json(user_id))
+    match state.auth.register_finish(req).await {
+        Ok(user_id) => {
+            counter!("auth_register_total", "result" => "success").increment(1);
+            tracing::info!(user_id = %user_id, "auth.register_finish");
+            Ok(Json(user_id))
+        }
+        Err(e) => {
+            counter!("auth_register_total", "result" => "failure").increment(1);
+            Err(ApiError::from(e))
+        }
+    }
 }
 
 pub async fn login_init(
@@ -48,7 +57,15 @@ pub async fn login_finish(
     State(state): State<AppState>,
     Json(req): Json<LoginFinishRequest>,
 ) -> Result<Json<SessionToken>, ApiError> {
-    let token = state.auth.login_finish(req).await?;
-    tracing::info!("auth.login_finish");
-    Ok(Json(token))
+    match state.auth.login_finish(req).await {
+        Ok(token) => {
+            counter!("auth_login_total", "result" => "success").increment(1);
+            tracing::info!("auth.login_finish");
+            Ok(Json(token))
+        }
+        Err(e) => {
+            counter!("auth_login_total", "result" => "failure").increment(1);
+            Err(ApiError::from(e))
+        }
+    }
 }

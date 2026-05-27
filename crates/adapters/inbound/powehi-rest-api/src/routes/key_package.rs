@@ -9,6 +9,7 @@ use axum::{
     Json,
 };
 use bytes::Bytes;
+use metrics::counter;
 use powehi_domain::{device::DeviceId, error::DomainError, key_package::KeyPackageId};
 use serde::{Deserialize, Serialize};
 
@@ -48,6 +49,7 @@ pub async fn upload(
     );
     let packages: Vec<Bytes> = req.packages.into_iter().map(Bytes::from).collect();
     let ids = state.key_package.upload(&device_id, packages).await?;
+    counter!("key_packages_uploaded_total").increment(ids.len() as u64);
     Ok(Json(UploadResponse { ids }))
 }
 
@@ -68,6 +70,7 @@ pub async fn fetch_one(
         "key_package.fetch_one"
     );
     let data = state.key_package.fetch_one(&device_id).await?;
+    counter!("key_packages_fetched_total").increment(1);
     Ok(Json(FetchOneResponse {
         data: data.to_vec(),
     }))

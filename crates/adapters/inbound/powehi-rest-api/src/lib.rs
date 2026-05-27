@@ -16,10 +16,13 @@ pub mod routes;
 use std::sync::Arc;
 
 use axum::{
+    body::Body,
     extract::DefaultBodyLimit,
+    response::Response,
     routing::{delete, get, post},
     Router,
 };
+use metrics_exporter_prometheus::PrometheusHandle;
 use powehi_port_inbound::{
     auth::AuthUseCase, key_package::KeyPackageUseCase, media::MediaUseCase,
     messaging::MessagingUseCase,
@@ -44,6 +47,31 @@ pub fn router(state: AppState) -> Router {
         rate_limit::auth_governor(),
         rate_limit::api_governor(),
     )
+}
+
+/// Build the internal admin router that exposes only `/metrics`.
+///
+/// This router MUST be bound to `127.0.0.1` (admin port, default 9090) and
+/// NEVER merged into the public-facing router. Prometheus scrapes from within
+/// the k8s cluster via pod-to-pod. Labels carry no user PII or message content.
+pub fn admin_router(handle: PrometheusHandle) -> Router {
+    let handle = Arc::new(handle);
+    Router::new().route(
+        "/metrics",
+        get(move || {
+            let h = Arc::clone(&handle);
+            async move { metrics_response(h) }
+        }),
+    )
+}
+
+fn metrics_response(handle: Arc<PrometheusHandle>) -> Response<Body> {
+    let mut resp = Response::new(Body::from(handle.render()));
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+    );
+    resp
 }
 
 #[cfg(test)]
@@ -975,6 +1003,88 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r2.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    // ── Metrics endpoint tests ───────────────────────────────────────────────
+
+    /// Produce a `PrometheusHandle` for tests without touching the global recorder.
+    /// Uses `OnceLock` so parallel tests share a single installation.
+    fn test_metrics_handle() -> metrics_exporter_prometheus::PrometheusHandle {
+        use std::sync::OnceLock;
+        static HANDLE: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();
+        HANDLE
+            .get_or_init(|| {
+                metrics_exporter_prometheus::PrometheusBuilder::new()
+                    .install_recorder()
+                    .expect("test prometheus recorder")
+            })
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_returns_200_with_prometheus_content_type() {
+        let handle = test_metrics_handle();
+        let app = admin_router(handle);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .expect("content-type header present")
+            .to_str()
+            .unwrap();
+        assert!(
+            ct.contains("text/plain"),
+            "content-type must be text/plain, got {ct}"
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_output_is_prometheus_text_format() {
+        let handle = test_metrics_handle();
+        let app = admin_router(handle);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = std::str::from_utf8(&body).unwrap();
+        // Prometheus text format: each non-comment line must be "<name> <value>"
+        // with no user-supplied strings as label values. Valid output is either
+        // empty (no metrics recorded) or lines beginning with "#" or metric names.
+        for line in text.lines() {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            // Metric lines: name{labels} value [timestamp]
+            // Label values in our metrics are always static strings like "success",
+            // "failure", "mls", "welcome", "commit" — never UUIDs.
+            // A basic heuristic: no line should contain 36-char UUID-shaped strings
+            // with four hyphens.
+            let has_uuid = line
+                .split('"')
+                .filter(|s| s.len() == 36)
+                .any(|s| s.chars().filter(|&c| c == '-').count() == 4);
+            assert!(
+                !has_uuid,
+                "metrics line contains a UUID-shaped label value (user/device ID leak?): {line}"
+            );
+        }
     }
 
     #[tokio::test]

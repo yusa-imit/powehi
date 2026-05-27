@@ -14,6 +14,7 @@ use axum::{
 };
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use metrics::counter;
 use powehi_domain::{
     device::DeviceId,
     envelope::{Envelope, EnvelopeId},
@@ -64,6 +65,7 @@ pub async fn send_message(
         .messaging
         .send_message(&sender, &req.group_id, Bytes::from(req.ciphertext))
         .await?;
+    counter!("messages_sent_total", "kind" => "mls").increment(1);
     Ok(Json(SendMessageResponse { envelope_id }))
 }
 
@@ -95,6 +97,7 @@ pub async fn send_welcome(
             &req.target_device_id,
         )
         .await?;
+    counter!("messages_sent_total", "kind" => "welcome").increment(1);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -124,6 +127,7 @@ pub async fn send_commit(
         .messaging
         .send_commit(&sender, &req.group_id, Bytes::from(req.commit))
         .await?;
+    counter!("messages_sent_total", "kind" => "commit").increment(1);
     Ok(Json(SendCommitResponse { epoch: epoch.0 }))
 }
 
