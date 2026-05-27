@@ -28,7 +28,7 @@ const files = walk(DIST);
 let failed = false;
 
 // JS chunks that are loaded on initial route (index-*.js)
-const initChunks = files.filter((f) => f.endsWith(".js") && /index-[a-zA-Z0-9]+\.js$/.test(f));
+const initChunks = files.filter((f) => f.endsWith(".js") && /index-[\w-]+\.js$/.test(f));
 for (const f of initChunks) {
 	const gz = gzSize(f);
 	const kb = (gz / 1024).toFixed(1);
