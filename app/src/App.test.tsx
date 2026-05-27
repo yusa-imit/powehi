@@ -31,9 +31,9 @@ describe("App — login phase", () => {
 		expect(screen.getByLabelText(/password/i)).toBeInTheDocument();
 	});
 
-	it("renders the send button", () => {
+	it("renders the sign in button", () => {
 		render(<App />);
-		expect(screen.getByRole("button", { name: /send/i })).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: /sign in/i })).toBeInTheDocument();
 	});
 });
 

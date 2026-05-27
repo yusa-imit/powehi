@@ -140,7 +140,7 @@ export function Login() {
 				</div>
 
 				{/* Title */}
-				<div
+				<h1
 					style={{
 						fontFamily: "var(--font-serif)",
 						fontStyle: "italic",
@@ -149,12 +149,25 @@ export function Login() {
 						textAlign: "center",
 						lineHeight: 1.1,
 						letterSpacing: "-0.02em",
+						margin: 0,
 					}}
 				>
+					<span
+						style={{
+							position: "absolute",
+							width: 1,
+							height: 1,
+							overflow: "hidden",
+							clip: "rect(0,0,0,0)",
+							whiteSpace: "nowrap",
+						}}
+					>
+						Powehi
+					</span>
 					Past the horizon,
 					<br />
 					<span style={{ color: "#FFD78A" }}>only you.</span>
-				</div>
+				</h1>
 
 				{/* Subtitle */}
 				<div
@@ -274,10 +287,10 @@ export function Login() {
 						{phase === "loading" ? (
 							<>
 								<Spinner />
-								Signing in
+								Signing in…
 							</>
 						) : (
-							"Send"
+							"Sign in"
 						)}
 					</button>
 				</form>
