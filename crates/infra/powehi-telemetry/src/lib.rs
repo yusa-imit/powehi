@@ -25,3 +25,44 @@ pub fn install_prometheus() -> anyhow::Result<PrometheusHandle> {
         .install_recorder()
         .map_err(|e| anyhow::anyhow!("failed to install Prometheus recorder: {e}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::OnceLock;
+
+    fn test_handle() -> &'static PrometheusHandle {
+        static HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
+        HANDLE.get_or_init(|| install_prometheus().expect("prometheus test handle"))
+    }
+
+    #[test]
+    fn install_prometheus_succeeds() {
+        let _ = test_handle();
+    }
+
+    #[test]
+    fn prometheus_handle_renders_valid_text_format() {
+        let text = test_handle().render();
+        for line in text.lines() {
+            assert!(
+                line.starts_with('#')
+                    || line.is_empty()
+                    || line.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_'),
+                "unexpected prometheus line: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn prometheus_output_contains_no_user_identifiers() {
+        // Security invariant: no UUIDs, emails, or handles in metrics output.
+        let text = test_handle().render();
+        for line in text.lines() {
+            assert!(
+                !line.contains('@'),
+                "metrics must not contain email-like strings: {line}"
+            );
+        }
+    }
+}

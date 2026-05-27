@@ -249,7 +249,10 @@ mod tests {
     #[test]
     fn serde_round_trip_user_registered() {
         let raw = Uuid::new_v4();
-        let e = DomainEvent::UserRegistered { user_id: UserId::from(raw), at: Utc::now() };
+        let e = DomainEvent::UserRegistered {
+            user_id: UserId::from(raw),
+            at: Utc::now(),
+        };
         let rt = round_trip(&e);
         assert_eq!(event_topic(&rt), "user.registered");
         if let DomainEvent::UserRegistered { user_id, .. } = rt {
@@ -269,7 +272,12 @@ mod tests {
             at: Utc::now(),
         };
         let rt = round_trip(&e);
-        if let DomainEvent::EnvelopeReceived { envelope_id, group_id, .. } = rt {
+        if let DomainEvent::EnvelopeReceived {
+            envelope_id,
+            group_id,
+            ..
+        } = rt
+        {
             assert_eq!(envelope_id.as_uuid(), raw_env);
             assert_eq!(group_id.as_uuid(), raw_grp);
         } else {
@@ -280,7 +288,11 @@ mod tests {
     #[test]
     fn serde_round_trip_epoch_advanced() {
         let grp_id = GroupId::from(Uuid::new_v4());
-        let e = DomainEvent::EpochAdvanced { group_id: grp_id, new_epoch: Epoch(7), at: Utc::now() };
+        let e = DomainEvent::EpochAdvanced {
+            group_id: grp_id,
+            new_epoch: Epoch(7),
+            at: Utc::now(),
+        };
         let rt = round_trip(&e);
         if let DomainEvent::EpochAdvanced { new_epoch, .. } = rt {
             assert_eq!(new_epoch, Epoch(7));

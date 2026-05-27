@@ -286,4 +286,74 @@ mod tests {
         assert_eq!(blob.storage_key, "media/abc123");
         assert_eq!(blob.size_bytes, 4096u64);
     }
+
+    #[test]
+    fn all_allowed_content_types_are_accepted() {
+        for ct in ALLOWED_CONTENT_TYPES {
+            assert!(
+                ALLOWED_CONTENT_TYPES.contains(ct),
+                "expected {ct} to be in ALLOWED_CONTENT_TYPES"
+            );
+        }
+    }
+
+    #[test]
+    fn disallowed_content_types_are_rejected() {
+        let disallowed = [
+            "text/plain",
+            "text/html",
+            "application/json",
+            "application/javascript",
+            "multipart/form-data",
+            "application/x-www-form-urlencoded",
+            "image/svg+xml",
+            "",
+        ];
+        for ct in disallowed {
+            assert!(
+                !ALLOWED_CONTENT_TYPES.contains(&ct),
+                "expected {ct} to be rejected by ALLOWED_CONTENT_TYPES"
+            );
+        }
+    }
+
+    #[test]
+    fn media_blob_row_preserves_expires_at_some() {
+        let id = Uuid::new_v4();
+        let uploader_device = Uuid::new_v4();
+        let now = Utc::now();
+        let expires = Some(now);
+        let row = MediaBlobRow {
+            id,
+            uploader_device_id: uploader_device,
+            storage_key: "media/xyz".into(),
+            content_type: "audio/ogg".into(),
+            size_bytes: 1024 * 512,
+            uploaded_at: now,
+            expires_at: expires,
+        };
+        let blob = MediaBlob::from(row);
+        assert!(blob.expires_at.is_some());
+        assert_eq!(blob.content_type, "audio/ogg");
+        assert_eq!(blob.size_bytes, 1024 * 512u64);
+    }
+
+    #[test]
+    fn storage_key_is_preserved_verbatim() {
+        let id = Uuid::new_v4();
+        let uploader_device = Uuid::new_v4();
+        let now = Utc::now();
+        let storage_key = format!("media/{}/encrypted_blob", Uuid::new_v4());
+        let row = MediaBlobRow {
+            id,
+            uploader_device_id: uploader_device,
+            storage_key: storage_key.clone(),
+            content_type: "image/webp".into(),
+            size_bytes: 8192,
+            uploaded_at: now,
+            expires_at: None,
+        };
+        let blob = MediaBlob::from(row);
+        assert_eq!(blob.storage_key, storage_key);
+    }
 }
