@@ -1,0 +1,16 @@
+target/
+app/
+node_modules/
+infra/
+docs/
+load-tests/
+.claude/
+.git/
+.github/
+*.md
+.env
+.env.*
+*.pem
+*.key
+*.crt
+app/test-results/

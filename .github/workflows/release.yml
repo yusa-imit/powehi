@@ -1,0 +1,154 @@
+name: Release — SLSA L3 Provenance + Container Sign
+
+# Triggered by a semver tag push (e.g. v0.1.0).
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions: {}  # all jobs declare minimum required permissions explicitly
+
+# Prevent concurrent releases from the same ref (never cancel mid-release).
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ── 1. Build the release binary ──────────────────────────────────────────────
+  build-binary:
+    name: Build release binary
+    runs-on: ubuntu-latest
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pin to the same compiler version as Dockerfile (rust:1.83.0-bookworm).
+      # Using @1.83.0 avoids the floating @stable branch (supply-chain risk).
+      - uses: dtolnay/rust-toolchain@1.83.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build (SOURCE_DATE_EPOCH=0 for reproducibility)
+        env:
+          SOURCE_DATE_EPOCH: "0"
+        # --locked: ensures Cargo resolves deps from the committed Cargo.lock
+        # only, preventing silent dep-tree drift in release artifacts.
+        run: cargo build --release --locked --bin powehi-server
+
+      - name: Rename artifact
+        run: cp target/release/powehi-server powehi-server-linux-amd64
+
+      - name: Compute SHA-256 subjects
+        id: hash
+        run: |
+          echo "hashes=$(sha256sum powehi-server-linux-amd64 | base64 -w0)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: powehi-server-linux-amd64
+          path: powehi-server-linux-amd64
+          if-no-files-found: error
+
+  # ── 2. SLSA L3 provenance for the binary ─────────────────────────────────────
+  # The generator_generic_slsa3 reusable workflow runs the build in an isolated
+  # ephemeral environment, signs the provenance with a short-lived OIDC cert
+  # (Sigstore keyless), and uploads the .intoto.jsonl attestation to Rekor.
+  # NOTE: slsa-github-generator reusable workflows must be pinned by semver tag
+  # (SHA pinning is unsupported by the framework per upstream docs).
+  binary-provenance:
+    name: Binary SLSA L3 provenance
+    needs: build-binary
+    permissions:
+      actions: read
+      id-token: write   # for OIDC keyless signing
+      contents: write   # to attach provenance to the GitHub release
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+    with:
+      base64-subjects: "${{ needs.build-binary.outputs.hashes }}"
+      upload-assets: true
+
+  # ── 3. Build + push container image ─────────────────────────────────────────
+  build-push-container:
+    name: Build and push container image
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.tags }}
+      digest: ${{ steps.push.outputs.digest }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write   # required for cosign keyless OIDC signing (step below)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/powehi-server
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64
+          build-args: |
+            SOURCE_DATE_EPOCH=0
+          # provenance=false: SLSA attestation is attached by container-provenance job below.
+          provenance: false
+          sbom: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Sign the container image with cosign keyless (Sigstore OIDC).
+      # id-token: write (declared above) gives cosign the OIDC token it needs.
+      # The signature and certificate are automatically recorded in Rekor.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image with cosign (keyless → Rekor)
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/powehi-server
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "$IMAGE@$DIGEST"
+
+  # ── 4. SLSA L3 container provenance ─────────────────────────────────────────
+  # Attaches a signed SLSA provenance attestation to the OCI image and records
+  # it in Rekor.  This is separate from (and in addition to) the cosign sign
+  # step above, which covers the raw image-signature requirement.
+  # GITHUB_TOKEN is passed so the generator can push the attestation to GHCR;
+  # its scope is bounded to the packages: write permission declared in this job.
+  container-provenance:
+    name: Container SLSA L3 provenance
+    needs: build-push-container
+    permissions:
+      actions: read
+      id-token: write   # for OIDC keyless signing
+      packages: write   # to push attestation to GHCR
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.0.0
+    with:
+      image: ghcr.io/${{ github.repository_owner }}/powehi-server
+      digest: ${{ needs.build-push-container.outputs.digest }}
+    secrets:
+      registry-username: ${{ github.repository_owner }}
+      registry-password: ${{ secrets.GITHUB_TOKEN }}
