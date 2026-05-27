@@ -31,3 +31,7 @@ pkg/
 
 # Cron autonomous-dev runtime state
 .claude/session-counter
+
+# Playwright test artifacts
+app/test-results/
+app/playwright-report/

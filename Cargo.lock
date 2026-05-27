@@ -3410,6 +3410,7 @@ name = "powehi-redis"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "futures-core",
  "powehi-domain",
  "powehi-port-outbound",
@@ -3418,6 +3419,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

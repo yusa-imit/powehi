@@ -140,6 +140,18 @@ fn event_topic(event: &DomainEvent) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
+
+    use chrono::Utc;
+    use futures_core::Stream;
+    use powehi_domain::{
+        device::DeviceId,
+        envelope::EnvelopeId,
+        group::{Epoch, GroupId},
+        user::UserId,
+    };
+    use uuid::Uuid;
+
     use super::*;
 
     fn assert_cache<T: CachePort>() {}
@@ -153,5 +165,167 @@ mod tests {
     #[test]
     fn redis_event_bus_impl_trait() {
         assert_bus::<RedisEventBus>();
+    }
+
+    // ── event_topic routing ──────────────────────────────────────────────────
+
+    #[test]
+    fn event_topic_user_registered() {
+        let e = DomainEvent::UserRegistered {
+            user_id: UserId::from(Uuid::new_v4()),
+            at: Utc::now(),
+        };
+        assert_eq!(event_topic(&e), "user.registered");
+    }
+
+    #[test]
+    fn event_topic_device_registered() {
+        let e = DomainEvent::DeviceRegistered {
+            device_id: DeviceId::from(Uuid::new_v4()),
+            user_id: UserId::from(Uuid::new_v4()),
+            at: Utc::now(),
+        };
+        assert_eq!(event_topic(&e), "device.registered");
+    }
+
+    #[test]
+    fn event_topic_device_revoked() {
+        let e = DomainEvent::DeviceRevoked {
+            device_id: DeviceId::from(Uuid::new_v4()),
+            at: Utc::now(),
+        };
+        assert_eq!(event_topic(&e), "device.revoked");
+    }
+
+    #[test]
+    fn event_topic_envelope_received() {
+        let e = DomainEvent::EnvelopeReceived {
+            envelope_id: EnvelopeId::from(Uuid::new_v4()),
+            group_id: GroupId::from(Uuid::new_v4()),
+            at: Utc::now(),
+        };
+        assert_eq!(event_topic(&e), "envelope.received");
+    }
+
+    #[test]
+    fn event_topic_epoch_advanced() {
+        let e = DomainEvent::EpochAdvanced {
+            group_id: GroupId::from(Uuid::new_v4()),
+            new_epoch: Epoch(3),
+            at: Utc::now(),
+        };
+        assert_eq!(event_topic(&e), "epoch.advanced");
+    }
+
+    #[test]
+    fn event_topic_member_added() {
+        let e = DomainEvent::MemberAdded {
+            group_id: GroupId::from(Uuid::new_v4()),
+            device_id: DeviceId::from(Uuid::new_v4()),
+            epoch: Epoch(1),
+            at: Utc::now(),
+        };
+        assert_eq!(event_topic(&e), "member.added");
+    }
+
+    #[test]
+    fn event_topic_member_removed() {
+        let e = DomainEvent::MemberRemoved {
+            group_id: GroupId::from(Uuid::new_v4()),
+            device_id: DeviceId::from(Uuid::new_v4()),
+            epoch: Epoch(2),
+            at: Utc::now(),
+        };
+        assert_eq!(event_topic(&e), "member.removed");
+    }
+
+    // ── DomainEvent serde round-trips ────────────────────────────────────────
+
+    fn round_trip(event: &DomainEvent) -> DomainEvent {
+        let bytes = serde_json::to_vec(event).expect("serialize");
+        serde_json::from_slice(&bytes).expect("deserialize")
+    }
+
+    #[test]
+    fn serde_round_trip_user_registered() {
+        let raw = Uuid::new_v4();
+        let e = DomainEvent::UserRegistered { user_id: UserId::from(raw), at: Utc::now() };
+        let rt = round_trip(&e);
+        assert_eq!(event_topic(&rt), "user.registered");
+        if let DomainEvent::UserRegistered { user_id, .. } = rt {
+            assert_eq!(user_id.as_uuid(), raw);
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn serde_round_trip_envelope_received() {
+        let raw_env = Uuid::new_v4();
+        let raw_grp = Uuid::new_v4();
+        let e = DomainEvent::EnvelopeReceived {
+            envelope_id: EnvelopeId::from(raw_env),
+            group_id: GroupId::from(raw_grp),
+            at: Utc::now(),
+        };
+        let rt = round_trip(&e);
+        if let DomainEvent::EnvelopeReceived { envelope_id, group_id, .. } = rt {
+            assert_eq!(envelope_id.as_uuid(), raw_env);
+            assert_eq!(group_id.as_uuid(), raw_grp);
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn serde_round_trip_epoch_advanced() {
+        let grp_id = GroupId::from(Uuid::new_v4());
+        let e = DomainEvent::EpochAdvanced { group_id: grp_id, new_epoch: Epoch(7), at: Utc::now() };
+        let rt = round_trip(&e);
+        if let DomainEvent::EpochAdvanced { new_epoch, .. } = rt {
+            assert_eq!(new_epoch, Epoch(7));
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    // ── JSON payload must not contain plaintext user content ─────────────────
+
+    #[test]
+    fn serde_envelope_payload_contains_only_opaque_ids() {
+        let raw_env = Uuid::new_v4();
+        let raw_grp = Uuid::new_v4();
+        let e = DomainEvent::EnvelopeReceived {
+            envelope_id: EnvelopeId::from(raw_env),
+            group_id: GroupId::from(raw_grp),
+            at: Utc::now(),
+        };
+        let json = serde_json::to_string(&e).expect("serialize");
+        // Must contain the UUIDs — opaque identifiers only, no human-readable names.
+        assert!(json.contains(&raw_env.to_string()));
+        assert!(json.contains(&raw_grp.to_string()));
+        // Must NOT contain any "content", "ciphertext", or "plaintext" keys.
+        assert!(!json.contains("content"));
+        assert!(!json.contains("ciphertext"));
+        assert!(!json.contains("plaintext"));
+    }
+
+    // ── EmptyStream ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn empty_stream_returns_none() {
+        use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+        fn no_op(_: *const ()) {}
+        fn clone(ptr: *const ()) -> RawWaker {
+            RawWaker::new(ptr, &VTABLE)
+        }
+        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, no_op, no_op, no_op);
+
+        let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
+        let mut cx = Context::from_waker(&waker);
+        let mut stream = EmptyStream;
+        let pin = Pin::new(&mut stream);
+        assert!(matches!(pin.poll_next(&mut cx), Poll::Ready(None)));
     }
 }

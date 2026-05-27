@@ -7,7 +7,14 @@
 	},
 	"files": {
 		"ignoreUnknown": false,
-		"ignore": ["dist", "node_modules", "*.d.ts", "src/wasm/**"]
+		"ignore": [
+			"dist",
+			"node_modules",
+			"*.d.ts",
+			"src/wasm/**",
+			"test-results/**",
+			"playwright-report/**"
+		]
 	},
 	"formatter": {
 		"enabled": true,
