@@ -666,14 +666,14 @@ mod tests {
 
     #[tokio::test]
     async fn upload_key_packages_returns_ids() {
+        // caller == device_id: ownership check must pass.
         let caller = DeviceId::new();
-        let device = DeviceId::new();
         let body = serde_json::json!({ "packages": [[1u8, 2], [3u8, 4]] });
         let resp = key_package_router()
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/v1/key-packages/{device}"))
+                    .uri(format!("/v1/key-packages/{caller}"))
                     .header("authorization", bearer(&caller))
                     .header("content-type", "application/json")
                     .body(Body::from(body.to_string()))
@@ -684,6 +684,27 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json["ids"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn upload_key_packages_cross_device_returns_401() {
+        // caller != device_id: MLS key substitution attempt → must be rejected.
+        let caller = DeviceId::new();
+        let other_device = DeviceId::new();
+        let body = serde_json::json!({ "packages": [[1u8, 2]] });
+        let resp = key_package_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/key-packages/{other_device}"))
+                    .header("authorization", bearer(&caller))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

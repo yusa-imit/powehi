@@ -36,8 +36,12 @@ pub async fn upload(
     Json(req): Json<UploadRequest>,
 ) -> Result<Json<UploadResponse>, ApiError> {
     let device_id = parse_device_id(&device_id)?;
+    // Ownership check: a device may only upload its own KeyPackages.
+    // Uploading under a different device_id would enable MLS key substitution.
+    if caller != device_id {
+        return Err(ApiError::from(DomainError::Unauthorized));
+    }
     tracing::info!(
-        caller = %caller,
         device_id = %device_id,
         package_count = req.packages.len(),
         "key_package.upload"
