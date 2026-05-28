@@ -22,7 +22,10 @@ powehi-postgres = { workspace = true }
 powehi-redis = { workspace = true }
 powehi-opaque = { workspace = true }
 powehi-r2 = { workspace = true }
+powehi-grpc = { workspace = true }
+powehi-proto = { workspace = true }
 axum = { workspace = true }
+tonic = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }

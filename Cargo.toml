@@ -93,6 +93,8 @@ powehi-opaque = { path = "crates/adapters/outbound/powehi-opaque" }
 powehi-r2 = { path = "crates/adapters/outbound/powehi-r2" }
 powehi-rest-api = { path = "crates/adapters/inbound/powehi-rest-api" }
 powehi-ws-hub = { path = "crates/adapters/inbound/powehi-ws-hub" }
+powehi-proto = { path = "crates/infra/powehi-proto" }
+powehi-grpc = { path = "crates/adapters/inbound/powehi-grpc" }
 
 [profile.release]
 lto = "thin"

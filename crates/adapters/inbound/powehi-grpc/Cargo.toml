@@ -1,6 +1,6 @@
 [package]
 name = "powehi-grpc"
-description = "gRPC inter-region adapter stub (tonic)."
+description = "gRPC inter-region adapter for the Powehi cross-region mesh."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,7 +8,19 @@ license.workspace = true
 [dependencies]
 powehi-domain = { workspace = true }
 powehi-port-outbound = { workspace = true }
-tonic = { workspace = true }
+powehi-proto = { workspace = true }
+tonic = { workspace = true, features = ["tls"] }
 prost = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+async-trait = { workspace = true }
+futures-core = "0.3"
+http = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

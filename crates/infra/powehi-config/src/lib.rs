@@ -32,6 +32,23 @@ pub struct AppConfig {
     /// Prometheus scrapes from within the cluster (k8s pod-to-pod).
     #[serde(default = "default_admin_port")]
     pub admin_port: u16,
+    /// gRPC port for the inter-region mesh (default 50051).
+    /// Bound on all interfaces so peer regions can reach it; secured by mTLS in production.
+    #[serde(default = "default_grpc_port")]
+    pub grpc_port: u16,
+    /// Comma-separated peer region endpoints: `"region_id=https://host:port,..."`
+    /// Empty string means no cross-region peers (single-region deployment).
+    #[serde(default)]
+    pub grpc_peers: String,
+    /// Path to this region's TLS certificate PEM. Empty = plaintext (dev only).
+    #[serde(default)]
+    pub grpc_tls_cert: String,
+    /// Path to this region's TLS private key PEM.
+    #[serde(default)]
+    pub grpc_tls_key: String,
+    /// Path to the CA certificate PEM used to verify peer region certificates.
+    #[serde(default)]
+    pub grpc_tls_ca: String,
 }
 
 fn default_presign_upload_ttl() -> u64 {
@@ -43,10 +60,36 @@ fn default_presign_download_ttl() -> u64 {
 fn default_admin_port() -> u16 {
     9090
 }
+fn default_grpc_port() -> u16 {
+    50051
+}
 
 impl AppConfig {
     pub fn region(&self) -> RegionId {
         RegionId::new(&self.region_id)
+    }
+
+    /// Parse `grpc_peers` into a list of `(RegionId, endpoint)` pairs.
+    ///
+    /// Format: `"region_id=https://host:port,region_id2=https://host2:port2"`
+    pub fn grpc_peer_list(&self) -> Vec<(powehi_domain::region::RegionId, String)> {
+        if self.grpc_peers.is_empty() {
+            return vec![];
+        }
+        self.grpc_peers
+            .split(',')
+            .filter_map(|pair| {
+                let (id, endpoint) = pair.trim().split_once('=')?;
+                Some((RegionId::new(id.trim()), endpoint.trim().to_string()))
+            })
+            .collect()
+    }
+
+    /// Returns `true` if mTLS is configured (all three TLS fields are non-empty).
+    pub fn grpc_tls_enabled(&self) -> bool {
+        !self.grpc_tls_cert.is_empty()
+            && !self.grpc_tls_key.is_empty()
+            && !self.grpc_tls_ca.is_empty()
     }
 }
 
@@ -60,6 +103,7 @@ pub fn load() -> Result<AppConfig, ConfigError> {
         .set_default("r2_endpoint", "http://localhost:9000")?
         .set_default("r2_bucket", "powehi-media")?
         .set_default("admin_port", 9090)?
+        .set_default("grpc_port", 50051)?
         // No defaults for credentials — POWEHI__R2_ACCESS_KEY_ID and
         // POWEHI__R2_SECRET_ACCESS_KEY must be injected by the operator.
         .set_default("r2_access_key_id", "")?
@@ -88,6 +132,11 @@ mod tests {
             r2_presign_upload_ttl_secs: 900,
             r2_presign_download_ttl_secs: 300,
             admin_port: 9090,
+            grpc_port: 50051,
+            grpc_peers: String::new(),
+            grpc_tls_cert: String::new(),
+            grpc_tls_key: String::new(),
+            grpc_tls_ca: String::new(),
         }
     }
 
@@ -110,6 +159,55 @@ mod tests {
     fn presign_ttl_defaults_are_correct() {
         assert_eq!(default_presign_upload_ttl(), 900);
         assert_eq!(default_presign_download_ttl(), 300);
+    }
+
+    #[test]
+    fn grpc_port_default_is_50051() {
+        assert_eq!(default_grpc_port(), 50051);
+        assert_eq!(default_config().grpc_port, 50051);
+    }
+
+    #[test]
+    fn grpc_peer_list_parses_comma_separated_pairs() {
+        let cfg = AppConfig {
+            grpc_peers:
+                "eu-central-1=https://eu.internal:50051,ap-seoul-1=https://ap.internal:50051".into(),
+            ..default_config()
+        };
+        let peers = cfg.grpc_peer_list();
+        assert_eq!(peers.len(), 2);
+        assert_eq!(peers[0].0.to_string(), "eu-central-1");
+        assert_eq!(peers[0].1, "https://eu.internal:50051");
+        assert_eq!(peers[1].0.to_string(), "ap-seoul-1");
+        assert_eq!(peers[1].1, "https://ap.internal:50051");
+    }
+
+    #[test]
+    fn grpc_peer_list_empty_when_no_peers_configured() {
+        assert!(default_config().grpc_peer_list().is_empty());
+    }
+
+    #[test]
+    fn grpc_tls_enabled_requires_all_three_fields() {
+        let no_tls = default_config();
+        assert!(!no_tls.grpc_tls_enabled());
+
+        let partial_tls = AppConfig {
+            grpc_tls_cert: "/path/to/cert.pem".into(),
+            ..default_config()
+        };
+        assert!(
+            !partial_tls.grpc_tls_enabled(),
+            "partial config must not enable TLS"
+        );
+
+        let full_tls = AppConfig {
+            grpc_tls_cert: "/path/cert.pem".into(),
+            grpc_tls_key: "/path/key.pem".into(),
+            grpc_tls_ca: "/path/ca.pem".into(),
+            ..default_config()
+        };
+        assert!(full_tls.grpc_tls_enabled());
     }
 
     #[test]

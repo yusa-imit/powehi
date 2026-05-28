@@ -1,0 +1,124 @@
+syntax = "proto3";
+
+package region;
+
+// RegionService — cross-region gRPC mesh for Powehi.
+//
+// Zero-knowledge invariant: `ciphertext` and `commit` fields are opaque bytes.
+// The server MUST NOT attempt to decrypt them. Only UUIDs and aggregate
+// counters cross the wire as structured data.
+service RegionService {
+  // Forward an MLS envelope (application / welcome / commit) to another region.
+  rpc ForwardEnvelope(ForwardEnvelopeRequest) returns (ForwardEnvelopeResponse);
+
+  // Forward an MLS commit to the group's home region for epoch serialisation.
+  rpc ForwardCommit(ForwardCommitRequest) returns (ForwardCommitResponse);
+
+  // Synchronise group membership state with a peer region.
+  rpc SyncGroupMembership(SyncGroupMembershipRequest) returns (SyncGroupMembershipResponse);
+
+  // Confirm cross-region KeyPackage consumption to prevent double-use.
+  rpc ConsumeKeyPackage(ConsumeKeyPackageRequest) returns (ConsumeKeyPackageResponse);
+
+  // Health probe for the inter-region circuit breaker.
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// ── ForwardEnvelope ────────────────────────────────────────────────────────
+
+message ForwardEnvelopeRequest {
+  string envelope_id           = 1; // UUID (opaque, no PII)
+  string group_id              = 2; // UUID (opaque, no PII)
+  string sender_device_id      = 3; // UUID (opaque, no PII)
+  // recipient_device_id is non-empty only for Welcome messages.
+  string recipient_device_id   = 4; // UUID or empty string
+  // Opaque MLS ciphertext — server MUST NOT attempt to decrypt.
+  bytes  ciphertext            = 5;
+  EnvelopeType envelope_type   = 6;
+  int64  sent_at_unix_ms       = 7; // UTC milliseconds
+}
+
+message ForwardEnvelopeResponse {
+  ForwardStatus status = 1;
+}
+
+enum EnvelopeType {
+  ENVELOPE_TYPE_UNSPECIFIED = 0;
+  ENVELOPE_TYPE_APPLICATION = 1;
+  ENVELOPE_TYPE_WELCOME     = 2;
+  ENVELOPE_TYPE_COMMIT      = 3;
+  ENVELOPE_TYPE_PROPOSAL    = 4;
+}
+
+// ── ForwardCommit ──────────────────────────────────────────────────────────
+
+message ForwardCommitRequest {
+  string group_id          = 1; // UUID
+  string sender_device_id  = 2; // UUID
+  // Opaque MLS commit bytes — server MUST NOT attempt to decrypt.
+  bytes  commit            = 3;
+  uint64 expected_epoch    = 4;
+}
+
+message ForwardCommitResponse {
+  ForwardStatus status         = 1;
+  uint64        accepted_epoch = 2; // new epoch when ACCEPTED
+}
+
+// ── SyncGroupMembership ────────────────────────────────────────────────────
+
+message SyncGroupMembershipRequest {
+  string          group_id          = 1; // UUID
+  string          home_region       = 2; // region ID string
+  repeated string member_device_ids = 3; // opaque device UUIDs — no PII
+}
+
+message SyncGroupMembershipResponse {
+  ForwardStatus status = 1;
+}
+
+// ── ConsumeKeyPackage ──────────────────────────────────────────────────────
+
+message ConsumeKeyPackageRequest {
+  string device_id        = 1; // target device UUID
+  string key_package_id   = 2; // UUID
+  string consuming_region = 3; // requesting region ID
+}
+
+message ConsumeKeyPackageResponse {
+  ConsumeStatus status = 1;
+}
+
+// ── HealthCheck ────────────────────────────────────────────────────────────
+
+message HealthCheckRequest {
+  string region_id = 1; // caller's region ID
+}
+
+message HealthCheckResponse {
+  HealthStatus status     = 1;
+  string       region_id  = 2; // this region's ID
+  uint64       latency_ms = 3;
+}
+
+// ── Shared enums ───────────────────────────────────────────────────────────
+
+enum ForwardStatus {
+  FORWARD_STATUS_UNSPECIFIED = 0;
+  FORWARD_STATUS_ACCEPTED    = 1;
+  FORWARD_STATUS_REJECTED    = 2;
+  FORWARD_STATUS_CONFLICT    = 3;
+}
+
+enum ConsumeStatus {
+  CONSUME_STATUS_UNSPECIFIED      = 0;
+  CONSUME_STATUS_CONSUMED         = 1;
+  CONSUME_STATUS_ALREADY_CONSUMED = 2;
+  CONSUME_STATUS_NOT_FOUND        = 3;
+}
+
+enum HealthStatus {
+  HEALTH_STATUS_UNSPECIFIED = 0;
+  HEALTH_STATUS_HEALTHY     = 1;
+  HEALTH_STATUS_DEGRADED    = 2;
+}

@@ -6,11 +6,13 @@ use powehi_application::{
     auth_service::AuthService, key_package_service::KeyPackageService, media_service::MediaService,
     messaging_service::MessagingService,
 };
+use powehi_grpc::{RegionGrpcServer, TlsConfig};
 use powehi_opaque::OpaqueServer;
 use powehi_postgres::{
     connect as pg_connect, run_migrations, PgDeviceRepository, PgEnvelopeRepository,
     PgGroupRepository, PgKeyPackageRepository, PgUserRepository,
 };
+use powehi_proto::region::region_service_server::RegionServiceServer;
 use powehi_r2::R2MediaAdapter;
 use powehi_redis::{RedisCache, RedisEventBus};
 use powehi_rest_api::AppState;
@@ -64,8 +66,9 @@ async fn main() -> Result<()> {
     let auth: Arc<dyn powehi_port_inbound::auth::AuthUseCase> =
         Arc::new(AuthService::new(user_repo, device_repo, opaque, cache));
 
-    let messaging: Arc<dyn powehi_port_inbound::messaging::MessagingUseCase> =
-        Arc::new(MessagingService::new(envelope_repo, group_repo, event_bus));
+    let messaging: Arc<dyn powehi_port_inbound::messaging::MessagingUseCase> = Arc::new(
+        MessagingService::new(envelope_repo.clone(), group_repo, event_bus.clone()),
+    );
 
     let key_package: Arc<dyn powehi_port_inbound::key_package::KeyPackageUseCase> =
         Arc::new(KeyPackageService::new(key_package_repo));
@@ -81,6 +84,57 @@ async fn main() -> Result<()> {
     ));
     let media: Arc<dyn powehi_port_inbound::media::MediaUseCase> =
         Arc::new(MediaService::new(media_r2));
+
+    // ── gRPC inter-region mesh server ──────────────────────────────────────
+
+    // Security: refuse to start with plaintext gRPC when peer regions are configured.
+    // Single-region deployments (no peers) may skip TLS for local dev.
+    if !cfg.grpc_peer_list().is_empty() && !cfg.grpc_tls_enabled() {
+        anyhow::bail!(
+            "SECURITY: grpc_peers is set but gRPC mTLS is not configured. \
+             Set POWEHI__GRPC_TLS_CERT, POWEHI__GRPC_TLS_KEY, POWEHI__GRPC_TLS_CA \
+             to enable mutual TLS for inter-region communication."
+        );
+    }
+
+    let tls_cfg: Option<TlsConfig> = if cfg.grpc_tls_enabled() {
+        Some(
+            TlsConfig::from_pem_files(&cfg.grpc_tls_cert, &cfg.grpc_tls_key, &cfg.grpc_tls_ca)
+                .context("load gRPC TLS config")?,
+        )
+    } else {
+        None
+    };
+
+    let grpc_server_impl = RegionGrpcServer::new(cfg.region(), envelope_repo, event_bus);
+    // Max message size = 64 KiB for MLS ciphertext (prd.md §6.4).
+    // This caps memory usage per in-flight RPC and matches the envelope size limit.
+    const GRPC_MAX_MSG_BYTES: usize = 64 * 1024;
+    let grpc_svc =
+        RegionServiceServer::new(grpc_server_impl).max_decoding_message_size(GRPC_MAX_MSG_BYTES);
+    let grpc_addr: std::net::SocketAddr = format!("0.0.0.0:{}", cfg.grpc_port)
+        .parse()
+        .context("parse gRPC listen addr")?;
+    info!(grpc_addr = %grpc_addr, tls = cfg.grpc_tls_enabled(), "gRPC region service listening");
+
+    let grpc_future: std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), tonic::transport::Error>> + Send>,
+    > = if let Some(tls) = &tls_cfg {
+        let tls_config = tls.server_tls().context("build server TLS config")?;
+        Box::pin(
+            tonic::transport::Server::builder()
+                .tls_config(tls_config)
+                .context("apply gRPC TLS")?
+                .add_service(grpc_svc)
+                .serve(grpc_addr),
+        )
+    } else {
+        Box::pin(
+            tonic::transport::Server::builder()
+                .add_service(grpc_svc)
+                .serve(grpc_addr),
+        )
+    };
 
     // ── HTTP + WS server ────────────────────────────────────────────────────
 
@@ -116,6 +170,7 @@ async fn main() -> Result<()> {
                 .await
                 .context("admin server")
         },
+        async { grpc_future.await.context("gRPC region server") },
     )?;
     Ok(())
 }
