@@ -17,6 +17,16 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-28, cycle 36 — FEATURE: Phase 6 single-region failover verification)
+- **Cycle 36 (commit 6a07f28):** Phase 6 DoD item "Single-region failure auto-failover verified (RTO <5min, RPO <30s)" completed:
+  - **`infra/synthetic/rpo-check.sh` (NEW):** Postgres streaming replication lag pre-check; queries `pg_stat_replication`; fails if any standby has `replay_lag > RPO_THRESHOLD_SECONDS` (default: 30s); validates no-standby degenerate state; `RPO_THRESHOLD_SECONDS` integer-validated before SQL interpolation (security R1 fix)
+  - **`infra/synthetic/failover-drill.sh` (EXTENDED):** Step 0 RPO pre-check (calls rpo-check.sh if DB_HOST set); Step 3b CF HEALTH_KV propagation assertion; Step 4 strict RTO exit-1 (was warn-only); Security fixes: R1 SQL injection (RPO_THRESHOLD_SECONDS integer guard), Y1 `^https://` scheme validation + `--proto '=https'` on curl, Y2 REGION allow-list regex, Y3 mktemp for temp file
+  - **`powehi-grpc/src/client.rs` (TESTS):** 2 circuit-breaker integration tests: `with_retry_fast_rejects_when_circuit_open` + `with_retry_trips_circuit_after_all_retries_fail`
+  - **STATUS.md updated:** Marked [x]: KeyPackage consume integrity (cycle 34), Edge Worker routing (cycle 34), Single-region failover (cycle 36)
+  - security-auditor: R1 fixed (SQLi), Y1/Y2/Y3 fixed; Y4 accepted (no content/PII/ciphertext in replication lag output)
+  - **194 Rust tests** (was 192); clippy clean
+  - **Phase 6 remaining:** Cross-region message round-trip p99 <200ms (EU↔KR) — gRPC forwarding latency synthetic test needed
+
 ## Current state (2026-05-28, cycle 35 — STABILIZATION: CF Worker security fixes + test gap closure)
 - **Cycle 35 (commit 91ef88e):** Stabilization — security sweep fixed 2 RED findings + 1 YELLOW, test gaps closed:
   - **RED #1 (PIPA bypass):** CF Worker `index.ts` read country from client-controlled `CF-IPCountry` header; fixed to read from `request.cf.country` (CF infrastructure, cannot be spoofed). KR users could bypass PIPA 503 by sending `CF-IPCountry: DE`.
