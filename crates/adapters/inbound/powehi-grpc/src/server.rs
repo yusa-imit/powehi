@@ -342,7 +342,10 @@ mod tests {
         let resp = server.forward_commit(req).await.unwrap();
         let body = resp.into_inner();
         assert_eq!(body.status, ForwardStatus::Accepted as i32);
-        assert_eq!(body.accepted_epoch, 0, "server must not echo back peer-supplied epoch");
+        assert_eq!(
+            body.accepted_epoch, 0,
+            "server must not echo back peer-supplied epoch"
+        );
     }
 
     #[tokio::test]
