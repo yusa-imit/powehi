@@ -17,6 +17,28 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-28, cycle 34 — FEATURE: Phase 6 CF smart-router + KeyPackage consume integrity)
+- **Cycle 34 (commit 5b7d855):** Two Phase 6 items implemented:
+  - **Cloudflare Edge Worker smart routing** (`infra/cloudflare/workers/smart-router/`):
+    - `src/router.ts`: pure routing logic — `resolveTarget` (geographic by CF-IPCountry), `pickOrigin` (health-state failover), `rewriteUrl`; zero-knowledge (never reads body)
+    - `src/index.ts`: CF Worker entry — reads `HEALTH_KV` (set by k6 synthetic), routes EU/AP, fails over on unhealthy, strips CF-Connecting-IP
+    - PIPA guard: KR → 503 `PIPA_REGION_PENDING` (sin1 ≠ Korea, prd.md §4A.1)
+    - `wrangler.toml`: powehi-smart-router, HEALTH_KV binding, EU/AP origins
+    - 16 Vitest tests: country routing, failover, PIPA block, URL rewrite — all green
+    - `infra/terraform/envs/cloudflare/worker.tf`: `cloudflare_workers_kv_namespace` (health state) + `cloudflare_workers_route` api.powehi.app/*
+    - Terraform v5 migration fix: `cloudflare_record` → `cloudflare_dns_record`, `value` → `content`, `.hostname` → `.name` in outputs; `tofu validate` clean
+    - `pnpm-workspace.yaml`: added infra/cloudflare/workers/smart-router
+  - **KeyPackage cross-region consume integrity**:
+    - `powehi-domain`: `ConsumeResult` enum (Consumed/AlreadyConsumed/NotFound)
+    - `powehi-port-outbound`: `KeyPackageRepository.mark_consumed` added
+    - `powehi-postgres`: `PgKeyPackageRepository.mark_consumed` — CAS UPDATE + EXISTS (atomic double-consume prevention)
+    - `powehi-grpc/server.rs`: `consume_key_package` RPC implemented; UUID validation; ConsumeResult→ConsumeStatus mapping; no KP content touched
+    - 5 new gRPC tests (Consumed/AlreadyConsumed/NotFound/invalid-UUID/empty-region)
+    - `main.rs`: `key_package_repo.clone()` → both KeyPackageService and RegionGrpcServer
+  - security-auditor: GREEN (YELLOW-8 benign TOCTOU; YELLOW-9 mTLS-mitigated oracle — neither blocking)
+  - 188 Rust tests passing (was 182); 16 Worker tests; clippy clean; rustfmt clean
+  - Next: cross-region p99 <200ms live measurement; single-region failover drill (RTO verification)
+
 ## Current state (2026-05-28, cycle 33 — FEATURE: Phase 6 AP-Seoul Tier 1 + Helm + synthetic)
 - **Cycle 33:** CI was RED (rustfmt assert_eq! multi-line in powehi-grpc/server.rs) → fixed + pushed (694661f). Then Phase 6 infra batch:
   - `infra/terraform/envs/prod-ap-seoul/`: Hetzner sin1 k3s HA (3CP+3W cx41); S3 remote backend (not local state)
@@ -318,7 +340,9 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 ### Phase 6 — Global Infrastructure
 - [x] gRPC mesh + mTLS: powehi-proto (protox 0.7), RegionGrpcServer, RegionGrpcRouter, TlsConfig, CircuitBreaker, security hardening — cycle 32 (commit 563ae8e)
 - [x] AP-Seoul Tier 1 Terraform + Helm chart + synthetic checks + infra-test gate — cycle 33 (commit d92e4aa)
-- [ ] Cloudflare Edge Worker smart routing; KeyPackage cross-region replication integrity; cross-region p99 <200ms live measurement; single-region failover drill (live RTO verification)
+- [x] Cloudflare Edge Worker smart routing — TypeScript Worker + PIPA guard + HEALTH_KV failover + Terraform KV/route — cycle 34 (commit 5b7d855)
+- [x] KeyPackage cross-region replication integrity — ConsumeKeyPackage RPC implemented, CAS double-consume prevention, 5 integrity tests — cycle 34 (commit 5b7d855)
+- [ ] Cross-region p99 <200ms live measurement; single-region failover drill (live RTO <5min, RPO <30s verification)
 
 ## Notes for the autonomous dev
 - Implement ONE checklist item per cycle. Flip `[ ]` → `[x]` here when done.
