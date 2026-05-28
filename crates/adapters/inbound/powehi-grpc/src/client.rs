@@ -309,4 +309,75 @@ mod tests {
             .await;
         assert!(matches!(result, Err(DomainError::Internal(_))));
     }
+
+    // ── Circuit breaker integration tests ─────────────────────────────────
+
+    /// When the circuit is open, with_retry must fast-reject without invoking
+    /// the RPC call at all.  This is the auto-failover fast-path: a downed
+    /// peer trips the circuit after CIRCUIT_THRESHOLD failures; subsequent
+    /// callers receive CircuitOpen immediately, enabling RTO <5 min (prd.md §4A.7).
+    #[tokio::test]
+    async fn with_retry_fast_rejects_when_circuit_open() {
+        // Lazy channel: no real connection until first RPC — the circuit check
+        // fires before any network call, so this test runs offline.
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let circuit = CircuitBreaker::new(1, Duration::from_secs(60));
+        circuit.record_failure(); // threshold=1 → circuit opens immediately
+        let peer = Arc::new(tokio::sync::Mutex::new(PeerState {
+            client: RegionServiceClient::new(channel),
+            circuit,
+        }));
+
+        let result: Result<(), GrpcError> = with_retry(
+            peer,
+            3,
+            0,
+            |_client| Box::pin(async { Ok::<(), tonic::Status>(()) }),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(GrpcError::CircuitOpen(_))),
+            "expected CircuitOpen, got {result:?}"
+        );
+    }
+
+    /// After all retries are exhausted, with_retry must record one failure on
+    /// the circuit breaker.  This ensures repeated peer failures accumulate
+    /// toward the open threshold — preventing the retry loop from masking a
+    /// degraded peer indefinitely.
+    #[tokio::test]
+    async fn with_retry_trips_circuit_after_all_retries_fail() {
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        // threshold=1: a single record_failure() call opens the circuit.
+        let circuit = CircuitBreaker::new(1, Duration::from_secs(60));
+        assert!(!circuit.is_open(), "circuit must start closed");
+
+        let peer = Arc::new(tokio::sync::Mutex::new(PeerState {
+            client: RegionServiceClient::new(channel),
+            circuit,
+        }));
+        let peer_ref = Arc::clone(&peer);
+
+        // Force every attempt to fail with Unavailable.
+        let result: Result<(), GrpcError> = with_retry(
+            peer,
+            2, // max_retries=2 → 3 total attempts (0..=2)
+            0,
+            |_client| {
+                Box::pin(async {
+                    Err::<(), tonic::Status>(tonic::Status::unavailable("forced failure"))
+                })
+            },
+        )
+        .await;
+
+        assert!(result.is_err(), "expected error after all retries exhausted");
+        // After the retry loop, with_retry calls circuit.record_failure() once.
+        // With threshold=1 that single call opens the circuit.
+        assert!(
+            peer_ref.lock().await.circuit.is_open(),
+            "circuit must be open after all retries failed"
+        );
+    }
 }
