@@ -1,0 +1,10 @@
+# Copy this file to terraform.tfvars and fill in non-secret values.
+# DO NOT put real API tokens here — export them as:
+#   export TF_VAR_hcloud_token="your-hcloud-token"
+
+cluster_name        = "powehi-prod-ap-seoul"
+location            = "sin1"
+ssh_key_name        = ""        # set to the name of your Hetzner SSH key
+k3s_version         = ""        # e.g. "v1.29.4+k3s1" to pin; leave empty for latest
+control_plane_count = 3
+worker_count        = 3

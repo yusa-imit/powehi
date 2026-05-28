@@ -1,0 +1,12 @@
+# Copy to backend.hcl and fill in values, then run:
+#   tofu init -backend-config=backend.hcl
+# backend.hcl is gitignored — never commit it.
+#
+# State files contain the k3s join token. Encryption at rest (SSE-KMS) is mandatory.
+
+bucket         = "powehi-tfstate-<region>"   # e.g. powehi-tfstate-eu, powehi-tfstate-ap-seoul
+key            = "<env>/terraform.tfstate"   # e.g. prod-ap-seoul/terraform.tfstate
+region         = "eu-central-1"              # AWS / S3-compatible provider region
+encrypt        = true
+kms_key_id     = "arn:aws:kms:<region>:<account>:key/<key-id>"
+dynamodb_table = "powehi-tfstate-lock"       # DynamoDB table for state locking

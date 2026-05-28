@@ -1,5 +1,6 @@
-# Terraform / OpenTofu generated directories
+# Terraform / OpenTofu generated directories and lock files
 .terraform/
+.terraform.lock.hcl
 
 # State files — never commit real state
 *.tfstate

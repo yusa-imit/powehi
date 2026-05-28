@@ -1,0 +1,218 @@
+{{- if .Values.networkPolicy.enabled }}
+# ---------------------------------------------------------------------------
+# NetworkPolicy — deny-all by default, explicit whitelist only.
+# Security invariant: all ingress/egress must be enumerated below.
+# ---------------------------------------------------------------------------
+
+# 1. Default deny all ingress and egress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "powehi.fullname" . }}-deny-all
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "powehi.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "powehi.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# 2. Ingress: allow public traffic (port 8080) from ingress-nginx controller.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "powehi.fullname" . }}-ingress-public
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "powehi.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "powehi.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.publicPort }}
+---
+# 3. Ingress: allow Prometheus scrape (port 9090) from monitoring namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "powehi.fullname" . }}-ingress-admin
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "powehi.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "powehi.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.adminPort }}
+---
+# 4. Ingress: allow gRPC mesh traffic (port 50051) from same namespace (mTLS, cross-region routed via LB).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "powehi.fullname" . }}-ingress-grpc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "powehi.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "powehi.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.grpcPort }}
+---
+# 5. Egress: allow DNS resolution (UDP + TCP port 53) to kube-dns.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "powehi.fullname" . }}-egress-dns
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "powehi.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "powehi.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# 6. Egress: allow connections to Postgres (port 5432) in postgres namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "powehi.fullname" . }}-egress-postgres
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "powehi.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "powehi.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+# 7. Egress: allow connections to Redis (port 6379) in redis namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "powehi.fullname" . }}-egress-redis
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "powehi.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "powehi.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+---
+# 8. Egress: allow HTTPS (port 443) to external destinations (R2, Web Push).
+# RFC1918 + link-local metadata endpoint excluded to harden against SSRF pivots.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "powehi.fullname" . }}-egress-https
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "powehi.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "powehi.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.169.254/32
+      ports:
+        - protocol: TCP
+          port: 443
+---
+# 9. Egress: allow gRPC mesh traffic (port 50051, mTLS) to peer regions.
+# Peers are external IPs resolved via DNS; RFC1918 and link-local excluded.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "powehi.fullname" . }}-egress-grpc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "powehi.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "powehi.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.169.254/32
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.grpcPort }}
+{{- end }}

@@ -1,0 +1,55 @@
+replicaCount: 2
+
+image:
+  repository: ghcr.io/yusa-imit/powehi
+  pullPolicy: IfNotPresent
+  tag: ""  # overridden per deploy; empty falls back to .Chart.AppVersion
+
+service:
+  type: ClusterIP
+  publicPort: 8080
+  adminPort: 9090
+  grpcPort: 50051
+
+resources:
+  limits:
+    cpu: "1"
+    memory: "512Mi"
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+networkPolicy:
+  enabled: true
+
+# REQUIRED: eu-frankfurt | ap-seoul
+region: ""
+
+config:
+  logLevel: "info"
+  adminPort: "9090"
+  grpcPort: "50051"
+  grpcPeers: ""         # CSV: https://peer1:50051,https://peer2:50051
+  grpcTlsEnabled: "true"
+
+externalSecrets:
+  enabled: true
+  refreshInterval: "1h"
+  secretStoreRef:
+    name: "powehi-secret-store"
+    kind: "ClusterSecretStore"
+  remoteRefs:
+    databaseUrl: "powehi/database-url"
+    redisUrl: "powehi/redis-url"
+    r2AccessKeyId: "powehi/r2-access-key-id"
+    r2SecretAccessKey: "powehi/r2-secret-access-key"
+    vapidPrivateKey: "powehi/vapid-private-key"
+    grpcTlsCert: "powehi/grpc-tls-cert"
+    grpcTlsKey: "powehi/grpc-tls-key"
+    grpcTlsCa: "powehi/grpc-tls-ca"

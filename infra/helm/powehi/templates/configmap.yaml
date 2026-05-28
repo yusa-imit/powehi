@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "powehi.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "powehi.labels" . | nindent 4 }}
+data:
+  POWEHI__REGION: {{ required "values.region is required (eu-frankfurt|ap-seoul)" .Values.region | quote }}
+  POWEHI__LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  POWEHI__ADMIN_PORT: {{ .Values.config.adminPort | quote }}
+  POWEHI__GRPC_PORT: {{ .Values.config.grpcPort | quote }}
+  POWEHI__GRPC_PEERS: {{ .Values.config.grpcPeers | quote }}
+  POWEHI__GRPC_TLS_ENABLED: {{ .Values.config.grpcTlsEnabled | quote }}

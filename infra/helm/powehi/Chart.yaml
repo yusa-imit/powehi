@@ -1,0 +1,6 @@
+apiVersion: v2
+name: powehi
+description: Powehi E2EE zero-knowledge web messenger — server-side service
+type: application
+version: "0.1.0"
+appVersion: "0.1.0"

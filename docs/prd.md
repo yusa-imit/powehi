@@ -408,8 +408,8 @@ sequenceDiagram
 
 | Tier | 리전 | 역할 | 인프라 |
 |------|------|------|--------|
-| Tier 1 | EU-Frankfurt | 풀 R/W Postgres, 사용자 데이터 소유 | Hetzner Cloud (k3s HA) |
-| Tier 1 | AP-Seoul | 풀 R/W Postgres, 사용자 데이터 소유 | Oracle Cloud / Vultr (k3s HA) |
+| Tier 1 | EU-Frankfurt | 풀 R/W Postgres, 사용자 데이터 소유 | Hetzner Cloud nbg1 (k3s HA) |
+| Tier 1 | AP-Seoul (스테이징: Hetzner sin1 Singapore) | 풀 R/W Postgres, 사용자 데이터 소유 | Hetzner Cloud sin1 (k3s HA) — **PIPA 주의**: 실제 KR 사용자 데이터는 한국 내 DC 확보 후 이전 예정 (현재 스테이징 전용) |
 | Tier 2 | AP-Tokyo (향후) | Read Replica + 릴레이, 쓰기는 Tier 1 포워딩 | Oracle Cloud (k3s) |
 | Tier 2 | US-Ashburn (향후) | Read Replica + 릴레이, 쓰기는 Tier 1 포워딩 | 미정 |
 | Tier 3 | Cloudflare Edge PoPs | WS 종단, 스마트 라우팅만, 상태 없음 | Cloudflare Workers |
