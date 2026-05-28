@@ -328,12 +328,9 @@ mod tests {
             circuit,
         }));
 
-        let result: Result<(), GrpcError> = with_retry(
-            peer,
-            3,
-            0,
-            |_client| Box::pin(async { Ok::<(), tonic::Status>(()) }),
-        )
+        let result: Result<(), GrpcError> = with_retry(peer, 3, 0, |_client| {
+            Box::pin(async { Ok::<(), tonic::Status>(()) })
+        })
         .await;
 
         assert!(
@@ -372,7 +369,10 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err(), "expected error after all retries exhausted");
+        assert!(
+            result.is_err(),
+            "expected error after all retries exhausted"
+        );
         // After the retry loop, with_retry calls circuit.record_failure() once.
         // With threshold=1 that single call opens the circuit.
         assert!(
