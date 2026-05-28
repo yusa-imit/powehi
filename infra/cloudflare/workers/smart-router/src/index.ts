@@ -21,9 +21,28 @@ export interface Env {
   HEALTH_KV: KVNamespace;
 }
 
+// Trust headers that must never be forwarded from client to origin.
+// These are used by the backend rate-limiter and PIPA guard as authoritative
+// signals — forwarding client-supplied values would allow rate-limit bypass.
+const STRIP_INBOUND_HEADERS = [
+  "cf-connecting-ip",
+  "cf-ipcountry",
+  "cf-visitor",
+  "cf-ray",
+  "cf-worker",
+  "x-forwarded-for",
+  "x-real-ip",
+  "forwarded",
+  // Strip any stale Worker-set label to prevent replay from a cached response
+  "x-powehi-region",
+] as const;
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const country = request.headers.get("CF-IPCountry") ?? "XX";
+    // Read geo from request.cf — this is set by CF infrastructure and cannot
+    // be spoofed by a client-supplied CF-IPCountry header (RED fix #1).
+    const cfProps = (request as unknown as { cf?: { country?: string } }).cf;
+    const country = cfProps?.country ?? "XX";
     const decision = resolveTarget(country);
 
     if (decision.kind === "pipa_blocked") {
@@ -57,9 +76,12 @@ export default {
 
     const targetUrl = rewriteUrl(request.url, originBase);
 
-    // Forward headers — strip CF-Connecting-IP before sending to origin
+    // Strip all inbound trust/IP/geo headers before forwarding to origin
+    // (RED fix #2: prevents rate-limit bypass via spoofed X-Forwarded-For etc.)
     const forwardHeaders = new Headers(request.headers);
-    forwardHeaders.delete("CF-Connecting-IP");
+    for (const h of STRIP_INBOUND_HEADERS) {
+      forwardHeaders.delete(h);
+    }
     // Indicate which region was selected so origin can log it (opaque label, no PII)
     forwardHeaders.set("X-Powehi-Region", target);
 
@@ -71,7 +93,15 @@ export default {
       redirect: "manual",
     });
 
-    return fetch(forwardedRequest);
+    // Wrap fetch so a transient origin error returns our structured 503 (YELLOW fix #3)
+    try {
+      return await fetch(forwardedRequest);
+    } catch {
+      return new Response(
+        JSON.stringify({ error: "service_unavailable", code: "ORIGIN_UNREACHABLE" }),
+        { status: 503, headers: { "Content-Type": "application/json" } },
+      );
+    }
   },
 };
 
