@@ -17,6 +17,18 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-29, cycle 39 — FEATURE: Web Push subscription management — RFC 8291/8292 VAPID)
+- **Cycle 39 (commit a8715db):** Web Push subscription management — post-Phase-6 bonus:
+  - **Domain/Ports**: `PushSubscription` struct; `PushSubscriptionRepository` port; `WebPushPort` port
+  - **powehi-webpush adapter**: `VapidWebPushAdapter` — ES256 VAPID JWT (p256 RustCrypto, no homegrown crypto); empty-body POST (ZK: no content through push channel); redirect disabled (SSRF via open-redirect); 410 Gone handled as success; graceful `disabled()` mode (no VAPID keys in dev)
+  - **powehi-postgres adapter**: `PgPushSubscriptionRepository` — upsert/fetch/delete; migration 0004 + rollback script; ignored Postgres integration test (run with `--ignored` against live DB)
+  - **REST API**: `POST/DELETE /v1/push-subscriptions` behind `AuthenticatedDevice` + `api_governor`; SSRF guard rejects private IPv4, RFC-1918, link-local, IPv6 loopback, ULA, and IPv4-mapped IPv6 (`::ffff:169.254.169.254`); no endpoint/key logged
+  - **Application layer**: `MessagingService.with_push()` + `maybe_push()` — fire-and-forget push on send_message/send_welcome; failures never propagate to caller
+  - **Config**: `vapid_private_key_pem` + `vapid_contact` (both optional)
+  - **Security auditor RED fixed**: IPv4-mapped IPv6 SSRF bypass (`::ffff:169.254.169.254`) — `to_ipv4_mapped()` check added; `to_ipv4()` NOT used (would incorrectly match `::1` as `0.0.0.1`)
+  - **crypto-reviewer**: PASS — ES256 r||s JOSE encoding correct; serde_json escapes `aud` claim; no homegrown crypto
+  - **214 Rust tests** (was 194); clippy clean; rustfmt clean
+
 ## Current state (2026-05-29, cycle 37 — FEATURE: Phase 6 COMPLETE — gRPC p99 synthetic + CI fix)
 - **Cycle 37 (commit 9efedcb):** Phase 6 final item completed + CI red fixed:
   - **CI red fix (commit 9efedcb):** `powehi-grpc/src/client.rs` rustfmt diff in circuit-breaker test blocks → `cargo fmt` applied; CI was failing on Format check job for 2 consecutive commits
