@@ -71,7 +71,7 @@ async fn main() -> Result<()> {
     );
 
     let key_package: Arc<dyn powehi_port_inbound::key_package::KeyPackageUseCase> =
-        Arc::new(KeyPackageService::new(key_package_repo));
+        Arc::new(KeyPackageService::new(key_package_repo.clone()));
 
     let media_r2 = Arc::new(R2MediaAdapter::new(
         pool.clone(),
@@ -106,7 +106,8 @@ async fn main() -> Result<()> {
         None
     };
 
-    let grpc_server_impl = RegionGrpcServer::new(cfg.region(), envelope_repo, event_bus);
+    let grpc_server_impl =
+        RegionGrpcServer::new(cfg.region(), envelope_repo, event_bus, key_package_repo);
     // Max message size = 64 KiB for MLS ciphertext (prd.md §6.4).
     // This caps memory usage per in-flight RPC and matches the envelope size limit.
     const GRPC_MAX_MSG_BYTES: usize = 64 * 1024;

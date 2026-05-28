@@ -6,18 +6,22 @@ use powehi_domain::{
     envelope::{Envelope, EnvelopeId, MessageType},
     event::DomainEvent,
     group::GroupId,
+    key_package::{ConsumeResult, KeyPackageId},
     region::RegionId,
 };
-use powehi_port_outbound::{envelope_repo::EnvelopeRepository, event_bus::DomainEventBus};
+use powehi_port_outbound::{
+    envelope_repo::EnvelopeRepository, event_bus::DomainEventBus,
+    key_package_repo::KeyPackageRepository,
+};
 use tonic::{Request, Response, Status};
 use tracing::{instrument, warn};
 use uuid::Uuid;
 
 use powehi_proto::region::{
     region_service_server::RegionService, ConsumeKeyPackageRequest, ConsumeKeyPackageResponse,
-    EnvelopeType, ForwardCommitRequest, ForwardCommitResponse, ForwardEnvelopeRequest,
-    ForwardEnvelopeResponse, ForwardStatus, HealthCheckRequest, HealthCheckResponse, HealthStatus,
-    SyncGroupMembershipRequest, SyncGroupMembershipResponse,
+    ConsumeStatus, EnvelopeType, ForwardCommitRequest, ForwardCommitResponse,
+    ForwardEnvelopeRequest, ForwardEnvelopeResponse, ForwardStatus, HealthCheckRequest,
+    HealthCheckResponse, HealthStatus, SyncGroupMembershipRequest, SyncGroupMembershipResponse,
 };
 
 use crate::error::domain_err_to_status;
@@ -26,6 +30,7 @@ pub struct RegionGrpcServer {
     pub local_region: RegionId,
     pub envelope_repo: Arc<dyn EnvelopeRepository>,
     pub event_bus: Arc<dyn DomainEventBus>,
+    pub key_package_repo: Arc<dyn KeyPackageRepository>,
 }
 
 impl RegionGrpcServer {
@@ -33,11 +38,13 @@ impl RegionGrpcServer {
         local_region: RegionId,
         envelope_repo: Arc<dyn EnvelopeRepository>,
         event_bus: Arc<dyn DomainEventBus>,
+        key_package_repo: Arc<dyn KeyPackageRepository>,
     ) -> Self {
         Self {
             local_region,
             envelope_repo,
             event_bus,
+            key_package_repo,
         }
     }
 }
@@ -191,17 +198,44 @@ impl RegionService for RegionGrpcServer {
         }))
     }
 
+    #[instrument(
+        skip(self, request),
+        fields(region = %self.local_region)
+    )]
     async fn consume_key_package(
         &self,
-        _request: Request<ConsumeKeyPackageRequest>,
+        request: Request<ConsumeKeyPackageRequest>,
     ) -> Result<Response<ConsumeKeyPackageResponse>, Status> {
-        // Cross-region KeyPackage consumption deferred until KeyPackageRepository
-        // is injected (Phase 6 follow-up). Returning Unimplemented is safer than
-        // a stub that silently returns Consumed — a caller must not act on a
-        // false confirmation.
-        Err(Status::unimplemented(
-            "ConsumeKeyPackage not yet implemented",
-        ))
+        let req = request.into_inner();
+
+        // Validate UUIDs — zero-knowledge: we never inspect KP content.
+        let kp_id = Uuid::parse_str(&req.key_package_id)
+            .map(KeyPackageId::from)
+            .map_err(|_| Status::invalid_argument("invalid key_package_id UUID"))?;
+        // Validate device_id and consuming_region for format — not used past validation.
+        Uuid::parse_str(&req.device_id)
+            .map_err(|_| Status::invalid_argument("invalid device_id UUID"))?;
+        if req.consuming_region.is_empty() {
+            return Err(Status::invalid_argument(
+                "consuming_region must not be empty",
+            ));
+        }
+
+        let result = self
+            .key_package_repo
+            .mark_consumed(&kp_id)
+            .await
+            .map_err(|e| domain_err_to_status(&e))?;
+
+        let status = match result {
+            ConsumeResult::Consumed => ConsumeStatus::Consumed,
+            ConsumeResult::AlreadyConsumed => ConsumeStatus::AlreadyConsumed,
+            ConsumeResult::NotFound => ConsumeStatus::NotFound,
+        };
+
+        Ok(Response::new(ConsumeKeyPackageResponse {
+            status: status as i32,
+        }))
     }
 
     async fn health_check(
@@ -232,10 +266,15 @@ mod tests {
         envelope::{Envelope, EnvelopeId},
         error::DomainError,
         event::DomainEvent,
+        key_package::{ConsumeResult, KeyPackage, KeyPackageId},
     };
-    use powehi_port_outbound::{envelope_repo::EnvelopeRepository, event_bus::DomainEventBus};
+    use powehi_port_outbound::{
+        envelope_repo::EnvelopeRepository, event_bus::DomainEventBus,
+        key_package_repo::KeyPackageRepository,
+    };
+    use std::collections::HashMap;
     use std::pin::Pin;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     struct NoopEnvelopeRepo;
 
@@ -276,11 +315,71 @@ mod tests {
         }
     }
 
+    struct FakeKpRepo {
+        store: Mutex<HashMap<KeyPackageId, KeyPackage>>,
+    }
+
+    impl FakeKpRepo {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                store: Mutex::new(HashMap::new()),
+            })
+        }
+
+        fn with_kp(kp: KeyPackage) -> Arc<Self> {
+            let repo = Self::new();
+            repo.store.lock().unwrap().insert(kp.id.clone(), kp);
+            repo
+        }
+    }
+
+    #[async_trait]
+    impl KeyPackageRepository for FakeKpRepo {
+        async fn save(&self, kp: &KeyPackage) -> Result<(), DomainError> {
+            self.store.lock().unwrap().insert(kp.id.clone(), kp.clone());
+            Ok(())
+        }
+        async fn fetch_one(
+            &self,
+            _device_id: &DeviceId,
+        ) -> Result<Option<KeyPackage>, DomainError> {
+            Ok(None)
+        }
+        async fn count_available(&self, _device_id: &DeviceId) -> Result<u64, DomainError> {
+            Ok(0)
+        }
+        async fn delete(&self, id: &KeyPackageId) -> Result<(), DomainError> {
+            self.store.lock().unwrap().remove(id);
+            Ok(())
+        }
+        async fn mark_consumed(&self, id: &KeyPackageId) -> Result<ConsumeResult, DomainError> {
+            let mut store = self.store.lock().unwrap();
+            match store.get_mut(id) {
+                Some(kp) if kp.consumed => Ok(ConsumeResult::AlreadyConsumed),
+                Some(kp) => {
+                    kp.consumed = true;
+                    Ok(ConsumeResult::Consumed)
+                }
+                None => Ok(ConsumeResult::NotFound),
+            }
+        }
+    }
+
     fn make_server() -> RegionGrpcServer {
         RegionGrpcServer::new(
             RegionId::new("eu-central-1"),
             Arc::new(NoopEnvelopeRepo),
             Arc::new(NoopEventBus),
+            FakeKpRepo::new(),
+        )
+    }
+
+    fn make_server_with_kp(kp: KeyPackage) -> RegionGrpcServer {
+        RegionGrpcServer::new(
+            RegionId::new("eu-central-1"),
+            Arc::new(NoopEnvelopeRepo),
+            Arc::new(NoopEventBus),
+            FakeKpRepo::with_kp(kp),
         )
     }
 
@@ -361,6 +460,78 @@ mod tests {
             sent_at_unix_ms: 0,
         });
         let err = server.forward_envelope(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    // ── ConsumeKeyPackage integrity tests ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn consume_key_package_unconsumed_returns_consumed() {
+        let kp = KeyPackage::new(DeviceId::new(), vec![0xde, 0xad]);
+        let kp_id = kp.id.clone();
+        let device_id = kp.device_id.clone();
+        let server = make_server_with_kp(kp);
+        let req = Request::new(ConsumeKeyPackageRequest {
+            device_id: device_id.as_uuid().to_string(),
+            key_package_id: kp_id.as_uuid().to_string(),
+            consuming_region: "ap-seoul-1".to_string(),
+        });
+        let resp = server.consume_key_package(req).await.unwrap();
+        assert_eq!(resp.into_inner().status, ConsumeStatus::Consumed as i32);
+    }
+
+    #[tokio::test]
+    async fn consume_key_package_already_consumed_returns_already_consumed() {
+        let mut kp = KeyPackage::new(DeviceId::new(), vec![0xca, 0xfe]);
+        kp.consumed = true;
+        let kp_id = kp.id.clone();
+        let device_id = kp.device_id.clone();
+        let server = make_server_with_kp(kp);
+        let req = Request::new(ConsumeKeyPackageRequest {
+            device_id: device_id.as_uuid().to_string(),
+            key_package_id: kp_id.as_uuid().to_string(),
+            consuming_region: "ap-seoul-1".to_string(),
+        });
+        let resp = server.consume_key_package(req).await.unwrap();
+        assert_eq!(
+            resp.into_inner().status,
+            ConsumeStatus::AlreadyConsumed as i32
+        );
+    }
+
+    #[tokio::test]
+    async fn consume_key_package_unknown_id_returns_not_found() {
+        let server = make_server();
+        let req = Request::new(ConsumeKeyPackageRequest {
+            device_id: Uuid::new_v4().to_string(),
+            key_package_id: Uuid::new_v4().to_string(),
+            consuming_region: "ap-seoul-1".to_string(),
+        });
+        let resp = server.consume_key_package(req).await.unwrap();
+        assert_eq!(resp.into_inner().status, ConsumeStatus::NotFound as i32);
+    }
+
+    #[tokio::test]
+    async fn consume_key_package_invalid_uuid_returns_invalid_argument() {
+        let server = make_server();
+        let req = Request::new(ConsumeKeyPackageRequest {
+            device_id: Uuid::new_v4().to_string(),
+            key_package_id: "not-a-uuid".to_string(),
+            consuming_region: "ap-seoul-1".to_string(),
+        });
+        let err = server.consume_key_package(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn consume_key_package_empty_region_returns_invalid_argument() {
+        let server = make_server();
+        let req = Request::new(ConsumeKeyPackageRequest {
+            device_id: Uuid::new_v4().to_string(),
+            key_package_id: Uuid::new_v4().to_string(),
+            consuming_region: String::new(),
+        });
+        let err = server.consume_key_package(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 }

@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use powehi_domain::{
     device::DeviceId,
     error::DomainError,
-    key_package::{KeyPackage, KeyPackageId},
+    key_package::{ConsumeResult, KeyPackage, KeyPackageId},
 };
 use powehi_port_outbound::key_package_repo::KeyPackageRepository;
 use sqlx::postgres::PgPool;
@@ -100,6 +100,36 @@ impl KeyPackageRepository for PgKeyPackageRepository {
             .await
             .map_err(map_err)?;
         Ok(())
+    }
+
+    async fn mark_consumed(&self, id: &KeyPackageId) -> Result<ConsumeResult, DomainError> {
+        // Attempt to flip consumed = FALSE → TRUE atomically.
+        let rows = sqlx::query(
+            "UPDATE key_packages SET consumed = TRUE WHERE id = $1 AND consumed = FALSE",
+        )
+        .bind(id.as_uuid())
+        .execute(&self.pool)
+        .await
+        .map_err(map_err)?
+        .rows_affected();
+
+        if rows == 1 {
+            return Ok(ConsumeResult::Consumed);
+        }
+
+        // No rows updated — distinguish AlreadyConsumed from NotFound.
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM key_packages WHERE id = $1)")
+                .bind(id.as_uuid())
+                .fetch_one(&self.pool)
+                .await
+                .map_err(map_err)?;
+
+        Ok(if exists {
+            ConsumeResult::AlreadyConsumed
+        } else {
+            ConsumeResult::NotFound
+        })
     }
 }
 

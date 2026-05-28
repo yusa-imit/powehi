@@ -1,0 +1,33 @@
+name = "powehi-smart-router"
+main = "src/index.ts"
+compatibility_date = "2025-05-01"
+compatibility_flags = ["nodejs_compat"]
+
+# ── KV namespace binding ────────────────────────────────────────────────────
+# namespace_id is managed by Terraform (infra/terraform/envs/cloudflare/worker.tf)
+# and injected at deploy time via `wrangler deploy --var HEALTH_KV_ID:<id>`
+# or set here after `tofu apply` outputs the ID.
+[[kv_namespaces]]
+binding = "HEALTH_KV"
+id = ""        # Set to Terraform output: cloudflare_workers_kv_namespace.region_health.id
+preview_id = ""  # Set to a preview namespace ID for local dev
+
+# ── Environment variables ───────────────────────────────────────────────────
+# These are plain-text; no secrets (no PII, no tokens — only origin URLs).
+[vars]
+EU_ORIGIN = "https://eu.api.powehi.app"
+AP_ORIGIN = "https://ap.api.powehi.app"
+
+# ── Production environment overrides ───────────────────────────────────────
+[env.production]
+name = "powehi-smart-router"
+[env.production.vars]
+EU_ORIGIN = "https://eu.api.powehi.app"
+AP_ORIGIN = "https://ap.api.powehi.app"
+
+# ── Routes ──────────────────────────────────────────────────────────────────
+# Matches api.powehi.app/* — route resource is also managed by Terraform.
+# The Terraform cloudflare_worker_route resource will reference this Worker by name.
+routes = [
+  { pattern = "api.powehi.app/*", zone_name = "powehi.app" }
+]

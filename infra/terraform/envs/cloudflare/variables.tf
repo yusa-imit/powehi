@@ -27,3 +27,9 @@ variable "proxied" {
   type        = bool
   default     = true
 }
+
+variable "cloudflare_account_id" {
+  description = "Cloudflare Account ID. Required for Workers KV namespace management. Supply via TF_VAR_cloudflare_account_id — never hardcode."
+  type        = string
+  default     = ""
+}

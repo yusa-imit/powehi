@@ -106,6 +106,21 @@ mod tests {
             self.store.lock().unwrap().remove(id);
             Ok(())
         }
+        async fn mark_consumed(
+            &self,
+            id: &KeyPackageId,
+        ) -> Result<powehi_domain::key_package::ConsumeResult, DomainError> {
+            use powehi_domain::key_package::ConsumeResult;
+            let mut store = self.store.lock().unwrap();
+            match store.get_mut(id) {
+                Some(kp) if kp.consumed => Ok(ConsumeResult::AlreadyConsumed),
+                Some(kp) => {
+                    kp.consumed = true;
+                    Ok(ConsumeResult::Consumed)
+                }
+                None => Ok(ConsumeResult::NotFound),
+            }
+        }
     }
 
     #[tokio::test]

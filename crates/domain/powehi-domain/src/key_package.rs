@@ -31,6 +31,17 @@ impl From<Uuid> for KeyPackageId {
     }
 }
 
+/// Result of a cross-region KeyPackage consumption attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConsumeResult {
+    /// Successfully marked as consumed (was unconsumed).
+    Consumed,
+    /// Already consumed by a prior request (idempotency guard).
+    AlreadyConsumed,
+    /// No KeyPackage found with the given ID.
+    NotFound,
+}
+
 /// MLS KeyPackage — opaque bytes stored by the server; consumed exactly once.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyPackage {
@@ -58,6 +69,13 @@ impl KeyPackage {
 mod tests {
     use super::*;
     use crate::device::DeviceId;
+
+    #[test]
+    fn consume_result_variants_are_distinct() {
+        assert_ne!(ConsumeResult::Consumed, ConsumeResult::AlreadyConsumed);
+        assert_ne!(ConsumeResult::Consumed, ConsumeResult::NotFound);
+        assert_ne!(ConsumeResult::AlreadyConsumed, ConsumeResult::NotFound);
+    }
 
     #[test]
     fn key_package_starts_unconsumed() {
