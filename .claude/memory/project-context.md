@@ -17,6 +17,18 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-28, cycle 35 — STABILIZATION: CF Worker security fixes + test gap closure)
+- **Cycle 35 (commit 91ef88e):** Stabilization — security sweep fixed 2 RED findings + 1 YELLOW, test gaps closed:
+  - **RED #1 (PIPA bypass):** CF Worker `index.ts` read country from client-controlled `CF-IPCountry` header; fixed to read from `request.cf.country` (CF infrastructure, cannot be spoofed). KR users could bypass PIPA 503 by sending `CF-IPCountry: DE`.
+  - **RED #2 (trust-header injection):** CF Worker forwarded all inbound headers to origin, including `X-Forwarded-For`, `X-Real-IP`, `CF-IPCountry`; fixed to strip full set of 8 trust/IP/geo headers before forwarding; backend rate-limiter was exploitable via IP rotation in XFF.
+  - **YELLOW #3:** Unguarded `fetch()` now wrapped in try/catch returning structured 503 ORIGIN_UNREACHABLE JSON (was CF default error page with ray-ID).
+  - **index.test.ts (new):** 8 security-invariant Vitest tests: RED-1 PIPA bypass invariant, RED-2 header stripping for all 7 headers + X-Powehi-Region overwrite, ALL_REGIONS_DOWN failover, ORIGIN_UNREACHABLE try/catch.
+  - **group_service.rs:** 4 new unit tests (create_group, add_member, remove_member, home_region invariant) using in-memory FakeGroupRepo — was 0 tests despite 66 lines of service code.
+  - **RUSTSEC-2025-0134 waiver:** `rustls-pemfile` unmaintained advisory (tonic 0.12.3 transitive dep) waived in both `.cargo/audit.toml` and `deny.toml`; `cargo audit` now shows 1 allowed warning (RUSTSEC-2024-0384 for instant/fluvio-wasm-timer, pre-existing).
+  - **192 Rust tests** (was 188); **24 CF Worker tests** (was 16); clippy clean; rustfmt clean; cargo audit 1 allowed warning.
+  - security-auditor: GREEN (all RED fixed, YELLOW fixed, remaining YELLOW-4/5 noted as acceptable).
+  - Next: Phase 6 remaining items — cross-region message round-trip p99 <200ms (EU↔KR); single-region failover RTO <5min RPO <30s; KeyPackage cross-region replication consume integrity.
+
 ## Current state (2026-05-28, cycle 34 — FEATURE: Phase 6 CF smart-router + KeyPackage consume integrity)
 - **Cycle 34 (commit 5b7d855):** Two Phase 6 items implemented:
   - **Cloudflare Edge Worker smart routing** (`infra/cloudflare/workers/smart-router/`):
