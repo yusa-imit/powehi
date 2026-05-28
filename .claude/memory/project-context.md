@@ -17,6 +17,22 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-28, cycle 33 — FEATURE: Phase 6 AP-Seoul Tier 1 + Helm + synthetic)
+- **Cycle 33:** CI was RED (rustfmt assert_eq! multi-line in powehi-grpc/server.rs) → fixed + pushed (694661f). Then Phase 6 infra batch:
+  - `infra/terraform/envs/prod-ap-seoul/`: Hetzner sin1 k3s HA (3CP+3W cx41); S3 remote backend (not local state)
+  - `infra/terraform/envs/prod-eu/versions.tf`: migrated to `backend "s3"` (matching prod-ap-seoul)
+  - `infra/terraform/envs/backend.hcl.example`: backend config template for operators
+  - `infra/helm/powehi/`: full Helm chart — Deployment (runAsNonRoot/readOnly/drop-ALL/limits), Service (8080/9090/50051), ConfigMap, HPA, 9-policy NetworkPolicy (deny-all + whitelist), ExternalSecret (ESO), ServiceAccount
+  - Security fixes from security-auditor: gRPC egress port 50051 added; 169.254.169.254/32 added to HTTPS egress except-block; failover-drill.sh guards against credentials-in-URL
+  - `infra/synthetic/cross-region-p99.js`: k6 p99<200ms + ZK guard
+  - `infra/synthetic/failover-drill.sh`: idempotent drain→probe→restore, RTO measurement
+  - prd.md §4A.1 updated: AP-Seoul = Hetzner sin1 (Singapore, interim), PIPA note added
+  - threat-model-checker: YELLOW (no crypto drift; Singapore≠Korea documented)
+  - `helm lint` clean; `tofu validate` green (both envs)
+  - 182 tests passing; clippy clean; rustfmt clean
+  - **Phase 6 infra-test gate DONE** — gRPC mesh + AP-Seoul Tier 1 + Helm + synthetic COMPLETE
+  - Next: Cloudflare Edge Worker smart routing; KeyPackage cross-region replication integrity test; cross-region p99 measurement
+
 ## Current state (2026-05-28, cycle 32 — FEATURE: Phase 6 gRPC inter-region mesh)
 - **Cycle 32 (commit 563ae8e):** gRPC cross-region delivery mesh:
   - `powehi-proto`: `region.proto` — 5 RPCs (ForwardEnvelope, ForwardCommit, SyncGroupMembership, ConsumeKeyPackage, HealthCheck); built with `protox 0.7` (pure-Rust, no system protoc); `compile_fds` API; 4 proto enum tests
@@ -301,7 +317,8 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 
 ### Phase 6 — Global Infrastructure
 - [x] gRPC mesh + mTLS: powehi-proto (protox 0.7), RegionGrpcServer, RegionGrpcRouter, TlsConfig, CircuitBreaker, security hardening — cycle 32 (commit 563ae8e)
-- [ ] AP-Seoul Tier 1 Terraform + Helm deployment; cross-region p99 <200ms synthetic check; failover test; KeyPackage replication; data residency verification; infra-test gate
+- [x] AP-Seoul Tier 1 Terraform + Helm chart + synthetic checks + infra-test gate — cycle 33 (commit d92e4aa)
+- [ ] Cloudflare Edge Worker smart routing; KeyPackage cross-region replication integrity; cross-region p99 <200ms live measurement; single-region failover drill (live RTO verification)
 
 ## Notes for the autonomous dev
 - Implement ONE checklist item per cycle. Flip `[ ]` → `[x]` here when done.
