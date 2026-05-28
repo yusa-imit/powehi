@@ -17,6 +17,22 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-28, cycle 32 — FEATURE: Phase 6 gRPC inter-region mesh)
+- **Cycle 32 (commit 563ae8e):** gRPC cross-region delivery mesh:
+  - `powehi-proto`: `region.proto` — 5 RPCs (ForwardEnvelope, ForwardCommit, SyncGroupMembership, ConsumeKeyPackage, HealthCheck); built with `protox 0.7` (pure-Rust, no system protoc); `compile_fds` API; 4 proto enum tests
+  - `powehi-grpc`: full server + client:
+    - `RegionGrpcServer`: implements `RegionService` tonic trait; `domain_err_to_status` strips internals; forward_envelope saves + publishes EnvelopeReceived; forward_commit does NOT trust peer-supplied epoch (deferred GroupRepository validation); consume_key_package returns `Unimplemented`; health_check returns HEALTHY; 5 tests
+    - `RegionGrpcRouter`: implements `RegionRouter` port; per-peer circuit breaker (`AtomicU32` + `Mutex<Option<Instant>>`); 3-retry exponential backoff; mTLS via `TlsConfig.server_tls/client_tls`; build_channel enforces https URI via `http::Uri` parsing (SSRF hardening); 5 tests
+    - `TlsConfig`: reads PEM files; ServerTlsConfig (mTLS client_ca_root) + ClientTlsConfig (identity + ca_cert)
+    - `CircuitBreaker`: threshold-based open/closed; poison-safe `unwrap_or_else(|e| e.into_inner())`; 5 tests
+  - `powehi-config`: `grpc_port` (default 50051), `grpc_peers` CSV parser, `grpc_tls_cert/key/ca`; `grpc_tls_enabled()` requires all 3 fields; 4 tests
+  - `bin/powehi-server`: fail-to-start when peers configured without mTLS; `max_decoding_message_size(64 KiB)`; `tokio::try_join!` now 3 futures (public + admin + gRPC)
+  - Security fixes applied (security-auditor pass): epoch not trusted from peer; internal errors not leaked; https-only when TLS; consume_key_package returns Unimplemented not silent CONSUMED; no plaintext in spans
+  - Test fix: `forward_commit_returns_accepted_with_zero_epoch` (was asserting peer-supplied epoch 42; now asserts 0 — server must not echo attacker-controlled value)
+  - 182 tests passing; clippy clean; rustfmt clean
+  - **Phase 6 item PARTIAL** — gRPC mesh + mTLS DONE; AP-Seoul Tier 1, cross-region p99, failover, KeyPackage replication, data residency, infra-test gate PENDING
+  - Next: AP-Seoul Tier 1 Terraform + Helm deployment
+
 ## Current state (2026-05-28, cycle 31 — STABILIZATION: CI red fix + test gap closure)
 - **Cycle 31 (commit 7402476):** CI was RED (rustfmt format check failed on powehi-redis tests added in cycle 30):
   - **Root cause**: 3 struct literals in `serde_round_trip_*` tests exceeded rustfmt's line-width limit:
@@ -284,7 +300,8 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - [x] SLSA L3 reproducible builds; cosign + Rekor; threat-model-checker pass; load test (10k concurrent WS); PQ migration doc — cycle 29 (commit 75e6c6f)
 
 ### Phase 6 — Global Infrastructure
-- [ ] gRPC mesh + mTLS; AP-Seoul Tier 1; cross-region p99 <200ms; failover; KeyPackage replication; data residency; infra-test gate
+- [x] gRPC mesh + mTLS: powehi-proto (protox 0.7), RegionGrpcServer, RegionGrpcRouter, TlsConfig, CircuitBreaker, security hardening — cycle 32 (commit 563ae8e)
+- [ ] AP-Seoul Tier 1 Terraform + Helm deployment; cross-region p99 <200ms synthetic check; failover test; KeyPackage replication; data residency verification; infra-test gate
 
 ## Notes for the autonomous dev
 - Implement ONE checklist item per cycle. Flip `[ ]` → `[x]` here when done.
