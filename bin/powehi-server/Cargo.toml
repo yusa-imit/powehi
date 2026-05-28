@@ -22,6 +22,7 @@ powehi-postgres = { workspace = true }
 powehi-redis = { workspace = true }
 powehi-opaque = { workspace = true }
 powehi-r2 = { workspace = true }
+powehi-webpush = { workspace = true }
 powehi-grpc = { workspace = true }
 powehi-proto = { workspace = true }
 axum = { workspace = true }

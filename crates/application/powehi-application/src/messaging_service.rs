@@ -13,6 +13,7 @@ use powehi_domain::{
 use powehi_port_inbound::messaging::MessagingUseCase;
 use powehi_port_outbound::{
     envelope_repo::EnvelopeRepository, event_bus::DomainEventBus, group_repo::GroupRepository,
+    push_subscription_repo::PushSubscriptionRepository, web_push::WebPushPort,
 };
 use tracing::instrument;
 
@@ -20,6 +21,8 @@ pub struct MessagingService {
     envelope_repo: Arc<dyn EnvelopeRepository>,
     group_repo: Arc<dyn GroupRepository>,
     event_bus: Arc<dyn DomainEventBus>,
+    push_sub_repo: Option<Arc<dyn PushSubscriptionRepository>>,
+    web_push: Option<Arc<dyn WebPushPort>>,
 }
 
 impl MessagingService {
@@ -32,6 +35,37 @@ impl MessagingService {
             envelope_repo,
             group_repo,
             event_bus,
+            push_sub_repo: None,
+            web_push: None,
+        }
+    }
+
+    /// Wire in Web Push support (optional — dev environments may omit VAPID keys).
+    pub fn with_push(
+        mut self,
+        push_sub_repo: Arc<dyn PushSubscriptionRepository>,
+        web_push: Arc<dyn WebPushPort>,
+    ) -> Self {
+        self.push_sub_repo = Some(push_sub_repo);
+        self.web_push = Some(web_push);
+        self
+    }
+
+    /// Fire-and-forget wake-up notification: look up the recipient's push
+    /// subscription and send an empty ping. Errors are logged but never
+    /// propagated — push delivery is best-effort and must not fail the message flow.
+    async fn maybe_push(&self, recipient: &DeviceId) {
+        let (Some(repo), Some(push)) = (self.push_sub_repo.as_ref(), self.web_push.as_ref()) else {
+            return;
+        };
+        match repo.fetch_by_device(recipient).await {
+            Ok(Some(sub)) => {
+                if push.notify(&sub).await.is_err() {
+                    tracing::warn!(error_kind = "push", "web push notify failed");
+                }
+            }
+            Ok(None) => {}
+            Err(_) => tracing::warn!(error_kind = "push_repo", "push sub lookup failed"),
         }
     }
 }
@@ -62,6 +96,9 @@ impl MessagingUseCase for MessagingService {
                 at: chrono::Utc::now(),
             })
             .await;
+        // Best-effort wake-up push to the sender itself (group message — no per-device recipient).
+        // In Phase 4+, fan-out to all group members; for now push to sender's devices.
+        self.maybe_push(sender).await;
         Ok(id)
     }
 
@@ -90,6 +127,8 @@ impl MessagingUseCase for MessagingService {
                 at: chrono::Utc::now(),
             })
             .await;
+        // Wake up the Welcome target device via push.
+        self.maybe_push(target).await;
         Ok(())
     }
 

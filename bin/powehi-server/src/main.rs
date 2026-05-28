@@ -10,12 +10,13 @@ use powehi_grpc::{RegionGrpcServer, TlsConfig};
 use powehi_opaque::OpaqueServer;
 use powehi_postgres::{
     connect as pg_connect, run_migrations, PgDeviceRepository, PgEnvelopeRepository,
-    PgGroupRepository, PgKeyPackageRepository, PgUserRepository,
+    PgGroupRepository, PgKeyPackageRepository, PgPushSubscriptionRepository, PgUserRepository,
 };
 use powehi_proto::region::region_service_server::RegionServiceServer;
 use powehi_r2::R2MediaAdapter;
 use powehi_redis::{RedisCache, RedisEventBus};
 use powehi_rest_api::AppState;
+use powehi_webpush::{VapidConfig, VapidWebPushAdapter};
 use powehi_ws_hub::{event_bus::WsEventBus, WsHub};
 
 #[tokio::main]
@@ -57,17 +58,43 @@ async fn main() -> Result<()> {
     let envelope_repo = Arc::new(PgEnvelopeRepository::new(pool.clone()));
     let group_repo = Arc::new(PgGroupRepository::new(pool.clone()));
     let key_package_repo = Arc::new(PgKeyPackageRepository::new(pool.clone()));
+    let push_sub_repo = Arc::new(PgPushSubscriptionRepository::new(pool.clone()));
 
     // ── Application services ────────────────────────────────────────────────
 
     let opaque: Arc<dyn powehi_port_outbound::opaque::OpaqueServerPort> =
         Arc::new(OpaqueServer::new());
 
+    // ── Web Push VAPID adapter ──────────────────────────────────────────────
+    // If VAPID config is absent (dev / no push keys), the adapter degrades to a
+    // no-op and never fails the message flow.
+    let web_push_adapter: Arc<VapidWebPushAdapter> =
+        Arc::new(match (&cfg.vapid_private_key_pem, &cfg.vapid_contact) {
+            (Some(pem), Some(contact)) => match VapidConfig::from_pem(pem, contact.clone()) {
+                Ok(vapid) => {
+                    info!("VAPID Web Push: enabled");
+                    VapidWebPushAdapter::new(vapid)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error_kind = "vapid_config",
+                        "invalid VAPID config: {e}; push disabled"
+                    );
+                    VapidWebPushAdapter::disabled()
+                }
+            },
+            _ => {
+                info!("VAPID Web Push: disabled (no keys configured)");
+                VapidWebPushAdapter::disabled()
+            }
+        });
+
     let auth: Arc<dyn powehi_port_inbound::auth::AuthUseCase> =
         Arc::new(AuthService::new(user_repo, device_repo, opaque, cache));
 
     let messaging: Arc<dyn powehi_port_inbound::messaging::MessagingUseCase> = Arc::new(
-        MessagingService::new(envelope_repo.clone(), group_repo, event_bus.clone()),
+        MessagingService::new(envelope_repo.clone(), group_repo, event_bus.clone())
+            .with_push(push_sub_repo.clone(), web_push_adapter),
     );
 
     let key_package: Arc<dyn powehi_port_inbound::key_package::KeyPackageUseCase> =
@@ -144,6 +171,7 @@ async fn main() -> Result<()> {
         messaging,
         key_package,
         media,
+        push_sub_repo,
     };
 
     let ws_rl = powehi_rest_api::rate_limit::api_governor();

@@ -7,12 +7,14 @@ pub mod device_repo;
 pub mod envelope_repo;
 pub mod group_repo;
 pub mod key_package_repo;
+pub mod push_subscription_repo;
 pub mod user_repo;
 
 pub use device_repo::PgDeviceRepository;
 pub use envelope_repo::PgEnvelopeRepository;
 pub use group_repo::PgGroupRepository;
 pub use key_package_repo::PgKeyPackageRepository;
+pub use push_subscription_repo::PgPushSubscriptionRepository;
 pub use user_repo::PgUserRepository;
 
 use powehi_domain::error::DomainError;

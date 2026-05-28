@@ -27,6 +27,7 @@ use powehi_port_inbound::{
     auth::AuthUseCase, key_package::KeyPackageUseCase, media::MediaUseCase,
     messaging::MessagingUseCase,
 };
+use powehi_port_outbound::push_subscription_repo::PushSubscriptionRepository;
 use tower_http::trace::TraceLayer;
 
 /// Global body cap. MLS messages are bounded by RFC 9420 limits; OPAQUE blobs
@@ -39,6 +40,7 @@ pub struct AppState {
     pub messaging: Arc<dyn MessagingUseCase>,
     pub key_package: Arc<dyn KeyPackageUseCase>,
     pub media: Arc<dyn MediaUseCase>,
+    pub push_sub_repo: Arc<dyn PushSubscriptionRepository>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -126,6 +128,10 @@ fn router_inner(
             get(routes::media::get_download_url),
         )
         .route("/v1/media/:id", delete(routes::media::delete_media))
+        .route(
+            "/v1/push-subscriptions",
+            post(routes::push_subscription::register).delete(routes::push_subscription::unregister),
+        )
         .layer(api_layer);
 
     Router::new()
@@ -158,6 +164,7 @@ mod tests {
         error::DomainError,
         group::{Epoch, GroupId},
         key_package::KeyPackageId,
+        push_subscription::PushSubscription,
         user::UserId,
     };
     use powehi_port_inbound::auth::{
@@ -165,7 +172,29 @@ mod tests {
         RegistrationFinishRequest, RegistrationInitRequest, RegistrationInitResponse, SessionToken,
     };
     use powehi_port_inbound::media::MediaUseCase;
+    use powehi_port_outbound::push_subscription_repo::PushSubscriptionRepository;
     use tower::ServiceExt; // for `oneshot`
+
+    struct NullPushSubRepo;
+    #[async_trait]
+    impl PushSubscriptionRepository for NullPushSubRepo {
+        async fn upsert(&self, _sub: &PushSubscription) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn fetch_by_device(
+            &self,
+            _device_id: &DeviceId,
+        ) -> Result<Option<PushSubscription>, DomainError> {
+            Ok(None)
+        }
+        async fn delete_by_device(&self, _device_id: &DeviceId) -> Result<(), DomainError> {
+            Ok(())
+        }
+    }
+
+    fn null_push_sub_repo() -> Arc<dyn PushSubscriptionRepository> {
+        Arc::new(NullPushSubRepo)
+    }
 
     struct MockAuth;
     #[async_trait]
@@ -304,6 +333,7 @@ mod tests {
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
+            push_sub_repo: null_push_sub_repo(),
         })
     }
 
@@ -475,6 +505,7 @@ mod tests {
             messaging: Arc::new(MockMessagingSuccess),
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
+            push_sub_repo: null_push_sub_repo(),
         })
     }
 
@@ -484,6 +515,7 @@ mod tests {
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackageSuccess),
             media: Arc::new(MockMedia),
+            push_sub_repo: null_push_sub_repo(),
         })
     }
 
@@ -493,6 +525,7 @@ mod tests {
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackageNotFound),
             media: Arc::new(MockMedia),
+            push_sub_repo: null_push_sub_repo(),
         })
     }
 
@@ -528,6 +561,7 @@ mod tests {
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMediaSuccess),
+            push_sub_repo: null_push_sub_repo(),
         })
     }
 
@@ -930,6 +964,7 @@ mod tests {
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
+            push_sub_repo: null_push_sub_repo(),
         }
     }
 

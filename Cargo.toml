@@ -71,6 +71,12 @@ opaque-ke = "3"
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 sha2 = "0.10"
 zeroize = { version = "1", features = ["derive"] }
+# Web Push (RFC 8291 + RFC 8292 VAPID): ES256 signing via RustCrypto p256.
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+# Outbound HTTP for push delivery — rustls only (no openssl, WASM-policy aligned).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# Constant-time base64url for VAPID JWT encoding.
+base64ct = { version = "1", features = ["alloc"] }
 # config
 config = "0.14"
 # AWS SDK for Cloudflare R2 (S3-compatible) presigned URLs
@@ -95,6 +101,7 @@ powehi-rest-api = { path = "crates/adapters/inbound/powehi-rest-api" }
 powehi-ws-hub = { path = "crates/adapters/inbound/powehi-ws-hub" }
 powehi-proto = { path = "crates/infra/powehi-proto" }
 powehi-grpc = { path = "crates/adapters/inbound/powehi-grpc" }
+powehi-webpush = { path = "crates/adapters/outbound/powehi-webpush" }
 
 [profile.release]
 lto = "thin"

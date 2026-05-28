@@ -26,6 +26,8 @@ governor = "0.6"
 http = "1"
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+powehi-port-outbound = { workspace = true }
+base64ct = { workspace = true }
 
 [dev-dependencies]
 # `oneshot` lives behind tower's `util` feature; enable it for the router tests.

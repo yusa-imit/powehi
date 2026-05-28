@@ -49,6 +49,14 @@ pub struct AppConfig {
     /// Path to the CA certificate PEM used to verify peer region certificates.
     #[serde(default)]
     pub grpc_tls_ca: String,
+    /// VAPID private key (PKCS#8 PEM) for Web Push signing.
+    /// `POWEHI__VAPID_PRIVATE_KEY_PEM`. None = push disabled (dev).
+    #[serde(default)]
+    pub vapid_private_key_pem: Option<String>,
+    /// VAPID contact URI (`mailto:` or `https:`) per RFC 8292 section 2.1.
+    /// `POWEHI__VAPID_CONTACT`.
+    #[serde(default)]
+    pub vapid_contact: Option<String>,
 }
 
 fn default_presign_upload_ttl() -> u64 {
@@ -137,6 +145,8 @@ mod tests {
             grpc_tls_cert: String::new(),
             grpc_tls_key: String::new(),
             grpc_tls_ca: String::new(),
+            vapid_private_key_pem: None,
+            vapid_contact: None,
         }
     }
 
@@ -208,6 +218,13 @@ mod tests {
             ..default_config()
         };
         assert!(full_tls.grpc_tls_enabled());
+    }
+
+    #[test]
+    fn vapid_fields_default_to_none() {
+        let cfg = default_config();
+        assert!(cfg.vapid_private_key_pem.is_none());
+        assert!(cfg.vapid_contact.is_none());
     }
 
     #[test]
