@@ -454,4 +454,139 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     }
+
+    #[tokio::test]
+    async fn post_p256dh_wrong_length_returns_400() {
+        let body = serde_json::json!({
+            "endpoint": "https://push.example.com/abc",
+            // 64 bytes — must be exactly 65 (uncompressed P-256 prefix + 32+32)
+            "p256dh": base64ct::Base64UrlUnpadded::encode_string(&[4u8; 64]),
+            "auth": base64ct::Base64UrlUnpadded::encode_string(&[0u8; 16]),
+        });
+        let repo = FakePushSubRepo::new();
+        let router = make_router(repo);
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/push-subscriptions")
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", bearer_header())
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn post_invalid_p256dh_base64_returns_400() {
+        let body = serde_json::json!({
+            "endpoint": "https://push.example.com/abc",
+            "p256dh": "not-valid-base64url!!!",
+            "auth": base64ct::Base64UrlUnpadded::encode_string(&[0u8; 16]),
+        });
+        let repo = FakePushSubRepo::new();
+        let router = make_router(repo);
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/push-subscriptions")
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", bearer_header())
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn post_auth_wrong_length_returns_400() {
+        let body = serde_json::json!({
+            "endpoint": "https://push.example.com/abc",
+            "p256dh": base64ct::Base64UrlUnpadded::encode_string(&[4u8; 65]),
+            // 15 bytes — must be exactly 16
+            "auth": base64ct::Base64UrlUnpadded::encode_string(&[0u8; 15]),
+        });
+        let repo = FakePushSubRepo::new();
+        let router = make_router(repo);
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/push-subscriptions")
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", bearer_header())
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn post_endpoint_too_long_returns_400() {
+        let endpoint = format!("https://push.example.com/{}", "x".repeat(2050));
+        let body = serde_json::json!({
+            "endpoint": endpoint,
+            "p256dh": base64ct::Base64UrlUnpadded::encode_string(&[4u8; 65]),
+            "auth": base64ct::Base64UrlUnpadded::encode_string(&[0u8; 16]),
+        });
+        let repo = FakePushSubRepo::new();
+        let router = make_router(repo);
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/push-subscriptions")
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", bearer_header())
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn post_ipv6_ula_and_link_local_endpoints_return_400() {
+        // SSRF guard must block ULA (fc00::/7) and link-local (fe80::/10) IPv6 addresses
+        // in addition to the cases tested in post_internal_ip_endpoint_returns_400.
+        for bad_endpoint in &[
+            "https://[fc00::1]/push", // ULA fc00::/7
+            "https://[fd00::1]/push", // ULA fd00::/8 (within fc00::/7)
+            "https://[fe80::1]/push", // link-local fe80::/10
+        ] {
+            let body = serde_json::json!({
+                "endpoint": bad_endpoint,
+                "p256dh": base64ct::Base64UrlUnpadded::encode_string(&[4u8; 65]),
+                "auth": base64ct::Base64UrlUnpadded::encode_string(&[0u8; 16]),
+            });
+            let repo = FakePushSubRepo::new();
+            let router = make_router(repo);
+            let resp = router
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/push-subscriptions")
+                        .header("Content-Type", "application/json")
+                        .header("Authorization", bearer_header())
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "SSRF guard must block IPv6 address: {bad_endpoint}"
+            );
+        }
+    }
 }

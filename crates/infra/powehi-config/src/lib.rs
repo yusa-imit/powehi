@@ -8,7 +8,7 @@ pub enum ConfigError {
     Load(#[from] config::ConfigError),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct AppConfig {
     pub region_id: String,
     pub tier: Tier,
@@ -98,6 +98,39 @@ impl AppConfig {
         !self.grpc_tls_cert.is_empty()
             && !self.grpc_tls_key.is_empty()
             && !self.grpc_tls_ca.is_empty()
+    }
+}
+
+impl std::fmt::Debug for AppConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppConfig")
+            .field("region_id", &self.region_id)
+            .field("tier", &self.tier)
+            .field("database_url", &"<redacted>")
+            .field("redis_url", &"<redacted>")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("r2_endpoint", &self.r2_endpoint)
+            .field("r2_bucket", &self.r2_bucket)
+            .field("r2_access_key_id", &self.r2_access_key_id)
+            .field("r2_secret_access_key", &"<redacted>")
+            .field(
+                "r2_presign_upload_ttl_secs",
+                &self.r2_presign_upload_ttl_secs,
+            )
+            .field(
+                "r2_presign_download_ttl_secs",
+                &self.r2_presign_download_ttl_secs,
+            )
+            .field("admin_port", &self.admin_port)
+            .field("grpc_port", &self.grpc_port)
+            .field("grpc_peers", &self.grpc_peers)
+            .field("grpc_tls_cert", &self.grpc_tls_cert)
+            .field("grpc_tls_key", &self.grpc_tls_key)
+            .field("grpc_tls_ca", &self.grpc_tls_ca)
+            .field("vapid_private_key_pem", &"<redacted>")
+            .field("vapid_contact", &self.vapid_contact)
+            .finish()
     }
 }
 
@@ -225,6 +258,40 @@ mod tests {
         let cfg = default_config();
         assert!(cfg.vapid_private_key_pem.is_none());
         assert!(cfg.vapid_contact.is_none());
+    }
+
+    #[test]
+    fn debug_output_redacts_secrets() {
+        let cfg = AppConfig {
+            database_url: "postgres://user:hunter2@localhost/powehi".into(),
+            redis_url: "redis://:supersecret@localhost".into(),
+            r2_secret_access_key: "AKIASECRET123".into(),
+            vapid_private_key_pem: Some(
+                "-----BEGIN PRIVATE KEY-----\nSECRET\n-----END PRIVATE KEY-----".into(),
+            ),
+            ..default_config()
+        };
+        let debug = format!("{cfg:?}");
+        assert!(
+            !debug.contains("hunter2"),
+            "database password must not appear in Debug output"
+        );
+        assert!(
+            !debug.contains("supersecret"),
+            "redis password must not appear in Debug output"
+        );
+        assert!(
+            !debug.contains("AKIASECRET123"),
+            "R2 secret must not appear in Debug output"
+        );
+        assert!(
+            !debug.contains("BEGIN PRIVATE KEY"),
+            "VAPID private key must not appear in Debug output"
+        );
+        assert!(
+            debug.contains("<redacted>"),
+            "must show <redacted> placeholder"
+        );
     }
 
     #[test]

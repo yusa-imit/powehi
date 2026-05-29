@@ -194,15 +194,21 @@ mod tests {
         envelope::{Envelope, EnvelopeId},
         event::DomainEvent,
         group::{Group, GroupId},
+        push_subscription::PushSubscription,
         region::RegionId,
     };
     use powehi_port_outbound::{
         envelope_repo::EnvelopeRepository,
         event_bus::{DomainEventBus, EventStream},
         group_repo::GroupRepository,
+        push_subscription_repo::PushSubscriptionRepository,
+        web_push::WebPushPort,
     };
     use std::collections::HashMap;
-    use std::sync::Mutex;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
 
     struct FakeEnvelopeRepo {
         store: Mutex<HashMap<EnvelopeId, Envelope>>,
@@ -312,6 +318,74 @@ mod tests {
         MessagingService::new(env_repo, group_repo, Arc::new(FakeEventBus))
     }
 
+    // ── Push support fakes ────────────────────────────────────────────────────
+
+    struct FakePushSubRepo {
+        sub: Option<PushSubscription>,
+    }
+    impl FakePushSubRepo {
+        fn with_sub(sub: PushSubscription) -> Arc<Self> {
+            Arc::new(Self { sub: Some(sub) })
+        }
+        fn empty() -> Arc<Self> {
+            Arc::new(Self { sub: None })
+        }
+    }
+    #[async_trait::async_trait]
+    impl PushSubscriptionRepository for FakePushSubRepo {
+        async fn upsert(&self, _sub: &PushSubscription) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn fetch_by_device(
+            &self,
+            _device_id: &DeviceId,
+        ) -> Result<Option<PushSubscription>, DomainError> {
+            Ok(self.sub.clone())
+        }
+        async fn delete_by_device(&self, _device_id: &DeviceId) -> Result<(), DomainError> {
+            Ok(())
+        }
+    }
+
+    struct FakeWebPush {
+        call_count: AtomicUsize,
+        should_fail: bool,
+    }
+    impl FakeWebPush {
+        fn ok() -> Arc<Self> {
+            Arc::new(Self {
+                call_count: AtomicUsize::new(0),
+                should_fail: false,
+            })
+        }
+        fn failing() -> Arc<Self> {
+            Arc::new(Self {
+                call_count: AtomicUsize::new(0),
+                should_fail: true,
+            })
+        }
+    }
+    #[async_trait::async_trait]
+    impl WebPushPort for FakeWebPush {
+        async fn notify(&self, _sub: &PushSubscription) -> Result<(), DomainError> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            if self.should_fail {
+                Err(DomainError::Internal("push failed".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn make_sub(device: &DeviceId) -> PushSubscription {
+        PushSubscription::new(
+            device.clone(),
+            "https://push.example/abc".into(),
+            vec![4u8; 65],
+            vec![0u8; 16],
+        )
+    }
+
     #[tokio::test]
     async fn send_message_stores_application_envelope() {
         let env_repo = FakeEnvelopeRepo::new();
@@ -400,5 +474,95 @@ mod tests {
             .unwrap();
         svc.ack_envelope(&DeviceId::new(), &id).await.unwrap();
         assert!(env_repo.store.lock().unwrap().get(&id).is_none());
+    }
+
+    // ── maybe_push tests ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn maybe_push_is_noop_when_push_not_configured() {
+        // Service built without with_push() — send_message must still succeed.
+        let svc = make_service(FakeEnvelopeRepo::new(), FakeGroupRepo::empty());
+        svc.send_message(&DeviceId::new(), &GroupId::new(), Bytes::from_static(b"ct"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn maybe_push_is_noop_when_no_subscription_found() {
+        // Push is configured but no subscription stored for the sender.
+        let push = FakeWebPush::ok();
+        let push_ref = Arc::clone(&push);
+        let svc = make_service(FakeEnvelopeRepo::new(), FakeGroupRepo::empty())
+            .with_push(FakePushSubRepo::empty(), push_ref);
+        svc.send_message(&DeviceId::new(), &GroupId::new(), Bytes::from_static(b"ct"))
+            .await
+            .unwrap();
+        assert_eq!(
+            push.call_count.load(Ordering::SeqCst),
+            0,
+            "notify must not be called when no subscription exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn maybe_push_notifies_when_subscription_exists() {
+        let sender = DeviceId::new();
+        let sub = make_sub(&sender);
+        let push = FakeWebPush::ok();
+        let push_ref = Arc::clone(&push);
+        let svc = make_service(FakeEnvelopeRepo::new(), FakeGroupRepo::empty())
+            .with_push(FakePushSubRepo::with_sub(sub), push_ref);
+        svc.send_message(&sender, &GroupId::new(), Bytes::from_static(b"ct"))
+            .await
+            .unwrap();
+        assert_eq!(
+            push.call_count.load(Ordering::SeqCst),
+            1,
+            "notify must be called once when subscription exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn maybe_push_failure_does_not_propagate_to_caller() {
+        // Push notify() returns Err — send_message must still return Ok (fire-and-forget).
+        let sender = DeviceId::new();
+        let sub = make_sub(&sender);
+        let push = FakeWebPush::failing();
+        let push_ref = Arc::clone(&push);
+        let svc = make_service(FakeEnvelopeRepo::new(), FakeGroupRepo::empty())
+            .with_push(FakePushSubRepo::with_sub(sub), push_ref);
+        let result = svc
+            .send_message(&sender, &GroupId::new(), Bytes::from_static(b"ct"))
+            .await;
+        assert!(
+            result.is_ok(),
+            "push failure must not propagate to message caller"
+        );
+        assert_eq!(push.call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn send_welcome_fires_push_to_target_not_sender() {
+        // send_welcome must push to the Welcome *target*, not the sender.
+        let sender = DeviceId::new();
+        let target = DeviceId::new();
+        let sub = make_sub(&target);
+        let push = FakeWebPush::ok();
+        let push_ref = Arc::clone(&push);
+        let svc = make_service(FakeEnvelopeRepo::new(), FakeGroupRepo::empty())
+            .with_push(FakePushSubRepo::with_sub(sub), push_ref);
+        svc.send_welcome(
+            &sender,
+            &GroupId::new(),
+            Bytes::from_static(b"welcome"),
+            &target,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            push.call_count.load(Ordering::SeqCst),
+            1,
+            "notify must fire once for the welcome target"
+        );
     }
 }
