@@ -329,6 +329,7 @@ mod tests {
             key_package: null.clone(),
             media: null.clone(),
             push_sub_repo,
+            handle_rate_limiter: std::sync::Arc::new(crate::rate_limit::HandleRateLimiter::new()),
         };
 
         Router::new()

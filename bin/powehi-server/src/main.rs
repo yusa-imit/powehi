@@ -170,12 +170,14 @@ async fn main() -> Result<()> {
 
     // ── HTTP + WS server ────────────────────────────────────────────────────
 
+    let handle_rate_limiter = Arc::new(powehi_rest_api::rate_limit::HandleRateLimiter::new());
     let state = AppState {
         auth,
         messaging,
         key_package,
         media,
         push_sub_repo,
+        handle_rate_limiter: Arc::clone(&handle_rate_limiter),
     };
 
     let ws_rl = powehi_rest_api::rate_limit::api_governor();
@@ -212,6 +214,18 @@ async fn main() -> Result<()> {
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error_kind = "gc", error = %e, "gc.delete_expired_failed"),
             }
+        }
+    });
+
+    // ── Background GC: per-handle rate-limiter DashMap ──────────────────────
+    // Prune stale handle-hash buckets every hour to bound memory growth.
+    // Calls retain_recent() which drops entries older than the quota period.
+    let handle_rl_gc = Arc::clone(&handle_rate_limiter);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            handle_rl_gc.retain_recent();
         }
     });
 

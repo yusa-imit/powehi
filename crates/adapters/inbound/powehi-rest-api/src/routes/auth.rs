@@ -7,7 +7,7 @@
 
 use axum::{extract::State, Json};
 use metrics::counter;
-use powehi_domain::user::UserId;
+use powehi_domain::{error::DomainError, user::UserId};
 use powehi_port_inbound::auth::{
     LoginFinishRequest, LoginInitRequest, LoginInitResponse, RegistrationFinishRequest,
     RegistrationInitRequest, RegistrationInitResponse, SessionToken,
@@ -15,10 +15,20 @@ use powehi_port_inbound::auth::{
 
 use crate::{error::ApiError, AppState};
 
+const HANDLE_HASH_LEN: usize = 32; // SHA-256 output is always 32 bytes
+
 pub async fn register_init(
     State(state): State<AppState>,
     Json(req): Json<RegistrationInitRequest>,
 ) -> Result<Json<RegistrationInitResponse>, ApiError> {
+    if req.handle_hash.len() != HANDLE_HASH_LEN {
+        return Err(ApiError::from(DomainError::InvalidInput(
+            "handle_hash must be 32 bytes".into(),
+        )));
+    }
+    if !state.handle_rate_limiter.check(&req.handle_hash) {
+        return Err(ApiError::too_many_requests());
+    }
     tracing::info!(
         handle_hash_len = req.handle_hash.len(),
         "auth.register_init"
@@ -48,6 +58,14 @@ pub async fn login_init(
     State(state): State<AppState>,
     Json(req): Json<LoginInitRequest>,
 ) -> Result<Json<LoginInitResponse>, ApiError> {
+    if req.handle_hash.len() != HANDLE_HASH_LEN {
+        return Err(ApiError::from(DomainError::InvalidInput(
+            "handle_hash must be 32 bytes".into(),
+        )));
+    }
+    if !state.handle_rate_limiter.check(&req.handle_hash) {
+        return Err(ApiError::too_many_requests());
+    }
     tracing::info!(handle_hash_len = req.handle_hash.len(), "auth.login_init");
     let resp = state.auth.login_init(req).await?;
     Ok(Json(resp))

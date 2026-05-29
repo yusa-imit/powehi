@@ -20,6 +20,17 @@ struct ErrorBody {
 
 pub struct ApiError(StatusCode, ErrorBody);
 
+impl ApiError {
+    pub fn too_many_requests() -> Self {
+        ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            ErrorBody {
+                code: "rate_limited",
+            },
+        )
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.0, Json(self.1)).into_response()

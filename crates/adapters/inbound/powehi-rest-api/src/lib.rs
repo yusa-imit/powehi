@@ -41,6 +41,8 @@ pub struct AppState {
     pub key_package: Arc<dyn KeyPackageUseCase>,
     pub media: Arc<dyn MediaUseCase>,
     pub push_sub_repo: Arc<dyn PushSubscriptionRepository>,
+    /// Per-handle-hash rate limiter — credential-stuffing guard complementing the per-IP limit.
+    pub handle_rate_limiter: Arc<rate_limit::HandleRateLimiter>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -335,6 +337,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
+            handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
     }
 
@@ -508,6 +511,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
+            handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
     }
 
@@ -518,6 +522,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackageSuccess),
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
+            handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
     }
 
@@ -528,6 +533,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackageNotFound),
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
+            handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
     }
 
@@ -564,6 +570,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMediaSuccess),
             push_sub_repo: null_push_sub_repo(),
+            handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
     }
 
@@ -983,6 +990,170 @@ mod tests {
         }
     }
 
+    // --- Handle rate-limit tests ---
+    //
+    // MockAuthSuccess returns valid responses so the handler can complete without
+    // panicking for the "allowed" request before the rate limit bites.
+
+    struct MockAuthSuccess;
+
+    #[async_trait]
+    impl AuthUseCase for MockAuthSuccess {
+        async fn register_init(
+            &self,
+            _req: RegistrationInitRequest,
+        ) -> Result<RegistrationInitResponse, DomainError> {
+            Ok(RegistrationInitResponse {
+                user_id: UserId::new(),
+                opaque_response: vec![],
+            })
+        }
+        async fn login_init(
+            &self,
+            _req: LoginInitRequest,
+        ) -> Result<LoginInitResponse, DomainError> {
+            Ok(LoginInitResponse {
+                user_id: UserId::new(),
+                opaque_ke2: vec![],
+                login_nonce: "test-nonce".to_string(),
+            })
+        }
+        async fn register_finish(
+            &self,
+            _req: RegistrationFinishRequest,
+        ) -> Result<UserId, DomainError> {
+            unimplemented!()
+        }
+        async fn login_finish(
+            &self,
+            _req: LoginFinishRequest,
+        ) -> Result<SessionToken, DomainError> {
+            unimplemented!()
+        }
+        async fn register_device(
+            &self,
+            _user_id: &UserId,
+            _req: DeviceRegistrationRequest,
+        ) -> Result<DeviceId, DomainError> {
+            unimplemented!()
+        }
+        async fn revoke_device(
+            &self,
+            _user_id: &UserId,
+            _device_id: &DeviceId,
+        ) -> Result<(), DomainError> {
+            unimplemented!()
+        }
+    }
+
+    fn login_init_body(handle_hash: Vec<u8>) -> String {
+        serde_json::json!({
+            "handle_hash": handle_hash,
+            "opaque_ke1": vec![0u8; 8]
+        })
+        .to_string()
+    }
+
+    fn login_init_req(body: String) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/auth/login/init")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn handle_rate_limit_blocks_second_request_from_same_handle_hash() {
+        let tight_rl = Arc::new(rate_limit::HandleRateLimiter::tight());
+        let state = AppState {
+            auth: Arc::new(MockAuthSuccess),
+            messaging: Arc::new(MockMessaging),
+            key_package: Arc::new(MockKeyPackage),
+            media: Arc::new(MockMedia),
+            push_sub_repo: null_push_sub_repo(),
+            handle_rate_limiter: Arc::clone(&tight_rl),
+        };
+        let app = router_for_test(
+            state,
+            rate_limit::auth_governor(),
+            rate_limit::api_governor(),
+        );
+
+        let hash = vec![0xAAu8; 32];
+        let r1 = app
+            .clone()
+            .oneshot(login_init_req(login_init_body(hash.clone())))
+            .await
+            .unwrap();
+        assert_ne!(
+            r1.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "first request must not be handle-rate-limited"
+        );
+
+        let r2 = app
+            .clone()
+            .oneshot(login_init_req(login_init_body(hash)))
+            .await
+            .unwrap();
+        assert_eq!(
+            r2.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "second request from same handle_hash must be rate-limited"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_rate_limit_does_not_affect_different_handle_hashes() {
+        let tight_rl = Arc::new(rate_limit::HandleRateLimiter::tight());
+        let state = AppState {
+            auth: Arc::new(MockAuthSuccess),
+            messaging: Arc::new(MockMessaging),
+            key_package: Arc::new(MockKeyPackage),
+            media: Arc::new(MockMedia),
+            push_sub_repo: null_push_sub_repo(),
+            handle_rate_limiter: Arc::clone(&tight_rl),
+        };
+        let app = router_for_test(
+            state,
+            rate_limit::auth_governor(),
+            rate_limit::api_governor(),
+        );
+
+        let hash_a = vec![0x01u8; 32];
+        let hash_b = vec![0x02u8; 32];
+
+        // Exhaust handle A's bucket.
+        let _ = app
+            .clone()
+            .oneshot(login_init_req(login_init_body(hash_a.clone())))
+            .await
+            .unwrap();
+        let r_a2 = app
+            .clone()
+            .oneshot(login_init_req(login_init_body(hash_a)))
+            .await
+            .unwrap();
+        assert_eq!(
+            r_a2.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "handle A exhausted"
+        );
+
+        // Handle B still has its own full bucket.
+        let r_b = app
+            .clone()
+            .oneshot(login_init_req(login_init_body(hash_b)))
+            .await
+            .unwrap();
+        assert_ne!(
+            r_b.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "handle B must not be affected by handle A's exhaustion"
+        );
+    }
+
     // --- Rate-limit tests ---
     //
     // SmartIpKeyExtractor checks X-Forwarded-For first. Tests inject a fake IP
@@ -995,6 +1166,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
+            handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         }
     }
 
