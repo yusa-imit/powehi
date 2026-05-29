@@ -17,6 +17,16 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-29, cycle 42 — FEATURE: Per-handle-hash rate limiting — credential-stuffing protection)
+- **Cycle 42 (commit 1cf76db):** Per-handle rate limiting (deferred from cycle 19 TODO(hardening)):
+  - **`HandleRateLimiter`** (`powehi-rest-api/src/rate_limit.rs`): `governor::DefaultKeyedRateLimiter<u128>` keyed on first 16 bytes of `handle_hash` (SHA-256 of plaintext handle, client-computed); burst=5, 1 refill per 3 minutes; `retain_recent()` for GC; `Default` impl
+  - **`ApiError::too_many_requests()`** (`error.rs`): static `{"code":"rate_limited"}` 429, no handle/timing leak
+  - **`AppState`** (`lib.rs`): gains `handle_rate_limiter: Arc<HandleRateLimiter>` field; all AppState constructions updated
+  - **`register_init` + `login_init`** (`routes/auth.rs`): (1) validate `handle_hash.len() == 32` → 400; (2) check handle bucket → 429; both before logging or calling use case
+  - **`main.rs`**: hourly `retain_recent()` GC task to bound DashMap memory growth
+  - **Tests**: +3 unit (HandleRateLimiter tight/isolation/short-hash), +2 integration (same-hash 429, different-hash isolation) — total: 234 Rust tests (was 229)
+  - **security-auditor**: YELLOW #1 (handle_hash length not validated) → FIXED; YELLOW #3 (unbounded DashMap growth) → FIXED (retain_recent GC); YELLOW #2 (empty hash zero-bucket) → resolved by #1; GREEN #4-7
+
 ## Current state (2026-05-29, cycle 41 — FEATURE: Disappearing Messages — Post-MVP TTL-gated expiry)
 - **Cycle 41 (commit fb85680):** Disappearing Messages (Post-MVP roadmap item):
   - **Port** (`powehi-port-inbound`): `MessagingUseCase::send_message` gains `ttl_seconds: Option<u32>` (range [30, 604800])
