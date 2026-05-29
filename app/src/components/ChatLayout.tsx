@@ -1,4 +1,12 @@
-import { type CSSProperties, type KeyboardEvent, useLayoutEffect, useRef, useState } from "react";
+import {
+	type CSSProperties,
+	type KeyboardEvent,
+	useEffect,
+	useLayoutEffect,
+	useRef,
+	useState,
+} from "react";
+import { db } from "../db/schema";
 import { Icon } from "./Icon";
 import { SafetyNumbers } from "./SafetyNumbers";
 
@@ -975,10 +983,63 @@ function InfoPanel({
 	onClose: () => void;
 	disappearingTtl: TtlOption;
 }) {
-	const [safetyVerified, setSafetyVerified] = useState(!!chat.verifiedAgo);
-	const [verifiedAt, setVerifiedAt] = useState<number | undefined>(
-		chat.verifiedAgo ? Date.now() - 2 * 86_400_000 : undefined,
-	);
+	const [safetyVerified, setSafetyVerified] = useState(false);
+	const [verifiedAt, setVerifiedAt] = useState<number | undefined>(undefined);
+	const [mitmAlert, setMitmAlert] = useState(false);
+
+	useEffect(() => {
+		let cancelled = false;
+		db.verifiedContacts
+			.get(chat.id)
+			.then((stored) => {
+				if (cancelled) return;
+				if (stored) {
+					setSafetyVerified(true);
+					setVerifiedAt(stored.verifiedAt);
+					// MITM detection: if the stored fingerprint no longer matches the
+					// current computed value, the peer's identity key has changed.
+					// TODO(wasm-wiring): replace MOCK_SAFETY_NUMBER with the value
+					// returned by cryptoWorker.mlsComputeSafetyNumber() — that call
+					// must fail closed (leave mitmAlert=true) if WASM is unavailable.
+					setMitmAlert(stored.safetyNumber !== MOCK_SAFETY_NUMBER);
+				} else {
+					setSafetyVerified(false);
+					setVerifiedAt(undefined);
+					setMitmAlert(false);
+				}
+			})
+			.catch(() => {
+				// DB read error: leave state as unverified (safer than asserting verified).
+				// Do NOT log the error body — no content/PII in logs (rule: no-plaintext-logging).
+				if (!cancelled) {
+					setSafetyVerified(false);
+					setVerifiedAt(undefined);
+					setMitmAlert(false);
+				}
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [chat.id]);
+
+	const handleVerify = async () => {
+		await db.verifiedContacts.put({
+			contactId: chat.id,
+			safetyNumber: MOCK_SAFETY_NUMBER,
+			verifiedAt: Date.now(),
+		});
+		setSafetyVerified(true);
+		setVerifiedAt(Date.now());
+		setMitmAlert(false);
+	};
+
+	const handleReset = async () => {
+		await db.verifiedContacts.delete(chat.id);
+		setSafetyVerified(false);
+		setVerifiedAt(undefined);
+		setMitmAlert(false);
+	};
+
 	const destructiveButton: CSSProperties = {
 		textAlign: "left",
 		background: "transparent",
@@ -1127,19 +1188,32 @@ function InfoPanel({
 							Safety Numbers
 						</span>
 					</div>
+					{mitmAlert && (
+						<div
+							style={{
+								display: "flex",
+								alignItems: "center",
+								gap: 8,
+								background: "rgba(255,100,100,0.08)",
+								border: "1px solid rgba(255,100,100,0.3)",
+								borderRadius: 9,
+								padding: "8px 10px",
+								marginBottom: 10,
+							}}
+						>
+							<Icon name="alert" size={14} color="#FF9999" />
+							<span style={{ fontSize: 12, color: "#FF9999" }}>
+								Safety number changed — verify again to confirm identity
+							</span>
+						</div>
+					)}
 					<SafetyNumbers
 						safetyNumber={MOCK_SAFETY_NUMBER}
 						peerName={chat.name}
 						verified={safetyVerified}
 						verifiedAt={verifiedAt}
-						onVerify={() => {
-							setSafetyVerified(true);
-							setVerifiedAt(Date.now());
-						}}
-						onReset={() => {
-							setSafetyVerified(false);
-							setVerifiedAt(undefined);
-						}}
+						onVerify={handleVerify}
+						onReset={handleReset}
 					/>
 				</div>
 			</div>
