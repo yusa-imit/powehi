@@ -17,6 +17,18 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-29, cycle 41 — FEATURE: Disappearing Messages — Post-MVP TTL-gated expiry)
+- **Cycle 41 (commit fb85680):** Disappearing Messages (Post-MVP roadmap item):
+  - **Port** (`powehi-port-inbound`): `MessagingUseCase::send_message` gains `ttl_seconds: Option<u32>` (range [30, 604800])
+  - **Application** (`MessagingService`): TTL validated; `expires_at` computed server-side (`Utc::now() + duration`) — clients cannot set arbitrary timestamps; `FakeEnvelopeRepo::find_pending` now filters expired entries in tests
+  - **DB adapter** (`PgEnvelopeRepository`): `find_pending` SQL hardened to `AND (expires_at IS NULL OR expires_at > NOW())` — expired ciphertext never returned even before GC runs
+  - **REST API** (`SendMessageRequest`): `ttl_seconds: Option<u32>` with edge validation [30, 604800]; returns 400 on out-of-range
+  - **Background GC** (`bin/powehi-server`): tokio 5-min interval task calling `delete_expired`; logs only `deleted = N` count; no content, no device IDs
+  - **Frontend** (`ChatLayout.tsx` + `Icon.tsx`): `timer` icon added; `Composer` TTL toggle button (cycles Off → 5m → 1h → 1d → 1w → Off) with orange active state; sent messages with active TTL show "Disappearing" badge; `InfoPanel` "Disappearing messages" row dynamic
+  - **Tests**: +4 backend (TTL set, TTL too short, TTL too long, REST 400), +2 frontend (timer cycle, badge render) — total: 229 Rust + 35 frontend
+  - **security-auditor**: GREEN (9 findings: all GREEN; 1 YELLOW pre-existing broadcast/fake divergence accepted)
+  - **229 Rust tests** (was 225 + 4 new); **35 frontend tests** (was 33 + 2 new); clippy clean; rustfmt clean; biome clean
+
 ## Current state (2026-05-29, cycle 40 — STABILIZATION: test gaps + AppConfig secret redaction)
 - **Cycle 40 (commit d06bd36):** Stabilization — CI green, no open issues, test gaps closed + security YELLOW fixed:
   - **MessagingService `maybe_push()` — 5 new tests** (was 0): noop when push not configured; noop with no subscription; fires when sub exists; push failure does not propagate (fire-and-forget invariant); send_welcome pushes to target not sender
