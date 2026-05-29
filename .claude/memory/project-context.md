@@ -17,6 +17,22 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-30, cycle 44 — FEATURE: Safety Numbers persistence + MITM alert wiring)
+- **Cycle 44 (commit c4a1602):** CI red fix (Biome: 6 errors from cycle 43) + Safety Numbers DB persistence:
+  - **CI fix (commit 5cd7b70):** 6 Biome errors fixed — SafetyNumbers.test.tsx import order; SafetyNumbers.tsx `<div role="group">`→`<fieldset>` (a11y); `key={i}`→`key={block}` (noArrayIndexKey); collapsed background ternary; ChatLayout.test.tsx multi-line expect collapsed; ChatLayout.tsx MOCK_SAFETY_NUMBER const split + span inline style expanded
+  - **Safety Numbers persistence (commit c4a1602):** Completes cycle-43 INFO-9 deferred wiring:
+    - `InfoPanel.useEffect`: loads `db.verifiedContacts.get(chat.id)` on mount + chat switch; `cancelled` flag prevents stale updates on rapid chat switch
+    - `.catch` on DB read: fails gracefully to unverified state; no content/PII logged (security-auditor RED #3 fixed)
+    - `handleVerify`: persists `{contactId, safetyNumber, verifiedAt}` to Dexie
+    - `handleReset`: deletes record, clears all verification state
+    - **MITM detection**: `mitmAlert = stored.safetyNumber !== MOCK_SAFETY_NUMBER` → red banner "Safety number changed — verify again to confirm identity"
+    - TODO comment: comparison must use `cryptoWorker.mlsComputeSafetyNumber()` with fail-closed when WASM unavailable (deferred to wasm-wiring)
+    - `test-setup.ts`: `import "fake-indexeddb/auto"` added globally
+    - **+3 frontend tests**: DB persists on verify; MITM alert on stale SN; DB cleared on reset — 43 total (was 40)
+    - **security-auditor**: RED #3 fixed (.catch); RED #1 TODO-d (WASM wiring); RED #2 pre-existing (Dexie unencrypted across all schema — deferred); YELLOW #4 fixed; GREEN #6/#7
+  - **239 Rust tests** (unchanged); **43 frontend tests** (was 40, +3); clippy clean; rustfmt clean; Biome clean
+  - **Safety Numbers feature COMPLETE** — both the WASM derivation (cycle 43) and DB persistence/MITM detection (cycle 44) are done; remaining deferred: Dexie encryption layer (pre-existing across schema), real WASM worker value wiring
+
 ## Current state (2026-05-29, cycle 43 — FEATURE: Safety Numbers — MLS identity verification fingerprint — prd.md §5.6)
 - **Cycle 43 (commit 68ce879):** Safety Numbers — MLS identity verification fingerprint:
   - **WASM** (`powehi-crypto-wasm/src/wasm_exports.rs`):
