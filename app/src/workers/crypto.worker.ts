@@ -23,6 +23,8 @@ export type MlsKeyPackageResult = { keyPackage: Uint8Array };
 export type MlsWelcomeResult = { welcome: Uint8Array };
 export type MlsCiphertextResult = { ciphertext: Uint8Array };
 export type MlsPlaintextResult = { plaintext: Uint8Array };
+export type MlsGroupMember = { leafIndex: number; sigKeyHex: string };
+export type MlsSafetyNumberResult = { safetyNumber: string };
 
 // ── Minimal type contract for the wasm-bindgen generated module ─────────────
 
@@ -48,6 +50,8 @@ interface WasmModule {
 	mls_join_group: (identityId: string, welcome: Uint8Array) => MlsGroupResult;
 	mls_encrypt: (identityId: string, groupId: string, plaintext: Uint8Array) => MlsCiphertextResult;
 	mls_decrypt: (identityId: string, groupId: string, ciphertext: Uint8Array) => MlsPlaintextResult;
+	mls_group_members: (identityId: string, groupId: string) => MlsGroupMember[];
+	mls_compute_safety_number: (sigKeyA: Uint8Array, sigKeyB: Uint8Array) => MlsSafetyNumberResult;
 }
 
 // ── WASM lazy-init ──────────────────────────────────────────────────────────
@@ -202,6 +206,29 @@ const api = {
 	): Promise<MlsPlaintextResult> {
 		const wasm = await getWasm();
 		return wasm.mls_decrypt(identityId, groupId, ciphertext);
+	},
+
+	/**
+	 * Get public identity info for all current members of an MLS group.
+	 * Returns an array of { leafIndex, sigKeyHex } objects.
+	 * sigKeyHex is the Ed25519 signature public key as hex — public data only.
+	 */
+	async mlsGroupMembers(identityId: string, groupId: string): Promise<MlsGroupMember[]> {
+		const wasm = await getWasm();
+		return wasm.mls_group_members(identityId, groupId) as unknown as MlsGroupMember[];
+	},
+
+	/**
+	 * Compute a Safety Number from two Ed25519 signature public keys.
+	 * Returns { safetyNumber } — 12 five-digit groups separated by spaces.
+	 * Symmetric: (a, b) == (b, a).
+	 */
+	async mlsComputeSafetyNumber(
+		sigKeyA: Uint8Array,
+		sigKeyB: Uint8Array,
+	): Promise<MlsSafetyNumberResult> {
+		const wasm = await getWasm();
+		return wasm.mls_compute_safety_number(sigKeyA, sigKeyB);
 	},
 };
 

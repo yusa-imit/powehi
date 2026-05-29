@@ -1,5 +1,6 @@
 import { type CSSProperties, type KeyboardEvent, useLayoutEffect, useRef, useState } from "react";
 import { Icon } from "./Icon";
+import { SafetyNumbers } from "./SafetyNumbers";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -958,6 +959,12 @@ function InfoRow({ label, trailing }: { label: string; trailing: string }) {
 	);
 }
 
+// Mock safety number — in the real flow this is computed from the MLS group
+// member signature keys via the crypto worker (mls_compute_safety_number).
+// Mock safety number — 12 six-digit groups (prd.md §5.6).
+// In production this is computed by the crypto worker via mls_compute_safety_number.
+const MOCK_SAFETY_NUMBER = "689053 337949 184798 288064 134849 362568 560227 765408 921198 315305 693006 807986";
+
 function InfoPanel({
 	chat,
 	onClose,
@@ -967,6 +974,10 @@ function InfoPanel({
 	onClose: () => void;
 	disappearingTtl: TtlOption;
 }) {
+	const [safetyVerified, setSafetyVerified] = useState(!!chat.verifiedAgo);
+	const [verifiedAt, setVerifiedAt] = useState<number | undefined>(
+		chat.verifiedAgo ? Date.now() - 2 * 86_400_000 : undefined,
+	);
 	const destructiveButton: CSSProperties = {
 		textAlign: "left",
 		background: "transparent",
@@ -1084,7 +1095,7 @@ function InfoPanel({
 				</div>
 			</div>
 
-			{/* Encryption verification card — photon blue */}
+			{/* Safety Numbers — photon blue encryption verification card */}
 			<div style={{ padding: "0 14px 16px" }}>
 				<div
 					style={{
@@ -1098,75 +1109,29 @@ function InfoPanel({
 						style={{
 							display: "flex",
 							alignItems: "center",
-							gap: 10,
-							marginBottom: 10,
+							gap: 8,
+							marginBottom: 12,
 						}}
 					>
-						<div
-							style={{
-								width: 32,
-								height: 32,
-								borderRadius: 10,
-								background: "rgba(168,200,255,0.14)",
-								display: "flex",
-								alignItems: "center",
-								justifyContent: "center",
-								color: "#A8C8FF",
-							}}
-						>
-							<Icon name="lock" size={16} color="#A8C8FF" />
-						</div>
-						<div style={{ flex: 1 }}>
-							<div style={{ fontSize: 13, fontWeight: 500, color: "var(--fg-1)" }}>
-								End-to-end encrypted
-							</div>
-							<div
-								style={{
-									fontSize: 11,
-									color: "#C8DCFF",
-									letterSpacing: "0.04em",
-								}}
-							>
-								VERIFIED · {chat.verifiedAgo ?? "2 days ago"}
-							</div>
-						</div>
+						<Icon name="lock" size={14} color="#A8C8FF" />
+						<span style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "#A8C8FF" }}>
+							Safety Numbers
+						</span>
 					</div>
-					<div
-						style={{
-							fontFamily: "var(--font-mono)",
-							fontSize: 11,
-							color: "var(--fg-2)",
-							background: "var(--bg-input)",
-							border: "1px solid var(--border-faint)",
-							borderRadius: 8,
-							padding: "8px 10px",
-							letterSpacing: "0.02em",
-							textAlign: "center",
-							lineHeight: 1.6,
+					<SafetyNumbers
+						safetyNumber={MOCK_SAFETY_NUMBER}
+						peerName={chat.name}
+						verified={safetyVerified}
+						verifiedAt={verifiedAt}
+						onVerify={() => {
+							setSafetyVerified(true);
+							setVerifiedAt(Date.now());
 						}}
-					>
-						A3:5F:91:CC:7E:08
-						<br />
-						72:1B:E4:88:3D:F0
-					</div>
-					<button
-						type="button"
-						style={{
-							width: "100%",
-							marginTop: 10,
-							background: "transparent",
-							border: "1px solid rgba(168,200,255,0.3)",
-							color: "#C8DCFF",
-							borderRadius: 9,
-							padding: "7px",
-							fontFamily: "var(--font-sans)",
-							fontSize: 12,
-							fontWeight: 500,
-							cursor: "pointer",
+						onReset={() => {
+							setSafetyVerified(false);
+							setVerifiedAt(undefined);
 						}}
-					>
-						Compare in person
-					</button>
+					/>
 				</div>
 			</div>
 

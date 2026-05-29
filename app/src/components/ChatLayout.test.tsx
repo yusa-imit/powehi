@@ -54,10 +54,14 @@ describe("ChatLayout", () => {
 		expect(screen.getAllByText(msg).length).toBeGreaterThan(0);
 	});
 
-	it("the info panel opens and shows fingerprint verify button", () => {
+	it("the info panel opens and shows safety numbers verify button", () => {
 		render(<ChatLayout />);
 		fireEvent.click(screen.getByRole("button", { name: /info/i }));
-		expect(screen.getByRole("button", { name: /compare in person/i })).toBeInTheDocument();
+		// Maya is pre-verified so aria-label is "Re-verify safety numbers".
+		// Jordan (unverified) would show "Verify safety numbers".
+		expect(
+			screen.getByRole("button", { name: /verify safety numbers/i }),
+		).toBeInTheDocument();
 	});
 
 	it("selecting Jordan switches the active conversation header", () => {

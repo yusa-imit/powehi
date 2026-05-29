@@ -382,6 +382,106 @@ pub fn mls_decrypt(
     js_obj(&[("plaintext", bytes_js(&plaintext))])
 }
 
+// ── Safety Numbers ─────────────────────────────────────────────────────────────
+
+/// Domain-separation prefix for the safety number derivation (prd.md §5.6).
+/// Pinning the construction version here makes any future format change detectable.
+const SAFETY_NUMBER_DOMAIN: &[u8] = b"powehi-safety-number-v1";
+
+/// Inner computation for safety numbers — testable without js_sys.
+///
+/// Inputs are two Ed25519 signature public keys, each exactly 32 bytes.
+/// Returns a 83-char string: 12 six-digit decimal groups separated by spaces
+/// (prd.md §5.6 "숫자 6자리 그룹"). Symmetric: same result for (a,b) and (b,a).
+///
+/// Construction: SHA-512(DOMAIN || 0x00 || len(first) || first || len(second) || second)
+/// where first/second are sorted lexicographically. Domain separation + length prefixes
+/// prevent cross-protocol collisions and extension attacks.
+fn compute_safety_number_inner(key_a: &[u8], key_b: &[u8]) -> Result<String, &'static str> {
+    use sha2::{Digest, Sha512};
+    if key_a.len() != 32 || key_b.len() != 32 {
+        return Err("safety number keys must be exactly 32 bytes");
+    }
+    // Sort lexicographically so (a,b) and (b,a) hash identically.
+    // Both operands are public keys — no timing side-channel concern.
+    let (first, second) = if key_a <= key_b {
+        (key_a, key_b)
+    } else {
+        (key_b, key_a)
+    };
+    let mut h = Sha512::new();
+    h.update(SAFETY_NUMBER_DOMAIN);
+    h.update([0u8]); // separator between domain and data
+    h.update((first.len() as u32).to_be_bytes()); // length-prefix (always 32; explicit for framing)
+    h.update(first);
+    h.update((second.len() as u32).to_be_bytes());
+    h.update(second);
+    let hash = h.finalize(); // 64 bytes
+                             // 12 groups × 4 bytes = 48 bytes; SHA-512 provides 64 bytes, 16 bytes unused.
+                             // Each u32 mod 1_000_000 → 6-digit group (prd.md §5.6).
+                             // Bias: 2^32 mod 1_000_000 = 967_296; values 0-967_295 appear once more in a
+                             // uniform 32-bit space — negligible (< 0.03%) for a human-verified fingerprint.
+    let groups: Vec<String> = (0..12)
+        .map(|i| {
+            let val = u32::from_be_bytes([
+                hash[4 * i],
+                hash[4 * i + 1],
+                hash[4 * i + 2],
+                hash[4 * i + 3],
+            ]);
+            format!("{:06}", val % 1_000_000)
+        })
+        .collect();
+    Ok(groups.join(" "))
+}
+
+/// Get public identity info for all current members of an MLS group.
+///
+/// Returns a JS Array of `{ leafIndex: number, sigKeyHex: string }` objects.
+/// `sigKeyHex` is the member's Ed25519 signature public key as a lowercase hex string.
+/// All data here is public — signature public keys are distributed openly in MLS.
+#[wasm_bindgen]
+pub fn mls_group_members(identity_id: &str, group_id: &str) -> Result<JsValue, JsError> {
+    MLS_CTX.with(|ctx| -> Result<JsValue, JsError> {
+        let ctx = ctx.borrow();
+        let c = ctx
+            .get(identity_id)
+            .ok_or_else(|| js_err("unknown mls identity"))?;
+        let group = c
+            .groups
+            .get(group_id)
+            .ok_or_else(|| js_err("unknown mls group"))?;
+        let arr = js_sys::Array::new();
+        for member in group.members() {
+            let leaf_index = member.index.u32();
+            let sig_key_hex: String = member
+                .signature_key
+                .as_slice()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            let obj = js_obj(&[
+                ("leafIndex", JsValue::from_f64(leaf_index as f64)),
+                ("sigKeyHex", JsValue::from_str(&sig_key_hex)),
+            ])?;
+            arr.push(&obj);
+        }
+        Ok(arr.into())
+    })
+}
+
+/// Compute a Safety Number from two Ed25519 signature public keys.
+///
+/// Returns `{ safetyNumber: string }` — 12 six-digit decimal groups separated by spaces
+/// (prd.md §5.6, 83 characters total including spaces).
+/// Symmetric: `mls_compute_safety_number(a, b) == mls_compute_safety_number(b, a)`.
+/// Both keys MUST be exactly 32 bytes (Ed25519 public key size); wrong length → error.
+#[wasm_bindgen]
+pub fn mls_compute_safety_number(sig_key_a: &[u8], sig_key_b: &[u8]) -> Result<JsValue, JsError> {
+    let safety_number = compute_safety_number_inner(sig_key_a, sig_key_b).map_err(js_err)?;
+    js_obj(&[("safetyNumber", JsValue::from_str(&safety_number))])
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────────
 //
 // Native tests bypass js_sys (which panics on non-wasm32) and test the
@@ -490,5 +590,81 @@ mod tests {
         let a = next_id();
         let b = next_id();
         assert_ne!(a, b, "consecutive IDs must be unique");
+    }
+
+    // ── Safety Numbers ────────────────────────────────────────────────────────
+
+    /// Safety numbers are symmetric: (a, b) == (b, a).
+    #[test]
+    fn test_safety_number_symmetry() {
+        let key_a = [0xABu8; 32];
+        let key_b = [0x12u8; 32];
+        let ab = compute_safety_number_inner(&key_a, &key_b).unwrap();
+        let ba = compute_safety_number_inner(&key_b, &key_a).unwrap();
+        assert_eq!(ab, ba, "safety numbers must be symmetric");
+    }
+
+    /// Safety number output format: 12 groups of 6 decimal digits, space-separated (prd.md §5.6).
+    #[test]
+    fn test_safety_number_format() {
+        let key_a = [0x01u8; 32];
+        let key_b = [0x02u8; 32];
+        let sn = compute_safety_number_inner(&key_a, &key_b).unwrap();
+        let groups: Vec<&str> = sn.split(' ').collect();
+        assert_eq!(groups.len(), 12, "must have exactly 12 groups");
+        for g in &groups {
+            assert_eq!(g.len(), 6, "each group must be exactly 6 characters");
+            assert!(
+                g.chars().all(|c| c.is_ascii_digit()),
+                "each group must be digits only"
+            );
+        }
+        // Total length: 12 × 6 digits + 11 spaces = 83 characters.
+        assert_eq!(sn.len(), 83, "total string must be 83 characters");
+    }
+
+    /// Different key pairs produce different safety numbers.
+    #[test]
+    fn test_safety_number_different_pairs_differ() {
+        let pair1 = compute_safety_number_inner(&[0x01u8; 32], &[0x02u8; 32]).unwrap();
+        let pair2 = compute_safety_number_inner(&[0x03u8; 32], &[0x04u8; 32]).unwrap();
+        assert_ne!(
+            pair1, pair2,
+            "distinct key pairs must give distinct safety numbers"
+        );
+    }
+
+    /// Non-32-byte inputs are rejected (crypto-reviewer finding R5).
+    #[test]
+    fn test_safety_number_rejects_wrong_length() {
+        assert!(
+            compute_safety_number_inner(&[0x01u8; 31], &[0x02u8; 32]).is_err(),
+            "31-byte key_a must error"
+        );
+        assert!(
+            compute_safety_number_inner(&[0x01u8; 32], &[0x02u8; 33]).is_err(),
+            "33-byte key_b must error"
+        );
+        assert!(
+            compute_safety_number_inner(&[], &[0x02u8; 32]).is_err(),
+            "empty key must error"
+        );
+    }
+
+    /// Known-answer test — detects silent changes to the derivation construction.
+    /// The expected value was produced by the initial correct implementation and frozen here.
+    /// Any change to domain string, length encoding, or hash algo will break this test.
+    #[test]
+    fn test_safety_number_known_answer() {
+        let key_a = [0x01u8; 32];
+        let key_b = [0x02u8; 32];
+        let sn = compute_safety_number_inner(&key_a, &key_b).unwrap();
+        // KAT: SHA-512(b"powehi-safety-number-v1" || 0x00 || 00000020 || [01;32] || 00000020 || [02;32])
+        // First is [0x01;32] (less than [0x02;32]), second is [0x02;32].
+        assert_eq!(
+            sn,
+            "689053 337949 184798 288064 134849 362568 560227 765408 921198 315305 693006 807986",
+            "safety number derivation must not change silently"
+        );
     }
 }

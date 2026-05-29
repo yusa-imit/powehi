@@ -29,10 +29,21 @@ export interface LocalIdentity {
 	exportKeyB64: string; // OPAQUE export key (used to derive encryption keys)
 }
 
+// VerifiedContact — Safety Numbers verification state.
+// Stores the safety number for a peer at the time the user verified it.
+// When the MLS identity key changes (device re-registration) the stored
+// safety number will no longer match the current one — alerting the user.
+export interface VerifiedContact {
+	contactId: string; // peer device ID or handle (opaque identifier)
+	safetyNumber: string; // 12 six-digit groups: "689053 337949 ..." (prd.md §5.6)
+	verifiedAt: number; // Date.now() timestamp in ms
+}
+
 export class PowehiDb extends Dexie {
 	messages!: Table<MessageRow, string>;
 	groups!: Table<GroupRow, string>;
 	identity!: Table<LocalIdentity, 1>;
+	verifiedContacts!: Table<VerifiedContact, string>;
 
 	constructor() {
 		super("PowehiDb");
@@ -40,6 +51,12 @@ export class PowehiDb extends Dexie {
 			messages: "id, groupId, epochSeq, receivedAt",
 			groups: "id, lastActivity",
 			identity: "id",
+		});
+		this.version(2).stores({
+			messages: "id, groupId, epochSeq, receivedAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
 		});
 	}
 }
