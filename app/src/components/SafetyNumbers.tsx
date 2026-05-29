@@ -70,9 +70,7 @@ export function SafetyNumbers({
 						width: 28,
 						height: 28,
 						borderRadius: 8,
-						background: verified
-							? "rgba(168,200,255,0.18)"
-							: "rgba(168,200,255,0.06)",
+						background: verified ? "rgba(168,200,255,0.18)" : "rgba(168,200,255,0.06)",
 						display: "flex",
 						alignItems: "center",
 						justifyContent: "center",
@@ -93,19 +91,21 @@ export function SafetyNumbers({
 			</div>
 
 			{/* Safety number grid — 4 columns × 3 rows */}
-			<div
-				role="group"
+			<fieldset
 				aria-label={`Safety number with ${peerName}`}
 				style={{
 					display: "grid",
 					gridTemplateColumns: "repeat(4, 1fr)",
 					gap: 4,
 					marginBottom: 10,
+					border: "none",
+					padding: 0,
+					margin: "0 0 10px",
 				}}
 			>
-				{groups.map((block, i) => (
+				{groups.map((block) => (
 					<div
-						key={i}
+						key={block}
 						style={{
 							fontFamily: "var(--font-mono)",
 							fontSize: 12,
@@ -122,7 +122,7 @@ export function SafetyNumbers({
 						{block}
 					</div>
 				))}
-			</div>
+			</fieldset>
 
 			{/* Confirm prompt (inline) */}
 			{confirmVisible ? (

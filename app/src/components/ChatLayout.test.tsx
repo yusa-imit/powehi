@@ -59,9 +59,7 @@ describe("ChatLayout", () => {
 		fireEvent.click(screen.getByRole("button", { name: /info/i }));
 		// Maya is pre-verified so aria-label is "Re-verify safety numbers".
 		// Jordan (unverified) would show "Verify safety numbers".
-		expect(
-			screen.getByRole("button", { name: /verify safety numbers/i }),
-		).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: /verify safety numbers/i })).toBeInTheDocument();
 	});
 
 	it("selecting Jordan switches the active conversation header", () => {

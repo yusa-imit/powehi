@@ -1,5 +1,5 @@
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
 import { SafetyNumbers } from "./SafetyNumbers";
 
 // 12 six-digit groups matching the WASM KAT output (prd.md §5.6).

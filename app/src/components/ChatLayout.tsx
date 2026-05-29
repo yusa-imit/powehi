@@ -963,7 +963,8 @@ function InfoRow({ label, trailing }: { label: string; trailing: string }) {
 // member signature keys via the crypto worker (mls_compute_safety_number).
 // Mock safety number — 12 six-digit groups (prd.md §5.6).
 // In production this is computed by the crypto worker via mls_compute_safety_number.
-const MOCK_SAFETY_NUMBER = "689053 337949 184798 288064 134849 362568 560227 765408 921198 315305 693006 807986";
+const MOCK_SAFETY_NUMBER =
+	"689053 337949 184798 288064 134849 362568 560227 765408 921198 315305 693006 807986";
 
 function InfoPanel({
 	chat,
@@ -1114,7 +1115,15 @@ function InfoPanel({
 						}}
 					>
 						<Icon name="lock" size={14} color="#A8C8FF" />
-						<span style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "#A8C8FF" }}>
+						<span
+							style={{
+								fontSize: 11,
+								fontWeight: 600,
+								letterSpacing: "0.1em",
+								textTransform: "uppercase",
+								color: "#A8C8FF",
+							}}
+						>
 							Safety Numbers
 						</span>
 					</div>
