@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+const MAX_MEDIA_BYTES: u64 = 100 * 1024 * 1024;
+
 fn size_bucket(bytes: u64) -> &'static str {
     match bytes {
         0..=1_024 => "<=1KB",
@@ -40,6 +42,11 @@ impl MediaUseCase for MediaService {
         content_type: &str,
         size_bytes: u64,
     ) -> Result<(MediaId, String), DomainError> {
+        // Defense-in-depth: validate size even though the REST handler already
+        // checks. Non-REST callers (gRPC, tests) must not bypass this cap.
+        if size_bytes == 0 || size_bytes > MAX_MEDIA_BYTES {
+            return Err(DomainError::InvalidInput("size_bytes out of range".into()));
+        }
         let blob = MediaBlob {
             id: MediaId::new(),
             uploader_device: uploader_device.clone(),
@@ -150,6 +157,26 @@ mod tests {
         async fn presigned_download_url(&self, _id: &MediaId) -> Result<String, DomainError> {
             Ok(self.download_url.clone())
         }
+    }
+
+    #[tokio::test]
+    async fn request_upload_size_zero_returns_invalid_input() {
+        let svc = MediaService::new(Arc::new(MockMediaRepo::new("u", "d")));
+        let err = svc
+            .request_upload(&DeviceId::new(), "image/jpeg", 0)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn request_upload_size_too_large_returns_invalid_input() {
+        let svc = MediaService::new(Arc::new(MockMediaRepo::new("u", "d")));
+        let err = svc
+            .request_upload(&DeviceId::new(), "image/jpeg", MAX_MEDIA_BYTES + 1)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::InvalidInput(_)));
     }
 
     #[tokio::test]

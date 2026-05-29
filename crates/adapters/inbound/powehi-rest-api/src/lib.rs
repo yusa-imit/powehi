@@ -641,6 +641,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_message_ttl_at_minimum_boundary_returns_200() {
+        // ttl_seconds = 30 is the inclusive minimum — must be accepted.
+        let device = DeviceId::new();
+        let group = GroupId::new();
+        let body = serde_json::json!({
+            "group_id": group.to_string(),
+            "ciphertext": [1u8, 2, 3],
+            "ttl_seconds": 30u32
+        });
+        let resp = messaging_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("authorization", bearer(&device))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn send_message_ttl_at_maximum_boundary_returns_200() {
+        // ttl_seconds = 604800 (7 days) is the inclusive maximum — must be accepted.
+        let device = DeviceId::new();
+        let group = GroupId::new();
+        let body = serde_json::json!({
+            "group_id": group.to_string(),
+            "ciphertext": [1u8, 2, 3],
+            "ttl_seconds": 604800u32
+        });
+        let resp = messaging_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("authorization", bearer(&device))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn send_message_ttl_above_maximum_returns_400() {
+        // ttl_seconds = 604801 exceeds the 7-day ceiling — must be rejected.
+        let device = DeviceId::new();
+        let group = GroupId::new();
+        let body = serde_json::json!({
+            "group_id": group.to_string(),
+            "ciphertext": [1u8, 2, 3],
+            "ttl_seconds": 604801u32
+        });
+        let resp = messaging_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("authorization", bearer(&device))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn poll_authenticated_returns_empty_list() {
         let device = DeviceId::new();
         let resp = messaging_router()
@@ -988,6 +1063,55 @@ mod tests {
                 "{method} {uri} without token should be 401"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn media_upload_size_zero_returns_400() {
+        // size_bytes = 0 must be rejected — empty uploads have no valid use case
+        // and could be used to enumerate MediaIds cheaply.
+        let device = DeviceId::new();
+        let body = serde_json::json!({
+            "content_type": "image/jpeg",
+            "size_bytes": 0u64
+        });
+        let resp = media_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/media/upload-url")
+                    .header("authorization", bearer(&device))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn media_upload_size_too_large_returns_400() {
+        // size_bytes > 100MB must be rejected to prevent over-allocation of pre-signed
+        // URLs and denial-of-service via massive upload promises.
+        let device = DeviceId::new();
+        let too_large: u64 = 100 * 1024 * 1024 + 1; // 100MB + 1 byte
+        let body = serde_json::json!({
+            "content_type": "image/jpeg",
+            "size_bytes": too_large
+        });
+        let resp = media_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/media/upload-url")
+                    .header("authorization", bearer(&device))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     // --- Handle rate-limit tests ---
