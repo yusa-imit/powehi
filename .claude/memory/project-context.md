@@ -17,6 +17,15 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-29, cycle 40 — STABILIZATION: test gaps + AppConfig secret redaction)
+- **Cycle 40 (commit d06bd36):** Stabilization — CI green, no open issues, test gaps closed + security YELLOW fixed:
+  - **MessagingService `maybe_push()` — 5 new tests** (was 0): noop when push not configured; noop with no subscription; fires when sub exists; push failure does not propagate (fire-and-forget invariant); send_welcome pushes to target not sender
+  - **push_subscription route — 5 new tests**: wrong p256dh length (64 bytes); invalid p256dh base64url; wrong auth length (15 bytes); endpoint too long (>2048 chars); IPv6 ULA (fc00::/7, fd00::/8) + link-local (fe80::/10) SSRF guard
+  - **AppConfig Debug redaction**: replaced `#[derive(Debug)]` with manual impl that redacts `database_url`, `redis_url`, `r2_secret_access_key`, `vapid_private_key_pem`; new test asserts secrets never appear in `format!("{cfg:?}")`
+  - **security-auditor**: YELLOW-1 (AppConfig Debug leaks VAPID key + DB credentials) → fixed; remaining YELLOWs accepted or pre-existing
+  - **cargo audit**: 1 allowed warning (RUSTSEC-2024-0384 instant/openmls waiver unchanged)
+  - **225 Rust tests** (was 214, +11); clippy clean; rustfmt clean
+
 ## Current state (2026-05-29, cycle 39 — FEATURE: Web Push subscription management — RFC 8291/8292 VAPID)
 - **Cycle 39 (commit a8715db):** Web Push subscription management — post-Phase-6 bonus:
   - **Domain/Ports**: `PushSubscription` struct; `PushSubscriptionRepository` port; `WebPushPort` port
