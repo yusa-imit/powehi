@@ -17,6 +17,15 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-30, cycle 45 — STABILIZATION: boundary tests + media size defense-in-depth)
+- **Cycle 45 (commit 2a08dac):** STABILIZATION — CI green, no open issues, security YELLOW #1 fixed + test gaps:
+  - **security-auditor (cycle 45):** YELLOW #1 fixed: `MediaService::request_upload` now validates `size_bytes ∈ [1, 100MB]` (defense-in-depth — non-REST callers like gRPC cannot bypass cap); YELLOW #2 (confirm_upload IDOR: any device can confirm any media_id) deferred (low impact, confirm-only path); YELLOW #3 (retain_recent) already wired in cycle 42 main.rs; RED: none
+  - **+7 Rust tests** (246 total, was 239):
+    - `powehi-rest-api` +5: TTL min boundary (30→200), TTL max boundary (604800→200), TTL above max (604801→400), media size zero (400), media size too large >100MB (400)
+    - `powehi-application` +2: `request_upload_size_zero_returns_invalid_input`, `request_upload_size_too_large_returns_invalid_input`
+  - **cargo audit**: 1 allowed warning (RUSTSEC-2024-0384 instant/openmls waiver unchanged)
+  - **246 Rust tests** (was 239, +7); **43 frontend tests** (unchanged); clippy clean; rustfmt clean; Biome clean
+
 ## Current state (2026-05-30, cycle 44 — FEATURE: Safety Numbers persistence + MITM alert wiring)
 - **Cycle 44 (commit c4a1602):** CI red fix (Biome: 6 errors from cycle 43) + Safety Numbers DB persistence:
   - **CI fix (commit 5cd7b70):** 6 Biome errors fixed — SafetyNumbers.test.tsx import order; SafetyNumbers.tsx `<div role="group">`→`<fieldset>` (a11y); `key={i}`→`key={block}` (noArrayIndexKey); collapsed background ternary; ChatLayout.test.tsx multi-line expect collapsed; ChatLayout.tsx MOCK_SAFETY_NUMBER const split + span inline style expanded
