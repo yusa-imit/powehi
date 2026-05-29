@@ -17,6 +17,24 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-29, cycle 43 — FEATURE: Safety Numbers — MLS identity verification fingerprint — prd.md §5.6)
+- **Cycle 43 (commit 68ce879):** Safety Numbers — MLS identity verification fingerprint:
+  - **WASM** (`powehi-crypto-wasm/src/wasm_exports.rs`):
+    - `compute_safety_number_inner`: SHA-512, domain prefix `"powehi-safety-number-v1"`, length-prefixed + sorted key concat, 12×6-digit groups (prd.md §5.6), enforces 32-byte inputs
+    - `mls_group_members`: returns all group member leaf indices + signature public keys (public data per RFC 9420 §7.2)
+    - `mls_compute_safety_number`: wasm_bindgen export, symmetric, propagates length-validation error
+    - +5 WASM tests: symmetry, format (12 groups × 6 digits × len=83), differing-pairs, wrong-length rejection (31/33/0 bytes), KAT frozen at "689053 337949 184798 288064 134849 362568 560227 765408 921198 315305 693006 807986"
+    - **crypto-reviewer R1** (domain separation) → FIXED; **R2** (6-digit spec) → FIXED; **R5** (length validation) → FIXED; Y3 (truncation documented), Y4 (bias minimal)
+  - **Frontend**:
+    - `SafetyNumbers.tsx` (new): presentational component — 4×3 grid of digit blocks, inline confirm prompt, verified/unverified state, `onVerify`/`onReset` callbacks; no crypto imports (rule: react-hooks-only)
+    - `db/schema.ts` v2: `verifiedContacts` table (`contactId`, `safetyNumber`, `verifiedAt`) — Dexie additive migration preserves v1 data
+    - `crypto.worker.ts`: `mlsGroupMembers` + `mlsComputeSafetyNumber` Comlink bindings + TS return types
+    - `ChatLayout.tsx`: `InfoPanel` replaces hardcoded fingerprint card with `<SafetyNumbers>`; state: `safetyVerified` + `verifiedAt`; mock safety number = KAT value
+    - +5 frontend tests (12-block render, verified-state timestamp, confirm flow calls onVerify, cancel is idempotent, unverified badge)
+    - **security-auditor**: GREEN — no RED/YELLOW; INFO-8 (comment inconsistency) fixed
+  - **239 Rust tests** (was 234, +5); **40 frontend tests** (was 35, +5); clippy clean; rustfmt clean
+  - **Remaining wiring** (deferred, security-auditor INFO-9): persist verification to `db.verifiedContacts`; compare stored vs. recomputed safety number on each group open → MITM alert if mismatch
+
 ## Current state (2026-05-29, cycle 42 — FEATURE: Per-handle-hash rate limiting — credential-stuffing protection)
 - **Cycle 42 (commit 1cf76db):** Per-handle rate limiting (deferred from cycle 19 TODO(hardening)):
   - **`HandleRateLimiter`** (`powehi-rest-api/src/rate_limit.rs`): `governor::DefaultKeyedRateLimiter<u128>` keyed on first 16 bytes of `handle_hash` (SHA-256 of plaintext handle, client-computed); burst=5, 1 refill per 3 minutes; `retain_recent()` for GC; `Default` impl
@@ -410,6 +428,7 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 ### Phase 4 — Frontend & Integration
 - [x] Login/Chat UI; Dexie encrypted storage; crypto worker hook — cycle 23 (commit 786cf6f)
 - [x] Service Worker push; Playwright E2E; bundle budget (<200KB init, <800KB WASM) — cycle 24 (commit 600c2b3)
+- [x] Safety Numbers UI — prd.md §5.6; WASM SHA-512 derivation; Dexie v2 verifiedContacts; SafetyNumbers component; crypto-reviewer PASS; security-auditor GREEN — cycle 43 (commit 68ce879)
 - UI MUST follow the design system — invoke `/powehi-design` or read `DESIGN.md` first. Brand non-negotiables (dark-first, cream text, dual-light orange=action / photon-blue=encryption, lock always photon-blue) are hard rules. Map `colors_and_type.css` → Tailwind v4 OKLCH.
 
 ### Phase 5 — Hardening
