@@ -133,8 +133,12 @@ async fn main() -> Result<()> {
         None
     };
 
-    let grpc_server_impl =
-        RegionGrpcServer::new(cfg.region(), envelope_repo, event_bus, key_package_repo);
+    let grpc_server_impl = RegionGrpcServer::new(
+        cfg.region(),
+        envelope_repo.clone(),
+        event_bus,
+        key_package_repo,
+    );
     // Max message size = 64 KiB for MLS ciphertext (prd.md §6.4).
     // This caps memory usage per in-flight RPC and matches the envelope size limit.
     const GRPC_MAX_MSG_BYTES: usize = 64 * 1024;
@@ -191,6 +195,25 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .with_context(|| format!("bind {addr}"))?;
+
+    // ── Background GC: disappearing messages ────────────────────────────────
+    // Delete expired envelopes every 5 minutes. ZK invariant preserved: this
+    // task only runs `delete_expired` (a bare DELETE ... WHERE expires_at < NOW())
+    // and reads no message content. Logs carry only the deleted count — never
+    // device IDs, content, or TTL values.
+    let envelope_repo_gc: Arc<dyn powehi_port_outbound::envelope_repo::EnvelopeRepository> =
+        envelope_repo.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        loop {
+            interval.tick().await;
+            match envelope_repo_gc.delete_expired().await {
+                Ok(n) if n > 0 => tracing::info!(deleted = n, "gc.envelopes_expired"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error_kind = "gc", error = %e, "gc.delete_expired_failed"),
+            }
+        }
+    });
 
     tokio::try_join!(
         async { axum::serve(listener, app).await.context("public server") },

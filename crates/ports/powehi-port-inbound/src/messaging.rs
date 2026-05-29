@@ -15,6 +15,7 @@ pub trait MessagingUseCase: Send + Sync {
         sender: &DeviceId,
         group_id: &GroupId,
         ciphertext: Bytes,
+        ttl_seconds: Option<u32>,
     ) -> Result<EnvelopeId, DomainError>;
 
     async fn send_welcome(

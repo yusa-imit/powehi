@@ -33,6 +33,7 @@ const ICON_PATHS: Record<string, string> = {
 	smile:
 		'<circle cx="12" cy="12" r="9"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/>',
 	doublecheck: '<polyline points="18 7 9.5 16 7 13.5"/><polyline points="22 11 14.5 18.5"/>',
+	timer: '<circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 15"/>',
 };
 
 export type IconName = keyof typeof ICON_PATHS;

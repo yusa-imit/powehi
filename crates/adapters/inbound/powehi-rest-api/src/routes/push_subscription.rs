@@ -247,6 +247,7 @@ mod tests {
             _: &DeviceId,
             _: &GroupId,
             _: Bytes,
+            _: Option<u32>,
         ) -> Result<EnvelopeId, DomainError> {
             unimplemented!()
         }

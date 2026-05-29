@@ -67,4 +67,31 @@ describe("ChatLayout", () => {
 		const header = screen.getByRole("banner");
 		expect(header).toHaveTextContent(/jordan/i);
 	});
+
+	it("timer button cycles through disappearing TTL options", () => {
+		render(<ChatLayout />);
+		// Initially Off — button has label "Set disappearing timer"
+		const timerBtn = screen.getByRole("button", { name: /disappearing timer/i });
+		expect(timerBtn).toBeInTheDocument();
+		// First click → 5m
+		fireEvent.click(timerBtn);
+		expect(screen.getByRole("button", { name: /disappearing: 5m/i })).toBeInTheDocument();
+		// Second click → 1h
+		fireEvent.click(screen.getByRole("button", { name: /disappearing: 5m/i }));
+		expect(screen.getByRole("button", { name: /disappearing: 1h/i })).toBeInTheDocument();
+	});
+
+	it("message sent with active TTL shows disappearing badge", () => {
+		render(<ChatLayout />);
+		// Enable disappearing timer (click once → 5m)
+		fireEvent.click(screen.getByRole("button", { name: /disappearing timer/i }));
+		// Send a message
+		const textarea = screen.getByPlaceholderText(/encrypted/i);
+		fireEvent.change(textarea, { target: { value: "secret message" } });
+		fireEvent.click(screen.getByRole("button", { name: /send message/i }));
+		// The message was appended
+		expect(screen.getAllByText("secret message").length).toBeGreaterThan(0);
+		// The disappearing badge should appear ("Disappearing" text)
+		expect(screen.getByText("Disappearing")).toBeInTheDocument();
+	});
 });

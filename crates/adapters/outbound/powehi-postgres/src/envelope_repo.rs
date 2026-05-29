@@ -105,6 +105,7 @@ impl EnvelopeRepository for PgEnvelopeRepository {
                         message_type, ciphertext, epoch, created_at, expires_at
                  FROM envelopes
                  WHERE recipient_device_id = $1 AND created_at > $2
+                   AND (expires_at IS NULL OR expires_at > NOW())
                  ORDER BY created_at ASC",
             )
             .bind(device_id.as_uuid())
@@ -118,6 +119,7 @@ impl EnvelopeRepository for PgEnvelopeRepository {
                         message_type, ciphertext, epoch, created_at, expires_at
                  FROM envelopes
                  WHERE recipient_device_id = $1
+                   AND (expires_at IS NULL OR expires_at > NOW())
                  ORDER BY created_at ASC",
             )
             .bind(device_id.as_uuid())

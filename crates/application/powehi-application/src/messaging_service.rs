@@ -17,6 +17,12 @@ use powehi_port_outbound::{
 };
 use tracing::instrument;
 
+/// Minimum disappearing-message TTL: 30 seconds. Shorter TTLs risk races with
+/// in-flight delivery/poll cycles.
+const MIN_TTL_SECONDS: u32 = 30;
+/// Maximum disappearing-message TTL: 7 days.
+const MAX_TTL_SECONDS: u32 = 604_800;
+
 pub struct MessagingService {
     envelope_repo: Arc<dyn EnvelopeRepository>,
     group_repo: Arc<dyn GroupRepository>,
@@ -78,14 +84,29 @@ impl MessagingUseCase for MessagingService {
         sender: &DeviceId,
         group_id: &GroupId,
         ciphertext: Bytes,
+        ttl_seconds: Option<u32>,
     ) -> Result<EnvelopeId, DomainError> {
-        let envelope = Envelope::new(
+        // Disappearing messages: TTL is an optional metadata field. When present
+        // it must fall within [30s, 7d]. expires_at is computed server-side so
+        // clients can never set an arbitrary timestamp. The TTL value itself is
+        // never logged alongside device IDs or content (ZK invariant).
+        let expires_at = match ttl_seconds {
+            Some(ttl) => {
+                if !(MIN_TTL_SECONDS..=MAX_TTL_SECONDS).contains(&ttl) {
+                    return Err(DomainError::InvalidInput("ttl_seconds out of range".into()));
+                }
+                Some(Utc::now() + chrono::Duration::seconds(ttl as i64))
+            }
+            None => None,
+        };
+        let mut envelope = Envelope::new(
             group_id.clone(),
             sender.clone(),
             None,
             MessageType::Application,
             ciphertext.to_vec(),
         );
+        envelope.expires_at = expires_at;
         let id = envelope.id.clone();
         self.envelope_repo.save(&envelope).await?;
         let _ = self
@@ -234,10 +255,13 @@ mod tests {
             device_id: &DeviceId,
             _since: Option<chrono::DateTime<Utc>>,
         ) -> Result<Vec<Envelope>, DomainError> {
+            let now = Utc::now();
             let store = self.store.lock().unwrap();
             Ok(store
                 .values()
                 .filter(|e| e.recipient.as_ref() == Some(device_id) || e.recipient.is_none())
+                // Disappearing messages: never return envelopes that have expired.
+                .filter(|e| e.expires_at.map(|exp| exp > now).unwrap_or(true))
                 .cloned()
                 .collect())
         }
@@ -393,7 +417,7 @@ mod tests {
         let sender = DeviceId::new();
         let group_id = GroupId::new();
         let id = svc
-            .send_message(&sender, &group_id, Bytes::from_static(b"ct"))
+            .send_message(&sender, &group_id, Bytes::from_static(b"ct"), None)
             .await
             .unwrap();
         let store = env_repo.store.lock().unwrap();
@@ -401,6 +425,60 @@ mod tests {
         assert_eq!(env.message_type, MessageType::Application);
         assert_eq!(env.ciphertext, b"ct");
         assert_eq!(env.sender, sender);
+    }
+
+    #[tokio::test]
+    async fn send_message_with_ttl_sets_expires_at() {
+        let env_repo = FakeEnvelopeRepo::new();
+        let svc = make_service(env_repo.clone(), FakeGroupRepo::empty());
+        let before = Utc::now();
+        let id = svc
+            .send_message(
+                &DeviceId::new(),
+                &GroupId::new(),
+                Bytes::from_static(b"ct"),
+                Some(60),
+            )
+            .await
+            .unwrap();
+        let store = env_repo.store.lock().unwrap();
+        let env = store.get(&id).expect("envelope saved");
+        let exp = env
+            .expires_at
+            .expect("expires_at must be set when ttl provided");
+        // expires_at is computed server-side: now + 60s.
+        assert!(exp > before + chrono::Duration::seconds(59));
+        assert!(exp < before + chrono::Duration::seconds(61));
+    }
+
+    #[tokio::test]
+    async fn send_message_ttl_too_short_returns_invalid_input() {
+        let svc = make_service(FakeEnvelopeRepo::new(), FakeGroupRepo::empty());
+        let err = svc
+            .send_message(
+                &DeviceId::new(),
+                &GroupId::new(),
+                Bytes::from_static(b"ct"),
+                Some(29),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn send_message_ttl_too_long_returns_invalid_input() {
+        let svc = make_service(FakeEnvelopeRepo::new(), FakeGroupRepo::empty());
+        let err = svc
+            .send_message(
+                &DeviceId::new(),
+                &GroupId::new(),
+                Bytes::from_static(b"ct"),
+                Some(604_801),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::InvalidInput(_)));
     }
 
     #[tokio::test]
@@ -446,9 +524,14 @@ mod tests {
         let svc = make_service(env_repo.clone(), FakeGroupRepo::empty());
 
         // message to device_a
-        svc.send_message(&device_b, &GroupId::new(), Bytes::from_static(b"for-a"))
-            .await
-            .unwrap();
+        svc.send_message(
+            &device_b,
+            &GroupId::new(),
+            Bytes::from_static(b"for-a"),
+            None,
+        )
+        .await
+        .unwrap();
         // welcome addressed to device_a
         svc.send_welcome(
             &device_b,
@@ -469,7 +552,12 @@ mod tests {
         let env_repo = FakeEnvelopeRepo::new();
         let svc = make_service(env_repo.clone(), FakeGroupRepo::empty());
         let id = svc
-            .send_message(&DeviceId::new(), &GroupId::new(), Bytes::from_static(b"x"))
+            .send_message(
+                &DeviceId::new(),
+                &GroupId::new(),
+                Bytes::from_static(b"x"),
+                None,
+            )
             .await
             .unwrap();
         svc.ack_envelope(&DeviceId::new(), &id).await.unwrap();
@@ -482,9 +570,14 @@ mod tests {
     async fn maybe_push_is_noop_when_push_not_configured() {
         // Service built without with_push() — send_message must still succeed.
         let svc = make_service(FakeEnvelopeRepo::new(), FakeGroupRepo::empty());
-        svc.send_message(&DeviceId::new(), &GroupId::new(), Bytes::from_static(b"ct"))
-            .await
-            .unwrap();
+        svc.send_message(
+            &DeviceId::new(),
+            &GroupId::new(),
+            Bytes::from_static(b"ct"),
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -494,9 +587,14 @@ mod tests {
         let push_ref = Arc::clone(&push);
         let svc = make_service(FakeEnvelopeRepo::new(), FakeGroupRepo::empty())
             .with_push(FakePushSubRepo::empty(), push_ref);
-        svc.send_message(&DeviceId::new(), &GroupId::new(), Bytes::from_static(b"ct"))
-            .await
-            .unwrap();
+        svc.send_message(
+            &DeviceId::new(),
+            &GroupId::new(),
+            Bytes::from_static(b"ct"),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             push.call_count.load(Ordering::SeqCst),
             0,
@@ -512,7 +610,7 @@ mod tests {
         let push_ref = Arc::clone(&push);
         let svc = make_service(FakeEnvelopeRepo::new(), FakeGroupRepo::empty())
             .with_push(FakePushSubRepo::with_sub(sub), push_ref);
-        svc.send_message(&sender, &GroupId::new(), Bytes::from_static(b"ct"))
+        svc.send_message(&sender, &GroupId::new(), Bytes::from_static(b"ct"), None)
             .await
             .unwrap();
         assert_eq!(
@@ -532,7 +630,7 @@ mod tests {
         let svc = make_service(FakeEnvelopeRepo::new(), FakeGroupRepo::empty())
             .with_push(FakePushSubRepo::with_sub(sub), push_ref);
         let result = svc
-            .send_message(&sender, &GroupId::new(), Bytes::from_static(b"ct"))
+            .send_message(&sender, &GroupId::new(), Bytes::from_static(b"ct"), None)
             .await;
         assert!(
             result.is_ok(),

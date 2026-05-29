@@ -43,7 +43,17 @@ fn bad_input() -> ApiError {
 pub struct SendMessageRequest {
     pub group_id: GroupId,
     pub ciphertext: Vec<u8>,
+    /// Optional disappearing-message TTL in seconds. When present it must be in
+    /// [30, 604800] (30s–7d); the server computes `expires_at` from it. TTL is a
+    /// metadata field and is never logged alongside device IDs or content.
+    #[serde(default)]
+    pub ttl_seconds: Option<u32>,
 }
+
+/// Disappearing-message TTL bounds, mirrored from the application service so the
+/// edge can reject out-of-range values with 422 before touching the use case.
+const MIN_TTL_SECONDS: u32 = 30;
+const MAX_TTL_SECONDS: u32 = 604_800;
 
 #[derive(Serialize)]
 pub struct SendMessageResponse {
@@ -61,9 +71,21 @@ pub async fn send_message(
         size_bucket = size_bucket(req.ciphertext.len()),
         "messaging.send_message"
     );
+    if let Some(ttl) = req.ttl_seconds {
+        if !(MIN_TTL_SECONDS..=MAX_TTL_SECONDS).contains(&ttl) {
+            return Err(ApiError::from(DomainError::InvalidInput(
+                "ttl_seconds out of range".into(),
+            )));
+        }
+    }
     let envelope_id = state
         .messaging
-        .send_message(&sender, &req.group_id, Bytes::from(req.ciphertext))
+        .send_message(
+            &sender,
+            &req.group_id,
+            Bytes::from(req.ciphertext),
+            req.ttl_seconds,
+        )
         .await?;
     counter!("messages_sent_total", "kind" => "mls").increment(1);
     Ok(Json(SendMessageResponse { envelope_id }))

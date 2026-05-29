@@ -11,6 +11,8 @@ interface ChatMessage {
 	last?: boolean;
 	time?: string;
 	read?: boolean;
+	/** Unix ms — set when sent with a disappearing TTL. Client-side mock only. */
+	expiresAt?: number;
 }
 
 interface Chat {
@@ -25,6 +27,26 @@ interface Chat {
 	unread: number;
 	verifiedAgo?: string;
 	messages: ChatMessage[];
+	/** Disappearing message TTL in seconds. undefined = off. */
+	disappearingTtl?: number;
+}
+
+// ── Disappearing messages helpers ──────────────────────────────────────────────
+
+const TTL_OPTIONS = [undefined, 300, 3600, 86400, 604800] as const;
+type TtlOption = (typeof TTL_OPTIONS)[number];
+
+function formatTtl(s: number | undefined): string {
+	if (!s) return "Off";
+	if (s < 3600) return `${s / 60}m`;
+	if (s < 86400) return `${s / 3600}h`;
+	if (s < 604800) return `${s / 86400}d`;
+	return "1w";
+}
+
+function nextTtl(current: number | undefined): TtlOption {
+	const idx = TTL_OPTIONS.indexOf(current as TtlOption);
+	return TTL_OPTIONS[(idx + 1) % TTL_OPTIONS.length];
 }
 
 // ── Mock data ─────────────────────────────────────────────────────────────────
@@ -638,6 +660,22 @@ function MessageBubble({
 						)}
 					</span>
 				)}
+				{msg.expiresAt && (
+					<div
+						style={{
+							display: "flex",
+							alignItems: "center",
+							gap: 3,
+							marginTop: 4,
+							fontSize: 10,
+							color: "#FF9E52",
+							opacity: 0.85,
+						}}
+					>
+						<Icon name="timer" size={10} color="#FF9E52" />
+						<span>Disappearing</span>
+					</div>
+				)}
 			</div>
 		</div>
 	);
@@ -757,9 +795,13 @@ function MessageList({
 function Composer({
 	onSend,
 	partner,
+	ttl,
+	onToggleTtl,
 }: {
 	onSend: (text: string) => void;
 	partner: string;
+	ttl: TtlOption;
+	onToggleTtl: () => void;
 }) {
 	const [text, setText] = useState("");
 	const send = () => {
@@ -796,6 +838,31 @@ function Composer({
 			>
 				<IconBtn icon="attach" label="Attach" size={32} />
 				<IconBtn icon="image" label="Photo" size={32} />
+				<button
+					type="button"
+					onClick={onToggleTtl}
+					aria-label={ttl ? `Disappearing: ${formatTtl(ttl)}` : "Set disappearing timer"}
+					title={ttl ? `Disappearing: ${formatTtl(ttl)}` : "Set disappearing timer"}
+					style={{
+						display: "inline-flex",
+						alignItems: "center",
+						gap: 3,
+						padding: "4px 6px",
+						borderRadius: 8,
+						border: "1px solid",
+						borderColor: ttl ? "rgba(255,158,82,0.4)" : "transparent",
+						background: ttl ? "rgba(255,158,82,0.1)" : "transparent",
+						color: ttl ? "#FF9E52" : "var(--fg-3)",
+						cursor: "pointer",
+						fontSize: 10,
+						fontFamily: "var(--font-mono)",
+						height: 32,
+						transition: "all 160ms",
+					}}
+				>
+					<Icon name="timer" size={14} color={ttl ? "#FF9E52" : undefined} />
+					{ttl && <span>{formatTtl(ttl)}</span>}
+				</button>
 				<textarea
 					value={text}
 					onChange={(e) => setText(e.target.value)}
@@ -894,9 +961,11 @@ function InfoRow({ label, trailing }: { label: string; trailing: string }) {
 function InfoPanel({
 	chat,
 	onClose,
+	disappearingTtl,
 }: {
 	chat: Chat;
 	onClose: () => void;
+	disappearingTtl: TtlOption;
 }) {
 	const destructiveButton: CSSProperties = {
 		textAlign: "left",
@@ -1106,7 +1175,7 @@ function InfoPanel({
 				<InfoRow label="Pin to top" trailing="On" />
 			</InfoSection>
 			<InfoSection title="Disappearing messages">
-				<InfoRow label="Auto-delete after" trailing="1 week" />
+				<InfoRow label="Auto-delete after" trailing={formatTtl(disappearingTtl)} />
 			</InfoSection>
 			<InfoSection title="Media">
 				<div
@@ -1156,11 +1225,15 @@ export function ChatLayout() {
 	const [activeId, setActiveId] = useState("maya");
 	const [search, setSearch] = useState("");
 	const [infoOpen, setInfoOpen] = useState(false);
+	const [disappearingTtl, setDisappearingTtl] = useState<TtlOption>(undefined);
 	const active = chats.find((c) => c.id === activeId);
+
+	const handleToggleTtl = () => setDisappearingTtl((t) => nextTtl(t));
 
 	const sendMessage = (text: string) => {
 		const now = new Date();
 		const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+		const expiresAt = disappearingTtl ? Date.now() + disappearingTtl * 1000 : undefined;
 		setChats((cs) =>
 			cs.map((c) => {
 				if (c.id !== activeId) return c;
@@ -1178,6 +1251,7 @@ export function ChatLayout() {
 					time,
 					read: false,
 					continued: msgs.length > 0 && msgs[msgs.length - 1].from === "me",
+					expiresAt,
 				});
 				return { ...c, messages: msgs, last: text, time };
 			}),
@@ -1223,11 +1297,22 @@ export function ChatLayout() {
 						infoOpen={infoOpen}
 					/>
 					<MessageList messages={active.messages} partner={active.name} />
-					<Composer onSend={sendMessage} partner={active.name} />
+					<Composer
+						onSend={sendMessage}
+						partner={active.name}
+						ttl={disappearingTtl}
+						onToggleTtl={handleToggleTtl}
+					/>
 				</main>
 			)}
 
-			{infoOpen && active && <InfoPanel chat={active} onClose={() => setInfoOpen(false)} />}
+			{infoOpen && active && (
+				<InfoPanel
+					chat={active}
+					onClose={() => setInfoOpen(false)}
+					disappearingTtl={disappearingTtl}
+				/>
+			)}
 		</div>
 	);
 }

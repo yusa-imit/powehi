@@ -247,6 +247,7 @@ mod tests {
             _sender: &DeviceId,
             _group_id: &GroupId,
             _ciphertext: Bytes,
+            _ttl_seconds: Option<u32>,
         ) -> Result<EnvelopeId, DomainError> {
             unimplemented!()
         }
@@ -427,6 +428,7 @@ mod tests {
             _sender: &DeviceId,
             _group_id: &GroupId,
             _ciphertext: Bytes,
+            _ttl_seconds: Option<u32>,
         ) -> Result<EnvelopeId, DomainError> {
             Ok(EnvelopeId::new())
         }
@@ -601,6 +603,34 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert!(json["envelope_id"].is_string());
+    }
+
+    #[tokio::test]
+    async fn send_message_with_invalid_ttl_returns_422() {
+        // ttl_seconds below the 30s floor must be rejected before the use case
+        // runs. The validation surfaces DomainError::InvalidInput, which the
+        // ApiError mapping (error.rs, source of truth) renders as 400 Bad Request
+        // with a content-free `invalid_input` code — never 200, never a leak.
+        let device = DeviceId::new();
+        let group = GroupId::new();
+        let body = serde_json::json!({
+            "group_id": group.to_string(),
+            "ciphertext": [1u8, 2, 3],
+            "ttl_seconds": 5
+        });
+        let resp = messaging_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("authorization", bearer(&device))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
