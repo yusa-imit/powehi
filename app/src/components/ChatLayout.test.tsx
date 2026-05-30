@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db/schema";
 import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
 import { ChatLayout } from "./ChatLayout";
@@ -161,12 +161,10 @@ describe("ChatLayout", () => {
 	});
 
 	it("clears verification in DB when user resets", async () => {
-		const currentSN =
-			"689053 337949 184798 288064 134849 362568 560227 765408 921198 315305 693006 807986";
 		// Pre-populate with the current safety number (previously verified)
 		await db.verifiedContacts.put({
 			contactId: "maya", // matches SEED_CHATS[0].id
-			safetyNumber: currentSN,
+			safetyNumber: KAT_SN,
 			verifiedAt: Date.now() - 86_400_000,
 		});
 		render(<ChatLayout />);
