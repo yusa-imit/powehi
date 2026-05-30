@@ -11,6 +11,7 @@
 // the structured-clone algorithm.
 
 import * as Comlink from "comlink";
+import { decryptField, deriveDbKey, encryptField } from "../db/encryption";
 
 // ── Return-type contracts ───────────────────────────────────────────────────
 
@@ -53,6 +54,13 @@ interface WasmModule {
 	mls_group_members: (identityId: string, groupId: string) => MlsGroupMember[];
 	mls_compute_safety_number: (sigKeyA: Uint8Array, sigKeyB: Uint8Array) => MlsSafetyNumberResult;
 }
+
+// ── IndexedDB key — held inside the worker, never crosses to main thread ─────
+
+// The DB key lives here for the authenticated session lifetime. The main thread
+// calls initDbKey(exportKeyBytes) once after OPAQUE login/registration, then uses
+// encryptDbField/decryptDbField for all IndexedDB field operations.
+let dbKey: CryptoKey | null = null;
 
 // ── WASM lazy-init ──────────────────────────────────────────────────────────
 
@@ -229,6 +237,37 @@ const api = {
 	): Promise<MlsSafetyNumberResult> {
 		const wasm = await getWasm();
 		return wasm.mls_compute_safety_number(sigKeyA, sigKeyB);
+	},
+
+	// ── IndexedDB field encryption ────────────────────────────────────────────
+
+	/**
+	 * Derive the IndexedDB AES-GCM-256 key from the OPAQUE export key bytes.
+	 * Call once after a successful OPAQUE login or registration.
+	 * The derived CryptoKey stays in this worker — it never crosses to the main thread.
+	 */
+	async initDbKey(exportKeyBytes: Uint8Array): Promise<void> {
+		dbKey = await deriveDbKey(exportKeyBytes);
+	},
+
+	/**
+	 * Encrypt a sensitive IndexedDB field value with the session DB key.
+	 * Returns base64url( IV || AES-GCM-ciphertext ).
+	 * Throws if initDbKey has not been called.
+	 */
+	async encryptDbField(value: string): Promise<string> {
+		if (dbKey === null) throw new Error("db key not initialised");
+		return encryptField(dbKey, value);
+	},
+
+	/**
+	 * Decrypt an IndexedDB field value encrypted by encryptDbField.
+	 * Throws on wrong key or tampered ciphertext (AES-GCM auth tag).
+	 * NEVER log the surrounding row context — no-plaintext-logging invariant.
+	 */
+	async decryptDbField(value: string): Promise<string> {
+		if (dbKey === null) throw new Error("db key not initialised");
+		return decryptField(dbKey, value);
 	},
 };
 

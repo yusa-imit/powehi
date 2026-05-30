@@ -23,10 +23,11 @@ export interface GroupRow {
 }
 
 // LocalIdentity — singleton device identity record.
+// SECURITY: the OPAQUE export key is NOT stored here — it is session-lifetime only
+// (held in the crypto worker). Re-authentication derives a fresh export key.
 export interface LocalIdentity {
 	id: 1; // singleton
 	deviceId: string;
-	exportKeyB64: string; // OPAQUE export key (used to derive encryption keys)
 }
 
 // VerifiedContact — Safety Numbers verification state.
@@ -53,6 +54,14 @@ export class PowehiDb extends Dexie {
 			identity: "id",
 		});
 		this.version(2).stores({
+			messages: "id, groupId, epochSeq, receivedAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v3: removed LocalIdentity.exportKeyB64 — OPAQUE export key must not be
+		// persisted to IndexedDB (crypto-reviewer R1). No index change needed.
+		this.version(3).stores({
 			messages: "id, groupId, epochSeq, receivedAt",
 			groups: "id, lastActivity",
 			identity: "id",
