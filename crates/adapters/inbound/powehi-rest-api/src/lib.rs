@@ -315,7 +315,11 @@ mod tests {
         ) -> Result<(MediaId, String), DomainError> {
             unimplemented!()
         }
-        async fn confirm_upload(&self, _id: &MediaId) -> Result<(), DomainError> {
+        async fn confirm_upload(
+            &self,
+            _id: &MediaId,
+            _device: &DeviceId,
+        ) -> Result<(), DomainError> {
             unimplemented!()
         }
         async fn get_download_url(
@@ -548,7 +552,11 @@ mod tests {
         ) -> Result<(MediaId, String), DomainError> {
             Ok((MediaId::new(), "https://r2.example/presigned-put".into()))
         }
-        async fn confirm_upload(&self, _id: &MediaId) -> Result<(), DomainError> {
+        async fn confirm_upload(
+            &self,
+            _id: &MediaId,
+            _device: &DeviceId,
+        ) -> Result<(), DomainError> {
             Ok(())
         }
         async fn get_download_url(
@@ -563,12 +571,53 @@ mod tests {
         }
     }
 
+    struct MockMediaUnauthorized;
+    #[async_trait]
+    impl MediaUseCase for MockMediaUnauthorized {
+        async fn request_upload(
+            &self,
+            _device: &DeviceId,
+            _content_type: &str,
+            _size_bytes: u64,
+        ) -> Result<(MediaId, String), DomainError> {
+            unimplemented!()
+        }
+        async fn confirm_upload(
+            &self,
+            _id: &MediaId,
+            _device: &DeviceId,
+        ) -> Result<(), DomainError> {
+            Err(DomainError::Unauthorized)
+        }
+        async fn get_download_url(
+            &self,
+            _id: &MediaId,
+            _device: &DeviceId,
+        ) -> Result<String, DomainError> {
+            unimplemented!()
+        }
+        async fn delete(&self, _id: &MediaId, _device: &DeviceId) -> Result<(), DomainError> {
+            unimplemented!()
+        }
+    }
+
     fn media_router() -> Router {
         router(AppState {
             auth: Arc::new(MockAuth),
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMediaSuccess),
+            push_sub_repo: null_push_sub_repo(),
+            handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
+        })
+    }
+
+    fn media_unauthorized_router() -> Router {
+        router(AppState {
+            auth: Arc::new(MockAuth),
+            messaging: Arc::new(MockMessaging),
+            key_package: Arc::new(MockKeyPackage),
+            media: Arc::new(MockMediaUnauthorized),
             push_sub_repo: null_push_sub_repo(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
@@ -999,6 +1048,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn confirm_upload_wrong_device_returns_401() {
+        let device = DeviceId::new();
+        let media_id = uuid::Uuid::new_v4();
+        let resp = media_unauthorized_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/media/{media_id}/confirm"))
+                    .header("authorization", bearer(&device))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

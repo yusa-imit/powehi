@@ -11,7 +11,11 @@ pub trait MediaUseCase: Send + Sync {
         size_bytes: u64,
     ) -> Result<(MediaId, String), DomainError>;
 
-    async fn confirm_upload(&self, media_id: &MediaId) -> Result<(), DomainError>;
+    async fn confirm_upload(
+        &self,
+        media_id: &MediaId,
+        confirmer_device: &DeviceId,
+    ) -> Result<(), DomainError>;
 
     /// Phase 3: requestor must be the uploader device.
     /// Phase 4 TODO: expand to group-member ACL check.

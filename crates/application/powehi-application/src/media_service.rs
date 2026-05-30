@@ -66,11 +66,19 @@ impl MediaUseCase for MediaService {
     }
 
     #[instrument(skip(self), fields(media_id = %media_id))]
-    async fn confirm_upload(&self, media_id: &MediaId) -> Result<(), DomainError> {
-        self.media_repo
+    async fn confirm_upload(
+        &self,
+        media_id: &MediaId,
+        confirmer_device: &DeviceId,
+    ) -> Result<(), DomainError> {
+        let blob = self
+            .media_repo
             .find_by_id(media_id)
             .await?
             .ok_or_else(|| DomainError::NotFound("media".into()))?;
+        if &blob.uploader_device != confirmer_device {
+            return Err(DomainError::Unauthorized);
+        }
         Ok(())
     }
 
@@ -201,15 +209,32 @@ mod tests {
         let svc = MediaService::new(repo.clone());
         let device = DeviceId::new();
         let (id, _) = svc.request_upload(&device, "image/png", 512).await.unwrap();
-        svc.confirm_upload(&id).await.unwrap();
+        svc.confirm_upload(&id, &device).await.unwrap();
     }
 
     #[tokio::test]
     async fn confirm_upload_not_found_when_blob_missing() {
         let repo = Arc::new(MockMediaRepo::new("u", "d"));
         let svc = MediaService::new(repo);
-        let err = svc.confirm_upload(&MediaId::new()).await.unwrap_err();
+        let err = svc
+            .confirm_upload(&MediaId::new(), &DeviceId::new())
+            .await
+            .unwrap_err();
         assert!(matches!(err, DomainError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn confirm_upload_by_different_device_returns_unauthorized() {
+        let repo = Arc::new(MockMediaRepo::new("u", "d"));
+        let svc = MediaService::new(repo.clone());
+        let uploader = DeviceId::new();
+        let other = DeviceId::new();
+        let (id, _) = svc
+            .request_upload(&uploader, "image/png", 512)
+            .await
+            .unwrap();
+        let err = svc.confirm_upload(&id, &other).await.unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
     }
 
     #[tokio::test]

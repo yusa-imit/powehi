@@ -307,7 +307,7 @@ mod tests {
         ) -> Result<(MediaId, String), DomainError> {
             unimplemented!()
         }
-        async fn confirm_upload(&self, _: &MediaId) -> Result<(), DomainError> {
+        async fn confirm_upload(&self, _: &MediaId, _: &DeviceId) -> Result<(), DomainError> {
             unimplemented!()
         }
         async fn get_download_url(&self, _: &MediaId, _: &DeviceId) -> Result<String, DomainError> {

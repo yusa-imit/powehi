@@ -62,13 +62,13 @@ pub async fn request_upload(
 
 pub async fn confirm_upload(
     State(state): State<AppState>,
-    _device: AuthenticatedDevice,
+    AuthenticatedDevice(device_id): AuthenticatedDevice,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let media_id = MediaId::from(id);
     state
         .media
-        .confirm_upload(&media_id)
+        .confirm_upload(&media_id, &device_id)
         .await
         .map_err(ApiError::from)?;
     Ok(StatusCode::NO_CONTENT)
