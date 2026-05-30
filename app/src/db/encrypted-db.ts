@@ -22,13 +22,13 @@ const SENSITIVE: Record<string, readonly string[]> = {
 	verifiedContacts: ["safetyNumber"],
 };
 
-async function encRow<T extends Record<string, unknown>>(
+async function encRow<T extends object>(
 	encryptor: FieldEncryptor,
 	row: T,
 	table: string,
 ): Promise<T> {
 	const fields = SENSITIVE[table] ?? [];
-	const result: Record<string, unknown> = { ...row };
+	const result: Record<string, unknown> = { ...(row as Record<string, unknown>) };
 	for (const field of fields) {
 		const value = result[field];
 		if (typeof value === "string") {
@@ -38,13 +38,13 @@ async function encRow<T extends Record<string, unknown>>(
 	return result as T;
 }
 
-async function decRow<T extends Record<string, unknown>>(
+async function decRow<T extends object>(
 	encryptor: FieldEncryptor,
 	row: T,
 	table: string,
 ): Promise<T> {
 	const fields = SENSITIVE[table] ?? [];
-	const result: Record<string, unknown> = { ...row };
+	const result: Record<string, unknown> = { ...(row as Record<string, unknown>) };
 	for (const field of fields) {
 		const value = result[field];
 		if (typeof value === "string") {
@@ -54,7 +54,7 @@ async function decRow<T extends Record<string, unknown>>(
 	return result as T;
 }
 
-async function decOptional<T extends Record<string, unknown>>(
+async function decOptional<T extends object>(
 	encryptor: FieldEncryptor,
 	row: T | undefined,
 	table: string,

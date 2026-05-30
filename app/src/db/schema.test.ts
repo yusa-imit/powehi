@@ -59,12 +59,11 @@ describe("PowehiDb", () => {
 		await db.identity.add({
 			id: 1,
 			deviceId: "dev-001",
-			exportKeyB64: "ZXhwb3J0S2V5",
 		});
 		const identity = await db.identity.get(1);
 		expect(identity?.deviceId).toBe("dev-001");
-		// Export key is stored — never logged, never sent to server.
-		expect(identity?.exportKeyB64).toBe("ZXhwb3J0S2V5");
+		// exportKeyB64 was removed in schema v3 — OPAQUE export key lives in
+		// the crypto worker only and must not be persisted (crypto-reviewer R1).
 	});
 
 	it("queries messages by groupId index", async () => {

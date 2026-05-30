@@ -53,9 +53,13 @@ function base64urlToUint8(b64url: string): Uint8Array {
  * If session duration or write rate grows dramatically, add a rekey trigger here.
  */
 export async function deriveDbKey(exportKeyBytes: Uint8Array): Promise<CryptoKey> {
-	const hkdfKey = await crypto.subtle.importKey("raw", exportKeyBytes, "HKDF", false, [
-		"deriveKey",
-	]);
+	const hkdfKey = await crypto.subtle.importKey(
+		"raw",
+		exportKeyBytes as unknown as ArrayBuffer,
+		"HKDF",
+		false,
+		["deriveKey"],
+	);
 	return crypto.subtle.deriveKey(
 		{ name: "HKDF", hash: "SHA-256", salt: DB_KEY_SALT, info: DB_KEY_INFO },
 		hkdfKey,
