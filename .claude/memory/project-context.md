@@ -17,6 +17,24 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-30, cycle 49 — FEATURE: WASM safety number wiring)
+- **Cycle 49 (commit a324e53):** InfoPanel WASM safety number wiring (deferred from cycle 44):
+  - **`ChatLayout.tsx` InfoPanel**: replaced `MOCK_SAFETY_NUMBER` constant with async WASM computation
+    - `cryptoWorker = useCryptoWorker()` top-level hook call in InfoPanel
+    - `computedSafetyNumber` state (null = unavailable)
+    - `useEffect` calls `cryptoWorker.mlsGroupMembers(identityId, groupId)` then `mlsComputeSafetyNumber(key1, key2)`
+    - Fails closed: WASM unavailable → stays null → SafetyNumbers not rendered, no false MITM alarm
+    - `handleVerify` guards on `computedSafetyNumber !== null`
+    - MITM alert: `computedSafetyNumber !== null && stored.safetyNumber !== computedSafetyNumber`
+    - `hexToBytes` validates hex input (Y2 fix); `members.length !== 2` fail-closed check (Y1 fix)
+    - Added `mlsGroupId?: string` and `mlsIdentityId?: string` to Chat interface
+    - SEED_CHATS[0] (Maya) has mock UUID group/identity IDs for testing
+  - **`ChatLayout.test.tsx`**: `vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(MOCK_WORKER)` in beforeEach (vi.mock factory does NOT intercept ES module live bindings in Vitest 3.x; spyOn does)
+  - **`app/src/hooks/__mocks__/useCryptoWorker.ts`** (NEW): manual mock file
+  - **security-auditor**: PASS (Y1 + Y2 fixed; fail-closed behavior, no logging, race condition cleanup verified)
+  - **58 frontend tests** (unchanged total, 14 ChatLayout tests updated); Biome clean; 246 Rust tests unchanged
+  - **NOTE**: vi.mock with factory does NOT work for Vitest 3.x ES module live bindings; use vi.spyOn(module, 'fn').mockReturnValue() instead
+
 ## Current state (2026-05-30, cycle 47 — FEATURE: Dexie AES-GCM-256 encryption layer)
 - **Cycle 47 (commit 380ef49):** IndexedDB encrypted storage layer — long-standing security-auditor RED #2 fixed:
   - **`app/src/db/encryption.ts`** (NEW): `deriveDbKey` (HKDF-SHA-256 from OPAQUE export key → AES-GCM-256 CryptoKey, non-extractable); `encryptField` (12-byte random IV || GCM ciphertext, base64url); `decryptField` (28-byte min length check, AES-GCM auth tag enforced); `FieldEncryptor` interface; `DirectFieldEncryptor` (test-only adapter)
