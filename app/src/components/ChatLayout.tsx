@@ -7,6 +7,7 @@ import {
 	useState,
 } from "react";
 import { db } from "../db/schema";
+import { useCryptoWorker } from "../hooks/useCryptoWorker";
 import { Icon } from "./Icon";
 import { SafetyNumbers } from "./SafetyNumbers";
 
@@ -38,6 +39,10 @@ interface Chat {
 	messages: ChatMessage[];
 	/** Disappearing message TTL in seconds. undefined = off. */
 	disappearingTtl?: number;
+	/** MLS group UUID returned by mls_create_group. undefined until E2EE session established. */
+	mlsGroupId?: string;
+	/** Local MLS identity ID returned by mls_init_identity. undefined until identity created. */
+	mlsIdentityId?: string;
 }
 
 // ── Disappearing messages helpers ──────────────────────────────────────────────
@@ -70,6 +75,8 @@ const SEED_CHATS: Chat[] = [
 		time: "14:32",
 		unread: 0,
 		verifiedAgo: "2 days ago",
+		mlsGroupId: "11111111-1111-1111-1111-111111111111",
+		mlsIdentityId: "22222222-2222-2222-2222-222222222222",
 		messages: [
 			{ day: "Yesterday", from: "them", text: "Hey — are you free tomorrow morning?" },
 			{
@@ -967,13 +974,6 @@ function InfoRow({ label, trailing }: { label: string; trailing: string }) {
 	);
 }
 
-// Mock safety number — in the real flow this is computed from the MLS group
-// member signature keys via the crypto worker (mls_compute_safety_number).
-// Mock safety number — 12 six-digit groups (prd.md §5.6).
-// In production this is computed by the crypto worker via mls_compute_safety_number.
-const MOCK_SAFETY_NUMBER =
-	"689053 337949 184798 288064 134849 362568 560227 765408 921198 315305 693006 807986";
-
 function InfoPanel({
 	chat,
 	onClose,
@@ -986,7 +986,51 @@ function InfoPanel({
 	const [safetyVerified, setSafetyVerified] = useState(false);
 	const [verifiedAt, setVerifiedAt] = useState<number | undefined>(undefined);
 	const [mitmAlert, setMitmAlert] = useState(false);
+	const [computedSafetyNumber, setComputedSafetyNumber] = useState<string | null>(null);
+	// useCryptoWorker() returns a module-level singleton — stable across re-renders.
+	const cryptoWorker = useCryptoWorker();
 
+	// Compute the safety number from the MLS group members' Ed25519 signature keys.
+	// Fails closed: if WASM unavailable or group not yet established, stays null.
+	useEffect(() => {
+		const worker = cryptoWorker;
+		if (!worker || !chat.mlsGroupId || !chat.mlsIdentityId) {
+			setComputedSafetyNumber(null);
+			return;
+		}
+		let cancelled = false;
+		const hexToBytes = (hex: string): Uint8Array => {
+			if (hex.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(hex)) throw new Error("invalid hex");
+			const bytes = new Uint8Array(hex.length / 2);
+			for (let i = 0; i < bytes.length; i++) {
+				bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+			}
+			return bytes;
+		};
+		worker
+			.mlsGroupMembers(chat.mlsIdentityId, chat.mlsGroupId)
+			.then((members) => {
+				// Require exactly 2 members — fail-closed for groups with >2 members.
+				if (cancelled || members.length !== 2) return undefined;
+				return worker.mlsComputeSafetyNumber(
+					hexToBytes(members[0].sigKeyHex),
+					hexToBytes(members[1].sigKeyHex),
+				);
+			})
+			.then((result) => {
+				if (cancelled || !result) return;
+				setComputedSafetyNumber(result.safetyNumber);
+			})
+			.catch(() => {
+				// Fail closed — WASM error or group absent (no-plaintext-logging invariant).
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [cryptoWorker, chat.mlsGroupId, chat.mlsIdentityId]);
+
+	// Load stored verification state; re-runs when computedSafetyNumber arrives so
+	// MITM detection works even when WASM loads after the DB read completes.
 	useEffect(() => {
 		let cancelled = false;
 		db.verifiedContacts
@@ -996,12 +1040,11 @@ function InfoPanel({
 				if (stored) {
 					setSafetyVerified(true);
 					setVerifiedAt(stored.verifiedAt);
-					// MITM detection: if the stored fingerprint no longer matches the
-					// current computed value, the peer's identity key has changed.
-					// TODO(wasm-wiring): replace MOCK_SAFETY_NUMBER with the value
-					// returned by cryptoWorker.mlsComputeSafetyNumber() — that call
-					// must fail closed (leave mitmAlert=true) if WASM is unavailable.
-					setMitmAlert(stored.safetyNumber !== MOCK_SAFETY_NUMBER);
+					// MITM alert only when we have a computed value to compare.
+					// Fail closed: if WASM unavailable (computed=null), do not false-alarm.
+					setMitmAlert(
+						computedSafetyNumber !== null && stored.safetyNumber !== computedSafetyNumber,
+					);
 				} else {
 					setSafetyVerified(false);
 					setVerifiedAt(undefined);
@@ -1009,8 +1052,7 @@ function InfoPanel({
 				}
 			})
 			.catch(() => {
-				// DB read error: leave state as unverified (safer than asserting verified).
-				// Do NOT log the error body — no content/PII in logs (rule: no-plaintext-logging).
+				// DB read error — leave state as unverified (no-plaintext-logging).
 				if (!cancelled) {
 					setSafetyVerified(false);
 					setVerifiedAt(undefined);
@@ -1020,12 +1062,14 @@ function InfoPanel({
 		return () => {
 			cancelled = true;
 		};
-	}, [chat.id]);
+	}, [chat.id, computedSafetyNumber]);
 
 	const handleVerify = async () => {
+		// Fail closed — cannot verify without a computed safety number (WASM unavailable).
+		if (computedSafetyNumber === null) return;
 		await db.verifiedContacts.put({
 			contactId: chat.id,
-			safetyNumber: MOCK_SAFETY_NUMBER,
+			safetyNumber: computedSafetyNumber,
 			verifiedAt: Date.now(),
 		});
 		setSafetyVerified(true);
@@ -1207,14 +1251,27 @@ function InfoPanel({
 							</span>
 						</div>
 					)}
-					<SafetyNumbers
-						safetyNumber={MOCK_SAFETY_NUMBER}
-						peerName={chat.name}
-						verified={safetyVerified}
-						verifiedAt={verifiedAt}
-						onVerify={handleVerify}
-						onReset={handleReset}
-					/>
+					{computedSafetyNumber !== null ? (
+						<SafetyNumbers
+							safetyNumber={computedSafetyNumber}
+							peerName={chat.name}
+							verified={safetyVerified}
+							verifiedAt={verifiedAt}
+							onVerify={handleVerify}
+							onReset={handleReset}
+						/>
+					) : (
+						<div
+							style={{
+								padding: "12px 0 4px",
+								fontSize: 12,
+								color: "var(--fg-3)",
+								textAlign: "center",
+							}}
+						>
+							Safety number not available
+						</div>
+					)}
 				</div>
 			</div>
 

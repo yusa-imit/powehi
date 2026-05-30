@@ -1,11 +1,36 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db/schema";
+import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
 import { ChatLayout } from "./ChatLayout";
+
+// The stable mock worker singleton — same reference on every useCryptoWorker() call
+// so the useEffect dependency array doesn't see a new object on re-renders.
+const MOCK_WORKER = {
+	mlsGroupMembers: vi.fn(async () => [
+		{ leafIndex: 0, sigKeyHex: "aa".repeat(64) },
+		{ leafIndex: 1, sigKeyHex: "bb".repeat(64) },
+	]),
+	mlsComputeSafetyNumber: vi.fn(async () => ({
+		safetyNumber:
+			"689053 337949 184798 288064 134849 362568 560227 765408 921198 315305 693006 807986",
+	})),
+};
+
+// KAT safety number (same value — used in test assertions after the mock is hoisted).
+const KAT_SN =
+	"689053 337949 184798 288064 134849 362568 560227 765408 921198 315305 693006 807986";
 
 describe("ChatLayout", () => {
 	beforeEach(async () => {
 		await db.verifiedContacts.clear();
+		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
+			MOCK_WORKER as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
+		);
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
 	});
 
 	it("renders the sidebar encryption banner", () => {
@@ -59,12 +84,14 @@ describe("ChatLayout", () => {
 		expect(screen.getAllByText(msg).length).toBeGreaterThan(0);
 	});
 
-	it("the info panel opens and shows safety numbers verify button", () => {
+	it("the info panel opens and shows safety numbers verify button", async () => {
 		render(<ChatLayout />);
 		fireEvent.click(screen.getByRole("button", { name: /info/i }));
-		// Maya is pre-verified so aria-label is "Re-verify safety numbers".
-		// Jordan (unverified) would show "Verify safety numbers".
-		expect(screen.getByRole("button", { name: /verify safety numbers/i })).toBeInTheDocument();
+		// Wait for the computed safety number to arrive (WASM computation is async).
+		// Maya is unverified by default → button aria-label is "Verify safety numbers".
+		expect(
+			await screen.findByRole("button", { name: /verify safety numbers/i }),
+		).toBeInTheDocument();
 	});
 
 	it("selecting Jordan switches the active conversation header", () => {
@@ -105,11 +132,11 @@ describe("ChatLayout", () => {
 	it("persists verification to DB when user confirms safety number match", async () => {
 		render(<ChatLayout />);
 		fireEvent.click(screen.getByRole("button", { name: /info/i }));
-		// Opens confirm dialog
-		fireEvent.click(screen.getByRole("button", { name: /verify safety numbers/i }));
-		// Confirms match
-		fireEvent.click(screen.getByRole("button", { name: /confirm match/i }));
-		// Wait for the DB write to complete (async handleVerify)
+		// Wait for computed safety number to arrive (WASM is async) then verify.
+		const verifyBtn = await screen.findByRole("button", { name: /verify safety numbers/i });
+		fireEvent.click(verifyBtn);
+		const confirmBtn = await screen.findByRole("button", { name: /confirm match/i });
+		fireEvent.click(confirmBtn);
 		await waitFor(async () => {
 			const allRecords = await db.verifiedContacts.toArray();
 			expect(allRecords).toHaveLength(1);
