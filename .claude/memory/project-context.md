@@ -17,6 +17,17 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-30, cycle 47 — FEATURE: Dexie AES-GCM-256 encryption layer)
+- **Cycle 47 (commit 380ef49):** IndexedDB encrypted storage layer — long-standing security-auditor RED #2 fixed:
+  - **`app/src/db/encryption.ts`** (NEW): `deriveDbKey` (HKDF-SHA-256 from OPAQUE export key → AES-GCM-256 CryptoKey, non-extractable); `encryptField` (12-byte random IV || GCM ciphertext, base64url); `decryptField` (28-byte min length check, AES-GCM auth tag enforced); `FieldEncryptor` interface; `DirectFieldEncryptor` (test-only adapter)
+  - **`app/src/db/encrypted-db.ts`** (NEW): `EncryptedPowehiDb` — SENSITIVE fields per-table: messages (ciphertextB64, plaintextB64), groups (mlsStateB64), verifiedContacts (safetyNumber); identity has no sensitive unindexed fields; getMessagesByGroup sorts by epochSeq (MLS RFC 9420 §6.3.1)
+  - **`app/src/db/schema.ts` v3**: removed `LocalIdentity.exportKeyB64` — OPAQUE export key must not be persisted to IndexedDB (circular wrapping key dependency)
+  - **`app/src/workers/crypto.worker.ts`**: added `initDbKey(exportKeyBytes)`, `encryptDbField(value)`, `decryptDbField(enc)` — CryptoKey held in worker, never crosses to main thread (react-hooks-only.md)
+  - **crypto-reviewer**: R1 fixed (no circular key wrapping: exportKeyB64 removed), R2 documented (session write budget <<2^32 per NIST SP 800-38D), R3 fixed (key in worker), Y1 fixed (min length <IV+TAG=28 bytes), Y5 fixed (epochSeq sort); Y2/Y3/Y4 addressed via comments
+  - **security-auditor**: GREEN — non-extractable key, random IV per call, no plaintext logged, indexed fields unencrypted by design
+  - **+15 frontend tests**: 9 encryption unit tests (deriveDbKey, encryptField/decryptField round-trips, IV randomness, wrong-key rejection, tamper detection, truncation); 6 encrypted-db integration tests (round-trip, raw-blob verification, group sort, identity, verifiedContact lifecycle, cross-key rejection)
+  - **58 frontend tests** (was 43, +15); Biome clean; 246 Rust tests unchanged
+
 ## Current state (2026-05-30, cycle 45 — STABILIZATION: boundary tests + media size defense-in-depth)
 - **Cycle 45 (commit 2a08dac):** STABILIZATION — CI green, no open issues, security YELLOW #1 fixed + test gaps:
   - **security-auditor (cycle 45):** YELLOW #1 fixed: `MediaService::request_upload` now validates `size_bytes ∈ [1, 100MB]` (defense-in-depth — non-REST callers like gRPC cannot bypass cap); YELLOW #2 (confirm_upload IDOR: any device can confirm any media_id) deferred (low impact, confirm-only path); YELLOW #3 (retain_recent) already wired in cycle 42 main.rs; RED: none
@@ -454,6 +465,7 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - [x] Login/Chat UI; Dexie encrypted storage; crypto worker hook — cycle 23 (commit 786cf6f)
 - [x] Service Worker push; Playwright E2E; bundle budget (<200KB init, <800KB WASM) — cycle 24 (commit 600c2b3)
 - [x] Safety Numbers UI — prd.md §5.6; WASM SHA-512 derivation; Dexie v2 verifiedContacts; SafetyNumbers component; crypto-reviewer PASS; security-auditor GREEN — cycle 43 (commit 68ce879)
+- [x] Dexie AES-GCM-256 encryption layer — `EncryptedPowehiDb` + `encryption.ts`; key in crypto worker; schema v3 (no exportKeyB64); crypto-reviewer + security-auditor GREEN — cycle 47 (commit 380ef49)
 - UI MUST follow the design system — invoke `/powehi-design` or read `DESIGN.md` first. Brand non-negotiables (dark-first, cream text, dual-light orange=action / photon-blue=encryption, lock always photon-blue) are hard rules. Map `colors_and_type.css` → Tailwind v4 OKLCH.
 
 ### Phase 5 — Hardening
