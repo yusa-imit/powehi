@@ -17,6 +17,16 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-31, cycle 54 — FEATURE: CI fix + Data Residency Verification — Phase 6 complete)
+- **Cycle 54 (commits fc7c5e0, e0cc130):**
+  - **CI fix (fc7c5e0):** `app/vite.config.ts` SRI plugin timing bug — `generateBundle{order:"post"}` runs AFTER Vite's HTML-emitting `generateBundle` hook (which calls `transformIndexHtml`), so the hashes Map was always empty at transform time. Fix: removed separate `generateBundle` hook; moved hash computation into `transformIndexHtml` using `ctx.bundle`. Also migrated from deprecated `enforce:` to `order:` (Vite 6). CI — Frontend was failing on bundle-budget step; now fixed. **64 frontend tests** unchanged; biome clean.
+  - **Data Residency Verification (e0cc130):** Phase 6 final DoD item — prd.md §4A.6:
+    - **powehi-grpc/server.rs +3 tests:** Exhaustive struct destructuring tests for `ForwardEnvelopeRequest` (7 fields) and `ForwardCommitRequest` (4 fields) — compile error if PII field added; UUID validation on all IDs; `sync_group_membership_member_ids_are_opaque_uuids`.
+    - **`infra/synthetic/data-residency-check.sh` (NEW):** 4-layer static verification script: (1) proto schema — \b word boundaries, awk message extraction; (2) gRPC server+client code — comment-stripped scanning, awk multi-line instrument block; (3) DomainEvent definitions; (4) all messaging*.rs files. All 11 checks PASS.
+    - **security-auditor:** RED-1 (grep-A overflow), RED-2 (PII denylist word boundary), RED-3 (multi-line instrument grep) — all fixed. YELLOW-5 (all messaging files) fixed.
+  - **262 Rust tests** (+3 from 259); **64 frontend tests** (unchanged); clippy clean; rustfmt clean; Biome clean.
+  - **Phase 6 ALL DoD items now complete.**
+
 ## Current state (2026-05-31, cycle 53 — FEATURE: CSP + Trusted Types + SRI — Phase 5 hardening)
 - **Cycle 53 (commit 07e260a):** Phase 5 remaining DoD item — CSP + Trusted Types + SRI 100%:
   - **Backend (`security_headers.rs` NEW):** Tower/axum middleware adds X-Content-Type-Options (nosniff), X-Frame-Options (DENY), Referrer-Policy (no-referrer), Permissions-Policy (geolocation/camera/mic=blocked), HSTS (max-age=63072000; includeSubDomains; preload) to ALL API responses. Wired as outermost layer via `from_fn(set_security_headers)` in `router_inner`. +8 tests (5 unit + 3 integration on /health).
@@ -547,6 +557,7 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - [x] Cloudflare Edge Worker smart routing — TypeScript Worker + PIPA guard + HEALTH_KV failover + Terraform KV/route — cycle 34 (commit 5b7d855)
 - [x] KeyPackage cross-region replication integrity — ConsumeKeyPackage RPC implemented, CAS double-consume prevention, 5 integrity tests — cycle 34 (commit 5b7d855)
 - [x] Cross-region p99 <200ms live measurement + gRPC forwarding synthetic — `cross-region-p99.js` extended: gRPC HealthCheck p99 threshold; ZK guard; plaintext guard; try/finally — cycle 37 (commit 9efedcb)
+- [x] Data residency verification — prd.md §4A.6: 3 compile-time gRPC PII-exclusion tests + `data-residency-check.sh` 4-layer static audit; security-auditor PASS — cycle 54 (commit e0cc130)
 
 ## Notes for the autonomous dev
 - Implement ONE checklist item per cycle. Flip `[ ]` → `[x]` here when done.
