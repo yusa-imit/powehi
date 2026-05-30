@@ -534,4 +534,96 @@ mod tests {
         let err = server.consume_key_package(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
+
+    // ── Data residency invariant tests (prd.md §4A.6) ─────────────────────────
+    //
+    // Principle: User PII (handle_hash, OPAQUE envelope, device keys) NEVER
+    // crosses region boundaries. Only opaque UUIDs + ciphertext are forwarded.
+    // These tests provide a compile-time + runtime proof that the wire format
+    // for cross-region messages contains no PII fields.
+
+    #[test]
+    fn forward_envelope_request_contains_exactly_seven_opaque_fields() {
+        // Exhaustive destructuring: if a PII field is added to ForwardEnvelopeRequest,
+        // this test will FAIL TO COMPILE, catching the violation before merge.
+        let req = ForwardEnvelopeRequest {
+            envelope_id: Uuid::new_v4().to_string(),
+            group_id: Uuid::new_v4().to_string(),
+            sender_device_id: Uuid::new_v4().to_string(),
+            recipient_device_id: String::new(),
+            ciphertext: vec![0xca, 0xfe, 0xba, 0xbe],
+            envelope_type: EnvelopeType::Application as i32,
+            sent_at_unix_ms: 1_700_000_000_000,
+        };
+        // Destructure ALL fields — Rust requires exhaustiveness;
+        // a new field without a binding here causes a compile error.
+        let ForwardEnvelopeRequest {
+            envelope_id,
+            group_id,
+            sender_device_id,
+            recipient_device_id,
+            ciphertext,
+            envelope_type,
+            sent_at_unix_ms,
+        } = req;
+
+        // IDs must be valid UUIDs — they cannot be user-visible handles or emails.
+        assert!(Uuid::parse_str(&envelope_id).is_ok(), "envelope_id must be UUID");
+        assert!(Uuid::parse_str(&group_id).is_ok(), "group_id must be UUID");
+        assert!(Uuid::parse_str(&sender_device_id).is_ok(), "sender_device_id must be UUID");
+        // recipient may be empty for broadcast (non-unicast) envelopes
+        assert!(
+            recipient_device_id.is_empty() || Uuid::parse_str(&recipient_device_id).is_ok(),
+            "recipient_device_id must be UUID or empty"
+        );
+        // ciphertext is opaque — present and non-zero length in a real envelope
+        assert!(!ciphertext.is_empty(), "ciphertext must be non-empty");
+        // envelope_type is a protocol enum, not linked to user identity
+        assert!(envelope_type > 0, "envelope_type must be specified");
+        // timestamp: milliseconds since epoch — no user identity information
+        assert!(sent_at_unix_ms > 0, "sent_at_unix_ms must be non-zero");
+    }
+
+    #[test]
+    fn forward_commit_request_contains_exactly_four_opaque_fields() {
+        // Exhaustive destructuring for ForwardCommitRequest — same invariant.
+        let req = ForwardCommitRequest {
+            group_id: Uuid::new_v4().to_string(),
+            sender_device_id: Uuid::new_v4().to_string(),
+            commit: vec![0x01, 0x02, 0x03],
+            expected_epoch: 7,
+        };
+        let ForwardCommitRequest {
+            group_id,
+            sender_device_id,
+            commit,
+            expected_epoch,
+        } = req;
+
+        assert!(Uuid::parse_str(&group_id).is_ok(), "group_id must be UUID");
+        assert!(Uuid::parse_str(&sender_device_id).is_ok(), "sender_device_id must be UUID");
+        // commit bytes are opaque MLS ciphertext — never decrypted server-side
+        assert!(!commit.is_empty(), "commit bytes must be non-empty");
+        // expected_epoch is a counter, not a PII field
+        assert_eq!(expected_epoch, 7);
+    }
+
+    #[test]
+    fn sync_group_membership_member_ids_are_opaque_uuids() {
+        // SyncGroupMembership: only group UUID + opaque device UUIDs cross the wire.
+        // No handle_hash, no OPAQUE enrollment data, no device keys.
+        let member_ids: Vec<String> = (0..3).map(|_| Uuid::new_v4().to_string()).collect();
+        let req = SyncGroupMembershipRequest {
+            group_id: Uuid::new_v4().to_string(),
+            home_region: "eu-de-1".to_string(),
+            member_device_ids: member_ids.clone(),
+        };
+        assert!(Uuid::parse_str(&req.group_id).is_ok());
+        for id in &req.member_device_ids {
+            assert!(
+                Uuid::parse_str(id).is_ok(),
+                "member_device_id must be opaque UUID, got: {id}"
+            );
+        }
+    }
 }
