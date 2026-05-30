@@ -17,6 +17,14 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-30, cycle 51 — FEATURE: confirm_upload IDOR fix)
+- **Cycle 51 (commit 5875c3e):** Closed `confirm_upload` IDOR (security-auditor Y8, deferred since cycle 21):
+  - **Root cause:** `POST /v1/media/:id/confirm` handler extracted `AuthenticatedDevice` but discarded it (`_device`). Any authenticated device could confirm any `media_id`.
+  - **Fix:** `MediaUseCase::confirm_upload` gained `confirmer_device: &DeviceId` parameter. `MediaService::confirm_upload` now fetches the blob and checks `blob.uploader_device == confirmer_device`, returning `DomainError::Unauthorized` on mismatch (same ownership pattern as `get_download_url` and `delete`). REST handler passes `device_id` instead of ignoring it. All mock impls updated.
+  - **+2 tests:** `confirm_upload_by_different_device_returns_unauthorized` (application layer); `confirm_upload_wrong_device_returns_401` (REST integration) — 248 Rust tests total (was 246)
+  - **security-auditor:** GREEN on IDOR fix; YELLOWs: confirm_upload is a semantic no-op (no state transition, pre-existing); TOCTOU on find+check (low impact, pre-existing); MediaId enumeration oracle mitigated by rate limiter + UUIDv4 space
+  - **248 Rust tests** (was 246, +2); clippy clean
+
 ## Current state (2026-05-30, cycle 50 — STABILIZATION: CI red fix + security sweep)
 - **Cycle 50 (commits addd946, d648bfc):** STABILIZATION — CI red fixed + security RED + 5 YELLOWs addressed:
   - **CI red fix (addd946):** `ChatLayout.test.tsx` — `afterEach` missing from vitest import (TS2304) + `KAT_SN` declared but never used (TS6133); fix: add `afterEach` to import, use `KAT_SN` in the "clears verification" test body
