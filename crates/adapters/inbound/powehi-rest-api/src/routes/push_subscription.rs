@@ -324,6 +324,7 @@ mod tests {
 
         let null: Arc<NullUseCase> = Arc::new(NullUseCase);
         let state = AppState {
+            region_id: "eu-de-1-test".to_string(),
             auth: null.clone(),
             messaging: null.clone(),
             key_package: null.clone(),

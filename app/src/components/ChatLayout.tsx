@@ -10,6 +10,7 @@ import {
 import { EncryptedPowehiDb } from "../db/encrypted-db";
 import { db } from "../db/schema";
 import { useCryptoWorker } from "../hooks/useCryptoWorker";
+import { useRegionDetect } from "../hooks/useRegionDetect";
 import { Icon } from "./Icon";
 import { SafetyNumbers } from "./SafetyNumbers";
 
@@ -454,6 +455,7 @@ function Sidebar({
 	searchQuery: string;
 	onSearch: (q: string) => void;
 }) {
+	const regionId = useRegionDetect();
 	const filtered = chats.filter(
 		(c) =>
 			!searchQuery ||
@@ -559,6 +561,26 @@ function Sidebar({
 					</div>
 				)}
 			</div>
+
+			{/* Data residency indicator (prd.md §7.6) */}
+			{regionId !== null && (
+				<div
+					data-testid="region-badge"
+					style={{
+						padding: "8px 16px",
+						borderTop: "1px solid var(--border-faint)",
+						display: "flex",
+						alignItems: "center",
+						gap: 6,
+						fontSize: 11,
+						color: "var(--fg-3)",
+						letterSpacing: "0.03em",
+					}}
+				>
+					<Icon name="globe" size={11} color="var(--fg-3)" />
+					<span>{regionId}</span>
+				</div>
+			)}
 		</aside>
 	);
 }

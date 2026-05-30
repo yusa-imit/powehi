@@ -36,6 +36,9 @@ const MAX_BODY_BYTES: usize = 512 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
+    /// This server's region identifier (e.g. "eu-de-1", "ap-sin-1").
+    /// Returned by `GET /v1/region/detect` so clients can confirm their routed region.
+    pub region_id: String,
     pub auth: Arc<dyn AuthUseCase>,
     pub messaging: Arc<dyn MessagingUseCase>,
     pub key_package: Arc<dyn KeyPackageUseCase>,
@@ -136,8 +139,13 @@ fn router_inner(
         )
         .layer(api_layer);
 
-    Router::new()
+    // Public endpoints — no auth, no per-IP rate limit (like /health).
+    let public_routes = Router::new()
         .route("/health", get(health))
+        .route("/v1/region/detect", get(routes::region::detect));
+
+    Router::new()
+        .merge(public_routes)
         .merge(auth_routes)
         .merge(api_routes)
         .with_state(state)
@@ -336,6 +344,7 @@ mod tests {
 
     fn test_router() -> Router {
         router(AppState {
+            region_id: "eu-de-1-test".to_string(),
             auth: Arc::new(MockAuth),
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackage),
@@ -510,6 +519,7 @@ mod tests {
 
     fn messaging_router() -> Router {
         router(AppState {
+            region_id: "eu-de-1-test".to_string(),
             auth: Arc::new(MockAuth),
             messaging: Arc::new(MockMessagingSuccess),
             key_package: Arc::new(MockKeyPackage),
@@ -521,6 +531,7 @@ mod tests {
 
     fn key_package_router() -> Router {
         router(AppState {
+            region_id: "eu-de-1-test".to_string(),
             auth: Arc::new(MockAuth),
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackageSuccess),
@@ -532,6 +543,7 @@ mod tests {
 
     fn key_package_not_found_router() -> Router {
         router(AppState {
+            region_id: "eu-de-1-test".to_string(),
             auth: Arc::new(MockAuth),
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackageNotFound),
@@ -603,6 +615,7 @@ mod tests {
 
     fn media_router() -> Router {
         router(AppState {
+            region_id: "eu-de-1-test".to_string(),
             auth: Arc::new(MockAuth),
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackage),
@@ -614,6 +627,7 @@ mod tests {
 
     fn media_unauthorized_router() -> Router {
         router(AppState {
+            region_id: "eu-de-1-test".to_string(),
             auth: Arc::new(MockAuth),
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackage),
@@ -1258,6 +1272,7 @@ mod tests {
     async fn handle_rate_limit_blocks_second_request_from_same_handle_hash() {
         let tight_rl = Arc::new(rate_limit::HandleRateLimiter::tight());
         let state = AppState {
+            region_id: "eu-de-1-test".to_string(),
             auth: Arc::new(MockAuthSuccess),
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackage),
@@ -1299,6 +1314,7 @@ mod tests {
     async fn handle_rate_limit_does_not_affect_different_handle_hashes() {
         let tight_rl = Arc::new(rate_limit::HandleRateLimiter::tight());
         let state = AppState {
+            region_id: "eu-de-1-test".to_string(),
             auth: Arc::new(MockAuthSuccess),
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackage),
@@ -1352,6 +1368,7 @@ mod tests {
 
     fn minimal_state() -> AppState {
         AppState {
+            region_id: "eu-de-1-test".to_string(),
             auth: Arc::new(MockAuth),
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackage),
