@@ -17,6 +17,22 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-31, cycle 52 — FEATURE: Region-Aware Client — prd.md §7.6)
+- **Cycle 52 (commit b5513b1):** Region-Aware Client — missing Phase 4 DoD item:
+  - **Backend:** `GET /v1/region/detect` (no auth required, parity with /health)
+    - `AppState` gains `region_id: String` from `AppConfig.region_id`
+    - Handler returns `{"region_id": "eu-de-1"}` — no PII, no IP, no country code
+    - CF Worker already routed to correct origin; endpoint just confirms the server's region
+    - +3 Rust tests: eu-de-1 response, ap-sin-1 response, no-auth-required (assert !401)
+    - security-auditor PASS: YELLOW-1 region_id unvalidated (operator-controlled, JSON-safe); YELLOW-2 public routes unrated (parity with /health)
+  - **Frontend:** region store + detect hook + sidebar data residency badge
+    - `app/src/store/region.ts`: Zustand store; fetch() → /v1/region/detect; silently fails on errors; guards empty strings
+    - `app/src/hooks/useRegionDetect.ts`: useEffect-based hook; returns regionId | null
+    - `app/src/components/ChatLayout.tsx`: Sidebar footer shows `[globe] eu-de-1` badge when regionId non-null (prd.md §7.6 UX)
+    - `app/src/components/Icon.tsx`: added "globe" SVG icon
+    - +5 frontend tests: initial null, successful fetch, non-ok, network error, empty region_id
+  - **251 Rust tests** (was 248, +3); **64 frontend tests** (was 59, +5); clippy clean; rustfmt clean; Biome clean
+
 ## Current state (2026-05-30, cycle 51 — FEATURE: confirm_upload IDOR fix)
 - **Cycle 51 (commit 5875c3e):** Closed `confirm_upload` IDOR (security-auditor Y8, deferred since cycle 21):
   - **Root cause:** `POST /v1/media/:id/confirm` handler extracted `AuthenticatedDevice` but discarded it (`_device`). Any authenticated device could confirm any `media_id`.
@@ -508,6 +524,7 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - [x] Service Worker push; Playwright E2E; bundle budget (<200KB init, <800KB WASM) — cycle 24 (commit 600c2b3)
 - [x] Safety Numbers UI — prd.md §5.6; WASM SHA-512 derivation; Dexie v2 verifiedContacts; SafetyNumbers component; crypto-reviewer PASS; security-auditor GREEN — cycle 43 (commit 68ce879)
 - [x] Dexie AES-GCM-256 encryption layer — `EncryptedPowehiDb` + `encryption.ts`; key in crypto worker; schema v3 (no exportKeyB64); crypto-reviewer + security-auditor GREEN — cycle 47 (commit 380ef49)
+- [x] Region-Aware Client — `GET /v1/region/detect` + Zustand region store + sidebar data residency badge; prd.md §7.6; security-auditor PASS — cycle 52 (commit b5513b1)
 - UI MUST follow the design system — invoke `/powehi-design` or read `DESIGN.md` first. Brand non-negotiables (dark-first, cream text, dual-light orange=action / photon-blue=encryption, lock always photon-blue) are hard rules. Map `colors_and_type.css` → Tailwind v4 OKLCH.
 
 ### Phase 5 — Hardening
