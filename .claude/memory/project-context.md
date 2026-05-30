@@ -17,6 +17,22 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-30, cycle 50 — STABILIZATION: CI red fix + security sweep)
+- **Cycle 50 (commits addd946, d648bfc):** STABILIZATION — CI red fixed + security RED + 5 YELLOWs addressed:
+  - **CI red fix (addd946):** `ChatLayout.test.tsx` — `afterEach` missing from vitest import (TS2304) + `KAT_SN` declared but never used (TS6133); fix: add `afterEach` to import, use `KAT_SN` in the "clears verification" test body
+  - **security-auditor RED #1 (d648bfc):** `ChatLayout.tsx InfoPanel` was writing/reading `db.verifiedContacts` via raw `PowehiDb`, bypassing `EncryptedPowehiDb`; `safetyNumber` was persisted in plaintext. Fix: import `EncryptedPowehiDb`; create `encryptedDb = useMemo(() => new EncryptedPowehiDb(db, cryptoWorker), [cryptoWorker])`; replace all 3 `db.verifiedContacts.*` calls with `encryptedDb.*VerifiedContact` calls; `encryptedDb === null` when worker unavailable — fail closed
+  - **YELLOW #2:** `computedSafetyNumber` reset to null at top of WASM `useEffect` on every dep change — prevents stale SN from previous chat causing transient false MITM alarm on rapid chat switch
+  - **YELLOW #5:** `dropDbKey()` added to `crypto.worker.ts`; call from auth store logout to clear AES-GCM key from worker memory (previously lingered until page close)
+  - **YELLOW #6:** `deriveDbKey` throws `"export key too short"` if `exportKeyBytes.length < 32` (defensive guard against weak HKDF input)
+  - **YELLOW #7:** `crypto.subtle.decrypt` in `decryptField` wrapped in try/catch; re-throws as `Error("decrypt_failed")` to prevent browser DOMException detail from leaking into logs
+  - **+1 test:** `encryption.test.ts` — `deriveDbKey throws when export key < 32 bytes`; wrong-key test now asserts `"decrypt_failed"` message
+  - **59 frontend tests** (was 58, +1); **246 Rust tests** (unchanged); TypeScript strict: clean; Biome: clean; cargo audit: 1 allowed warning (RUSTSEC-2024-0384 instant/openmls waiver)
+  - **Remaining deferred (security-auditor YELLOW):**
+    - Y3: `.catch(() => {})` in InfoPanel swallows error category — add opaque counters (low priority)
+    - Y4: HKDF salt fixed constant — acceptable per NIST SP 800-56C, add comment (Y4 already documented)
+    - Y8: `confirm_upload` IDOR (any device confirms any media_id) — Phase 4 media ACL deferred
+  - **NOTE:** `dropDbKey()` in `crypto.worker.ts` is wired to the API but NOT yet called from the auth store logout — needs to be called in auth.ts `logout()` reducer when auth store is wired to real OPAQUE
+
 ## Current state (2026-05-30, cycle 49 — FEATURE: WASM safety number wiring)
 - **Cycle 49 (commit a324e53):** InfoPanel WASM safety number wiring (deferred from cycle 44):
   - **`ChatLayout.tsx` InfoPanel**: replaced `MOCK_SAFETY_NUMBER` constant with async WASM computation
