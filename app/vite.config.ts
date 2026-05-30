@@ -37,15 +37,31 @@ function powehiWasmStub(): Plugin {
 // Computes SHA-256 integrity hash for Subresource Integrity (SRI).
 // Only active during `pnpm build` (apply: "build"); never runs in dev or tests.
 function sriPlugin(): Plugin {
-	const hashes = new Map<string, string>(); // "assets/foo.js" → "sha256-..."
-
 	function sriHash(content: string | Uint8Array): string {
 		return `sha256-${createHash("sha256")
 			.update(content instanceof Uint8Array ? Buffer.from(content) : content)
 			.digest("base64")}`;
 	}
 
-	function injectSriScript(input: string): string {
+	// Builds the name→hash map from ctx.bundle inside transformIndexHtml.
+	// This avoids the timing hazard where a separate generateBundle hook with
+	// order:"post" would run AFTER Vite's own HTML-emitting generateBundle hook
+	// (which calls transformIndexHtml), leaving the map empty at transform time.
+	function buildHashMap(bundle: Record<string, unknown>): Map<string, string> {
+		const map = new Map<string, string>();
+		for (const [name, chunk] of Object.entries(bundle)) {
+			if (chunk !== null && typeof chunk === "object") {
+				if ("code" in chunk && typeof (chunk as { code: unknown }).code === "string") {
+					map.set(name, sriHash((chunk as { code: string }).code));
+				} else if ("source" in chunk && (chunk as { source: unknown }).source != null) {
+					map.set(name, sriHash((chunk as { source: string | Uint8Array }).source));
+				}
+			}
+		}
+		return map;
+	}
+
+	function injectSriScript(input: string, hashes: Map<string, string>): string {
 		return input.replace(
 			/<script\b([^>]*)\bsrc="(\/assets\/[^"]+)"([^>]*)>/g,
 			(match: string, before: string, src: string, after: string): string => {
@@ -59,7 +75,7 @@ function sriPlugin(): Plugin {
 		);
 	}
 
-	function injectSriLink(input: string): string {
+	function injectSriLink(input: string, hashes: Map<string, string>): string {
 		return input.replace(
 			/<link\b([^>]*)\bhref="(\/assets\/[^"]+)"([^>]*)\/?>/g,
 			(match: string, before: string, href: string, after: string): string => {
@@ -76,37 +92,12 @@ function sriPlugin(): Plugin {
 	return {
 		name: "powehi-sri",
 		apply: "build",
-		// order: "post" ensures this runs after all other plugins have mutated chunks,
-		// so hashes are computed over the final emitted bytes.
-		generateBundle: {
-			order: "post" as const,
-			handler(_opts: unknown, bundle: Record<string, unknown>) {
-				for (const [name, chunk] of Object.entries(bundle)) {
-					if (
-						chunk !== null &&
-						typeof chunk === "object" &&
-						"code" in chunk &&
-						typeof (chunk as { code: unknown }).code === "string"
-					) {
-						hashes.set(name, sriHash((chunk as { code: string }).code));
-					} else if (
-						chunk !== null &&
-						typeof chunk === "object" &&
-						"source" in chunk &&
-						(chunk as { source: unknown }).source != null
-					) {
-						hashes.set(name, sriHash((chunk as { source: string | Uint8Array }).source));
-					}
-				}
-			},
-		},
 		transformIndexHtml: {
-			enforce: "post",
-			handler(html: string): string {
-				const result = injectSriLink(injectSriScript(html));
-				// Verify every /assets/ script and link received an integrity hash.
-				// A missing hash means the chunk was not in the bundle map — fail fast
-				// rather than silently ship an unprotected resource.
+			order: "post",
+			handler(html: string, ctx: { bundle?: Record<string, unknown> }): string {
+				const hashes = ctx.bundle ? buildHashMap(ctx.bundle) : new Map<string, string>();
+				const result = injectSriLink(injectSriScript(html, hashes), hashes);
+				// Fail fast if any /assets/ script or link is missing an integrity hash.
 				const missing = [
 					...(result.match(/<script\b[^>]*\bsrc="\/assets\/[^"]*"[^>]*>/g) ?? []),
 					...(result.match(/<link\b[^>]*\bhref="\/assets\/[^"]*"[^>]*\/?>/g) ?? []),
