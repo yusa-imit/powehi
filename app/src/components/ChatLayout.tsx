@@ -3,9 +3,11 @@ import {
 	type KeyboardEvent,
 	useEffect,
 	useLayoutEffect,
+	useMemo,
 	useRef,
 	useState,
 } from "react";
+import { EncryptedPowehiDb } from "../db/encrypted-db";
 import { db } from "../db/schema";
 import { useCryptoWorker } from "../hooks/useCryptoWorker";
 import { Icon } from "./Icon";
@@ -989,13 +991,22 @@ function InfoPanel({
 	const [computedSafetyNumber, setComputedSafetyNumber] = useState<string | null>(null);
 	// useCryptoWorker() returns a module-level singleton — stable across re-renders.
 	const cryptoWorker = useCryptoWorker();
+	// EncryptedPowehiDb wraps the raw Dexie instance with AES-GCM-256 field encryption.
+	// The CryptoKey lives in the worker; this wrapper never observes raw key bytes.
+	// null when worker unavailable — all DB paths fail closed in that case.
+	const encryptedDb = useMemo(
+		() => (cryptoWorker ? new EncryptedPowehiDb(db, cryptoWorker) : null),
+		[cryptoWorker],
+	);
 
 	// Compute the safety number from the MLS group members' Ed25519 signature keys.
 	// Fails closed: if WASM unavailable or group not yet established, stays null.
 	useEffect(() => {
 		const worker = cryptoWorker;
+		// Reset immediately so a stale value from a previous chat never triggers a
+		// false MITM alarm during the async WASM call for the new chat (Y2).
+		setComputedSafetyNumber(null);
 		if (!worker || !chat.mlsGroupId || !chat.mlsIdentityId) {
-			setComputedSafetyNumber(null);
 			return;
 		}
 		let cancelled = false;
@@ -1032,9 +1043,10 @@ function InfoPanel({
 	// Load stored verification state; re-runs when computedSafetyNumber arrives so
 	// MITM detection works even when WASM loads after the DB read completes.
 	useEffect(() => {
+		if (!encryptedDb) return;
 		let cancelled = false;
-		db.verifiedContacts
-			.get(chat.id)
+		encryptedDb
+			.getVerifiedContact(chat.id)
 			.then((stored) => {
 				if (cancelled) return;
 				if (stored) {
@@ -1062,12 +1074,12 @@ function InfoPanel({
 		return () => {
 			cancelled = true;
 		};
-	}, [chat.id, computedSafetyNumber]);
+	}, [chat.id, computedSafetyNumber, encryptedDb]);
 
 	const handleVerify = async () => {
-		// Fail closed — cannot verify without a computed safety number (WASM unavailable).
-		if (computedSafetyNumber === null) return;
-		await db.verifiedContacts.put({
+		// Fail closed — cannot verify without a computed safety number or encrypted DB.
+		if (computedSafetyNumber === null || !encryptedDb) return;
+		await encryptedDb.putVerifiedContact({
 			contactId: chat.id,
 			safetyNumber: computedSafetyNumber,
 			verifiedAt: Date.now(),
@@ -1078,7 +1090,7 @@ function InfoPanel({
 	};
 
 	const handleReset = async () => {
-		await db.verifiedContacts.delete(chat.id);
+		if (encryptedDb) await encryptedDb.deleteVerifiedContact(chat.id);
 		setSafetyVerified(false);
 		setVerifiedAt(undefined);
 		setMitmAlert(false);

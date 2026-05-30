@@ -269,6 +269,14 @@ const api = {
 		if (dbKey === null) throw new Error("db key not initialised");
 		return decryptField(dbKey, value);
 	},
+
+	/**
+	 * Clear the IndexedDB key from worker memory.
+	 * Call from the auth store logout reducer so the key does not linger after sign-out.
+	 */
+	dropDbKey(): void {
+		dbKey = null;
+	},
 };
 
 export type CryptoWorkerApi = typeof api;

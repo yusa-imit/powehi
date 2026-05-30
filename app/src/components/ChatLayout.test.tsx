@@ -15,6 +15,10 @@ const MOCK_WORKER = {
 		safetyNumber:
 			"689053 337949 184798 288064 134849 362568 560227 765408 921198 315305 693006 807986",
 	})),
+	// Passthrough encryption for tests — EncryptedPowehiDb interface satisfaction.
+	// Tests verify DB round-trip behavior; encryption correctness is covered by encryption.test.ts.
+	encryptDbField: vi.fn(async (v: string) => v),
+	decryptDbField: vi.fn(async (v: string) => v),
 };
 
 // KAT safety number (same value — used in test assertions after the mock is hoisted).

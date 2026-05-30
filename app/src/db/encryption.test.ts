@@ -6,6 +6,12 @@ const FAKE_EXPORT_KEY = new Uint8Array(32).fill(0xab);
 const FAKE_EXPORT_KEY_B = new Uint8Array(32).fill(0xcd);
 
 describe("deriveDbKey", () => {
+	it("throws when export key is shorter than 32 bytes", async () => {
+		await expect(deriveDbKey(new Uint8Array(31).fill(0xab))).rejects.toThrow(
+			"export key too short",
+		);
+	});
+
 	it("returns a non-extractable AES-GCM CryptoKey", async () => {
 		const key = await deriveDbKey(FAKE_EXPORT_KEY);
 		expect(key.type).toBe("secret");
@@ -65,7 +71,7 @@ describe("encryptField / decryptField", () => {
 		const keyA = await deriveDbKey(FAKE_EXPORT_KEY);
 		const keyB = await deriveDbKey(FAKE_EXPORT_KEY_B);
 		const enc = await encryptField(keyA, "secret-mls-state");
-		await expect(decryptField(keyB, enc)).rejects.toThrow();
+		await expect(decryptField(keyB, enc)).rejects.toThrow("decrypt_failed");
 	});
 
 	it("decryptField throws on tampered ciphertext", async () => {

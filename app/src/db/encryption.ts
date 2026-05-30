@@ -53,6 +53,7 @@ function base64urlToUint8(b64url: string): Uint8Array {
  * If session duration or write rate grows dramatically, add a rekey trigger here.
  */
 export async function deriveDbKey(exportKeyBytes: Uint8Array): Promise<CryptoKey> {
+	if (exportKeyBytes.length < 32) throw new Error("export key too short: need ≥32 bytes");
 	const hkdfKey = await crypto.subtle.importKey(
 		"raw",
 		exportKeyBytes as unknown as ArrayBuffer,
@@ -105,7 +106,13 @@ export async function decryptField(key: CryptoKey, enc: string): Promise<string>
 	// .slice() copies — subarray() shares the backing buffer and MUST NOT be used here.
 	const iv = combined.slice(0, GCM_IV_BYTES);
 	const ciphertext = combined.slice(GCM_IV_BYTES);
-	const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
+	let plaintext: ArrayBuffer;
+	try {
+		plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
+	} catch {
+		// Wrap to prevent browser-specific DOMException detail from leaking into logs.
+		throw new Error("decrypt_failed");
+	}
 	return new TextDecoder().decode(plaintext);
 }
 
