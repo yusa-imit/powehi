@@ -21,6 +21,29 @@ export interface Env {
   HEALTH_KV: KVNamespace;
 }
 
+// Security headers added to every outgoing response (both forwarded and synthetic
+// error responses). These apply to the JSON API surface; the HTML SPA gets its
+// CSP + Trusted Types from the Cloudflare Pages `_headers` file.
+const SECURITY_HEADERS: Record<string, string> = {
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "Referrer-Policy": "no-referrer",
+  "Permissions-Policy": "geolocation=(), camera=(), microphone=()",
+  "Strict-Transport-Security": "max-age=63072000; includeSubDomains; preload",
+};
+
+function addSecurityHeaders(response: Response): Response {
+  const headers = new Headers(response.headers);
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
+    headers.set(name, value);
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 // Trust headers that must never be forwarded from client to origin.
 // These are used by the backend rate-limiter and PIPA guard as authoritative
 // signals — forwarding client-supplied values would allow rate-limit bypass.
@@ -46,7 +69,7 @@ export default {
     const decision = resolveTarget(country);
 
     if (decision.kind === "pipa_blocked") {
-      return pipaBlockedResponse();
+      return addSecurityHeaders(pipaBlockedResponse());
     }
 
     const target = decision.target;
@@ -68,10 +91,10 @@ export default {
     );
 
     if (originBase === null) {
-      return new Response(
+      return addSecurityHeaders(new Response(
         JSON.stringify({ error: "service_unavailable", code: "ALL_REGIONS_DOWN" }),
         { status: 503, headers: { "Content-Type": "application/json" } },
-      );
+      ));
     }
 
     const targetUrl = rewriteUrl(request.url, originBase);
@@ -95,12 +118,12 @@ export default {
 
     // Wrap fetch so a transient origin error returns our structured 503 (YELLOW fix #3)
     try {
-      return await fetch(forwardedRequest);
+      return addSecurityHeaders(await fetch(forwardedRequest));
     } catch {
-      return new Response(
+      return addSecurityHeaders(new Response(
         JSON.stringify({ error: "service_unavailable", code: "ORIGIN_UNREACHABLE" }),
         { status: 503, headers: { "Content-Type": "application/json" } },
-      );
+      ));
     }
   },
 };

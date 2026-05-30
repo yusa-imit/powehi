@@ -12,12 +12,14 @@ pub mod error;
 pub mod middleware;
 pub mod rate_limit;
 pub mod routes;
+pub mod security_headers;
 
 use std::sync::Arc;
 
 use axum::{
     body::Body,
     extract::DefaultBodyLimit,
+    middleware::from_fn,
     response::Response,
     routing::{delete, get, post},
     Router,
@@ -151,6 +153,7 @@ fn router_inner(
         .with_state(state)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
+        .layer(from_fn(security_headers::set_security_headers))
 }
 
 async fn health() -> &'static str {
@@ -1530,6 +1533,68 @@ mod tests {
                 "metrics line contains a UUID-shaped label value (user/device ID leak?): {line}"
             );
         }
+    }
+
+    // ── Security headers on the public router ────────────────────────────────
+
+    #[tokio::test]
+    async fn health_response_has_x_content_type_options_nosniff() {
+        let resp = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.headers()
+                .get("x-content-type-options")
+                .and_then(|v| v.to_str().ok()),
+            Some("nosniff"),
+        );
+    }
+
+    #[tokio::test]
+    async fn health_response_has_x_frame_options_deny() {
+        let resp = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.headers()
+                .get("x-frame-options")
+                .and_then(|v| v.to_str().ok()),
+            Some("DENY"),
+        );
+    }
+
+    #[tokio::test]
+    async fn health_response_has_hsts() {
+        let resp = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let hsts = resp
+            .headers()
+            .get("strict-transport-security")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            hsts.contains("max-age=63072000"),
+            "HSTS max-age must be 2 years, got: {hsts}"
+        );
     }
 
     #[tokio::test]

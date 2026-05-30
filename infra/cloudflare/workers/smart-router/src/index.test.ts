@@ -166,6 +166,38 @@ describe("RED-2: Trust headers stripped before forwarding to origin", () => {
   });
 });
 
+// ── Security headers ─────────────────────────────────────────────────────
+
+describe("security headers on all responses", () => {
+  it("sets X-Content-Type-Options: nosniff on forwarded origin responses", async () => {
+    vi.stubGlobal("fetch", async () => new Response("ok", { status: 200 }));
+    const req = makeRequest("/v1/test", "DE");
+    const res = await worker.fetch(req, makeEnv());
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    vi.unstubAllGlobals();
+  });
+
+  it("sets security headers on PIPA-blocked (503) responses", async () => {
+    const req = makeRequest("/v1/test", "KR");
+    const res = await worker.fetch(req, makeEnv());
+    expect(res.status).toBe(503);
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(res.headers.get("x-frame-options")).toBe("DENY");
+    expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+  });
+
+  it("sets HSTS with long max-age on all responses", async () => {
+    vi.stubGlobal("fetch", async () => new Response("ok", { status: 200 }));
+    const req = makeRequest("/v1/test", "JP"); // routes to AP
+    const res = await worker.fetch(req, makeEnv());
+    const hsts = res.headers.get("strict-transport-security") ?? "";
+    expect(hsts).toContain("max-age=63072000");
+    expect(hsts).toContain("includeSubDomains");
+    expect(hsts).toContain("preload");
+    vi.unstubAllGlobals();
+  });
+});
+
 // ── Origin failover behaviour ─────────────────────────────────────────────
 
 describe("origin failover", () => {
