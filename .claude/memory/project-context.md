@@ -17,6 +17,15 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-31, cycle 53 — FEATURE: CSP + Trusted Types + SRI — Phase 5 hardening)
+- **Cycle 53 (commit 07e260a):** Phase 5 remaining DoD item — CSP + Trusted Types + SRI 100%:
+  - **Backend (`security_headers.rs` NEW):** Tower/axum middleware adds X-Content-Type-Options (nosniff), X-Frame-Options (DENY), Referrer-Policy (no-referrer), Permissions-Policy (geolocation/camera/mic=blocked), HSTS (max-age=63072000; includeSubDomains; preload) to ALL API responses. Wired as outermost layer via `from_fn(set_security_headers)` in `router_inner`. +8 tests (5 unit + 3 integration on /health).
+  - **CF Worker (`smart-router/src/index.ts`):** `addSecurityHeaders(response)` wraps all outgoing responses (forwarded origin + ALL_REGIONS_DOWN + ORIGIN_UNREACHABLE + PIPA-blocked). Same 5-header set. +3 tests.
+  - **Cloudflare Pages (`app/public/_headers`):** Full CSP for the SPA — `script-src 'self' 'wasm-unsafe-eval'`; `worker-src 'self' blob:` (Comlink crypto worker + Service Worker); Google Fonts (`fonts.googleapis.com` CSS + `fonts.gstatic.com` woff2); `require-trusted-types-for 'script'; trusted-types default`; `frame-ancestors 'none'; object-src 'none'; base-uri 'self'`; COOP same-origin (NO COEP — Google Fonts has no CORP header, and SharedArrayBuffer not needed for MLS/OPAQUE).
+  - **Vite SRI plugin (`vite.config.ts`):** `sriPlugin()` compute SHA-256 hashes of ALL emitted JS/CSS chunks in `generateBundle {order: "post"}`, inject `integrity="sha256-..."` on `<script src="/assets/...">` and `<link href="/assets/...">` in HTML via `transformIndexHtml {enforce: "post"}`. Build-fail guard: throws if any matched asset lacks integrity attribute.
+  - **security-auditor:** R1 fixed (worker-src blob: added); R2 fixed (COEP removed — Google Fonts incompatible); R3 fixed (SRI order: post + build-fail guard); Y2 (Trusted Types policy name `default` vs `react-html`), Y3 (connect-src host), Y4 (panic 500 headers), Y5 (intentional overwrite) — all documented/deferred.
+  - **259 Rust tests** (+8 from 251); **64 frontend tests** (unchanged); **27 CF Worker tests** (+3 from 24); clippy clean; rustfmt clean; Biome clean.
+
 ## Current state (2026-05-31, cycle 52 — FEATURE: Region-Aware Client — prd.md §7.6)
 - **Cycle 52 (commit b5513b1):** Region-Aware Client — missing Phase 4 DoD item:
   - **Backend:** `GET /v1/region/detect` (no auth required, parity with /health)
@@ -530,6 +539,7 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 ### Phase 5 — Hardening
 - [x] Observability: Prometheus metrics on internal admin port (127.0.0.1:9090); zero-knowledge counters; security-auditor PASS — cycle 28
 - [x] SLSA L3 reproducible builds; cosign + Rekor; threat-model-checker pass; load test (10k concurrent WS); PQ migration doc — cycle 29 (commit 75e6c6f)
+- [x] CSP + Trusted Types + SRI 100%: security_headers.rs axum middleware; CF Worker addSecurityHeaders; Cloudflare Pages _headers CSP (worker-src blob:, wasm-unsafe-eval, TT, COOP); Vite SRI plugin with build-fail guard — cycle 53 (commit 07e260a)
 
 ### Phase 6 — Global Infrastructure
 - [x] gRPC mesh + mTLS: powehi-proto (protox 0.7), RegionGrpcServer, RegionGrpcRouter, TlsConfig, CircuitBreaker, security hardening — cycle 32 (commit 563ae8e)
