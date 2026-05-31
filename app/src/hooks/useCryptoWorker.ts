@@ -31,6 +31,17 @@ function getProxy(): Comlink.Remote<CryptoWorkerApi> | null {
  * Returns the Comlink-wrapped crypto worker proxy (shared singleton).
  * May return null if the WASM bundle is not available (e.g., during dev
  * before `pnpm build:wasm` has been run). Callers must null-check.
+ *
+ * Non-hook callers (e.g., Zustand stores) must use this instead of useCryptoWorker.
+ */
+export function getCryptoWorkerProxy(): Comlink.Remote<CryptoWorkerApi> | null {
+	return getProxy();
+}
+
+/**
+ * Returns the Comlink-wrapped crypto worker proxy (shared singleton).
+ * May return null if the WASM bundle is not available (e.g., during dev
+ * before `pnpm build:wasm` has been run). Callers must null-check.
  */
 export function useCryptoWorker(): Comlink.Remote<CryptoWorkerApi> | null {
 	return getProxy();
