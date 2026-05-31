@@ -17,6 +17,9 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-01, cycle 63 — STABILIZATION: CI red fix — rustfmt wasm_exports line-width)
+- **Cycle 63 (commit efd9626):** CI was RED on Format check — `mls_clear_session` WASM tests (added cycle 62) had two `.with()` closures exceeding stable 1.96.0 rustfmt line-length limit. Fixed by expanding both to multi-line block form. 284 Rust tests pass; rustfmt clean; clippy clean.
+
 ## Current state (2026-06-01, cycle 62 — FEATURE: MLS/OPAQUE WASM heap wipe on logout — session-clear closed)
 - **Cycle 62 (commit 4119253):** Closed long-deferred "MLS WASM heap wipe on logout" security item:
   - **WASM (`wasm_exports.rs`):** New `mls_clear_session()` `#[wasm_bindgen]` export — calls `.clear()` on `MLS_CTX`, `OPAQUE_REG`, `OPAQUE_LOGIN` thread-locals. After logout, no Rust-level reference to prior-session identity material, encryption secrets, or in-flight OPAQUE sessions remains.
