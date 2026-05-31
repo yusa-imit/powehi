@@ -53,13 +53,32 @@ describe("useAuthStore", () => {
 		// by the encrypted-db.test.ts wrong-key rejection test (cross-key decrypt throws).
 		it("calls dropDbKey on the crypto worker so the AES-GCM key does not linger", () => {
 			const dropDbKey = vi.fn();
+			const clearSessionState = vi.fn().mockResolvedValue(undefined);
 			vi.spyOn(CryptoWorkerHook, "getCryptoWorkerProxy").mockReturnValue({
 				dropDbKey,
+				clearSessionState,
 			} as unknown as ReturnType<typeof CryptoWorkerHook.getCryptoWorkerProxy>);
 
 			useAuthStore.getState().logout();
 
 			expect(dropDbKey).toHaveBeenCalledOnce();
+		});
+
+		it("calls clearSessionState to wipe MLS and OPAQUE heap state on logout", () => {
+			const clearSessionState = vi.fn().mockResolvedValue(undefined);
+			const dropDbKey = vi.fn();
+			vi.spyOn(CryptoWorkerHook, "getCryptoWorkerProxy").mockReturnValue({
+				clearSessionState,
+				dropDbKey,
+			} as unknown as ReturnType<typeof CryptoWorkerHook.getCryptoWorkerProxy>);
+
+			useAuthStore.getState().logout();
+
+			expect(clearSessionState).toHaveBeenCalledOnce();
+			// clearSessionState must be called before dropDbKey (documented order).
+			expect(clearSessionState.mock.invocationCallOrder[0]).toBeLessThan(
+				dropDbKey.mock.invocationCallOrder[0],
+			);
 		});
 
 		it("still transitions to login phase even when worker is unavailable (null proxy)", () => {

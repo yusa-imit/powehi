@@ -482,6 +482,25 @@ pub fn mls_compute_safety_number(sig_key_a: &[u8], sig_key_b: &[u8]) -> Result<J
     js_obj(&[("safetyNumber", JsValue::from_str(&safety_number))])
 }
 
+// ── Session lifecycle ──────────────────────────────────────────────────────────
+
+/// Clear all MLS and OPAQUE session state from the WASM heap on logout.
+///
+/// Drops all MLS identities, groups, and any in-flight OPAQUE sessions so the
+/// next login starts with a clean slate and cannot access prior-session keys.
+///
+/// Limitation: WASM linear memory is not physically zeroed — the allocator marks
+/// freed pages as available but the byte values persist until overwritten by
+/// subsequent allocations. This is a fundamental WASM constraint; the functional
+/// guarantee is that no Rust-level reference to the prior session's material
+/// remains accessible after this call returns.
+#[wasm_bindgen]
+pub fn mls_clear_session() {
+    MLS_CTX.with(|ctx| ctx.borrow_mut().clear());
+    OPAQUE_REG.with(|s| s.borrow_mut().clear());
+    OPAQUE_LOGIN.with(|s| s.borrow_mut().clear());
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────────
 //
 // Native tests bypass js_sys (which panics on non-wasm32) and test the
@@ -590,6 +609,88 @@ mod tests {
         let a = next_id();
         let b = next_id();
         assert_ne!(a, b, "consecutive IDs must be unique");
+    }
+
+    // ── Session clear ─────────────────────────────────────────────────────────
+
+    /// mls_clear_session removes all MLS identities and groups.
+    #[test]
+    fn test_clear_session_removes_mls_contexts() {
+        let provider = OpenMlsRustCrypto::default();
+        let identity = generate_identity(b"bob@session-clear-test", &provider).unwrap();
+        let id = next_id();
+        MLS_CTX.with(|ctx| {
+            ctx.borrow_mut().insert(
+                id.clone(),
+                MlsContext {
+                    identity,
+                    provider,
+                    groups: HashMap::new(),
+                },
+            );
+        });
+        assert!(
+            MLS_CTX.with(|ctx| ctx.borrow().contains_key(&id)),
+            "context should be present before clear"
+        );
+
+        mls_clear_session();
+
+        assert!(
+            !MLS_CTX.with(|ctx| ctx.borrow().contains_key(&id)),
+            "context must be absent after clear"
+        );
+        assert_eq!(
+            MLS_CTX.with(|ctx| ctx.borrow().len()),
+            0,
+            "MLS_CTX must be empty after clear"
+        );
+    }
+
+    /// mls_clear_session removes in-flight OPAQUE registration sessions.
+    #[test]
+    fn test_clear_session_removes_opaque_reg_sessions() {
+        let mut rng = OsRng;
+        let (state, _) = opaque::registration_start(b"pw", &mut rng).unwrap();
+        let id = next_id();
+        OPAQUE_REG.with(|s| s.borrow_mut().insert(id.clone(), OpaqueRegSession { state }));
+        assert!(OPAQUE_REG.with(|s| s.borrow().contains_key(&id)));
+
+        mls_clear_session();
+
+        assert_eq!(
+            OPAQUE_REG.with(|s| s.borrow().len()),
+            0,
+            "OPAQUE_REG must be empty after clear"
+        );
+    }
+
+    /// mls_clear_session removes in-flight OPAQUE login sessions.
+    #[test]
+    fn test_clear_session_removes_opaque_login_sessions() {
+        let mut rng = OsRng;
+        let (state, _) = opaque::login_start(b"pw", &mut rng).unwrap();
+        let id = next_id();
+        OPAQUE_LOGIN.with(|s| s.borrow_mut().insert(id.clone(), OpaqueLoginSession { state }));
+        assert!(OPAQUE_LOGIN.with(|s| s.borrow().contains_key(&id)));
+
+        mls_clear_session();
+
+        assert_eq!(
+            OPAQUE_LOGIN.with(|s| s.borrow().len()),
+            0,
+            "OPAQUE_LOGIN must be empty after clear"
+        );
+    }
+
+    /// mls_clear_session is idempotent: calling it on empty state does not panic.
+    #[test]
+    fn test_clear_session_idempotent_on_empty_state() {
+        mls_clear_session();
+        mls_clear_session();
+        assert_eq!(MLS_CTX.with(|ctx| ctx.borrow().len()), 0);
+        assert_eq!(OPAQUE_REG.with(|s| s.borrow().len()), 0);
+        assert_eq!(OPAQUE_LOGIN.with(|s| s.borrow().len()), 0);
     }
 
     // ── Safety Numbers ────────────────────────────────────────────────────────

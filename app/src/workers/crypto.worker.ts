@@ -53,6 +53,7 @@ interface WasmModule {
 	mls_decrypt: (identityId: string, groupId: string, ciphertext: Uint8Array) => MlsPlaintextResult;
 	mls_group_members: (identityId: string, groupId: string) => MlsGroupMember[];
 	mls_compute_safety_number: (sigKeyA: Uint8Array, sigKeyB: Uint8Array) => MlsSafetyNumberResult;
+	mls_clear_session: () => void;
 }
 
 // ── IndexedDB key — held inside the worker, never crosses to main thread ─────
@@ -276,6 +277,20 @@ const api = {
 	 */
 	dropDbKey(): void {
 		dbKey = null;
+	},
+
+	/**
+	 * Clear all MLS identities, groups, and in-flight OPAQUE sessions from WASM heap.
+	 * Call from the auth store logout reducer so the prior session's key material is
+	 * no longer accessible after sign-out.
+	 *
+	 * Note: WASM linear memory is not physically zeroed — the allocator marks freed
+	 * memory as available, but bytes persist until overwritten. The guarantee is that
+	 * no Rust-level reference to prior-session material remains after this call.
+	 */
+	async clearSessionState(): Promise<void> {
+		const wasm = await getWasm();
+		wasm.mls_clear_session();
 	},
 };
 

@@ -17,6 +17,7 @@ const mockWorker = {
 			"689053 337949 184798 288064 134849 362568 560227 765408 921198 315305 693006 807986",
 	}),
 	dropDbKey: async () => {},
+	clearSessionState: async () => {},
 };
 
 export const useCryptoWorker = () => mockWorker;
