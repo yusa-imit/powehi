@@ -247,7 +247,7 @@ impl RegionService for RegionGrpcServer {
         let group_id = parse_group_id(&req.group_id)
             .ok_or_else(|| Status::invalid_argument("invalid group_id UUID"))?;
 
-        // Validate home_region: non-empty, reasonable length, ASCII printable.
+        // Validate home_region: non-empty, ≤64 bytes.
         // Architectural note (RED-2/RED-3): We also need to verify the calling peer's mTLS
         // cert matches this home_region claim — deferred until tonic TlsConnectInfo plumbing.
         if req.home_region.is_empty() || req.home_region.len() > 64 {
@@ -935,6 +935,68 @@ mod tests {
             member_device_ids: vec![Uuid::new_v4().to_string()],
         });
         let err = server.sync_group_membership(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn sync_group_membership_home_region_too_long_returns_invalid_argument() {
+        let server = make_server();
+        let req = Request::new(SyncGroupMembershipRequest {
+            group_id: Uuid::new_v4().to_string(),
+            home_region: "x".repeat(65), // > 64 chars
+            member_device_ids: vec![Uuid::new_v4().to_string()],
+        });
+        let err = server.sync_group_membership(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn sync_group_membership_invalid_member_device_id_returns_invalid_argument() {
+        let server = make_server();
+        let req = Request::new(SyncGroupMembershipRequest {
+            group_id: Uuid::new_v4().to_string(),
+            home_region: "eu-de-1".to_string(),
+            member_device_ids: vec!["not-a-uuid".to_string()],
+        });
+        let err = server.sync_group_membership(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn sync_group_membership_home_region_exactly_64_chars_is_accepted() {
+        let server = make_server();
+        let req = Request::new(SyncGroupMembershipRequest {
+            group_id: Uuid::new_v4().to_string(),
+            home_region: "x".repeat(64), // boundary: exactly 64 chars must be accepted
+            member_device_ids: vec![Uuid::new_v4().to_string()],
+        });
+        let resp = server.sync_group_membership(req).await.unwrap();
+        assert_eq!(resp.into_inner().status, ForwardStatus::Accepted as i32);
+    }
+
+    #[tokio::test]
+    async fn forward_commit_invalid_group_id_returns_invalid_argument() {
+        let server = make_server();
+        let req = Request::new(ForwardCommitRequest {
+            group_id: "not-a-uuid".to_string(),
+            sender_device_id: Uuid::new_v4().to_string(),
+            commit: vec![0x01, 0x02],
+            expected_epoch: 0,
+        });
+        let err = server.forward_commit(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn forward_commit_invalid_sender_device_id_returns_invalid_argument() {
+        let server = make_server();
+        let req = Request::new(ForwardCommitRequest {
+            group_id: Uuid::new_v4().to_string(),
+            sender_device_id: "not-a-uuid".to_string(),
+            commit: vec![0x01, 0x02],
+            expected_epoch: 0,
+        });
+        let err = server.forward_commit(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 

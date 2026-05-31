@@ -172,14 +172,24 @@ impl AuthUseCase for AuthService {
 
         // Track token in per-device set so revoke_device can invalidate it (Y-1).
         // Fail hard — a tracking failure leaves an unrevocable orphan session.
+        // On error: delete the session we already wrote before returning Unauthorized.
         let device_sessions_key = format!("device_sessions:{}", req.device_id.as_uuid());
-        self.cache
+        if self
+            .cache
             .set_add(&device_sessions_key, &token)
             .await
-            .map_err(|_| {
-                // best-effort: clean up the session we already wrote
-                DomainError::Unauthorized
-            })?;
+            .is_err()
+        {
+            // Best-effort cleanup: token is never returned to client so the
+            // orphan session cannot be used, but log to surface cache partitions.
+            if self.cache.delete(&session_cache_key).await.is_err() {
+                tracing::warn!(
+                    "login_finish: set_add failed and cleanup delete also failed — \
+                     orphan session may persist until SESSION_TTL expires"
+                );
+            }
+            return Err(DomainError::Unauthorized);
+        }
         let _ = self
             .cache
             .set_expire(&device_sessions_key, DEVICE_SESSIONS_TTL)
@@ -189,7 +199,12 @@ impl AuthUseCase for AuthService {
         // revoke↔login_finish race — if revoke_device deleted the device between
         // our first ownership check and here, we detect it and clean up).
         if self.device_repo.find_by_id(&req.device_id).await?.is_none() {
-            let _ = self.cache.delete(&session_cache_key).await;
+            if self.cache.delete(&session_cache_key).await.is_err() {
+                tracing::warn!(
+                    "login_finish: revoked-device race and cleanup delete failed — \
+                     orphan session may persist until SESSION_TTL expires"
+                );
+            }
             let _ = self.cache.delete(&device_sessions_key).await;
             return Err(DomainError::Unauthorized);
         }
@@ -408,6 +423,50 @@ mod tests {
                 .get(key)
                 .cloned()
                 .unwrap_or_default())
+        }
+    }
+
+    /// A FakeCache variant that fails on `set_add` to test the hard-fail path.
+    struct SetAddFailCache {
+        inner: Arc<FakeCache>,
+    }
+    impl SetAddFailCache {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                inner: FakeCache::new(),
+            })
+        }
+    }
+    #[async_trait::async_trait]
+    impl CachePort for SetAddFailCache {
+        async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, DomainError> {
+            self.inner.get(key).await
+        }
+        async fn set(
+            &self,
+            key: &str,
+            value: Vec<u8>,
+            ttl: Option<Duration>,
+        ) -> Result<(), DomainError> {
+            self.inner.set(key, value, ttl).await
+        }
+        async fn delete(&self, key: &str) -> Result<(), DomainError> {
+            self.inner.delete(key).await
+        }
+        async fn exists(&self, key: &str) -> Result<bool, DomainError> {
+            self.inner.exists(key).await
+        }
+        async fn get_del(&self, key: &str) -> Result<Option<Vec<u8>>, DomainError> {
+            self.inner.get_del(key).await
+        }
+        async fn set_add(&self, _key: &str, _member: &str) -> Result<(), DomainError> {
+            Err(DomainError::Internal("set_add injected failure".into()))
+        }
+        async fn set_expire(&self, _key: &str, _ttl: Duration) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn set_members(&self, key: &str) -> Result<Vec<String>, DomainError> {
+            self.inner.set_members(key).await
         }
     }
 
@@ -754,6 +813,68 @@ mod tests {
             .filter(|k| k.starts_with("session:"))
             .count();
         assert_eq!(session_count, 0, "no orphan session after revoke");
+    }
+
+    #[tokio::test]
+    async fn login_finish_set_add_failure_returns_unauthorized_and_cleans_session() {
+        // Hard-fail invariant: if set_add (session tracking) fails, login_finish must
+        // return Unauthorized and must NOT leave an orphan session in the cache.
+        let user_repo = FakeUserRepo::new();
+        let device_repo = FakeDeviceRepo::new();
+        let opaque = Arc::new(FakeOpaque);
+        let fail_cache = SetAddFailCache::new();
+        let svc = AuthService::new(
+            user_repo.clone(),
+            device_repo.clone(),
+            opaque,
+            fail_cache.clone(),
+        );
+
+        let uid = UserId::new();
+        user_repo
+            .save(&User::new(uid.clone(), b"hash".to_vec()))
+            .await
+            .unwrap();
+        let device_id = svc
+            .register_device(
+                &uid,
+                DeviceRegistrationRequest {
+                    mls_credential: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        let init = svc
+            .login_init(LoginInitRequest {
+                handle_hash: b"hash".to_vec(),
+                opaque_ke1: vec![0u8; 32],
+            })
+            .await
+            .unwrap();
+
+        let err = svc
+            .login_finish(LoginFinishRequest {
+                opaque_ke3: vec![0u8; 32],
+                login_nonce: init.login_nonce,
+                device_id: device_id.clone(),
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DomainError::Unauthorized),
+            "set_add failure must return Unauthorized"
+        );
+
+        // No orphan session must remain after the hard-fail.
+        let session_count = fail_cache
+            .inner
+            .store
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|k| k.starts_with("session:"))
+            .count();
+        assert_eq!(session_count, 0, "no orphan session after set_add failure");
     }
 
     #[tokio::test]
