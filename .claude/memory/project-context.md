@@ -17,6 +17,23 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-31, cycle 55 — STABILIZATION: CI fix + ack IDOR fix)
+- **Cycle 55 (commits 7d0bed9, 40aa98c):**
+  - **CI red fix (7d0bed9):** `powehi-grpc/src/server.rs` rustfmt failure — stable 1.96.0 requires 2-arg `assert!` macros to be multi-line when over line length. Three `assert!` calls in data-residency tests expanded. CI now green.
+  - **ack IDOR fix — security-auditor Y-3 (40aa98c):** `MessagingService::ack_envelope` was deleting any envelope by ID without checking caller ownership. Fix: added `EnvelopeRepository::find_by_id` to port + all impls; ownership check in service: broadcast (None recipient) = any device may ack; unicast = only recipient may ack; idempotent when not found.
+    - `+1` method to `EnvelopeRepository` port (find_by_id)
+    - `+12` SQL lines in `PgEnvelopeRepository` (find_by_id)  
+    - `+1` method to all stub/fake impls (`FakeEnvelopeRepo`, `NoopEnvelopeRepo`)
+    - `+3` application-layer tests: wrong-device-unauthorized, owner-succeeds, idempotent-not-found
+    - `+1` REST-layer test: ack_by_wrong_device_returns_401
+  - **266 Rust tests** (+4 from 262); **64 frontend tests** (unchanged); clippy clean; rustfmt clean.
+  - **security-auditor remaining deferred (2 pre-existing architectural deferrals):**
+    - R-1: gRPC `forward_envelope` has no sender-membership check (requires GroupRepository in gRPC server — architectural deferred)
+    - R-2: Bearer token = raw DeviceId UUID (stub auth, replacing with Redis session is a Phase 3 deferred item)
+    - Y-1: `poll` broadcast envelopes need group-membership scoping (adapter-level gap, deferred)
+    - Y-2: media `get_download_url` ACL needs upload-time group binding (Phase 4 deferred)
+    - Y-4: `consume_key_package` peer region not validated against mTLS identity (deferred)
+
 ## Current state (2026-05-31, cycle 54 — FEATURE: CI fix + Data Residency Verification — Phase 6 complete)
 - **Cycle 54 (commits fc7c5e0, e0cc130):**
   - **CI fix (fc7c5e0):** `app/vite.config.ts` SRI plugin timing bug — `generateBundle{order:"post"}` runs AFTER Vite's HTML-emitting `generateBundle` hook (which calls `transformIndexHtml`), so the hashes Map was always empty at transform time. Fix: removed separate `generateBundle` hook; moved hash computation into `transformIndexHtml` using `ctx.bundle`. Also migrated from deprecated `enforce:` to `order:` (Vite 6). CI — Frontend was failing on bundle-budget step; now fixed. **64 frontend tests** unchanged; biome clean.
