@@ -203,7 +203,17 @@ impl MessagingUseCase for MessagingService {
         device_id: &DeviceId,
         envelope_id: &EnvelopeId,
     ) -> Result<(), DomainError> {
-        self.envelope_repo.delete(envelope_id).await
+        match self.envelope_repo.find_by_id(envelope_id).await? {
+            // Envelope already gone — ack is idempotent.
+            None => Ok(()),
+            // Broadcast (no recipient) — any authenticated device may ack.
+            Some(e) if e.recipient.is_none() => self.envelope_repo.delete(envelope_id).await,
+            // Unicast — only the intended recipient may ack.
+            Some(e) if e.recipient.as_ref() == Some(device_id) => {
+                self.envelope_repo.delete(envelope_id).await
+            }
+            Some(_) => Err(DomainError::Unauthorized),
+        }
     }
 }
 
@@ -264,6 +274,9 @@ mod tests {
                 .filter(|e| e.expires_at.map(|exp| exp > now).unwrap_or(true))
                 .cloned()
                 .collect())
+        }
+        async fn find_by_id(&self, id: &EnvelopeId) -> Result<Option<Envelope>, DomainError> {
+            Ok(self.store.lock().unwrap().get(id).cloned())
         }
         async fn delete(&self, id: &EnvelopeId) -> Result<(), DomainError> {
             self.store.lock().unwrap().remove(id);
@@ -551,6 +564,8 @@ mod tests {
     async fn ack_envelope_removes_it() {
         let env_repo = FakeEnvelopeRepo::new();
         let svc = make_service(env_repo.clone(), FakeGroupRepo::empty());
+        // send_message creates a broadcast envelope (recipient = None);
+        // any authenticated device may ack a broadcast.
         let id = svc
             .send_message(
                 &DeviceId::new(),
@@ -562,6 +577,50 @@ mod tests {
             .unwrap();
         svc.ack_envelope(&DeviceId::new(), &id).await.unwrap();
         assert!(env_repo.store.lock().unwrap().get(&id).is_none());
+    }
+
+    #[tokio::test]
+    async fn ack_unicast_envelope_by_wrong_device_returns_unauthorized() {
+        let sender = DeviceId::new();
+        let target = DeviceId::new();
+        let wrong = DeviceId::new();
+        let group_id = GroupId::new();
+        let env_repo = FakeEnvelopeRepo::new();
+        let svc = make_service(env_repo.clone(), FakeGroupRepo::empty());
+        svc.send_welcome(&sender, &group_id, Bytes::from_static(b"welcome"), &target)
+            .await
+            .unwrap();
+        let pending = svc.poll_envelopes(&target, None).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        let id = pending[0].id.clone();
+        let err = svc.ack_envelope(&wrong, &id).await.unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
+        // envelope must not have been deleted
+        assert!(env_repo.store.lock().unwrap().get(&id).is_some());
+    }
+
+    #[tokio::test]
+    async fn ack_unicast_envelope_by_owner_succeeds() {
+        let sender = DeviceId::new();
+        let target = DeviceId::new();
+        let group_id = GroupId::new();
+        let env_repo = FakeEnvelopeRepo::new();
+        let svc = make_service(env_repo.clone(), FakeGroupRepo::empty());
+        svc.send_welcome(&sender, &group_id, Bytes::from_static(b"welcome"), &target)
+            .await
+            .unwrap();
+        let pending = svc.poll_envelopes(&target, None).await.unwrap();
+        let id = pending[0].id.clone();
+        svc.ack_envelope(&target, &id).await.unwrap();
+        assert!(env_repo.store.lock().unwrap().get(&id).is_none());
+    }
+
+    #[tokio::test]
+    async fn ack_nonexistent_envelope_is_idempotent() {
+        let svc = make_service(FakeEnvelopeRepo::new(), FakeGroupRepo::empty());
+        let phantom = EnvelopeId::new();
+        // deleting something that doesn't exist must not error
+        svc.ack_envelope(&DeviceId::new(), &phantom).await.unwrap();
     }
 
     // ── maybe_push tests ──────────────────────────────────────────────────────

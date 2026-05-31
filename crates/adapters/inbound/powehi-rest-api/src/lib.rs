@@ -520,11 +520,64 @@ mod tests {
         }
     }
 
+    struct MockMessagingUnauthorized;
+    #[async_trait]
+    impl MessagingUseCase for MockMessagingUnauthorized {
+        async fn send_message(
+            &self,
+            _: &DeviceId,
+            _: &GroupId,
+            _: Bytes,
+            _: Option<u32>,
+        ) -> Result<EnvelopeId, DomainError> {
+            unimplemented!()
+        }
+        async fn send_welcome(
+            &self,
+            _: &DeviceId,
+            _: &GroupId,
+            _: Bytes,
+            _: &DeviceId,
+        ) -> Result<(), DomainError> {
+            unimplemented!()
+        }
+        async fn send_commit(
+            &self,
+            _: &DeviceId,
+            _: &GroupId,
+            _: Bytes,
+        ) -> Result<Epoch, DomainError> {
+            unimplemented!()
+        }
+        async fn poll_envelopes(
+            &self,
+            _: &DeviceId,
+            _: Option<DateTime<Utc>>,
+        ) -> Result<Vec<Envelope>, DomainError> {
+            unimplemented!()
+        }
+        async fn ack_envelope(&self, _: &DeviceId, _: &EnvelopeId) -> Result<(), DomainError> {
+            Err(DomainError::Unauthorized)
+        }
+    }
+
     fn messaging_router() -> Router {
         router(AppState {
             region_id: "eu-de-1-test".to_string(),
             auth: Arc::new(MockAuth),
             messaging: Arc::new(MockMessagingSuccess),
+            key_package: Arc::new(MockKeyPackage),
+            media: Arc::new(MockMedia),
+            push_sub_repo: null_push_sub_repo(),
+            handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
+        })
+    }
+
+    fn messaging_unauthorized_router() -> Router {
+        router(AppState {
+            region_id: "eu-de-1-test".to_string(),
+            auth: Arc::new(MockAuth),
+            messaging: Arc::new(MockMessagingUnauthorized),
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
@@ -850,6 +903,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn ack_by_wrong_device_returns_401() {
+        let device = DeviceId::new();
+        let envelope_id = EnvelopeId::new();
+        let resp = messaging_unauthorized_router()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/messages/{envelope_id}"))
+                    .header("authorization", bearer(&device))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

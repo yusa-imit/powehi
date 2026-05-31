@@ -290,6 +290,9 @@ mod tests {
         ) -> Result<Vec<Envelope>, DomainError> {
             Ok(vec![])
         }
+        async fn find_by_id(&self, _id: &EnvelopeId) -> Result<Option<Envelope>, DomainError> {
+            Ok(None)
+        }
         async fn delete(&self, _id: &EnvelopeId) -> Result<(), DomainError> {
             Ok(())
         }

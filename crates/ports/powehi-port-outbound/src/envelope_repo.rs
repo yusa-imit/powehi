@@ -14,6 +14,7 @@ pub trait EnvelopeRepository: Send + Sync {
         device_id: &DeviceId,
         since: Option<DateTime<Utc>>,
     ) -> Result<Vec<Envelope>, DomainError>;
+    async fn find_by_id(&self, id: &EnvelopeId) -> Result<Option<Envelope>, DomainError>;
     async fn delete(&self, id: &EnvelopeId) -> Result<(), DomainError>;
     async fn delete_expired(&self) -> Result<u64, DomainError>;
 }

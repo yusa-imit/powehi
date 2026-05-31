@@ -130,6 +130,20 @@ impl EnvelopeRepository for PgEnvelopeRepository {
         Ok(rows.into_iter().map(Envelope::from).collect())
     }
 
+    async fn find_by_id(&self, id: &EnvelopeId) -> Result<Option<Envelope>, DomainError> {
+        sqlx::query_as::<_, EnvelopeRow>(
+            "SELECT id, group_id, sender_device_id, recipient_device_id,
+                    message_type, ciphertext, epoch, created_at, expires_at
+             FROM envelopes
+             WHERE id = $1",
+        )
+        .bind(id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_err)
+        .map(|opt| opt.map(Envelope::from))
+    }
+
     async fn delete(&self, id: &EnvelopeId) -> Result<(), DomainError> {
         sqlx::query("DELETE FROM envelopes WHERE id = $1")
             .bind(id.as_uuid())
