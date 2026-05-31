@@ -17,6 +17,20 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-31, cycle 58 — FEATURE: session-auth hardening — YELLOWs Y-1…Y-5 + RED-1 closed)
+- **Cycle 58 (commit 951f5d3):** Closed all 5 deferred security-auditor YELLOWs from cycle 56 + auditor RED-1 found in review:
+  - **Y-1 (session revocation on device revoke):** `login_finish` writes session token into `device_sessions:{device_id}` Redis set (SADD + EXPIRE). `revoke_device` calls SMEMBERS, deletes each `session:{token}`, deletes the set. Immediate invalidation on device revoke.
+  - **R-1 (revoke↔login_finish race):** `login_finish` re-verifies device existence _after_ writing the session. If device was concurrently revoked, the orphan session is deleted before returning Unauthorized.
+  - **Y-1 / set_add hard-fail:** `set_add` failure now returns Unauthorized instead of silently creating an untrackable session.
+  - **Y-2 (nonce TTL naming):** Separate `LOGIN_NONCE_TTL` constant distinct from `REG_TTL` (same 300s, semantically separate).
+  - **Y-3 (atomic nonce consume):** `login_finish` uses `cache.get_del` (Redis GETDEL) — no TOCTOU replay window.
+  - **Y-4 (device_id logging order):** Removed `device_id` from `#[instrument]` fields; logged only after ownership verification via `tracing::debug!`.
+  - **Y-5 (remove unused user_id field):** `LoginFinishRequest.user_id` removed; server always resolves user from nonce cache.
+  - **CachePort new methods:** `get_del`, `set_add`, `set_expire`, `set_members` with default no-op implementations; `RedisCache` overrides with GETDEL/SADD/EXPIRE/SMEMBERS.
+  - **+3 tests:** `login_finish_nonce_cannot_be_reused`, `revoke_device_invalidates_active_sessions`, `login_finish_after_device_revoked_returns_unauthorized`.
+  - **272 Rust tests** (cargo test; was 274 with nextest — no regressions); clippy clean; rustfmt clean.
+  - **Remaining deferred:** Y-4 (`set_expire` without NX/GT flag — acceptable, `EXPIRE` renews TTL on each login which is correct behavior).
+
 ## Current state (2026-05-31, cycle 56 — FEATURE: Redis session auth — Bearer stub closed on REST + WS)
 - **Cycle 56 (commit 52e30d9):** Closed the stub Bearer auth vulnerability (R-2/R-1 from security-auditor):
   - **R-2 (REST API):** `AuthenticatedDevice` middleware rewritten from raw `DeviceId` UUID parse to `session:{token}` → DeviceId UUID bytes Redis cache lookup. Any token not in the live session store returns 401. `FromRef<AppState> for Arc<dyn CachePort>` added. `AppState` gains `cache` field. `EmptyCache`/`FakeCache` added to all test state constructions.
