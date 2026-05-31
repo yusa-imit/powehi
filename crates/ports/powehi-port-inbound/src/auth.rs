@@ -41,7 +41,6 @@ pub struct LoginInitResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoginFinishRequest {
-    pub user_id: UserId,
     pub opaque_ke3: Vec<u8>,
     /// Must match the `login_nonce` returned by `login_init`.
     pub login_nonce: String,

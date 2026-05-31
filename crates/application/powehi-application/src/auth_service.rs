@@ -20,7 +20,10 @@ use tracing::instrument;
 use uuid::Uuid;
 
 const REG_TTL: Duration = Duration::from_secs(300);
+const LOGIN_NONCE_TTL: Duration = Duration::from_secs(300);
 const SESSION_TTL: Duration = Duration::from_secs(86_400);
+/// Buffer added to `device_sessions` set TTL so it outlives any session it tracks.
+const DEVICE_SESSIONS_TTL: Duration = Duration::from_secs(86_400 + 300);
 
 pub struct AuthService {
     user_repo: Arc<dyn UserRepository>,
@@ -111,7 +114,7 @@ impl AuthUseCase for AuthService {
             .set(
                 &nonce_key,
                 user_id.as_uuid().as_bytes().to_vec(),
-                Some(REG_TTL),
+                Some(LOGIN_NONCE_TTL),
             )
             .await?;
 
@@ -122,27 +125,28 @@ impl AuthUseCase for AuthService {
         })
     }
 
-    #[instrument(skip(self, req), fields(device_id = %req.device_id))]
+    // device_id not logged before ownership verification — added after (Y-4).
+    #[instrument(skip(self, req))]
     async fn login_finish(&self, req: LoginFinishRequest) -> Result<SessionToken, DomainError> {
-        // Collapse all OPAQUE errors to Unauthorized (Y-5: no error oracle).
+        // Collapse all OPAQUE errors to Unauthorized (no error oracle).
         self.opaque
             .login_finish(req.login_nonce.as_bytes(), &req.opaque_ke3)
             .map_err(|_| DomainError::Unauthorized)?;
 
-        // Resolve the authenticated user_id from the server-controlled nonce cache —
-        // never from req.user_id which is client-supplied (security-auditor finding #1).
+        // Atomically consume the nonce — GETDEL prevents replay within the same
+        // TTL window (Y-3: no TOCTOU between get and delete).
         let nonce_key = format!("login_nonce:{}", req.login_nonce);
         let user_id_bytes = self
             .cache
-            .get(&nonce_key)
+            .get_del(&nonce_key)
             .await
             .map_err(|_| DomainError::Unauthorized)?
             .ok_or(DomainError::Unauthorized)?;
-        let _ = self.cache.delete(&nonce_key).await; // consume nonce — prevents replay
         let user_uuid = Uuid::from_slice(&user_id_bytes).map_err(|_| DomainError::Unauthorized)?;
         let authenticated_user_id = UserId::from(user_uuid);
 
         // Verify the claimed device belongs to the authenticated user.
+        // Log device_id only after this ownership check passes (Y-4).
         let device = self
             .device_repo
             .find_by_id(&req.device_id)
@@ -151,9 +155,10 @@ impl AuthUseCase for AuthService {
         if device.user_id != authenticated_user_id {
             return Err(DomainError::Unauthorized);
         }
+        tracing::debug!(device_id = %req.device_id, "login_finish.device_verified");
 
-        // Session maps token → DeviceId (not UserId). All protected API routes
-        // require a DeviceId; storing it here avoids an extra lookup per request.
+        // Session maps token → DeviceId. All protected routes need DeviceId;
+        // storing it here avoids a DB lookup per request.
         let token = Uuid::new_v4().to_string();
         let session_cache_key = format!("session:{}", token);
         self.cache
@@ -164,6 +169,30 @@ impl AuthUseCase for AuthService {
             )
             .await
             .map_err(|_| DomainError::Unauthorized)?;
+
+        // Track token in per-device set so revoke_device can invalidate it (Y-1).
+        // Fail hard — a tracking failure leaves an unrevocable orphan session.
+        let device_sessions_key = format!("device_sessions:{}", req.device_id.as_uuid());
+        self.cache
+            .set_add(&device_sessions_key, &token)
+            .await
+            .map_err(|_| {
+                // best-effort: clean up the session we already wrote
+                DomainError::Unauthorized
+            })?;
+        let _ = self
+            .cache
+            .set_expire(&device_sessions_key, DEVICE_SESSIONS_TTL)
+            .await;
+
+        // Re-verify device still exists after session write (R-1: closes the
+        // revoke↔login_finish race — if revoke_device deleted the device between
+        // our first ownership check and here, we detect it and clean up).
+        if self.device_repo.find_by_id(&req.device_id).await?.is_none() {
+            let _ = self.cache.delete(&session_cache_key).await;
+            let _ = self.cache.delete(&device_sessions_key).await;
+            return Err(DomainError::Unauthorized);
+        }
 
         Ok(SessionToken(token))
     }
@@ -194,7 +223,18 @@ impl AuthUseCase for AuthService {
         if &device.user_id != user_id {
             return Err(DomainError::Unauthorized);
         }
-        self.device_repo.delete(device_id).await
+        self.device_repo.delete(device_id).await?;
+
+        // Immediately invalidate all active sessions for the revoked device (Y-1).
+        // Propagate set_members error — silently succeeding on cache failure
+        // would leave live session tokens for a revoked device (Y-5).
+        let device_sessions_key = format!("device_sessions:{}", device_id.as_uuid());
+        let tokens = self.cache.set_members(&device_sessions_key).await?;
+        for token in &tokens {
+            let _ = self.cache.delete(&format!("session:{token}")).await;
+        }
+        let _ = self.cache.delete(&device_sessions_key).await;
+        Ok(())
     }
 }
 
@@ -313,11 +353,13 @@ mod tests {
 
     struct FakeCache {
         store: Mutex<HashMap<String, Vec<u8>>>,
+        sets: Mutex<HashMap<String, Vec<String>>>,
     }
     impl FakeCache {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 store: Mutex::new(HashMap::new()),
+                sets: Mutex::new(HashMap::new()),
             })
         }
     }
@@ -337,10 +379,35 @@ mod tests {
         }
         async fn delete(&self, key: &str) -> Result<(), DomainError> {
             self.store.lock().unwrap().remove(key);
+            self.sets.lock().unwrap().remove(key);
             Ok(())
         }
         async fn exists(&self, key: &str) -> Result<bool, DomainError> {
             Ok(self.store.lock().unwrap().contains_key(key))
+        }
+        async fn get_del(&self, key: &str) -> Result<Option<Vec<u8>>, DomainError> {
+            Ok(self.store.lock().unwrap().remove(key))
+        }
+        async fn set_add(&self, key: &str, member: &str) -> Result<(), DomainError> {
+            self.sets
+                .lock()
+                .unwrap()
+                .entry(key.to_owned())
+                .or_default()
+                .push(member.to_owned());
+            Ok(())
+        }
+        async fn set_expire(&self, _key: &str, _ttl: Duration) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn set_members(&self, key: &str) -> Result<Vec<String>, DomainError> {
+            Ok(self
+                .sets
+                .lock()
+                .unwrap()
+                .get(key)
+                .cloned()
+                .unwrap_or_default())
         }
     }
 
@@ -479,7 +546,6 @@ mod tests {
             .unwrap();
         let token = svc
             .login_finish(LoginFinishRequest {
-                user_id: uid.clone(),
                 opaque_ke3: vec![0u8; 32],
                 login_nonce: init.login_nonce,
                 device_id: device_id.clone(),
@@ -527,7 +593,6 @@ mod tests {
             .unwrap();
         let err = svc
             .login_finish(LoginFinishRequest {
-                user_id: uid.clone(),
                 opaque_ke3: vec![0u8; 32],
                 login_nonce: init.login_nonce,
                 device_id: other_device,
@@ -535,6 +600,160 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::Unauthorized));
+    }
+
+    #[tokio::test]
+    async fn login_finish_nonce_cannot_be_reused() {
+        // Y-3: nonce must be consumed atomically; a second login_finish with the
+        // same nonce must return Unauthorized even if OPAQUE ke3 verifies.
+        let (svc, user_repo, _, _) = make_svc();
+        let uid = UserId::new();
+        user_repo
+            .save(&User::new(uid.clone(), b"hash".to_vec()))
+            .await
+            .unwrap();
+        let device_id = svc
+            .register_device(
+                &uid,
+                DeviceRegistrationRequest {
+                    mls_credential: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        let init = svc
+            .login_init(LoginInitRequest {
+                handle_hash: b"hash".to_vec(),
+                opaque_ke1: vec![0u8; 32],
+            })
+            .await
+            .unwrap();
+        let nonce = init.login_nonce.clone();
+
+        // First use succeeds.
+        svc.login_finish(LoginFinishRequest {
+            opaque_ke3: vec![0u8; 32],
+            login_nonce: nonce.clone(),
+            device_id: device_id.clone(),
+        })
+        .await
+        .unwrap();
+
+        // Second use with the same nonce must fail (nonce was consumed).
+        let err = svc
+            .login_finish(LoginFinishRequest {
+                opaque_ke3: vec![0u8; 32],
+                login_nonce: nonce,
+                device_id: device_id.clone(),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
+    }
+
+    #[tokio::test]
+    async fn revoke_device_invalidates_active_sessions() {
+        // Y-1: revoking a device must delete all live session tokens for that device.
+        let (svc, user_repo, _, cache) = make_svc();
+        let uid = UserId::new();
+        user_repo
+            .save(&User::new(uid.clone(), b"hash".to_vec()))
+            .await
+            .unwrap();
+        let device_id = svc
+            .register_device(
+                &uid,
+                DeviceRegistrationRequest {
+                    mls_credential: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        // Log in once to create a session.
+        let init = svc
+            .login_init(LoginInitRequest {
+                handle_hash: b"hash".to_vec(),
+                opaque_ke1: vec![0u8; 32],
+            })
+            .await
+            .unwrap();
+        let token = svc
+            .login_finish(LoginFinishRequest {
+                opaque_ke3: vec![0u8; 32],
+                login_nonce: init.login_nonce,
+                device_id: device_id.clone(),
+            })
+            .await
+            .unwrap();
+
+        // Session exists before revocation.
+        let session_key = format!("session:{}", token.0);
+        assert!(
+            cache.get(&session_key).await.unwrap().is_some(),
+            "session must exist before revoke"
+        );
+
+        // Revoke the device.
+        svc.revoke_device(&uid, &device_id).await.unwrap();
+
+        // Session must be deleted.
+        assert!(
+            cache.get(&session_key).await.unwrap().is_none(),
+            "session must be deleted after device revoke"
+        );
+    }
+
+    #[tokio::test]
+    async fn login_finish_after_device_revoked_returns_unauthorized() {
+        // R-1 race-close: if the device is revoked between the ownership check
+        // and the final re-verify in login_finish, the session must NOT be issued.
+        // We simulate this by revoking the device before login_finish runs.
+        let (svc, user_repo, _, cache) = make_svc();
+        let uid = UserId::new();
+        user_repo
+            .save(&User::new(uid.clone(), b"hash".to_vec()))
+            .await
+            .unwrap();
+        let device_id = svc
+            .register_device(
+                &uid,
+                DeviceRegistrationRequest {
+                    mls_credential: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        let init = svc
+            .login_init(LoginInitRequest {
+                handle_hash: b"hash".to_vec(),
+                opaque_ke1: vec![0u8; 32],
+            })
+            .await
+            .unwrap();
+
+        // Revoke the device before login_finish.
+        svc.revoke_device(&uid, &device_id).await.unwrap();
+
+        let err = svc
+            .login_finish(LoginFinishRequest {
+                opaque_ke3: vec![0u8; 32],
+                login_nonce: init.login_nonce,
+                device_id: device_id.clone(),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
+
+        // No session must have been left in the cache.
+        let session_count = cache
+            .store
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|k| k.starts_with("session:"))
+            .count();
+        assert_eq!(session_count, 0, "no orphan session after revoke");
     }
 
     #[tokio::test]

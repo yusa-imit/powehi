@@ -82,6 +82,35 @@ impl CachePort for RedisCache {
         let n: u32 = conn.exists(key).await.map_err(map_err)?;
         Ok(n > 0)
     }
+
+    async fn get_del(&self, key: &str) -> Result<Option<Vec<u8>>, DomainError> {
+        let mut conn = self.conn.clone();
+        let val: Option<Vec<u8>> = redis::cmd("GETDEL")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .map_err(map_err)?;
+        Ok(val)
+    }
+
+    async fn set_add(&self, key: &str, member: &str) -> Result<(), DomainError> {
+        let mut conn = self.conn.clone();
+        conn.sadd::<_, _, ()>(key, member).await.map_err(map_err)?;
+        Ok(())
+    }
+
+    async fn set_expire(&self, key: &str, ttl: Duration) -> Result<(), DomainError> {
+        let mut conn = self.conn.clone();
+        let secs = i64::try_from(ttl.as_secs().max(1)).unwrap_or(i64::MAX);
+        conn.expire::<_, ()>(key, secs).await.map_err(map_err)?;
+        Ok(())
+    }
+
+    async fn set_members(&self, key: &str) -> Result<Vec<String>, DomainError> {
+        let mut conn = self.conn.clone();
+        let members: Vec<String> = conn.smembers(key).await.map_err(map_err)?;
+        Ok(members)
+    }
 }
 
 // ── DomainEventBus ──────────────────────────────────────────────────────────
