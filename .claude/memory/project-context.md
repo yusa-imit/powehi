@@ -17,6 +17,16 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-31, cycle 60 — STABILIZATION: orphan-session security fix + test gap closure)
+- **Cycle 60 (commit 6b89f4a):** STABILIZATION — CI green, no open issues, security fix + test gaps:
+  - **Orphan-session bug found and fixed (security-significant):** In `login_finish`, when `set_add` (device_sessions tracking) failed, code returned `Unauthorized` but LEFT an orphan `session:{token}` in the cache. Token unreachable by client but persisted for SESSION_TTL. Fixed: `is_err()` branch now explicitly deletes `session_cache_key` before returning. Added `tracing::warn!` on both cleanup-failure paths (set_add fail + revoke-race fail) so cache partitions surface to ops.
+  - **Test that proved the bug:** `login_finish_set_add_failure_returns_unauthorized_and_cleans_session` — uses `SetAddFailCache` error-injectable fake; originally FAILED (confirmed orphan session existed), passes after fix.
+  - **+5 gRPC input-validation tests:** `sync_group_membership_home_region_too_long`, `sync_group_membership_home_region_exactly_64_chars_is_accepted` (boundary), `sync_group_membership_invalid_member_device_id`, `forward_commit_invalid_group_id`, `forward_commit_invalid_sender_device_id`
+  - **Comment fix:** `home_region` validation comment corrected (was "ASCII printable" — code only checks length/non-empty)
+  - **security-auditor:** GREEN (no RED; YELLOWs addressed: cleanup warn-logging added, comment fixed, boundary test added; remaining deferred: set_expire best-effort stale-token accumulation, revoke_device partial-delete logging)
+  - **284 Rust tests** (was 278, +6); clippy clean; rustfmt clean; cargo audit 1 allowed warning (RUSTSEC-2024-0384 unchanged)
+  - **Remaining deferred (non-blocking):** mTLS peer-cert → home_region binding (RED-2/RED-3, architectural), set_expire stale-token accumulation, revoke_device mid-loop delete failure logging
+
 ## Current state (2026-05-31, cycle 59 — FEATURE: gRPC sender-membership enforcement — gRPC R-1 closed)
 - **Cycle 59 (commit 63ce31d):** Closed long-deferred gRPC R-1 (forward_envelope no sender-membership check):
   - **`RegionGrpcServer` gains `group_repo: Arc<dyn GroupRepository>`** — passed from `main.rs` (clone of `PgGroupRepository`)
