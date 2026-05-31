@@ -104,6 +104,17 @@ impl AuthUseCase for AuthService {
             login_nonce.as_bytes(),
         )?;
 
+        // Cache nonce → user_id so login_finish can look up the authenticated user
+        // without trusting the client-supplied req.user_id.
+        let nonce_key = format!("login_nonce:{}", login_nonce);
+        self.cache
+            .set(
+                &nonce_key,
+                user_id.as_uuid().as_bytes().to_vec(),
+                Some(REG_TTL),
+            )
+            .await?;
+
         Ok(LoginInitResponse {
             user_id,
             opaque_ke2: ke2,
@@ -111,20 +122,46 @@ impl AuthUseCase for AuthService {
         })
     }
 
-    #[instrument(skip(self, req), fields(user_id = %req.user_id))]
+    #[instrument(skip(self, req), fields(device_id = %req.device_id))]
     async fn login_finish(&self, req: LoginFinishRequest) -> Result<SessionToken, DomainError> {
         // Collapse all OPAQUE errors to Unauthorized (Y-5: no error oracle).
-        // Use the server-bound identity as session subject — never req.user_id
-        // (security-auditor finding #1).
-        let (_session_key, bound_identity) = self
-            .opaque
+        self.opaque
             .login_finish(req.login_nonce.as_bytes(), &req.opaque_ke3)
             .map_err(|_| DomainError::Unauthorized)?;
 
+        // Resolve the authenticated user_id from the server-controlled nonce cache —
+        // never from req.user_id which is client-supplied (security-auditor finding #1).
+        let nonce_key = format!("login_nonce:{}", req.login_nonce);
+        let user_id_bytes = self
+            .cache
+            .get(&nonce_key)
+            .await
+            .map_err(|_| DomainError::Unauthorized)?
+            .ok_or(DomainError::Unauthorized)?;
+        let _ = self.cache.delete(&nonce_key).await; // consume nonce — prevents replay
+        let user_uuid = Uuid::from_slice(&user_id_bytes).map_err(|_| DomainError::Unauthorized)?;
+        let authenticated_user_id = UserId::from(user_uuid);
+
+        // Verify the claimed device belongs to the authenticated user.
+        let device = self
+            .device_repo
+            .find_by_id(&req.device_id)
+            .await?
+            .ok_or(DomainError::Unauthorized)?;
+        if device.user_id != authenticated_user_id {
+            return Err(DomainError::Unauthorized);
+        }
+
+        // Session maps token → DeviceId (not UserId). All protected API routes
+        // require a DeviceId; storing it here avoids an extra lookup per request.
         let token = Uuid::new_v4().to_string();
         let session_cache_key = format!("session:{}", token);
         self.cache
-            .set(&session_cache_key, bound_identity, Some(SESSION_TTL))
+            .set(
+                &session_cache_key,
+                req.device_id.as_uuid().as_bytes().to_vec(),
+                Some(SESSION_TTL),
+            )
             .await
             .map_err(|_| DomainError::Unauthorized)?;
 
@@ -417,11 +454,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn login_finish_issues_session_token() {
+    async fn login_finish_issues_session_token_bound_to_device() {
         let (svc, user_repo, _, cache) = make_svc();
         let uid = UserId::new();
         user_repo
             .save(&User::new(uid.clone(), b"hash".to_vec()))
+            .await
+            .unwrap();
+        let device_id = svc
+            .register_device(
+                &uid,
+                DeviceRegistrationRequest {
+                    mls_credential: vec![],
+                },
+            )
             .await
             .unwrap();
         let init = svc
@@ -436,12 +482,59 @@ mod tests {
                 user_id: uid.clone(),
                 opaque_ke3: vec![0u8; 32],
                 login_nonce: init.login_nonce,
+                device_id: device_id.clone(),
             })
             .await
             .unwrap();
         let session_key = format!("session:{}", token.0);
-        let stored = cache.get(&session_key).await.unwrap();
-        assert!(stored.is_some(), "session token must be stored in cache");
+        let stored = cache
+            .get(&session_key)
+            .await
+            .unwrap()
+            .expect("session stored");
+        assert_eq!(
+            stored,
+            device_id.as_uuid().as_bytes().to_vec(),
+            "session must store DeviceId bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn login_finish_wrong_device_owner_returns_unauthorized() {
+        let (svc, user_repo, _, _) = make_svc();
+        let uid = UserId::new();
+        let other_uid = UserId::new();
+        user_repo
+            .save(&User::new(uid.clone(), b"hash".to_vec()))
+            .await
+            .unwrap();
+        // Register a device under a DIFFERENT user.
+        let other_device = svc
+            .register_device(
+                &other_uid,
+                DeviceRegistrationRequest {
+                    mls_credential: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        let init = svc
+            .login_init(LoginInitRequest {
+                handle_hash: b"hash".to_vec(),
+                opaque_ke1: vec![0u8; 32],
+            })
+            .await
+            .unwrap();
+        let err = svc
+            .login_finish(LoginFinishRequest {
+                user_id: uid.clone(),
+                opaque_ke3: vec![0u8; 32],
+                login_nonce: init.login_nonce,
+                device_id: other_device,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
     }
 
     #[tokio::test]

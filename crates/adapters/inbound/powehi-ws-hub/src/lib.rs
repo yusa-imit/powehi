@@ -21,6 +21,7 @@ use serde::Serialize;
 use tokio::sync::broadcast;
 
 use powehi_domain::event::DomainEvent;
+use powehi_port_outbound::cache::CachePort;
 
 /// Capacity of the broadcast ring buffer.
 const HUB_CAPACITY: usize = 512;
@@ -45,6 +46,14 @@ pub enum WsNotification {
     MemberRemoved {
         group_id: String,
     },
+}
+
+/// State shared by every WebSocket connection: the broadcast hub and the
+/// session cache used to resolve Bearer tokens to DeviceIds.
+#[derive(Clone)]
+pub(crate) struct WsHubState {
+    pub(crate) hub: Arc<WsHub>,
+    pub(crate) cache: Arc<dyn CachePort>,
 }
 
 /// Global fan-out hub.  All authenticated WS connections share one broadcast sender.
@@ -105,10 +114,10 @@ impl Default for WsHub {
 }
 
 /// Build the axum router fragment for the WS endpoint (`GET /v1/ws`).
-pub fn router(hub: Arc<WsHub>) -> Router {
+pub fn router(hub: Arc<WsHub>, cache: Arc<dyn CachePort>) -> Router {
     Router::new()
         .route("/v1/ws", get(handler::ws_handler))
-        .with_state(hub)
+        .with_state(WsHubState { hub, cache })
 }
 
 #[cfg(test)]

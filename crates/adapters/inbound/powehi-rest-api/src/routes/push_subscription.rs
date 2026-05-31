@@ -330,6 +330,7 @@ mod tests {
             key_package: null.clone(),
             media: null.clone(),
             push_sub_repo,
+            cache: test_session_cache(),
             handle_rate_limiter: std::sync::Arc::new(crate::rate_limit::HandleRateLimiter::new()),
         };
 
@@ -342,6 +343,56 @@ mod tests {
             .with_state(state)
     }
 
+    /// Fixed test token (matches `test_session_cache()` seed).
+    const TEST_TOKEN: &str = "test-push-token";
+
+    fn test_device_id() -> DeviceId {
+        use uuid::Uuid;
+        DeviceId::from(Uuid::from_bytes([2u8; 16]))
+    }
+
+    fn test_session_cache() -> std::sync::Arc<dyn powehi_port_outbound::cache::CachePort> {
+        use powehi_port_outbound::cache::CachePort;
+        use std::collections::HashMap;
+        use std::time::Duration;
+
+        struct FakeCache {
+            store: Mutex<HashMap<String, Vec<u8>>>,
+        }
+        #[async_trait::async_trait]
+        impl CachePort for FakeCache {
+            async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, DomainError> {
+                Ok(self.store.lock().unwrap().get(key).cloned())
+            }
+            async fn set(
+                &self,
+                key: &str,
+                value: Vec<u8>,
+                _: Option<Duration>,
+            ) -> Result<(), DomainError> {
+                self.store.lock().unwrap().insert(key.to_owned(), value);
+                Ok(())
+            }
+            async fn delete(&self, key: &str) -> Result<(), DomainError> {
+                self.store.lock().unwrap().remove(key);
+                Ok(())
+            }
+            async fn exists(&self, key: &str) -> Result<bool, DomainError> {
+                Ok(self.store.lock().unwrap().contains_key(key))
+            }
+        }
+        let cache = std::sync::Arc::new(FakeCache {
+            store: Mutex::new(HashMap::new()),
+        });
+        let key = format!("session:{TEST_TOKEN}");
+        cache
+            .store
+            .lock()
+            .unwrap()
+            .insert(key, test_device_id().as_uuid().as_bytes().to_vec());
+        cache
+    }
+
     fn valid_register_body() -> serde_json::Value {
         serde_json::json!({
             "endpoint": "https://push.example.com/abc",
@@ -352,7 +403,7 @@ mod tests {
     }
 
     fn bearer_header() -> String {
-        format!("Bearer {}", DeviceId::new())
+        format!("Bearer {TEST_TOKEN}")
     }
 
     #[tokio::test]

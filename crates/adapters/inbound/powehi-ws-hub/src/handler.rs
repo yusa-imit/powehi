@@ -1,6 +1,8 @@
 //! WebSocket upgrade handler.
 //!
-//! Auth: same `Bearer <device_id_uuid>` scheme as the REST API.
+//! Auth: `Authorization: Bearer <session_token>` resolved against the Redis
+//! session store (same store used by the REST API middleware).  Any raw UUID
+//! that is not a live session entry is rejected with 401.
 //! After upgrade the socket streams `WsNotification` JSON frames.
 //! The socket loop exits cleanly on client close or channel shutdown.
 //!
@@ -20,10 +22,12 @@ use axum::{
 };
 use tokio::{sync::broadcast, time::timeout};
 use tracing::instrument;
+use uuid::Uuid;
 
 use powehi_domain::device::DeviceId;
+use powehi_port_outbound::cache::CachePort;
 
-use crate::{WsHub, WsNotification};
+use crate::{WsHubState, WsNotification};
 
 /// Max inbound frame size: 4 KiB. The protocol is server-push only; clients
 /// only send Close/Ping. Large frames from clients are a sign of abuse.
@@ -35,12 +39,12 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 #[instrument(skip_all)]
 pub async fn ws_handler(
     upgrade: WebSocketUpgrade,
-    State(hub): State<Arc<WsHub>>,
+    State(state): State<WsHubState>,
     headers: HeaderMap,
 ) -> Response {
-    match extract_device_id(&headers) {
+    match extract_device_id(&headers, &state.cache).await {
         Ok(device_id) => {
-            let rx = hub.subscribe();
+            let rx = state.hub.subscribe();
             upgrade
                 .max_message_size(MAX_FRAME_BYTES)
                 .on_upgrade(move |socket| handle_socket(socket, device_id, rx))
@@ -49,15 +53,26 @@ pub async fn ws_handler(
     }
 }
 
-fn extract_device_id(headers: &HeaderMap) -> Result<DeviceId, StatusCode> {
+async fn extract_device_id(
+    headers: &HeaderMap,
+    cache: &Arc<dyn CachePort>,
+) -> Result<DeviceId, StatusCode> {
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
+        .filter(|t| !t.is_empty())
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    token
-        .parse::<DeviceId>()
-        .map_err(|_| StatusCode::UNAUTHORIZED)
+
+    let key = format!("session:{token}");
+    let raw = cache
+        .get(&key)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    let bytes: [u8; 16] = raw.try_into().map_err(|_| StatusCode::UNAUTHORIZED)?;
+    Ok(DeviceId::from(Uuid::from_bytes(bytes)))
 }
 
 async fn handle_socket(
@@ -117,49 +132,128 @@ async fn handle_socket(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use axum::http::{header, HeaderMap, HeaderValue};
+    use powehi_domain::error::DomainError;
+    use std::{collections::HashMap, sync::Mutex};
+
+    struct FakeCache {
+        store: Mutex<HashMap<String, Vec<u8>>>,
+    }
+
+    #[async_trait]
+    impl CachePort for FakeCache {
+        async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, DomainError> {
+            Ok(self.store.lock().unwrap().get(key).cloned())
+        }
+        async fn set(
+            &self,
+            key: &str,
+            value: Vec<u8>,
+            _ttl: Option<Duration>,
+        ) -> Result<(), DomainError> {
+            self.store.lock().unwrap().insert(key.to_owned(), value);
+            Ok(())
+        }
+        async fn delete(&self, key: &str) -> Result<(), DomainError> {
+            self.store.lock().unwrap().remove(key);
+            Ok(())
+        }
+        async fn exists(&self, key: &str) -> Result<bool, DomainError> {
+            Ok(self.store.lock().unwrap().contains_key(key))
+        }
+    }
+
+    fn empty_cache() -> Arc<dyn CachePort> {
+        Arc::new(FakeCache {
+            store: Mutex::new(HashMap::new()),
+        })
+    }
+
+    fn seeded_cache(token: &str, device_id: &DeviceId) -> Arc<dyn CachePort> {
+        let c = FakeCache {
+            store: Mutex::new(HashMap::new()),
+        };
+        c.store.lock().unwrap().insert(
+            format!("session:{token}"),
+            device_id.as_uuid().as_bytes().to_vec(),
+        );
+        Arc::new(c)
+    }
 
     fn headers_with_bearer(token: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
         h.insert(
             header::AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
         );
         h
     }
 
-    #[test]
-    fn valid_device_uuid_accepted() {
-        let id = uuid::Uuid::new_v4().to_string();
-        let h = headers_with_bearer(&id);
-        assert!(extract_device_id(&h).is_ok());
+    #[tokio::test]
+    async fn valid_session_token_resolves_device_id() {
+        let device_id = DeviceId::new();
+        let token = "valid-session-token";
+        let cache = seeded_cache(token, &device_id);
+        let h = headers_with_bearer(token);
+        let result = extract_device_id(&h, &cache).await.unwrap();
+        assert_eq!(result.to_string(), device_id.to_string());
     }
 
-    #[test]
-    fn missing_authorization_header_is_401() {
+    #[tokio::test]
+    async fn missing_authorization_header_is_401() {
+        let cache = empty_cache();
         let h = HeaderMap::new();
-        assert_eq!(extract_device_id(&h), Err(StatusCode::UNAUTHORIZED));
+        assert_eq!(
+            extract_device_id(&h, &cache).await,
+            Err(StatusCode::UNAUTHORIZED)
+        );
     }
 
-    #[test]
-    fn wrong_scheme_is_401() {
+    #[tokio::test]
+    async fn wrong_scheme_is_401() {
+        let cache = empty_cache();
         let mut h = HeaderMap::new();
         h.insert(
             header::AUTHORIZATION,
             HeaderValue::from_static("Basic dXNlcjpwYXNz"),
         );
-        assert_eq!(extract_device_id(&h), Err(StatusCode::UNAUTHORIZED));
+        assert_eq!(
+            extract_device_id(&h, &cache).await,
+            Err(StatusCode::UNAUTHORIZED)
+        );
     }
 
-    #[test]
-    fn non_uuid_bearer_token_is_401() {
-        let h = headers_with_bearer("not-a-uuid");
-        assert_eq!(extract_device_id(&h), Err(StatusCode::UNAUTHORIZED));
+    #[tokio::test]
+    async fn unknown_token_is_401() {
+        let cache = empty_cache();
+        let h = headers_with_bearer("unknown-token");
+        assert_eq!(
+            extract_device_id(&h, &cache).await,
+            Err(StatusCode::UNAUTHORIZED)
+        );
     }
 
-    #[test]
-    fn empty_bearer_is_401() {
+    #[tokio::test]
+    async fn empty_bearer_is_401() {
+        let cache = empty_cache();
         let h = headers_with_bearer("");
-        assert_eq!(extract_device_id(&h), Err(StatusCode::UNAUTHORIZED));
+        assert_eq!(
+            extract_device_id(&h, &cache).await,
+            Err(StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_device_uuid_without_session_is_401() {
+        // Regression: R-1 fix — a bare DeviceId UUID that is not a live session
+        // entry must be rejected. Previously the stub parsed Bearer as raw UUID.
+        let cache = empty_cache();
+        let device_id = DeviceId::new();
+        let h = headers_with_bearer(&device_id.to_string());
+        assert_eq!(
+            extract_device_id(&h, &cache).await,
+            Err(StatusCode::UNAUTHORIZED)
+        );
     }
 }

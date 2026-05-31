@@ -45,6 +45,9 @@ pub struct LoginFinishRequest {
     pub opaque_ke3: Vec<u8>,
     /// Must match the `login_nonce` returned by `login_init`.
     pub login_nonce: String,
+    /// The device the user is authenticating from. Server verifies ownership before
+    /// issuing a device-scoped session token.
+    pub device_id: DeviceId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

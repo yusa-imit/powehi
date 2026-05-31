@@ -89,8 +89,12 @@ async fn main() -> Result<()> {
             }
         });
 
-    let auth: Arc<dyn powehi_port_inbound::auth::AuthUseCase> =
-        Arc::new(AuthService::new(user_repo, device_repo, opaque, cache));
+    let auth: Arc<dyn powehi_port_inbound::auth::AuthUseCase> = Arc::new(AuthService::new(
+        user_repo,
+        device_repo,
+        opaque,
+        cache.clone(),
+    ));
 
     let messaging: Arc<dyn powehi_port_inbound::messaging::MessagingUseCase> = Arc::new(
         MessagingService::new(envelope_repo.clone(), group_repo, event_bus.clone())
@@ -178,11 +182,13 @@ async fn main() -> Result<()> {
         key_package,
         media,
         push_sub_repo,
+        cache: Arc::clone(&cache),
         handle_rate_limiter: Arc::clone(&handle_rate_limiter),
     };
 
     let ws_rl = powehi_rest_api::rate_limit::api_governor();
-    let app = powehi_rest_api::router(state).merge(powehi_ws_hub::router(ws_hub).layer(ws_rl));
+    let app = powehi_rest_api::router(state)
+        .merge(powehi_ws_hub::router(ws_hub, Arc::clone(&cache)).layer(ws_rl));
 
     // Admin server: internal-only, Prometheus scrape target.
     // Bound to 127.0.0.1 so it is never reachable from outside the pod.

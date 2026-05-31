@@ -192,6 +192,33 @@ mod tests {
             }
         }
 
+        use powehi_port_outbound::cache::CachePort;
+        use std::collections::HashMap;
+        use std::time::Duration;
+
+        struct EmptyCache;
+        #[async_trait]
+        impl CachePort for EmptyCache {
+            async fn get(&self, _: &str) -> Result<Option<Vec<u8>>, DomainError> {
+                Ok(None)
+            }
+            async fn set(
+                &self,
+                _: &str,
+                _: Vec<u8>,
+                _: Option<Duration>,
+            ) -> Result<(), DomainError> {
+                Ok(())
+            }
+            async fn delete(&self, _: &str) -> Result<(), DomainError> {
+                Ok(())
+            }
+            async fn exists(&self, _: &str) -> Result<bool, DomainError> {
+                Ok(false)
+            }
+        }
+        let _ = HashMap::<String, Vec<u8>>::new(); // suppress unused import warning
+
         AppState {
             region_id: region_id.to_string(),
             auth: Arc::new(Null),
@@ -199,6 +226,7 @@ mod tests {
             key_package: Arc::new(Null),
             media: Arc::new(Null),
             push_sub_repo: Arc::new(Null),
+            cache: Arc::new(EmptyCache),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         }
     }

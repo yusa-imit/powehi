@@ -4,9 +4,9 @@
 //! `KeyPackageUseCase`) to HTTP routes. The server never sees plaintext: every
 //! payload is opaque E2EE material and is never logged or inspected here.
 //!
-//! Auth model (Phase 3 stub): protected routes use the `AuthenticatedDevice`
-//! extractor, which reads a Bearer token that is currently a raw `DeviceId`.
-//! Real Redis-backed session lookup is deferred (see `middleware`).
+//! Auth model: protected routes use the `AuthenticatedDevice` extractor, which
+//! validates `Authorization: Bearer <token>` against Redis-backed sessions. The
+//! session maps `session:{token}` → DeviceId UUID bytes (16 bytes).
 
 pub mod error;
 pub mod middleware;
@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::DefaultBodyLimit,
+    extract::{DefaultBodyLimit, FromRef},
     middleware::from_fn,
     response::Response,
     routing::{delete, get, post},
@@ -29,7 +29,7 @@ use powehi_port_inbound::{
     auth::AuthUseCase, key_package::KeyPackageUseCase, media::MediaUseCase,
     messaging::MessagingUseCase,
 };
-use powehi_port_outbound::push_subscription_repo::PushSubscriptionRepository;
+use powehi_port_outbound::{cache::CachePort, push_subscription_repo::PushSubscriptionRepository};
 use tower_http::trace::TraceLayer;
 
 /// Global body cap. MLS messages are bounded by RFC 9420 limits; OPAQUE blobs
@@ -46,8 +46,18 @@ pub struct AppState {
     pub key_package: Arc<dyn KeyPackageUseCase>,
     pub media: Arc<dyn MediaUseCase>,
     pub push_sub_repo: Arc<dyn PushSubscriptionRepository>,
+    /// Session store: `session:{token}` → DeviceId UUID bytes. Used by the
+    /// `AuthenticatedDevice` extractor to validate Bearer tokens.
+    pub cache: Arc<dyn CachePort>,
     /// Per-handle-hash rate limiter — credential-stuffing guard complementing the per-IP limit.
     pub handle_rate_limiter: Arc<rate_limit::HandleRateLimiter>,
+}
+
+/// Allows `AuthenticatedDevice` extractor to access the session cache from `AppState`.
+impl FromRef<AppState> for Arc<dyn CachePort> {
+    fn from_ref(state: &AppState) -> Arc<dyn CachePort> {
+        state.cache.clone()
+    }
 }
 
 pub fn router(state: AppState) -> Router {
@@ -161,6 +171,7 @@ async fn health() -> &'static str {
 }
 
 #[cfg(test)]
+#[allow(unused_variables)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
@@ -207,6 +218,72 @@ mod tests {
 
     fn null_push_sub_repo() -> Arc<dyn PushSubscriptionRepository> {
         Arc::new(NullPushSubRepo)
+    }
+
+    // ── session cache helpers ────────────────────────────────────────────────
+
+    use powehi_port_outbound::cache::CachePort;
+    use std::{collections::HashMap, time::Duration};
+    use uuid::Uuid as TestUuid;
+
+    struct FakeCache {
+        store: std::sync::Mutex<HashMap<String, Vec<u8>>>,
+    }
+
+    impl FakeCache {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                store: std::sync::Mutex::new(HashMap::new()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl CachePort for FakeCache {
+        async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, DomainError> {
+            Ok(self.store.lock().unwrap().get(key).cloned())
+        }
+        async fn set(
+            &self,
+            key: &str,
+            value: Vec<u8>,
+            _ttl: Option<Duration>,
+        ) -> Result<(), DomainError> {
+            self.store.lock().unwrap().insert(key.to_owned(), value);
+            Ok(())
+        }
+        async fn delete(&self, key: &str) -> Result<(), DomainError> {
+            self.store.lock().unwrap().remove(key);
+            Ok(())
+        }
+        async fn exists(&self, key: &str) -> Result<bool, DomainError> {
+            Ok(self.store.lock().unwrap().contains_key(key))
+        }
+    }
+
+    /// Fixed test token for all router-level tests.
+    const TEST_TOKEN: &str = "test-session-token";
+
+    /// Fixed DeviceId that the test session token authenticates as.
+    fn test_device_id() -> DeviceId {
+        DeviceId::from(TestUuid::from_bytes([1u8; 16]))
+    }
+
+    /// Session cache pre-seeded so `"Bearer TEST_TOKEN"` authenticates as `test_device_id()`.
+    fn test_session_cache() -> Arc<dyn CachePort> {
+        let cache = FakeCache::new();
+        let key = format!("session:{TEST_TOKEN}");
+        cache
+            .store
+            .lock()
+            .unwrap()
+            .insert(key, test_device_id().as_uuid().as_bytes().to_vec());
+        cache
+    }
+
+    /// An empty session cache — any Bearer token will return 401 (used in auth-bypass tests).
+    fn empty_cache() -> Arc<dyn CachePort> {
+        FakeCache::new()
     }
 
     struct MockAuth;
@@ -353,6 +430,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
+            cache: empty_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
     }
@@ -569,6 +647,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
+            cache: test_session_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
     }
@@ -581,6 +660,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
+            cache: test_session_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
     }
@@ -593,6 +673,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackageSuccess),
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
+            cache: test_session_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
     }
@@ -605,6 +686,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackageNotFound),
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
+            cache: test_session_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
     }
@@ -677,6 +759,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMediaSuccess),
             push_sub_repo: null_push_sub_repo(),
+            cache: test_session_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
     }
@@ -689,12 +772,14 @@ mod tests {
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMediaUnauthorized),
             push_sub_repo: null_push_sub_repo(),
+            cache: test_session_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
     }
 
-    fn bearer(device: &DeviceId) -> String {
-        format!("Bearer {device}")
+    /// Returns the test session Bearer token (maps to `test_device_id()` in `test_session_cache()`).
+    fn bearer() -> String {
+        format!("Bearer {TEST_TOKEN}")
     }
 
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
@@ -719,7 +804,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/v1/messages")
-                    .header("authorization", bearer(&device))
+                    .header("authorization", bearer())
                     .header("content-type", "application/json")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
@@ -749,7 +834,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/v1/messages")
-                    .header("authorization", bearer(&device))
+                    .header("authorization", bearer())
                     .header("content-type", "application/json")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
@@ -774,7 +859,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/v1/messages")
-                    .header("authorization", bearer(&device))
+                    .header("authorization", bearer())
                     .header("content-type", "application/json")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
@@ -799,7 +884,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/v1/messages")
-                    .header("authorization", bearer(&device))
+                    .header("authorization", bearer())
                     .header("content-type", "application/json")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
@@ -824,7 +909,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/v1/messages")
-                    .header("authorization", bearer(&device))
+                    .header("authorization", bearer())
                     .header("content-type", "application/json")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
@@ -842,7 +927,7 @@ mod tests {
                 Request::builder()
                     .method("GET")
                     .uri("/v1/messages")
-                    .header("authorization", bearer(&device))
+                    .header("authorization", bearer())
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -861,7 +946,7 @@ mod tests {
                 Request::builder()
                     .method("GET")
                     .uri("/v1/messages?since=1000000")
-                    .header("authorization", bearer(&device))
+                    .header("authorization", bearer())
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -879,7 +964,7 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri(format!("/v1/messages/{envelope_id}"))
-                    .header("authorization", bearer(&device))
+                    .header("authorization", bearer())
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -896,7 +981,7 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri("/v1/messages/not-a-uuid")
-                    .header("authorization", bearer(&device))
+                    .header("authorization", bearer())
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -914,7 +999,7 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri(format!("/v1/messages/{envelope_id}"))
-                    .header("authorization", bearer(&device))
+                    .header("authorization", bearer())
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -938,7 +1023,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/v1/messages/welcome")
-                    .header("authorization", bearer(&device))
+                    .header("authorization", bearer())
                     .header("content-type", "application/json")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
@@ -961,7 +1046,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/v1/messages/commit")
-                    .header("authorization", bearer(&device))
+                    .header("authorization", bearer())
                     .header("content-type", "application/json")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
@@ -977,15 +1062,16 @@ mod tests {
 
     #[tokio::test]
     async fn upload_key_packages_returns_ids() {
-        // caller == device_id: ownership check must pass.
-        let caller = DeviceId::new();
+        // caller == authenticated device: ownership check must pass.
+        // bearer() authenticates as test_device_id(), so the URL path must match.
+        let caller = test_device_id();
         let body = serde_json::json!({ "packages": [[1u8, 2], [3u8, 4]] });
         let resp = key_package_router()
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri(format!("/v1/key-packages/{caller}"))
-                    .header("authorization", bearer(&caller))
+                    .header("authorization", bearer())
                     .header("content-type", "application/json")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
@@ -1008,7 +1094,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/v1/key-packages/{other_device}"))
-                    .header("authorization", bearer(&caller))
+                    .header("authorization", bearer())
                     .header("content-type", "application/json")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
@@ -1027,7 +1113,7 @@ mod tests {
                 Request::builder()
                     .method("GET")
                     .uri(format!("/v1/key-packages/{device}"))
-                    .header("authorization", bearer(&caller))
+                    .header("authorization", bearer())
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1047,7 +1133,7 @@ mod tests {
                 Request::builder()
                     .method("GET")
                     .uri(format!("/v1/key-packages/{device}/count"))
-                    .header("authorization", bearer(&caller))
+                    .header("authorization", bearer())
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1067,7 +1153,7 @@ mod tests {
                 Request::builder()
                     .method("GET")
                     .uri(format!("/v1/key-packages/{device}"))
-                    .header("authorization", bearer(&caller))
+                    .header("authorization", bearer())
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1090,7 +1176,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/v1/media/upload-url")
-                    .header("authorization", bearer(&device))
+                    .header("authorization", bearer())
                     .header("content-type", "application/json")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
@@ -1129,7 +1215,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/v1/media/{media_id}/confirm"))
-                    .header("authorization", bearer(&device))
+                    .header("authorization", bearer())
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1147,7 +1233,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/v1/media/{media_id}/confirm"))
-                    .header("authorization", bearer(&device))
+                    .header("authorization", bearer())
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1165,7 +1251,7 @@ mod tests {
                 Request::builder()
                     .method("GET")
                     .uri(format!("/v1/media/{media_id}/download-url"))
-                    .header("authorization", bearer(&device))
+                    .header("authorization", bearer())
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1185,7 +1271,7 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri(format!("/v1/media/{media_id}"))
-                    .header("authorization", bearer(&device))
+                    .header("authorization", bearer())
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1234,7 +1320,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/v1/media/upload-url")
-                    .header("authorization", bearer(&device))
+                    .header("authorization", bearer())
                     .header("content-type", "application/json")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
@@ -1259,7 +1345,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/v1/media/upload-url")
-                    .header("authorization", bearer(&device))
+                    .header("authorization", bearer())
                     .header("content-type", "application/json")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
@@ -1352,6 +1438,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
+            cache: empty_cache(),
             handle_rate_limiter: Arc::clone(&tight_rl),
         };
         let app = router_for_test(
@@ -1394,6 +1481,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
+            cache: empty_cache(),
             handle_rate_limiter: Arc::clone(&tight_rl),
         };
         let app = router_for_test(
@@ -1448,6 +1536,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
+            cache: empty_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         }
     }
