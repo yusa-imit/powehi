@@ -568,9 +568,15 @@ mod tests {
         } = req;
 
         // IDs must be valid UUIDs — they cannot be user-visible handles or emails.
-        assert!(Uuid::parse_str(&envelope_id).is_ok(), "envelope_id must be UUID");
+        assert!(
+            Uuid::parse_str(&envelope_id).is_ok(),
+            "envelope_id must be UUID"
+        );
         assert!(Uuid::parse_str(&group_id).is_ok(), "group_id must be UUID");
-        assert!(Uuid::parse_str(&sender_device_id).is_ok(), "sender_device_id must be UUID");
+        assert!(
+            Uuid::parse_str(&sender_device_id).is_ok(),
+            "sender_device_id must be UUID"
+        );
         // recipient may be empty for broadcast (non-unicast) envelopes
         assert!(
             recipient_device_id.is_empty() || Uuid::parse_str(&recipient_device_id).is_ok(),
@@ -601,7 +607,10 @@ mod tests {
         } = req;
 
         assert!(Uuid::parse_str(&group_id).is_ok(), "group_id must be UUID");
-        assert!(Uuid::parse_str(&sender_device_id).is_ok(), "sender_device_id must be UUID");
+        assert!(
+            Uuid::parse_str(&sender_device_id).is_ok(),
+            "sender_device_id must be UUID"
+        );
         // commit bytes are opaque MLS ciphertext — never decrypted server-side
         assert!(!commit.is_empty(), "commit bytes must be non-empty");
         // expected_epoch is a counter, not a PII field
