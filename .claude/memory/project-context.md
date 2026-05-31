@@ -17,6 +17,16 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-01, cycle 61 — FEATURE: dropDbKey wired to auth logout — AES-GCM key lifecycle closed)
+- **Cycle 61 (commit bf1f90f):** Deferred security item from cycle 50 — AES-GCM-256 IndexedDB key now cleared on sign-out:
+  - **`useCryptoWorker.ts`**: exported `getCryptoWorkerProxy()` as a non-hook callable so Zustand stores can invoke the worker singleton without violating react-hooks-only.md boundary.
+  - **`auth.ts` logout()**: calls `getCryptoWorkerProxy()?.dropDbKey()` fire-and-forget before state transition. FIFO Comlink queue guarantees drop is processed before any subsequent `initDbKey()` from a new OPAQUE login. Documented scope: only the Dexie AES-GCM key is wiped; MLS WASM heap state deferred to OPAQUE→MLS session binding work.
+  - **`__mocks__/useCryptoWorker.ts`**: added `dropDbKey: async () => {}` and `getCryptoWorkerProxy` export (type-fidelity fix from security-auditor YELLOW-7).
+  - **+2 frontend tests**: `dropDbKey called on logout`; `null proxy guard — still transitions to login`.
+  - **security-auditor**: YELLOW (fire-and-forget TOCTOU window documented in comment; MLS WASM state scope documented; test adequacy note added per testing-conventions.md convention). No RED findings blocking commit.
+  - **66 frontend tests** (was 64, +2); Biome clean; 284 Rust tests unchanged.
+  - **Remaining deferred:** MLS WASM heap wipe on logout (full session-clear); mTLS peer-cert → home_region binding (RED-2/RED-3, architectural); set_expire stale-token accumulation; revoke_device mid-loop delete failure logging.
+
 ## Current state (2026-05-31, cycle 60 — STABILIZATION: orphan-session security fix + test gap closure)
 - **Cycle 60 (commit 6b89f4a):** STABILIZATION — CI green, no open issues, security fix + test gaps:
   - **Orphan-session bug found and fixed (security-significant):** In `login_finish`, when `set_add` (device_sessions tracking) failed, code returned `Unauthorized` but LEFT an orphan `session:{token}` in the cache. Token unreachable by client but persisted for SESSION_TTL. Fixed: `is_err()` branch now explicitly deletes `session_cache_key` before returning. Added `tracing::warn!` on both cleanup-failure paths (set_add fail + revoke-race fail) so cache partitions surface to ops.
