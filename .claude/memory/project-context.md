@@ -17,6 +17,21 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-31, cycle 59 — FEATURE: gRPC sender-membership enforcement — gRPC R-1 closed)
+- **Cycle 59 (commit 63ce31d):** Closed long-deferred gRPC R-1 (forward_envelope no sender-membership check):
+  - **`RegionGrpcServer` gains `group_repo: Arc<dyn GroupRepository>`** — passed from `main.rs` (clone of `PgGroupRepository`)
+  - **`check_sender_is_member`** helper: calls `group_repo.list_members(group_id)`:
+    - **Fail-closed** — if no membership data (empty list), rejects with PermissionDenied + warning log
+    - If members exist, sender must be in the list; generic `"sender is not authorized for this group"` error (no member-list leakage)
+    - Architectural deferral comment: RED-2/RED-3 (mTLS peer-identity binding to home_region) deferred until tonic `TlsConnectInfo` plumbing
+  - **`forward_envelope` + `forward_commit`** call `check_sender_is_member` before saving the envelope
+  - **`sync_group_membership`** now persists: checks `find_by_id` → creates Group stub if absent → `add_member` for each device_id (ON CONFLICT DO NOTHING)
+  - **YELLOW-2 fix**: `home_region` validated (non-empty, ≤64 chars) before DB writes
+  - **YELLOW-3 fix**: `#[instrument]` added to `sync_group_membership`; logs only `group_id` UUID + `member_count` (no device UUIDs per no-plaintext-logging.md)
+  - **+6 tests**: known-member accepted, non-member rejected, unknown-group fail-closed, commit non-member rejected, sync persists+enables forward, empty home_region rejected
+  - **278 Rust tests** (was 272, +6); clippy clean; rustfmt clean
+  - **Remaining deferred**: RED-2/RED-3 (mTLS peer-cert → home_region binding), TOCTOU in find_by_id→save under concurrent sync (low-risk, add_member is idempotent), non-atomic member batch insertion
+
 ## Current state (2026-05-31, cycle 58 — FEATURE: session-auth hardening — YELLOWs Y-1…Y-5 + RED-1 closed)
 - **Cycle 58 (commit 951f5d3):** Closed all 5 deferred security-auditor YELLOWs from cycle 56 + auditor RED-1 found in review:
   - **Y-1 (session revocation on device revoke):** `login_finish` writes session token into `device_sessions:{device_id}` Redis set (SADD + EXPIRE). `revoke_device` calls SMEMBERS, deletes each `session:{token}`, deletes the set. Immediate invalidation on device revoke.
