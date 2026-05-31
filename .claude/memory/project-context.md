@@ -17,6 +17,18 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-01, cycle 62 — FEATURE: MLS/OPAQUE WASM heap wipe on logout — session-clear closed)
+- **Cycle 62 (commit 4119253):** Closed long-deferred "MLS WASM heap wipe on logout" security item:
+  - **WASM (`wasm_exports.rs`):** New `mls_clear_session()` `#[wasm_bindgen]` export — calls `.clear()` on `MLS_CTX`, `OPAQUE_REG`, `OPAQUE_LOGIN` thread-locals. After logout, no Rust-level reference to prior-session identity material, encryption secrets, or in-flight OPAQUE sessions remains.
+  - **`crypto.worker.ts`:** Added `mls_clear_session: () => void` to `WasmModule` interface; added `clearSessionState(): Promise<void>` to Comlink `api`.
+  - **`auth.ts` logout():** Calls `proxy?.clearSessionState().catch(() => {})` then `proxy?.dropDbKey()` (single proxy capture, documented FIFO order guarantee, `.catch()` per no-plaintext-logging rule).
+  - **`__mocks__/useCryptoWorker.ts`:** Added `clearSessionState: async () => {}`.
+  - **+4 WASM unit tests:** removes MLS contexts, removes OPAQUE reg sessions, removes OPAQUE login sessions, idempotent on empty state.
+  - **+1 frontend test:** `clearSessionState called on logout` with ordering assertion (`clearSessionState` before `dropDbKey`).
+  - **security-auditor:** PASS — YELLOW-1 (WASM heap residual bytes — documented platform constraint), YELLOW-3 (unhandled rejection — fixed with `.catch`), YELLOW-6 (ordering assertion — fixed in test). No RED findings.
+  - **67 frontend tests** (was 66, +1); **18 WASM tests** (was 14, +4); 284 Rust workspace tests unchanged; Biome clean; clippy clean.
+  - **Remaining deferred:** YELLOW-1 (zeroize wrappers on `OpaqueRegSession`/`OpaqueLoginSession` — opaque-ke implements `Zeroize`, wiring deferred); mTLS peer-cert → home_region binding (RED-2/RED-3, architectural); set_expire stale-token accumulation; revoke_device mid-loop delete failure logging.
+
 ## Current state (2026-06-01, cycle 61 — FEATURE: dropDbKey wired to auth logout — AES-GCM key lifecycle closed)
 - **Cycle 61 (commit bf1f90f):** Deferred security item from cycle 50 — AES-GCM-256 IndexedDB key now cleared on sign-out:
   - **`useCryptoWorker.ts`**: exported `getCryptoWorkerProxy()` as a non-hook callable so Zustand stores can invoke the worker singleton without violating react-hooks-only.md boundary.
