@@ -17,6 +17,21 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-05-31, cycle 56 — FEATURE: Redis session auth — Bearer stub closed on REST + WS)
+- **Cycle 56 (commit 52e30d9):** Closed the stub Bearer auth vulnerability (R-2/R-1 from security-auditor):
+  - **R-2 (REST API):** `AuthenticatedDevice` middleware rewritten from raw `DeviceId` UUID parse to `session:{token}` → DeviceId UUID bytes Redis cache lookup. Any token not in the live session store returns 401. `FromRef<AppState> for Arc<dyn CachePort>` added. `AppState` gains `cache` field. `EmptyCache`/`FakeCache` added to all test state constructions.
+  - **R-1 (WebSocket hub):** `extract_device_id` changed from sync UUID parse to async Redis session lookup. `WsHubState { hub, cache }` struct added in `lib.rs`. `router()` now takes `Arc<WsHub>` + `Arc<dyn CachePort>`. Handler uses `State<WsHubState>`. `main.rs` passes `Arc::clone(&cache)` to WS router.
+  - **auth_service changes:** `login_init` seeds `login_nonce:{nonce}` → user_id bytes (replay prevention). `login_finish` resolves user from nonce cache (server-controlled), verifies device ownership, deletes nonce, writes `session:{token}` → DeviceId bytes with SESSION_TTL. `LoginFinishRequest` gains `device_id: DeviceId` field (port change).
+  - **Regression tests:** `raw_device_uuid_without_session_returns_401` (REST), `raw_device_uuid_without_session_is_401` (WS); `login_finish_issues_session_token_bound_to_device`; `login_finish_wrong_device_owner_returns_unauthorized`.
+  - **274 Rust tests** (was 266 +8); clippy clean; rustfmt clean.
+  - **security-auditor deferred (non-blocking YELLOWs):**
+    - Y-1: Sliding TTL / session revocation on device revoke
+    - Y-2: Rename nonce TTL constant to LOGIN_NONCE_TTL (cosmetic)
+    - Y-3: Atomic nonce consume (GETDEL or document OPAQUE mutex guarantee)
+    - Y-4: Move device_id logging after ownership verification
+    - Y-5: Remove or document req.user_id field (client should not send it)
+    - gRPC R-1 (forward_envelope no sender-membership check) — architectural deferred
+
 ## Current state (2026-05-31, cycle 55 — STABILIZATION: CI fix + ack IDOR fix)
 - **Cycle 55 (commits 7d0bed9, 40aa98c):**
   - **CI red fix (7d0bed9):** `powehi-grpc/src/server.rs` rustfmt failure — stable 1.96.0 requires 2-arg `assert!` macros to be multi-line when over line length. Three `assert!` calls in data-residency tests expanded. CI now green.
