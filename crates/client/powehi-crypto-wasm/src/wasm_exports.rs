@@ -653,7 +653,10 @@ mod tests {
         let mut rng = OsRng;
         let (state, _) = opaque::registration_start(b"pw", &mut rng).unwrap();
         let id = next_id();
-        OPAQUE_REG.with(|s| s.borrow_mut().insert(id.clone(), OpaqueRegSession { state }));
+        OPAQUE_REG.with(|s| {
+            s.borrow_mut()
+                .insert(id.clone(), OpaqueRegSession { state })
+        });
         assert!(OPAQUE_REG.with(|s| s.borrow().contains_key(&id)));
 
         mls_clear_session();
@@ -671,7 +674,10 @@ mod tests {
         let mut rng = OsRng;
         let (state, _) = opaque::login_start(b"pw", &mut rng).unwrap();
         let id = next_id();
-        OPAQUE_LOGIN.with(|s| s.borrow_mut().insert(id.clone(), OpaqueLoginSession { state }));
+        OPAQUE_LOGIN.with(|s| {
+            s.borrow_mut()
+                .insert(id.clone(), OpaqueLoginSession { state })
+        });
         assert!(OPAQUE_LOGIN.with(|s| s.borrow().contains_key(&id)));
 
         mls_clear_session();
