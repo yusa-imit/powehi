@@ -3,14 +3,15 @@ use std::time::Instant;
 
 use chrono::DateTime;
 use powehi_domain::{
+    device::DeviceId,
     envelope::{Envelope, EnvelopeId, MessageType},
     event::DomainEvent,
-    group::GroupId,
+    group::{Epoch, Group, GroupId, GroupMember},
     key_package::{ConsumeResult, KeyPackageId},
     region::RegionId,
 };
 use powehi_port_outbound::{
-    envelope_repo::EnvelopeRepository, event_bus::DomainEventBus,
+    envelope_repo::EnvelopeRepository, event_bus::DomainEventBus, group_repo::GroupRepository,
     key_package_repo::KeyPackageRepository,
 };
 use tonic::{Request, Response, Status};
@@ -31,6 +32,7 @@ pub struct RegionGrpcServer {
     pub envelope_repo: Arc<dyn EnvelopeRepository>,
     pub event_bus: Arc<dyn DomainEventBus>,
     pub key_package_repo: Arc<dyn KeyPackageRepository>,
+    pub group_repo: Arc<dyn GroupRepository>,
 }
 
 impl RegionGrpcServer {
@@ -39,13 +41,58 @@ impl RegionGrpcServer {
         envelope_repo: Arc<dyn EnvelopeRepository>,
         event_bus: Arc<dyn DomainEventBus>,
         key_package_repo: Arc<dyn KeyPackageRepository>,
+        group_repo: Arc<dyn GroupRepository>,
     ) -> Self {
         Self {
             local_region,
             envelope_repo,
             event_bus,
             key_package_repo,
+            group_repo,
         }
+    }
+}
+
+impl RegionGrpcServer {
+    /// Verify that `sender` is a known member of `group_id` in the local membership store.
+    ///
+    /// Fail-closed: if no membership data exists the envelope is rejected with PermissionDenied.
+    /// The correct operational sequence is: peer region calls SyncGroupMembership before
+    /// any ForwardEnvelope/ForwardCommit for a given group.
+    ///
+    /// Architectural deferral (RED-2/RED-3): tonic does not yet expose the mTLS peer certificate
+    /// in a way this handler can read without changes to the TLS handshake plumbing. Once
+    /// `tonic::transport::server::TlsConnectInfo` is wired through, we must additionally verify
+    /// that the mTLS Subject/SAN of the calling peer matches `group.home_region` so that only
+    /// the authoritative home-region peer can issue SyncGroupMembership for a given group_id.
+    /// Until then, any peer in the mTLS perimeter can sync membership for any group_id.
+    async fn check_sender_is_member(
+        &self,
+        group_id: &GroupId,
+        sender: &DeviceId,
+    ) -> Result<(), Status> {
+        let members = self
+            .group_repo
+            .list_members(group_id)
+            .await
+            .map_err(|e| domain_err_to_status(&e))?;
+
+        if members.is_empty() {
+            warn!(
+                group_id = %group_id.as_uuid(),
+                "forward rejected: no membership data; SyncGroupMembership must precede ForwardEnvelope"
+            );
+            return Err(Status::permission_denied(
+                "sender is not authorized for this group",
+            ));
+        }
+
+        if !members.iter().any(|m| &m.device_id == sender) {
+            return Err(Status::permission_denied(
+                "sender is not authorized for this group",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -104,6 +151,8 @@ impl RegionService for RegionGrpcServer {
         let created_at =
             DateTime::from_timestamp_millis(req.sent_at_unix_ms).unwrap_or_else(chrono::Utc::now);
 
+        self.check_sender_is_member(&group_id, &sender).await?;
+
         let envelope = Envelope {
             id: envelope_id.clone(),
             group_id: group_id.clone(),
@@ -154,6 +203,9 @@ impl RegionService for RegionGrpcServer {
         // The commit bytes are opaque — we do not decrypt them.
         let sender = parse_device_id(&req.sender_device_id)
             .ok_or_else(|| Status::invalid_argument("invalid sender_device_id UUID"))?;
+
+        self.check_sender_is_member(&group_id, &sender).await?;
+
         let envelope = Envelope::new(
             group_id.clone(),
             sender,
@@ -180,19 +232,81 @@ impl RegionService for RegionGrpcServer {
         }))
     }
 
+    #[instrument(
+        skip(self, request),
+        fields(
+            region = %self.local_region,
+            // device UUIDs are pseudonymous but kept out of spans per no-plaintext-logging.md
+        )
+    )]
     async fn sync_group_membership(
         &self,
         request: Request<SyncGroupMembershipRequest>,
     ) -> Result<Response<SyncGroupMembershipResponse>, Status> {
-        // Membership sync is stored via the group_repo; deferred to follow-up.
-        // Validate UUIDs only to enforce the zero-knowledge invariant.
         let req = request.into_inner();
-        parse_group_id(&req.group_id)
+        let group_id = parse_group_id(&req.group_id)
             .ok_or_else(|| Status::invalid_argument("invalid group_id UUID"))?;
-        for did in &req.member_device_ids {
-            parse_device_id(did)
-                .ok_or_else(|| Status::invalid_argument("invalid member_device_id UUID"))?;
+
+        // Validate home_region: non-empty, reasonable length, ASCII printable.
+        // Architectural note (RED-2/RED-3): We also need to verify the calling peer's mTLS
+        // cert matches this home_region claim — deferred until tonic TlsConnectInfo plumbing.
+        if req.home_region.is_empty() || req.home_region.len() > 64 {
+            return Err(Status::invalid_argument(
+                "home_region must be 1–64 characters",
+            ));
         }
+
+        // Validate and collect all device IDs before any DB writes (fail-fast)
+        let mut device_ids: Vec<DeviceId> = Vec::with_capacity(req.member_device_ids.len());
+        for did in &req.member_device_ids {
+            device_ids.push(
+                parse_device_id(did)
+                    .ok_or_else(|| Status::invalid_argument("invalid member_device_id UUID"))?,
+            );
+        }
+
+        // Ensure the group record exists before inserting members (FK constraint).
+        // If the group is unknown locally, create a stub record with epoch 0.
+        // We do NOT update epoch on conflict to avoid downgrading a locally-tracked epoch.
+        if self
+            .group_repo
+            .find_by_id(&group_id)
+            .await
+            .map_err(|e| domain_err_to_status(&e))?
+            .is_none()
+        {
+            let group = Group {
+                id: group_id.clone(),
+                home_region: RegionId::new(req.home_region.clone()),
+                epoch: Epoch(0),
+                created_at: chrono::Utc::now(),
+            };
+            self.group_repo
+                .save(&group)
+                .await
+                .map_err(|e| domain_err_to_status(&e))?;
+        }
+
+        let member_count = device_ids.len();
+        // Upsert members (add_member uses ON CONFLICT DO NOTHING)
+        for device_id in device_ids {
+            let member = GroupMember {
+                group_id: group_id.clone(),
+                device_id,
+                joined_at_epoch: Epoch(0),
+            };
+            self.group_repo
+                .add_member(&member)
+                .await
+                .map_err(|e| domain_err_to_status(&e))?;
+        }
+
+        tracing::debug!(
+            group_id = %group_id.as_uuid(),
+            member_count,
+            "sync_group_membership accepted"
+        );
+
         Ok(Response::new(SyncGroupMembershipResponse {
             status: ForwardStatus::Accepted as i32,
         }))
@@ -266,10 +380,11 @@ mod tests {
         envelope::{Envelope, EnvelopeId},
         error::DomainError,
         event::DomainEvent,
+        group::{Epoch, Group, GroupId, GroupMember},
         key_package::{ConsumeResult, KeyPackage, KeyPackageId},
     };
     use powehi_port_outbound::{
-        envelope_repo::EnvelopeRepository, event_bus::DomainEventBus,
+        envelope_repo::EnvelopeRepository, event_bus::DomainEventBus, group_repo::GroupRepository,
         key_package_repo::KeyPackageRepository,
     };
     use std::collections::HashMap;
@@ -368,12 +483,94 @@ mod tests {
         }
     }
 
+    struct FakeGroupRepo {
+        groups: Mutex<HashMap<GroupId, Group>>,
+        members: Mutex<HashMap<GroupId, Vec<GroupMember>>>,
+    }
+
+    impl FakeGroupRepo {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                groups: Mutex::new(HashMap::new()),
+                members: Mutex::new(HashMap::new()),
+            })
+        }
+
+        fn with_member(group_id: GroupId, device_id: DeviceId) -> Arc<Self> {
+            let repo = Self::new();
+            {
+                let mut gs = repo.groups.lock().unwrap();
+                gs.insert(
+                    group_id.clone(),
+                    Group {
+                        id: group_id.clone(),
+                        home_region: RegionId::new("eu-central-1"),
+                        epoch: Epoch(0),
+                        created_at: Utc::now(),
+                    },
+                );
+            }
+            {
+                let mut ms = repo.members.lock().unwrap();
+                ms.entry(group_id.clone()).or_default().push(GroupMember {
+                    group_id,
+                    device_id,
+                    joined_at_epoch: Epoch(0),
+                });
+            }
+            repo
+        }
+    }
+
+    #[async_trait]
+    impl GroupRepository for FakeGroupRepo {
+        async fn save(&self, group: &Group) -> Result<(), DomainError> {
+            self.groups
+                .lock()
+                .unwrap()
+                .insert(group.id.clone(), group.clone());
+            Ok(())
+        }
+        async fn find_by_id(&self, id: &GroupId) -> Result<Option<Group>, DomainError> {
+            Ok(self.groups.lock().unwrap().get(id).cloned())
+        }
+        async fn add_member(&self, member: &GroupMember) -> Result<(), DomainError> {
+            self.members
+                .lock()
+                .unwrap()
+                .entry(member.group_id.clone())
+                .or_default()
+                .push(member.clone());
+            Ok(())
+        }
+        async fn remove_member(
+            &self,
+            group_id: &GroupId,
+            device_id: &DeviceId,
+        ) -> Result<(), DomainError> {
+            if let Some(members) = self.members.lock().unwrap().get_mut(group_id) {
+                members.retain(|m| &m.device_id != device_id);
+            }
+            Ok(())
+        }
+        async fn list_members(&self, group_id: &GroupId) -> Result<Vec<GroupMember>, DomainError> {
+            Ok(self
+                .members
+                .lock()
+                .unwrap()
+                .get(group_id)
+                .cloned()
+                .unwrap_or_default())
+        }
+    }
+
     fn make_server() -> RegionGrpcServer {
         RegionGrpcServer::new(
             RegionId::new("eu-central-1"),
             Arc::new(NoopEnvelopeRepo),
             Arc::new(NoopEventBus),
             FakeKpRepo::new(),
+            FakeGroupRepo::new(),
         )
     }
 
@@ -383,6 +580,17 @@ mod tests {
             Arc::new(NoopEnvelopeRepo),
             Arc::new(NoopEventBus),
             FakeKpRepo::with_kp(kp),
+            FakeGroupRepo::new(),
+        )
+    }
+
+    fn make_server_with_group_member(group_id: GroupId, device_id: DeviceId) -> RegionGrpcServer {
+        RegionGrpcServer::new(
+            RegionId::new("eu-central-1"),
+            Arc::new(NoopEnvelopeRepo),
+            Arc::new(NoopEventBus),
+            FakeKpRepo::new(),
+            FakeGroupRepo::with_member(group_id, device_id),
         )
     }
 
@@ -416,11 +624,14 @@ mod tests {
 
     #[tokio::test]
     async fn forward_envelope_valid_request_returns_accepted() {
-        let server = make_server();
+        // Sender must be a known member for the envelope to be accepted (fail-closed policy).
+        let group_id = GroupId::from(Uuid::new_v4());
+        let sender = DeviceId::new();
+        let server = make_server_with_group_member(group_id.clone(), sender.clone());
         let req = Request::new(ForwardEnvelopeRequest {
             envelope_id: Uuid::new_v4().to_string(),
-            group_id: Uuid::new_v4().to_string(),
-            sender_device_id: Uuid::new_v4().to_string(),
+            group_id: group_id.as_uuid().to_string(),
+            sender_device_id: sender.as_uuid().to_string(),
             recipient_device_id: String::new(),
             // ciphertext is opaque bytes — server never reads content
             ciphertext: vec![0xca, 0xfe, 0xba, 0xbe],
@@ -433,10 +644,13 @@ mod tests {
 
     #[tokio::test]
     async fn forward_commit_returns_accepted_with_zero_epoch() {
-        let server = make_server();
+        // Sender must be a known member for the commit to be accepted (fail-closed policy).
+        let group_id = GroupId::from(Uuid::new_v4());
+        let sender = DeviceId::new();
+        let server = make_server_with_group_member(group_id.clone(), sender.clone());
         let req = Request::new(ForwardCommitRequest {
-            group_id: Uuid::new_v4().to_string(),
-            sender_device_id: Uuid::new_v4().to_string(),
+            group_id: group_id.as_uuid().to_string(),
+            sender_device_id: sender.as_uuid().to_string(),
             commit: vec![0x01, 0x02],
             // expected_epoch from peer is NOT trusted — server returns 0 until GroupRepository validates
             expected_epoch: 42,
@@ -637,5 +851,118 @@ mod tests {
                 "member_device_id must be opaque UUID, got: {id}"
             );
         }
+    }
+
+    // ── Sender-membership enforcement tests ───────────────────────────────────
+
+    #[tokio::test]
+    async fn forward_envelope_sender_is_known_member_returns_accepted() {
+        let group_id = GroupId::from(Uuid::new_v4());
+        let sender = DeviceId::new();
+        let server = make_server_with_group_member(group_id.clone(), sender.clone());
+        let req = Request::new(ForwardEnvelopeRequest {
+            envelope_id: Uuid::new_v4().to_string(),
+            group_id: group_id.as_uuid().to_string(),
+            sender_device_id: sender.as_uuid().to_string(),
+            recipient_device_id: String::new(),
+            ciphertext: vec![0xca, 0xfe],
+            envelope_type: EnvelopeType::Application as i32,
+            sent_at_unix_ms: 1_700_000_000_000,
+        });
+        let resp = server.forward_envelope(req).await.unwrap();
+        assert_eq!(resp.into_inner().status, ForwardStatus::Accepted as i32);
+    }
+
+    #[tokio::test]
+    async fn forward_envelope_sender_not_member_returns_permission_denied() {
+        let group_id = GroupId::from(Uuid::new_v4());
+        let real_member = DeviceId::new();
+        let impostor = DeviceId::new();
+        // group has real_member but NOT impostor
+        let server = make_server_with_group_member(group_id.clone(), real_member);
+        let req = Request::new(ForwardEnvelopeRequest {
+            envelope_id: Uuid::new_v4().to_string(),
+            group_id: group_id.as_uuid().to_string(),
+            sender_device_id: impostor.as_uuid().to_string(),
+            recipient_device_id: String::new(),
+            ciphertext: vec![0x01],
+            envelope_type: EnvelopeType::Application as i32,
+            sent_at_unix_ms: 1_700_000_000_000,
+        });
+        let err = server.forward_envelope(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn forward_commit_sender_not_member_returns_permission_denied() {
+        let group_id = GroupId::from(Uuid::new_v4());
+        let real_member = DeviceId::new();
+        let impostor = DeviceId::new();
+        let server = make_server_with_group_member(group_id.clone(), real_member);
+        let req = Request::new(ForwardCommitRequest {
+            group_id: group_id.as_uuid().to_string(),
+            sender_device_id: impostor.as_uuid().to_string(),
+            commit: vec![0x01, 0x02],
+            expected_epoch: 0,
+        });
+        let err = server.forward_commit(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn forward_envelope_unknown_group_returns_permission_denied() {
+        // Fail-closed: no membership data → reject (SyncGroupMembership must precede ForwardEnvelope)
+        let server = make_server();
+        let req = Request::new(ForwardEnvelopeRequest {
+            envelope_id: Uuid::new_v4().to_string(),
+            group_id: Uuid::new_v4().to_string(),
+            sender_device_id: Uuid::new_v4().to_string(),
+            recipient_device_id: String::new(),
+            ciphertext: vec![0x01],
+            envelope_type: EnvelopeType::Application as i32,
+            sent_at_unix_ms: 1_700_000_000_000,
+        });
+        let err = server.forward_envelope(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn sync_group_membership_empty_home_region_returns_invalid_argument() {
+        let server = make_server();
+        let req = Request::new(SyncGroupMembershipRequest {
+            group_id: Uuid::new_v4().to_string(),
+            home_region: String::new(),
+            member_device_ids: vec![Uuid::new_v4().to_string()],
+        });
+        let err = server.sync_group_membership(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn sync_group_membership_persists_members() {
+        let server = make_server();
+        let group_id = Uuid::new_v4();
+        let member_ids: Vec<String> = (0..2).map(|_| Uuid::new_v4().to_string()).collect();
+        let req = Request::new(SyncGroupMembershipRequest {
+            group_id: group_id.to_string(),
+            home_region: "eu-de-1".to_string(),
+            member_device_ids: member_ids.clone(),
+        });
+        let resp = server.sync_group_membership(req).await.unwrap();
+        assert_eq!(resp.into_inner().status, ForwardStatus::Accepted as i32);
+
+        // Members are now stored; a forwarded envelope from member[0] must be accepted
+        let sender_id = member_ids[0].clone();
+        let fwd_req = Request::new(ForwardEnvelopeRequest {
+            envelope_id: Uuid::new_v4().to_string(),
+            group_id: group_id.to_string(),
+            sender_device_id: sender_id,
+            recipient_device_id: String::new(),
+            ciphertext: vec![0xde, 0xad],
+            envelope_type: EnvelopeType::Application as i32,
+            sent_at_unix_ms: 1_700_000_000_000,
+        });
+        let fwd_resp = server.forward_envelope(fwd_req).await.unwrap();
+        assert_eq!(fwd_resp.into_inner().status, ForwardStatus::Accepted as i32);
     }
 }

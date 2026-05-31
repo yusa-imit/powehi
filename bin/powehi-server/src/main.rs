@@ -96,6 +96,8 @@ async fn main() -> Result<()> {
         cache.clone(),
     ));
 
+    let group_repo_grpc: Arc<dyn powehi_port_outbound::group_repo::GroupRepository> =
+        group_repo.clone();
     let messaging: Arc<dyn powehi_port_inbound::messaging::MessagingUseCase> = Arc::new(
         MessagingService::new(envelope_repo.clone(), group_repo, event_bus.clone())
             .with_push(push_sub_repo.clone(), web_push_adapter),
@@ -142,6 +144,7 @@ async fn main() -> Result<()> {
         envelope_repo.clone(),
         event_bus,
         key_package_repo,
+        group_repo_grpc,
     );
     // Max message size = 64 KiB for MLS ciphertext (prd.md §6.4).
     // This caps memory usage per in-flight RPC and matches the envelope size limit.
