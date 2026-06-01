@@ -17,6 +17,23 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-02, cycle 71 — FEATURE: handle-hash oracle fix — deterministic HMAC synthetic user_id)
+- **Cycle 71 (commit 0d7c67a):** Closed long-deferred YELLOW: login_init handle-hash oracle fix:
+  - **Root cause:** `login_init` called `UserId::new()` (random UUID per call) for unknown handles. An attacker calling login_init twice for the same unknown handle observed different `user_id` values each time → handle enumeration oracle.
+  - **Fix:** `AuthService` now holds `handle_oracle_secret: [u8; 32]`. Unknown handles map through `HMAC-SHA256(secret, handle_hash)` → deterministic 16-byte UUID. Same handle_hash always yields same synthetic user_id → indistinguishable from known handles.
+  - **`hmac = "0.12"`** added to workspace (RustCrypto, approved per crypto-libraries-pinned.md).
+  - **`AppConfig.handle_oracle_secret_token`**: operator-supplied stable secret; falls back to random key with `tracing::warn!`. Redacted in Debug impl.
+  - **`POWEHI__HANDLE_ORACLE_SECRET_TOKEN`** env var for persistent stable key across restarts.
+  - **+2 security-invariant tests**: `login_init_unknown_handle_returns_consistent_synthetic_user_id`, `login_init_different_unknown_handles_return_different_synthetic_ids`.
+  - **security-auditor:** GREEN. YELLOW-1 (handle_hash UNIQUE constraint) — verified already exists in migration 0002. YELLOW-2 (cross-restart oracle with empty token) — documented deferred.
+  - **306 Rust tests** (was 304, +2); clippy clean; rustfmt clean.
+  - **Remaining deferred security findings (YELLOW)**:
+    - WS broadcast global fan-out (Phase 5 architectural — all devices get wake-up signals)
+    - TraceLayer UUID path params at DEBUG level (logging hygiene)
+    - WS per-connection rate limiting (connection-establishment is rate-limited; per-message is not)
+    - mTLS peer-cert → home_region binding (RED-2/RED-3, architectural, tonic TlsConnectInfo)
+    - POWEHI__HANDLE_ORACLE_SECRET_TOKEN cross-restart oracle if env var not set (YELLOW-2, documented)
+
 ## Current state (2026-06-02, cycle 70 — STABILIZATION: group membership authorization RED fix)
 - **Cycle 70 (commit 664b421):** STABILIZATION — security-auditor found RED-1/RED-2 (any authenticated device could post envelopes to any group_id without being a member). Fixed:
   - **`MessagingService.check_sender_is_member`**: fail-closed (empty member list → Unauthorized); called in `send_message` (before TTL check), `send_welcome`, `send_commit` (after group existence check).
