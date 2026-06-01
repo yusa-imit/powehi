@@ -246,7 +246,19 @@ impl AuthUseCase for AuthService {
         let device_sessions_key = format!("device_sessions:{}", device_id.as_uuid());
         let tokens = self.cache.set_members(&device_sessions_key).await?;
         for token in &tokens {
-            let _ = self.cache.delete(&format!("session:{token}")).await;
+            if self
+                .cache
+                .delete(&format!("session:{token}"))
+                .await
+                .is_err()
+            {
+                // Best-effort: continue revoking other tokens but surface the
+                // cache failure so ops can detect a partially-revoked device.
+                tracing::warn!(
+                    "revoke_device: failed to delete session token — \
+                     token may persist until SESSION_TTL expires"
+                );
+            }
         }
         let _ = self.cache.delete(&device_sessions_key).await;
         Ok(())
@@ -467,6 +479,100 @@ mod tests {
         }
         async fn set_members(&self, key: &str) -> Result<Vec<String>, DomainError> {
             self.inner.set_members(key).await
+        }
+    }
+
+    /// A FakeCache variant whose `delete` fails for any key starting with "session:".
+    /// Used to test the revoke_device per-token deletion failure path.
+    struct SessionDeleteFailCache {
+        inner: Arc<FakeCache>,
+    }
+    impl SessionDeleteFailCache {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                inner: FakeCache::new(),
+            })
+        }
+    }
+    #[async_trait::async_trait]
+    impl CachePort for SessionDeleteFailCache {
+        async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, DomainError> {
+            self.inner.get(key).await
+        }
+        async fn set(
+            &self,
+            key: &str,
+            value: Vec<u8>,
+            ttl: Option<Duration>,
+        ) -> Result<(), DomainError> {
+            self.inner.set(key, value, ttl).await
+        }
+        async fn delete(&self, key: &str) -> Result<(), DomainError> {
+            if key.starts_with("session:") {
+                return Err(DomainError::Internal(
+                    "injected session delete failure".into(),
+                ));
+            }
+            self.inner.delete(key).await
+        }
+        async fn exists(&self, key: &str) -> Result<bool, DomainError> {
+            self.inner.exists(key).await
+        }
+        async fn get_del(&self, key: &str) -> Result<Option<Vec<u8>>, DomainError> {
+            self.inner.get_del(key).await
+        }
+        async fn set_add(&self, key: &str, member: &str) -> Result<(), DomainError> {
+            self.inner.set_add(key, member).await
+        }
+        async fn set_expire(&self, key: &str, ttl: Duration) -> Result<(), DomainError> {
+            self.inner.set_expire(key, ttl).await
+        }
+        async fn set_members(&self, key: &str) -> Result<Vec<String>, DomainError> {
+            self.inner.set_members(key).await
+        }
+    }
+
+    /// A FakeCache variant that fails on `set_members` to test the propagation path.
+    struct SetMembersFailCache {
+        inner: Arc<FakeCache>,
+    }
+    impl SetMembersFailCache {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                inner: FakeCache::new(),
+            })
+        }
+    }
+    #[async_trait::async_trait]
+    impl CachePort for SetMembersFailCache {
+        async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, DomainError> {
+            self.inner.get(key).await
+        }
+        async fn set(
+            &self,
+            key: &str,
+            value: Vec<u8>,
+            ttl: Option<Duration>,
+        ) -> Result<(), DomainError> {
+            self.inner.set(key, value, ttl).await
+        }
+        async fn delete(&self, key: &str) -> Result<(), DomainError> {
+            self.inner.delete(key).await
+        }
+        async fn exists(&self, key: &str) -> Result<bool, DomainError> {
+            self.inner.exists(key).await
+        }
+        async fn get_del(&self, key: &str) -> Result<Option<Vec<u8>>, DomainError> {
+            self.inner.get_del(key).await
+        }
+        async fn set_add(&self, key: &str, member: &str) -> Result<(), DomainError> {
+            self.inner.set_add(key, member).await
+        }
+        async fn set_expire(&self, key: &str, ttl: Duration) -> Result<(), DomainError> {
+            self.inner.set_expire(key, ttl).await
+        }
+        async fn set_members(&self, _key: &str) -> Result<Vec<String>, DomainError> {
+            Err(DomainError::Internal("injected set_members failure".into()))
         }
     }
 
@@ -943,5 +1049,94 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn revoke_device_partial_session_delete_failure_still_returns_ok() {
+        // Per-token delete failures (e.g. cache partition) must not abort the
+        // revocation — the device must be deleted and the function must return Ok.
+        // Surviving tokens will expire after SESSION_TTL.
+        let user_repo = FakeUserRepo::new();
+        let device_repo = FakeDeviceRepo::new();
+        let opaque = Arc::new(FakeOpaque);
+        let fail_cache = SessionDeleteFailCache::new();
+        let svc = AuthService::new(
+            user_repo.clone(),
+            device_repo.clone(),
+            opaque,
+            fail_cache.clone(),
+        );
+
+        let uid = UserId::new();
+        user_repo
+            .save(&User::new(uid.clone(), b"hash".to_vec()))
+            .await
+            .unwrap();
+        let device_id = svc
+            .register_device(
+                &uid,
+                DeviceRegistrationRequest {
+                    mls_credential: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        // Inject a token into the device_sessions set directly so the loop has
+        // something to try to delete.
+        let device_sessions_key = format!("device_sessions:{}", device_id.as_uuid());
+        fail_cache
+            .inner
+            .set_add(&device_sessions_key, "fake-token-abc")
+            .await
+            .unwrap();
+
+        // revoke_device must succeed even though the session delete will fail.
+        svc.revoke_device(&uid, &device_id).await.unwrap();
+
+        // Device must have been deleted despite the cache error.
+        assert!(
+            device_repo.find_by_id(&device_id).await.unwrap().is_none(),
+            "device must be deleted even when session delete fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_device_set_members_failure_propagates_error() {
+        // If we cannot enumerate active sessions the revocation fails — silently
+        // leaving live tokens for a revoked device is worse than returning an error.
+        // NOTE: the device delete happens BEFORE the cache enumeration, so the
+        // device will be gone even if this returns an error.
+        let user_repo = FakeUserRepo::new();
+        let device_repo = FakeDeviceRepo::new();
+        let opaque = Arc::new(FakeOpaque);
+        let fail_cache = SetMembersFailCache::new();
+        let svc = AuthService::new(
+            user_repo.clone(),
+            device_repo.clone(),
+            opaque,
+            fail_cache.clone(),
+        );
+
+        let uid = UserId::new();
+        user_repo
+            .save(&User::new(uid.clone(), b"hash".to_vec()))
+            .await
+            .unwrap();
+        let device_id = svc
+            .register_device(
+                &uid,
+                DeviceRegistrationRequest {
+                    mls_credential: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        let err = svc.revoke_device(&uid, &device_id).await.unwrap_err();
+        assert!(
+            matches!(err, DomainError::Internal(_)),
+            "set_members failure must propagate"
+        );
     }
 }
