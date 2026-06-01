@@ -17,6 +17,17 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-02, cycle 70 — STABILIZATION: group membership authorization RED fix)
+- **Cycle 70 (commit 664b421):** STABILIZATION — security-auditor found RED-1/RED-2 (any authenticated device could post envelopes to any group_id without being a member). Fixed:
+  - **`MessagingService.check_sender_is_member`**: fail-closed (empty member list → Unauthorized); called in `send_message` (before TTL check), `send_welcome`, `send_commit` (after group existence check).
+  - **`POST /v1/groups`**: new REST endpoint wires `GroupService.create_group` — creator becomes first member. Required prerequisite for the membership gate.
+  - **`AppState`**: gains `group: Arc<dyn GroupUseCase>`; all 13 test constructions updated with `noop_group()` mock; `main.rs` wires `GroupService`.
+  - **`FakeGroupRepo`** in messaging tests now properly tracks members. `FakeGroupRepo::with_group_and_member`, `with_member_in` constructors added.
+  - **+4 security tests**: `send_message_by_non_member_returns_unauthorized`, `send_message_to_unknown_group_returns_unauthorized`, `send_welcome_by_non_member_returns_unauthorized`, `send_commit_by_non_member_returns_unauthorized`.
+  - **304 Rust tests** (was 300, +4); clippy clean; rustfmt clean.
+  - **Remaining deferred security findings (YELLOW)**: login_init handle-hash oracle (UUID non-deterministic for unknown users → deterministic HMAC recommended; complexity deferred); WS broadcast global fan-out (Phase 5 architectural); TraceLayer UUID path params at DEBUG level; WS rate limiting.
+  - **Previously deferred**: mTLS peer-cert → home_region binding (RED-2/RED-3, architectural); set_expire stale-token (acceptable); Y5 invalid group_id → 500 (cosmetic).
+
 ## Current state (2026-06-02, cycle 69 — STABILIZATION: CI red fix — WasmModule exportKey type mismatch)
 - **Cycle 69 (commit d7d7de3):** STABILIZATION — CI was RED on "Bundle budget check / Build" step:
   - **Root cause:** `crypto.worker.ts` `WasmModule` interface declared `opaque_registration_finish` / `opaque_login_finish` as returning the public `RegFinishResult`/`LoginFinishResult` types, which lacked `exportKey`. The worker internally consumed `result.exportKey` to derive the IndexedDB AES-GCM key (lines 121/149) but TypeScript emitted TS2339 `Property 'exportKey' does not exist` during the production build.
