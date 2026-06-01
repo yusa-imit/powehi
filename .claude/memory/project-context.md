@@ -17,6 +17,13 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-02, cycle 69 — STABILIZATION: CI red fix — WasmModule exportKey type mismatch)
+- **Cycle 69 (commit d7d7de3):** STABILIZATION — CI was RED on "Bundle budget check / Build" step:
+  - **Root cause:** `crypto.worker.ts` `WasmModule` interface declared `opaque_registration_finish` / `opaque_login_finish` as returning the public `RegFinishResult`/`LoginFinishResult` types, which lacked `exportKey`. The worker internally consumed `result.exportKey` to derive the IndexedDB AES-GCM key (lines 121/149) but TypeScript emitted TS2339 `Property 'exportKey' does not exist` during the production build.
+  - **Fix:** Introduced `WasmRegFinishResult = { exportKey: Uint8Array; upload: Uint8Array }` and `WasmLoginFinishResult = { exportKey: Uint8Array; finalization: Uint8Array }` as internal-only types mirroring the actual WASM output. `WasmModule` now uses these for the two finish functions. Public `RegFinishResult`/`LoginFinishResult` remain export-key-free — the key is consumed inside the worker and never crosses the thread boundary.
+  - **72 frontend tests** pass; Biome clean; tsc --noEmit clean; bundle budget within limits (107KB JS gz, 553KB WASM gz).
+  - **No Rust changes;** 297 workspace tests unchanged.
+
 ## Current state (2026-06-01, cycle 67 — FEATURE: zeroize OpaqueRegSession/OpaqueLoginSession — YELLOW-1 closed)
 - **Cycle 67 (commit 135fe51):** Closed long-deferred crypto-reviewer YELLOW-1 (zeroize wrappers on OpaqueRegSession/OpaqueLoginSession):
   - **`powehi-crypto-wasm/src/wasm_exports.rs`:** `OpaqueRegSession.state` and `OpaqueLoginSession.state` replaced with `bytes: Zeroizing<Vec<u8>>`. Ephemeral OPRF client state and KE1 ephemeral DH keys are now serialized (infallible `opaque_ke::ClientRegistration::serialize()` / `ClientLogin::serialize()`) on store and deserialized on consume.
