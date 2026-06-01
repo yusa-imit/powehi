@@ -17,6 +17,17 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-01, cycle 67 — FEATURE: zeroize OpaqueRegSession/OpaqueLoginSession — YELLOW-1 closed)
+- **Cycle 67 (commit 135fe51):** Closed long-deferred crypto-reviewer YELLOW-1 (zeroize wrappers on OpaqueRegSession/OpaqueLoginSession):
+  - **`powehi-crypto-wasm/src/wasm_exports.rs`:** `OpaqueRegSession.state` and `OpaqueLoginSession.state` replaced with `bytes: Zeroizing<Vec<u8>>`. Ephemeral OPRF client state and KE1 ephemeral DH keys are now serialized (infallible `opaque_ke::ClientRegistration::serialize()` / `ClientLogin::serialize()`) on store and deserialized on consume.
+  - **Security guarantee:** `Zeroizing<Vec<u8>>` calls `Vec<u8>::zeroize()` on drop, zeroing the backing allocation before deallocation. Prevents ephemeral OPRF blind scalar and KE1 ephemeral DH keys from persisting in WASM linear memory beyond useful lifetime.
+  - **Drop chain preserved:** deserialized `ClientRegistration`/`ClientLogin` are `derive_where(ZeroizeOnDrop)`, so the working copy is also zeroed when consumed by finish functions.
+  - **NIT-1 documented:** transient stack `GenericArray` from `serialize().to_vec()` is not Zeroized (heap copy IS zeroed); consistent with existing WASM linear-memory residue caveat.
+  - **+2 tests:** `test_opaque_registration_session_roundtrip`, `test_opaque_login_session_roundtrip` — serialize→deserialize identity tests.
+  - **crypto-reviewer:** GREEN — YELLOW-1 closed. No RFC 9807 concerns.
+  - **20 WASM tests** (was 18, +2); **297 Rust workspace tests** unchanged; clippy clean; rustfmt clean.
+  - **Remaining deferred:** mTLS peer-cert → home_region binding (RED-2/RED-3, architectural); set_expire stale-token (best-effort, acceptable); Y5 invalid group_id → 500 (cosmetic).
+
 ## Current state (2026-06-01, cycle 66 — FEATURE: uploader membership check at media upload — Y1 closed)
 - **Cycle 66 (commit 7f626ab):** Closed deferred security finding Y1 (media upload group membership check):
   - **`powehi-application/src/media_service.rs`:** `MediaService::request_upload` now validates group membership when `group_id` is provided. Fail-closed: empty member list → `Unauthorized` (consistent with gRPC `check_sender_is_member` pattern from cycle 59). Non-member uploader → `Unauthorized`. Only UUIDs logged per no-plaintext-logging.md.
