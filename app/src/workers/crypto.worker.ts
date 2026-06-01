@@ -27,6 +27,11 @@ export type MlsPlaintextResult = { plaintext: Uint8Array };
 export type MlsGroupMember = { leafIndex: number; sigKeyHex: string };
 export type MlsSafetyNumberResult = { safetyNumber: string };
 
+// ── Internal WASM raw return types (include exportKey — consumed in worker) ──
+
+type WasmRegFinishResult = { exportKey: Uint8Array; upload: Uint8Array };
+type WasmLoginFinishResult = { exportKey: Uint8Array; finalization: Uint8Array };
+
 // ── Minimal type contract for the wasm-bindgen generated module ─────────────
 
 interface WasmModule {
@@ -37,13 +42,13 @@ interface WasmModule {
 		sessionId: string,
 		password: Uint8Array,
 		serverResponse: Uint8Array,
-	) => RegFinishResult;
+	) => WasmRegFinishResult;
 	opaque_login_start: (password: Uint8Array) => OpaqueStartResult;
 	opaque_login_finish: (
 		sessionId: string,
 		password: Uint8Array,
 		serverResponse: Uint8Array,
-	) => LoginFinishResult;
+	) => WasmLoginFinishResult;
 	mls_init_identity: (identityBytes: Uint8Array) => MlsIdentityResult;
 	mls_get_key_package: (identityId: string) => MlsKeyPackageResult;
 	mls_create_group: (identityId: string) => MlsGroupResult;
