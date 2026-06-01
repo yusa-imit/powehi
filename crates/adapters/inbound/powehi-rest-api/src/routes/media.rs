@@ -5,20 +5,15 @@
 //!
 //! POST  /v1/media/upload-url        — allocate MediaId + get a pre-signed PUT URL
 //! POST  /v1/media/:id/confirm       — mark upload complete (metadata only)
-//! GET   /v1/media/:id/download-url  — get a pre-signed GET URL (Phase 3: uploader only)
+//! GET   /v1/media/:id/download-url  — get a pre-signed GET URL (uploader OR group member)
 //! DELETE /v1/media/:id              — delete (uploader device only)
-//!
-//! SECURITY NOTE (Phase 3 / Phase 4 TODO): `get_download_url` currently restricts
-//! access to the uploader device only. In Phase 4, when group membership is tracked,
-//! this must be expanded to "uploader OR member of any MLS group the blob was sent to".
-//! Tracking issue: Phase 4 media ACL — recipient group-member check.
 
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     Json,
 };
-use powehi_domain::media::MediaId;
+use powehi_domain::{group::GroupId, media::MediaId};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -31,6 +26,8 @@ const MAX_UPLOAD_BYTES: u64 = 100 * 1024 * 1024;
 pub struct UploadRequest {
     content_type: String,
     size_bytes: u64,
+    /// MLS group this blob is being shared to. When set, any group member may download.
+    group_id: Option<Uuid>,
 }
 
 #[derive(Serialize)]
@@ -49,9 +46,15 @@ pub async fn request_upload(
             powehi_domain::error::DomainError::InvalidInput("size_bytes out of range".into()),
         ));
     }
+    let group_id = body.group_id.map(GroupId::from);
     let (media_id, url) = state
         .media
-        .request_upload(&device_id, &body.content_type, body.size_bytes)
+        .request_upload(
+            &device_id,
+            &body.content_type,
+            body.size_bytes,
+            group_id.as_ref(),
+        )
         .await
         .map_err(ApiError::from)?;
     Ok(Json(UploadResponse {

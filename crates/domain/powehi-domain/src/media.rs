@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::device::DeviceId;
+use crate::group::GroupId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MediaId(Uuid);
@@ -36,7 +37,8 @@ impl std::fmt::Display for MediaId {
 }
 
 /// Metadata for an E2EE media blob stored in R2. The key and IV are client-side only.
-/// Uploader is tracked at device granularity (Phase 3: bearer token = DeviceId).
+/// Uploader is tracked at device granularity. If the blob was shared to an MLS group,
+/// `group_id` records it so group members can obtain a download URL.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaBlob {
     pub id: MediaId,
@@ -47,4 +49,6 @@ pub struct MediaBlob {
     pub size_bytes: u64,
     pub uploaded_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
+    /// MLS group this blob was shared to. When set, any group member may download.
+    pub group_id: Option<GroupId>,
 }

@@ -98,6 +98,8 @@ async fn main() -> Result<()> {
 
     let group_repo_grpc: Arc<dyn powehi_port_outbound::group_repo::GroupRepository> =
         group_repo.clone();
+    let group_repo_media: Arc<dyn powehi_port_outbound::group_repo::GroupRepository> =
+        group_repo.clone();
     let messaging: Arc<dyn powehi_port_inbound::messaging::MessagingUseCase> = Arc::new(
         MessagingService::new(envelope_repo.clone(), group_repo, event_bus.clone())
             .with_push(push_sub_repo.clone(), web_push_adapter),
@@ -116,7 +118,7 @@ async fn main() -> Result<()> {
         cfg.r2_presign_download_ttl_secs,
     ));
     let media: Arc<dyn powehi_port_inbound::media::MediaUseCase> =
-        Arc::new(MediaService::new(media_r2));
+        Arc::new(MediaService::new(media_r2, group_repo_media));
 
     // ── gRPC inter-region mesh server ──────────────────────────────────────
 

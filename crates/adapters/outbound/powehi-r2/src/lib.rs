@@ -22,6 +22,7 @@ use aws_sdk_s3::{
 use chrono::{DateTime, Utc};
 use powehi_domain::{
     error::DomainError,
+    group::GroupId,
     media::{MediaBlob, MediaId},
 };
 use powehi_port_outbound::media_repo::MediaRepository;
@@ -115,6 +116,7 @@ struct MediaBlobRow {
     size_bytes: i64,
     uploaded_at: DateTime<Utc>,
     expires_at: Option<DateTime<Utc>>,
+    group_id: Option<Uuid>,
 }
 
 impl From<MediaBlobRow> for MediaBlob {
@@ -127,6 +129,7 @@ impl From<MediaBlobRow> for MediaBlob {
             size_bytes: r.size_bytes as u64,
             uploaded_at: r.uploaded_at,
             expires_at: r.expires_at,
+            group_id: r.group_id.map(GroupId::from),
         }
     }
 }
@@ -147,8 +150,8 @@ impl MediaRepository for R2MediaAdapter {
     async fn save(&self, blob: &MediaBlob) -> Result<(), DomainError> {
         sqlx::query(
             "INSERT INTO media_blobs
-             (id, uploader_device_id, storage_key, content_type, size_bytes, uploaded_at, expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             (id, uploader_device_id, storage_key, content_type, size_bytes, uploaded_at, expires_at, group_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              ON CONFLICT (id) DO NOTHING",
         )
         .bind(blob.id.as_uuid())
@@ -158,6 +161,7 @@ impl MediaRepository for R2MediaAdapter {
         .bind(blob.size_bytes as i64)
         .bind(blob.uploaded_at)
         .bind(blob.expires_at)
+        .bind(blob.group_id.as_ref().map(|g| g.as_uuid()))
         .execute(&self.pool)
         .await
         .map_err(map_sqlx)?;
@@ -167,7 +171,7 @@ impl MediaRepository for R2MediaAdapter {
     #[instrument(skip(self), fields(media_id = %id))]
     async fn find_by_id(&self, id: &MediaId) -> Result<Option<MediaBlob>, DomainError> {
         let row = sqlx::query_as::<_, MediaBlobRow>(
-            "SELECT id, uploader_device_id, storage_key, content_type, size_bytes, uploaded_at, expires_at
+            "SELECT id, uploader_device_id, storage_key, content_type, size_bytes, uploaded_at, expires_at, group_id
              FROM media_blobs WHERE id = $1",
         )
         .bind(id.as_uuid())
@@ -279,12 +283,14 @@ mod tests {
             size_bytes: 4096,
             uploaded_at: now,
             expires_at: None,
+            group_id: None,
         };
         let blob = MediaBlob::from(row);
         assert_eq!(blob.id.as_uuid(), id);
         assert_eq!(blob.uploader_device.as_uuid(), uploader_device);
         assert_eq!(blob.storage_key, "media/abc123");
         assert_eq!(blob.size_bytes, 4096u64);
+        assert!(blob.group_id.is_none());
     }
 
     #[test]
@@ -331,6 +337,7 @@ mod tests {
             size_bytes: 1024 * 512,
             uploaded_at: now,
             expires_at: expires,
+            group_id: None,
         };
         let blob = MediaBlob::from(row);
         assert!(blob.expires_at.is_some());
@@ -352,6 +359,7 @@ mod tests {
             size_bytes: 8192,
             uploaded_at: now,
             expires_at: None,
+            group_id: None,
         };
         let blob = MediaBlob::from(row);
         assert_eq!(blob.storage_key, storage_key);

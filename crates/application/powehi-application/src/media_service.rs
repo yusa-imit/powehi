@@ -17,19 +17,24 @@ use async_trait::async_trait;
 use powehi_domain::{
     device::DeviceId,
     error::DomainError,
+    group::GroupId,
     media::{MediaBlob, MediaId},
 };
 use powehi_port_inbound::media::MediaUseCase;
-use powehi_port_outbound::media_repo::MediaRepository;
+use powehi_port_outbound::{group_repo::GroupRepository, media_repo::MediaRepository};
 use tracing::instrument;
 
 pub struct MediaService {
     media_repo: Arc<dyn MediaRepository>,
+    group_repo: Arc<dyn GroupRepository>,
 }
 
 impl MediaService {
-    pub fn new(media_repo: Arc<dyn MediaRepository>) -> Self {
-        Self { media_repo }
+    pub fn new(media_repo: Arc<dyn MediaRepository>, group_repo: Arc<dyn GroupRepository>) -> Self {
+        Self {
+            media_repo,
+            group_repo,
+        }
     }
 }
 
@@ -41,6 +46,7 @@ impl MediaUseCase for MediaService {
         uploader_device: &DeviceId,
         content_type: &str,
         size_bytes: u64,
+        group_id: Option<&GroupId>,
     ) -> Result<(MediaId, String), DomainError> {
         // Defense-in-depth: validate size even though the REST handler already
         // checks. Non-REST callers (gRPC, tests) must not bypass this cap.
@@ -55,6 +61,7 @@ impl MediaUseCase for MediaService {
             size_bytes,
             uploaded_at: chrono::Utc::now(),
             expires_at: None,
+            group_id: group_id.cloned(),
         };
         let id = blob.id.clone();
         self.media_repo.save(&blob).await?;
@@ -93,10 +100,21 @@ impl MediaUseCase for MediaService {
             .find_by_id(media_id)
             .await?
             .ok_or_else(|| DomainError::NotFound("media".into()))?;
-        if &blob.uploader_device != requestor_device {
-            return Err(DomainError::Unauthorized);
+
+        // Uploader always has access.
+        if &blob.uploader_device == requestor_device {
+            return self.media_repo.presigned_download_url(media_id).await;
         }
-        self.media_repo.presigned_download_url(media_id).await
+
+        // Group members have access when the blob was shared to an MLS group.
+        if let Some(gid) = &blob.group_id {
+            let members = self.group_repo.list_members(gid).await?;
+            if members.iter().any(|m| &m.device_id == requestor_device) {
+                return self.media_repo.presigned_download_url(media_id).await;
+            }
+        }
+
+        Err(DomainError::Unauthorized)
     }
 
     #[instrument(skip(self), fields(media_id = %media_id, requestor_device = %requestor_device))]
@@ -121,7 +139,10 @@ impl MediaUseCase for MediaService {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use powehi_domain::media::MediaBlob;
+    use powehi_domain::{
+        group::{Epoch, Group, GroupId, GroupMember},
+        media::MediaBlob,
+    };
     use std::sync::{Arc, Mutex};
 
     struct MockMediaRepo {
@@ -167,11 +188,64 @@ mod tests {
         }
     }
 
+    struct FakeGroupRepo {
+        members: Mutex<Vec<(GroupId, DeviceId)>>,
+    }
+
+    impl FakeGroupRepo {
+        fn empty() -> Arc<Self> {
+            Arc::new(Self {
+                members: Mutex::new(vec![]),
+            })
+        }
+        fn with_member(group_id: GroupId, device_id: DeviceId) -> Arc<Self> {
+            Arc::new(Self {
+                members: Mutex::new(vec![(group_id, device_id)]),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl GroupRepository for FakeGroupRepo {
+        async fn save(&self, _group: &Group) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn find_by_id(&self, _id: &GroupId) -> Result<Option<Group>, DomainError> {
+            Ok(None)
+        }
+        async fn add_member(&self, _member: &GroupMember) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn remove_member(
+            &self,
+            _group_id: &GroupId,
+            _device_id: &DeviceId,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn list_members(&self, group_id: &GroupId) -> Result<Vec<GroupMember>, DomainError> {
+            let locked = self.members.lock().unwrap();
+            Ok(locked
+                .iter()
+                .filter(|(gid, _)| gid == group_id)
+                .map(|(gid, did)| GroupMember {
+                    group_id: gid.clone(),
+                    device_id: did.clone(),
+                    joined_at_epoch: Epoch(0),
+                })
+                .collect())
+        }
+    }
+
+    fn svc(repo: Arc<MockMediaRepo>) -> MediaService {
+        MediaService::new(repo, FakeGroupRepo::empty())
+    }
+
     #[tokio::test]
     async fn request_upload_size_zero_returns_invalid_input() {
-        let svc = MediaService::new(Arc::new(MockMediaRepo::new("u", "d")));
-        let err = svc
-            .request_upload(&DeviceId::new(), "image/jpeg", 0)
+        let s = svc(Arc::new(MockMediaRepo::new("u", "d")));
+        let err = s
+            .request_upload(&DeviceId::new(), "image/jpeg", 0, None)
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::InvalidInput(_)));
@@ -179,9 +253,9 @@ mod tests {
 
     #[tokio::test]
     async fn request_upload_size_too_large_returns_invalid_input() {
-        let svc = MediaService::new(Arc::new(MockMediaRepo::new("u", "d")));
-        let err = svc
-            .request_upload(&DeviceId::new(), "image/jpeg", MAX_MEDIA_BYTES + 1)
+        let s = svc(Arc::new(MockMediaRepo::new("u", "d")));
+        let err = s
+            .request_upload(&DeviceId::new(), "image/jpeg", MAX_MEDIA_BYTES + 1, None)
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::InvalidInput(_)));
@@ -190,10 +264,10 @@ mod tests {
     #[tokio::test]
     async fn request_upload_saves_blob_and_returns_url() {
         let repo = Arc::new(MockMediaRepo::new("https://r2.example/upload", "unused"));
-        let svc = MediaService::new(repo.clone());
+        let s = svc(repo.clone());
         let device = DeviceId::new();
-        let (id, url) = svc
-            .request_upload(&device, "image/jpeg", 1024)
+        let (id, url) = s
+            .request_upload(&device, "image/jpeg", 1024, None)
             .await
             .unwrap();
         assert_eq!(url, "https://r2.example/upload");
@@ -201,22 +275,40 @@ mod tests {
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].id, id);
         assert_eq!(saved[0].uploader_device, device);
+        assert!(saved[0].group_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn request_upload_stores_group_id() {
+        let repo = Arc::new(MockMediaRepo::new("u", "d"));
+        let s = svc(repo.clone());
+        let device = DeviceId::new();
+        let group = GroupId::new();
+        let (id, _) = s
+            .request_upload(&device, "image/jpeg", 512, Some(&group))
+            .await
+            .unwrap();
+        let saved = repo.saved.lock().unwrap();
+        assert_eq!(saved[0].id, id);
+        assert_eq!(saved[0].group_id, Some(group));
     }
 
     #[tokio::test]
     async fn confirm_upload_ok_when_blob_exists() {
         let repo = Arc::new(MockMediaRepo::new("u", "d"));
-        let svc = MediaService::new(repo.clone());
+        let s = svc(repo.clone());
         let device = DeviceId::new();
-        let (id, _) = svc.request_upload(&device, "image/png", 512).await.unwrap();
-        svc.confirm_upload(&id, &device).await.unwrap();
+        let (id, _) = s
+            .request_upload(&device, "image/png", 512, None)
+            .await
+            .unwrap();
+        s.confirm_upload(&id, &device).await.unwrap();
     }
 
     #[tokio::test]
     async fn confirm_upload_not_found_when_blob_missing() {
-        let repo = Arc::new(MockMediaRepo::new("u", "d"));
-        let svc = MediaService::new(repo);
-        let err = svc
+        let s = svc(Arc::new(MockMediaRepo::new("u", "d")));
+        let err = s
             .confirm_upload(&MediaId::new(), &DeviceId::new())
             .await
             .unwrap_err();
@@ -226,68 +318,100 @@ mod tests {
     #[tokio::test]
     async fn confirm_upload_by_different_device_returns_unauthorized() {
         let repo = Arc::new(MockMediaRepo::new("u", "d"));
-        let svc = MediaService::new(repo.clone());
+        let s = svc(repo.clone());
         let uploader = DeviceId::new();
         let other = DeviceId::new();
-        let (id, _) = svc
-            .request_upload(&uploader, "image/png", 512)
+        let (id, _) = s
+            .request_upload(&uploader, "image/png", 512, None)
             .await
             .unwrap();
-        let err = svc.confirm_upload(&id, &other).await.unwrap_err();
+        let err = s.confirm_upload(&id, &other).await.unwrap_err();
         assert!(matches!(err, DomainError::Unauthorized));
     }
 
     #[tokio::test]
     async fn get_download_url_returns_url_for_uploader() {
         let repo = Arc::new(MockMediaRepo::new("u", "https://r2.example/download"));
-        let svc = MediaService::new(repo.clone());
+        let s = svc(repo.clone());
         let device = DeviceId::new();
-        let (id, _) = svc
-            .request_upload(&device, "video/mp4", 2048)
+        let (id, _) = s
+            .request_upload(&device, "video/mp4", 2048, None)
             .await
             .unwrap();
-        let url = svc.get_download_url(&id, &device).await.unwrap();
+        let url = s.get_download_url(&id, &device).await.unwrap();
         assert_eq!(url, "https://r2.example/download");
     }
 
     #[tokio::test]
     async fn get_download_url_by_different_device_returns_unauthorized() {
         let repo = Arc::new(MockMediaRepo::new("u", "https://r2.example/download"));
-        let svc = MediaService::new(repo.clone());
+        let s = svc(repo.clone());
         let uploader = DeviceId::new();
         let other = DeviceId::new();
-        let (id, _) = svc
-            .request_upload(&uploader, "video/mp4", 2048)
+        let (id, _) = s
+            .request_upload(&uploader, "video/mp4", 2048, None)
             .await
             .unwrap();
-        let err = svc.get_download_url(&id, &other).await.unwrap_err();
+        let err = s.get_download_url(&id, &other).await.unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
+    }
+
+    #[tokio::test]
+    async fn get_download_url_by_group_member_succeeds() {
+        let repo = Arc::new(MockMediaRepo::new("u", "https://r2.example/download"));
+        let uploader = DeviceId::new();
+        let member = DeviceId::new();
+        let group = GroupId::new();
+        let group_repo = FakeGroupRepo::with_member(group.clone(), member.clone());
+        let s = MediaService::new(repo.clone(), group_repo);
+        let (id, _) = s
+            .request_upload(&uploader, "image/jpeg", 512, Some(&group))
+            .await
+            .unwrap();
+        let url = s.get_download_url(&id, &member).await.unwrap();
+        assert_eq!(url, "https://r2.example/download");
+    }
+
+    #[tokio::test]
+    async fn get_download_url_by_non_member_returns_unauthorized() {
+        let repo = Arc::new(MockMediaRepo::new("u", "d"));
+        let uploader = DeviceId::new();
+        let non_member = DeviceId::new();
+        let group = GroupId::new();
+        let group_repo = FakeGroupRepo::empty();
+        let s = MediaService::new(repo.clone(), group_repo);
+        let (id, _) = s
+            .request_upload(&uploader, "image/jpeg", 512, Some(&group))
+            .await
+            .unwrap();
+        let err = s.get_download_url(&id, &non_member).await.unwrap_err();
         assert!(matches!(err, DomainError::Unauthorized));
     }
 
     #[tokio::test]
     async fn delete_by_uploader_succeeds() {
         let repo = Arc::new(MockMediaRepo::new("u", "d"));
-        let svc = MediaService::new(repo.clone());
+        let s = svc(repo.clone());
         let device = DeviceId::new();
-        let (id, _) = svc
-            .request_upload(&device, "image/webp", 256)
+        let (id, _) = s
+            .request_upload(&device, "image/webp", 256, None)
             .await
             .unwrap();
-        svc.delete(&id, &device).await.unwrap();
+        s.delete(&id, &device).await.unwrap();
         assert!(repo.saved.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn delete_by_different_device_returns_unauthorized() {
         let repo = Arc::new(MockMediaRepo::new("u", "d"));
-        let svc = MediaService::new(repo.clone());
+        let s = svc(repo.clone());
         let uploader = DeviceId::new();
         let other = DeviceId::new();
-        let (id, _) = svc
-            .request_upload(&uploader, "audio/mpeg", 128)
+        let (id, _) = s
+            .request_upload(&uploader, "audio/mpeg", 128, None)
             .await
             .unwrap();
-        let err = svc.delete(&id, &other).await.unwrap_err();
+        let err = s.delete(&id, &other).await.unwrap_err();
         assert!(matches!(err, DomainError::Unauthorized));
     }
 }

@@ -158,6 +158,7 @@ mod tests {
                 _: &DeviceId,
                 _: &str,
                 _: u64,
+                _: Option<&GroupId>,
             ) -> Result<(MediaId, String), DomainError> {
                 unimplemented!()
             }

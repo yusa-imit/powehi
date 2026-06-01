@@ -400,6 +400,7 @@ mod tests {
             _device: &DeviceId,
             _content_type: &str,
             _size_bytes: u64,
+            _group_id: Option<&GroupId>,
         ) -> Result<(MediaId, String), DomainError> {
             unimplemented!()
         }
@@ -699,6 +700,7 @@ mod tests {
             _device: &DeviceId,
             _content_type: &str,
             _size_bytes: u64,
+            _group_id: Option<&GroupId>,
         ) -> Result<(MediaId, String), DomainError> {
             Ok((MediaId::new(), "https://r2.example/presigned-put".into()))
         }
@@ -729,6 +731,7 @@ mod tests {
             _device: &DeviceId,
             _content_type: &str,
             _size_bytes: u64,
+            _group_id: Option<&GroupId>,
         ) -> Result<(MediaId, String), DomainError> {
             unimplemented!()
         }
