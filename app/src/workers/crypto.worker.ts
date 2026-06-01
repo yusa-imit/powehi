@@ -16,8 +16,8 @@ import { decryptField, deriveDbKey, encryptField } from "../db/encryption";
 // ── Return-type contracts ───────────────────────────────────────────────────
 
 export type OpaqueStartResult = { sessionId: string; message: Uint8Array };
-export type RegFinishResult = { exportKey: Uint8Array; upload: Uint8Array };
-export type LoginFinishResult = { exportKey: Uint8Array; finalization: Uint8Array };
+export type RegFinishResult = { upload: Uint8Array };
+export type LoginFinishResult = { finalization: Uint8Array };
 export type MlsIdentityResult = { identityId: string; keyPackage: Uint8Array };
 export type MlsGroupResult = { groupId: string };
 export type MlsKeyPackageResult = { keyPackage: Uint8Array };
@@ -105,7 +105,9 @@ const api = {
 
 	/**
 	 * Finish OPAQUE registration (client step 3).
-	 * Returns { exportKey, upload }. Send `upload` to the server.
+	 * Returns { upload }. Send `upload` to the server.
+	 * The OPAQUE export key is derived into the IndexedDB AES-GCM-256 key here
+	 * in the worker — it never crosses the worker/main-thread boundary.
 	 * The session is consumed — calling again with the same sessionId errors.
 	 */
 	async opaqueRegistrationFinish(
@@ -114,7 +116,10 @@ const api = {
 		serverResponse: Uint8Array,
 	): Promise<RegFinishResult> {
 		const wasm = await getWasm();
-		return wasm.opaque_registration_finish(sessionId, password, serverResponse);
+		const result = wasm.opaque_registration_finish(sessionId, password, serverResponse);
+		// Derive and hold the DB key inside the worker (F1: export key never leaves).
+		dbKey = await deriveDbKey(result.exportKey);
+		return { upload: result.upload };
 	},
 
 	/**
@@ -128,8 +133,10 @@ const api = {
 
 	/**
 	 * Finish OPAQUE login (client step 3).
-	 * Returns { exportKey, finalization }. Send `finalization` to the server.
-	 * Wrong password → rejection; export key is never produced on failure.
+	 * Returns { finalization }. Send `finalization` to the server.
+	 * The OPAQUE export key is derived into the IndexedDB AES-GCM-256 key here
+	 * in the worker — it never crosses the worker/main-thread boundary.
+	 * Wrong password → rejection; DB key is never set on failure.
 	 */
 	async opaqueLoginFinish(
 		sessionId: string,
@@ -137,7 +144,10 @@ const api = {
 		serverResponse: Uint8Array,
 	): Promise<LoginFinishResult> {
 		const wasm = await getWasm();
-		return wasm.opaque_login_finish(sessionId, password, serverResponse);
+		const result = wasm.opaque_login_finish(sessionId, password, serverResponse);
+		// Derive and hold the DB key inside the worker (F1: export key never leaves).
+		dbKey = await deriveDbKey(result.exportKey);
+		return { finalization: result.finalization };
 	},
 
 	// ── MLS ──────────────────────────────────────────────────────────────────
@@ -241,15 +251,6 @@ const api = {
 	},
 
 	// ── IndexedDB field encryption ────────────────────────────────────────────
-
-	/**
-	 * Derive the IndexedDB AES-GCM-256 key from the OPAQUE export key bytes.
-	 * Call once after a successful OPAQUE login or registration.
-	 * The derived CryptoKey stays in this worker — it never crosses to the main thread.
-	 */
-	async initDbKey(exportKeyBytes: Uint8Array): Promise<void> {
-		dbKey = await deriveDbKey(exportKeyBytes);
-	},
 
 	/**
 	 * Encrypt a sensitive IndexedDB field value with the session DB key.

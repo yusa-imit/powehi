@@ -7,10 +7,10 @@
 
 use axum::{extract::State, Json};
 use metrics::counter;
-use powehi_domain::{error::DomainError, user::UserId};
+use powehi_domain::error::DomainError;
 use powehi_port_inbound::auth::{
     LoginFinishRequest, LoginInitRequest, LoginInitResponse, RegistrationFinishRequest,
-    RegistrationInitRequest, RegistrationInitResponse, SessionToken,
+    RegistrationFinishResponse, RegistrationInitRequest, RegistrationInitResponse, SessionToken,
 };
 
 use crate::{error::ApiError, AppState};
@@ -40,12 +40,12 @@ pub async fn register_init(
 pub async fn register_finish(
     State(state): State<AppState>,
     Json(req): Json<RegistrationFinishRequest>,
-) -> Result<Json<UserId>, ApiError> {
+) -> Result<Json<RegistrationFinishResponse>, ApiError> {
     match state.auth.register_finish(req).await {
-        Ok(user_id) => {
+        Ok(resp) => {
             counter!("auth_register_total", "result" => "success").increment(1);
-            tracing::info!(user_id = %user_id, "auth.register_finish");
-            Ok(Json(user_id))
+            tracing::info!(user_id = %resp.user_id, "auth.register_finish");
+            Ok(Json(resp))
         }
         Err(e) => {
             counter!("auth_register_total", "result" => "failure").increment(1);

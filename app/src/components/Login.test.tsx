@@ -1,5 +1,5 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAuthStore } from "../store/auth";
 import { Login } from "./Login";
 
@@ -8,8 +8,22 @@ vi.mock("../hooks/useCryptoWorker", () => ({
 	useCryptoWorker: () => null,
 }));
 
+// Mock API calls — no network in unit tests.
+vi.mock("../api/auth", () => ({
+	hashHandle: async (h: string) => new Uint8Array(32).fill(h.charCodeAt(0)),
+	regInit: vi.fn(),
+	regFinish: vi.fn(),
+	loginInit: vi.fn(),
+	loginFinish: vi.fn(),
+	uploadKeyPackage: vi.fn(),
+	fromJsonArray: (a: number[]) => new Uint8Array(a),
+}));
+
+// fake-indexeddb is loaded globally in test-setup.ts.
+
+afterEach(cleanup);
 beforeEach(() => {
-	useAuthStore.setState({ phase: "login", deviceId: null });
+	useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null });
 });
 
 describe("Login component", () => {
@@ -48,7 +62,7 @@ describe("Login component", () => {
 		expect(useAuthStore.getState().phase).toBe("login");
 	});
 
-	it("advances to app phase when handle and password are provided (no worker)", async () => {
+	it("shows no-device error when sign-in attempted without a registered device", async () => {
 		render(<Login />);
 		fireEvent.change(screen.getByLabelText(/handle/i), { target: { value: "alice" } });
 		fireEvent.change(screen.getByLabelText(/password/i), {
@@ -56,8 +70,38 @@ describe("Login component", () => {
 		});
 		fireEvent.click(screen.getByRole("button", { name: /sign in/i }));
 		await waitFor(() => {
-			expect(useAuthStore.getState().phase).toBe("app");
+			expect(screen.getByText(/no device registered on this browser/i)).toBeInTheDocument();
 		});
+		expect(useAuthStore.getState().phase).toBe("login");
+	});
+
+	it("shows crypto unavailable error on create-account when worker is null", async () => {
+		render(<Login />);
+		// Switch to create-account mode
+		fireEvent.click(screen.getByText(/new to powehi/i));
+		fireEvent.change(screen.getByLabelText(/handle/i), { target: { value: "alice" } });
+		fireEvent.change(screen.getByLabelText(/password/i), {
+			target: { value: "password123!" },
+		});
+		fireEvent.click(screen.getByRole("button", { name: /create account/i }));
+		await waitFor(() => {
+			expect(screen.getByText(/encryption module unavailable/i)).toBeInTheDocument();
+		});
+		expect(useAuthStore.getState().phase).toBe("login");
+	});
+
+	it("toggles to create-account mode showing zero-knowledge subtitle", () => {
+		render(<Login />);
+		const toggleBtn = screen.getByText(/new to powehi/i);
+		fireEvent.click(toggleBtn);
+		expect(screen.getByText(/zero knowledge/i)).toBeInTheDocument();
+	});
+
+	it("toggles back to sign-in mode showing sign-in subtitle", () => {
+		render(<Login />);
+		fireEvent.click(screen.getByText(/new to powehi/i));
+		fireEvent.click(screen.getByText(/already have an account/i));
+		expect(screen.getByText(/sign in securely/i)).toBeInTheDocument();
 	});
 
 	it("shows encrypted footer with lock icon", () => {

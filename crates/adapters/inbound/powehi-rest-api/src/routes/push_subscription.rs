@@ -164,8 +164,8 @@ mod tests {
     use powehi_port_inbound::{
         auth::{
             AuthUseCase, DeviceRegistrationRequest, LoginFinishRequest, LoginInitRequest,
-            LoginInitResponse, RegistrationFinishRequest, RegistrationInitRequest,
-            RegistrationInitResponse, SessionToken,
+            LoginInitResponse, RegistrationFinishRequest, RegistrationFinishResponse,
+            RegistrationInitRequest, RegistrationInitResponse, SessionToken,
         },
         key_package::KeyPackageUseCase,
         media::MediaUseCase,
@@ -219,7 +219,7 @@ mod tests {
         async fn register_finish(
             &self,
             _: RegistrationFinishRequest,
-        ) -> Result<UserId, DomainError> {
+        ) -> Result<RegistrationFinishResponse, DomainError> {
             unimplemented!()
         }
         async fn login_init(&self, _: LoginInitRequest) -> Result<LoginInitResponse, DomainError> {

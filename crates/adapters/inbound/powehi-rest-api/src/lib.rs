@@ -193,7 +193,8 @@ mod tests {
     };
     use powehi_port_inbound::auth::{
         DeviceRegistrationRequest, LoginFinishRequest, LoginInitRequest, LoginInitResponse,
-        RegistrationFinishRequest, RegistrationInitRequest, RegistrationInitResponse, SessionToken,
+        RegistrationFinishRequest, RegistrationFinishResponse, RegistrationInitRequest,
+        RegistrationInitResponse, SessionToken,
     };
     use powehi_port_inbound::media::MediaUseCase;
     use powehi_port_outbound::push_subscription_repo::PushSubscriptionRepository;
@@ -298,7 +299,7 @@ mod tests {
         async fn register_finish(
             &self,
             _req: RegistrationFinishRequest,
-        ) -> Result<UserId, DomainError> {
+        ) -> Result<RegistrationFinishResponse, DomainError> {
             unimplemented!()
         }
         async fn login_init(
@@ -1412,9 +1413,12 @@ mod tests {
         }
         async fn register_finish(
             &self,
-            _req: RegistrationFinishRequest,
-        ) -> Result<UserId, DomainError> {
-            unimplemented!()
+            req: RegistrationFinishRequest,
+        ) -> Result<RegistrationFinishResponse, DomainError> {
+            Ok(RegistrationFinishResponse {
+                user_id: req.user_id,
+                device_id: DeviceId::new(),
+            })
         }
         async fn login_finish(
             &self,
@@ -1781,6 +1785,58 @@ mod tests {
         assert!(
             hsts.contains("max-age=63072000"),
             "HSTS max-age must be 2 years, got: {hsts}"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_finish_returns_user_id_and_device_id() {
+        let state = AppState {
+            region_id: "eu-de-1-test".to_string(),
+            auth: Arc::new(MockAuthSuccess),
+            messaging: Arc::new(MockMessaging),
+            key_package: Arc::new(MockKeyPackage),
+            media: Arc::new(MockMedia),
+            push_sub_repo: null_push_sub_repo(),
+            cache: empty_cache(),
+            handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
+        };
+        let app = router_for_test(
+            state,
+            rate_limit::auth_governor(),
+            rate_limit::api_governor(),
+        );
+
+        let body = serde_json::json!({
+            "user_id": TestUuid::new_v4(),
+            "opaque_record": [1u8, 2, 3],
+            "mls_credential": [4u8, 5, 6],
+        })
+        .to_string();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/register/finish")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            json.get("user_id").and_then(|v| v.as_str()).is_some(),
+            "response must include user_id"
+        );
+        assert!(
+            json.get("device_id").and_then(|v| v.as_str()).is_some(),
+            "response must include device_id (new in this cycle)"
         );
     }
 

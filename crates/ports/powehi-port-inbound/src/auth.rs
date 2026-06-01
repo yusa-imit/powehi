@@ -52,6 +52,16 @@ pub struct LoginFinishRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionToken(pub String);
 
+/// Returned by `register_finish`. Carries both the user's persistent ID and the
+/// newly-created device ID that the client must store for subsequent logins.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistrationFinishResponse {
+    pub user_id: UserId,
+    /// Server-assigned device ID. Client stores this in LocalIdentity and presents
+    /// it as `device_id` in every `LoginFinishRequest`.
+    pub device_id: DeviceId,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceRegistrationRequest {
     pub mls_credential: Vec<u8>,
@@ -63,7 +73,10 @@ pub trait AuthUseCase: Send + Sync {
         &self,
         req: RegistrationInitRequest,
     ) -> Result<RegistrationInitResponse, DomainError>;
-    async fn register_finish(&self, req: RegistrationFinishRequest) -> Result<UserId, DomainError>;
+    async fn register_finish(
+        &self,
+        req: RegistrationFinishRequest,
+    ) -> Result<RegistrationFinishResponse, DomainError>;
     async fn login_init(&self, req: LoginInitRequest) -> Result<LoginInitResponse, DomainError>;
     async fn login_finish(&self, req: LoginFinishRequest) -> Result<SessionToken, DomainError>;
     async fn register_device(

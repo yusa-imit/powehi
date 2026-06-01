@@ -1,4 +1,13 @@
 import { type ChangeEvent, type FormEvent, useState } from "react";
+import {
+	hashHandle,
+	loginFinish,
+	loginInit,
+	regFinish,
+	regInit,
+	uploadKeyPackage,
+} from "../api/auth";
+import { db } from "../db/schema";
 import { useCryptoWorker } from "../hooks/useCryptoWorker";
 import { useAuthStore } from "../store/auth";
 import { Icon } from "./Icon";
@@ -31,6 +40,7 @@ function Logo({ size = 32 }: { size?: number }) {
 }
 
 type LoginPhase = "idle" | "loading" | "error";
+type Mode = "sign-in" | "create-account";
 
 export function Login() {
 	const login = useAuthStore((s) => s.login);
@@ -40,6 +50,7 @@ export function Login() {
 	const [password, setPassword] = useState("");
 	const [phase, setPhase] = useState<LoginPhase>("idle");
 	const [errorMsg, setErrorMsg] = useState("");
+	const [mode, setMode] = useState<Mode>("sign-in");
 
 	const handleHandleChange = (e: ChangeEvent<HTMLInputElement>) => {
 		setHandle(e.target.value);
@@ -47,6 +58,72 @@ export function Login() {
 
 	const handlePasswordChange = (e: ChangeEvent<HTMLInputElement>) => {
 		setPassword(e.target.value);
+	};
+
+	/** OPAQUE registration → returns (device_id, session_token). DB key derived inside worker. */
+	const doRegister = async (
+		pw: Uint8Array,
+		handle_hash: Uint8Array,
+	): Promise<{ device_id: string; token: string }> => {
+		if (!cryptoWorker) throw new Error("crypto_unavailable");
+
+		// Step 1: OPAQUE reg start
+		const { sessionId, message: ke1 } = await cryptoWorker.opaqueRegistrationStart(pw);
+
+		// Step 2: server registration init
+		const initResp = await regInit(handle_hash, ke1);
+
+		// Step 3: OPAQUE reg finish — worker derives DB key internally; returns upload only.
+		const { upload: opaque_record } = await cryptoWorker.opaqueRegistrationFinish(
+			sessionId,
+			pw,
+			new Uint8Array(initResp.opaque_response),
+		);
+
+		// Step 4: MLS identity init — random 16-byte BasicCredential identity (RFC 9420 §5.3).
+		const mlsIdentityBytes = crypto.getRandomValues(new Uint8Array(16));
+		const { identityId, keyPackage } = await cryptoWorker.mlsInitIdentity(mlsIdentityBytes);
+
+		// Step 5: server registration finish — creates user + device
+		const finishResp = await regFinish(initResp.user_id, opaque_record, mlsIdentityBytes);
+
+		// Step 6: auto-login to get a session token
+		const { token } = await doLogin(pw, handle_hash, finishResp.device_id);
+
+		// Step 7: upload initial key package (non-fatal)
+		uploadKeyPackage(token, finishResp.device_id, keyPackage).catch(() => {});
+
+		// Suppress unused warning — identityId stored in WASM context
+		void identityId;
+
+		return { device_id: finishResp.device_id, token };
+	};
+
+	/** OPAQUE login → returns session_token. DB key derived inside worker. */
+	const doLogin = async (
+		pw: Uint8Array,
+		handle_hash: Uint8Array,
+		device_id: string,
+	): Promise<{ token: string }> => {
+		if (!cryptoWorker) throw new Error("crypto_unavailable");
+
+		// Step 1: OPAQUE login start
+		const { sessionId, message: ke1 } = await cryptoWorker.opaqueLoginStart(pw);
+
+		// Step 2: server login init
+		const initResp = await loginInit(handle_hash, ke1);
+
+		// Step 3: OPAQUE login finish — verifies server, worker derives DB key internally.
+		const { finalization: ke3 } = await cryptoWorker.opaqueLoginFinish(
+			sessionId,
+			pw,
+			new Uint8Array(initResp.opaque_ke2),
+		);
+
+		// Step 4: server login finish — validates ke3, returns session token
+		const token = await loginFinish(ke3, initResp.login_nonce, device_id);
+
+		return { token };
 	};
 
 	const handleSubmit = async (e: FormEvent) => {
@@ -60,20 +137,51 @@ export function Login() {
 		setPhase("loading");
 		setErrorMsg("");
 
+		const encoder = new TextEncoder();
+		const pw = encoder.encode(password);
+		// F2: clear password from React state immediately after encoding to Uint8Array.
+		setPassword("");
+
 		try {
-			if (cryptoWorker) {
-				// Real OPAQUE login flow — worker does the WASM heavy lifting.
-				// Phase 4 mock: the server endpoint is not yet live so we simulate.
-				// In production this exchanges opaqueLoginStart/Finish with the server.
-				const encoder = new TextEncoder();
-				await cryptoWorker.opaqueLoginStart(encoder.encode(password));
-				// Server round-trip would happen here; for now we accept the mock.
+			const handle_hash = await hashHandle(handle.trim());
+
+			let device_id: string;
+			let token: string;
+
+			if (mode === "create-account") {
+				const result = await doRegister(pw, handle_hash);
+				device_id = result.device_id;
+				token = result.token;
+			} else {
+				// Load stored device_id from IndexedDB LocalIdentity
+				const identity = await db.identity.get(1);
+				if (!identity?.deviceId) {
+					setPhase("error");
+					setErrorMsg("No device registered on this browser. Create an account first.");
+					return;
+				}
+				device_id = identity.deviceId;
+				({ token } = await doLogin(pw, handle_hash, device_id));
 			}
-			// Success — advance to app phase.
-			login("mock-device-id");
-		} catch {
+
+			// Persist device_id in IndexedDB (singleton identity record)
+			await db.identity.put({ id: 1, deviceId: device_id });
+
+			// Advance to app phase — DB key was derived inside the crypto worker.
+			login(device_id, token);
+		} catch (err) {
 			setPhase("error");
-			setErrorMsg("Sign in failed. Check your handle and password.");
+			const msg = err instanceof Error ? err.message : "unknown_error";
+			if (msg === "invalid_credentials" || msg === "unauthorized") {
+				setErrorMsg("Incorrect handle or password.");
+			} else if (msg === "crypto_unavailable") {
+				setErrorMsg("Encryption module unavailable. Please reload.");
+			} else {
+				setErrorMsg("Sign in failed. Please try again.");
+			}
+		} finally {
+			// F2: zero password bytes regardless of success or failure.
+			pw.fill(0);
 		}
 	};
 
@@ -179,7 +287,9 @@ export function Login() {
 						lineHeight: 1.5,
 					}}
 				>
-					Sign in securely. We never see your messages.
+					{mode === "create-account"
+						? "Create your encrypted account. Zero knowledge."
+						: "Sign in securely. We never see your messages."}
 				</div>
 
 				{/* Form */}
@@ -287,18 +397,25 @@ export function Login() {
 						{phase === "loading" ? (
 							<>
 								<Spinner />
-								Signing in…
+								{mode === "create-account" ? "Creating account…" : "Signing in…"}
 							</>
+						) : mode === "create-account" ? (
+							"Create account"
 						) : (
 							"Sign in"
 						)}
 					</button>
 				</form>
 
-				{/* Ghost link */}
+				{/* Mode toggle */}
 				<div style={{ textAlign: "center", marginTop: 16 }}>
 					<button
 						type="button"
+						onClick={() => {
+							setMode(mode === "sign-in" ? "create-account" : "sign-in");
+							setErrorMsg("");
+							setPhase("idle");
+						}}
 						style={{
 							background: "transparent",
 							border: "none",
@@ -309,7 +426,9 @@ export function Login() {
 							padding: 0,
 						}}
 					>
-						New to Powehi? Create account
+						{mode === "sign-in"
+							? "New to Powehi? Create account"
+							: "Already have an account? Sign in"}
 					</button>
 				</div>
 

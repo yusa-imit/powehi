@@ -3,7 +3,7 @@ import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
 import { useAuthStore } from "./auth";
 
 afterEach(() => {
-	useAuthStore.setState({ phase: "login", deviceId: null });
+	useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null });
 	vi.restoreAllMocks();
 });
 
@@ -21,12 +21,24 @@ describe("useAuthStore", () => {
 		expect(state.deviceId).toBe("device-abc");
 	});
 
-	it("logout() returns to login phase and clears deviceId", () => {
+	it("login() stores sessionToken when provided", () => {
+		useAuthStore.getState().login("device-abc", "tok-xyz");
+		const state = useAuthStore.getState();
+		expect(state.sessionToken).toBe("tok-xyz");
+	});
+
+	it("login() without sessionToken stores null", () => {
 		useAuthStore.getState().login("device-abc");
-		useAuthStore.getState().logout();
+		expect(useAuthStore.getState().sessionToken).toBeNull();
+	});
+
+	it("logout() returns to login phase and clears deviceId and sessionToken", async () => {
+		useAuthStore.getState().login("device-abc", "tok-xyz");
+		await useAuthStore.getState().logout();
 		const state = useAuthStore.getState();
 		expect(state.phase).toBe("login");
 		expect(state.deviceId).toBeNull();
+		expect(state.sessionToken).toBeNull();
 	});
 
 	it("login() with empty deviceId still transitions phase", () => {
@@ -51,7 +63,7 @@ describe("useAuthStore", () => {
 		// ("mock the Comlink proxy; never import crypto libs into a component test")
 		// and verify the contractual call is made.  End-to-end correctness is covered
 		// by the encrypted-db.test.ts wrong-key rejection test (cross-key decrypt throws).
-		it("calls dropDbKey on the crypto worker so the AES-GCM key does not linger", () => {
+		it("calls dropDbKey on the crypto worker so the AES-GCM key does not linger", async () => {
 			const dropDbKey = vi.fn();
 			const clearSessionState = vi.fn().mockResolvedValue(undefined);
 			vi.spyOn(CryptoWorkerHook, "getCryptoWorkerProxy").mockReturnValue({
@@ -59,12 +71,12 @@ describe("useAuthStore", () => {
 				clearSessionState,
 			} as unknown as ReturnType<typeof CryptoWorkerHook.getCryptoWorkerProxy>);
 
-			useAuthStore.getState().logout();
+			await useAuthStore.getState().logout();
 
 			expect(dropDbKey).toHaveBeenCalledOnce();
 		});
 
-		it("calls clearSessionState to wipe MLS and OPAQUE heap state on logout", () => {
+		it("calls clearSessionState to wipe MLS and OPAQUE heap state on logout", async () => {
 			const clearSessionState = vi.fn().mockResolvedValue(undefined);
 			const dropDbKey = vi.fn();
 			vi.spyOn(CryptoWorkerHook, "getCryptoWorkerProxy").mockReturnValue({
@@ -72,7 +84,7 @@ describe("useAuthStore", () => {
 				dropDbKey,
 			} as unknown as ReturnType<typeof CryptoWorkerHook.getCryptoWorkerProxy>);
 
-			useAuthStore.getState().logout();
+			await useAuthStore.getState().logout();
 
 			expect(clearSessionState).toHaveBeenCalledOnce();
 			// clearSessionState must be called before dropDbKey (documented order).
@@ -81,10 +93,10 @@ describe("useAuthStore", () => {
 			);
 		});
 
-		it("still transitions to login phase even when worker is unavailable (null proxy)", () => {
+		it("still transitions to login phase even when worker is unavailable (null proxy)", async () => {
 			vi.spyOn(CryptoWorkerHook, "getCryptoWorkerProxy").mockReturnValue(null);
 
-			useAuthStore.getState().logout();
+			await useAuthStore.getState().logout();
 
 			expect(useAuthStore.getState().phase).toBe("login");
 			expect(useAuthStore.getState().deviceId).toBeNull();

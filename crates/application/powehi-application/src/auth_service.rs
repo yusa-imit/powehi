@@ -9,8 +9,8 @@ use powehi_domain::{
 };
 use powehi_port_inbound::auth::{
     AuthUseCase, DeviceRegistrationRequest, LoginFinishRequest, LoginInitRequest,
-    LoginInitResponse, RegistrationFinishRequest, RegistrationInitRequest,
-    RegistrationInitResponse, SessionToken,
+    LoginInitResponse, RegistrationFinishRequest, RegistrationFinishResponse,
+    RegistrationInitRequest, RegistrationInitResponse, SessionToken,
 };
 use powehi_port_outbound::{
     cache::CachePort, device_repo::DeviceRepository, opaque::OpaqueServerPort,
@@ -70,21 +70,34 @@ impl AuthUseCase for AuthService {
     }
 
     #[instrument(skip(self, req), fields(user_id = %req.user_id))]
-    async fn register_finish(&self, req: RegistrationFinishRequest) -> Result<UserId, DomainError> {
+    async fn register_finish(
+        &self,
+        req: RegistrationFinishRequest,
+    ) -> Result<RegistrationFinishResponse, DomainError> {
         let password_file = self.opaque.registration_finish(&req.opaque_record)?;
         let cache_key = format!("reg:{}", req.user_id.as_uuid());
+        // Atomically consume the registration session — prevents concurrent-finish
+        // races and nonce replay within the TTL window (audit finding sec-F1).
         let handle_hash = self
             .cache
-            .get(&cache_key)
+            .get_del(&cache_key)
             .await?
             .ok_or_else(|| DomainError::NotFound("registration session".into()))?;
 
-        // Save user before evicting the cache entry — if save fails the client
-        // can retry (finding #5: delete after save, not before).
         let user = User::registered(req.user_id.clone(), handle_hash, password_file);
         self.user_repo.save(&user).await?;
-        let _ = self.cache.delete(&cache_key).await; // best-effort cleanup
-        Ok(req.user_id)
+
+        // Create the first device for this user. The client supplies its MLS
+        // credential bytes (raw BasicCredential identity). The server assigns a
+        // fresh DeviceId so the client can present it in subsequent LoginFinishRequests.
+        let device_id = DeviceId::new();
+        let device = Device::new(device_id.clone(), req.user_id.clone(), req.mls_credential);
+        self.device_repo.save(&device).await?;
+
+        Ok(RegistrationFinishResponse {
+            user_id: req.user_id,
+            device_id,
+        })
     }
 
     #[instrument(skip(self, req), fields(handle_hash_len = req.handle_hash.len()))]
