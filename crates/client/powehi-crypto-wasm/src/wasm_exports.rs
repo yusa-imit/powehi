@@ -39,12 +39,17 @@ fn next_id() -> String {
 
 // ── Thread-local state ─────────────────────────────────────────────────────────
 
+// SECURITY: ephemeral OPRF client state is stored as serialized bytes wrapped in
+// Zeroizing<Vec<u8>>. When the session is removed from the map (consumed by a
+// finish call or cleared by mls_clear_session on logout), the Zeroizing wrapper
+// zeroes the bytes before deallocating, preventing the ephemeral secret material
+// from persisting in WASM linear memory beyond its useful lifetime.
 struct OpaqueRegSession {
-    state: opaque_ke::ClientRegistration<DefaultCipherSuite>,
+    bytes: Zeroizing<Vec<u8>>,
 }
 
 struct OpaqueLoginSession {
-    state: opaque_ke::ClientLogin<DefaultCipherSuite>,
+    bytes: Zeroizing<Vec<u8>>,
 }
 
 /// In-memory context for one MLS identity: the identity material, the
@@ -93,9 +98,16 @@ pub fn opaque_registration_start(password: &[u8]) -> Result<JsValue, JsError> {
     let (state, message) =
         opaque::registration_start(password, &mut rng).map_err(|e| js_err(&e.to_string()))?;
     let session_id = next_id();
+    // Serialize ephemeral OPRF state to bytes and wrap in Zeroizing so the
+    // heap buffer is zeroed when the session is consumed or cleared.
+    // Note: serialize() produces a transient stack GenericArray that is not
+    // Zeroized; .to_vec() copies to heap which IS Zeroized via Zeroizing.
+    // The transient stack bytes share the WASM linear-memory residue caveat
+    // documented above and at mls_clear_session.
+    let bytes = Zeroizing::new(state.serialize().to_vec());
     OPAQUE_REG.with(|s| {
         s.borrow_mut()
-            .insert(session_id.clone(), OpaqueRegSession { state });
+            .insert(session_id.clone(), OpaqueRegSession { bytes });
     });
     js_obj(&[
         ("sessionId", JsValue::from_str(&session_id)),
@@ -115,10 +127,13 @@ pub fn opaque_registration_finish(
     password: &[u8],
     server_response: &[u8],
 ) -> Result<JsValue, JsError> {
-    let state = OPAQUE_REG
+    let session = OPAQUE_REG
         .with(|s| s.borrow_mut().remove(session_id))
-        .ok_or_else(|| js_err("unknown opaque registration session"))?
-        .state;
+        .ok_or_else(|| js_err("unknown opaque registration session"))?;
+    // Deserialize from the Zeroizing byte buffer; the buffer is zeroed on drop
+    // when `session` goes out of scope at the end of this function.
+    let state = opaque_ke::ClientRegistration::<DefaultCipherSuite>::deserialize(&session.bytes)
+        .map_err(|_| js_err("opaque registration session corrupted"))?;
     let mut rng = OsRng;
     let (result, upload) = opaque::registration_finish(state, password, server_response, &mut rng)
         .map_err(|e| js_err(&e.to_string()))?;
@@ -140,9 +155,13 @@ pub fn opaque_login_start(password: &[u8]) -> Result<JsValue, JsError> {
     let (state, message) =
         opaque::login_start(password, &mut rng).map_err(|e| js_err(&e.to_string()))?;
     let session_id = next_id();
+    // Serialize ephemeral KE1 state (ephemeral DH keys + OPRF client) to bytes
+    // and wrap in Zeroizing so the heap buffer is zeroed when the session is
+    // consumed or cleared on logout. Same transient-stack caveat as registration.
+    let bytes = Zeroizing::new(state.serialize().to_vec());
     OPAQUE_LOGIN.with(|s| {
         s.borrow_mut()
-            .insert(session_id.clone(), OpaqueLoginSession { state });
+            .insert(session_id.clone(), OpaqueLoginSession { bytes });
     });
     js_obj(&[
         ("sessionId", JsValue::from_str(&session_id)),
@@ -162,10 +181,13 @@ pub fn opaque_login_finish(
     password: &[u8],
     server_response: &[u8],
 ) -> Result<JsValue, JsError> {
-    let state = OPAQUE_LOGIN
+    let session = OPAQUE_LOGIN
         .with(|s| s.borrow_mut().remove(session_id))
-        .ok_or_else(|| js_err("unknown opaque login session"))?
-        .state;
+        .ok_or_else(|| js_err("unknown opaque login session"))?;
+    // Deserialize from the Zeroizing byte buffer; the buffer is zeroed on drop
+    // when `session` goes out of scope at the end of this function.
+    let state = opaque_ke::ClientLogin::<DefaultCipherSuite>::deserialize(&session.bytes)
+        .map_err(|_| js_err("opaque login session corrupted"))?;
     let result = opaque::login_finish_full(state, password, server_response)
         .map_err(|e| js_err(&e.to_string()))?;
     // Zeroizing ensures the Rust-side copy is wiped from linear memory on drop.
@@ -510,24 +532,29 @@ pub fn mls_clear_session() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opaque_ke::{ClientLogin, ClientRegistration};
 
     // ── OPAQUE session state ──────────────────────────────────────────────────
 
-    /// OPAQUE registration sessions are stored and removed correctly.
+    /// OPAQUE registration sessions are stored as Zeroizing bytes and removed correctly.
     #[test]
     fn test_opaque_registration_session_lifecycle() {
         let mut rng = OsRng;
         let (state, _msg) = opaque::registration_start(b"password123", &mut rng).unwrap();
         let id = next_id();
+        let bytes = Zeroizing::new(state.serialize().to_vec());
         OPAQUE_REG.with(|s| {
             s.borrow_mut()
-                .insert(id.clone(), OpaqueRegSession { state });
+                .insert(id.clone(), OpaqueRegSession { bytes });
         });
         assert!(
             OPAQUE_REG.with(|s| s.borrow().contains_key(&id)),
             "session should be stored"
         );
-        // Removing the session returns Some.
+        // Stored bytes are non-empty (serialized OPRF client state is 64 bytes for Ristretto255).
+        let byte_len = OPAQUE_REG.with(|s| s.borrow().get(&id).map(|s| s.bytes.len()).unwrap_or(0));
+        assert!(byte_len > 0, "session bytes must be non-empty");
+        // Removing the session returns Some and drops (zeroing) the bytes.
         let removed = OPAQUE_REG.with(|s| s.borrow_mut().remove(&id));
         assert!(removed.is_some(), "session should be removable");
         // Second removal returns None (single-use).
@@ -535,22 +562,51 @@ mod tests {
         assert!(removed2.is_none(), "session must be single-use");
     }
 
-    /// OPAQUE login sessions are stored and removed correctly.
+    /// OPAQUE login sessions are stored as Zeroizing bytes and removed correctly.
     #[test]
     fn test_opaque_login_session_lifecycle() {
         let mut rng = OsRng;
         let (state, _msg) = opaque::login_start(b"password123", &mut rng).unwrap();
         let id = next_id();
+        let bytes = Zeroizing::new(state.serialize().to_vec());
         OPAQUE_LOGIN.with(|s| {
             s.borrow_mut()
-                .insert(id.clone(), OpaqueLoginSession { state });
+                .insert(id.clone(), OpaqueLoginSession { bytes });
         });
         assert!(
             OPAQUE_LOGIN.with(|s| s.borrow().contains_key(&id)),
             "session should be stored"
         );
+        // Stored bytes are non-empty (serialized KE1 state includes ephemeral DH keys).
+        let byte_len =
+            OPAQUE_LOGIN.with(|s| s.borrow().get(&id).map(|s| s.bytes.len()).unwrap_or(0));
+        assert!(byte_len > 0, "login session bytes must be non-empty");
         let removed = OPAQUE_LOGIN.with(|s| s.borrow_mut().remove(&id));
         assert!(removed.is_some(), "session should be removable");
+    }
+
+    /// Consumed registration session bytes can be deserialized back to the original state.
+    #[test]
+    fn test_opaque_registration_session_roundtrip() {
+        let mut rng = OsRng;
+        let (state, _msg) = opaque::registration_start(b"roundtrip-pw", &mut rng).unwrap();
+        let original_bytes = state.serialize().to_vec();
+        // Deserialize must succeed for our DefaultCipherSuite.
+        let restored =
+            ClientRegistration::<DefaultCipherSuite>::deserialize(&original_bytes).unwrap();
+        // Confirm round-trip: re-serializing gives the same bytes.
+        assert_eq!(restored.serialize().as_slice(), original_bytes.as_slice());
+    }
+
+    /// Consumed login session bytes can be deserialized back to the original state.
+    #[test]
+    fn test_opaque_login_session_roundtrip() {
+        let mut rng = OsRng;
+        let (state, _msg) = opaque::login_start(b"roundtrip-pw", &mut rng).unwrap();
+        let original_bytes = state.serialize().to_vec();
+        // Deserialize must succeed for our DefaultCipherSuite.
+        let restored = ClientLogin::<DefaultCipherSuite>::deserialize(&original_bytes).unwrap();
+        assert_eq!(restored.serialize().as_slice(), original_bytes.as_slice());
     }
 
     // ── MLS context state ─────────────────────────────────────────────────────
@@ -647,15 +703,16 @@ mod tests {
         );
     }
 
-    /// mls_clear_session removes in-flight OPAQUE registration sessions.
+    /// mls_clear_session removes in-flight OPAQUE registration sessions (and zeroes bytes).
     #[test]
     fn test_clear_session_removes_opaque_reg_sessions() {
         let mut rng = OsRng;
         let (state, _) = opaque::registration_start(b"pw", &mut rng).unwrap();
         let id = next_id();
+        let bytes = Zeroizing::new(state.serialize().to_vec());
         OPAQUE_REG.with(|s| {
             s.borrow_mut()
-                .insert(id.clone(), OpaqueRegSession { state })
+                .insert(id.clone(), OpaqueRegSession { bytes })
         });
         assert!(OPAQUE_REG.with(|s| s.borrow().contains_key(&id)));
 
@@ -668,15 +725,16 @@ mod tests {
         );
     }
 
-    /// mls_clear_session removes in-flight OPAQUE login sessions.
+    /// mls_clear_session removes in-flight OPAQUE login sessions (and zeroes bytes).
     #[test]
     fn test_clear_session_removes_opaque_login_sessions() {
         let mut rng = OsRng;
         let (state, _) = opaque::login_start(b"pw", &mut rng).unwrap();
         let id = next_id();
+        let bytes = Zeroizing::new(state.serialize().to_vec());
         OPAQUE_LOGIN.with(|s| {
             s.borrow_mut()
-                .insert(id.clone(), OpaqueLoginSession { state })
+                .insert(id.clone(), OpaqueLoginSession { bytes })
         });
         assert!(OPAQUE_LOGIN.with(|s| s.borrow().contains_key(&id)));
 
