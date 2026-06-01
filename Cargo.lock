@@ -3358,9 +3358,11 @@ dependencies = [
  "bytes",
  "chrono",
  "futures",
+ "hmac 0.12.1",
  "powehi-domain",
  "powehi-port-inbound",
  "powehi-port-outbound",
+ "sha2 0.10.9",
  "tokio",
  "tracing",
  "uuid",
@@ -3582,9 +3584,11 @@ dependencies = [
  "powehi-telemetry",
  "powehi-webpush",
  "powehi-ws-hub",
+ "sha2 0.10.9",
  "tokio",
  "tonic",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

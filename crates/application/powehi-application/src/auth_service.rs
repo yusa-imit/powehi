@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use hmac::{Hmac, Mac};
 use powehi_domain::{
     device::{Device, DeviceId},
     error::DomainError,
@@ -16,8 +17,11 @@ use powehi_port_outbound::{
     cache::CachePort, device_repo::DeviceRepository, opaque::OpaqueServerPort,
     user_repo::UserRepository,
 };
+use sha2::Sha256;
 use tracing::instrument;
 use uuid::Uuid;
+
+type HmacSha256 = Hmac<Sha256>;
 
 const REG_TTL: Duration = Duration::from_secs(300);
 const LOGIN_NONCE_TTL: Duration = Duration::from_secs(300);
@@ -30,6 +34,10 @@ pub struct AuthService {
     device_repo: Arc<dyn DeviceRepository>,
     opaque: Arc<dyn OpaqueServerPort>,
     cache: Arc<dyn CachePort>,
+    /// Server-side secret for HMAC-SHA256 synthetic user_id derivation.
+    /// Prevents handle-existence timing oracle: unknown handles always map to the
+    /// same deterministic UUID (per secret), indistinguishable from known handles.
+    handle_oracle_secret: [u8; 32],
 }
 
 impl AuthService {
@@ -38,13 +46,32 @@ impl AuthService {
         device_repo: Arc<dyn DeviceRepository>,
         opaque: Arc<dyn OpaqueServerPort>,
         cache: Arc<dyn CachePort>,
+        handle_oracle_secret: [u8; 32],
     ) -> Self {
         Self {
             user_repo,
             device_repo,
             opaque,
             cache,
+            handle_oracle_secret,
         }
+    }
+
+    /// Derives a deterministic UserId from `handle_hash` using HMAC-SHA256 keyed
+    /// with `handle_oracle_secret`. The result is stable across calls within a
+    /// server lifetime (or across restarts when the secret is persisted in config),
+    /// closing the handle-enumeration oracle in `login_init`.
+    fn synthetic_user_id(&self, handle_hash: &[u8]) -> UserId {
+        let mut mac = HmacSha256::new_from_slice(&self.handle_oracle_secret)
+            .expect("HMAC accepts any key size");
+        mac.update(handle_hash);
+        let digest: [u8; 32] = mac.finalize().into_bytes().into();
+        // Interpret first 16 bytes as a UUID v4 (version + variant bits set per RFC 4122).
+        let mut id_bytes = [0u8; 16];
+        id_bytes.copy_from_slice(&digest[..16]);
+        id_bytes[6] = (id_bytes[6] & 0x0f) | 0x40; // version 4
+        id_bytes[8] = (id_bytes[8] & 0x3f) | 0x80; // RFC 4122 variant
+        UserId::from(Uuid::from_bytes(id_bytes))
     }
 }
 
@@ -107,7 +134,10 @@ impl AuthUseCase for AuthService {
         let (user_id, password_file_opt) =
             match self.user_repo.find_by_handle_hash(&req.handle_hash).await? {
                 Some(user) => (user.id, Some(user.opaque_password_file)),
-                None => (UserId::new(), None), // synthetic path — client will fail ke3
+                // Deterministic synthetic path: same handle_hash always yields the same
+                // UserId so consecutive login_init calls for an unknown handle are
+                // indistinguishable from known-handle calls (closes handle-oracle).
+                None => (self.synthetic_user_id(&req.handle_hash), None),
             };
 
         let identity = user_id.as_uuid().as_bytes().to_vec();
@@ -589,6 +619,8 @@ mod tests {
         }
     }
 
+    const TEST_ORACLE_SECRET: [u8; 32] = [42u8; 32];
+
     fn make_svc() -> (
         AuthService,
         Arc<FakeUserRepo>,
@@ -604,6 +636,7 @@ mod tests {
             device_repo.clone(),
             opaque,
             cache.clone(),
+            TEST_ORACLE_SECRET,
         );
         (svc, user_repo, device_repo, cache)
     }
@@ -947,6 +980,7 @@ mod tests {
             device_repo.clone(),
             opaque,
             fail_cache.clone(),
+            TEST_ORACLE_SECRET,
         );
 
         let uid = UserId::new();
@@ -1078,6 +1112,7 @@ mod tests {
             device_repo.clone(),
             opaque,
             fail_cache.clone(),
+            TEST_ORACLE_SECRET,
         );
 
         let uid = UserId::new();
@@ -1115,6 +1150,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn login_init_unknown_handle_returns_consistent_synthetic_user_id() {
+        // Handle-oracle invariant: two consecutive login_init calls with the same
+        // unknown handle_hash must return the SAME user_id (deterministic synthetic UUID).
+        // If they returned different UUIDs, an attacker could enumerate valid handles.
+        let (svc, _, _, _) = make_svc();
+        let unknown_hash = vec![0xabu8; 32];
+
+        let resp1 = svc
+            .login_init(LoginInitRequest {
+                handle_hash: unknown_hash.clone(),
+                opaque_ke1: vec![0u8; 32],
+            })
+            .await
+            .unwrap();
+        let resp2 = svc
+            .login_init(LoginInitRequest {
+                handle_hash: unknown_hash.clone(),
+                opaque_ke1: vec![0u8; 32],
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp1.user_id, resp2.user_id,
+            "unknown handle must map to the same synthetic user_id across calls"
+        );
+    }
+
+    #[tokio::test]
+    async fn login_init_different_unknown_handles_return_different_synthetic_ids() {
+        // Different unknown handles must map to different synthetic user_ids so they
+        // are not collapsed to the same nonce cache slot.
+        let (svc, _, _, _) = make_svc();
+        let resp1 = svc
+            .login_init(LoginInitRequest {
+                handle_hash: vec![0xaau8; 32],
+                opaque_ke1: vec![0u8; 32],
+            })
+            .await
+            .unwrap();
+        let resp2 = svc
+            .login_init(LoginInitRequest {
+                handle_hash: vec![0xbbu8; 32],
+                opaque_ke1: vec![0u8; 32],
+            })
+            .await
+            .unwrap();
+
+        assert_ne!(
+            resp1.user_id, resp2.user_id,
+            "different unknown handles must produce different synthetic user_ids"
+        );
+    }
+
+    #[tokio::test]
     async fn revoke_device_set_members_failure_propagates_error() {
         // If we cannot enumerate active sessions the revocation fails — silently
         // leaving live tokens for a revoked device is worse than returning an error.
@@ -1129,6 +1219,7 @@ mod tests {
             device_repo.clone(),
             opaque,
             fail_cache.clone(),
+            TEST_ORACLE_SECRET,
         );
 
         let uid = UserId::new();

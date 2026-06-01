@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tracing::info;
 
@@ -89,11 +90,35 @@ async fn main() -> Result<()> {
             }
         });
 
+    // Derive the 32-byte HMAC key for the handle-oracle anti-enumeration defence.
+    // If the operator supplies POWEHI__HANDLE_ORACLE_SECRET_TOKEN, derive from it
+    // via SHA256 so the key is stable across restarts. If unset, use a random key
+    // (per-restart only — the oracle is closed, but across restarts a known handle
+    // would get a different synthetic user_id on login_init, which is benign).
+    let handle_oracle_secret: [u8; 32] = if cfg.handle_oracle_secret_token.is_empty() {
+        tracing::warn!(
+            "POWEHI__HANDLE_ORACLE_SECRET_TOKEN not configured — \
+             using ephemeral random oracle key; set this env var for stable behavior"
+        );
+        let a = uuid::Uuid::new_v4();
+        let b = uuid::Uuid::new_v4();
+        let mut key = [0u8; 32];
+        key[..16].copy_from_slice(a.as_bytes());
+        key[16..].copy_from_slice(b.as_bytes());
+        key
+    } else {
+        let digest = Sha256::digest(
+            format!("powehi-oracle-v1:{}", cfg.handle_oracle_secret_token).as_bytes(),
+        );
+        digest.into()
+    };
+
     let auth: Arc<dyn powehi_port_inbound::auth::AuthUseCase> = Arc::new(AuthService::new(
         user_repo,
         device_repo,
         opaque,
         cache.clone(),
+        handle_oracle_secret,
     ));
 
     let group_repo_grpc: Arc<dyn powehi_port_outbound::group_repo::GroupRepository> =

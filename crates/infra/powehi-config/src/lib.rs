@@ -57,6 +57,13 @@ pub struct AppConfig {
     /// `POWEHI__VAPID_CONTACT`.
     #[serde(default)]
     pub vapid_contact: Option<String>,
+    /// Arbitrary secret token used to derive the HMAC-SHA256 key for the
+    /// login_init handle-existence anti-oracle (deterministic synthetic user_id).
+    /// Set to any high-entropy string (e.g. a UUID) and keep it stable across
+    /// restarts. If empty, a random key is generated at startup (per-restart only).
+    /// `POWEHI__HANDLE_ORACLE_SECRET_TOKEN`.
+    #[serde(default)]
+    pub handle_oracle_secret_token: String,
 }
 
 fn default_presign_upload_ttl() -> u64 {
@@ -130,6 +137,7 @@ impl std::fmt::Debug for AppConfig {
             .field("grpc_tls_ca", &self.grpc_tls_ca)
             .field("vapid_private_key_pem", &"<redacted>")
             .field("vapid_contact", &self.vapid_contact)
+            .field("handle_oracle_secret_token", &"<redacted>")
             .finish()
     }
 }
@@ -180,6 +188,7 @@ mod tests {
             grpc_tls_ca: String::new(),
             vapid_private_key_pem: None,
             vapid_contact: None,
+            handle_oracle_secret_token: String::new(),
         }
     }
 
@@ -269,6 +278,7 @@ mod tests {
             vapid_private_key_pem: Some(
                 "-----BEGIN PRIVATE KEY-----\nSECRET\n-----END PRIVATE KEY-----".into(),
             ),
+            handle_oracle_secret_token: "super-secret-oracle-token-12345".into(),
             ..default_config()
         };
         let debug = format!("{cfg:?}");
@@ -287,6 +297,10 @@ mod tests {
         assert!(
             !debug.contains("BEGIN PRIVATE KEY"),
             "VAPID private key must not appear in Debug output"
+        );
+        assert!(
+            !debug.contains("super-secret-oracle-token-12345"),
+            "handle oracle secret must not appear in Debug output"
         );
         assert!(
             debug.contains("<redacted>"),
