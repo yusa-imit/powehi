@@ -3,8 +3,8 @@ use std::sync::Arc;
 use tracing::info;
 
 use powehi_application::{
-    auth_service::AuthService, key_package_service::KeyPackageService, media_service::MediaService,
-    messaging_service::MessagingService,
+    auth_service::AuthService, group_service::GroupService, key_package_service::KeyPackageService,
+    media_service::MediaService, messaging_service::MessagingService,
 };
 use powehi_grpc::{RegionGrpcServer, TlsConfig};
 use powehi_opaque::OpaqueServer;
@@ -100,6 +100,12 @@ async fn main() -> Result<()> {
         group_repo.clone();
     let group_repo_media: Arc<dyn powehi_port_outbound::group_repo::GroupRepository> =
         group_repo.clone();
+    let group_repo_rest: Arc<dyn powehi_port_outbound::group_repo::GroupRepository> =
+        group_repo.clone();
+    let group: Arc<dyn powehi_port_inbound::group::GroupUseCase> = Arc::new(GroupService::new(
+        group_repo_rest,
+        powehi_domain::region::RegionId::new(&cfg.region_id),
+    ));
     let messaging: Arc<dyn powehi_port_inbound::messaging::MessagingUseCase> = Arc::new(
         MessagingService::new(envelope_repo.clone(), group_repo, event_bus.clone())
             .with_push(push_sub_repo.clone(), web_push_adapter),
@@ -183,6 +189,7 @@ async fn main() -> Result<()> {
     let state = AppState {
         region_id: cfg.region_id.clone(),
         auth,
+        group,
         messaging,
         key_package,
         media,

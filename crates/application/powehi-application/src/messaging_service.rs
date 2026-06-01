@@ -57,6 +57,25 @@ impl MessagingService {
         self
     }
 
+    /// Fail-closed group membership guard: sender must appear in the group's
+    /// member list. Empty member list → Unauthorized (no membership data means
+    /// the group was never registered or the group_id is unknown/spoofed).
+    async fn check_sender_is_member(
+        &self,
+        sender: &DeviceId,
+        group_id: &GroupId,
+    ) -> Result<(), DomainError> {
+        let members = self.group_repo.list_members(group_id).await?;
+        if members.is_empty() {
+            tracing::warn!(group_id = %group_id, "messaging: empty member list — fail-closed");
+            return Err(DomainError::Unauthorized);
+        }
+        if !members.iter().any(|m| &m.device_id == sender) {
+            return Err(DomainError::Unauthorized);
+        }
+        Ok(())
+    }
+
     /// Fire-and-forget wake-up notification: look up the recipient's push
     /// subscription and send an empty ping. Errors are logged but never
     /// propagated — push delivery is best-effort and must not fail the message flow.
@@ -86,6 +105,7 @@ impl MessagingUseCase for MessagingService {
         ciphertext: Bytes,
         ttl_seconds: Option<u32>,
     ) -> Result<EnvelopeId, DomainError> {
+        self.check_sender_is_member(sender, group_id).await?;
         // Disappearing messages: TTL is an optional metadata field. When present
         // it must fall within [30s, 7d]. expires_at is computed server-side so
         // clients can never set an arbitrary timestamp. The TTL value itself is
@@ -131,6 +151,7 @@ impl MessagingUseCase for MessagingService {
         welcome: Bytes,
         target: &DeviceId,
     ) -> Result<(), DomainError> {
+        self.check_sender_is_member(sender, group_id).await?;
         let envelope = Envelope::new(
             group_id.clone(),
             sender.clone(),
@@ -165,6 +186,7 @@ impl MessagingUseCase for MessagingService {
             .find_by_id(group_id)
             .await?
             .ok_or_else(|| DomainError::NotFound("group".into()))?;
+        self.check_sender_is_member(sender, &group.id).await?;
         let new_epoch = Epoch(group.epoch.0 + 1);
         group.epoch = new_epoch;
         self.group_repo.save(&group).await?;
@@ -288,38 +310,59 @@ mod tests {
     }
 
     struct FakeGroupRepo {
-        store: Mutex<HashMap<GroupId, Group>>,
+        groups: Mutex<HashMap<GroupId, Group>>,
+        members: Mutex<Vec<powehi_domain::group::GroupMember>>,
     }
     impl FakeGroupRepo {
-        fn with_group(group: Group) -> Arc<Self> {
+        fn empty() -> Arc<Self> {
+            Arc::new(Self {
+                groups: Mutex::new(HashMap::new()),
+                members: Mutex::new(vec![]),
+            })
+        }
+        /// Group entity + sender as a member (for send_commit tests).
+        fn with_group_and_member(group: Group, device_id: DeviceId) -> Arc<Self> {
+            let group_id = group.id.clone();
             let mut m = HashMap::new();
             m.insert(group.id.clone(), group);
             Arc::new(Self {
-                store: Mutex::new(m),
+                groups: Mutex::new(m),
+                members: Mutex::new(vec![powehi_domain::group::GroupMember {
+                    group_id,
+                    device_id,
+                    joined_at_epoch: Epoch(0),
+                }]),
             })
         }
-        fn empty() -> Arc<Self> {
+        /// No group entity — just membership record (for send_message / send_welcome tests).
+        fn with_member_in(group_id: GroupId, device_id: DeviceId) -> Arc<Self> {
             Arc::new(Self {
-                store: Mutex::new(HashMap::new()),
+                groups: Mutex::new(HashMap::new()),
+                members: Mutex::new(vec![powehi_domain::group::GroupMember {
+                    group_id,
+                    device_id,
+                    joined_at_epoch: Epoch(0),
+                }]),
             })
         }
     }
     #[async_trait::async_trait]
     impl GroupRepository for FakeGroupRepo {
         async fn save(&self, group: &Group) -> Result<(), DomainError> {
-            self.store
+            self.groups
                 .lock()
                 .unwrap()
                 .insert(group.id.clone(), group.clone());
             Ok(())
         }
         async fn find_by_id(&self, id: &GroupId) -> Result<Option<Group>, DomainError> {
-            Ok(self.store.lock().unwrap().get(id).cloned())
+            Ok(self.groups.lock().unwrap().get(id).cloned())
         }
         async fn add_member(
             &self,
-            _member: &powehi_domain::group::GroupMember,
+            member: &powehi_domain::group::GroupMember,
         ) -> Result<(), DomainError> {
+            self.members.lock().unwrap().push(member.clone());
             Ok(())
         }
         async fn remove_member(
@@ -331,9 +374,16 @@ mod tests {
         }
         async fn list_members(
             &self,
-            _group_id: &GroupId,
+            group_id: &GroupId,
         ) -> Result<Vec<powehi_domain::group::GroupMember>, DomainError> {
-            Ok(vec![])
+            Ok(self
+                .members
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| &m.group_id == group_id)
+                .cloned()
+                .collect())
         }
     }
 
@@ -352,6 +402,16 @@ mod tests {
         env_repo: Arc<dyn EnvelopeRepository>,
         group_repo: Arc<dyn GroupRepository>,
     ) -> MessagingService {
+        MessagingService::new(env_repo, group_repo, Arc::new(FakeEventBus))
+    }
+
+    /// Helper: service where `sender` is already a member of `group_id`.
+    fn make_service_with_member(
+        env_repo: Arc<dyn EnvelopeRepository>,
+        group_id: GroupId,
+        sender: DeviceId,
+    ) -> MessagingService {
+        let group_repo = FakeGroupRepo::with_member_in(group_id, sender);
         MessagingService::new(env_repo, group_repo, Arc::new(FakeEventBus))
     }
 
@@ -426,9 +486,9 @@ mod tests {
     #[tokio::test]
     async fn send_message_stores_application_envelope() {
         let env_repo = FakeEnvelopeRepo::new();
-        let svc = make_service(env_repo.clone(), FakeGroupRepo::empty());
         let sender = DeviceId::new();
         let group_id = GroupId::new();
+        let svc = make_service_with_member(env_repo.clone(), group_id.clone(), sender.clone());
         let id = svc
             .send_message(&sender, &group_id, Bytes::from_static(b"ct"), None)
             .await
@@ -443,15 +503,12 @@ mod tests {
     #[tokio::test]
     async fn send_message_with_ttl_sets_expires_at() {
         let env_repo = FakeEnvelopeRepo::new();
-        let svc = make_service(env_repo.clone(), FakeGroupRepo::empty());
+        let sender = DeviceId::new();
+        let group_id = GroupId::new();
+        let svc = make_service_with_member(env_repo.clone(), group_id.clone(), sender.clone());
         let before = Utc::now();
         let id = svc
-            .send_message(
-                &DeviceId::new(),
-                &GroupId::new(),
-                Bytes::from_static(b"ct"),
-                Some(60),
-            )
+            .send_message(&sender, &group_id, Bytes::from_static(b"ct"), Some(60))
             .await
             .unwrap();
         let store = env_repo.store.lock().unwrap();
@@ -466,14 +523,12 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_ttl_too_short_returns_invalid_input() {
-        let svc = make_service(FakeEnvelopeRepo::new(), FakeGroupRepo::empty());
+        let sender = DeviceId::new();
+        let group_id = GroupId::new();
+        let svc =
+            make_service_with_member(FakeEnvelopeRepo::new(), group_id.clone(), sender.clone());
         let err = svc
-            .send_message(
-                &DeviceId::new(),
-                &GroupId::new(),
-                Bytes::from_static(b"ct"),
-                Some(29),
-            )
+            .send_message(&sender, &group_id, Bytes::from_static(b"ct"), Some(29))
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::InvalidInput(_)));
@@ -481,14 +536,12 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_ttl_too_long_returns_invalid_input() {
-        let svc = make_service(FakeEnvelopeRepo::new(), FakeGroupRepo::empty());
+        let sender = DeviceId::new();
+        let group_id = GroupId::new();
+        let svc =
+            make_service_with_member(FakeEnvelopeRepo::new(), group_id.clone(), sender.clone());
         let err = svc
-            .send_message(
-                &DeviceId::new(),
-                &GroupId::new(),
-                Bytes::from_static(b"ct"),
-                Some(604_801),
-            )
+            .send_message(&sender, &group_id, Bytes::from_static(b"ct"), Some(604_801))
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::InvalidInput(_)));
@@ -496,12 +549,12 @@ mod tests {
 
     #[tokio::test]
     async fn send_commit_advances_epoch_and_stores_envelope() {
+        let sender = DeviceId::new();
         let group = Group::new(GroupId::new(), RegionId::new("eu-central"));
         let group_id = group.id.clone();
         let env_repo = FakeEnvelopeRepo::new();
-        let group_repo = FakeGroupRepo::with_group(group);
+        let group_repo = FakeGroupRepo::with_group_and_member(group, sender.clone());
         let svc = make_service(env_repo.clone(), group_repo.clone());
-        let sender = DeviceId::new();
 
         let new_epoch = svc
             .send_commit(&sender, &group_id, Bytes::from_static(b"commit"))
@@ -534,21 +587,19 @@ mod tests {
         let env_repo = FakeEnvelopeRepo::new();
         let device_a = DeviceId::new();
         let device_b = DeviceId::new();
-        let svc = make_service(env_repo.clone(), FakeGroupRepo::empty());
+        let group_id = GroupId::new();
+        // device_b is member of group_id for both send calls.
+        let group_repo = FakeGroupRepo::with_member_in(group_id.clone(), device_b.clone());
+        let svc = make_service(env_repo.clone(), group_repo);
 
-        // message to device_a
-        svc.send_message(
-            &device_b,
-            &GroupId::new(),
-            Bytes::from_static(b"for-a"),
-            None,
-        )
-        .await
-        .unwrap();
-        // welcome addressed to device_a
+        // message to device_a (broadcast in group_id)
+        svc.send_message(&device_b, &group_id, Bytes::from_static(b"for-a"), None)
+            .await
+            .unwrap();
+        // welcome addressed to device_a (device_b is sender/member)
         svc.send_welcome(
             &device_b,
-            &GroupId::new(),
+            &group_id,
             Bytes::from_static(b"welcome"),
             &device_a,
         )
@@ -563,16 +614,13 @@ mod tests {
     #[tokio::test]
     async fn ack_envelope_removes_it() {
         let env_repo = FakeEnvelopeRepo::new();
-        let svc = make_service(env_repo.clone(), FakeGroupRepo::empty());
+        let sender = DeviceId::new();
+        let group_id = GroupId::new();
+        let svc = make_service_with_member(env_repo.clone(), group_id.clone(), sender.clone());
         // send_message creates a broadcast envelope (recipient = None);
         // any authenticated device may ack a broadcast.
         let id = svc
-            .send_message(
-                &DeviceId::new(),
-                &GroupId::new(),
-                Bytes::from_static(b"x"),
-                None,
-            )
+            .send_message(&sender, &group_id, Bytes::from_static(b"x"), None)
             .await
             .unwrap();
         svc.ack_envelope(&DeviceId::new(), &id).await.unwrap();
@@ -586,7 +634,7 @@ mod tests {
         let wrong = DeviceId::new();
         let group_id = GroupId::new();
         let env_repo = FakeEnvelopeRepo::new();
-        let svc = make_service(env_repo.clone(), FakeGroupRepo::empty());
+        let svc = make_service_with_member(env_repo.clone(), group_id.clone(), sender.clone());
         svc.send_welcome(&sender, &group_id, Bytes::from_static(b"welcome"), &target)
             .await
             .unwrap();
@@ -605,7 +653,7 @@ mod tests {
         let target = DeviceId::new();
         let group_id = GroupId::new();
         let env_repo = FakeEnvelopeRepo::new();
-        let svc = make_service(env_repo.clone(), FakeGroupRepo::empty());
+        let svc = make_service_with_member(env_repo.clone(), group_id.clone(), sender.clone());
         svc.send_welcome(&sender, &group_id, Bytes::from_static(b"welcome"), &target)
             .await
             .unwrap();
@@ -628,32 +676,28 @@ mod tests {
     #[tokio::test]
     async fn maybe_push_is_noop_when_push_not_configured() {
         // Service built without with_push() — send_message must still succeed.
-        let svc = make_service(FakeEnvelopeRepo::new(), FakeGroupRepo::empty());
-        svc.send_message(
-            &DeviceId::new(),
-            &GroupId::new(),
-            Bytes::from_static(b"ct"),
-            None,
-        )
-        .await
-        .unwrap();
+        let sender = DeviceId::new();
+        let group_id = GroupId::new();
+        let svc =
+            make_service_with_member(FakeEnvelopeRepo::new(), group_id.clone(), sender.clone());
+        svc.send_message(&sender, &group_id, Bytes::from_static(b"ct"), None)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn maybe_push_is_noop_when_no_subscription_found() {
         // Push is configured but no subscription stored for the sender.
+        let sender = DeviceId::new();
+        let group_id = GroupId::new();
         let push = FakeWebPush::ok();
         let push_ref = Arc::clone(&push);
-        let svc = make_service(FakeEnvelopeRepo::new(), FakeGroupRepo::empty())
-            .with_push(FakePushSubRepo::empty(), push_ref);
-        svc.send_message(
-            &DeviceId::new(),
-            &GroupId::new(),
-            Bytes::from_static(b"ct"),
-            None,
-        )
-        .await
-        .unwrap();
+        let svc =
+            make_service_with_member(FakeEnvelopeRepo::new(), group_id.clone(), sender.clone())
+                .with_push(FakePushSubRepo::empty(), push_ref);
+        svc.send_message(&sender, &group_id, Bytes::from_static(b"ct"), None)
+            .await
+            .unwrap();
         assert_eq!(
             push.call_count.load(Ordering::SeqCst),
             0,
@@ -664,12 +708,14 @@ mod tests {
     #[tokio::test]
     async fn maybe_push_notifies_when_subscription_exists() {
         let sender = DeviceId::new();
+        let group_id = GroupId::new();
         let sub = make_sub(&sender);
         let push = FakeWebPush::ok();
         let push_ref = Arc::clone(&push);
-        let svc = make_service(FakeEnvelopeRepo::new(), FakeGroupRepo::empty())
-            .with_push(FakePushSubRepo::with_sub(sub), push_ref);
-        svc.send_message(&sender, &GroupId::new(), Bytes::from_static(b"ct"), None)
+        let svc =
+            make_service_with_member(FakeEnvelopeRepo::new(), group_id.clone(), sender.clone())
+                .with_push(FakePushSubRepo::with_sub(sub), push_ref);
+        svc.send_message(&sender, &group_id, Bytes::from_static(b"ct"), None)
             .await
             .unwrap();
         assert_eq!(
@@ -683,13 +729,15 @@ mod tests {
     async fn maybe_push_failure_does_not_propagate_to_caller() {
         // Push notify() returns Err — send_message must still return Ok (fire-and-forget).
         let sender = DeviceId::new();
+        let group_id = GroupId::new();
         let sub = make_sub(&sender);
         let push = FakeWebPush::failing();
         let push_ref = Arc::clone(&push);
-        let svc = make_service(FakeEnvelopeRepo::new(), FakeGroupRepo::empty())
-            .with_push(FakePushSubRepo::with_sub(sub), push_ref);
+        let svc =
+            make_service_with_member(FakeEnvelopeRepo::new(), group_id.clone(), sender.clone())
+                .with_push(FakePushSubRepo::with_sub(sub), push_ref);
         let result = svc
-            .send_message(&sender, &GroupId::new(), Bytes::from_static(b"ct"), None)
+            .send_message(&sender, &group_id, Bytes::from_static(b"ct"), None)
             .await;
         assert!(
             result.is_ok(),
@@ -702,24 +750,88 @@ mod tests {
     async fn send_welcome_fires_push_to_target_not_sender() {
         // send_welcome must push to the Welcome *target*, not the sender.
         let sender = DeviceId::new();
+        let group_id = GroupId::new();
         let target = DeviceId::new();
         let sub = make_sub(&target);
         let push = FakeWebPush::ok();
         let push_ref = Arc::clone(&push);
-        let svc = make_service(FakeEnvelopeRepo::new(), FakeGroupRepo::empty())
-            .with_push(FakePushSubRepo::with_sub(sub), push_ref);
-        svc.send_welcome(
-            &sender,
-            &GroupId::new(),
-            Bytes::from_static(b"welcome"),
-            &target,
-        )
-        .await
-        .unwrap();
+        let svc =
+            make_service_with_member(FakeEnvelopeRepo::new(), group_id.clone(), sender.clone())
+                .with_push(FakePushSubRepo::with_sub(sub), push_ref);
+        svc.send_welcome(&sender, &group_id, Bytes::from_static(b"welcome"), &target)
+            .await
+            .unwrap();
         assert_eq!(
             push.call_count.load(Ordering::SeqCst),
             1,
             "notify must fire once for the welcome target"
         );
+    }
+
+    // ── Group membership authorization tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn send_message_by_non_member_returns_unauthorized() {
+        let non_member = DeviceId::new();
+        let group_id = GroupId::new();
+        // Group exists but non_member is not in it.
+        let other_device = DeviceId::new();
+        let group_repo = FakeGroupRepo::with_member_in(group_id.clone(), other_device);
+        let svc = make_service(FakeEnvelopeRepo::new(), group_repo);
+        let err = svc
+            .send_message(&non_member, &group_id, Bytes::from_static(b"ct"), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
+    }
+
+    #[tokio::test]
+    async fn send_message_to_unknown_group_returns_unauthorized() {
+        // Fail-closed: empty member list → Unauthorized.
+        let svc = make_service(FakeEnvelopeRepo::new(), FakeGroupRepo::empty());
+        let err = svc
+            .send_message(
+                &DeviceId::new(),
+                &GroupId::new(),
+                Bytes::from_static(b"ct"),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
+    }
+
+    #[tokio::test]
+    async fn send_welcome_by_non_member_returns_unauthorized() {
+        let non_member = DeviceId::new();
+        let target = DeviceId::new();
+        let group_id = GroupId::new();
+        let svc = make_service(FakeEnvelopeRepo::new(), FakeGroupRepo::empty());
+        let err = svc
+            .send_welcome(
+                &non_member,
+                &group_id,
+                Bytes::from_static(b"welcome"),
+                &target,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
+    }
+
+    #[tokio::test]
+    async fn send_commit_by_non_member_returns_unauthorized() {
+        let non_member = DeviceId::new();
+        let other_device = DeviceId::new();
+        let group = Group::new(GroupId::new(), RegionId::new("eu-central"));
+        let group_id = group.id.clone();
+        // Group exists, but non_member is not in it.
+        let group_repo = FakeGroupRepo::with_group_and_member(group, other_device);
+        let svc = make_service(FakeEnvelopeRepo::new(), group_repo);
+        let err = svc
+            .send_commit(&non_member, &group_id, Bytes::from_static(b"commit"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
     }
 }

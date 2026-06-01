@@ -26,7 +26,7 @@ use axum::{
 };
 use metrics_exporter_prometheus::PrometheusHandle;
 use powehi_port_inbound::{
-    auth::AuthUseCase, key_package::KeyPackageUseCase, media::MediaUseCase,
+    auth::AuthUseCase, group::GroupUseCase, key_package::KeyPackageUseCase, media::MediaUseCase,
     messaging::MessagingUseCase,
 };
 use powehi_port_outbound::{cache::CachePort, push_subscription_repo::PushSubscriptionRepository};
@@ -42,6 +42,7 @@ pub struct AppState {
     /// Returned by `GET /v1/region/detect` so clients can confirm their routed region.
     pub region_id: String,
     pub auth: Arc<dyn AuthUseCase>,
+    pub group: Arc<dyn GroupUseCase>,
     pub messaging: Arc<dyn MessagingUseCase>,
     pub key_package: Arc<dyn KeyPackageUseCase>,
     pub media: Arc<dyn MediaUseCase>,
@@ -120,6 +121,7 @@ fn router_inner(
 
     // Authenticated API endpoints — general per-IP rate limit.
     let api_routes = Router::new()
+        .route("/v1/groups", post(routes::groups::create_group))
         .route(
             "/v1/messages",
             post(routes::messaging::send_message).get(routes::messaging::poll),
@@ -424,10 +426,44 @@ mod tests {
         }
     }
 
+    /// No-op group mock used in tests that don't exercise group creation.
+    struct NoopGroup;
+    #[async_trait]
+    impl GroupUseCase for NoopGroup {
+        async fn create_group(
+            &self,
+            _creator: &DeviceId,
+            _group_id: GroupId,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn add_member(
+            &self,
+            _group_id: &GroupId,
+            _device_id: &DeviceId,
+            _epoch: powehi_domain::group::Epoch,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn remove_member(
+            &self,
+            _group_id: &GroupId,
+            _device_id: &DeviceId,
+            _epoch: powehi_domain::group::Epoch,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+    }
+
+    fn noop_group() -> Arc<dyn GroupUseCase> {
+        Arc::new(NoopGroup)
+    }
+
     fn test_router() -> Router {
         router(AppState {
             region_id: "eu-de-1-test".to_string(),
             auth: Arc::new(MockAuth),
+            group: noop_group(),
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
@@ -645,6 +681,7 @@ mod tests {
         router(AppState {
             region_id: "eu-de-1-test".to_string(),
             auth: Arc::new(MockAuth),
+            group: noop_group(),
             messaging: Arc::new(MockMessagingSuccess),
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
@@ -658,6 +695,7 @@ mod tests {
         router(AppState {
             region_id: "eu-de-1-test".to_string(),
             auth: Arc::new(MockAuth),
+            group: noop_group(),
             messaging: Arc::new(MockMessagingUnauthorized),
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
@@ -671,6 +709,7 @@ mod tests {
         router(AppState {
             region_id: "eu-de-1-test".to_string(),
             auth: Arc::new(MockAuth),
+            group: noop_group(),
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackageSuccess),
             media: Arc::new(MockMedia),
@@ -684,6 +723,7 @@ mod tests {
         router(AppState {
             region_id: "eu-de-1-test".to_string(),
             auth: Arc::new(MockAuth),
+            group: noop_group(),
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackageNotFound),
             media: Arc::new(MockMedia),
@@ -759,6 +799,7 @@ mod tests {
         router(AppState {
             region_id: "eu-de-1-test".to_string(),
             auth: Arc::new(MockAuth),
+            group: noop_group(),
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMediaSuccess),
@@ -772,6 +813,7 @@ mod tests {
         router(AppState {
             region_id: "eu-de-1-test".to_string(),
             auth: Arc::new(MockAuth),
+            group: noop_group(),
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMediaUnauthorized),
@@ -1465,6 +1507,7 @@ mod tests {
         let state = AppState {
             region_id: "eu-de-1-test".to_string(),
             auth: Arc::new(MockAuthSuccess),
+            group: noop_group(),
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
@@ -1508,6 +1551,7 @@ mod tests {
         let state = AppState {
             region_id: "eu-de-1-test".to_string(),
             auth: Arc::new(MockAuthSuccess),
+            group: noop_group(),
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
@@ -1563,6 +1607,7 @@ mod tests {
         AppState {
             region_id: "eu-de-1-test".to_string(),
             auth: Arc::new(MockAuth),
+            group: noop_group(),
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
@@ -1793,6 +1838,7 @@ mod tests {
         let state = AppState {
             region_id: "eu-de-1-test".to_string(),
             auth: Arc::new(MockAuthSuccess),
+            group: noop_group(),
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),

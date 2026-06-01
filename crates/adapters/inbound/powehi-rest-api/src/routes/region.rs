@@ -193,6 +193,33 @@ mod tests {
             }
         }
 
+        #[async_trait]
+        impl powehi_port_inbound::group::GroupUseCase for Null {
+            async fn create_group(
+                &self,
+                _: &DeviceId,
+                _: powehi_domain::group::GroupId,
+            ) -> Result<(), DomainError> {
+                unimplemented!()
+            }
+            async fn add_member(
+                &self,
+                _: &powehi_domain::group::GroupId,
+                _: &DeviceId,
+                _: powehi_domain::group::Epoch,
+            ) -> Result<(), DomainError> {
+                unimplemented!()
+            }
+            async fn remove_member(
+                &self,
+                _: &powehi_domain::group::GroupId,
+                _: &DeviceId,
+                _: powehi_domain::group::Epoch,
+            ) -> Result<(), DomainError> {
+                unimplemented!()
+            }
+        }
+
         use powehi_port_outbound::cache::CachePort;
         use std::collections::HashMap;
         use std::time::Duration;
@@ -223,6 +250,7 @@ mod tests {
         AppState {
             region_id: region_id.to_string(),
             auth: Arc::new(Null),
+            group: Arc::new(Null),
             messaging: Arc::new(Null),
             key_package: Arc::new(Null),
             media: Arc::new(Null),

@@ -319,6 +319,33 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl powehi_port_inbound::group::GroupUseCase for NullUseCase {
+        async fn create_group(
+            &self,
+            _: &DeviceId,
+            _: powehi_domain::group::GroupId,
+        ) -> Result<(), DomainError> {
+            unimplemented!()
+        }
+        async fn add_member(
+            &self,
+            _: &powehi_domain::group::GroupId,
+            _: &DeviceId,
+            _: powehi_domain::group::Epoch,
+        ) -> Result<(), DomainError> {
+            unimplemented!()
+        }
+        async fn remove_member(
+            &self,
+            _: &powehi_domain::group::GroupId,
+            _: &DeviceId,
+            _: powehi_domain::group::Epoch,
+        ) -> Result<(), DomainError> {
+            unimplemented!()
+        }
+    }
+
     fn make_router(push_sub_repo: Arc<dyn PushSubscriptionRepository>) -> Router {
         use crate::routes;
         use axum::routing::post;
@@ -327,6 +354,7 @@ mod tests {
         let state = AppState {
             region_id: "eu-de-1-test".to_string(),
             auth: null.clone(),
+            group: null.clone(),
             messaging: null.clone(),
             key_package: null.clone(),
             media: null.clone(),
