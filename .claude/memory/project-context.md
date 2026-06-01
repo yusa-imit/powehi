@@ -17,6 +17,20 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-01, cycle 65 — STABILIZATION: revoke_device warn logging + test gaps closed)
+- **Cycle 65 (commit d12f49d):** STABILIZATION — CI green, no open issues, security sweep + deferred fix:
+  - **`cargo audit`:** 1 allowed warning (RUSTSEC-2024-0384 instant/openmls — unchanged).
+  - **Deferred fix — revoke_device per-token delete failure logging:** `auth_service.rs` loop now emits `tracing::warn!` when individual `session:{token}` cache deletes fail during device revocation. Previously silently swallowed via `let _ =`. Device revocation still returns Ok (best-effort continuation is correct — surviving tokens expire within SESSION_TTL).
+  - **`SessionDeleteFailCache`** test helper: `delete` fails for any `session:*` key; all other ops delegate to inner FakeCache.
+  - **`SetMembersFailCache`** test helper: `set_members` always returns Internal error.
+  - **+2 tests:**
+    - `revoke_device_partial_session_delete_failure_still_returns_ok`: proves device deleted and Ok returned even when cache deletes fail; tokens expire naturally.
+    - `revoke_device_set_members_failure_propagates_error`: documents ordering hazard — device row is removed before set_members; caller gets error but device is gone.
+  - **security-auditor:** GREEN — no new RED findings; all prior deferred items confirmed unchanged; no logging violations.
+  - **294 Rust tests** (was 292, +2); clippy clean; rustfmt clean.
+  - **Remaining deferred (non-blocking):** Y1 (uploader membership check at upload); mTLS peer-cert → home_region binding (RED-2/RED-3, architectural); set_expire stale-token (best-effort, acceptable); Y5 invalid group_id → 500 (cosmetic).
+  - **Security-auditor observation (not a finding):** safety of revoke_device silent-swallow depends on every session-consuming handler re-verifying device row existence post-lookup. All current handlers do this; note added to secondary-cache invariant tracking.
+
 ## Current state (2026-06-01, cycle 64 — FEATURE: media group-member download ACL — Phase 4 deferred closed)
 - **Cycle 64 (commit ed4693e):** Closed "Phase 4 TODO: expand to group-member ACL check" in `get_download_url`:
   - **`powehi-domain/src/media.rs`:** `MediaBlob` gains `group_id: Option<GroupId>` — MLS group the blob was shared to.
