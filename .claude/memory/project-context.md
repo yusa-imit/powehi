@@ -17,6 +17,21 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-01, cycle 64 — FEATURE: media group-member download ACL — Phase 4 deferred closed)
+- **Cycle 64 (commit ed4693e):** Closed "Phase 4 TODO: expand to group-member ACL check" in `get_download_url`:
+  - **`powehi-domain/src/media.rs`:** `MediaBlob` gains `group_id: Option<GroupId>` — MLS group the blob was shared to.
+  - **`powehi-port-inbound/src/media.rs`:** `request_upload` gains `group_id: Option<&GroupId>` param; Phase 4 TODO comment removed.
+  - **`powehi-application/src/media_service.rs`:** `MediaService` gains `group_repo: Arc<dyn GroupRepository>`. `get_download_url` checks: uploader → allow; else if `blob.group_id` is Some → `list_members` → check membership → allow; else → Unauthorized. `request_upload` saves `group_id` into blob.
+  - **Migration `0005_media_group_id.sql`:** `ALTER TABLE media_blobs ADD COLUMN group_id UUID NULL REFERENCES groups(id) ON DELETE SET NULL` + index.
+  - **`powehi-r2`:** `MediaBlobRow` gets `group_id: Option<Uuid>`; `From<MediaBlobRow>` maps it; `save`/`find_by_id` SQL updated.
+  - **`powehi-rest-api/routes/media.rs`:** `UploadRequest` gets `group_id: Option<Uuid>`; handler maps `GroupId::from(uuid)` and passes to service; comment updated.
+  - **All 5 `MockMedia`/mock impls** in REST API lib/routes updated to match new trait signature.
+  - **`main.rs`:** `group_repo_media` clone passed to `MediaService::new`.
+  - **+7 tests:** `request_upload_stores_group_id`, `get_download_url_by_group_member_succeeds`, `get_download_url_by_non_member_returns_unauthorized`, plus 3 `MediaBlobRow` test fixes.
+  - **security-auditor:** PASS (YELLOW-only). Y1: uploader not validated as member of claimed group at upload time (ciphertext can't be spoofed; deferred). Y5: invalid group_id → 500 instead of 400 (cosmetic, deferred).
+  - **291 Rust tests** (was 284, +7); clippy clean; rustfmt clean.
+  - **Remaining deferred:** Y1 (uploader membership check at upload); mTLS peer-cert → home_region binding (RED-2/RED-3, architectural); set_expire stale-token (already deemed acceptable); revoke_device mid-loop delete failure logging.
+
 ## Current state (2026-06-01, cycle 63 — STABILIZATION: CI red fix — rustfmt wasm_exports line-width)
 - **Cycle 63 (commit efd9626):** CI was RED on Format check — `mls_clear_session` WASM tests (added cycle 62) had two `.with()` closures exceeding stable 1.96.0 rustfmt line-length limit. Fixed by expanding both to multi-line block form. 284 Rust tests pass; rustfmt clean; clippy clean.
 
