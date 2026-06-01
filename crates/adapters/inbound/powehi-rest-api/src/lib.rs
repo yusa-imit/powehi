@@ -733,7 +733,7 @@ mod tests {
             _size_bytes: u64,
             _group_id: Option<&GroupId>,
         ) -> Result<(MediaId, String), DomainError> {
-            unimplemented!()
+            Err(DomainError::Unauthorized)
         }
         async fn confirm_upload(
             &self,
@@ -1356,6 +1356,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn request_upload_non_member_group_returns_401() {
+        // Service returns Unauthorized when the uploader is not a member of the
+        // claimed group_id. The REST handler must surface this as 401.
+        let body = serde_json::json!({
+            "content_type": "image/jpeg",
+            "size_bytes": 1024u64,
+            "group_id": uuid::Uuid::new_v4()
+        });
+        let resp = media_unauthorized_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/media/upload-url")
+                    .header("authorization", bearer())
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     // --- Handle rate-limit tests ---

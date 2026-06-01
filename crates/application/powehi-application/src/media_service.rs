@@ -53,6 +53,20 @@ impl MediaUseCase for MediaService {
         if size_bytes == 0 || size_bytes > MAX_MEDIA_BYTES {
             return Err(DomainError::InvalidInput("size_bytes out of range".into()));
         }
+        // Membership check: when a group_id is supplied, verify the uploader is
+        // an actual member of that group before associating the blob with it.
+        // Fail-closed: if no membership data exists (empty list), reject the
+        // upload rather than silently accepting an unverifiable group claim.
+        if let Some(gid) = group_id {
+            let members = self.group_repo.list_members(gid).await?;
+            if members.is_empty() {
+                tracing::warn!(group_id = %gid, "request_upload fail-closed: no membership data");
+                return Err(DomainError::Unauthorized);
+            }
+            if !members.iter().any(|m| &m.device_id == uploader_device) {
+                return Err(DomainError::Unauthorized);
+            }
+        }
         let blob = MediaBlob {
             id: MediaId::new(),
             uploader_device: uploader_device.clone(),
@@ -203,6 +217,11 @@ mod tests {
                 members: Mutex::new(vec![(group_id, device_id)]),
             })
         }
+        fn with_members(pairs: Vec<(GroupId, DeviceId)>) -> Arc<Self> {
+            Arc::new(Self {
+                members: Mutex::new(pairs),
+            })
+        }
     }
 
     #[async_trait]
@@ -281,9 +300,13 @@ mod tests {
     #[tokio::test]
     async fn request_upload_stores_group_id() {
         let repo = Arc::new(MockMediaRepo::new("u", "d"));
-        let s = svc(repo.clone());
         let device = DeviceId::new();
         let group = GroupId::new();
+        // Uploader must be a member for the group association to be accepted.
+        let s = MediaService::new(
+            repo.clone(),
+            FakeGroupRepo::with_member(group.clone(), device.clone()),
+        );
         let (id, _) = s
             .request_upload(&device, "image/jpeg", 512, Some(&group))
             .await
@@ -362,7 +385,12 @@ mod tests {
         let uploader = DeviceId::new();
         let member = DeviceId::new();
         let group = GroupId::new();
-        let group_repo = FakeGroupRepo::with_member(group.clone(), member.clone());
+        // Both uploader and member are in the group; uploader needs membership to
+        // associate the blob with the group, member exercises the download ACL.
+        let group_repo = FakeGroupRepo::with_members(vec![
+            (group.clone(), uploader.clone()),
+            (group.clone(), member.clone()),
+        ]);
         let s = MediaService::new(repo.clone(), group_repo);
         let (id, _) = s
             .request_upload(&uploader, "image/jpeg", 512, Some(&group))
@@ -378,7 +406,8 @@ mod tests {
         let uploader = DeviceId::new();
         let non_member = DeviceId::new();
         let group = GroupId::new();
-        let group_repo = FakeGroupRepo::empty();
+        // Uploader is a member (so upload succeeds), but non_member is not.
+        let group_repo = FakeGroupRepo::with_member(group.clone(), uploader.clone());
         let s = MediaService::new(repo.clone(), group_repo);
         let (id, _) = s
             .request_upload(&uploader, "image/jpeg", 512, Some(&group))
@@ -413,5 +442,57 @@ mod tests {
             .unwrap();
         let err = s.delete(&id, &other).await.unwrap_err();
         assert!(matches!(err, DomainError::Unauthorized));
+    }
+
+    #[tokio::test]
+    async fn request_upload_with_group_id_member_succeeds() {
+        let repo = Arc::new(MockMediaRepo::new("u", "d"));
+        let uploader = DeviceId::new();
+        let group = GroupId::new();
+        let s = MediaService::new(
+            repo.clone(),
+            FakeGroupRepo::with_member(group.clone(), uploader.clone()),
+        );
+        let (id, _) = s
+            .request_upload(&uploader, "image/jpeg", 1024, Some(&group))
+            .await
+            .unwrap();
+        let saved = repo.saved.lock().unwrap();
+        assert_eq!(saved[0].id, id);
+        assert_eq!(saved[0].group_id, Some(group));
+    }
+
+    #[tokio::test]
+    async fn request_upload_with_group_id_non_member_returns_unauthorized() {
+        let repo = Arc::new(MockMediaRepo::new("u", "d"));
+        let uploader = DeviceId::new();
+        let other = DeviceId::new();
+        let group = GroupId::new();
+        // `other` is a member but `uploader` is not.
+        let s = MediaService::new(
+            repo.clone(),
+            FakeGroupRepo::with_member(group.clone(), other.clone()),
+        );
+        let err = s
+            .request_upload(&uploader, "image/jpeg", 512, Some(&group))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
+        // No blob should have been saved.
+        assert!(repo.saved.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn request_upload_with_group_id_empty_membership_fails_closed() {
+        // No membership data → fail-closed, upload rejected.
+        let repo = Arc::new(MockMediaRepo::new("u", "d"));
+        let group = GroupId::new();
+        let s = MediaService::new(repo.clone(), FakeGroupRepo::empty());
+        let err = s
+            .request_upload(&DeviceId::new(), "image/jpeg", 512, Some(&group))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
+        assert!(repo.saved.lock().unwrap().is_empty());
     }
 }
