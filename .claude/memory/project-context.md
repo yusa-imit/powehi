@@ -17,6 +17,18 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-01, cycle 66 — FEATURE: uploader membership check at media upload — Y1 closed)
+- **Cycle 66 (commit 7f626ab):** Closed deferred security finding Y1 (media upload group membership check):
+  - **`powehi-application/src/media_service.rs`:** `MediaService::request_upload` now validates group membership when `group_id` is provided. Fail-closed: empty member list → `Unauthorized` (consistent with gRPC `check_sender_is_member` pattern from cycle 59). Non-member uploader → `Unauthorized`. Only UUIDs logged per no-plaintext-logging.md.
+  - **`FakeGroupRepo`:** Added `with_members(pairs: Vec<(GroupId, DeviceId)>)` constructor for tests requiring multiple group members.
+  - **Fixed 2 existing tests** (`get_download_url_by_group_member_succeeds`, `get_download_url_by_non_member_returns_unauthorized`) that uploaded with `group_id` but the uploader wasn't in the group — now correctly supply membership.
+  - **`request_upload_stores_group_id`**: Updated to use `FakeGroupRepo::with_member` for the uploader.
+  - **+4 service-layer tests:** `request_upload_stores_group_id` (fixed), `request_upload_with_group_id_member_succeeds`, `request_upload_with_group_id_non_member_returns_unauthorized`, `request_upload_with_group_id_empty_membership_fails_closed`.
+  - **+1 REST integration test:** `request_upload_non_member_group_returns_401` — `MockMediaUnauthorized::request_upload` changed from `unimplemented!()` to `Err(Unauthorized)`.
+  - **security-auditor:** GREEN — no RED/YELLOW blockers. Advisory findings: O(N) list_members (future `is_member` port method), TOCTOU benign (download-time ACL re-checks), log compliance confirmed.
+  - **297 Rust tests** (was 294, +3 net); clippy clean; rustfmt clean.
+  - **Remaining deferred:** mTLS peer-cert → home_region binding (RED-2/RED-3, architectural); zeroize wrappers on `OpaqueRegSession`/`OpaqueLoginSession`; set_expire stale-token (best-effort, acceptable); Y5 invalid group_id → 500 (cosmetic).
+
 ## Current state (2026-06-01, cycle 65 — STABILIZATION: revoke_device warn logging + test gaps closed)
 - **Cycle 65 (commit d12f49d):** STABILIZATION — CI green, no open issues, security sweep + deferred fix:
   - **`cargo audit`:** 1 allowed warning (RUSTSEC-2024-0384 instant/openmls — unchanged).
