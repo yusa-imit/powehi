@@ -20,4 +20,8 @@ tokio = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
 sqlx = { workspace = true }
+chrono = { workspace = true }
+powehi-domain = { workspace = true }
 powehi-port-outbound = { workspace = true }
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }

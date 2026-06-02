@@ -58,6 +58,28 @@ jobs:
       - name: cargo nextest run
         run: cargo nextest run --workspace
 
+  integration-test:
+    name: Integration Tests (Docker)
+    runs-on: ubuntu-latest
+    needs: fmt
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@nextest
+
+      - name: cargo nextest run (testcontainers integration)
+        # Runs only the pg_security_it binary (testcontainers-based) which starts
+        # its own ephemeral Postgres — does NOT run push_subscription_repo_it
+        # which requires a pre-existing TEST_DATABASE_URL.
+        run: cargo nextest run -p powehi-postgres --run-ignored all -E 'binary(pg_security_it)'
+
   audit:
     name: Security audit
     runs-on: ubuntu-latest

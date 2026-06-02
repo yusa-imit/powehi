@@ -89,6 +89,9 @@ config = "0.14"
 aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "sigv4a", "http-1x", "default-https-client", "rt-tokio"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-credential-types = "1"
+# integration testing
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
 # workspace crates
 powehi-domain = { path = "crates/domain/powehi-domain" }
 powehi-port-inbound = { path = "crates/ports/powehi-port-inbound" }
