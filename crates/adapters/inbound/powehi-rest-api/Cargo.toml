@@ -32,3 +32,5 @@ base64ct = { workspace = true }
 [dev-dependencies]
 # `oneshot` lives behind tower's `util` feature; enable it for the router tests.
 tower = { workspace = true, features = ["util"] }
+# For security invariant tests that verify span fields don't contain UUID path params.
+tracing-subscriber = { workspace = true }

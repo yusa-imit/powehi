@@ -164,7 +164,20 @@ fn router_inner(
         .merge(api_routes)
         .with_state(state)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            // Override make_span_with to omit `uri` — the default span includes
+            // `uri = %request.uri()` which exposes UUID path parameters (device IDs,
+            // envelope IDs, media IDs) at ALL log levels. Only http.method is recorded
+            // in the span; status + latency appear in child events emitted by the
+            // default DefaultOnResponse and DefaultOnRequest callbacks, not as span fields.
+            // Rule: no-plaintext-logging.md.
+            TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<Body>| {
+                tracing::info_span!(
+                    "http_request",
+                    http.method = %request.method(),
+                )
+            }),
+        )
         .layer(from_fn(security_headers::set_security_headers))
 }
 
@@ -1915,5 +1928,105 @@ mod tests {
             StatusCode::TOO_MANY_REQUESTS,
             "different IP must not be affected by sibling's rate limit"
         );
+    }
+
+    // ── TraceLayer logging-hygiene tests ─────────────────────────────────────
+
+    /// Captures the field NAMES recorded in every new span.
+    /// Used to assert that no `uri` or `http.uri` field leaks into HTTP spans.
+    #[derive(Clone, Default)]
+    struct SpanFieldNames(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl SpanFieldNames {
+        fn names(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::layer::Layer<S> for SpanFieldNames {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::span::Id,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut visitor = FieldNameVisitor(self.0.clone());
+            attrs.record(&mut visitor);
+        }
+
+        // Also capture fields added via `span.record(...)` after span creation.
+        // tower-http's on_response/on_failure callbacks can use this pattern to
+        // add late-bound fields (e.g., status, uri) — we must catch those too.
+        fn on_record(
+            &self,
+            _id: &tracing::span::Id,
+            values: &tracing::span::Record<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut visitor = FieldNameVisitor(self.0.clone());
+            values.record(&mut visitor);
+        }
+    }
+
+    struct FieldNameVisitor(Arc<std::sync::Mutex<Vec<String>>>);
+    impl tracing::field::Visit for FieldNameVisitor {
+        fn record_str(&mut self, field: &tracing::field::Field, _value: &str) {
+            self.0.lock().unwrap().push(field.name().to_string());
+        }
+        fn record_debug(&mut self, field: &tracing::field::Field, _value: &dyn std::fmt::Debug) {
+            self.0.lock().unwrap().push(field.name().to_string());
+        }
+    }
+
+    /// Security invariant (no-plaintext-logging.md): the HTTP request span must NOT
+    /// contain a `uri` field. The tower-http default span emits `uri = %request.uri()`
+    /// which exposes UUID path parameters (device IDs, envelope IDs, media IDs) at
+    /// ALL log levels. Our custom make_span_with omits uri; only http.method is recorded.
+    #[tokio::test(flavor = "current_thread")]
+    async fn trace_span_omits_uri_field_for_path_param_routes() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let fields = SpanFieldNames::default();
+        let subscriber = tracing_subscriber::registry().with(fields.clone());
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+
+        let device = test_device_id();
+        let _ = key_package_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/key-packages/{device}"))
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let names = fields.names();
+        assert!(
+            !names.iter().any(|n| n == "uri" || n == "http.uri"),
+            "HTTP span must not contain a `uri` field; found fields: {names:?}"
+        );
+    }
+
+    /// Verify that /v1/key-packages/:device_id/count returns 200 when authenticated.
+    /// Exercises the custom make_span_with on a nested path-param route.
+    #[tokio::test]
+    async fn key_package_count_returns_200_when_authenticated() {
+        let device = test_device_id();
+        let resp = key_package_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/key-packages/{device}/count"))
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }
