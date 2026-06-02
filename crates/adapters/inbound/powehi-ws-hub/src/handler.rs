@@ -10,7 +10,10 @@
 //! get every notification regardless of group membership). Clients filter by
 //! polling the REST API. Per-group fan-out is scoped to Phase 5 hardening.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::{
     extract::{
@@ -35,6 +38,44 @@ const MAX_FRAME_BYTES: usize = 4 * 1024;
 
 /// Max time to wait for a single `socket.send` to complete.
 const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Max Ping frames per connection within PING_WINDOW.
+const PING_BURST: u32 = 5;
+/// Sliding window size for Ping rate limiting.
+const PING_WINDOW: Duration = Duration::from_secs(10);
+
+/// Per-connection fixed-window Ping rate limiter.
+///
+/// Limits abusive clients that flood Ping frames to amplify Pong responses.
+/// Uses a fixed window (not sliding): a client can send up to `2 * PING_BURST`
+/// pings across a window boundary in quick succession. At current values
+/// (5 pings / 10 s) that worst case (10 pings in ~0 s) is still harmless —
+/// Pong work is negligible and `SEND_TIMEOUT` bounds backpressure.
+/// Legitimate clients send one keepalive Ping per ~30 s.
+struct PingRateLimiter {
+    window_start: Instant,
+    count: u32,
+}
+
+impl PingRateLimiter {
+    fn new() -> Self {
+        Self {
+            window_start: Instant::now(),
+            count: 0,
+        }
+    }
+
+    /// Returns `true` if the Ping is allowed, `false` if the limit is exceeded.
+    fn check(&mut self) -> bool {
+        let now = Instant::now();
+        if now.duration_since(self.window_start) >= PING_WINDOW {
+            self.window_start = now;
+            self.count = 0;
+        }
+        self.count += 1;
+        self.count <= PING_BURST
+    }
+}
 
 #[instrument(skip_all)]
 pub async fn ws_handler(
@@ -80,6 +121,7 @@ async fn handle_socket(
     _device_id: DeviceId,
     mut rx: broadcast::Receiver<WsNotification>,
 ) {
+    let mut ping_limiter = PingRateLimiter::new();
     loop {
         tokio::select! {
             biased;
@@ -88,6 +130,11 @@ async fn handle_socket(
                 let should_break = match msg {
                     Some(Ok(Message::Close(_))) | None => true,
                     Some(Ok(Message::Ping(data))) => {
+                        if !ping_limiter.check() {
+                            // Rate limit exceeded: disconnect abusive client.
+                            tracing::warn!("ws ping rate limit exceeded; closing connection");
+                            break;
+                        }
                         timeout(SEND_TIMEOUT, socket.send(Message::Pong(data)))
                             .await
                             .map_or(true, |r| r.is_err())
@@ -255,5 +302,53 @@ mod tests {
             extract_device_id(&h, &cache).await,
             Err(StatusCode::UNAUTHORIZED)
         );
+    }
+
+    // --- PingRateLimiter unit tests ---
+
+    #[test]
+    fn ping_rate_limiter_allows_pings_within_burst() {
+        let mut limiter = PingRateLimiter::new();
+        for _ in 0..PING_BURST {
+            assert!(limiter.check(), "ping within burst should be allowed");
+        }
+    }
+
+    #[test]
+    fn ping_rate_limiter_rejects_ping_over_burst() {
+        let mut limiter = PingRateLimiter::new();
+        for _ in 0..PING_BURST {
+            limiter.check();
+        }
+        assert!(
+            !limiter.check(),
+            "ping exceeding burst in same window should be rejected"
+        );
+    }
+
+    #[test]
+    fn ping_rate_limiter_resets_after_window_expires() {
+        let mut limiter = PingRateLimiter {
+            window_start: Instant::now() - PING_WINDOW - Duration::from_millis(1),
+            count: PING_BURST,
+        };
+        // Window has elapsed; next check should reset and allow.
+        assert!(
+            limiter.check(),
+            "after window expiry, first ping should be allowed"
+        );
+        assert_eq!(
+            limiter.count, 1,
+            "count should reset to 1 after window reset"
+        );
+    }
+
+    #[test]
+    fn ping_rate_limiter_boundary_exactly_at_burst_is_allowed() {
+        let mut limiter = PingRateLimiter::new();
+        for i in 1..=PING_BURST {
+            let allowed = limiter.check();
+            assert!(allowed, "ping {i} of {PING_BURST} should be allowed");
+        }
     }
 }
