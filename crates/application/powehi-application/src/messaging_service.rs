@@ -257,7 +257,7 @@ mod tests {
         push_subscription_repo::PushSubscriptionRepository,
         web_push::WebPushPort,
     };
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
@@ -265,12 +265,28 @@ mod tests {
 
     struct FakeEnvelopeRepo {
         store: Mutex<HashMap<EnvelopeId, Envelope>>,
+        // group_id → set of member device_ids.  Mirrors the group_members table
+        // join in PgEnvelopeRepository: broadcasts are only returned to members.
+        memberships: Mutex<HashMap<GroupId, HashSet<DeviceId>>>,
     }
     impl FakeEnvelopeRepo {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 store: Mutex::new(HashMap::new()),
+                memberships: Mutex::new(HashMap::new()),
             })
+        }
+
+        /// Pre-populate group membership so `find_pending` returns group broadcasts
+        /// to the listed members, matching PgEnvelopeRepository's JOIN behaviour.
+        fn with_memberships(pairs: Vec<(GroupId, DeviceId)>) -> Arc<Self> {
+            let repo = Self::new();
+            let mut m = repo.memberships.lock().unwrap();
+            for (gid, did) in pairs {
+                m.entry(gid).or_default().insert(did);
+            }
+            drop(m);
+            repo
         }
     }
     #[async_trait::async_trait]
@@ -289,9 +305,19 @@ mod tests {
         ) -> Result<Vec<Envelope>, DomainError> {
             let now = Utc::now();
             let store = self.store.lock().unwrap();
+            let memberships = self.memberships.lock().unwrap();
             Ok(store
                 .values()
-                .filter(|e| e.recipient.as_ref() == Some(device_id) || e.recipient.is_none())
+                .filter(|e| {
+                    match &e.recipient {
+                        // Unicast: only the addressed device receives it.
+                        Some(r) => r == device_id,
+                        // Broadcast: only group members receive it.
+                        None => memberships
+                            .get(&e.group_id)
+                            .is_some_and(|members| members.contains(device_id)),
+                    }
+                })
                 // Disappearing messages: never return envelopes that have expired.
                 .filter(|e| e.expires_at.map(|exp| exp > now).unwrap_or(true))
                 .cloned()
@@ -343,6 +369,22 @@ mod tests {
                     device_id,
                     joined_at_epoch: Epoch(0),
                 }]),
+            })
+        }
+
+        /// Multiple membership records — use when a group needs several members.
+        fn with_member_list(pairs: Vec<(GroupId, DeviceId)>) -> Arc<Self> {
+            let members = pairs
+                .into_iter()
+                .map(|(group_id, device_id)| powehi_domain::group::GroupMember {
+                    group_id,
+                    device_id,
+                    joined_at_epoch: Epoch(0),
+                })
+                .collect();
+            Arc::new(Self {
+                groups: Mutex::new(HashMap::new()),
+                members: Mutex::new(members),
             })
         }
     }
@@ -584,19 +626,26 @@ mod tests {
 
     #[tokio::test]
     async fn poll_envelopes_returns_recipient_envelopes() {
-        let env_repo = FakeEnvelopeRepo::new();
+        let group_id = GroupId::new();
         let device_a = DeviceId::new();
         let device_b = DeviceId::new();
-        let group_id = GroupId::new();
-        // device_b is member of group_id for both send calls.
-        let group_repo = FakeGroupRepo::with_member_in(group_id.clone(), device_b.clone());
+        // Both devices are members: device_a must be a member for the broadcast
+        // to be delivered, and device_b must be a member to send.
+        let env_repo = FakeEnvelopeRepo::with_memberships(vec![
+            (group_id.clone(), device_a.clone()),
+            (group_id.clone(), device_b.clone()),
+        ]);
+        let group_repo = FakeGroupRepo::with_member_list(vec![
+            (group_id.clone(), device_a.clone()),
+            (group_id.clone(), device_b.clone()),
+        ]);
         let svc = make_service(env_repo.clone(), group_repo);
 
-        // message to device_a (broadcast in group_id)
-        svc.send_message(&device_b, &group_id, Bytes::from_static(b"for-a"), None)
+        // Broadcast Application message to the group (recipient = None).
+        svc.send_message(&device_b, &group_id, Bytes::from_static(b"for-group"), None)
             .await
             .unwrap();
-        // welcome addressed to device_a (device_b is sender/member)
+        // Unicast Welcome addressed to device_a.
         svc.send_welcome(
             &device_b,
             &group_id,
@@ -607,8 +656,56 @@ mod tests {
         .unwrap();
 
         let pending = svc.poll_envelopes(&device_a, None).await.unwrap();
-        // broadcast (no recipient) + welcome to device_a both returned
+        // broadcast (group member) + Welcome unicast — both returned.
         assert_eq!(pending.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn poll_envelopes_does_not_return_broadcast_for_non_member() {
+        // Security invariant: a device NOT in a group must never receive that
+        // group's broadcast envelopes, even if they happen to call poll.
+        let group_id = GroupId::new();
+        let sender = DeviceId::new();
+        let non_member = DeviceId::new();
+        // Sender is a member; non_member is not.
+        let env_repo = FakeEnvelopeRepo::with_memberships(vec![(group_id.clone(), sender.clone())]);
+        let group_repo = FakeGroupRepo::with_member_in(group_id.clone(), sender.clone());
+        let svc = make_service(env_repo, group_repo);
+
+        svc.send_message(&sender, &group_id, Bytes::from_static(b"secret"), None)
+            .await
+            .unwrap();
+
+        let pending = svc.poll_envelopes(&non_member, None).await.unwrap();
+        assert!(
+            pending.is_empty(),
+            "non-member must receive zero group broadcasts"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_envelopes_returns_group_broadcasts_to_member() {
+        // A device that IS in the group must receive broadcast Application messages.
+        let group_id = GroupId::new();
+        let sender = DeviceId::new();
+        let member = DeviceId::new();
+        let env_repo = FakeEnvelopeRepo::with_memberships(vec![
+            (group_id.clone(), sender.clone()),
+            (group_id.clone(), member.clone()),
+        ]);
+        let group_repo = FakeGroupRepo::with_member_list(vec![
+            (group_id.clone(), sender.clone()),
+            (group_id.clone(), member.clone()),
+        ]);
+        let svc = make_service(env_repo, group_repo);
+
+        svc.send_message(&sender, &group_id, Bytes::from_static(b"hello"), None)
+            .await
+            .unwrap();
+
+        let pending = svc.poll_envelopes(&member, None).await.unwrap();
+        assert_eq!(pending.len(), 1, "member must receive the group broadcast");
+        assert!(pending[0].recipient.is_none(), "envelope is a broadcast");
     }
 
     #[tokio::test]

@@ -99,12 +99,31 @@ impl EnvelopeRepository for PgEnvelopeRepository {
         device_id: &DeviceId,
         since: Option<DateTime<Utc>>,
     ) -> Result<Vec<Envelope>, DomainError> {
+        // Return envelopes for this device in two cases:
+        //   1. Unicast: recipient_device_id matches the device directly.
+        //   2. Broadcast (group message, recipient_device_id IS NULL): the device
+        //      is a member of the envelope's group.  The subquery references $1
+        //      again — PostgreSQL allows a placeholder to appear multiple times.
+        // Fail-closed: `IN (<empty subquery>)` evaluates to FALSE in Postgres, so a
+        // device with no group memberships receives zero broadcasts — unicasts arrive
+        // normally.  This invariant must be preserved if the subquery is ever
+        // refactored to a JOIN (LEFT JOIN / IS NOT DISTINCT FROM have different NULL
+        // semantics).
         let rows = if let Some(since) = since {
             sqlx::query_as::<_, EnvelopeRow>(
                 "SELECT id, group_id, sender_device_id, recipient_device_id,
                         message_type, ciphertext, epoch, created_at, expires_at
                  FROM envelopes
-                 WHERE recipient_device_id = $1 AND created_at > $2
+                 WHERE (
+                     recipient_device_id = $1
+                     OR (
+                         recipient_device_id IS NULL
+                         AND group_id IN (
+                             SELECT group_id FROM group_members WHERE device_id = $1
+                         )
+                     )
+                 )
+                   AND created_at > $2
                    AND (expires_at IS NULL OR expires_at > NOW())
                  ORDER BY created_at ASC",
             )
@@ -118,7 +137,15 @@ impl EnvelopeRepository for PgEnvelopeRepository {
                 "SELECT id, group_id, sender_device_id, recipient_device_id,
                         message_type, ciphertext, epoch, created_at, expires_at
                  FROM envelopes
-                 WHERE recipient_device_id = $1
+                 WHERE (
+                     recipient_device_id = $1
+                     OR (
+                         recipient_device_id IS NULL
+                         AND group_id IN (
+                             SELECT group_id FROM group_members WHERE device_id = $1
+                         )
+                     )
+                 )
                    AND (expires_at IS NULL OR expires_at > NOW())
                  ORDER BY created_at ASC",
             )
