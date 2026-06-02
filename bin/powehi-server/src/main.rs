@@ -127,6 +127,8 @@ async fn main() -> Result<()> {
         group_repo.clone();
     let group_repo_rest: Arc<dyn powehi_port_outbound::group_repo::GroupRepository> =
         group_repo.clone();
+    let group_repo_ws: Arc<dyn powehi_port_outbound::group_repo::GroupRepository> =
+        group_repo.clone();
     let group: Arc<dyn powehi_port_inbound::group::GroupUseCase> = Arc::new(GroupService::new(
         group_repo_rest,
         powehi_domain::region::RegionId::new(&cfg.region_id),
@@ -226,7 +228,7 @@ async fn main() -> Result<()> {
 
     let ws_rl = powehi_rest_api::rate_limit::api_governor();
     let app = powehi_rest_api::router(state)
-        .merge(powehi_ws_hub::router(ws_hub, Arc::clone(&cache)).layer(ws_rl));
+        .merge(powehi_ws_hub::router(ws_hub, Arc::clone(&cache), group_repo_ws).layer(ws_rl));
 
     // Admin server: internal-only, Prometheus scrape target.
     // Bound to 127.0.0.1 so it is never reachable from outside the pod.

@@ -254,6 +254,17 @@ mod tests {
                 })
                 .collect())
         }
+        async fn list_groups_for_device(
+            &self,
+            device_id: &DeviceId,
+        ) -> Result<Vec<GroupId>, DomainError> {
+            let locked = self.members.lock().unwrap();
+            Ok(locked
+                .iter()
+                .filter(|(_, did)| did == device_id)
+                .map(|(gid, _)| gid.clone())
+                .collect())
+        }
     }
 
     fn svc(repo: Arc<MockMediaRepo>) -> MediaService {

@@ -3,10 +3,11 @@
 //! Pushes opaque delivery notifications to connected devices via WebSocket.
 //! The hub dispatches only metadata (UUIDs, epoch numbers) — no ciphertext, no PII.
 //!
-//! Design: a single `tokio::sync::broadcast` channel fans out to all open sockets.
-//! Clients receive a "there is something new" signal and then call the REST poll API
-//! to fetch their device-specific envelopes.  Simpler than per-device channels,
-//! correct for Phase 3, and naturally narrows to group/device fan-out in Phase 5.
+//! Design: a single `tokio::sync::broadcast` channel fans out. Each per-connection
+//! handler filters by the connecting device's group memberships so that a device
+//! only receives notifications for groups it belongs to.  This closes the global
+//! fan-out YELLOW: previously all devices saw all group activity; now only group
+//! members receive group-specific wake-up signals.
 //!
 //! Security invariant (rule: no-plaintext-logging):
 //!   Log only opaque IDs; never log ciphertext or message content.
@@ -21,14 +22,16 @@ use serde::Serialize;
 use tokio::sync::broadcast;
 
 use powehi_domain::event::DomainEvent;
-use powehi_port_outbound::cache::CachePort;
+use powehi_port_outbound::{cache::CachePort, group_repo::GroupRepository};
 
 /// Capacity of the broadcast ring buffer.
 const HUB_CAPACITY: usize = 512;
 
-/// Opaque WebSocket notification pushed to all connected devices.
+/// Opaque WebSocket notification pushed to relevant connected devices.
 ///
 /// Contains only group/envelope UUIDs and epoch numbers — never ciphertext.
+/// `MemberAdded`/`MemberRemoved` carry the affected `device_id` so each
+/// handler can update its local membership set without an extra DB round-trip.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WsNotification {
@@ -42,21 +45,26 @@ pub enum WsNotification {
     },
     MemberAdded {
         group_id: String,
+        device_id: String,
     },
     MemberRemoved {
         group_id: String,
+        device_id: String,
     },
 }
 
-/// State shared by every WebSocket connection: the broadcast hub and the
-/// session cache used to resolve Bearer tokens to DeviceIds.
+/// State shared by every WebSocket connection: the broadcast hub, the session
+/// cache used to resolve Bearer tokens, and the group repository for
+/// per-device membership filtering.
 #[derive(Clone)]
 pub(crate) struct WsHubState {
     pub(crate) hub: Arc<WsHub>,
     pub(crate) cache: Arc<dyn CachePort>,
+    pub(crate) group_repo: Arc<dyn GroupRepository>,
 }
 
-/// Global fan-out hub.  All authenticated WS connections share one broadcast sender.
+/// Broadcast hub.  All authenticated WS connections share one broadcast sender.
+/// Each handler filters the stream by the connecting device's group memberships.
 #[derive(Clone)]
 pub struct WsHub {
     tx: broadcast::Sender<WsNotification>,
@@ -93,11 +101,21 @@ impl WsHub {
                 group_id: group_id.to_string(),
                 new_epoch: new_epoch.0,
             }),
-            DomainEvent::MemberAdded { group_id, .. } => Some(WsNotification::MemberAdded {
+            DomainEvent::MemberAdded {
+                group_id,
+                device_id,
+                ..
+            } => Some(WsNotification::MemberAdded {
                 group_id: group_id.to_string(),
+                device_id: device_id.to_string(),
             }),
-            DomainEvent::MemberRemoved { group_id, .. } => Some(WsNotification::MemberRemoved {
+            DomainEvent::MemberRemoved {
+                group_id,
+                device_id,
+                ..
+            } => Some(WsNotification::MemberRemoved {
                 group_id: group_id.to_string(),
+                device_id: device_id.to_string(),
             }),
             _ => None,
         };
@@ -114,16 +132,25 @@ impl Default for WsHub {
 }
 
 /// Build the axum router fragment for the WS endpoint (`GET /v1/ws`).
-pub fn router(hub: Arc<WsHub>, cache: Arc<dyn CachePort>) -> Router {
+pub fn router(
+    hub: Arc<WsHub>,
+    cache: Arc<dyn CachePort>,
+    group_repo: Arc<dyn GroupRepository>,
+) -> Router {
     Router::new()
         .route("/v1/ws", get(handler::ws_handler))
-        .with_state(WsHubState { hub, cache })
+        .with_state(WsHubState {
+            hub,
+            cache,
+            group_repo,
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use powehi_domain::{
+        device::DeviceId,
         envelope::EnvelopeId,
         event::DomainEvent,
         group::{Epoch, GroupId},
@@ -181,6 +208,60 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_member_added_produces_notification_with_device_id() {
+        let hub = WsHub::new();
+        let mut rx = hub.subscribe();
+
+        let gid = GroupId::new();
+        let did = DeviceId::new();
+        hub.dispatch(&DomainEvent::MemberAdded {
+            group_id: gid.clone(),
+            device_id: did.clone(),
+            epoch: Epoch(1),
+            at: chrono::Utc::now(),
+        });
+
+        let notif = rx.try_recv().expect("notification sent");
+        match notif {
+            WsNotification::MemberAdded {
+                group_id,
+                device_id,
+            } => {
+                assert_eq!(group_id, gid.to_string());
+                assert_eq!(device_id, did.to_string());
+            }
+            other => panic!("unexpected notification: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn dispatch_member_removed_produces_notification_with_device_id() {
+        let hub = WsHub::new();
+        let mut rx = hub.subscribe();
+
+        let gid = GroupId::new();
+        let did = DeviceId::new();
+        hub.dispatch(&DomainEvent::MemberRemoved {
+            group_id: gid.clone(),
+            device_id: did.clone(),
+            epoch: Epoch(2),
+            at: chrono::Utc::now(),
+        });
+
+        let notif = rx.try_recv().expect("notification sent");
+        match notif {
+            WsNotification::MemberRemoved {
+                group_id,
+                device_id,
+            } => {
+                assert_eq!(group_id, gid.to_string());
+                assert_eq!(device_id, did.to_string());
+            }
+            other => panic!("unexpected notification: {:?}", other),
+        }
+    }
+
+    #[test]
     fn user_registered_event_produces_no_notification() {
         let hub = WsHub::new();
         let mut rx = hub.subscribe();
@@ -213,6 +294,18 @@ mod tests {
         let json = serde_json::to_string(&n).unwrap();
         assert!(json.contains("\"type\":\"envelope_received\""));
         assert!(json.contains("\"group_id\":\"abc\""));
+        assert!(!json.contains("ciphertext"));
+    }
+
+    #[test]
+    fn member_added_notification_contains_device_id_in_json() {
+        let n = WsNotification::MemberAdded {
+            group_id: "grp".into(),
+            device_id: "dev".into(),
+        };
+        let json = serde_json::to_string(&n).unwrap();
+        assert!(json.contains("\"type\":\"member_added\""));
+        assert!(json.contains("\"device_id\":\"dev\""));
         assert!(!json.contains("ciphertext"));
     }
 

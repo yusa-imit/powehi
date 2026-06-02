@@ -4,13 +4,15 @@
 //! session store (same store used by the REST API middleware).  Any raw UUID
 //! that is not a live session entry is rejected with 401.
 //! After upgrade the socket streams `WsNotification` JSON frames.
-//! The socket loop exits cleanly on client close or channel shutdown.
 //!
-//! Known deferred (Phase 5): notifications are broadcast globally (all devices
-//! get every notification regardless of group membership). Clients filter by
-//! polling the REST API. Per-group fan-out is scoped to Phase 5 hardening.
+//! Group-scoped fan-out: on connect the handler loads the device's current
+//! group memberships and only forwards notifications for those groups.
+//! `MemberAdded`/`MemberRemoved` events update the in-memory set so that
+//! membership changes while the socket is open are reflected immediately
+//! without a reconnect.
 
 use std::{
+    collections::HashSet,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -27,8 +29,15 @@ use tokio::{sync::broadcast, time::timeout};
 use tracing::instrument;
 use uuid::Uuid;
 
-use powehi_domain::device::DeviceId;
-use powehi_port_outbound::cache::CachePort;
+use powehi_domain::{device::DeviceId, group::GroupId};
+use powehi_port_outbound::{cache::CachePort, group_repo::GroupRepository};
+
+/// Parse a DeviceId from a UUID string. Used in `filter_notification` to avoid
+/// stringly-typed identity comparison (auditor Y-1: string equality of UUIDs
+/// is format-sensitive; typed comparison is canonical).
+fn parse_device_id(s: &str) -> Option<DeviceId> {
+    s.parse::<DeviceId>().ok()
+}
 
 use crate::{WsHubState, WsNotification};
 
@@ -86,9 +95,10 @@ pub async fn ws_handler(
     match extract_device_id(&headers, &state.cache).await {
         Ok(device_id) => {
             let rx = state.hub.subscribe();
+            let group_repo = state.group_repo.clone();
             upgrade
                 .max_message_size(MAX_FRAME_BYTES)
-                .on_upgrade(move |socket| handle_socket(socket, device_id, rx))
+                .on_upgrade(move |socket| handle_socket(socket, device_id, rx, group_repo))
         }
         Err(status) => status.into_response(),
     }
@@ -118,9 +128,34 @@ async fn extract_device_id(
 
 async fn handle_socket(
     mut socket: WebSocket,
-    _device_id: DeviceId,
+    device_id: DeviceId,
     mut rx: broadcast::Receiver<WsNotification>,
+    group_repo: Arc<dyn GroupRepository>,
 ) {
+    // Load initial group memberships — fail-closed: if the DB is unreachable,
+    // the device gets an empty set and receives no notifications until reconnect
+    // (no fail-open: missing membership data must not grant notifications).
+    // A warn log surfaces DB outages that are otherwise silent from the client side.
+    //
+    // Race note (accepted): the broadcast subscription (`hub.subscribe()`) is taken
+    // before this DB call. Notifications for groups the device was added to AFTER
+    // the subscribe but BEFORE the DB load completes will have device_id == this
+    // device in the MemberAdded notification, and `filter_notification` will insert
+    // the group and return true — correct. A MemberAdded for another device in a
+    // group the device was added to in the same window may be dropped (only affects
+    // a member-list notification, not message delivery). Reconnect resolves.
+    let initial: Vec<GroupId> = match group_repo.list_groups_for_device(&device_id).await {
+        Ok(groups) => groups,
+        Err(_) => {
+            tracing::warn!(
+                error_kind = "db_error",
+                "ws.group_membership_load_failed; no notifications delivered until reconnect"
+            );
+            Vec::new()
+        }
+    };
+    let mut my_groups: HashSet<GroupId> = initial.into_iter().collect();
+
     let mut ping_limiter = PingRateLimiter::new();
     loop {
         tokio::select! {
@@ -151,6 +186,9 @@ async fn handle_socket(
             notification = rx.recv() => {
                 match notification {
                     Ok(n) => {
+                        if !filter_notification(&mut my_groups, &n, &device_id) {
+                            continue;
+                        }
                         match serde_json::to_string(&n) {
                             Ok(json) => {
                                 let sent = timeout(
@@ -174,6 +212,62 @@ async fn handle_socket(
             }
         }
     }
+}
+
+/// Decide whether `notification` should be forwarded to `device_id` and
+/// update `my_groups` for membership-change events.
+///
+/// Security invariant: a device only receives notifications for groups it
+/// currently belongs to. `MemberAdded` for this device expands the set
+/// (so the device immediately receives subsequent group events), while
+/// `MemberRemoved` shrinks it (future events are suppressed).
+fn filter_notification(
+    my_groups: &mut HashSet<GroupId>,
+    notification: &WsNotification,
+    device_id: &DeviceId,
+) -> bool {
+    match notification {
+        WsNotification::MemberAdded {
+            group_id,
+            device_id: added_device,
+        } => {
+            let gid = match parse_group_id(group_id) {
+                Some(g) => g,
+                None => return false,
+            };
+            if parse_device_id(added_device).as_ref() == Some(device_id) {
+                // This device was added: update set first, then always notify it.
+                my_groups.insert(gid);
+                return true;
+            }
+            // Another device was added: only relevant if this device is already a member.
+            my_groups.contains(&gid)
+        }
+        WsNotification::MemberRemoved {
+            group_id,
+            device_id: removed_device,
+        } => {
+            let gid = match parse_group_id(group_id) {
+                Some(g) => g,
+                None => return false,
+            };
+            if parse_device_id(removed_device).as_ref() == Some(device_id) {
+                // This device was removed: notify it of removal, then drop the group.
+                let was_member = my_groups.remove(&gid);
+                return was_member;
+            }
+            // Another device was removed: only relevant if this device is a member.
+            my_groups.contains(&gid)
+        }
+        WsNotification::EnvelopeReceived { group_id, .. }
+        | WsNotification::EpochAdvanced { group_id, .. } => {
+            parse_group_id(group_id).is_some_and(|gid| my_groups.contains(&gid))
+        }
+    }
+}
+
+fn parse_group_id(s: &str) -> Option<GroupId> {
+    Uuid::parse_str(s).ok().map(GroupId::from)
 }
 
 #[cfg(test)]
@@ -350,5 +444,143 @@ mod tests {
             let allowed = limiter.check();
             assert!(allowed, "ping {i} of {PING_BURST} should be allowed");
         }
+    }
+
+    // --- filter_notification security-invariant tests ---
+
+    fn make_groups(ids: &[GroupId]) -> HashSet<GroupId> {
+        ids.iter().cloned().collect()
+    }
+
+    #[test]
+    fn member_receives_envelope_for_their_group() {
+        let device = DeviceId::new();
+        let group = GroupId::new();
+        let mut groups = make_groups(std::slice::from_ref(&group));
+
+        let notif = WsNotification::EnvelopeReceived {
+            group_id: group.to_string(),
+            envelope_id: "env-id".into(),
+        };
+        assert!(
+            filter_notification(&mut groups, &notif, &device),
+            "member should receive notification for their group"
+        );
+    }
+
+    #[test]
+    fn non_member_does_not_receive_envelope_notification() {
+        let device = DeviceId::new();
+        let other_group = GroupId::new();
+        let mut groups = make_groups(&[]); // device is in no groups
+
+        let notif = WsNotification::EnvelopeReceived {
+            group_id: other_group.to_string(),
+            envelope_id: "env-id".into(),
+        };
+        assert!(
+            !filter_notification(&mut groups, &notif, &device),
+            "non-member must not receive group notification"
+        );
+    }
+
+    #[test]
+    fn member_added_for_this_device_grants_future_notifications() {
+        let device = DeviceId::new();
+        let new_group = GroupId::new();
+        let mut groups = make_groups(&[]); // starts with no groups
+
+        // MemberAdded for this device → should be forwarded and expand the set
+        let added = WsNotification::MemberAdded {
+            group_id: new_group.to_string(),
+            device_id: device.to_string(),
+        };
+        assert!(
+            filter_notification(&mut groups, &added, &device),
+            "device should receive its own MemberAdded notification"
+        );
+        assert!(
+            groups.contains(&new_group),
+            "new group should be in the membership set"
+        );
+
+        // Subsequent envelope for that group should now be relevant
+        let env = WsNotification::EnvelopeReceived {
+            group_id: new_group.to_string(),
+            envelope_id: "e".into(),
+        };
+        assert!(
+            filter_notification(&mut groups, &env, &device),
+            "after being added, device should receive group notifications"
+        );
+    }
+
+    #[test]
+    fn member_removed_for_this_device_revokes_future_notifications() {
+        let device = DeviceId::new();
+        let group = GroupId::new();
+        let mut groups = make_groups(std::slice::from_ref(&group));
+
+        // MemberRemoved for this device → should be forwarded and shrink the set
+        let removed = WsNotification::MemberRemoved {
+            group_id: group.to_string(),
+            device_id: device.to_string(),
+        };
+        assert!(
+            filter_notification(&mut groups, &removed, &device),
+            "device should receive its own MemberRemoved notification"
+        );
+        assert!(
+            !groups.contains(&group),
+            "removed group should no longer be in the membership set"
+        );
+
+        // Subsequent envelope for that group should now be irrelevant
+        let env = WsNotification::EnvelopeReceived {
+            group_id: group.to_string(),
+            envelope_id: "e".into(),
+        };
+        assert!(
+            !filter_notification(&mut groups, &env, &device),
+            "after being removed, device must not receive group notifications"
+        );
+    }
+
+    #[test]
+    fn member_added_for_other_device_only_relevant_if_already_member() {
+        let device = DeviceId::new();
+        let other_device = DeviceId::new();
+        let group = GroupId::new();
+        let mut groups_with = make_groups(std::slice::from_ref(&group));
+        let mut groups_without = make_groups(&[]);
+
+        let notif = WsNotification::MemberAdded {
+            group_id: group.to_string(),
+            device_id: other_device.to_string(),
+        };
+
+        assert!(
+            filter_notification(&mut groups_with, &notif.clone(), &device),
+            "existing member should see someone else being added to their group"
+        );
+        assert!(
+            !filter_notification(&mut groups_without, &notif, &device),
+            "non-member must not see MemberAdded for a group they don't belong to"
+        );
+    }
+
+    #[test]
+    fn invalid_group_id_in_notification_is_filtered_out() {
+        let device = DeviceId::new();
+        let mut groups = make_groups(&[]);
+
+        let notif = WsNotification::EnvelopeReceived {
+            group_id: "not-a-uuid".into(),
+            envelope_id: "e".into(),
+        };
+        assert!(
+            !filter_notification(&mut groups, &notif, &device),
+            "notification with invalid group_id must be dropped"
+        );
     }
 }

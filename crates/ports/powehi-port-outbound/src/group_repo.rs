@@ -16,4 +16,9 @@ pub trait GroupRepository: Send + Sync {
         device_id: &DeviceId,
     ) -> Result<(), DomainError>;
     async fn list_members(&self, group_id: &GroupId) -> Result<Vec<GroupMember>, DomainError>;
+    /// Returns all group IDs that `device_id` is a member of.
+    async fn list_groups_for_device(
+        &self,
+        device_id: &DeviceId,
+    ) -> Result<Vec<GroupId>, DomainError>;
 }

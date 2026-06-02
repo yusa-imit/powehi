@@ -682,6 +682,24 @@ mod tests {
                 .cloned()
                 .unwrap_or_default())
         }
+        async fn list_groups_for_device(
+            &self,
+            device_id: &DeviceId,
+        ) -> Result<Vec<GroupId>, DomainError> {
+            Ok(self
+                .members
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|(gid, members)| {
+                    if members.iter().any(|m| &m.device_id == device_id) {
+                        Some(gid.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect())
+        }
     }
 
     fn make_server() -> RegionGrpcServer {

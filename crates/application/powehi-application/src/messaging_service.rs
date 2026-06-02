@@ -427,6 +427,19 @@ mod tests {
                 .cloned()
                 .collect())
         }
+        async fn list_groups_for_device(
+            &self,
+            device_id: &DeviceId,
+        ) -> Result<Vec<GroupId>, DomainError> {
+            Ok(self
+                .members
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| &m.device_id == device_id)
+                .map(|m| m.group_id.clone())
+                .collect())
+        }
     }
 
     struct FakeEventBus;

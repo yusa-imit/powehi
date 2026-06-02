@@ -129,6 +129,20 @@ impl GroupRepository for PgGroupRepository {
         .map_err(map_err)?;
         Ok(rows.into_iter().map(GroupMember::from).collect())
     }
+
+    async fn list_groups_for_device(
+        &self,
+        device_id: &DeviceId,
+    ) -> Result<Vec<GroupId>, DomainError> {
+        let rows = sqlx::query_scalar::<_, Uuid>(
+            "SELECT group_id FROM group_members WHERE device_id = $1",
+        )
+        .bind(device_id.as_uuid())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_err)?;
+        Ok(rows.into_iter().map(GroupId::from).collect())
+    }
 }
 
 #[cfg(test)]
