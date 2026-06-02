@@ -17,6 +17,23 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-02, cycle 75 — STABILIZATION: create_group REST test gap + security sweep)
+- **Cycle 75 (commit 8dc597c):** STABILIZATION — CI green, no open issues, test gap closed + security sweep:
+  - **cargo audit:** 1 allowed warning (RUSTSEC-2024-0384 instant/openmls — unchanged).
+  - **Test gap fixed:** `POST /v1/groups` (create_group handler, added cycle 70) had ZERO REST-layer tests despite being the entry point for group creation and the prerequisite for the membership auth gate.
+  - **+3 tests:**
+    - `create_group_without_token_returns_401` (auth bypass invariant — testing-conventions.md)
+    - `create_group_returns_204` (authenticated creator → 204 NO_CONTENT)
+    - `create_group_with_missing_group_id_returns_unprocessable` (bad body → 422)
+  - **Added `groups_router()` helper** using `test_session_cache()` + `noop_group()`.
+  - **security-auditor:** GREEN — no RED findings. YELLOW-1 (group_id uniqueness — enforced at DB layer by ON CONFLICT in PgGroupRepository, not a handler concern). YELLOW-2 (WS global broadcast — pre-existing architectural deferral Phase 5).
+  - **287 Rust tests** (was 284, +3); clippy clean; rustfmt clean.
+  - **Remaining deferred security findings (YELLOW)**:
+    - WS broadcast global fan-out (Phase 5 architectural — all devices get wake-up signals)
+    - mTLS peer-cert → home_region binding (RED-2/RED-3, architectural, tonic TlsConnectInfo)
+    - POWEHI__HANDLE_ORACLE_SECRET_TOKEN cross-restart oracle if env var not set (YELLOW-2, documented)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+
 ## Current state (2026-06-02, cycle 74 — FEATURE: broadcast envelope poll — offline devices now receive group messages)
 - **Cycle 74 (commit a12f742):** Fixed functional gap: `PgEnvelopeRepository::find_pending` previously only returned unicast messages (`WHERE recipient_device_id = $1`), silently dropping all group (broadcast) Application envelopes for offline devices.
   - **Root cause:** `find_pending` never included `recipient_device_id IS NULL` rows. An offline device would miss every group message sent while it was disconnected.
