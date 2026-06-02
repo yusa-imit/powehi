@@ -17,6 +17,19 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-02, cycle 72 — FEATURE: WS per-connection Ping rate limiter)
+- **Cycle 72 (commit c423874):** Closed long-deferred YELLOW: WS per-message rate limiting:
+  - **`powehi-ws-hub/src/handler.rs`:** Added `PingRateLimiter` — fixed-window counter per connection. `PING_BURST=5` pings allowed per `PING_WINDOW=10s`. Exceeding the limit: `tracing::warn!` (static string, no PII) + immediate disconnect.
+  - **Fixed-window caveat documented:** worst case 2×PING_BURST (10) pings at window boundary in ~0s — harmless at current values since Pong work is negligible. Comment explains the limitation.
+  - **security-auditor:** GREEN — no PII logging, no auth bypass, fail-closed on limit breach, per-connection scope (one abuser cannot poison another's budget).
+  - **+4 unit tests:** within-burst (all 5 allowed), over-burst (6th rejected), post-window-reset (count resets, first allowed), boundary-exactly-at-burst-is-allowed.
+  - **310 Rust tests** (was 306, +4); clippy clean; rustfmt clean.
+  - **Remaining deferred security findings (YELLOW)**:
+    - WS broadcast global fan-out (Phase 5 architectural — all devices get wake-up signals)
+    - TraceLayer UUID path params at DEBUG level (logging hygiene)
+    - mTLS peer-cert → home_region binding (RED-2/RED-3, architectural, tonic TlsConnectInfo)
+    - POWEHI__HANDLE_ORACLE_SECRET_TOKEN cross-restart oracle if env var not set (YELLOW-2, documented)
+
 ## Current state (2026-06-02, cycle 71 — FEATURE: handle-hash oracle fix — deterministic HMAC synthetic user_id)
 - **Cycle 71 (commit 0d7c67a):** Closed long-deferred YELLOW: login_init handle-hash oracle fix:
   - **Root cause:** `login_init` called `UserId::new()` (random UUID per call) for unknown handles. An attacker calling login_init twice for the same unknown handle observed different `user_id` values each time → handle enumeration oracle.
@@ -30,7 +43,7 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
   - **Remaining deferred security findings (YELLOW)**:
     - WS broadcast global fan-out (Phase 5 architectural — all devices get wake-up signals)
     - TraceLayer UUID path params at DEBUG level (logging hygiene)
-    - WS per-connection rate limiting (connection-establishment is rate-limited; per-message is not)
+    - WS per-connection rate limiting (connection-establishment is rate-limited; per-message is not) ← CLOSED in cycle 72
     - mTLS peer-cert → home_region binding (RED-2/RED-3, architectural, tonic TlsConnectInfo)
     - POWEHI__HANDLE_ORACLE_SECRET_TOKEN cross-restart oracle if env var not set (YELLOW-2, documented)
 
