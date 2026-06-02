@@ -17,6 +17,20 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-03, cycle 77 — FEATURE: tls_required runtime assertion — mTLS startup YELLOW closed)
+- **Cycle 77 (commit 07ccea8):** Closed deferred YELLOW from cycle 76: gRPC mTLS startup assertion:
+  - **Root cause:** `verify_peer_region` was a free function that, when `TlsConnectInfo` was absent (no TLS on the gRPC listener), would log a warning and return `Ok(())`. In production, if the gRPC listener started without `.tls_config()` due to misconfiguration, all `SyncGroupMembership` peer-cert checks would silently pass — bypassing the home_region binding.
+  - **Fix:** Converted `verify_peer_region` to an `&self` method on `RegionGrpcServer`. Added `tls_required: bool` field. When `tls_required=true` and `TlsConnectInfo` is absent: returns `Err(Status::permission_denied("peer certificate required"))` — fail-closed. When `tls_required=false` (dev/test): warns + passes (unchanged behavior).
+  - **`main.rs`:** Passes `cfg.grpc_tls_enabled()` as `tls_required` so the listener wiring (`.tls_config()` call) and the per-request check are always in sync — no skew window.
+  - **Error message:** `"peer certificate required"` — does not reveal whether `tls_required` is set or why TLS was absent (non-disclosing).
+  - **+2 security-invariant tests:** `sync_group_membership_without_tls_info_rejected_when_tls_required` (asserts PermissionDenied when tls_required=true + no TlsConnectInfo), `sync_group_membership_without_tls_info_passes_when_tls_not_required` (dev/test backward compat).
+  - **security-auditor:** PASS — no RED/YELLOW findings. Wiring verified: `grpc_tls_enabled()` produces `true` iff all 3 TLS env vars set, and same value used for both listener `.tls_config()` and `tls_required`.
+  - **325 Rust tests** (was 323, +2); clippy clean; rustfmt clean.
+  - **Remaining deferred security findings (YELLOW)**:
+    - WS broadcast global fan-out (Phase 5 architectural — all devices get wake-up signals)
+    - POWEHI__HANDLE_ORACLE_SECRET_TOKEN cross-restart oracle if env var not set (YELLOW-2, documented)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+
 ## Current state (2026-06-02, cycle 76 — FEATURE: mTLS peer-cert → home_region binding — RED-2/RED-3 closed)
 - **Cycle 76 (commit 92005f9):** Closed long-deferred RED-2/RED-3: gRPC peer region identity binding:
   - **Root cause:** `sync_group_membership` accepted any `home_region` claim from any peer inside the mTLS perimeter. A compromised or rogue peer could declare membership for groups it doesn't own, enabling `ForwardEnvelope` acceptance for those groups.
