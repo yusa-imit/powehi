@@ -17,6 +17,26 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-03, cycle 78 — FEATURE: WS broadcast global fan-out YELLOW closed — group-scoped notifications)
+- **Cycle 78 (commit 7396c78):** Closed long-deferred YELLOW: WS broadcast global fan-out:
+  - **Root cause:** `handle_socket` ignored the authenticated `DeviceId` — every connected device received every group notification (EnvelopeReceived, EpochAdvanced, MemberAdded, MemberRemoved) regardless of group membership. Device could observe activity in groups it never joined.
+  - **Fix:** Added `GroupRepository::list_groups_for_device(device_id) -> Vec<GroupId>` to port. `handle_socket` loads the device's groups on connect and maintains a local `HashSet<GroupId>`. `filter_notification()` function gates all outgoing notifications against this set:
+    - `MemberAdded { device_id == me }` → insert group, always notify (this device just got access)
+    - `MemberRemoved { device_id == me }` → notify once, then remove group (no further events)
+    - `MemberAdded/Removed { device_id != me }` → only forward if already a member
+    - `EnvelopeReceived`/`EpochAdvanced` → only forward if member
+  - **WsNotification::MemberAdded/MemberRemoved** now carry `device_id: String` (opaque UUID) for in-flight membership updates; enables live set maintenance without extra DB calls.
+  - **Auditor Y-1 fix:** `parse_device_id(s).as_ref() == Some(device_id)` (typed Uuid comparison, not string equality)
+  - **Auditor Y-2 fix:** DB error on connect emits `tracing::warn!(error_kind="db_error")` + returns empty set (fail-closed)
+  - **`PgGroupRepository`:** `SELECT group_id FROM group_members WHERE device_id = $1`
+  - **All 4 FakeGroupRepo impls** updated with `list_groups_for_device`
+  - **security-auditor:** PASS — no RED; Y-1+Y-2 fixed; Y-3 (initial-load race) accepted+documented in comment; Y-4 (outbound rate limit) pre-existing.
+  - **+9 tests:** dispatch MemberAdded/Removed with device_id; 6 filter_notification security invariants; JSON format check; all in powehi-ws-hub.
+  - **334 Rust tests** (was 325, +9); clippy clean; rustfmt clean.
+  - **Remaining deferred security findings (YELLOW)**:
+    - POWEHI__HANDLE_ORACLE_SECRET_TOKEN cross-restart oracle if env var not set (YELLOW-2, documented)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+
 ## Current state (2026-06-03, cycle 77 — FEATURE: tls_required runtime assertion — mTLS startup YELLOW closed)
 - **Cycle 77 (commit 07ccea8):** Closed deferred YELLOW from cycle 76: gRPC mTLS startup assertion:
   - **Root cause:** `verify_peer_region` was a free function that, when `TlsConnectInfo` was absent (no TLS on the gRPC listener), would log a warning and return `Ok(())`. In production, if the gRPC listener started without `.tls_config()` due to misconfiguration, all `SyncGroupMembership` peer-cert checks would silently pass — bypassing the home_region binding.
