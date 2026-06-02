@@ -17,6 +17,22 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-02, cycle 76 — FEATURE: mTLS peer-cert → home_region binding — RED-2/RED-3 closed)
+- **Cycle 76 (commit 92005f9):** Closed long-deferred RED-2/RED-3: gRPC peer region identity binding:
+  - **Root cause:** `sync_group_membership` accepted any `home_region` claim from any peer inside the mTLS perimeter. A compromised or rogue peer could declare membership for groups it doesn't own, enabling `ForwardEnvelope` acceptance for those groups.
+  - **Fix:** `verify_peer_region(extensions, expected_region)` — extracts `TlsConnectInfo<TcpConnectInfo>` from tonic request extensions; if absent (dev/test, no TLS) → warns + passes; if present but no peer cert → PermissionDenied; calls `peer_cert_matches_region`.
+  - **`peer_cert_matches_region(der, region)`** — x509-parser 0.16 parses the DER leaf cert; checks Subject CN and SAN DNS names for exact string match against `home_region`. Parser-only — no crypto ops; chain trust already enforced by rustls handshake.
+  - **`sync_group_membership`**: `request.into_parts()` once to access extensions + body; `verify_peer_region` called before any DB writes. `ForwardEnvelope`/`ForwardCommit` covered transitively (Sync is the only membership writer; those handlers are fail-closed on empty membership).
+  - **x509-parser = "0.16"** added to workspace (parser only, no homegrown crypto; no ring added — crypto-libraries-pinned.md compliant).
+  - **+6 peer cert unit tests** using pre-generated P-256 DER fixtures (no rcgen/ring dep — bytes generated once with OpenSSL and hardcoded): `peer_cert_matches_by_cn`, `_by_san_dns`, `_mismatched_region`, `_wrong_cn_no_matching_san`, `_cn_matches_own_region`, `_invalid_der`.
+  - **security-auditor:** PASS — 2 YELLOW (startup assertion for dev-mode skip deferred; lowercase-region doc comment advisory). No RED.
+  - **323 Rust tests** (was 287 with nextest, count differs with cargo test; +9 net in powehi-grpc: 31→40); clippy clean; rustfmt clean.
+  - **Remaining deferred security findings (YELLOW)**:
+    - WS broadcast global fan-out (Phase 5 architectural — all devices get wake-up signals)
+    - mTLS startup assertion: no runtime check that gRPC listener actually uses TLS_config (YELLOW from cycle 76 security-auditor)
+    - POWEHI__HANDLE_ORACLE_SECRET_TOKEN cross-restart oracle if env var not set (YELLOW-2, documented)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+
 ## Current state (2026-06-02, cycle 75 — STABILIZATION: create_group REST test gap + security sweep)
 - **Cycle 75 (commit 8dc597c):** STABILIZATION — CI green, no open issues, test gap closed + security sweep:
   - **cargo audit:** 1 allowed warning (RUSTSEC-2024-0384 instant/openmls — unchanged).
