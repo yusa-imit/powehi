@@ -17,6 +17,23 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-02, cycle 74 — FEATURE: broadcast envelope poll — offline devices now receive group messages)
+- **Cycle 74 (commit a12f742):** Fixed functional gap: `PgEnvelopeRepository::find_pending` previously only returned unicast messages (`WHERE recipient_device_id = $1`), silently dropping all group (broadcast) Application envelopes for offline devices.
+  - **Root cause:** `find_pending` never included `recipient_device_id IS NULL` rows. An offline device would miss every group message sent while it was disconnected.
+  - **Fix:** Added OR clause to SQL: `OR (recipient_device_id IS NULL AND group_id IN (SELECT group_id FROM group_members WHERE device_id = $1))`. PostgreSQL's `IN (<empty subquery>) = FALSE` keeps the fail-closed invariant: a device with no memberships gets zero broadcasts.
+  - **Migration `0006_group_members_device_idx.sql`:** `CREATE INDEX … ON group_members(device_id)` — the existing PRIMARY KEY `(group_id, device_id)` is useless for `WHERE device_id = $1`; the new index prevents a full scan on every poll call.
+  - **`FakeEnvelopeRepo` updated:** Added `memberships: Mutex<HashMap<GroupId, HashSet<DeviceId>>>` field. `find_pending` now uses `is_some_and(|members| members.contains(device_id))` for broadcasts — mirrors SQL semantics exactly.
+  - **`FakeGroupRepo::with_member_list`:** New constructor accepting multiple `(GroupId, DeviceId)` pairs.
+  - **security-auditor:** PASS — no RED. YELLOW-1 (post-removal staleness window) acceptable (MLS PCS enforces epoch-bounded decryption; evicted device cannot decrypt after next Commit). YELLOW-2 (delete_expired race) pre-existing/benign.
+  - **+2 tests:** `poll_envelopes_does_not_return_broadcast_for_non_member` (security invariant), `poll_envelopes_returns_group_broadcasts_to_member` (functional).
+  - **Fixed test:** `poll_envelopes_returns_recipient_envelopes` updated to add device_a to the group (was relying on the permissive fake behavior).
+  - **284 Rust tests** (was 282, +2); clippy clean; rustfmt clean.
+  - **Remaining deferred security findings (YELLOW)**:
+    - WS broadcast global fan-out (Phase 5 architectural — all devices get wake-up signals)
+    - mTLS peer-cert → home_region binding (RED-2/RED-3, architectural, tonic TlsConnectInfo)
+    - POWEHI__HANDLE_ORACLE_SECRET_TOKEN cross-restart oracle if env var not set (YELLOW-2, documented)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+
 ## Current state (2026-06-02, cycle 73 — FEATURE: TraceLayer URI omission — UUID path-param log leakage fix)
 - **Cycle 73 (commit c2e473e):** Closed deferred YELLOW: TraceLayer UUID path params at DEBUG level (logging hygiene):
   - **Root cause:** `TraceLayer::new_for_http()` default `make_span_with` emits `uri = %request.uri()` in every HTTP span at ALL log levels. Routes like `/v1/key-packages/:device_id`, `/v1/messages/:id`, `/v1/media/:id` would expose device UUIDs, envelope IDs, and media IDs in trace logs — violating `no-plaintext-logging.md`.
