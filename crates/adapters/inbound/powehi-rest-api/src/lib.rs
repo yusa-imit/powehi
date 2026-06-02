@@ -841,6 +841,20 @@ mod tests {
         format!("Bearer {TEST_TOKEN}")
     }
 
+    fn groups_router() -> Router {
+        router(AppState {
+            region_id: "eu-de-1-test".to_string(),
+            auth: Arc::new(MockAuth),
+            group: noop_group(),
+            messaging: Arc::new(MockMessaging),
+            key_package: Arc::new(MockKeyPackage),
+            media: Arc::new(MockMedia),
+            push_sub_repo: null_push_sub_repo(),
+            cache: test_session_cache(),
+            handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
+        })
+    }
+
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -2028,5 +2042,64 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ── POST /v1/groups tests ────────────────────────────────────────────────
+
+    /// Auth bypass invariant: unauthenticated request must be rejected before reaching the handler.
+    #[tokio::test]
+    async fn create_group_without_token_returns_401() {
+        let group_id = GroupId::new();
+        let body = serde_json::json!({ "group_id": group_id.to_string() });
+        let resp = test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/groups")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Happy path: authenticated creator registers a new MLS group — server returns 204.
+    #[tokio::test]
+    async fn create_group_returns_204() {
+        let group_id = GroupId::new();
+        let body = serde_json::json!({ "group_id": group_id.to_string() });
+        let resp = groups_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/groups")
+                    .header("authorization", bearer())
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    /// Malformed body (missing required group_id field) must be rejected before the handler runs.
+    #[tokio::test]
+    async fn create_group_with_missing_group_id_returns_unprocessable() {
+        let resp = groups_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/groups")
+                    .header("authorization", bearer())
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 }
