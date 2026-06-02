@@ -178,6 +178,7 @@ async fn main() -> Result<()> {
         event_bus,
         key_package_repo,
         group_repo_grpc,
+        cfg.grpc_tls_enabled(),
     );
     // Max message size = 64 KiB for MLS ciphertext (prd.md §6.4).
     // This caps memory usage per in-flight RPC and matches the envelope size limit.

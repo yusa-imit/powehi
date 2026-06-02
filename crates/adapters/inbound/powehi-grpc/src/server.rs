@@ -33,6 +33,12 @@ pub struct RegionGrpcServer {
     pub event_bus: Arc<dyn DomainEventBus>,
     pub key_package_repo: Arc<dyn KeyPackageRepository>,
     pub group_repo: Arc<dyn GroupRepository>,
+    /// When `true`, requests that arrive without `TlsConnectInfo` are rejected with
+    /// PermissionDenied instead of being passed through with a warning. Set to
+    /// `cfg.grpc_tls_enabled()` in the composition root so that any misconfiguration
+    /// that causes the gRPC listener to start without TLS (despite TLS being configured)
+    /// is caught at the RPC layer rather than silently degrading to plaintext.
+    pub tls_required: bool,
 }
 
 impl RegionGrpcServer {
@@ -42,6 +48,7 @@ impl RegionGrpcServer {
         event_bus: Arc<dyn DomainEventBus>,
         key_package_repo: Arc<dyn KeyPackageRepository>,
         group_repo: Arc<dyn GroupRepository>,
+        tls_required: bool,
     ) -> Self {
         Self {
             local_region,
@@ -49,11 +56,79 @@ impl RegionGrpcServer {
             event_bus,
             key_package_repo,
             group_repo,
+            tls_required,
         }
     }
 }
 
 impl RegionGrpcServer {
+    /// Verify that the calling peer's mTLS certificate CN or DNS SAN matches `expected_region`.
+    ///
+    /// Behaviour matrix:
+    /// - `TlsConnectInfo` absent AND `self.tls_required = false` (dev/test mode): warns + passes.
+    /// - `TlsConnectInfo` absent AND `self.tls_required = true` (production): PermissionDenied.
+    ///   This catches the misconfiguration where the gRPC listener started without `.tls_config()`
+    ///   even though TLS was configured — fail-closed rather than silently degrading.
+    /// - `TlsConnectInfo` present but peer presented no certificate: PermissionDenied.
+    /// - Peer cert fails to parse: PermissionDenied.
+    /// - No CN/SAN matches `expected_region`: PermissionDenied.
+    ///
+    /// Logging policy (no-plaintext-logging.md): only the region string is logged — no device
+    /// IDs, no certificate bytes, no DNs.
+    #[allow(clippy::result_large_err)] // tonic::Status is large by design; boxing would cascade
+    fn verify_peer_region(
+        &self,
+        extensions: &tonic::Extensions,
+        expected_region: &str,
+    ) -> Result<(), Status> {
+        use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
+
+        let Some(tls_info) = extensions.get::<TlsConnectInfo<TcpConnectInfo>>() else {
+            if self.tls_required {
+                // TLS is configured on this server but the listener did not inject
+                // TlsConnectInfo. Reject rather than silently bypassing peer-cert checks.
+                warn!(
+                    expected_region,
+                    "no TlsConnectInfo despite tls_required=true — rejecting request"
+                );
+                return Err(Status::permission_denied("peer certificate required"));
+            }
+            // Dev/test mode — no TLS termination on this hop. Fail-open with a warning so
+            // unit tests and local dev still function. In production the gRPC listener MUST
+            // be wrapped in `tonic::transport::Server::builder().tls_config(...)`, which
+            // inserts this extension. Set POWEHI__GRPC_TLS_* env vars to enable tls_required.
+            warn!(
+                expected_region,
+                "no TlsConnectInfo — skipping peer cert check (dev/test mode)"
+            );
+            return Ok(());
+        };
+
+        let Some(certs) = tls_info.peer_certs() else {
+            warn!(expected_region, "peer presented no certificate under mTLS");
+            return Err(Status::permission_denied("peer certificate required"));
+        };
+
+        let Some(first_cert) = certs.first() else {
+            return Err(Status::permission_denied("peer certificate required"));
+        };
+
+        match peer_cert_matches_region(first_cert.as_ref(), expected_region) {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                warn!(
+                    expected_region,
+                    "peer cert CN/SAN does not match home_region"
+                );
+                Err(Status::permission_denied("peer region mismatch"))
+            }
+            Err(e) => {
+                warn!(expected_region, error = %e, "failed to parse peer certificate");
+                Err(Status::permission_denied("peer certificate invalid"))
+            }
+        }
+    }
+
     /// Verify that `sender` is a known member of `group_id` in the local membership store.
     ///
     /// Fail-closed: if no membership data exists the envelope is rejected with PermissionDenied.
@@ -114,56 +189,6 @@ fn proto_type_to_domain(t: i32) -> Option<MessageType> {
         EnvelopeType::Commit => Some(MessageType::Commit),
         EnvelopeType::Proposal => Some(MessageType::Proposal),
         EnvelopeType::Unspecified => None,
-    }
-}
-
-/// Verify that the calling peer's mTLS certificate CN or DNS SAN matches `expected_region`.
-///
-/// Behaviour matrix:
-/// - No `TlsConnectInfo` extension (plain TCP / unit-test mode): logs a warning and passes.
-/// - `TlsConnectInfo` present but peer presented no certificate: returns `PermissionDenied`.
-/// - Peer cert fails to parse: returns `PermissionDenied`.
-/// - No CN/SAN matches `expected_region`: returns `PermissionDenied`.
-///
-/// Logging policy (no-plaintext-logging.md): we log only the region string — no device IDs,
-/// no certificate bytes, no DNs.
-#[allow(clippy::result_large_err)] // tonic::Status is large by design; boxing would cascade
-fn verify_peer_region(extensions: &tonic::Extensions, expected_region: &str) -> Result<(), Status> {
-    use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
-
-    let Some(tls_info) = extensions.get::<TlsConnectInfo<TcpConnectInfo>>() else {
-        // Dev/test mode — no TLS termination on this hop. Fail-open with a warning so unit
-        // tests and local dev still function. In production the gRPC listener MUST be wrapped
-        // in `tonic::transport::Server::builder().tls_config(...)`, which inserts this extension.
-        warn!(
-            expected_region,
-            "no TlsConnectInfo — skipping peer cert check (dev/test mode)"
-        );
-        return Ok(());
-    };
-
-    let Some(certs) = tls_info.peer_certs() else {
-        warn!(expected_region, "peer presented no certificate under mTLS");
-        return Err(Status::permission_denied("peer certificate required"));
-    };
-
-    let Some(first_cert) = certs.first() else {
-        return Err(Status::permission_denied("peer certificate required"));
-    };
-
-    match peer_cert_matches_region(first_cert.as_ref(), expected_region) {
-        Ok(true) => Ok(()),
-        Ok(false) => {
-            warn!(
-                expected_region,
-                "peer cert CN/SAN does not match home_region"
-            );
-            Err(Status::permission_denied("peer region mismatch"))
-        }
-        Err(e) => {
-            warn!(expected_region, error = %e, "failed to parse peer certificate");
-            Err(Status::permission_denied("peer certificate invalid"))
-        }
     }
 }
 
@@ -349,7 +374,7 @@ impl RegionService for RegionGrpcServer {
         // the claimed home_region. Only the authoritative home-region peer is allowed to
         // declare membership for a given group_id; without this, any peer inside the mTLS
         // perimeter could synthesise membership and pivot to ForwardEnvelope acceptance.
-        verify_peer_region(&request_exts, &req.home_region)?;
+        self.verify_peer_region(&request_exts, &req.home_region)?;
 
         // Validate and collect all device IDs before any DB writes (fail-fast)
         let mut device_ids: Vec<DeviceId> = Vec::with_capacity(req.member_device_ids.len());
@@ -666,6 +691,7 @@ mod tests {
             Arc::new(NoopEventBus),
             FakeKpRepo::new(),
             FakeGroupRepo::new(),
+            false, // tls_required=false in unit tests (no TLS listener)
         )
     }
 
@@ -676,6 +702,7 @@ mod tests {
             Arc::new(NoopEventBus),
             FakeKpRepo::with_kp(kp),
             FakeGroupRepo::new(),
+            false,
         )
     }
 
@@ -686,6 +713,7 @@ mod tests {
             Arc::new(NoopEventBus),
             FakeKpRepo::new(),
             FakeGroupRepo::with_member(group_id, device_id),
+            false,
         )
     }
 
@@ -1272,5 +1300,53 @@ mod tests {
     fn peer_cert_invalid_der_returns_err() {
         let result = peer_cert_matches_region(b"not-a-der-cert", "eu-de-1");
         assert!(result.is_err());
+    }
+
+    // ── tls_required startup-assertion tests ─────────────────────────────────
+    //
+    // Security invariant: when the composition root sets tls_required=true (because
+    // POWEHI__GRPC_TLS_* env vars are configured), requests arriving without
+    // TlsConnectInfo must be rejected with PermissionDenied. This catches the
+    // misconfiguration where the gRPC listener starts without .tls_config(…) even
+    // though TLS material was supplied — fail-closed rather than silently degrading
+    // to plaintext and logging a warning.
+
+    #[tokio::test]
+    async fn sync_group_membership_without_tls_info_rejected_when_tls_required() {
+        // Build a server with tls_required=true (production mode).
+        let server = RegionGrpcServer::new(
+            RegionId::new("eu-central-1"),
+            Arc::new(NoopEnvelopeRepo),
+            Arc::new(NoopEventBus),
+            FakeKpRepo::new(),
+            FakeGroupRepo::new(),
+            true, // tls_required — no TlsConnectInfo in extensions → must reject
+        );
+        // A plain Request::new() has no TlsConnectInfo in its extensions.
+        let req = Request::new(SyncGroupMembershipRequest {
+            group_id: Uuid::new_v4().to_string(),
+            home_region: "eu-de-1".to_string(),
+            member_device_ids: vec![Uuid::new_v4().to_string()],
+        });
+        let err = server.sync_group_membership(req).await.unwrap_err();
+        assert_eq!(
+            err.code(),
+            tonic::Code::PermissionDenied,
+            "missing TlsConnectInfo must be rejected when tls_required=true"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_group_membership_without_tls_info_passes_when_tls_not_required() {
+        // Build a server with tls_required=false (dev/test mode).
+        let server = make_server(); // tls_required=false
+        let req = Request::new(SyncGroupMembershipRequest {
+            group_id: Uuid::new_v4().to_string(),
+            home_region: "eu-de-1".to_string(),
+            member_device_ids: vec![Uuid::new_v4().to_string()],
+        });
+        // No TlsConnectInfo in extensions but tls_required=false → warn + pass.
+        let resp = server.sync_group_membership(req).await.unwrap();
+        assert_eq!(resp.into_inner().status, ForwardStatus::Accepted as i32);
     }
 }
