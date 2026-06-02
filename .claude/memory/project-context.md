@@ -17,6 +17,23 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-02, cycle 73 — FEATURE: TraceLayer URI omission — UUID path-param log leakage fix)
+- **Cycle 73 (commit c2e473e):** Closed deferred YELLOW: TraceLayer UUID path params at DEBUG level (logging hygiene):
+  - **Root cause:** `TraceLayer::new_for_http()` default `make_span_with` emits `uri = %request.uri()` in every HTTP span at ALL log levels. Routes like `/v1/key-packages/:device_id`, `/v1/messages/:id`, `/v1/media/:id` would expose device UUIDs, envelope IDs, and media IDs in trace logs — violating `no-plaintext-logging.md`.
+  - **Fix:** `powehi-rest-api/src/lib.rs` — custom `make_span_with` closure records only `http.method`. Status + latency appear in `DefaultOnResponse` child events (not span fields), so observability is fully preserved.
+  - **Tower-http `DefaultOnResponse` verified:** does NOT add `uri` via `span.record()` post-creation — confirmed against tower-http 0.5.2 source.
+  - **`tracing-subscriber` added to dev-dependencies** (workspace pin, features: env-filter + json).
+  - **`SpanFieldNames` custom tracing `Layer`:** hooks both `on_new_span` AND `on_record` to capture field names at creation AND via late-bound `span.record(...)` calls — future-proof against post-creation URI injection.
+  - **+2 tests:**
+    - `trace_span_omits_uri_field_for_path_param_routes`: asserts no `uri`/`http.uri` field present in span after request to `/v1/key-packages/:device_id`.
+    - `key_package_count_returns_200_when_authenticated`: behavioral test for `/v1/key-packages/:device_id/count` with auth.
+  - **security-auditor:** GREEN — YELLOW-1 (on_record coverage) fixed; YELLOW-2 (misleading comment) fixed. No RED findings.
+  - **312 Rust tests** (was 310, +2); clippy clean; rustfmt clean.
+  - **Remaining deferred security findings (YELLOW)**:
+    - WS broadcast global fan-out (Phase 5 architectural — all devices get wake-up signals)
+    - mTLS peer-cert → home_region binding (RED-2/RED-3, architectural, tonic TlsConnectInfo)
+    - POWEHI__HANDLE_ORACLE_SECRET_TOKEN cross-restart oracle if env var not set (YELLOW-2, documented)
+
 ## Current state (2026-06-02, cycle 72 — FEATURE: WS per-connection Ping rate limiter)
 - **Cycle 72 (commit c423874):** Closed long-deferred YELLOW: WS per-message rate limiting:
   - **`powehi-ws-hub/src/handler.rs`:** Added `PingRateLimiter` — fixed-window counter per connection. `PING_BURST=5` pings allowed per `PING_WINDOW=10s`. Exceeding the limit: `tracing::warn!` (static string, no PII) + immediate disconnect.
@@ -26,7 +43,7 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
   - **310 Rust tests** (was 306, +4); clippy clean; rustfmt clean.
   - **Remaining deferred security findings (YELLOW)**:
     - WS broadcast global fan-out (Phase 5 architectural — all devices get wake-up signals)
-    - TraceLayer UUID path params at DEBUG level (logging hygiene)
+    - TraceLayer UUID path params at DEBUG level (logging hygiene) ← CLOSED in cycle 73
     - mTLS peer-cert → home_region binding (RED-2/RED-3, architectural, tonic TlsConnectInfo)
     - POWEHI__HANDLE_ORACLE_SECRET_TOKEN cross-restart oracle if env var not set (YELLOW-2, documented)
 
