@@ -60,6 +60,8 @@ redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 # gRPC
 tonic = "0.12"
 prost = "0.13"
+# X.509 parser (mTLS peer-cert region binding) — parser only, no homegrown crypto
+x509-parser = { version = "0.16", default-features = false }
 # crypto — no homegrown crypto; only audited libraries
 openmls = { version = "0.8", default-features = false }
 # OpenMLS native Rust crypto backend + basic credential helper (versions tracked by openmls 0.8.1)

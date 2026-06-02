@@ -21,6 +21,8 @@ chrono = { workspace = true }
 async-trait = { workspace = true }
 futures-core = "0.3"
 http = "1"
+# X.509 peer-cert parsing for mTLS region binding (RED-2/RED-3)
+x509-parser = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
