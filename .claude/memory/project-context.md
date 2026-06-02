@@ -17,6 +17,29 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-03, cycle 79 — FEATURE: testcontainers integration tests — Postgres security invariants)
+- **Cycle 79 (commit bc30041):** Implemented the required testcontainers gate from testing-conventions.md (outbound adapters must have integration tests against real Postgres):
+  - **New file:** `crates/adapters/outbound/powehi-postgres/tests/pg_security_it.rs`
+  - **8 security-invariant integration tests** (all `#[ignore = "requires Docker (testcontainers)"]`):
+    - `list_groups_for_device_returns_only_own_groups` — device scoping: device_a sees only group_a
+    - `find_pending_broadcast_excluded_for_non_member` — cycle-74 SQL fix validated against real PG: `IN (<empty subquery>)` is FALSE in PG, non-member gets zero broadcasts
+    - `find_pending_broadcast_included_for_member` — positive case: member receives group broadcast
+    - `find_pending_excludes_expired_envelopes` — TTL enforcement: `expires_at > NOW()` guard is real PG
+    - `key_package_fetch_one_atomically_marks_consumed` — single-use: count drops to 0, second fetch returns None
+    - `mark_consumed_prevents_double_consume` — CAS: first = Consumed, second = AlreadyConsumed
+    - `mark_consumed_not_found_for_unknown_id` — NotFound (not Internal error)
+    - `group_add_member_is_idempotent` — ON CONFLICT DO NOTHING: no duplicate rows
+  - **New CI job** `integration-test` in `.github/workflows/ci-rust.yml`:
+    - `timeout-minutes: 20` + `permissions: contents: read`
+    - `cargo nextest run -p powehi-postgres --run-ignored all -E 'binary(pg_security_it)'`
+    - Specifically runs only the testcontainers binary (not push_subscription_repo_it which needs TEST_DATABASE_URL)
+  - **testcontainers = "0.23"** + **testcontainers-modules = { version = "0.11", features = ["postgres"] }** added to workspace Cargo.toml
+  - **security-auditor:** PASS — no RED; YELLOW-2 (CI permissions + timeout) fixed; no plaintext fixtures
+  - **334 Rust tests** unchanged; 8 new tests ignored (Docker required); clippy clean; rustfmt clean
+  - **Remaining deferred security findings (YELLOW)**:
+    - POWEHI__HANDLE_ORACLE_SECRET_TOKEN cross-restart oracle if env var not set (YELLOW-2, documented)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+
 ## Current state (2026-06-03, cycle 78 — FEATURE: WS broadcast global fan-out YELLOW closed — group-scoped notifications)
 - **Cycle 78 (commit 7396c78):** Closed long-deferred YELLOW: WS broadcast global fan-out:
   - **Root cause:** `handle_socket` ignored the authenticated `DeviceId` — every connected device received every group notification (EnvelopeReceived, EpochAdvanced, MemberAdded, MemberRemoved) regardless of group membership. Device could observe activity in groups it never joined.
