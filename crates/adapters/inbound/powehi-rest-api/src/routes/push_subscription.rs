@@ -330,6 +330,7 @@ mod tests {
         }
         async fn add_member(
             &self,
+            _: &DeviceId,
             _: &powehi_domain::group::GroupId,
             _: &DeviceId,
             _: powehi_domain::group::Epoch,
@@ -338,6 +339,7 @@ mod tests {
         }
         async fn remove_member(
             &self,
+            _: &DeviceId,
             _: &powehi_domain::group::GroupId,
             _: &DeviceId,
             _: powehi_domain::group::Epoch,

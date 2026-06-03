@@ -123,6 +123,10 @@ fn router_inner(
     let api_routes = Router::new()
         .route("/v1/groups", post(routes::groups::create_group))
         .route(
+            "/v1/groups/:group_id/members/:device_id",
+            post(routes::groups::add_member).delete(routes::groups::remove_member),
+        )
+        .route(
             "/v1/messages",
             post(routes::messaging::send_message).get(routes::messaging::poll),
         )
@@ -452,6 +456,7 @@ mod tests {
         }
         async fn add_member(
             &self,
+            _caller: &DeviceId,
             _group_id: &GroupId,
             _device_id: &DeviceId,
             _epoch: powehi_domain::group::Epoch,
@@ -460,6 +465,7 @@ mod tests {
         }
         async fn remove_member(
             &self,
+            _caller: &DeviceId,
             _group_id: &GroupId,
             _device_id: &DeviceId,
             _epoch: powehi_domain::group::Epoch,
@@ -470,6 +476,51 @@ mod tests {
 
     fn noop_group() -> Arc<dyn GroupUseCase> {
         Arc::new(NoopGroup)
+    }
+
+    /// Group mock that returns Unauthorized for add/remove (simulates a non-member caller).
+    struct MockGroupUnauthorized;
+    #[async_trait]
+    impl GroupUseCase for MockGroupUnauthorized {
+        async fn create_group(
+            &self,
+            _creator: &DeviceId,
+            _group_id: GroupId,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn add_member(
+            &self,
+            _caller: &DeviceId,
+            _group_id: &GroupId,
+            _device_id: &DeviceId,
+            _epoch: powehi_domain::group::Epoch,
+        ) -> Result<(), DomainError> {
+            Err(DomainError::Unauthorized)
+        }
+        async fn remove_member(
+            &self,
+            _caller: &DeviceId,
+            _group_id: &GroupId,
+            _device_id: &DeviceId,
+            _epoch: powehi_domain::group::Epoch,
+        ) -> Result<(), DomainError> {
+            Err(DomainError::Unauthorized)
+        }
+    }
+
+    fn groups_router_unauthorized() -> Router {
+        router(AppState {
+            region_id: "eu-de-1-test".to_string(),
+            auth: Arc::new(MockAuth),
+            group: Arc::new(MockGroupUnauthorized),
+            messaging: Arc::new(MockMessaging),
+            key_package: Arc::new(MockKeyPackage),
+            media: Arc::new(MockMedia),
+            push_sub_repo: null_push_sub_repo(),
+            cache: test_session_cache(),
+            handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
+        })
     }
 
     fn test_router() -> Router {
@@ -2101,5 +2152,125 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    // ── POST /v1/groups/:group_id/members/:device_id tests ───────────────────
+
+    /// Auth bypass invariant: unauthenticated add_member must be rejected before the handler.
+    #[tokio::test]
+    async fn add_member_without_token_returns_401() {
+        let group_id = uuid::Uuid::new_v4();
+        let device_id = uuid::Uuid::new_v4();
+        let body = serde_json::json!({ "epoch": 1u64 });
+        let resp = test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/groups/{group_id}/members/{device_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Auth bypass invariant: unauthenticated remove_member must be rejected before the handler.
+    #[tokio::test]
+    async fn remove_member_without_token_returns_401() {
+        let group_id = uuid::Uuid::new_v4();
+        let device_id = uuid::Uuid::new_v4();
+        let resp = test_router()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/groups/{group_id}/members/{device_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Membership enforcement: non-member caller must receive 401.
+    #[tokio::test]
+    async fn add_member_by_non_member_returns_401() {
+        let group_id = uuid::Uuid::new_v4();
+        let device_id = uuid::Uuid::new_v4();
+        let body = serde_json::json!({ "epoch": 2u64 });
+        let resp = groups_router_unauthorized()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/groups/{group_id}/members/{device_id}"))
+                    .header("authorization", bearer())
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Membership enforcement: non-member caller must receive 401 on remove.
+    #[tokio::test]
+    async fn remove_member_by_non_member_returns_401() {
+        let group_id = uuid::Uuid::new_v4();
+        let device_id = uuid::Uuid::new_v4();
+        let resp = groups_router_unauthorized()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/groups/{group_id}/members/{device_id}"))
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Happy path: authenticated member adds a new device — server returns 204.
+    #[tokio::test]
+    async fn add_member_returns_204() {
+        let group_id = uuid::Uuid::new_v4();
+        let device_id = uuid::Uuid::new_v4();
+        let body = serde_json::json!({ "epoch": 3u64 });
+        let resp = groups_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/groups/{group_id}/members/{device_id}"))
+                    .header("authorization", bearer())
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    /// Happy path: authenticated member removes a device — server returns 204.
+    #[tokio::test]
+    async fn remove_member_returns_204() {
+        let group_id = uuid::Uuid::new_v4();
+        let device_id = uuid::Uuid::new_v4();
+        let resp = groups_router()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/groups/{group_id}/members/{device_id}"))
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     }
 }

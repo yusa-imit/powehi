@@ -39,13 +39,31 @@ impl GroupUseCase for GroupService {
         self.group_repo.add_member(&member).await
     }
 
-    #[instrument(skip(self), fields(group_id = %group_id, device_id = %device_id))]
+    #[instrument(skip(self), fields(caller = %caller, group_id = %group_id, device_id = %device_id))]
     async fn add_member(
         &self,
+        caller: &DeviceId,
         group_id: &GroupId,
         device_id: &DeviceId,
         epoch: Epoch,
     ) -> Result<(), DomainError> {
+        // Fail-closed: caller must already be a member. TOCTOU: the list_members
+        // read and the add_member write are not in the same transaction. A
+        // just-revoked caller could slip through in the window. This is acceptable
+        // because (a) the MLS Welcome+Commit protocol is the actual E2E auth
+        // boundary — a non-member cannot produce a valid MLS state for the group,
+        // and (b) the server is zero-trust per prd.md threat model; this check is
+        // defense-in-depth. Tracked: security-auditor YELLOW cycle 81.
+        if !self
+            .group_repo
+            .list_members(group_id)
+            .await?
+            .iter()
+            .any(|m| &m.device_id == caller)
+        {
+            tracing::warn!(caller = %caller, group_id = %group_id, "add_member: caller is not a member");
+            return Err(DomainError::Unauthorized);
+        }
         let member = GroupMember {
             group_id: group_id.clone(),
             device_id: device_id.clone(),
@@ -54,13 +72,25 @@ impl GroupUseCase for GroupService {
         self.group_repo.add_member(&member).await
     }
 
-    #[instrument(skip(self), fields(group_id = %group_id, device_id = %device_id))]
+    #[instrument(skip(self), fields(caller = %caller, group_id = %group_id, device_id = %device_id))]
     async fn remove_member(
         &self,
+        caller: &DeviceId,
         group_id: &GroupId,
         device_id: &DeviceId,
         _epoch: Epoch,
     ) -> Result<(), DomainError> {
+        // Same fail-closed guard and TOCTOU caveat as add_member above.
+        if !self
+            .group_repo
+            .list_members(group_id)
+            .await?
+            .iter()
+            .any(|m| &m.device_id == caller)
+        {
+            tracing::warn!(caller = %caller, group_id = %group_id, "remove_member: caller is not a member");
+            return Err(DomainError::Unauthorized);
+        }
         self.group_repo.remove_member(group_id, device_id).await
     }
 }
@@ -167,7 +197,7 @@ mod tests {
         let group_id = GroupId::new();
 
         svc.create_group(&creator, group_id.clone()).await.unwrap();
-        svc.add_member(&group_id, &newcomer, Epoch(3))
+        svc.add_member(&creator, &group_id, &newcomer, Epoch(3))
             .await
             .unwrap();
 
@@ -175,6 +205,39 @@ mod tests {
         assert_eq!(members.len(), 2);
         let joined = members.iter().find(|m| m.device_id == newcomer).unwrap();
         assert_eq!(joined.joined_at_epoch, Epoch(3));
+    }
+
+    #[tokio::test]
+    async fn add_member_by_non_member_returns_unauthorized() {
+        let repo = FakeGroupRepo::new();
+        let svc = make_svc(repo.clone());
+        let creator = DeviceId::new();
+        let outsider = DeviceId::new();
+        let newcomer = DeviceId::new();
+        let group_id = GroupId::new();
+
+        svc.create_group(&creator, group_id.clone()).await.unwrap();
+        let err = svc
+            .add_member(&outsider, &group_id, &newcomer, Epoch(1))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
+    }
+
+    #[tokio::test]
+    async fn remove_member_by_non_member_returns_unauthorized() {
+        let repo = FakeGroupRepo::new();
+        let svc = make_svc(repo.clone());
+        let creator = DeviceId::new();
+        let outsider = DeviceId::new();
+        let group_id = GroupId::new();
+
+        svc.create_group(&creator, group_id.clone()).await.unwrap();
+        let err = svc
+            .remove_member(&outsider, &group_id, &creator, Epoch(1))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
     }
 
     #[tokio::test]
@@ -186,10 +249,10 @@ mod tests {
         let group_id = GroupId::new();
 
         svc.create_group(&device_a, group_id.clone()).await.unwrap();
-        svc.add_member(&group_id, &device_b, Epoch(1))
+        svc.add_member(&device_a, &group_id, &device_b, Epoch(1))
             .await
             .unwrap();
-        svc.remove_member(&group_id, &device_b, Epoch(2))
+        svc.remove_member(&device_a, &group_id, &device_b, Epoch(2))
             .await
             .unwrap();
 
