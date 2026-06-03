@@ -17,6 +17,22 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-04, cycle 87 — FEATURE: persist handle-oracle secret in Postgres — closes YELLOW-2)
+- **Cycle 87 (commit 9c2a47f):** Closed YELLOW-2: handle oracle cross-restart oracle fix.
+  - **Root cause:** If `POWEHI__HANDLE_ORACLE_SECRET_TOKEN` env var was not set, `main.rs` generated a fresh random 32-byte HMAC key each restart. Consecutive `login_init` calls for the same unknown handle across a server restart would get different synthetic `UserId` values — distinguishable from known handles, breaking the anti-enumeration guarantee.
+  - **Fix:**
+    - Migration `0007_server_config.sql`: new `server_config (key TEXT PK, value_bytes BYTEA, created_at TIMESTAMPTZ)` table for opaque server-side config blobs (never content/PII/ciphertext).
+    - New port `ServerConfigRepository` (`get_bytes` / `upsert_bytes`) in `powehi-port-outbound`.
+    - `PgServerConfigRepository` in `powehi-postgres` — sqlx parameterized queries (no SQL injection), `ON CONFLICT DO NOTHING` semantics.
+    - `main.rs` startup priority: (1) env var set → SHA-256 derive; (2) DB has key → load it; (3) first boot → generate, INSERT DO NOTHING, re-read winner (concurrent first-boot race-safe).
+  - **Race safety:** `ON CONFLICT DO NOTHING + re-read` ensures all concurrent first-boot instances converge on the same value (the first writer's key).
+  - **security-auditor:** PASS — no RED. YELLOW entropy note (UUID v4 ≈244 bits for HMAC-SHA256 key — acceptable). YELLOW-2 CLOSED.
+  - **+3 testcontainers integration tests** (`#[ignore]`): `get_before_insert → None`, round-trip, `DO NOTHING` preserves first writer's value.
+  - **342 Rust tests** (unchanged non-ignored count); 11 ignored (was 8 + 3 new server_config tests); clippy clean; rustfmt clean.
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+
 ## Current state (2026-06-04, cycle 86 — FEATURE: sort messages by receivedAt — closes Y1 epoch-namespace mismatch)
 - **Cycle 86 (commit 7c1b45b):** Closed Y1 from cycle 83: outgoing message display ordering fix.
   - **Y1 closed:** `getMessagesByGroup` and `persistIncoming` optimistic sort now use `receivedAt` (wall-clock ms) instead of `epochSeq`. Outgoing messages had `epochSeq = Date.now()` (~1.7e12) while incoming messages used real MLS epoch sequences (~0–N), causing outgoing to always sort after every incoming message regardless of actual send time. Fix: both directions use `receivedAt` for display ordering; `epochSeq` is retained for potential future WASM-layer replay detection.
@@ -24,7 +40,7 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
   - **+1 test:** "Y1 — outgoing message with large epochSeq sorts before later incoming". "sorts by epochSeq" test updated to "sorts by receivedAt". 130 frontend tests (was 129); Biome clean; 342 Rust tests unchanged.
   - **Remaining deferred security findings (YELLOW):**
     - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
-    - POWEHI__HANDLE_ORACLE_SECRET_TOKEN cross-restart oracle if env var not set (YELLOW-2, documented)
+    - POWEHI__HANDLE_ORACLE_SECRET_TOKEN cross-restart oracle if env var not set (YELLOW-2) ← CLOSED cycle 87
     - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
 
 ## Current state (2026-06-04, cycle 85 — STABILIZATION: Y3 closed — writeErrorCount telemetry in usePersistentMessages)
