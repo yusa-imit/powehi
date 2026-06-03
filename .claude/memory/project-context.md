@@ -17,6 +17,18 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-03, cycle 84 — STABILIZATION: CI red fix — Biome lint + dedup test race condition)
+- **Cycle 84 (commit db37b0a):** STABILIZATION — Frontend CI was RED due to two issues in the cycle-83 `usePersistentMessages` commit:
+  1. **7 Biome errors:** Import ordering violations in `useMessages.ts`, `usePersistentMessages.ts`, `usePersistentMessages.test.ts`, and `ChatLayout.tsx`. Format violation: multi-line function signatures that Biome expects on one line. Two `noNonNullAssertion` lint errors in test (`!` → `?? ""`).
+  2. **1 Vitest test failure:** `persistIncoming deduplicates — same id added twice stays one row` → `expected [] to have a length of 1 but got 0`. Root cause: race condition — the initial `useEffect`'s async `getMessagesByGroup` promise resolves INSIDE the `act()` that calls `persistIncoming`, and its `setRows([])` overrides the optimistic `setRows([row])`. Fix: pre-flush the initial DB load with `await act(async () => {})` before calling `persistIncoming`, so the DB load completes before dedup is tested.
+  - **126 frontend tests** pass (all 15 test files); Biome clean; 342 Rust tests pass (unchanged).
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - POWEHI__HANDLE_ORACLE_SECRET_TOKEN cross-restart oracle if env var not set (YELLOW-2, documented)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+    - Y1 from cycle 83: `epochSeq = Date.now()` for outgoing mixes epoch namespaces (display order only)
+    - Y3 from cycle 83: Dexie write errors silently swallowed (no telemetry counter yet)
+
 ## Current state (2026-06-03, cycle 83 — FEATURE: Dexie encrypted message persistence + CI TypeScript fix)
 - **Cycle 83 (commit 3177792):** Two changes:
   1. **CI fix (commit 4683d19):** Frontend CI was RED — `useMessages.test.ts` had TS2322 type errors on `pollSpy`/`ackSpy` declared as `ReturnType<typeof vi.spyOn>` (too-wide generic type incompatible with the specific spy return type in Vitest 3.x). Fixed: typed as `MockInstance<typeof MessagesModule.pollMessages/ackMessage>`. Also removed unused `useCallback` import (TS6133) from `useMessages.ts`. CI now GREEN.
