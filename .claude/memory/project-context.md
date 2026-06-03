@@ -17,6 +17,18 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-03, cycle 82 — FEATURE: Frontend messaging API integration — MLS encrypt/decrypt + REST polling)
+- **Cycle 82 (commit 82f60b6):** Closed the largest remaining frontend gap: ChatLayout sent messages only to local mock state; no real API calls were made.
+  - **New API clients:** `app/src/api/messages.ts` (`sendMessage`, `sendWelcome`, `sendCommit`, `pollMessages`, `ackMessage`); `app/src/api/groups.ts` (`createGroup`, `addMember`, `removeMember`); `app/src/api/key_packages.ts` (`fetchKeyPackage`, `getKeyPackageCount`). All use Bearer token auth headers, never URL params; binary payloads as JSON number arrays (matching serde `Vec<u8>`).
+  - **New hook `useMessages`:** Polls `GET /v1/messages` every 3 s. Application messages decrypted via `cryptoWorker.mlsDecrypt(identityId, groupId, ciphertext)` → `onMessage`. Welcome/Commit/Proposal acked silently. Wrong-group envelopes skipped without decryption. Decrypt failures swallowed (no ack — server GC via TTL). `sinceRef` tracks last timestamp to avoid re-delivery. Cleanup: `cancelled + clearInterval` on unmount.
+  - **ChatLayout wiring:** `sendMessage` now async with optimistic local update (synchronous) + real MLS encrypt (`cryptoWorker.mlsEncrypt`) + `sendMessageApi` REST POST. Plaintext `Uint8Array` zeroed in `finally`. Silent failure on network/encrypt error — optimistic message remains visible.
+  - **Security:** `security-auditor` PASS. Token only in Authorization header. No console.log of content/ciphertext/tokens. `plaintext.fill(0)` in finally block. Server error `code` field forwarded as exception (no server internals). UUID interpolated into paths (frontend-only, TypeScript-typed; UUID format not re-validated — low severity). XSS-safe: React JSX escapes `msg.text`.
+  - **+36 tests (108 total frontend, was 72):** 15 messages API tests, 6 groups API tests, 6 key_packages API tests, 9 useMessages hook tests. Uses `vi.spyOn(module, 'fn')` on namespace imports (not `vi.mock` factory — ESM live binding issue with Vitest 3.x).
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - POWEHI__HANDLE_ORACLE_SECRET_TOKEN cross-restart oracle if env var not set (YELLOW-2, documented)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+
 ## Current state (2026-06-03, cycle 81 — FEATURE: REST endpoints for group member add/remove — closed group membership gap)
 - **Cycle 81 (commit 775745c):** Closed functional gap: `GroupUseCase.add_member`/`remove_member` existed but had no REST surface — clients could create a group but never add subsequent members.
   - **New endpoints:**
