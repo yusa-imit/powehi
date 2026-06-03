@@ -1,5 +1,5 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as MessagesModule from "../api/messages";
 import type { Envelope } from "../api/messages";
 import { useAuthStore } from "../store/auth";
@@ -19,8 +19,8 @@ const mockWorker = {
 	})),
 };
 
-let pollSpy: ReturnType<typeof vi.spyOn>;
-let ackSpy: ReturnType<typeof vi.spyOn>;
+let pollSpy: MockInstance<typeof MessagesModule.pollMessages>;
+let ackSpy: MockInstance<typeof MessagesModule.ackMessage>;
 
 beforeEach(() => {
 	// Spy on the exported functions — works with Vitest's ESM proxy.

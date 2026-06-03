@@ -13,7 +13,7 @@
  * - Polling stops on unmount or when any required context is absent.
  */
 
-import { useCallback, useEffect, useRef } from "react";
+import { useEffect, useRef } from "react";
 import { type Envelope, ackMessage, pollMessages } from "../api/messages";
 import { useAuthStore } from "../store/auth";
 import { useCryptoWorker } from "./useCryptoWorker";
