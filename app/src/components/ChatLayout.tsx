@@ -1,16 +1,20 @@
 import {
 	type CSSProperties,
 	type KeyboardEvent,
+	useCallback,
 	useEffect,
 	useLayoutEffect,
 	useMemo,
 	useRef,
 	useState,
 } from "react";
+import { sendMessage as sendMessageApi } from "../api/messages";
 import { EncryptedPowehiDb } from "../db/encrypted-db";
 import { db } from "../db/schema";
 import { useCryptoWorker } from "../hooks/useCryptoWorker";
+import { type IncomingMessage, useMessages } from "../hooks/useMessages";
 import { useRegionDetect } from "../hooks/useRegionDetect";
+import { useAuthStore } from "../store/auth";
 import { Icon } from "./Icon";
 import { SafetyNumbers } from "./SafetyNumbers";
 
@@ -1367,12 +1371,46 @@ export function ChatLayout() {
 	const [disappearingTtl, setDisappearingTtl] = useState<TtlOption>(undefined);
 	const active = chats.find((c) => c.id === activeId);
 
+	const { sessionToken } = useAuthStore();
+	const cryptoWorker = useCryptoWorker();
+
 	const handleToggleTtl = () => setDisappearingTtl((t) => nextTtl(t));
 
-	const sendMessage = (text: string) => {
+	/** Append a received message to the correct chat. */
+	const handleIncoming = useCallback((msg: IncomingMessage) => {
+		setChats((cs) =>
+			cs.map((c) => {
+				if (c.mlsGroupId !== msg.groupId) return c;
+				const now = new Date();
+				const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+				const msgs = [...c.messages];
+				for (let i = msgs.length - 1; i >= 0; i--) {
+					if (msgs[i].from === "them" && msgs[i].last) {
+						msgs[i] = { ...msgs[i], last: false, continued: true };
+						break;
+					}
+				}
+				msgs.push({
+					from: "them",
+					text: msg.text,
+					last: true,
+					time,
+					continued: msgs.length > 0 && msgs[msgs.length - 1].from === "them",
+				});
+				return { ...c, messages: msgs, last: msg.text, time };
+			}),
+		);
+	}, []);
+
+	// Poll for incoming messages whenever there's an active MLS group + session.
+	useMessages(active?.mlsIdentityId, active?.mlsGroupId, handleIncoming);
+
+	const sendMessage = async (text: string) => {
 		const now = new Date();
 		const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
 		const expiresAt = disappearingTtl ? Date.now() + disappearingTtl * 1000 : undefined;
+
+		// Optimistic local update — always runs synchronously so UI is responsive.
 		setChats((cs) =>
 			cs.map((c) => {
 				if (c.id !== activeId) return c;
@@ -1395,6 +1433,25 @@ export function ChatLayout() {
 				return { ...c, messages: msgs, last: text, time };
 			}),
 		);
+
+		// Real MLS encryption + REST API call when all context is available.
+		if (sessionToken && active?.mlsGroupId && active?.mlsIdentityId && cryptoWorker) {
+			const encoder = new TextEncoder();
+			const plaintext = encoder.encode(text);
+			try {
+				const { ciphertext } = await cryptoWorker.mlsEncrypt(
+					active.mlsIdentityId,
+					active.mlsGroupId,
+					plaintext,
+				);
+				await sendMessageApi(sessionToken, active.mlsGroupId, ciphertext, disappearingTtl);
+			} catch {
+				// Silent failure — optimistic message stays in UI.
+				// In future: mark message as "failed" with retry affordance.
+			} finally {
+				plaintext.fill(0);
+			}
+		}
 	};
 
 	return (

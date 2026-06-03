@@ -15,6 +15,8 @@ const MOCK_WORKER = {
 		safetyNumber:
 			"689053 337949 184798 288064 134849 362568 560227 765408 921198 315305 693006 807986",
 	})),
+	mlsEncrypt: vi.fn(async () => ({ ciphertext: new Uint8Array([0xde, 0xad]) })),
+	mlsDecrypt: vi.fn(async () => ({ plaintext: new Uint8Array() })),
 	// Passthrough encryption for tests — EncryptedPowehiDb interface satisfaction.
 	// Tests verify DB round-trip behavior; encryption correctness is covered by encryption.test.ts.
 	encryptDbField: vi.fn(async (v: string) => v),
