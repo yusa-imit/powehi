@@ -17,6 +17,17 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-04, cycle 85 — STABILIZATION: Y3 closed — writeErrorCount telemetry in usePersistentMessages)
+- **Cycle 85 (commit 495226a):** STABILIZATION — CI green, cargo audit clean (1 allowed: instant/openmls), no open issues.
+  - **Y3 closed:** `usePersistentMessages` now exposes `writeErrorCount: number` in `PersistedMessages`. Both `persistIncoming` and `persistOutgoing` catch `encryptedDb.putMessage()` failures and increment an opaque React state counter (no content, no error details, no logging). Security-auditor GREEN across all 5 invariants (counter is per-instance, discards rejection reason, no new console output).
+  - **+3 tests:** `writeErrorCount starts at 0`, increments on persistIncoming write failure, increments on persistOutgoing write failure. Used `vi.spyOn(EncryptedPowehiDb.prototype, 'putMessage').mockRejectedValueOnce(...)`.
+  - **129 frontend tests** pass (was 126, +3); Biome clean; 342 Rust tests unchanged.
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - POWEHI__HANDLE_ORACLE_SECRET_TOKEN cross-restart oracle if env var not set (YELLOW-2, documented)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+    - Y1 from cycle 83: `epochSeq = Date.now()` for outgoing mixes epoch namespaces (display order only)
+
 ## Current state (2026-06-03, cycle 84 — STABILIZATION: CI red fix — Biome lint + dedup test race condition)
 - **Cycle 84 (commit db37b0a):** STABILIZATION — Frontend CI was RED due to two issues in the cycle-83 `usePersistentMessages` commit:
   1. **7 Biome errors:** Import ordering violations in `useMessages.ts`, `usePersistentMessages.ts`, `usePersistentMessages.test.ts`, and `ChatLayout.tsx`. Format violation: multi-line function signatures that Biome expects on one line. Two `noNonNullAssertion` lint errors in test (`!` → `?? ""`).
