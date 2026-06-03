@@ -17,6 +17,16 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-04, cycle 86 — FEATURE: sort messages by receivedAt — closes Y1 epoch-namespace mismatch)
+- **Cycle 86 (commit 7c1b45b):** Closed Y1 from cycle 83: outgoing message display ordering fix.
+  - **Y1 closed:** `getMessagesByGroup` and `persistIncoming` optimistic sort now use `receivedAt` (wall-clock ms) instead of `epochSeq`. Outgoing messages had `epochSeq = Date.now()` (~1.7e12) while incoming messages used real MLS epoch sequences (~0–N), causing outgoing to always sort after every incoming message regardless of actual send time. Fix: both directions use `receivedAt` for display ordering; `epochSeq` is retained for potential future WASM-layer replay detection.
+  - **security-auditor:** GREEN — `receivedAt` is already a plaintext-indexed field; no new exposure surface, no auth path touched, no plaintext logged.
+  - **+1 test:** "Y1 — outgoing message with large epochSeq sorts before later incoming". "sorts by epochSeq" test updated to "sorts by receivedAt". 130 frontend tests (was 129); Biome clean; 342 Rust tests unchanged.
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - POWEHI__HANDLE_ORACLE_SECRET_TOKEN cross-restart oracle if env var not set (YELLOW-2, documented)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+
 ## Current state (2026-06-04, cycle 85 — STABILIZATION: Y3 closed — writeErrorCount telemetry in usePersistentMessages)
 - **Cycle 85 (commit 495226a):** STABILIZATION — CI green, cargo audit clean (1 allowed: instant/openmls), no open issues.
   - **Y3 closed:** `usePersistentMessages` now exposes `writeErrorCount: number` in `PersistedMessages`. Both `persistIncoming` and `persistOutgoing` catch `encryptedDb.putMessage()` failures and increment an opaque React state counter (no content, no error details, no logging). Security-auditor GREEN across all 5 invariants (counter is per-instance, discards rejection reason, no new console output).
@@ -26,7 +36,7 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
     - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
     - POWEHI__HANDLE_ORACLE_SECRET_TOKEN cross-restart oracle if env var not set (YELLOW-2, documented)
     - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
-    - Y1 from cycle 83: `epochSeq = Date.now()` for outgoing mixes epoch namespaces (display order only)
+    - Y1 from cycle 83: `epochSeq = Date.now()` for outgoing mixes epoch namespaces (display order only) ← CLOSED cycle 86
 
 ## Current state (2026-06-03, cycle 84 — STABILIZATION: CI red fix — Biome lint + dedup test race condition)
 - **Cycle 84 (commit db37b0a):** STABILIZATION — Frontend CI was RED due to two issues in the cycle-83 `usePersistentMessages` commit:
