@@ -17,6 +17,25 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-03, cycle 83 — FEATURE: Dexie encrypted message persistence + CI TypeScript fix)
+- **Cycle 83 (commit 3177792):** Two changes:
+  1. **CI fix (commit 4683d19):** Frontend CI was RED — `useMessages.test.ts` had TS2322 type errors on `pollSpy`/`ackSpy` declared as `ReturnType<typeof vi.spyOn>` (too-wide generic type incompatible with the specific spy return type in Vitest 3.x). Fixed: typed as `MockInstance<typeof MessagesModule.pollMessages/ackMessage>`. Also removed unused `useCallback` import (TS6133) from `useMessages.ts`. CI now GREEN.
+  2. **Dexie encrypted persistence (commit 3177792):** Closes Phase 4 "Dexie encrypted storage layer functional":
+     - **New hook `usePersistentMessages(groupId)`:** Loads `MessageRow[]` from `EncryptedPowehiDb.getMessagesByGroup()` on group change; `persistIncoming(msg)` / `persistOutgoing(id, groupId, text, ct)` write AES-GCM-256-encrypted rows to IndexedDB.
+     - **`IncomingMessage` extended:** Added `ciphertextB64: string` + `epochSeq: number` so the wire ciphertext is available for `MessageRow.ciphertextB64` persistence.
+     - **`useMessages.processEnvelope`:** Computes `ciphertextB64` (safe loop via `uint8ToBase64`) + `epochSeq` from envelope and passes to callback.
+     - **`ChatLayout` wired:** `handleIncoming` calls `persistIncoming`; `sendMessage` captures server-returned `envelopeId` from `sendMessageApi` and calls `persistOutgoing` with the MLS ciphertext.
+     - **New `app/src/utils/base64.ts`:** `uint8ToBase64` (byte-by-byte loop — no spread/RangeError), `textToBase64`, `base64ToText`. Replaces all `btoa(String.fromCharCode(...array))` occurrences (security-auditor R1 fix).
+     - **`plaintextB64` now stores base64-encoded UTF-8** via `textToBase64` — matching the field name contract; prevents silent corruption of Korean/emoji text (security-auditor R2 fix).
+     - **security-auditor:** R1 (stack overflow on large ciphertext) and R2 (raw UTF-8 in B64 field) fixed. PASS.
+     - **+18 tests (126 total frontend, was 108):** 9 `usePersistentMessages` tests, 9 `base64` utility tests. Total: 15 test files, 126 tests.
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - POWEHI__HANDLE_ORACLE_SECRET_TOKEN cross-restart oracle if env var not set (YELLOW-2, documented)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+    - Y1 from cycle 83: `epochSeq = Date.now()` for outgoing mixes epoch namespaces (display order only; replay detection at WASM layer)
+    - Y3 from cycle 83: Dexie write errors silently swallowed (no telemetry counter yet)
+
 ## Current state (2026-06-03, cycle 82 — FEATURE: Frontend messaging API integration — MLS encrypt/decrypt + REST polling)
 - **Cycle 82 (commit 82f60b6):** Closed the largest remaining frontend gap: ChatLayout sent messages only to local mock state; no real API calls were made.
   - **New API clients:** `app/src/api/messages.ts` (`sendMessage`, `sendWelcome`, `sendCommit`, `pollMessages`, `ackMessage`); `app/src/api/groups.ts` (`createGroup`, `addMember`, `removeMember`); `app/src/api/key_packages.ts` (`fetchKeyPackage`, `getKeyPackageCount`). All use Bearer token auth headers, never URL params; binary payloads as JSON number arrays (matching serde `Vec<u8>`).
