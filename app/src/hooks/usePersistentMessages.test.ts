@@ -86,16 +86,57 @@ describe("usePersistentMessages", () => {
 		expect(result.current.rows).toHaveLength(1);
 	});
 
-	it("persistIncoming sorts rows by epochSeq", async () => {
+	it("persistIncoming sorts rows by receivedAt (wall-clock), not epochSeq", async () => {
 		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		// Flush initial DB load so the setRows([]) from useEffect doesn't race.
+		await act(async () => {});
+
+		// id-first arrives earlier (mocked receivedAt=1000) but has a higher epochSeq.
+		// id-second arrives later (mocked receivedAt=2000) but has a lower epochSeq.
+		// With the Y1 fix, sort is by receivedAt — id-first must appear first.
+		let nowValue = 1000;
+		const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => nowValue);
 
 		await act(async () => {
-			result.current.persistIncoming(makeIncoming({ id: "id-b", epochSeq: 2000 }));
-			result.current.persistIncoming(makeIncoming({ id: "id-a", epochSeq: 1000 }));
+			result.current.persistIncoming(makeIncoming({ id: "id-first", epochSeq: 999 }));
+		});
+		nowValue = 2000;
+		await act(async () => {
+			result.current.persistIncoming(makeIncoming({ id: "id-second", epochSeq: 1 }));
 		});
 
-		expect(result.current.rows[0].id).toBe("id-a");
-		expect(result.current.rows[1].id).toBe("id-b");
+		nowSpy.mockRestore();
+
+		expect(result.current.rows[0].id).toBe("id-first");
+		expect(result.current.rows[1].id).toBe("id-second");
+	});
+
+	it("Y1 — outgoing message with large epochSeq sorts before later incoming", async () => {
+		// Before Y1 fix: outgoing epochSeq = Date.now() ≈ 1.7e12 always sorted AFTER
+		// every incoming message (MLS epoch sequences are small integers like 0, 1, 2…).
+		// After fix: both sort by receivedAt — earlier wall-clock time comes first.
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		let nowValue = 1_000_000;
+		const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => nowValue);
+
+		// Persist an outgoing message first (receivedAt=1_000_000, epochSeq=Date.now()~large).
+		await act(async () => {
+			result.current.persistOutgoing("out-id", GROUP_ID, "sent first", btoa("ct"));
+		});
+		nowValue = 2_000_000;
+		// Persist an incoming message second (receivedAt=2_000_000, epochSeq=0 from MLS).
+		await act(async () => {
+			result.current.persistIncoming(makeIncoming({ id: "in-id", epochSeq: 0 }));
+		});
+
+		nowSpy.mockRestore();
+
+		// Outgoing was created at t=1_000_000, incoming at t=2_000_000.
+		// receivedAt sort must preserve this chronological order.
+		expect(result.current.rows[0].id).toBe("out-id");
+		expect(result.current.rows[1].id).toBe("in-id");
 	});
 
 	it("persistOutgoing adds message to rows immediately with deviceId as sender", async () => {

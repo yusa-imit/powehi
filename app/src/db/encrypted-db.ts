@@ -99,9 +99,11 @@ export class EncryptedPowehiDb {
 	async getMessagesByGroup(groupId: string): Promise<MessageRow[]> {
 		const rows = await this.db.messages.where("groupId").equals(groupId).toArray();
 		const decrypted = await Promise.all(rows.map((r) => decRow(this.encryptor, r, "messages")));
-		// Sort ascending by epochSeq — MLS replay detection depends on monotonic
-		// epoch order (RFC 9420 §6.3.1); ordering after decrypt preserves this guarantee.
-		return decrypted.sort((a, b) => a.epochSeq - b.epochSeq);
+		// Sort ascending by receivedAt (wall-clock ms). Both incoming (epochSeq from
+		// MLS, small integers) and outgoing (epochSeq = Date.now(), 13-digit ms) use
+		// receivedAt so they interleave correctly — fixes Y1 epoch-namespace mismatch.
+		// epochSeq is retained in each row for replay-detection at the WASM layer.
+		return decrypted.sort((a, b) => a.receivedAt - b.receivedAt);
 	}
 
 	// ── Groups ─────────────────────────────────────────────────────────────────

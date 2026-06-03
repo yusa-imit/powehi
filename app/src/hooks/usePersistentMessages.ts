@@ -77,7 +77,9 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 			// Optimistically add to local state for immediate UI visibility.
 			setRows((prev) => {
 				if (prev.some((r) => r.id === row.id)) return prev;
-				return [...prev, row].sort((a, b) => a.epochSeq - b.epochSeq);
+				// Sort by receivedAt (wall-clock) — same namespace as outgoing messages,
+				// so incoming and outgoing interleave in chronological order (Y1 fix).
+				return [...prev, row].sort((a, b) => a.receivedAt - b.receivedAt);
 			});
 			encryptedDb.putMessage(row).catch(() => setWriteErrorCount((n) => n + 1));
 		},
@@ -87,9 +89,10 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 	const persistOutgoing = useCallback(
 		(id: string, groupId: string, text: string, ciphertextB64: string) => {
 			if (!encryptedDb || !deviceId) return;
-			// Use Date.now() as epochSeq for outgoing — mlsEncrypt does not expose the
-			// MLS sequence number. Replay detection is enforced at the WASM layer; this
-			// field is only used for display ordering in getMessagesByGroup().
+			// epochSeq: Date.now() for outgoing — mlsEncrypt does not expose the MLS
+			// sequence number. Display ordering now uses receivedAt (not epochSeq) so
+			// the outgoing large-timestamp value no longer causes sort namespace mismatch.
+			// epochSeq is retained for potential future replay-detection use at the WASM layer.
 			// plaintextB64 stores base64-encoded UTF-8 (textToBase64 safe loop).
 			const row: MessageRow = {
 				id,

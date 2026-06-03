@@ -55,7 +55,11 @@ describe("EncryptedPowehiDb", () => {
 		expect(rawRow?.ciphertextB64).toMatch(/^[A-Za-z0-9\-_]+$/);
 	});
 
-	it("getMessagesByGroup decrypts all messages and returns them sorted by epochSeq", async () => {
+	it("getMessagesByGroup decrypts all messages and returns them sorted by receivedAt", async () => {
+		// m1: high epochSeq (1), low receivedAt (1000) — incoming, received earlier.
+		// m2: low epochSeq (0), high receivedAt (2000) — outgoing or later-arriving.
+		// Y1 fix: sort by receivedAt so both namespaces (MLS epoch ints and Date.now() ms)
+		// interleave correctly; m1 must sort first despite the higher epochSeq.
 		await encDb.addMessage({
 			id: "m1",
 			groupId: "g-shared",
@@ -82,11 +86,11 @@ describe("EncryptedPowehiDb", () => {
 		});
 		const msgs = await encDb.getMessagesByGroup("g-shared");
 		expect(msgs).toHaveLength(2);
-		// sorted by epochSeq ascending (Y5 — MLS replay-protection ordering)
-		expect(msgs[0].epochSeq).toBe(0);
-		expect(msgs[1].epochSeq).toBe(1);
-		expect(msgs[0].ciphertextB64).toBe("c2Vjb25k");
-		expect(msgs[1].ciphertextB64).toBe("Zmlyc3Q=");
+		// sorted by receivedAt ascending: m1 (1000) before m2 (2000)
+		expect(msgs[0].receivedAt).toBe(1000);
+		expect(msgs[1].receivedAt).toBe(2000);
+		expect(msgs[0].ciphertextB64).toBe("Zmlyc3Q=");
+		expect(msgs[1].ciphertextB64).toBe("c2Vjb25k");
 	});
 
 	it("setIdentity + getIdentity round-trips deviceId (no export key stored)", async () => {
