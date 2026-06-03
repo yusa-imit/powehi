@@ -56,7 +56,13 @@ async fn setup() -> (testcontainers::ContainerAsync<Postgres>, PgPool) {
 // ── Fixture helpers ───────────────────────────────────────────────────────────
 
 async fn insert_user(pool: &PgPool) -> UserId {
-    let user = User::new(UserId::new(), vec![0u8; 32]);
+    // Use two random UUIDs to form a unique 32-byte handle_hash per call,
+    // avoiding violations of the users_handle_hash_unique constraint when
+    // insert_user is called multiple times within the same test database.
+    let h1 = Uuid::new_v4();
+    let h2 = Uuid::new_v4();
+    let handle_hash = [h1.as_bytes().as_slice(), h2.as_bytes().as_slice()].concat();
+    let user = User::new(UserId::new(), handle_hash);
     PgUserRepository::new(pool.clone())
         .save(&user)
         .await
@@ -65,7 +71,12 @@ async fn insert_user(pool: &PgPool) -> UserId {
 }
 
 async fn insert_device(pool: &PgPool, user_id: UserId) -> DeviceId {
-    let device = Device::new(DeviceId::new(), user_id, vec![0u8; 32]);
+    // Use a random UUID to form a unique 32-byte mls_credential per call,
+    // guarding against potential future UNIQUE constraints on that column.
+    let cred_uuid = Uuid::new_v4();
+    let mut cred = [0u8; 32];
+    cred[..16].copy_from_slice(cred_uuid.as_bytes());
+    let device = Device::new(DeviceId::new(), user_id, cred.to_vec());
     PgDeviceRepository::new(pool.clone())
         .save(&device)
         .await

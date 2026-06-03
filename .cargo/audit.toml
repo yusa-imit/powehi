@@ -16,4 +16,12 @@
 # Impact: maintenance warning only, no security vulnerability.
 # Transitively pulled via tonic 0.12.3; no upgrade path until tonic 0.13+.
 # Revisit when tonic bumps its rustls-pemfile dependency.
-ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0124", "RUSTSEC-2025-0134"]
+#
+# RUSTSEC-2025-0111: tokio-tar 0.3.1 — PAX extended header parsing allows file smuggling
+# Impact: tokio-tar is used internally by testcontainers (dev/test-only dep) to create tar
+# archives that are sent TO the Docker daemon during container startup. It is never used to
+# untar untrusted archives received from external sources.
+# The file smuggling attack requires an adversary to supply a crafted tar archive; Powehi
+# never processes untrusted tar data in any code path. No production binary includes this dep.
+# No fixed version available upstream. Revisit when testcontainers upgrades tokio-tar.
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0124", "RUSTSEC-2025-0134", "RUSTSEC-2025-0111"]
