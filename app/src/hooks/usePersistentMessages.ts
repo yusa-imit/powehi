@@ -20,6 +20,8 @@ import type { IncomingMessage } from "./useMessages";
 
 export interface PersistedMessages {
 	rows: MessageRow[];
+	/** Count of IndexedDB write failures since mount. Never contains content — opaque counter only. */
+	writeErrorCount: number;
 	persistIncoming: (msg: IncomingMessage) => void;
 	persistOutgoing: (id: string, groupId: string, text: string, ciphertextB64: string) => void;
 }
@@ -33,6 +35,7 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 	const { deviceId } = useAuthStore();
 	const cryptoWorker = useCryptoWorker();
 	const [rows, setRows] = useState<MessageRow[]>([]);
+	const [writeErrorCount, setWriteErrorCount] = useState(0);
 
 	const encryptedDb = useMemo(
 		() => (cryptoWorker ? new EncryptedPowehiDb(db, cryptoWorker) : null),
@@ -76,7 +79,7 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 				if (prev.some((r) => r.id === row.id)) return prev;
 				return [...prev, row].sort((a, b) => a.epochSeq - b.epochSeq);
 			});
-			encryptedDb.putMessage(row).catch(() => {});
+			encryptedDb.putMessage(row).catch(() => setWriteErrorCount((n) => n + 1));
 		},
 		[encryptedDb],
 	);
@@ -101,10 +104,10 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 				if (prev.some((r) => r.id === row.id)) return prev;
 				return [...prev, row];
 			});
-			encryptedDb.putMessage(row).catch(() => {});
+			encryptedDb.putMessage(row).catch(() => setWriteErrorCount((n) => n + 1));
 		},
 		[encryptedDb, deviceId],
 	);
 
-	return { rows, persistIncoming, persistOutgoing };
+	return { rows, writeErrorCount, persistIncoming, persistOutgoing };
 }

@@ -1,6 +1,7 @@
 import "fake-indexeddb/auto";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as EncryptedDbModule from "../db/encrypted-db";
 import { DirectFieldEncryptor, deriveDbKey } from "../db/encryption";
 import { useAuthStore } from "../store/auth";
 import { base64ToText, textToBase64 } from "../utils/base64";
@@ -138,6 +139,44 @@ describe("usePersistentMessages", () => {
 
 		await waitFor(() => {
 			expect(result.current.rows).toHaveLength(0);
+		});
+	});
+
+	it("writeErrorCount starts at 0", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+		expect(result.current.writeErrorCount).toBe(0);
+	});
+
+	it("writeErrorCount increments when putMessage throws on persistIncoming", async () => {
+		vi.spyOn(EncryptedDbModule.EncryptedPowehiDb.prototype, "putMessage").mockRejectedValueOnce(
+			new Error("db full"),
+		);
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistIncoming(makeIncoming());
+		});
+
+		await waitFor(() => {
+			expect(result.current.writeErrorCount).toBe(1);
+		});
+	});
+
+	it("writeErrorCount increments when putMessage throws on persistOutgoing", async () => {
+		vi.spyOn(EncryptedDbModule.EncryptedPowehiDb.prototype, "putMessage").mockRejectedValueOnce(
+			new Error("quota exceeded"),
+		);
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistOutgoing("out-id", GROUP_ID, "text", btoa("ct"));
+		});
+
+		await waitFor(() => {
+			expect(result.current.writeErrorCount).toBe(1);
 		});
 	});
 
