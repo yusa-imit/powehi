@@ -8,6 +8,7 @@
 //!   - `mark_consumed` double-consume prevention (CAS gRPC ConsumeKeyPackage).
 //!   - TTL enforcement: expired envelopes are filtered at the DB layer.
 //!   - `add_member` ON CONFLICT DO NOTHING idempotency.
+//!   - `server_config` round-trip and first-boot race convergence (DO NOTHING).
 //!
 //! Tests are `#[ignore]` because they require Docker (testcontainers).
 //! Run them in CI via: `cargo nextest run -p powehi-postgres --run-ignored all
@@ -24,11 +25,12 @@ use powehi_domain::{
 };
 use powehi_port_outbound::{
     device_repo::DeviceRepository, envelope_repo::EnvelopeRepository, group_repo::GroupRepository,
-    key_package_repo::KeyPackageRepository, user_repo::UserRepository,
+    key_package_repo::KeyPackageRepository, server_config_repo::ServerConfigRepository,
+    user_repo::UserRepository,
 };
 use powehi_postgres::{
     PgDeviceRepository, PgEnvelopeRepository, PgGroupRepository, PgKeyPackageRepository,
-    PgUserRepository,
+    PgServerConfigRepository, PgUserRepository,
 };
 use sqlx::PgPool;
 use testcontainers::runners::AsyncRunner;
@@ -354,5 +356,63 @@ async fn group_add_member_is_idempotent() {
         members.len(),
         1,
         "idempotent add must not create duplicate rows"
+    );
+}
+
+// ── server_config_repo integration tests ────────────────────────────────────
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn server_config_get_returns_none_before_insert() {
+    let (_container, pool) = setup().await;
+    let repo = PgServerConfigRepository::new(pool);
+    let val = repo.get_bytes("nonexistent_key").await.expect("get_bytes");
+    assert!(val.is_none(), "unset key must return None");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn server_config_upsert_and_get_round_trip() {
+    let (_container, pool) = setup().await;
+    let repo = PgServerConfigRepository::new(pool);
+    let secret = [0xabu8; 32];
+    repo.upsert_bytes("handle_oracle_secret", &secret)
+        .await
+        .expect("upsert");
+    let got = repo
+        .get_bytes("handle_oracle_secret")
+        .await
+        .expect("get_bytes")
+        .expect("must be Some after upsert");
+    assert_eq!(got, secret, "round-trip must return the stored bytes");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn server_config_do_nothing_on_conflict_keeps_first_value() {
+    // Verifies the first-boot race convergence: INSERT ... ON CONFLICT DO NOTHING
+    // must NOT overwrite an already-persisted oracle secret.  All concurrent
+    // instances converge on the same value by re-reading after their insert attempt.
+    let (_container, pool) = setup().await;
+    let repo = PgServerConfigRepository::new(pool);
+
+    let first = [0x11u8; 32];
+    let second = [0x22u8; 32];
+
+    repo.upsert_bytes("handle_oracle_secret", &first)
+        .await
+        .expect("first insert");
+    repo.upsert_bytes("handle_oracle_secret", &second)
+        .await
+        .expect("second insert (must be a no-op)");
+
+    let got = repo
+        .get_bytes("handle_oracle_secret")
+        .await
+        .expect("get_bytes")
+        .expect("must be Some");
+    assert_eq!(
+        got, first,
+        "DO NOTHING must preserve the first writer's value"
     );
 }

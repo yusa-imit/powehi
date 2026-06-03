@@ -11,7 +11,8 @@ use powehi_grpc::{RegionGrpcServer, TlsConfig};
 use powehi_opaque::OpaqueServer;
 use powehi_postgres::{
     connect as pg_connect, run_migrations, PgDeviceRepository, PgEnvelopeRepository,
-    PgGroupRepository, PgKeyPackageRepository, PgPushSubscriptionRepository, PgUserRepository,
+    PgGroupRepository, PgKeyPackageRepository, PgPushSubscriptionRepository,
+    PgServerConfigRepository, PgUserRepository,
 };
 use powehi_proto::region::region_service_server::RegionServiceServer;
 use powehi_r2::R2MediaAdapter;
@@ -54,6 +55,7 @@ async fn main() -> Result<()> {
 
     // ── Outbound repositories ───────────────────────────────────────────────
 
+    let server_config_repo = Arc::new(PgServerConfigRepository::new(pool.clone()));
     let user_repo = Arc::new(PgUserRepository::new(pool.clone()));
     let device_repo = Arc::new(PgDeviceRepository::new(pool.clone()));
     let envelope_repo = Arc::new(PgEnvelopeRepository::new(pool.clone()));
@@ -91,26 +93,67 @@ async fn main() -> Result<()> {
         });
 
     // Derive the 32-byte HMAC key for the handle-oracle anti-enumeration defence.
-    // If the operator supplies POWEHI__HANDLE_ORACLE_SECRET_TOKEN, derive from it
-    // via SHA256 so the key is stable across restarts. If unset, use a random key
-    // (per-restart only — the oracle is closed, but across restarts a known handle
-    // would get a different synthetic user_id on login_init, which is benign).
-    let handle_oracle_secret: [u8; 32] = if cfg.handle_oracle_secret_token.is_empty() {
-        tracing::warn!(
-            "POWEHI__HANDLE_ORACLE_SECRET_TOKEN not configured — \
-             using ephemeral random oracle key; set this env var for stable behavior"
-        );
-        let a = uuid::Uuid::new_v4();
-        let b = uuid::Uuid::new_v4();
-        let mut key = [0u8; 32];
-        key[..16].copy_from_slice(a.as_bytes());
-        key[16..].copy_from_slice(b.as_bytes());
-        key
-    } else {
+    //
+    // Priority:
+    //   1. POWEHI__HANDLE_ORACLE_SECRET_TOKEN set → derive via SHA-256 (operator-controlled,
+    //      stable across all instances).
+    //   2. Not set → load from server_config table (generated once, persisted across restarts).
+    //   3. Not in DB → generate, persist, then use (first-boot path).
+    //
+    // This closes YELLOW-2: even without the env var the key is now stable across restarts,
+    // so consecutive login_init calls for an unknown handle return the same synthetic user_id.
+    const ORACLE_SECRET_DB_KEY: &str = "handle_oracle_secret";
+    let handle_oracle_secret: [u8; 32] = if !cfg.handle_oracle_secret_token.is_empty() {
         let digest = Sha256::digest(
             format!("powehi-oracle-v1:{}", cfg.handle_oracle_secret_token).as_bytes(),
         );
         digest.into()
+    } else {
+        use powehi_port_outbound::server_config_repo::ServerConfigRepository;
+        match server_config_repo
+            .get_bytes(ORACLE_SECRET_DB_KEY)
+            .await
+            .context("load handle_oracle_secret from server_config")?
+        {
+            Some(bytes) => bytes.try_into().map_err(|_| {
+                anyhow::anyhow!(
+                    "handle_oracle_secret in server_config is not 32 bytes — \
+                         delete the row and restart to regenerate"
+                )
+            })?,
+            None => {
+                // First boot: generate a candidate 32-byte secret from two UUIDv4s
+                // (uuid::Uuid::new_v4 is backed by OsRng — ~244 bits of entropy).
+                let a = uuid::Uuid::new_v4();
+                let b = uuid::Uuid::new_v4();
+                let mut candidate = [0u8; 32];
+                candidate[..16].copy_from_slice(a.as_bytes());
+                candidate[16..].copy_from_slice(b.as_bytes());
+
+                // INSERT ... DO NOTHING: first-boot concurrent instances do not
+                // overwrite each other. After the attempt, re-read the winner's
+                // value so all instances converge on the same key regardless of
+                // which pod inserted it.
+                server_config_repo
+                    .upsert_bytes(ORACLE_SECRET_DB_KEY, &candidate)
+                    .await
+                    .context("persist handle_oracle_secret to server_config")?;
+                let winner = server_config_repo
+                    .get_bytes(ORACLE_SECRET_DB_KEY)
+                    .await
+                    .context("re-read handle_oracle_secret from server_config")?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("handle_oracle_secret disappeared immediately after insert")
+                    })?;
+                tracing::info!(
+                    "generated and persisted handle_oracle_secret; \
+                     set POWEHI__HANDLE_ORACLE_SECRET_TOKEN to control this value"
+                );
+                winner.try_into().map_err(|_| {
+                    anyhow::anyhow!("persisted handle_oracle_secret is not 32 bytes")
+                })?
+            }
+        }
     };
 
     let auth: Arc<dyn powehi_port_inbound::auth::AuthUseCase> = Arc::new(AuthService::new(

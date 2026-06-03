@@ -8,5 +8,6 @@ pub mod media_repo;
 pub mod opaque;
 pub mod push_subscription_repo;
 pub mod region_router;
+pub mod server_config_repo;
 pub mod user_repo;
 pub mod web_push;
