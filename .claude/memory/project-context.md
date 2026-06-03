@@ -17,6 +17,17 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-03, cycle 80 — STABILIZATION: CI red fix — audit RUSTSEC-2025-0111 + duplicate handle_hash in pg_security_it)
+- **Cycle 80 (commit 31a0c4e):** STABILIZATION — CI was RED on 2 jobs; both fixed:
+  - **Security audit job failure:** `RUSTSEC-2025-0111` (tokio-tar 0.3.1 — PAX extended header parsing allows file smuggling) appeared in the cargo advisory DB. Added to `.cargo/audit.toml` ignore list with full impact analysis: tokio-tar is a test-only transitive dep of testcontainers, used only to write tar archives to the Docker daemon (never to untar untrusted input). No production binary includes it. No fixed version upstream.
+  - **Integration Tests job failure:** `insert_user` fixture in `pg_security_it.rs` always used `vec![0u8; 32]` as handle_hash. When any test called `insert_user` twice in the same DB (e.g., creating separate sender + non_member users), the second insert violated `users_handle_hash_unique`. Fixed: `insert_user` now uses two random `Uuid::new_v4()` values concatenated to form a unique 32-byte handle_hash per call.
+  - **Preemptive fix:** `insert_device` was using the same anti-pattern (`vec![0u8; 32]` for mls_credential). Fixed to use a UUID-derived unique value, guarding against potential future uniqueness constraints on that column.
+  - **security-auditor:** PASS — GREEN on both changes. YELLOW-1 (insert_device anti-pattern) was also fixed in the same commit.
+  - **334 Rust tests** unchanged (8 testcontainers tests still `#[ignore]`); cargo audit clean (1 allowed warning: instant/openmls unmaintained); clippy clean; rustfmt clean.
+  - **Remaining deferred security findings (YELLOW)**:
+    - POWEHI__HANDLE_ORACLE_SECRET_TOKEN cross-restart oracle if env var not set (YELLOW-2, documented)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+
 ## Current state (2026-06-03, cycle 79 — FEATURE: testcontainers integration tests — Postgres security invariants)
 - **Cycle 79 (commit bc30041):** Implemented the required testcontainers gate from testing-conventions.md (outbound adapters must have integration tests against real Postgres):
   - **New file:** `crates/adapters/outbound/powehi-postgres/tests/pg_security_it.rs`
