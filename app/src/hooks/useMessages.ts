@@ -15,8 +15,8 @@
 
 import { useEffect, useRef } from "react";
 import { type Envelope, ackMessage, pollMessages } from "../api/messages";
-import { uint8ToBase64 } from "../utils/base64";
 import { useAuthStore } from "../store/auth";
+import { uint8ToBase64 } from "../utils/base64";
 import { useCryptoWorker } from "./useCryptoWorker";
 
 const POLL_INTERVAL_MS = 3_000;

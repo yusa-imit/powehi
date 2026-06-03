@@ -13,20 +13,15 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { EncryptedPowehiDb } from "../db/encrypted-db";
 import type { MessageRow } from "../db/schema";
 import { db } from "../db/schema";
-import { textToBase64 } from "../utils/base64";
 import { useAuthStore } from "../store/auth";
+import { textToBase64 } from "../utils/base64";
 import { useCryptoWorker } from "./useCryptoWorker";
 import type { IncomingMessage } from "./useMessages";
 
 export interface PersistedMessages {
 	rows: MessageRow[];
 	persistIncoming: (msg: IncomingMessage) => void;
-	persistOutgoing: (
-		id: string,
-		groupId: string,
-		text: string,
-		ciphertextB64: string,
-	) => void;
+	persistOutgoing: (id: string, groupId: string, text: string, ciphertextB64: string) => void;
 }
 
 /**
@@ -34,9 +29,7 @@ export interface PersistedMessages {
  *
  * @param groupId  MLS group UUID. When undefined the hook is dormant (no reads/writes).
  */
-export function usePersistentMessages(
-	groupId: string | undefined,
-): PersistedMessages {
+export function usePersistentMessages(groupId: string | undefined): PersistedMessages {
 	const { deviceId } = useAuthStore();
 	const cryptoWorker = useCryptoWorker();
 	const [rows, setRows] = useState<MessageRow[]>([]);

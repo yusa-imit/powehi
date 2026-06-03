@@ -2,8 +2,8 @@ import "fake-indexeddb/auto";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DirectFieldEncryptor, deriveDbKey } from "../db/encryption";
-import { base64ToText, textToBase64 } from "../utils/base64";
 import { useAuthStore } from "../store/auth";
+import { base64ToText, textToBase64 } from "../utils/base64";
 import * as CryptoWorkerHook from "./useCryptoWorker";
 import type { IncomingMessage } from "./useMessages";
 import { usePersistentMessages } from "./usePersistentMessages";
@@ -66,11 +66,16 @@ describe("usePersistentMessages", () => {
 		expect(result.current.rows[0].id).toBe(ENV_ID);
 		// plaintextB64 stores base64-encoded UTF-8 (safe encoding contract).
 		expect(result.current.rows[0].plaintextB64).toBe(textToBase64("hello"));
-		expect(base64ToText(result.current.rows[0].plaintextB64!)).toBe("hello");
+		expect(base64ToText(result.current.rows[0].plaintextB64 ?? "")).toBe("hello");
 	});
 
 	it("persistIncoming deduplicates — same id added twice stays one row", async () => {
 		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+
+		// Flush the initial useEffect DB load before testing deduplication.
+		// Without this, the async getMessagesByGroup promise may resolve inside
+		// the act below and setRows([]) could override the optimistic update.
+		await act(async () => {});
 
 		await act(async () => {
 			result.current.persistIncoming(makeIncoming());
@@ -103,7 +108,7 @@ describe("usePersistentMessages", () => {
 		expect(result.current.rows[0].id).toBe("out-id");
 		expect(result.current.rows[0].senderDeviceId).toBe(DEVICE_ID);
 		// plaintextB64 is base64-encoded UTF-8.
-		expect(base64ToText(result.current.rows[0].plaintextB64!)).toBe("sent text");
+		expect(base64ToText(result.current.rows[0].plaintextB64 ?? "")).toBe("sent text");
 	});
 
 	it("persistOutgoing is no-op when deviceId is null", async () => {
