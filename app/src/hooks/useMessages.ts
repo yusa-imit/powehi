@@ -15,6 +15,7 @@
 
 import { useEffect, useRef } from "react";
 import { type Envelope, ackMessage, pollMessages } from "../api/messages";
+import { uint8ToBase64 } from "../utils/base64";
 import { useAuthStore } from "../store/auth";
 import { useCryptoWorker } from "./useCryptoWorker";
 
@@ -29,6 +30,10 @@ export interface IncomingMessage {
 	groupId: string;
 	/** Decrypted plaintext as a string. */
 	text: string;
+	/** Base64-encoded MLS application ciphertext — used for Dexie persistence. */
+	ciphertextB64: string;
+	/** MLS epoch used as primary sort key for Dexie ordering. */
+	epochSeq: number;
 }
 
 /**
@@ -73,11 +78,16 @@ export function useMessages(
 				const ciphertext = new Uint8Array(env.ciphertext);
 				const { plaintext } = await cryptoWorker.mlsDecrypt(identityId, groupId, ciphertext);
 				const text = new TextDecoder().decode(plaintext);
+				// Base64-encode the wire ciphertext for Dexie persistence (safe loop, no spread).
+				const ciphertextB64 = uint8ToBase64(env.ciphertext);
+				const epochSeq = env.epoch ?? Date.now();
 				onMessageRef.current({
 					id: env.id,
 					senderId: env.sender,
 					groupId: env.group_id,
 					text,
+					ciphertextB64,
+					epochSeq,
 				});
 				await ackMessage(sessionToken, env.id).catch(() => {});
 			} catch {

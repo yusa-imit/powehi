@@ -12,9 +12,11 @@ import { sendMessage as sendMessageApi } from "../api/messages";
 import { EncryptedPowehiDb } from "../db/encrypted-db";
 import { db } from "../db/schema";
 import { useCryptoWorker } from "../hooks/useCryptoWorker";
+import { usePersistentMessages } from "../hooks/usePersistentMessages";
 import { type IncomingMessage, useMessages } from "../hooks/useMessages";
 import { useRegionDetect } from "../hooks/useRegionDetect";
 import { useAuthStore } from "../store/auth";
+import { uint8ToBase64 } from "../utils/base64";
 import { Icon } from "./Icon";
 import { SafetyNumbers } from "./SafetyNumbers";
 
@@ -1373,34 +1375,40 @@ export function ChatLayout() {
 
 	const { sessionToken } = useAuthStore();
 	const cryptoWorker = useCryptoWorker();
+	const { persistIncoming, persistOutgoing } = usePersistentMessages(active?.mlsGroupId);
 
 	const handleToggleTtl = () => setDisappearingTtl((t) => nextTtl(t));
 
-	/** Append a received message to the correct chat. */
-	const handleIncoming = useCallback((msg: IncomingMessage) => {
-		setChats((cs) =>
-			cs.map((c) => {
-				if (c.mlsGroupId !== msg.groupId) return c;
-				const now = new Date();
-				const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-				const msgs = [...c.messages];
-				for (let i = msgs.length - 1; i >= 0; i--) {
-					if (msgs[i].from === "them" && msgs[i].last) {
-						msgs[i] = { ...msgs[i], last: false, continued: true };
-						break;
+	/** Append a received message to the correct chat and persist it to Dexie. */
+	const handleIncoming = useCallback(
+		(msg: IncomingMessage) => {
+			setChats((cs) =>
+				cs.map((c) => {
+					if (c.mlsGroupId !== msg.groupId) return c;
+					const now = new Date();
+					const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+					const msgs = [...c.messages];
+					for (let i = msgs.length - 1; i >= 0; i--) {
+						if (msgs[i].from === "them" && msgs[i].last) {
+							msgs[i] = { ...msgs[i], last: false, continued: true };
+							break;
+						}
 					}
-				}
-				msgs.push({
-					from: "them",
-					text: msg.text,
-					last: true,
-					time,
-					continued: msgs.length > 0 && msgs[msgs.length - 1].from === "them",
-				});
-				return { ...c, messages: msgs, last: msg.text, time };
-			}),
-		);
-	}, []);
+					msgs.push({
+						from: "them",
+						text: msg.text,
+						last: true,
+						time,
+						continued: msgs.length > 0 && msgs[msgs.length - 1].from === "them",
+					});
+					return { ...c, messages: msgs, last: msg.text, time };
+				}),
+			);
+			// Encrypt and persist to IndexedDB — fails closed if encryptedDb unavailable.
+			persistIncoming(msg);
+		},
+		[persistIncoming],
+	);
 
 	// Poll for incoming messages whenever there's an active MLS group + session.
 	useMessages(active?.mlsIdentityId, active?.mlsGroupId, handleIncoming);
@@ -1444,7 +1452,16 @@ export function ChatLayout() {
 					active.mlsGroupId,
 					plaintext,
 				);
-				await sendMessageApi(sessionToken, active.mlsGroupId, ciphertext, disappearingTtl);
+				const envelopeId = await sendMessageApi(
+					sessionToken,
+					active.mlsGroupId,
+					ciphertext,
+					disappearingTtl,
+				);
+				// Persist the sent message to Dexie (encrypted at rest).
+				// uint8ToBase64 uses a safe byte-at-a-time loop — no spread/RangeError risk.
+				const ciphertextB64 = uint8ToBase64(ciphertext);
+				persistOutgoing(envelopeId, active.mlsGroupId, text, ciphertextB64);
 			} catch {
 				// Silent failure — optimistic message stays in UI.
 				// In future: mark message as "failed" with retry affordance.
