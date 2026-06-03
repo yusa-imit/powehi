@@ -17,6 +17,21 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-03, cycle 81 — FEATURE: REST endpoints for group member add/remove — closed group membership gap)
+- **Cycle 81 (commit 775745c):** Closed functional gap: `GroupUseCase.add_member`/`remove_member` existed but had no REST surface — clients could create a group but never add subsequent members.
+  - **New endpoints:**
+    - `POST /v1/groups/:group_id/members/:device_id` → `add_member` (body: `{ "epoch": u64 }`)
+    - `DELETE /v1/groups/:group_id/members/:device_id` → `remove_member` (no body)
+  - **Security:** `GroupService.add_member`/`remove_member` now enforce caller-must-be-member (fail-closed) via `list_members()` before the mutation. Both handlers require `AuthenticatedDevice`. Path params extracted as `Path<(Uuid, Uuid)>` → typed `GroupId`/`DeviceId`.
+  - **Logging:** only opaque UUIDs logged (caller + group_id); target device_id omitted per no-plaintext-logging.md.
+  - **security-auditor:** PASS — no RED. YELLOW-1 (TOCTOU between `list_members` read and `add_member`/`remove_member` write — documented in comment; non-blocking because MLS Welcome+Commit is the actual E2E auth boundary; server is zero-trust per prd.md threat model).
+  - **+8 tests:** 2 application-layer (add_member/remove_member by non-member → Unauthorized), 6 REST-layer (auth-bypass ×2, non-member ×2, happy-path ×2).
+  - **342 Rust tests** (was 334, +8); clippy clean; rustfmt clean.
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - POWEHI__HANDLE_ORACLE_SECRET_TOKEN cross-restart oracle if env var not set (YELLOW-2, documented)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+
 ## Current state (2026-06-03, cycle 80 — STABILIZATION: CI red fix — audit RUSTSEC-2025-0111 + duplicate handle_hash in pg_security_it)
 - **Cycle 80 (commit 31a0c4e):** STABILIZATION — CI was RED on 2 jobs; both fixed:
   - **Security audit job failure:** `RUSTSEC-2025-0111` (tokio-tar 0.3.1 — PAX extended header parsing allows file smuggling) appeared in the cargo advisory DB. Added to `.cargo/audit.toml` ignore list with full impact analysis: tokio-tar is a test-only transitive dep of testcontainers, used only to write tar archives to the Docker daemon (never to untar untrusted input). No production binary includes it. No fixed version upstream.
