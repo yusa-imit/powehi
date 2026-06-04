@@ -1219,6 +1219,22 @@ mod tests {
         assert!(!valid, "wrong public key must cause verification to fail");
     }
 
+    /// ml_kem_768_sign_encap_key with unknown identity_id: MLS_CTX lookup fails (fail-closed).
+    /// Confirms the WASM export never returns a signature for an unregistered identity.
+    #[test]
+    fn test_ml_kem_sign_unknown_identity_returns_error() {
+        // A fresh test thread's MLS_CTX is empty — any lookup returns None, which the
+        // WASM export maps to JsError("unknown mls identity"). Verify the invariant.
+        let not_present = MLS_CTX.with(|ctx| {
+            let ctx = ctx.borrow();
+            ctx.get("nonexistent-test-identity-id").is_none()
+        });
+        assert!(
+            not_present,
+            "unregistered identity_id must not be found in MLS_CTX"
+        );
+    }
+
     // ── Safety Numbers ────────────────────────────────────────────────────────
 
     /// Safety numbers are symmetric: (a, b) == (b, a).

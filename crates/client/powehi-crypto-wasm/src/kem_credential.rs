@@ -270,4 +270,29 @@ mod tests {
             "33-byte pub key must error"
         );
     }
+
+    // ── Domain-separation regression ────────────────────────────────────────────
+
+    /// A signature over raw ek_bytes (no domain prefix) must be rejected by
+    /// verify_encap_key, which expects `SIGN_DOMAIN || 0x00 || ek_bytes`.
+    ///
+    /// This guards against cross-protocol signature reuse: a signature produced
+    /// by a signer over a different message format cannot be substituted for a
+    /// valid signed encap key.
+    #[test]
+    fn raw_signature_without_domain_is_rejected() {
+        let (provider, signer) = make_provider_and_signer();
+        let ek = vec![0u8; EK_SIZE];
+        // Sign the raw encap key bytes — no domain prefix, no NUL separator.
+        let raw_sig = signer.sign(&ek).expect("raw signing must succeed");
+        let pub_key = signer.to_public_vec();
+        // verify_encap_key checks SIGN_DOMAIN || 0x00 || ek; a signature over
+        // raw ek_bytes is over a different message and must be rejected.
+        let valid =
+            verify_encap_key(&ek, &raw_sig, &pub_key, &provider).expect("verify must not error");
+        assert!(
+            !valid,
+            "signature over raw ek_bytes (no domain) must be rejected by verify_encap_key"
+        );
+    }
 }
