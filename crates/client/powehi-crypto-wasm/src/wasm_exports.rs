@@ -724,17 +724,13 @@ pub fn ml_kem_768_drop_shared_secret(handle: &str) {
 /// crosses the WASM-JS boundary.  Distribute the signature alongside the encap
 /// key so peers can call `ml_kem_768_verify_encap_key` before encapsulating.
 #[wasm_bindgen]
-pub fn ml_kem_768_sign_encap_key(
-    identity_id: &str,
-    encap_key: &[u8],
-) -> Result<JsValue, JsError> {
+pub fn ml_kem_768_sign_encap_key(identity_id: &str, encap_key: &[u8]) -> Result<JsValue, JsError> {
     let signature = MLS_CTX.with(|ctx| -> Result<Vec<u8>, JsError> {
         let ctx = ctx.borrow();
         let c = ctx
             .get(identity_id)
             .ok_or_else(|| js_err("unknown mls identity"))?;
-        kem_credential::sign_encap_key(encap_key, &c.identity.signer)
-            .map_err(js_err)
+        kem_credential::sign_encap_key(encap_key, &c.identity.signer).map_err(js_err)
     })?;
     js_obj(&[("signature", bytes_js(&signature))])
 }
@@ -1194,8 +1190,8 @@ mod tests {
         let provider = OpenMlsRustCrypto::default();
         let identity = generate_identity(b"sign-test-identity", &provider).unwrap();
         let ek = vec![0u8; kem::EK_SIZE];
-        let sig = kem_credential::sign_encap_key(&ek, &identity.signer)
-            .expect("signing must succeed");
+        let sig =
+            kem_credential::sign_encap_key(&ek, &identity.signer).expect("signing must succeed");
         assert_eq!(sig.len(), 64, "Ed25519 signature must be 64 bytes");
         let pub_key = identity.signer.to_public_vec();
         let valid = kem_credential::verify_encap_key(&ek, &sig, &pub_key, &provider)
@@ -1212,8 +1208,7 @@ mod tests {
             (p, id.signer)
         };
         let ek = vec![0u8; kem::EK_SIZE];
-        let sig = kem_credential::sign_encap_key(&ek, &signer)
-            .expect("signing must succeed");
+        let sig = kem_credential::sign_encap_key(&ek, &signer).expect("signing must succeed");
 
         let provider2 = OpenMlsRustCrypto::default();
         let attacker = generate_identity(b"attacker-identity", &provider2).unwrap();

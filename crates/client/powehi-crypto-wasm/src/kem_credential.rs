@@ -62,10 +62,7 @@ fn signing_message(ek_bytes: &[u8]) -> Vec<u8> {
 /// # Errors
 /// - `ek_bytes` is not exactly `EK_SIZE` (1184) bytes.
 /// - The Ed25519 signing operation fails (provider error).
-pub fn sign_encap_key(
-    ek_bytes: &[u8],
-    signer: &SignatureKeyPair,
-) -> Result<Vec<u8>, &'static str> {
+pub fn sign_encap_key(ek_bytes: &[u8], signer: &SignatureKeyPair) -> Result<Vec<u8>, &'static str> {
     if ek_bytes.len() != EK_SIZE {
         return Err("invalid encap key: expected 1184 bytes");
     }
@@ -186,8 +183,8 @@ mod tests {
         let mut tampered = ek.clone();
         tampered[0] ^= 0x01;
 
-        let valid = verify_encap_key(&tampered, &sig, &pub_key, &provider)
-            .expect("verify must not error");
+        let valid =
+            verify_encap_key(&tampered, &sig, &pub_key, &provider).expect("verify must not error");
         assert!(!valid, "substituted encap key must be rejected");
     }
 
@@ -216,7 +213,10 @@ mod tests {
         let ek_b = vec![0x02u8; EK_SIZE];
         let sig_a = sign_encap_key(&ek_a, &signer).expect("sign_a must succeed");
         let sig_b = sign_encap_key(&ek_b, &signer).expect("sign_b must succeed");
-        assert_ne!(sig_a, sig_b, "distinct encap keys must yield distinct signatures");
+        assert_ne!(
+            sig_a, sig_b,
+            "distinct encap keys must yield distinct signatures"
+        );
     }
 
     // ── Input validation ────────────────────────────────────────────────────────
@@ -236,8 +236,7 @@ mod tests {
     fn verify_rejects_short_encap_key() {
         let (provider, _) = make_provider_and_signer();
         assert!(
-            verify_encap_key(&vec![0u8; EK_SIZE - 1], &[0u8; 64], &[0u8; 32], &provider)
-                .is_err(),
+            verify_encap_key(&vec![0u8; EK_SIZE - 1], &[0u8; 64], &[0u8; 32], &provider).is_err(),
             "short encap key must error in verify"
         );
     }

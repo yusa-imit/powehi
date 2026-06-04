@@ -450,10 +450,7 @@ const api = {
 	 * The private signing key stays inside the WASM worker (ADR-0003 Phase B, Y-3).
 	 * Distribute the signature alongside the encap key so peers can verify it.
 	 */
-	async mlKem768SignEncapKey(
-		identityId: string,
-		encapKey: Uint8Array,
-	): Promise<MlKemSignResult> {
+	async mlKem768SignEncapKey(identityId: string, encapKey: Uint8Array): Promise<MlKemSignResult> {
 		const wasm = await getWasm();
 		return wasm.ml_kem_768_sign_encap_key(identityId, encapKey);
 	},
