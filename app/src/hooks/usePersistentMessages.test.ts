@@ -29,6 +29,15 @@ const makeIncoming = (overrides: Partial<IncomingMessage> = {}): IncomingMessage
 });
 
 beforeEach(async () => {
+	// Delete the database before each test so state from previous tests does not
+	// leak into subsequent ones (fake-indexeddb is shared within a test file).
+	await new Promise<void>((resolve) => {
+		const req = indexedDB.deleteDatabase("PowehiDb");
+		req.onsuccess = () => resolve();
+		req.onerror = () => resolve(); // Resolve anyway — test will fail meaningfully if DB state is stale
+		req.onblocked = () => resolve();
+	});
+
 	const key = await deriveDbKey(FAKE_KEY);
 	encryptor = new DirectFieldEncryptor(key);
 

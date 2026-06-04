@@ -26,6 +26,10 @@ export type MlsCiphertextResult = { ciphertext: Uint8Array };
 export type MlsPlaintextResult = { plaintext: Uint8Array };
 export type MlsGroupMember = { leafIndex: number; sigKeyHex: string };
 export type MlsSafetyNumberResult = { safetyNumber: string };
+// ADR-0003 Phase B: opaque-handle types — raw key bytes stay inside the worker.
+export type MlKemKeygenV2Result = { encapKey: Uint8Array; decapKeyHandle: string };
+export type MlKemEncapV2Result = { ciphertext: Uint8Array; sharedSecretHandle: string };
+export type MlKemDecapV2Result = { sharedSecretHandle: string };
 
 // ── Internal WASM raw return types (include exportKey — consumed in worker) ──
 
@@ -63,6 +67,12 @@ interface WasmModule {
 	ml_kem_768_keygen: () => { encapKey: Uint8Array; decapKey: Uint8Array };
 	ml_kem_768_encap: (encapKey: Uint8Array) => { ciphertext: Uint8Array; sharedSecret: Uint8Array };
 	ml_kem_768_decap: (decapKey: Uint8Array, ciphertext: Uint8Array) => { sharedSecret: Uint8Array };
+	// ADR-0003 Phase B: opaque-handle API — raw key bytes never cross the WASM-JS boundary.
+	ml_kem_768_keygen_v2: () => MlKemKeygenV2Result;
+	ml_kem_768_encap_v2: (encapKey: Uint8Array) => MlKemEncapV2Result;
+	ml_kem_768_decap_v2: (decapKeyHandle: string, ciphertext: Uint8Array) => MlKemDecapV2Result;
+	ml_kem_768_drop_decap_key: (handle: string) => void;
+	ml_kem_768_drop_shared_secret: (handle: string) => void;
 }
 
 // ── IndexedDB key — held inside the worker, never crosses to main thread ─────
@@ -350,6 +360,71 @@ const api = {
 	): Promise<{ sharedSecret: Uint8Array }> {
 		const wasm = await getWasm();
 		return wasm.ml_kem_768_decap(decapKey, ciphertext);
+	},
+
+	// ── ML-KEM-768 Phase B: opaque-handle API (ADR-0003 Phase B, Y-1 fix) ─────
+	//
+	// These methods close Y-1: raw decap keys and shared secrets are stored inside
+	// the WASM worker and never cross the Comlink boundary to the main thread.
+	// Only encapKey (public) and opaque string handles are returned to callers.
+
+	/**
+	 * Generate an ML-KEM-768 keypair — Phase B opaque-handle API.
+	 * Returns { encapKey: 1184 bytes, decapKeyHandle: string }.
+	 * decapKey bytes stay inside the WASM worker (Y-1 fix).
+	 * Call mlKem768DropDecapKey(handle) when done.
+	 */
+	async mlKem768KeygenV2(): Promise<MlKemKeygenV2Result> {
+		const wasm = await getWasm();
+		return wasm.ml_kem_768_keygen_v2();
+	},
+
+	/**
+	 * Encapsulate a shared secret — Phase B opaque-handle API.
+	 * encapKey must be 1184 bytes (from mlKem768KeygenV2).
+	 * Returns { ciphertext: 1088 bytes, sharedSecretHandle: string }.
+	 * sharedSecret bytes stay inside the WASM worker (Y-1 fix).
+	 * Call mlKem768DropSharedSecret(handle) when done.
+	 */
+	async mlKem768EncapV2(encapKey: Uint8Array): Promise<MlKemEncapV2Result> {
+		const wasm = await getWasm();
+		return wasm.ml_kem_768_encap_v2(encapKey);
+	},
+
+	/**
+	 * Decapsulate using a stored decap key handle — Phase B opaque-handle API.
+	 * decapKeyHandle: string from mlKem768KeygenV2.
+	 * ciphertext: 1088 bytes from mlKem768EncapV2.
+	 * Returns { sharedSecretHandle: string }.
+	 * sharedSecret bytes stay inside the WASM worker (Y-1 fix).
+	 * Call mlKem768DropSharedSecret(handle) when done.
+	 */
+	async mlKem768DecapV2(
+		decapKeyHandle: string,
+		ciphertext: Uint8Array,
+	): Promise<MlKemDecapV2Result> {
+		const wasm = await getWasm();
+		return wasm.ml_kem_768_decap_v2(decapKeyHandle, ciphertext);
+	},
+
+	/**
+	 * Explicitly drop a stored ML-KEM-768 decap key by handle.
+	 * The Zeroizing wrapper zeroes the heap buffer before deallocation.
+	 * Idempotent: no-ops on unknown handles.
+	 */
+	async mlKem768DropDecapKey(handle: string): Promise<void> {
+		const wasm = await getWasm();
+		wasm.ml_kem_768_drop_decap_key(handle);
+	},
+
+	/**
+	 * Explicitly drop a stored ML-KEM-768 shared secret by handle.
+	 * The Zeroizing wrapper zeroes the heap buffer before deallocation.
+	 * Idempotent: no-ops on unknown handles.
+	 */
+	async mlKem768DropSharedSecret(handle: string): Promise<void> {
+		const wasm = await getWasm();
+		wasm.ml_kem_768_drop_shared_secret(handle);
 	},
 };
 

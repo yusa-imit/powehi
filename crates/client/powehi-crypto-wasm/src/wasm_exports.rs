@@ -65,6 +65,12 @@ thread_local! {
     static OPAQUE_REG:   RefCell<HashMap<String, OpaqueRegSession>>   = RefCell::new(HashMap::new());
     static OPAQUE_LOGIN: RefCell<HashMap<String, OpaqueLoginSession>> = RefCell::new(HashMap::new());
     static MLS_CTX:      RefCell<HashMap<String, MlsContext>>         = RefCell::new(HashMap::new());
+    // ADR-0003 Phase B: opaque-handle storage for ML-KEM key material.
+    // Raw decap keys and shared secrets never cross the WASM-JS boundary — only
+    // string handles are returned to JS.  Both maps use Zeroizing so the heap
+    // buffer is zeroed when a handle is dropped or the session is cleared.
+    static KEM_DECAP_KEYS:     RefCell<HashMap<String, Zeroizing<Vec<u8>>>> = RefCell::new(HashMap::new());
+    static KEM_SHARED_SECRETS: RefCell<HashMap<String, Zeroizing<Vec<u8>>>> = RefCell::new(HashMap::new());
 }
 
 // ── JS object helpers ──────────────────────────────────────────────────────────
@@ -581,12 +587,126 @@ pub fn ml_kem_768_decap(decap_key: &[u8], ciphertext: &[u8]) -> Result<JsValue, 
     js_obj(&[("sharedSecret", bytes_js(&ss))])
 }
 
+// ── ML-KEM-768 Phase B: opaque-handle API (ADR-0003 Phase B, Y-1 fix) ─────────
+//
+// These exports close Y-1 from the crypto-reviewer: raw decap keys and shared
+// secrets no longer cross the WASM-JS boundary.  String handles are returned
+// instead, pointing to Zeroizing<Vec<u8>> stored in thread-local maps.
+// Key material is zeroed on explicit drop or on mls_clear_session (logout).
+//
+// Usage pattern:
+//   const { encapKey, decapKeyHandle } = await mlKem768KeygenV2();
+//   // distribute encapKey to peer
+//   const { sharedSecretHandle } = await mlKem768DecapV2(decapKeyHandle, ciphertext);
+//   // use sharedSecretHandle in further worker-internal operations (Phase C)
+//   await mlKem768DropDecapKey(decapKeyHandle);
+//   await mlKem768DropSharedSecret(sharedSecretHandle);
+
+/// Generate an ML-KEM-768 keypair — Phase B opaque-handle API.
+///
+/// Returns `{ encapKey: Uint8Array, decapKeyHandle: string }`.
+/// - `encapKey` (1184 bytes): distribute to the peer who will encapsulate.
+/// - `decapKeyHandle`: opaque string handle; pass to `ml_kem_768_decap_v2`.
+///   The raw decap key bytes are stored inside the WASM worker — they NEVER
+///   cross the WASM-JS boundary (ADR-0003 Phase B, Y-1 fix).
+///
+/// Call `ml_kem_768_drop_decap_key(decapKeyHandle)` when done.
+/// `mls_clear_session()` also drops all decap key handles.
+#[wasm_bindgen]
+pub fn ml_kem_768_keygen_v2() -> Result<JsValue, JsError> {
+    let pair = kem::generate();
+    let handle = next_id();
+    // Build the JS result BEFORE inserting into the map (Y-7 fix): if js_obj fails
+    // (extraordinary JS host exception), no orphan handle entry is left in the map.
+    let result = js_obj(&[
+        ("encapKey", bytes_js(&pair.encap_key)),
+        ("decapKeyHandle", JsValue::from_str(&handle)),
+    ])?;
+    KEM_DECAP_KEYS.with(|m| m.borrow_mut().insert(handle, pair.decap_key));
+    Ok(result)
+}
+
+/// Encapsulate a shared secret under an ML-KEM-768 encapsulation key — Phase B API.
+///
+/// `encap_key` must be exactly 1184 bytes (from `ml_kem_768_keygen_v2`).
+///
+/// Returns `{ ciphertext: Uint8Array, sharedSecretHandle: string }`.
+/// - `ciphertext` (1088 bytes): send to the decapsulation-key holder.
+/// - `sharedSecretHandle`: opaque handle; the raw 32-byte shared secret is
+///   stored inside the WASM worker (ADR-0003 Phase B, Y-1 fix).
+///
+/// Call `ml_kem_768_drop_shared_secret(sharedSecretHandle)` when done.
+#[wasm_bindgen]
+pub fn ml_kem_768_encap_v2(encap_key: &[u8]) -> Result<JsValue, JsError> {
+    let (ct, ss) = kem::encapsulate(encap_key).map_err(js_err)?;
+    let handle = next_id();
+    // Y-7 fix: build JS result before inserting so no orphan handle is created on failure.
+    let result = js_obj(&[
+        ("ciphertext", bytes_js(&ct)),
+        ("sharedSecretHandle", JsValue::from_str(&handle)),
+    ])?;
+    KEM_SHARED_SECRETS.with(|m| m.borrow_mut().insert(handle, ss));
+    Ok(result)
+}
+
+/// Decapsulate a shared secret using a stored decap key handle — Phase B API.
+///
+/// `decap_key_handle`: string returned by `ml_kem_768_keygen_v2`.
+/// `ciphertext` must be exactly 1088 bytes (from `ml_kem_768_encap_v2`).
+///
+/// Returns `{ sharedSecretHandle: string }`.
+/// The raw 32-byte shared secret is stored inside the WASM worker and never
+/// crosses the WASM-JS boundary (ADR-0003 Phase B, Y-1 fix).
+///
+/// ML-KEM implicit rejection (FIPS 203 §6.3.3) applies: a wrong-ciphertext
+/// decap returns a pseudorandom handle (not an error).
+///
+/// Call `ml_kem_768_drop_shared_secret(sharedSecretHandle)` when done.
+#[wasm_bindgen]
+pub fn ml_kem_768_decap_v2(decap_key_handle: &str, ciphertext: &[u8]) -> Result<JsValue, JsError> {
+    // Clone the stored key bytes so the handle remains valid for future decap calls.
+    // The clone produces a Zeroizing copy; both the clone and the original are zeroed
+    // on drop (the clone at the end of this function, the stored copy on drop/clear).
+    // Note (Y-8): a caller flooding repeated decap calls before logout grows
+    // KEM_SHARED_SECRETS unboundedly. Mitigation: caller-side rate limiting (Phase C).
+    let dk_bytes = KEM_DECAP_KEYS
+        .with(|m| m.borrow().get(decap_key_handle).cloned())
+        .ok_or_else(|| js_err("unknown decap key handle"))?;
+    let ss = kem::decapsulate(&dk_bytes, ciphertext).map_err(js_err)?;
+    let handle = next_id();
+    // Y-7 fix: build JS result before inserting so no orphan handle is created on failure.
+    let result = js_obj(&[("sharedSecretHandle", JsValue::from_str(&handle))])?;
+    KEM_SHARED_SECRETS.with(|m| m.borrow_mut().insert(handle, ss));
+    Ok(result)
+}
+
+/// Explicitly drop a stored ML-KEM-768 decapsulation key by handle.
+///
+/// Removes the entry from `KEM_DECAP_KEYS`; the `Zeroizing<Vec<u8>>` wrapper
+/// zeroes the heap buffer on drop.  Silently no-ops on unknown handles
+/// (idempotent / safe to call after `mls_clear_session`).
+#[wasm_bindgen]
+pub fn ml_kem_768_drop_decap_key(handle: &str) {
+    KEM_DECAP_KEYS.with(|m| m.borrow_mut().remove(handle));
+}
+
+/// Explicitly drop a stored ML-KEM-768 shared secret by handle.
+///
+/// Removes the entry from `KEM_SHARED_SECRETS`; the `Zeroizing<Vec<u8>>`
+/// wrapper zeroes the heap buffer on drop.  Silently no-ops on unknown handles.
+#[wasm_bindgen]
+pub fn ml_kem_768_drop_shared_secret(handle: &str) {
+    KEM_SHARED_SECRETS.with(|m| m.borrow_mut().remove(handle));
+}
+
 // ── Session lifecycle ──────────────────────────────────────────────────────────
 
-/// Clear all MLS and OPAQUE session state from the WASM heap on logout.
+/// Clear all MLS, OPAQUE, and ML-KEM session state from the WASM heap on logout.
 ///
-/// Drops all MLS identities, groups, and any in-flight OPAQUE sessions so the
-/// next login starts with a clean slate and cannot access prior-session keys.
+/// Drops all MLS identities, groups, in-flight OPAQUE sessions, and any stored
+/// ML-KEM decap keys and shared secrets so the next login starts with a clean
+/// slate and cannot access prior-session keys.  All `Zeroizing<Vec<u8>>` entries
+/// are zeroed before deallocation.
 ///
 /// Limitation: WASM linear memory is not physically zeroed — the allocator marks
 /// freed pages as available but the byte values persist until overwritten by
@@ -598,6 +718,8 @@ pub fn mls_clear_session() {
     MLS_CTX.with(|ctx| ctx.borrow_mut().clear());
     OPAQUE_REG.with(|s| s.borrow_mut().clear());
     OPAQUE_LOGIN.with(|s| s.borrow_mut().clear());
+    KEM_DECAP_KEYS.with(|m| m.borrow_mut().clear());
+    KEM_SHARED_SECRETS.with(|m| m.borrow_mut().clear());
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -832,6 +954,168 @@ mod tests {
         assert_eq!(MLS_CTX.with(|ctx| ctx.borrow().len()), 0);
         assert_eq!(OPAQUE_REG.with(|s| s.borrow().len()), 0);
         assert_eq!(OPAQUE_LOGIN.with(|s| s.borrow().len()), 0);
+    }
+
+    // ── ML-KEM Phase B opaque-handle tests (ADR-0003 Phase B, Y-1) ───────────
+    //
+    // These tests exercise the thread-local state management for KEM_DECAP_KEYS
+    // and KEM_SHARED_SECRETS.  The wasm-bindgen functions themselves (keygen_v2,
+    // encap_v2, decap_v2) use js_sys which panics in native tests; the logic they
+    // wrap is tested by directly manipulating the thread-locals + calling kem::*.
+
+    /// Keygen v2: decap key stored in KEM_DECAP_KEYS, not exposed to caller.
+    #[test]
+    fn test_ml_kem_v2_keygen_stores_decap_key() {
+        let pair = kem::generate();
+        let handle = next_id();
+        KEM_DECAP_KEYS.with(|m| m.borrow_mut().insert(handle.clone(), pair.decap_key));
+        assert!(
+            KEM_DECAP_KEYS.with(|m| m.borrow().contains_key(&handle)),
+            "decap key must be stored in KEM_DECAP_KEYS"
+        );
+        let len = KEM_DECAP_KEYS.with(|m| m.borrow().get(&handle).map(|v| v.len()).unwrap_or(0));
+        assert_eq!(len, kem::DK_SIZE, "stored decap key must be DK_SIZE bytes");
+    }
+
+    /// Encap v2: shared secret stored in KEM_SHARED_SECRETS, not exposed to caller.
+    #[test]
+    fn test_ml_kem_v2_encap_stores_shared_secret() {
+        let pair = kem::generate();
+        let (_ct, ss) = kem::encapsulate(&pair.encap_key).unwrap();
+        let handle = next_id();
+        KEM_SHARED_SECRETS.with(|m| m.borrow_mut().insert(handle.clone(), ss));
+        assert!(
+            KEM_SHARED_SECRETS.with(|m| m.borrow().contains_key(&handle)),
+            "shared secret must be stored in KEM_SHARED_SECRETS"
+        );
+        let len =
+            KEM_SHARED_SECRETS.with(|m| m.borrow().get(&handle).map(|v| v.len()).unwrap_or(0));
+        assert_eq!(
+            len,
+            kem::SS_SIZE,
+            "stored shared secret must be SS_SIZE bytes"
+        );
+    }
+
+    /// Decap v2: retrieves stored decap key by handle, stores recovered secret.
+    #[test]
+    fn test_ml_kem_v2_decap_uses_handle_and_stores_result() {
+        let pair = kem::generate();
+        let (ct, ss_enc) = kem::encapsulate(&pair.encap_key).unwrap();
+        let dk_handle = next_id();
+        KEM_DECAP_KEYS.with(|m| m.borrow_mut().insert(dk_handle.clone(), pair.decap_key));
+        // Retrieve and decapsulate (same logic as ml_kem_768_decap_v2, without js_sys)
+        let dk_bytes = KEM_DECAP_KEYS
+            .with(|m| m.borrow().get(&dk_handle).cloned())
+            .expect("stored decap key must be retrievable by handle");
+        let ss_dec = kem::decapsulate(&dk_bytes, &ct).unwrap();
+        let ss_handle = next_id();
+        KEM_SHARED_SECRETS.with(|m| m.borrow_mut().insert(ss_handle.clone(), ss_dec.clone()));
+        let stored = KEM_SHARED_SECRETS
+            .with(|m| m.borrow().get(&ss_handle).cloned())
+            .unwrap();
+        assert_eq!(
+            ss_enc.as_slice(),
+            stored.as_slice(),
+            "decap must recover the encapsulator's shared secret"
+        );
+    }
+
+    /// Round-trip via handles: encap+decap produce identical stored shared secrets.
+    #[test]
+    fn test_ml_kem_v2_round_trip_via_handles() {
+        let pair = kem::generate();
+        // Store decap key under a handle (keygen_v2)
+        let dk_handle = next_id();
+        KEM_DECAP_KEYS.with(|m| m.borrow_mut().insert(dk_handle.clone(), pair.decap_key));
+        // Encapsulate and store encap-side shared secret (encap_v2)
+        let (ct, ss_enc) = kem::encapsulate(&pair.encap_key).unwrap();
+        let enc_ss_handle = next_id();
+        KEM_SHARED_SECRETS.with(|m| m.borrow_mut().insert(enc_ss_handle.clone(), ss_enc.clone()));
+        // Decapsulate via handle and store decap-side shared secret (decap_v2)
+        let dk_bytes = KEM_DECAP_KEYS
+            .with(|m| m.borrow().get(&dk_handle).cloned())
+            .unwrap();
+        let ss_dec = kem::decapsulate(&dk_bytes, &ct).unwrap();
+        let dec_ss_handle = next_id();
+        KEM_SHARED_SECRETS.with(|m| m.borrow_mut().insert(dec_ss_handle.clone(), ss_dec));
+        let stored_enc = KEM_SHARED_SECRETS
+            .with(|m| m.borrow().get(&enc_ss_handle).cloned())
+            .unwrap();
+        let stored_dec = KEM_SHARED_SECRETS
+            .with(|m| m.borrow().get(&dec_ss_handle).cloned())
+            .unwrap();
+        assert_eq!(
+            stored_enc.as_slice(),
+            stored_dec.as_slice(),
+            "encap and decap stored shared secrets must match (round-trip via handles)"
+        );
+    }
+
+    /// Drop decap key: remove + zeroize on explicit drop.
+    #[test]
+    fn test_ml_kem_v2_drop_decap_key_removes_entry() {
+        let pair = kem::generate();
+        let handle = next_id();
+        KEM_DECAP_KEYS.with(|m| m.borrow_mut().insert(handle.clone(), pair.decap_key));
+        assert!(KEM_DECAP_KEYS.with(|m| m.borrow().contains_key(&handle)));
+        // Simulate ml_kem_768_drop_decap_key
+        KEM_DECAP_KEYS.with(|m| m.borrow_mut().remove(&handle));
+        assert!(
+            !KEM_DECAP_KEYS.with(|m| m.borrow().contains_key(&handle)),
+            "dropped decap key must not be retrievable"
+        );
+    }
+
+    /// Drop shared secret: remove + zeroize on explicit drop.
+    #[test]
+    fn test_ml_kem_v2_drop_shared_secret_removes_entry() {
+        let pair = kem::generate();
+        let (_, ss) = kem::encapsulate(&pair.encap_key).unwrap();
+        let handle = next_id();
+        KEM_SHARED_SECRETS.with(|m| m.borrow_mut().insert(handle.clone(), ss));
+        assert!(KEM_SHARED_SECRETS.with(|m| m.borrow().contains_key(&handle)));
+        KEM_SHARED_SECRETS.with(|m| m.borrow_mut().remove(&handle));
+        assert!(
+            !KEM_SHARED_SECRETS.with(|m| m.borrow().contains_key(&handle)),
+            "dropped shared secret must not be retrievable"
+        );
+    }
+
+    /// Unknown decap key handle: retrieving a nonexistent handle returns None.
+    #[test]
+    fn test_ml_kem_v2_unknown_decap_handle_returns_none() {
+        let result = KEM_DECAP_KEYS.with(|m| m.borrow().get("no-such-handle").cloned());
+        assert!(
+            result.is_none(),
+            "unknown decap key handle must return None (error path in decap_v2)"
+        );
+    }
+
+    /// mls_clear_session also clears KEM_DECAP_KEYS and KEM_SHARED_SECRETS.
+    #[test]
+    fn test_clear_session_removes_kem_handles() {
+        let pair = kem::generate();
+        let dk_handle = next_id();
+        KEM_DECAP_KEYS.with(|m| m.borrow_mut().insert(dk_handle.clone(), pair.decap_key));
+        let (_, ss) = kem::encapsulate(&pair.encap_key).unwrap();
+        let ss_handle = next_id();
+        KEM_SHARED_SECRETS.with(|m| m.borrow_mut().insert(ss_handle.clone(), ss));
+        assert!(KEM_DECAP_KEYS.with(|m| m.borrow().contains_key(&dk_handle)));
+        assert!(KEM_SHARED_SECRETS.with(|m| m.borrow().contains_key(&ss_handle)));
+
+        mls_clear_session();
+
+        assert_eq!(
+            KEM_DECAP_KEYS.with(|m| m.borrow().len()),
+            0,
+            "KEM_DECAP_KEYS must be empty after mls_clear_session"
+        );
+        assert_eq!(
+            KEM_SHARED_SECRETS.with(|m| m.borrow().len()),
+            0,
+            "KEM_SHARED_SECRETS must be empty after mls_clear_session"
+        );
     }
 
     // ── Safety Numbers ────────────────────────────────────────────────────────

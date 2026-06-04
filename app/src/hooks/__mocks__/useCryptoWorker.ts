@@ -26,6 +26,20 @@ const mockWorker = {
 	mlKem768Decap: async (_decapKey: Uint8Array, _ciphertext: Uint8Array) => ({
 		sharedSecret: new Uint8Array(32),
 	}),
+	// ADR-0003 Phase B: opaque-handle mocks — handles are static strings (no real state).
+	mlKem768KeygenV2: async () => ({
+		encapKey: new Uint8Array(1184),
+		decapKeyHandle: "mock-decap-handle-0",
+	}),
+	mlKem768EncapV2: async (_encapKey: Uint8Array) => ({
+		ciphertext: new Uint8Array(1088),
+		sharedSecretHandle: "mock-ss-enc-handle-0",
+	}),
+	mlKem768DecapV2: async (_decapKeyHandle: string, _ciphertext: Uint8Array) => ({
+		sharedSecretHandle: "mock-ss-dec-handle-0",
+	}),
+	mlKem768DropDecapKey: async (_handle: string) => {},
+	mlKem768DropSharedSecret: async (_handle: string) => {},
 };
 
 export const useCryptoWorker = () => mockWorker;
