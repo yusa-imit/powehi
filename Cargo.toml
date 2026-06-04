@@ -74,6 +74,9 @@ argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 sha2 = "0.10"
 hmac = "0.12"
 zeroize = { version = "1", features = ["derive"] }
+# Ed25519 signatures (approved per crypto-libraries-pinned.md; transitive via openmls_basic_credential).
+# Pinned exact minor to match Cargo.lock resolution and prevent silent drift.
+ed25519-dalek = "2.2"
 # Post-quantum KEM (FIPS 203 ML-KEM-768) — approved per crypto-libraries-pinned.md.
 # zeroize feature: derives Zeroize+ZeroizeOnDrop on DecapsulationKey, DecryptionKey,
 # and their internals (s_hat secret polynomial) — required for key-material hygiene.

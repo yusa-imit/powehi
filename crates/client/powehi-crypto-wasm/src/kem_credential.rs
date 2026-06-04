@@ -271,6 +271,117 @@ mod tests {
         );
     }
 
+    // ── KAT (supply-chain / wire-format regression) ────────────────────────────
+
+    /// Known-Answer Test: sign all-zero encap key with a known Ed25519 key pair.
+    ///
+    /// Pins the exact 64-byte Ed25519 signature output for:
+    ///   - signing key  = ed25519-dalek 2.2.0 `SigningKey::from_bytes([0x42; 32])`
+    ///   - encap key    = all-zero 1184 bytes
+    ///   - message      = SIGN_DOMAIN || 0x00 || ek_bytes
+    ///
+    /// Purpose: detects silent library drift (openmls / ed25519-dalek version bump
+    /// that changes the wire format) and supply-chain tampering. Re-capture using
+    /// the `kem_credential_kat_capture` test if the signing library is intentionally
+    /// upgraded. Ed25519 is deterministic (RFC 8032 §5.1) so the value is stable.
+    #[test]
+    fn sign_encap_key_kat_wire_format() {
+        use openmls::prelude::SignatureScheme;
+        // Fixed seed: [0x42; 32]. Public key derived via ed25519-dalek 2.2.0.
+        // Captured from `kem_credential_kat_capture` (below).
+        const KAT_SEED: [u8; 32] = [0x42u8; 32];
+        const KAT_PUB: [u8; 32] = [
+            0x21, 0x52, 0xf8, 0xd1, 0x9b, 0x79, 0x1d, 0x24, 0x45, 0x32, 0x42, 0xe1, 0x5f, 0x2e,
+            0xab, 0x6c, 0xb7, 0xcf, 0xfa, 0x7b, 0x6a, 0x5e, 0xd3, 0x00, 0x97, 0x96, 0x0e, 0x06,
+            0x98, 0x81, 0xdb, 0x12,
+        ];
+        // Expected signature for SIGN_DOMAIN || 0x00 || [0u8; 1184] with the above key.
+        // Captured from kat_capture run on openmls_basic_credential 0.5.0 + ed25519-dalek 2.2.0.
+        // Re-capture (see kat_capture test) if ed25519-dalek is intentionally upgraded.
+        const KAT_SIG: [u8; SIG_SIZE] = [
+            0x79, 0x5b, 0x94, 0x29, 0x5f, 0xbf, 0x60, 0xb7, 0x7c, 0x08, 0x52, 0xd0, 0x90, 0x70,
+            0x56, 0xcc, 0x04, 0x62, 0x9c, 0x45, 0x61, 0x62, 0x80, 0xe4, 0x1d, 0x13, 0x3f, 0x56,
+            0xb2, 0x0c, 0xb9, 0x85, 0x05, 0xa5, 0xb3, 0xca, 0xe7, 0x90, 0xe2, 0x4b, 0x71, 0x0b,
+            0xd4, 0xa3, 0x24, 0x52, 0x5c, 0xdb, 0x60, 0xb3, 0x21, 0xb0, 0x25, 0x06, 0x21, 0x38,
+            0x44, 0xf3, 0xea, 0x03, 0x09, 0x75, 0xea, 0x05,
+        ];
+
+        let signer = SignatureKeyPair::from_raw(
+            SignatureScheme::ED25519,
+            KAT_SEED.to_vec(),
+            KAT_PUB.to_vec(),
+        );
+        let provider = OpenMlsRustCrypto::default();
+        let ek = vec![0u8; EK_SIZE];
+
+        let sig = sign_encap_key(&ek, &signer).expect("KAT signing must succeed");
+        assert_eq!(
+            sig.as_slice(),
+            &KAT_SIG,
+            "KAT mismatch — wire format changed; re-capture if ed25519-dalek upgraded"
+        );
+        let pub_key = signer.to_public_vec();
+        let valid =
+            verify_encap_key(&ek, &sig, &pub_key, &provider).expect("KAT verify must not error");
+        assert!(valid, "KAT signature must verify under its own public key");
+    }
+
+    /// KAT capture helper — prints private/public key bytes and signature for hardcoding.
+    /// Run with `cargo test kat_capture -- --nocapture --ignored` to update KAT constants
+    /// when ed25519-dalek is intentionally upgraded.
+    ///
+    /// WARNING: any change to the hardcoded KAT_SIG/KAT_PUB constants in
+    /// `sign_encap_key_kat_wire_format` MUST be reviewed by the crypto-reviewer agent
+    /// (skill: crypto-review) with the ed25519-dalek version delta in the diff.
+    /// Do NOT commit rotated KAT constants without that review — the KAT is a
+    /// supply-chain guard and silently rotating it defeats its purpose.
+    #[test]
+    #[ignore = "capture-only: run manually to update KAT constants when library changes"]
+    fn kem_credential_kat_capture() {
+        // Derive a deterministic Ed25519 key pair from a fixed seed via ed25519-dalek 2.x.
+        // The same version is used by openmls_basic_credential so sign+verify are consistent.
+        let seed = [0x42u8; 32];
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let public_bytes = signing_key.verifying_key().to_bytes().to_vec();
+        let private_bytes = signing_key.to_bytes().to_vec();
+
+        let signer = SignatureKeyPair::from_raw(
+            openmls::prelude::SignatureScheme::ED25519,
+            private_bytes.clone(),
+            public_bytes.clone(),
+        );
+        let provider = OpenMlsRustCrypto::default();
+        let ek = vec![0u8; EK_SIZE];
+        let sig = sign_encap_key(&ek, &signer).expect("sign must succeed");
+        let pub_key = signer.to_public_vec();
+        let valid = verify_encap_key(&ek, &sig, &pub_key, &provider).expect("verify");
+        assert!(valid, "freshly generated key must verify");
+        eprintln!("=== KAT CAPTURE ===");
+        eprintln!(
+            "KAT_SEED: {:?}",
+            private_bytes
+                .iter()
+                .map(|b| format!("0x{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        eprintln!(
+            "KAT_PUB:  {:?}",
+            public_bytes
+                .iter()
+                .map(|b| format!("0x{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        eprintln!(
+            "KAT_SIG:  {:?}",
+            sig.iter()
+                .map(|b| format!("0x{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
     // ── Domain-separation regression ────────────────────────────────────────────
 
     /// A signature over raw ek_bytes (no domain prefix) must be rejected by
