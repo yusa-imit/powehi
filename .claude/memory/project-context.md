@@ -17,6 +17,12 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-04, cycle 91 — STABILIZATION: CI red fix — mlKem768 mock TS2554)
+- **Cycle 91 (STABILIZATION — CI was RED):** Frontend CI was RED on Bundle budget check step.
+  - **Root cause:** `app/src/hooks/__mocks__/useCryptoWorker.ts` declared `mlKem768Encap` and `mlKem768Decap` with zero parameters. Tests in `mlKem768.test.ts` (added cycle 90) call them with arguments (`encapKey`, `decapKey+ciphertext`). TypeScript strict mode emits TS2554 "Expected 0 arguments, but got N" during `tsc -b`.
+  - **Fix:** Added `_encapKey: Uint8Array`, `_decapKey: Uint8Array`, `_ciphertext: Uint8Array` parameters to the two mock functions. TypeScript check passes; 135 frontend tests pass; Biome clean.
+  - **No security impact:** mock-only change; no production code touched.
+
 ## Current state (2026-06-04, cycle 90 — STABILIZATION: ML-KEM-768 crypto-review pass + test gap closure)
 - **Cycle 90 (STABILIZATION):** CI green, cargo audit clean (1 allowed: instant/openmls), no open issues. Two changes:
   - **Test gap closed:** `mlKem768Keygen/Encap/Decap` in `crypto.worker.ts` (added cycle 88) had zero frontend tests. Added `app/src/workers/mlKem768.test.ts` — 5 API-contract tests verifying FIPS 203 §2.4 byte sizes (EK=1184, DK=2400, CT=1088, SS=32) through the standard mock proxy.
