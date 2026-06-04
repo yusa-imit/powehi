@@ -17,6 +17,25 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-04, cycle 93 — FEATURE: ADR-0003 Phase B — ML-KEM opaque-handle pattern, Y-1 closed)
+- **Cycle 93 (commit 36277ae):** ADR-0003 Phase B — closed Y-1 from cycle-90 crypto-reviewer (raw ML-KEM key bytes crossed WASM-JS boundary):
+  - **Y-1 CLOSED:** New opaque-handle API: `ml_kem_768_keygen_v2` returns `{encapKey, decapKeyHandle}`, `ml_kem_768_encap_v2` returns `{ciphertext, sharedSecretHandle}`, `ml_kem_768_decap_v2(handle, ct)` returns `{sharedSecretHandle}`. Raw decap keys (2400 bytes) and shared secrets (32 bytes) are stored in `KEM_DECAP_KEYS` and `KEM_SHARED_SECRETS` thread-locals (`Zeroizing<Vec<u8>>`) — never returned to JS.
+  - **Y-7 NEW+FIXED:** JS object built before thread-local insert in all 3 v2 functions, preventing orphan handle entries if `js_obj()` fails (extraordinary JS host exception).
+  - **`mls_clear_session()` extended:** now also clears `KEM_DECAP_KEYS` and `KEM_SHARED_SECRETS` (Zeroizing zeroes each buffer on drop).
+  - **Phase A exports preserved** (`ml_kem_768_keygen/encap/decap`) with "Phase A test surface only" warnings — kept for backward compatibility during migration window.
+  - **crypto-reviewer:** PASS — Y-1 CLOSED. Y-7 fixed. Y-8 (DoS via unbounded decap calls — documented in comment, Phase C), Y-9 (Zeroizing buffer-zero verification in tests — future unsafe test), Y-10 (sequential handle IDs visible in WASM memory — informational, pre-existing) noted but non-blocking.
+  - **+8 native Rust tests** (handle storage, round-trip via handles, explicit drop, clear_session clears KEM); **+12 frontend tests** (opaque-handle invariant, `@ts-expect-error` type guards, idempotent drop).
+  - **DB reset fix:** `usePersistentMessages.test.ts` `beforeEach` now calls `indexedDB.deleteDatabase("PowehiDb")` before each test, fixing flaky "Y1 — outgoing epochSeq" test caused by cross-test IndexedDB state contamination.
+  - **39 WASM tests** (+8); **147 frontend tests** (+12); clippy clean; rustfmt clean.
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+    - ML-KEM-768 Phase B remaining prerequisites:
+      - Y-3: Encap key not authenticated (Phase B hybrid handshake must bind ek to signed credential)
+      - Y-5 follow-up: NIST ACVP conformance KAT (official vectors from ACVP-Server)
+      - Y-8: Unbounded KEM_SHARED_SECRETS growth on repeated decap (Phase C rate limiting)
+      - Y-9: Zeroizing buffer-zero verification in tests (unsafe ptr test, future work)
+
 ## Current state (2026-06-04, cycle 92 — FEATURE: ADR-0003 Phase B — ml-kem version pin + regression KAT)
 - **Cycle 92 (commit 9136790):** ADR-0003 Phase B — closed Y-5 (partial) and Y-6 from cycle-90 crypto-reviewer:
   - **Y-6 CLOSED:** `ml-kem` workspace dep tightened from `"0.2"` to `"=0.2.3"` in `Cargo.toml`. Prevents silent `cargo update` to a future 0.2.x that could shift KAT output or introduce behavioral differences. The Cargo.lock checksum `8de49b3df74c35498c0232031bb7e85f9389f913e2796169c8ab47a53993a18f` is now the authoritative pin.
