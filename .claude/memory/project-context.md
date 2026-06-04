@@ -17,6 +17,26 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-05, cycle 96 — FEATURE: KAT for sign_encap_key wire format — closes YELLOW-b)
+- **Cycle 96 (commit 9b3f18c):** FEATURE — closed YELLOW-b from cycle-95 crypto-reviewer (no KAT for ml_kem_sign_encap_key output wire format):
+  - **YELLOW-b CLOSED:** New test `sign_encap_key_kat_wire_format` in `kem_credential.rs`:
+    - Fixed seed: `[0x42u8; 32]` → derived public key via `ed25519-dalek 2.2.0 SigningKey::from_bytes`
+    - Signs all-zero 1184-byte encap key with domain `SIGN_DOMAIN || 0x00 || ek`
+    - Asserts exact 64-byte signature matches hardcoded `KAT_SIG` constant (captured from openmls_basic_credential 0.5.0 + ed25519-dalek 2.2.0)
+    - Asserts `verify_encap_key` returns `Ok(true)` for the KAT signature (round-trip)
+    - Detects silent library drift (ed25519-dalek upgrade) and supply-chain tampering
+  - **Ignored capture helper:** `kem_credential_kat_capture` — derives key from fixed seed via ed25519-dalek, signs + verifies, prints bytes for re-capture. Includes crypto-reviewer gate comment (WARNING: rotation must be reviewed by crypto-reviewer agent before commit — YELLOW-2 from crypto-review fix).
+  - **Workspace dep hoist:** `ed25519-dalek = "2.2"` hoisted to `[workspace.dependencies]` in root `Cargo.toml` (YELLOW-1 from crypto-review fix, prevents future version skew).
+  - **crypto-reviewer:** PASS — GREEN on all correctness criteria. YELLOW-1 (workspace pin) and YELLOW-2 (KAT rotation gate comment) both fixed in this cycle. No RFC 8032/9420 violations.
+  - **54 WASM tests** (+1 KAT test; was 53); rustfmt clean; clippy clean.
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+    - ML-KEM-768 Phase B/C remaining prerequisites:
+      - Y-5 follow-up: NIST ACVP conformance KAT (official vectors from ACVP-Server)
+      - Y-8: Unbounded KEM_SHARED_SECRETS growth on repeated decap (Phase C rate limiting)
+      - Y-9: Zeroizing buffer-zero verification in tests (unsafe ptr test, future work)
+
 ## Current state (2026-06-05, cycle 95 — STABILIZATION: CI red fix + crypto test gap closure)
 - **Cycle 95 (commits a0d4645, 30ffa1a):** STABILIZATION — CI was RED on both Rust + Frontend pipelines since cycle-94 commit (e8bb982). Fixed:
   - **Rust CI fix (a0d4645):** `cargo fmt` stable 1.96.0 emitted diffs for 3 files added in cycle 94:
