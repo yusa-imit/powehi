@@ -59,6 +59,11 @@ describe("usePersistentMessages", () => {
 	it("persistIncoming adds message to rows immediately", async () => {
 		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
 
+		// Flush the initial useEffect DB load before testing. Without this,
+		// the async getMessagesByGroup may resolve inside the act below and
+		// setRows([]) overrides the optimistic update (same race as cycle 84).
+		await act(async () => {});
+
 		await act(async () => {
 			result.current.persistIncoming(makeIncoming());
 		});
