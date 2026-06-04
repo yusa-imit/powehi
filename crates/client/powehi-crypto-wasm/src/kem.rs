@@ -335,3 +335,88 @@ mod tests {
         assert_ne!(recovered1.as_slice(), recovered2.as_slice());
     }
 }
+
+// ── ml-kem 0.2.3 Regression KAT (supply-chain guard) ─────────────────────────
+//
+// Deterministic regression KAT using fixed seeds: d = 0x00..1f, z = 0x20..3f,
+// m = 0x40..5f. Expected values captured from ml-kem =0.2.3.
+//
+// Scope (ADR-0003 Phase B, Y-5 partial close):
+//   This is a self-consistency / supply-chain regression guard — it detects
+//   implementation drift or crate tampering. It does NOT use official NIST ACVP
+//   vectors, so it is NOT a FIPS 203 §A.3 conformance test. A true conformance
+//   KAT against NIST-sourced vectors is tracked as Y-5 follow-up.
+//
+// Re-verify pinned values if ml-kem version changes (see Y-6 in project-context.md).
+// Gated on `#[cfg(test)]`; NOT compiled into the production WASM binary.
+#[cfg(test)]
+mod kat_tests {
+    use super::{DK_SIZE, EK_SIZE, SS_SIZE};
+    use ml_kem::kem::{Decapsulate, DecapsulationKey, EncapsulationKey};
+    use ml_kem::{
+        EncapsulateDeterministic, EncodedSizeUser, KemCore, MlKem768, MlKem768Params, B32,
+    };
+
+    /// 32-byte shared secret for seeds d=0x00..1f, z=0x20..3f, m=0x40..5f.
+    /// Captured from ml-kem =0.2.3. Must be re-verified if ml-kem version changes.
+    const KAT_SS: [u8; SS_SIZE] = [
+        0x9c, 0xdd, 0xd0, 0x89, 0xff, 0xe7, 0x0e, 0x39, 0x96, 0xe7, 0x6f, 0x7c, 0x8d, 0x06, 0x74,
+        0x6d, 0xf3, 0x4d, 0x07, 0xe8, 0x65, 0x7b, 0xc0, 0xfc, 0xf2, 0xbb, 0x0e, 0x1c, 0x30, 0x84,
+        0xae, 0xa1,
+    ];
+
+    /// First 16 bytes of the encapsulation key for the same seed (supply-chain guard).
+    const KAT_EK_PREFIX: [u8; 16] = [
+        0x29, 0x8a, 0xa1, 0x0d, 0x42, 0x3c, 0x8d, 0xda, 0x06, 0x9d, 0x02, 0xbc, 0x59, 0xe6, 0xcd,
+        0xf0,
+    ];
+
+    /// Regression KAT for ml-kem =0.2.3 (supply-chain / drift detection).
+    ///
+    /// Verifies:
+    /// 1. Key sizes per FIPS 203 §2.4.
+    /// 2. Determinism: same seed always produces the same keys and shared secret.
+    /// 3. Shared secret consistency: encapsulator and decapsulator derive equal secrets.
+    /// 4. Pinned output: SS matches reference captured from ml-kem 0.2.3, guarding
+    ///    against crate tampering or undetected version drift.
+    #[test]
+    fn ml_kem_768_regression_kat_fixed_seed() {
+        let d: B32 = core::array::from_fn::<u8, 32, _>(|i| i as u8).into();
+        let z: B32 = core::array::from_fn::<u8, 32, _>(|i| (i + 32) as u8).into();
+        let m: B32 = core::array::from_fn::<u8, 32, _>(|i| (i + 64) as u8).into();
+
+        let (dk, ek): (
+            DecapsulationKey<MlKem768Params>,
+            EncapsulationKey<MlKem768Params>,
+        ) = MlKem768::generate_deterministic(&d, &z);
+
+        let ek_bytes = ek.as_bytes();
+        let dk_bytes = dk.as_bytes();
+        assert_eq!(ek_bytes.len(), EK_SIZE, "encap key size must be {EK_SIZE}");
+        assert_eq!(dk_bytes.len(), DK_SIZE, "decap key size must be {DK_SIZE}");
+
+        assert_eq!(
+            &ek_bytes[..16],
+            &KAT_EK_PREFIX,
+            "ek prefix mismatch — crate may have been changed or tampered with"
+        );
+
+        let (ct, ss_enc) = ek.encapsulate_deterministic(&m).unwrap();
+        let ss_dec = dk.decapsulate(&ct).unwrap();
+
+        assert_eq!(ct.len(), 1088, "ciphertext size must be 1088");
+        assert_eq!(ss_enc.len(), SS_SIZE, "encap SS size must be {SS_SIZE}");
+        assert_eq!(ss_dec.len(), SS_SIZE, "decap SS size must be {SS_SIZE}");
+
+        let ss_enc_slice: &[u8] = &ss_enc;
+        let ss_dec_slice: &[u8] = &ss_dec;
+        assert_eq!(
+            ss_enc_slice, ss_dec_slice,
+            "encap and decap shared secrets must match"
+        );
+        assert_eq!(
+            ss_enc_slice, &KAT_SS,
+            "shared secret differs from ml-kem 0.2.3 reference — re-verify if version changed"
+        );
+    }
+}

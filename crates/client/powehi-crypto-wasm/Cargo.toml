@@ -43,6 +43,9 @@ openmls_traits = { workspace = true }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
+# Enable deterministic keygen/encap APIs for the FIPS 203 KAT test (test-only;
+# not compiled into the production WASM binary). ADR-0003 Phase B, Y-5.
+ml-kem = { workspace = true, features = ["deterministic"] }
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-O", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]
