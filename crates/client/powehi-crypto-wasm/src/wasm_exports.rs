@@ -24,6 +24,7 @@ use wasm_bindgen::prelude::*;
 use zeroize::Zeroizing;
 
 use crate::kem;
+use crate::kem_credential;
 use crate::mls_group::{
     add_member, create_group, decrypt_message, encrypt_message, generate_identity,
     generate_key_package, join_group, Identity,
@@ -699,6 +700,73 @@ pub fn ml_kem_768_drop_shared_secret(handle: &str) {
     KEM_SHARED_SECRETS.with(|m| m.borrow_mut().remove(handle));
 }
 
+// ── ML-KEM-768 Phase B: signed encap key (ADR-0003 Phase B, Y-3 fix) ──────────
+//
+// Y-3 closed: the encap key holder signs their ML-KEM-768 encap key with their
+// MLS Ed25519 identity key. Peers MUST call ml_kem_768_verify_encap_key before
+// encapsulating to confirm the encap key was not substituted in transit.
+//
+// Sign:  SIGN_DOMAIN || 0x00 || ek_bytes, signed with identity's Ed25519 key.
+// Verify: same message reconstruction, verify against peer's known public key.
+//
+// The private signing key stays in MLS_CTX (never crosses WASM-JS boundary).
+// The 64-byte signature and 32-byte public key are public data.
+
+/// Sign an ML-KEM-768 encapsulation key with the identity's MLS Ed25519 signing key.
+///
+/// `identity_id`: string returned by `mls_init_identity`.
+/// `encap_key`: 1184 bytes (from `ml_kem_768_keygen_v2`).
+///
+/// Returns `{ signature: Uint8Array }` — 64-byte Ed25519 signature over
+/// `"powehi-kem-ek-v1" || 0x00 || encap_key`.
+///
+/// The private signing key stays inside the WASM worker (MLS_CTX) and never
+/// crosses the WASM-JS boundary.  Distribute the signature alongside the encap
+/// key so peers can call `ml_kem_768_verify_encap_key` before encapsulating.
+#[wasm_bindgen]
+pub fn ml_kem_768_sign_encap_key(
+    identity_id: &str,
+    encap_key: &[u8],
+) -> Result<JsValue, JsError> {
+    let signature = MLS_CTX.with(|ctx| -> Result<Vec<u8>, JsError> {
+        let ctx = ctx.borrow();
+        let c = ctx
+            .get(identity_id)
+            .ok_or_else(|| js_err("unknown mls identity"))?;
+        kem_credential::sign_encap_key(encap_key, &c.identity.signer)
+            .map_err(js_err)
+    })?;
+    js_obj(&[("signature", bytes_js(&signature))])
+}
+
+/// Verify an ML-KEM-768 encapsulation-key signature.
+///
+/// `encap_key`: 1184 bytes — the encap key to authenticate.
+/// `signature`: 64 bytes — Ed25519 signature from `ml_kem_768_sign_encap_key`.
+/// `sig_pub_key`: 32 bytes — the signer's Ed25519 public key.  Obtain from
+///    `mls_group_members` (`sigKeyHex` field, hex-decoded) using the expected
+///    member's leaf index.  NEVER accept this value from an untrusted source.
+///
+/// Returns `{ valid: boolean }`.
+/// `valid: true`  — the signature is correct; the encap key is authentic.
+/// `valid: false` — the encap key was NOT signed by the claimed identity; do
+///    NOT encapsulate under it (key substitution attack — ADR-0003 Phase B, Y-3).
+///
+/// This function only checks the signature mathematics, not the trust anchor.
+/// The caller is responsible for sourcing `sig_pub_key` from the verified MLS
+/// group roster.  A temporary stateless provider is used — no identity needed.
+#[wasm_bindgen]
+pub fn ml_kem_768_verify_encap_key(
+    encap_key: &[u8],
+    signature: &[u8],
+    sig_pub_key: &[u8],
+) -> Result<JsValue, JsError> {
+    let provider = OpenMlsRustCrypto::default();
+    let valid = kem_credential::verify_encap_key(encap_key, signature, sig_pub_key, &provider)
+        .map_err(js_err)?;
+    js_obj(&[("valid", JsValue::from_bool(valid))])
+}
+
 // ── Session lifecycle ──────────────────────────────────────────────────────────
 
 /// Clear all MLS, OPAQUE, and ML-KEM session state from the WASM heap on logout.
@@ -1116,6 +1184,44 @@ mod tests {
             0,
             "KEM_SHARED_SECRETS must be empty after mls_clear_session"
         );
+    }
+
+    // ── ML-KEM-768 signed encap key (ADR-0003 Phase B, Y-3) ──────────────────
+
+    /// sign_encap_key + verify_encap_key via internal state: valid sig accepted.
+    #[test]
+    fn test_ml_kem_sign_verify_via_internal_state() {
+        let provider = OpenMlsRustCrypto::default();
+        let identity = generate_identity(b"sign-test-identity", &provider).unwrap();
+        let ek = vec![0u8; kem::EK_SIZE];
+        let sig = kem_credential::sign_encap_key(&ek, &identity.signer)
+            .expect("signing must succeed");
+        assert_eq!(sig.len(), 64, "Ed25519 signature must be 64 bytes");
+        let pub_key = identity.signer.to_public_vec();
+        let valid = kem_credential::verify_encap_key(&ek, &sig, &pub_key, &provider)
+            .expect("verify must not error");
+        assert!(valid, "valid signature must be accepted");
+    }
+
+    /// Wrong public key → verify returns false (key substitution is rejected).
+    #[test]
+    fn test_ml_kem_verify_wrong_pub_key_returns_false() {
+        let (provider, signer) = {
+            let p = OpenMlsRustCrypto::default();
+            let id = generate_identity(b"signer-identity", &p).unwrap();
+            (p, id.signer)
+        };
+        let ek = vec![0u8; kem::EK_SIZE];
+        let sig = kem_credential::sign_encap_key(&ek, &signer)
+            .expect("signing must succeed");
+
+        let provider2 = OpenMlsRustCrypto::default();
+        let attacker = generate_identity(b"attacker-identity", &provider2).unwrap();
+        let wrong_pub = attacker.signer.to_public_vec();
+
+        let valid = kem_credential::verify_encap_key(&ek, &sig, &wrong_pub, &provider)
+            .expect("verify must not error");
+        assert!(!valid, "wrong public key must cause verification to fail");
     }
 
     // ── Safety Numbers ────────────────────────────────────────────────────────

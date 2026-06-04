@@ -30,6 +30,9 @@ export type MlsSafetyNumberResult = { safetyNumber: string };
 export type MlKemKeygenV2Result = { encapKey: Uint8Array; decapKeyHandle: string };
 export type MlKemEncapV2Result = { ciphertext: Uint8Array; sharedSecretHandle: string };
 export type MlKemDecapV2Result = { sharedSecretHandle: string };
+// ADR-0003 Phase B, Y-3: signed encap key credential.
+export type MlKemSignResult = { signature: Uint8Array };
+export type MlKemVerifyResult = { valid: boolean };
 
 // ── Internal WASM raw return types (include exportKey — consumed in worker) ──
 
@@ -73,6 +76,13 @@ interface WasmModule {
 	ml_kem_768_decap_v2: (decapKeyHandle: string, ciphertext: Uint8Array) => MlKemDecapV2Result;
 	ml_kem_768_drop_decap_key: (handle: string) => void;
 	ml_kem_768_drop_shared_secret: (handle: string) => void;
+	// ADR-0003 Phase B, Y-3: signed encap key credential.
+	ml_kem_768_sign_encap_key: (identityId: string, encapKey: Uint8Array) => MlKemSignResult;
+	ml_kem_768_verify_encap_key: (
+		encapKey: Uint8Array,
+		signature: Uint8Array,
+		sigPubKey: Uint8Array,
+	) => MlKemVerifyResult;
 }
 
 // ── IndexedDB key — held inside the worker, never crosses to main thread ─────
@@ -425,6 +435,44 @@ const api = {
 	async mlKem768DropSharedSecret(handle: string): Promise<void> {
 		const wasm = await getWasm();
 		wasm.ml_kem_768_drop_shared_secret(handle);
+	},
+
+	// ── ML-KEM-768 Phase B: signed encap key (ADR-0003 Phase B, Y-3 fix) ─────
+	//
+	// These methods close Y-3: the encap key holder authenticates the encap key
+	// by signing it with the MLS Ed25519 identity key. Peers MUST verify the
+	// signature before encapsulating to prevent key substitution attacks.
+
+	/**
+	 * Sign an ML-KEM-768 encap key with the identity's MLS Ed25519 signing key.
+	 * identityId: from mlsInitIdentity; encapKey: 1184 bytes from mlKem768KeygenV2.
+	 * Returns { signature: 64 bytes }.
+	 * The private signing key stays inside the WASM worker (ADR-0003 Phase B, Y-3).
+	 * Distribute the signature alongside the encap key so peers can verify it.
+	 */
+	async mlKem768SignEncapKey(
+		identityId: string,
+		encapKey: Uint8Array,
+	): Promise<MlKemSignResult> {
+		const wasm = await getWasm();
+		return wasm.ml_kem_768_sign_encap_key(identityId, encapKey);
+	},
+
+	/**
+	 * Verify an ML-KEM-768 encap key signature before encapsulating.
+	 * encapKey: 1184 bytes. signature: 64 bytes from mlKem768SignEncapKey.
+	 * sigPubKey: 32 bytes — the signer's Ed25519 public key from the MLS roster
+	 *   (mls_group_members sigKeyHex, hex-decoded). MUST come from a trusted source.
+	 * Returns { valid: boolean }.
+	 * If valid is false, the encap key was substituted — do NOT encapsulate under it.
+	 */
+	async mlKem768VerifyEncapKey(
+		encapKey: Uint8Array,
+		signature: Uint8Array,
+		sigPubKey: Uint8Array,
+	): Promise<MlKemVerifyResult> {
+		const wasm = await getWasm();
+		return wasm.ml_kem_768_verify_encap_key(encapKey, signature, sigPubKey);
 	},
 };
 

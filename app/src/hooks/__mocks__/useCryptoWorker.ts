@@ -40,6 +40,15 @@ const mockWorker = {
 	}),
 	mlKem768DropDecapKey: async (_handle: string) => {},
 	mlKem768DropSharedSecret: async (_handle: string) => {},
+	// ADR-0003 Phase B, Y-3: signed encap key credential mocks.
+	mlKem768SignEncapKey: async (_identityId: string, _encapKey: Uint8Array) => ({
+		signature: new Uint8Array(64),
+	}),
+	mlKem768VerifyEncapKey: async (
+		_encapKey: Uint8Array,
+		_signature: Uint8Array,
+		_sigPubKey: Uint8Array,
+	) => ({ valid: true }),
 };
 
 export const useCryptoWorker = () => mockWorker;
