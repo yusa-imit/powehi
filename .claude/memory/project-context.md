@@ -17,6 +17,24 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-04, cycle 90 — STABILIZATION: ML-KEM-768 crypto-review pass + test gap closure)
+- **Cycle 90 (STABILIZATION):** CI green, cargo audit clean (1 allowed: instant/openmls), no open issues. Two changes:
+  - **Test gap closed:** `mlKem768Keygen/Encap/Decap` in `crypto.worker.ts` (added cycle 88) had zero frontend tests. Added `app/src/workers/mlKem768.test.ts` — 5 API-contract tests verifying FIPS 203 §2.4 byte sizes (EK=1184, DK=2400, CT=1088, SS=32) through the standard mock proxy.
+  - **Race condition fixed:** `usePersistentMessages.test.ts` `persistIncoming adds message to rows immediately` was failing intermittently — same root cause as the cycle-84 dedup race (initial `getMessagesByGroup` useEffect resolving inside `act()` and overriding the optimistic `setRows([row])`). Fix: added `await act(async () => {})` pre-flush before the `persistIncoming` call.
+  - **crypto-reviewer on ML-KEM-768 (kem.rs + wasm_exports.rs + crypto.worker.ts):** PASS — GREEN on all correctness criteria (FIPS 203 §2.4 sizes, key-type ordering, OsRng/CSPRNG, implicit rejection, encapsulation randomness, length validation, Zeroizing, no homegrown crypto, no plaintext logging, §7.2 caveat disclosed). 6 YELLOW advisories — ALL scoped to Phase B (not blocking Phase A):
+    - Y-1: decapKey/sharedSecret cross worker boundary as raw Uint8Array (Phase B must use opaque-handle pattern like MlsContext)
+    - Y-2: Transient `Encoded<Dk768>` stack array not zeroized (WASM linear-memory residue, already documented)
+    - Y-3: Encap key not authenticated before use (acknowledged in comment; Phase B hybrid handshake must bind ek to signed credential)
+    - Y-4: ZeroizeOnDrop round-trip through from_bytes (no action needed — documented)
+    - Y-5: No FIPS 203 §A.3 KAT vectors (add at least one for Phase B)
+    - Y-6: ml-kem 0.2.3 is pre-1.0 (pin exact version for Phase B)
+  - **security-auditor on handle-oracle Postgres + ML-KEM-768:** PASS — all GREEN. SQL injection: parameterized queries, no string concat. No plaintext logging of key/value_bytes. First-boot race: ON CONFLICT DO NOTHING + re-read is safe. Error messages: no key bytes. Authorization: server_config table unreachable from REST/gRPC/WS (server-process only). No RED findings.
+  - **353 Rust tests** (unchanged non-ignored), **135 frontend tests** (+5 ML-KEM, +0 other); Biome clean; clippy clean; rustfmt clean.
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+    - ML-KEM-768 Phase B prerequisites (Y-1 through Y-6 above — Phase A test surface only)
+
 ## Current state (2026-06-04, cycle 87 — FEATURE: persist handle-oracle secret in Postgres — closes YELLOW-2)
 - **Cycle 87 (commit 9c2a47f):** Closed YELLOW-2: handle oracle cross-restart oracle fix.
   - **Root cause:** If `POWEHI__HANDLE_ORACLE_SECRET_TOKEN` env var was not set, `main.rs` generated a fresh random 32-byte HMAC key each restart. Consecutive `login_init` calls for the same unknown handle across a server restart would get different synthetic `UserId` values — distinguishable from known handles, breaking the anti-enumeration guarantee.
