@@ -18,6 +18,12 @@ const mockWorker = {
 	}),
 	dropDbKey: async () => {},
 	clearSessionState: async () => {},
+	mlKem768Keygen: async () => ({ encapKey: new Uint8Array(1184), decapKey: new Uint8Array(2400) }),
+	mlKem768Encap: async () => ({
+		ciphertext: new Uint8Array(1088),
+		sharedSecret: new Uint8Array(32),
+	}),
+	mlKem768Decap: async () => ({ sharedSecret: new Uint8Array(32) }),
 };
 
 export const useCryptoWorker = () => mockWorker;

@@ -18,6 +18,8 @@ serde_bytes = "0.11"
 thiserror = { workspace = true }
 sha2 = { workspace = true }
 zeroize = { workspace = true }
+# Post-quantum KEM (FIPS 203 ML-KEM-768)
+ml-kem = { workspace = true }
 # OPAQUE (RFC 9807) — pure Rust, compiles on native + wasm32. No homegrown crypto.
 opaque-ke = { workspace = true, features = ["ristretto255-voprf", "argon2", "serde", "std"] }
 # Argon2 KSF type used in the OPAQUE ciphersuite definition.

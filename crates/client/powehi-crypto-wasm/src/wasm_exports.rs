@@ -23,6 +23,7 @@ use openmls_rust_crypto::OpenMlsRustCrypto;
 use wasm_bindgen::prelude::*;
 use zeroize::Zeroizing;
 
+use crate::kem;
 use crate::mls_group::{
     add_member, create_group, decrypt_message, encrypt_message, generate_identity,
     generate_key_package, join_group, Identity,
@@ -502,6 +503,82 @@ pub fn mls_group_members(identity_id: &str, group_id: &str) -> Result<JsValue, J
 pub fn mls_compute_safety_number(sig_key_a: &[u8], sig_key_b: &[u8]) -> Result<JsValue, JsError> {
     let safety_number = compute_safety_number_inner(sig_key_a, sig_key_b).map_err(js_err)?;
     js_obj(&[("safetyNumber", JsValue::from_str(&safety_number))])
+}
+
+// ── ML-KEM-768 exports (ADR-0003 Phase A: PQ KEM primitives) ──────────────────
+//
+// These standalone KEM operations are independent of the MLS or OPAQUE flows.
+// They expose the building blocks for post-quantum hybrid key exchange, to be
+// integrated with openmls when it gains an ML-KEM ciphersuite.
+//
+// PHASE-A TEST-SURFACE ONLY — NOT FOR PRODUCTION USE:
+// Unlike MLS operations (which keep all key material inside the worker via MlsContext),
+// these functions return raw key material (decapKey, sharedSecret) to the JS caller.
+// This violates the react-hooks-only.md invariant that "raw key material must never
+// appear in React component scope" if the caller is in the main thread.
+// Before production use, these primitives must be wrapped in a higher-level hybrid
+// KEM flow (e.g. X25519+ML-KEM combined handshake) that keeps all intermediate key
+// material inside the worker, mirroring the MlsContext pattern.  ADR-0003 Phase B
+// will define that higher-level API; these exports exist solely to validate the
+// underlying FIPS 203 primitives.
+
+/// Generate an ML-KEM-768 keypair (FIPS 203).
+///
+/// Returns `{ encapKey: Uint8Array, decapKey: Uint8Array }`.
+/// - `encapKey` (1184 bytes): distribute to the peer who will encapsulate.
+/// - `decapKey` (2400 bytes): keep secret; pass to `ml_kem_768_decap`.
+///
+/// Uses the browser CSPRNG via getrandom (same path as OPAQUE and MLS).
+/// Security note: `decapKey` is copied to the JS heap as a Uint8Array.
+/// The Rust-side Zeroizing buffer is zeroed on drop, but the JS copy is
+/// not zeroed automatically — callers should zero `decapKey` after use
+/// via `decapKey.fill(0)`.
+#[wasm_bindgen]
+pub fn ml_kem_768_keygen() -> Result<JsValue, JsError> {
+    let pair = kem::generate();
+    js_obj(&[
+        ("encapKey", bytes_js(&pair.encap_key)),
+        ("decapKey", bytes_js(&pair.decap_key)),
+    ])
+}
+
+/// Encapsulate a shared secret under the given ML-KEM-768 encapsulation key.
+///
+/// `encap_key` must be exactly 1184 bytes (output of `ml_kem_768_keygen`).
+///
+/// Returns `{ ciphertext: Uint8Array, sharedSecret: Uint8Array }`.
+/// - `ciphertext` (1088 bytes): send to the decapsulation-key holder.
+/// - `sharedSecret` (32 bytes): the locally derived shared key.
+///
+/// Security note: `sharedSecret` is sensitive. The JS copy should be
+/// zeroed (`sharedSecret.fill(0)`) after the key material has been consumed.
+#[wasm_bindgen]
+pub fn ml_kem_768_encap(encap_key: &[u8]) -> Result<JsValue, JsError> {
+    let (ct, ss) = kem::encapsulate(encap_key).map_err(js_err)?;
+    js_obj(&[
+        ("ciphertext", bytes_js(&ct)),
+        ("sharedSecret", bytes_js(&ss)),
+    ])
+}
+
+/// Decapsulate a shared secret from a ciphertext using the ML-KEM-768 decapsulation key.
+///
+/// `decap_key` must be exactly 2400 bytes (output of `ml_kem_768_keygen`).
+/// `ciphertext` must be exactly 1088 bytes (output of `ml_kem_768_encap`).
+///
+/// Returns `{ sharedSecret: Uint8Array }` — the 32-byte recovered shared key.
+///
+/// ML-KEM uses implicit rejection (FIPS 203 §6.3.3): decapsulating with the
+/// wrong key still returns success, but the shared secret is a pseudorandom
+/// value unrelated to the encapsulator's secret. Callers must not use a decap
+/// error as proof of message integrity — use an authenticated AEAD scheme
+/// (e.g. AES-256-GCM) on top of the shared secret for that guarantee.
+///
+/// Security note: zero `sharedSecret` after use (`sharedSecret.fill(0)`).
+#[wasm_bindgen]
+pub fn ml_kem_768_decap(decap_key: &[u8], ciphertext: &[u8]) -> Result<JsValue, JsError> {
+    let ss = kem::decapsulate(decap_key, ciphertext).map_err(js_err)?;
+    js_obj(&[("sharedSecret", bytes_js(&ss))])
 }
 
 // ── Session lifecycle ──────────────────────────────────────────────────────────

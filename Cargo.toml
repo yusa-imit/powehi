@@ -74,6 +74,10 @@ argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 sha2 = "0.10"
 hmac = "0.12"
 zeroize = { version = "1", features = ["derive"] }
+# Post-quantum KEM (FIPS 203 ML-KEM-768) — approved per crypto-libraries-pinned.md.
+# zeroize feature: derives Zeroize+ZeroizeOnDrop on DecapsulationKey, DecryptionKey,
+# and their internals (s_hat secret polynomial) — required for key-material hygiene.
+ml-kem = { version = "0.2", features = ["zeroize"] }
 # Web Push (RFC 8291 + RFC 8292 VAPID): ES256 signing via RustCrypto p256.
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 # Outbound HTTP for push delivery — rustls only (no openssl, WASM-policy aligned).

@@ -7,6 +7,7 @@
 
 use wasm_bindgen::prelude::*;
 
+pub mod kem;
 pub mod mls_group;
 pub mod opaque;
 pub mod wasm_exports;

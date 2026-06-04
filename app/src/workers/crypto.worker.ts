@@ -59,6 +59,10 @@ interface WasmModule {
 	mls_group_members: (identityId: string, groupId: string) => MlsGroupMember[];
 	mls_compute_safety_number: (sigKeyA: Uint8Array, sigKeyB: Uint8Array) => MlsSafetyNumberResult;
 	mls_clear_session: () => void;
+	// Post-quantum KEM (FIPS 203 ML-KEM-768) — ADR-0003 Phase A primitives.
+	ml_kem_768_keygen: () => { encapKey: Uint8Array; decapKey: Uint8Array };
+	ml_kem_768_encap: (encapKey: Uint8Array) => { ciphertext: Uint8Array; sharedSecret: Uint8Array };
+	ml_kem_768_decap: (decapKey: Uint8Array, ciphertext: Uint8Array) => { sharedSecret: Uint8Array };
 }
 
 // ── IndexedDB key — held inside the worker, never crosses to main thread ─────
@@ -297,6 +301,55 @@ const api = {
 	async clearSessionState(): Promise<void> {
 		const wasm = await getWasm();
 		wasm.mls_clear_session();
+	},
+
+	// ── ML-KEM-768 (FIPS 203) — ADR-0003 Phase A PQ KEM primitives ──────────────
+	//
+	// PHASE-A TEST-SURFACE ONLY — NOT FOR PRODUCTION USE:
+	// These methods return raw key material (decapKey, sharedSecret) across the
+	// Comlink worker boundary to the main thread, which violates the rule that
+	// "raw key material must never appear in React component scope" (react-hooks-only.md).
+	// Production code must NOT call these methods from React components or stores.
+	// They exist solely to validate the FIPS 203 primitives end-to-end.
+	// ADR-0003 Phase B will define a higher-level hybrid KEM API where all intermediate
+	// key material stays inside the worker (mirroring the MLS mlsEncrypt/mlsDecrypt pattern).
+
+	/**
+	 * Generate an ML-KEM-768 keypair.
+	 * Returns { encapKey: 1184 bytes, decapKey: 2400 bytes }.
+	 * Zero decapKey after use: decapKey.fill(0).
+	 * PHASE-A ONLY: decapKey crosses the worker boundary — do not use in production code.
+	 */
+	async mlKem768Keygen(): Promise<{ encapKey: Uint8Array; decapKey: Uint8Array }> {
+		const wasm = await getWasm();
+		return wasm.ml_kem_768_keygen();
+	},
+
+	/**
+	 * Encapsulate a shared secret under the given ML-KEM-768 encapsulation key.
+	 * encapKey must be 1184 bytes (from mlKem768Keygen).
+	 * Returns { ciphertext: 1088 bytes, sharedSecret: 32 bytes }.
+	 * Zero sharedSecret after use: sharedSecret.fill(0).
+	 */
+	async mlKem768Encap(
+		encapKey: Uint8Array,
+	): Promise<{ ciphertext: Uint8Array; sharedSecret: Uint8Array }> {
+		const wasm = await getWasm();
+		return wasm.ml_kem_768_encap(encapKey);
+	},
+
+	/**
+	 * Decapsulate a shared secret from a ciphertext using the ML-KEM-768 decapsulation key.
+	 * decapKey must be 2400 bytes, ciphertext must be 1088 bytes.
+	 * Returns { sharedSecret: 32 bytes }. Zero sharedSecret after use.
+	 * Note: ML-KEM implicit rejection — wrong key returns a pseudorandom secret, not an error.
+	 */
+	async mlKem768Decap(
+		decapKey: Uint8Array,
+		ciphertext: Uint8Array,
+	): Promise<{ sharedSecret: Uint8Array }> {
+		const wasm = await getWasm();
+		return wasm.ml_kem_768_decap(decapKey, ciphertext);
 	},
 };
 
