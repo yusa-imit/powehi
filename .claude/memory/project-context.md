@@ -17,6 +17,42 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-05, cycle 95 — STABILIZATION: CI red fix + crypto test gap closure)
+- **Cycle 95 (commits a0d4645, 30ffa1a):** STABILIZATION — CI was RED on both Rust + Frontend pipelines since cycle-94 commit (e8bb982). Fixed:
+  - **Rust CI fix (a0d4645):** `cargo fmt` stable 1.96.0 emitted diffs for 3 files added in cycle 94:
+    - `kem_credential.rs`: `sign_encap_key` params collapsed to one line (fits ≤100 chars), `tampered_encap_key_rejects_signature` let-binding style, `assert_ne!` expanded to 3-line macro form
+    - `wasm_exports.rs`: `ml_kem_768_sign_encap_key` params on one line, two method-chain test assertions flattened
+  - **Frontend CI fix (a0d4645):** Biome line-width violation — `mlKem768SignEncapKey` method signature in `crypto.worker.ts` collapsed to one line.
+  - **crypto-reviewer sweep (GREEN) on `kem_credential.rs`:** All cryptographic properties verified: domain separation sound (`SIGN_DOMAIN || 0x00 || ek`), signing uses openmls Signer trait correctly, verification correctly collapses `InvalidSignature`/`CryptoLibraryError` → `Ok(false)`, input validation complete. No RFC 9420 violations. Two YELLOW test gaps identified (non-blocking):
+    - YELLOW-a: No cross-protocol domain-separation regression test → CLOSED this cycle
+    - YELLOW-b: No KAT for sign output wire format → deferred to next cycle
+  - **New tests (30ffa1a):**
+    - `kem_credential.rs`: `raw_signature_without_domain_is_rejected` — signs `ek_bytes` without domain prefix and asserts `verify_encap_key` returns `Ok(false)` (domain-separation regression)
+    - `wasm_exports.rs`: `test_ml_kem_sign_unknown_identity_returns_error` — confirms `MLS_CTX.get()` returns `None` for unregistered identity_id (WASM export fail-closed path)
+  - **cargo audit:** clean (1 allowed: instant/openmls unmaintained, unchanged)
+  - **53 WASM tests** (+2 new, was 51 before cycle 94 formatting; cycle 94 added sign/verify tests); **152 frontend tests** unchanged; rustfmt clean; Biome clean; clippy clean.
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+    - ML-KEM-768 Phase B remaining prerequisites:
+      - Y-3 CLOSED (cycle 94): Encap key authentication via Ed25519 sign/verify implemented
+      - Y-5 follow-up: NIST ACVP conformance KAT (official vectors from ACVP-Server)
+      - Y-8: Unbounded KEM_SHARED_SECRETS growth on repeated decap (Phase C rate limiting)
+      - Y-9: Zeroizing buffer-zero verification in tests (unsafe ptr test, future work)
+      - YELLOW-b: KAT for ml_kem_sign_encap_key output wire format (deferred from cycle 95)
+
+## Current state (2026-06-04, cycle 94 — FEATURE: ADR-0003 Phase B — ML-KEM encap key authentication, Y-3 closed)
+- **Cycle 94 (commit e8bb982):** ADR-0003 Phase B — closed Y-3 from cycle-90 crypto-reviewer (encap key not authenticated):
+  - **Y-3 CLOSED:** New module `kem_credential.rs` — `sign_encap_key(ek_bytes, signer)` signs `SIGN_DOMAIN || 0x00 || ek_bytes` with MLS Ed25519 identity key; `verify_encap_key(ek, sig, pub_key, provider)` verifies. Domain `b"powehi-kem-ek-v1"` with NUL separator prevents cross-protocol reuse and prefix extension.
+  - **WASM exports:** `ml_kem_768_sign_encap_key(identity_id, encap_key)` → `{signature: 64 bytes}`; `ml_kem_768_verify_encap_key(encap_key, signature, sig_pub_key)` → `{valid: boolean}`. Private signing key stays in MLS_CTX; signature (public) may cross WASM-JS boundary.
+  - **`crypto.worker.ts`:** `mlKem768SignEncapKey(identityId, encapKey)` and `mlKem768VerifyEncapKey(encapKey, signature, sigPubKey)` added to Comlink API.
+  - **+5 frontend tests** in `mlKem768Credential.test.ts`: API contract tests (signature size, no private key in result, verify returns boolean, round-trip mock, no key material in verify result).
+  - **+11 Rust unit tests** in `kem_credential.rs`: round-trip, determinism, wrong-pubkey, tampered-ek, tampered-sig, cross-key isolation, input validation.
+  - **+2 WASM tests** in `wasm_exports.rs`: sign+verify via internal state, wrong-pubkey via internal state.
+  - **crypto-reviewer:** PASS (GREEN, cycle 95 sweep) — see cycle 95 entry above.
+  - **CI FAILURE (fixed in cycle 95):** rustfmt stable 1.96.0 + Biome line-width violations — formatting-only, no logic changed.
+  - **Remaining deferred security findings (YELLOW):** see cycle 95 entry above.
+
 ## Current state (2026-06-04, cycle 93 — FEATURE: ADR-0003 Phase B — ML-KEM opaque-handle pattern, Y-1 closed)
 - **Cycle 93 (commit 36277ae):** ADR-0003 Phase B — closed Y-1 from cycle-90 crypto-reviewer (raw ML-KEM key bytes crossed WASM-JS boundary):
   - **Y-1 CLOSED:** New opaque-handle API: `ml_kem_768_keygen_v2` returns `{encapKey, decapKeyHandle}`, `ml_kem_768_encap_v2` returns `{ciphertext, sharedSecretHandle}`, `ml_kem_768_decap_v2(handle, ct)` returns `{sharedSecretHandle}`. Raw decap keys (2400 bytes) and shared secrets (32 bytes) are stored in `KEM_DECAP_KEYS` and `KEM_SHARED_SECRETS` thread-locals (`Zeroizing<Vec<u8>>`) — never returned to JS.
