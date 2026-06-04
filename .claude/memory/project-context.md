@@ -17,6 +17,25 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-04, cycle 92 — FEATURE: ADR-0003 Phase B — ml-kem version pin + regression KAT)
+- **Cycle 92 (commit 9136790):** ADR-0003 Phase B — closed Y-5 (partial) and Y-6 from cycle-90 crypto-reviewer:
+  - **Y-6 CLOSED:** `ml-kem` workspace dep tightened from `"0.2"` to `"=0.2.3"` in `Cargo.toml`. Prevents silent `cargo update` to a future 0.2.x that could shift KAT output or introduce behavioral differences. The Cargo.lock checksum `8de49b3df74c35498c0232031bb7e85f9389f913e2796169c8ab47a53993a18f` is now the authoritative pin.
+  - **Y-5 PARTIALLY CLOSED:** Added `kem::kat_tests::ml_kem_768_regression_kat_fixed_seed` — uses `generate_deterministic(d, z)` + `encapsulate_deterministic(m)` with fixed seeds (d=0x00..1f, z=0x20..3f, m=0x40..5f) to pin:
+    - First 16 bytes of encapsulation key (supply-chain / tamper detection)
+    - Full 32-byte shared secret captured from ml-kem 0.2.3
+    - Verifies: key sizes (FIPS 203 §2.4), encap/decap agreement, determinism
+  - **`deterministic` feature added to `[dev-dependencies]`** in `powehi-crypto-wasm/Cargo.toml` only — NOT compiled into production WASM binary.
+  - **crypto-reviewer:** PASS — no RED findings. Y-5 partially closed (self-consistency / supply-chain guard; NOT a NIST ACVP conformance test — full FIPS 203 §A.3 conformance via official vectors is Y-5 follow-up). No production code changed.
+  - **354 Rust tests** (+1 KAT test; was 353 non-ignored); clippy clean; rustfmt clean.
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+    - ML-KEM-768 Phase B remaining prerequisites:
+      - Y-1: decapKey/sharedSecret cross worker boundary as raw Uint8Array (opaque-handle pattern, Phase B architecture)
+      - Y-2: Transient stack array (documented, no action needed)
+      - Y-3: Encap key not authenticated (Phase B hybrid handshake)
+      - Y-5 follow-up: NIST ACVP conformance KAT (official vectors from ACVP-Server)
+
 ## Current state (2026-06-04, cycle 91 — STABILIZATION: CI red fix — mlKem768 mock TS2554)
 - **Cycle 91 (STABILIZATION — CI was RED):** Frontend CI was RED on Bundle budget check step.
   - **Root cause:** `app/src/hooks/__mocks__/useCryptoWorker.ts` declared `mlKem768Encap` and `mlKem768Decap` with zero parameters. Tests in `mlKem768.test.ts` (added cycle 90) call them with arguments (`encapKey`, `decapKey+ciphertext`). TypeScript strict mode emits TS2554 "Expected 0 arguments, but got N" during `tsc -b`.
