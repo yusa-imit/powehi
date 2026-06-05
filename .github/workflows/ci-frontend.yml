@@ -126,3 +126,25 @@ jobs:
 
       - name: wasm-pack build (--target web)
         run: wasm-pack build crates/client/powehi-crypto-wasm --target web
+
+  wasm-test:
+    name: WASM bindgen tests (wasm-pack test --node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: wasm-pack test (--node)
+        run: wasm-pack test --node crates/client/powehi-crypto-wasm
