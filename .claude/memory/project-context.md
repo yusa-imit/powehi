@@ -17,6 +17,20 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-06, cycle 104 — FEATURE: close Cookie + case-insensitive auth header advisories)
+- **Cycle 104 (commit a23a5ee):** Closed the two non-blocking advisories filed by security-auditor in cycle 103:
+  - **Cookie header absence CLOSED:** `regInit`, `regFinish`, `loginInit`, `loginFinish` each assert `headers?.Cookie` is `undefined` — guards against future refactors that accidentally attach session cookies to unauthenticated requests.
+  - **Lowercase authorization absence CLOSED:** `regInit`, `regFinish`, `loginInit`, `loginFinish` each assert `headers?.authorization` (lowercase) is `undefined` — closes the case-insensitive gap. If code ever sets `"authorization": token` instead of `"Authorization": token`, the test fails.
+  - **security-auditor:** PASS — GREEN, no RED/YELLOW blockers. Two informational findings deferred to next cycle: (1) header-shape coupling (if fetch init migrates to `Headers` instance, property access semantics differ); (2) lowercase `cookie` and `credentials: "include"` absence assertions.
+  - **189 frontend tests** (+8, was 181); Biome clean; tsc clean; security-auditor PASS.
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+    - ML-KEM-768 Phase C remaining:
+      - Y-9: Zeroizing buffer-zero verification in tests (unsafe ptr test, future work)
+      - Y-ACVP-2: ACVP vector provenance — upstream encap-decap.json not vendored in-tree
+    - Future auth test hardening (next cycle): lowercase `cookie` check, `credentials: "include"` absence, `Object.keys(headers)` comprehensive assertion
+
 ## Current state (2026-06-06, cycle 103 — FEATURE: close 5 auth API security-auditor YELLOWs from cycle 102)
 - **Cycle 103 (commit 0b014fd):** Closed all 5 YELLOW advisories filed by security-auditor in cycle 102:
   - **Token not-in-URL CLOSED:** `uploadKeyPackage` test asserts Bearer token does not appear in the request URL (must be in Authorization header only).
