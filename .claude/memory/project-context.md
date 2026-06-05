@@ -17,6 +17,24 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-05, cycle 100 — STABILIZATION: NIST ACVP ML-KEM-768 KAT — closes Y-5 (ADR-0003 Phase C))
+- **Cycle 100 (commit 87ecdcd):** STABILIZATION — CI GREEN, no open issues. Closed Y-5 (NIST ACVP conformance KAT):
+  - **Y-5 CLOSED:** New `mod acvp_kat_tests` in `kem.rs` — 2 `#[test]` functions (cfg(test) only, not in prod WASM binary):
+    - `ml_kem_768_nist_acvp_encap_conformance`: FIPS 203 §6.2 ML-KEM.Encaps_internal — uses `EncapsulateDeterministic` with NIST-sourced `(ek, m)` from RustCrypto/KEMs ml-kem/tests/encap-decap.json (mirrors usnistgov/ACVP-Server@65370b8), tcId 26. Verifies `(ct, ss)` matches NIST expected output.
+    - `ml_kem_768_nist_acvp_decap_conformance`: FIPS 203 §6.3 — uses NIST-sourced `(dk, ct)`, verifies `ss` matches. Together these close Y-5 for both encap+decap directions.
+  - **Key correctness:** Vectors independently computed by NIST (not self-consistent like the regression KAT). A FIPS 203-non-conformant ml-kem cannot produce correct output even if self-consistency passes. `EncapsulateDeterministic` exercises ML-KEM.Encaps_internal (FIPS 203 Alg. 17) exactly. `Ciphertext<MlKem768>` is the correct public type (consistent with production `decapsulate()`).
+  - **Compilation fix:** Changed `ml_kem::kem::EncodedCiphertext<MlKem768Params>` (private type) to `Ciphertext<MlKem768>` (public) in ACVP decap test.
+  - **cargo audit:** clean (1 allowed: instant/openmls unmaintained, unchanged).
+  - **crypto-reviewer:** PASS — GREEN on all criteria. Y-ACVP-1 (is_multiple_of Rust ≥1.87, non-blocking: CI @stable ≥1.87) and Y-ACVP-2 (vector provenance comment advisory) filed below.
+  - **59 Rust tests** (+2 ACVP KAT; was 57); rustfmt clean; clippy clean (is_multiple_of fix applied).
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+    - ML-KEM-768 Phase C remaining:
+      - Y-9: Zeroizing buffer-zero verification in tests (unsafe ptr test, future work)
+      - Y-ACVP-1: Workspace has no `rust-version` field; `is_multiple_of` requires ≥1.87 (CI @stable is fine; advisory only)
+      - Y-ACVP-2: ACVP vector provenance — upstream encap-decap.json not vendored in-tree (add SHA256 comment or fixture in future)
+
 ## Current state (2026-06-05, cycle 98 — FEATURE: wasm-bindgen cap tests — closes YELLOW-2 (ADR-0003 Phase C))
 - **Cycle 98 (commit 2f57c52):** FEATURE — closed YELLOW-2 from cycle-97 crypto-reviewer (no wasm-bindgen integration test verifying cap→JsError at the JS boundary):
   - **YELLOW-2 CLOSED:** New file `crates/client/powehi-crypto-wasm/tests/wasm_bindgen_tests.rs` — 2 `#[wasm_bindgen_test]` integration tests:
