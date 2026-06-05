@@ -17,6 +17,25 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-06, cycle 102 — FEATURE: auth API client tests + workspace MSRV — closes Y-ACVP-1)
+- **Cycle 102 (commit da59613):** Closed advisory Y-ACVP-1 and filled auth API test gap:
+  - **Y-ACVP-1 CLOSED:** Added `rust-version = "1.87"` to `[workspace.package]` in root `Cargo.toml`. Formalises the minimum Rust version required by `is_multiple_of` (stabilised in Rust 1.87, used in `powehi-crypto-wasm`). CI @1.96.0 already satisfied; this pins the contract.
+  - **Test gap CLOSED:** New `app/src/api/auth.test.ts` — 21 tests covering the full OPAQUE auth API client (`hashHandle`, `regInit`, `regFinish`, `loginInit`, `loginFinish`, `uploadKeyPackage`). Previously the only coverage was in `Login.test.tsx` which mocked all these functions.
+  - **Security invariants tested:**
+    - Sentinel-string assertions: plaintext handle never appears in `regInit`/`loginInit` request body
+    - `handle_hash` is a 32-element number array (not a string) in all protocol messages
+    - `loginFinish` maps server `"unauthorized"` → `"invalid_credentials"` (prevents user-not-found oracle)
+    - `uploadKeyPackage` non-fatal on HTTP failure (does not throw)
+    - HTTP status code is logged on KP upload failure, not key bytes
+  - **security-auditor:** PASS — GREEN on all 5 checks. Five YELLOW advisories for future test-author symmetry work (token not-in-URL assertion, regFinish wire shape, body shape for loginFinish/regFinish, log args count check, pre-auth endpoints don't attach tokens). All non-blocking.
+  - **173 frontend tests** (+21, was 152); Biome clean; tsc clean.
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+    - ML-KEM-768 Phase C remaining:
+      - Y-9: Zeroizing buffer-zero verification in tests (unsafe ptr test, future work)
+      - Y-ACVP-2: ACVP vector provenance — upstream encap-decap.json not vendored in-tree
+
 ## Current state (2026-06-05, cycle 101 — STABILIZATION: CI red fix — rustfmt 1.96.0 assert! formatting in ACVP KAT)
 - **Cycle 101 (commit 67da97e):** CI was RED on Format check since cycle 100. Root cause: Rust stable updated to 1.96.0 (2026-05-28), which reformats single-line `assert!(condition, message)` with both args to a 3-line block. Fixed `kem.rs:449` `from_hex` helper in `acvp_kat_tests` module. `cargo fmt --all --check` passes; all tests green (59 Rust tests in crypto-wasm, full workspace clean). No security/logic changes.
   - **Advisory:** Y-ACVP-1 (is_multiple_of Rust ≥1.87) confirmed non-blocking — CI now on 1.96.0 which satisfies.
