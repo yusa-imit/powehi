@@ -17,6 +17,16 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-05, cycle 101 — STABILIZATION: CI red fix — rustfmt 1.96.0 assert! formatting in ACVP KAT)
+- **Cycle 101 (commit 67da97e):** CI was RED on Format check since cycle 100. Root cause: Rust stable updated to 1.96.0 (2026-05-28), which reformats single-line `assert!(condition, message)` with both args to a 3-line block. Fixed `kem.rs:449` `from_hex` helper in `acvp_kat_tests` module. `cargo fmt --all --check` passes; all tests green (59 Rust tests in crypto-wasm, full workspace clean). No security/logic changes.
+  - **Advisory:** Y-ACVP-1 (is_multiple_of Rust ≥1.87) confirmed non-blocking — CI now on 1.96.0 which satisfies.
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+    - ML-KEM-768 Phase C remaining:
+      - Y-9: Zeroizing buffer-zero verification in tests (unsafe ptr test, future work)
+      - Y-ACVP-2: ACVP vector provenance — upstream encap-decap.json not vendored in-tree (add SHA256 comment or fixture in future)
+
 ## Current state (2026-06-05, cycle 100 — STABILIZATION: NIST ACVP ML-KEM-768 KAT — closes Y-5 (ADR-0003 Phase C))
 - **Cycle 100 (commit 87ecdcd):** STABILIZATION — CI GREEN, no open issues. Closed Y-5 (NIST ACVP conformance KAT):
   - **Y-5 CLOSED:** New `mod acvp_kat_tests` in `kem.rs` — 2 `#[test]` functions (cfg(test) only, not in prod WASM binary):
