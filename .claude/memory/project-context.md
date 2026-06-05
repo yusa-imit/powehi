@@ -17,6 +17,23 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-06, cycle 103 — FEATURE: close 5 auth API security-auditor YELLOWs from cycle 102)
+- **Cycle 103 (commit 0b014fd):** Closed all 5 YELLOW advisories filed by security-auditor in cycle 102:
+  - **Token not-in-URL CLOSED:** `uploadKeyPackage` test asserts Bearer token does not appear in the request URL (must be in Authorization header only).
+  - **regFinish wire shape CLOSED:** New test verifies body fields: `user_id` (string), `opaque_record` and `mls_credential` as number arrays with correct lengths.
+  - **loginFinish body shape CLOSED:** New test verifies `opaque_ke3` is a number array of correct length, `login_nonce` and `device_id` are strings.
+  - **Log args count CLOSED:** `uploadKeyPackage` `console.warn` now asserted to be called with exactly 2 args (prefix + status code) — catches any future key/body/token leak appended to the warn line.
+  - **Pre-auth no-token CLOSED:** `regInit`, `regFinish`, `loginInit`, `loginFinish` each assert `headers?.Authorization` is `undefined`.
+  - **security-auditor:** GREEN — no RED/YELLOW blockers. Two non-blocking advisories for future cycles: (1) assert absence of Cookie header on pre-auth endpoints; (2) case-insensitive `authorization` header check.
+  - **181 frontend tests** (+8, was 173); Biome clean; security-auditor GREEN.
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+    - ML-KEM-768 Phase C remaining:
+      - Y-9: Zeroizing buffer-zero verification in tests (unsafe ptr test, future work)
+      - Y-ACVP-2: ACVP vector provenance — upstream encap-decap.json not vendored in-tree
+    - Future auth test hardening: Cookie header assertion + case-insensitive authorization check
+
 ## Current state (2026-06-06, cycle 102 — FEATURE: auth API client tests + workspace MSRV — closes Y-ACVP-1)
 - **Cycle 102 (commit da59613):** Closed advisory Y-ACVP-1 and filled auth API test gap:
   - **Y-ACVP-1 CLOSED:** Added `rust-version = "1.87"` to `[workspace.package]` in root `Cargo.toml`. Formalises the minimum Rust version required by `is_multiple_of` (stabilised in Rust 1.87, used in `powehi-crypto-wasm`). CI @1.96.0 already satisfied; this pins the contract.
