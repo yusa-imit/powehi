@@ -104,6 +104,22 @@ describe("regInit", () => {
 		expect(headers?.Authorization).toBeUndefined();
 	});
 
+	it("does not send lowercase authorization header (case-insensitive check)", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp({ user_id: USER_ID, opaque_response: [] }));
+		await regInit(HANDLE_HASH, OPAQUE_BYTES);
+		const [, init] = fetchMock.mock.calls[0];
+		const headers = init?.headers as Record<string, string> | undefined;
+		expect(headers?.authorization).toBeUndefined();
+	});
+
+	it("does not send Cookie header (pre-auth endpoint)", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp({ user_id: USER_ID, opaque_response: [] }));
+		await regInit(HANDLE_HASH, OPAQUE_BYTES);
+		const [, init] = fetchMock.mock.calls[0];
+		const headers = init?.headers as Record<string, string> | undefined;
+		expect(headers?.Cookie).toBeUndefined();
+	});
+
 	it("throws server error code on failure", async () => {
 		fetchMock.mockResolvedValueOnce(
 			new Response(JSON.stringify({ code: "conflict" }), { status: 409 }),
@@ -148,6 +164,22 @@ describe("regFinish", () => {
 		const [, init] = fetchMock.mock.calls[0];
 		const headers = init?.headers as Record<string, string> | undefined;
 		expect(headers?.Authorization).toBeUndefined();
+	});
+
+	it("does not send lowercase authorization header (case-insensitive check)", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp({ user_id: USER_ID, device_id: DEVICE_ID }));
+		await regFinish(USER_ID, OPAQUE_BYTES, new Uint8Array(16));
+		const [, init] = fetchMock.mock.calls[0];
+		const headers = init?.headers as Record<string, string> | undefined;
+		expect(headers?.authorization).toBeUndefined();
+	});
+
+	it("does not send Cookie header (pre-auth endpoint)", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp({ user_id: USER_ID, device_id: DEVICE_ID }));
+		await regFinish(USER_ID, OPAQUE_BYTES, new Uint8Array(16));
+		const [, init] = fetchMock.mock.calls[0];
+		const headers = init?.headers as Record<string, string> | undefined;
+		expect(headers?.Cookie).toBeUndefined();
 	});
 
 	it("throws server error code on failure", async () => {
@@ -206,6 +238,26 @@ describe("loginInit", () => {
 		expect(headers?.Authorization).toBeUndefined();
 	});
 
+	it("does not send lowercase authorization header (case-insensitive check)", async () => {
+		fetchMock.mockResolvedValueOnce(
+			jsonResp({ user_id: USER_ID, opaque_ke2: [], login_nonce: NONCE }),
+		);
+		await loginInit(HANDLE_HASH, OPAQUE_BYTES);
+		const [, init] = fetchMock.mock.calls[0];
+		const headers = init?.headers as Record<string, string> | undefined;
+		expect(headers?.authorization).toBeUndefined();
+	});
+
+	it("does not send Cookie header (pre-auth endpoint)", async () => {
+		fetchMock.mockResolvedValueOnce(
+			jsonResp({ user_id: USER_ID, opaque_ke2: [], login_nonce: NONCE }),
+		);
+		await loginInit(HANDLE_HASH, OPAQUE_BYTES);
+		const [, init] = fetchMock.mock.calls[0];
+		const headers = init?.headers as Record<string, string> | undefined;
+		expect(headers?.Cookie).toBeUndefined();
+	});
+
 	it("throws server error code on failure", async () => {
 		fetchMock.mockResolvedValueOnce(
 			new Response(JSON.stringify({ code: "not_found" }), { status: 404 }),
@@ -257,6 +309,22 @@ describe("loginFinish", () => {
 		const [, init] = fetchMock.mock.calls[0];
 		const headers = init?.headers as Record<string, string> | undefined;
 		expect(headers?.Authorization).toBeUndefined();
+	});
+
+	it("does not send lowercase authorization header (case-insensitive check)", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp(TOKEN));
+		await loginFinish(OPAQUE_BYTES, NONCE, DEVICE_ID);
+		const [, init] = fetchMock.mock.calls[0];
+		const headers = init?.headers as Record<string, string> | undefined;
+		expect(headers?.authorization).toBeUndefined();
+	});
+
+	it("does not send Cookie header (pre-auth endpoint)", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp(TOKEN));
+		await loginFinish(OPAQUE_BYTES, NONCE, DEVICE_ID);
+		const [, init] = fetchMock.mock.calls[0];
+		const headers = init?.headers as Record<string, string> | undefined;
+		expect(headers?.Cookie).toBeUndefined();
 	});
 
 	it("passes other server error codes through unchanged", async () => {
