@@ -17,6 +17,22 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-05, cycle 98 — FEATURE: wasm-bindgen cap tests — closes YELLOW-2 (ADR-0003 Phase C))
+- **Cycle 98 (commit 2f57c52):** FEATURE — closed YELLOW-2 from cycle-97 crypto-reviewer (no wasm-bindgen integration test verifying cap→JsError at the JS boundary):
+  - **YELLOW-2 CLOSED:** New file `crates/client/powehi-crypto-wasm/tests/wasm_bindgen_tests.rs` — 2 `#[wasm_bindgen_test]` integration tests:
+    - `test_keygen_v2_cap_exceeded_returns_js_error`: fills `KEM_DECAP_KEYS` to 256 via `ml_kem_768_keygen_v2()`, asserts 257th returns `Err(JsError)` with message containing "cap exceeded". Cleans up via `ml_kem_768_drop_decap_key`.
+    - `test_encap_v2_cap_exceeded_returns_js_error`: fills `KEM_SHARED_SECRETS` to 256 via `ml_kem_768_encap_v2()` (same map checked by `decap_v2`), asserts 257th returns `Err(JsError)`. Uses `mls_clear_session()` for full cleanup. Also covers the `decap_v2` cap path (same map).
+  - **Helper `js_err_message`:** uses `wasm_bindgen::JsCast::dyn_into::<js_sys::Error>()` to extract the JsError message string at the JS boundary — not relying on `Display` which is not guaranteed in wasm context.
+  - **New CI job `wasm-test`** in `ci-frontend.yml`: `wasm-pack test --node crates/client/powehi-crypto-wasm` with Node.js 20 setup. Tests run only under wasm32 (0 native tests confirmed, consistent with `wasm_bindgen_test` semantics).
+  - **crypto-reviewer:** PASS — GREEN on all criteria. FIPS 203 §6.2 multi-encap with same key is correct (randomized per call, IND-CCA2). Cleanup is correct. No RFC 9420 violations.
+  - **57 WASM tests** (unchanged native; +2 wasm-bindgen tests run via wasm-pack test --node); rustfmt clean; clippy clean.
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+    - ML-KEM-768 Phase C remaining:
+      - Y-5 follow-up: NIST ACVP conformance KAT (official vectors from ACVP-Server)
+      - Y-9: Zeroizing buffer-zero verification in tests (unsafe ptr test, future work)
+
 ## Current state (2026-06-05, cycle 97 — FEATURE: KEM handle cap — closes Y-8 (ADR-0003 Phase C))
 - **Cycle 97 (commit c3787c4):** FEATURE — closed Y-8 from cycle-90 crypto-reviewer (unbounded KEM_SHARED_SECRETS growth on repeated decap):
   - **Y-8 CLOSED:** `MAX_KEM_HANDLES = 256` cap on both `KEM_DECAP_KEYS` and `KEM_SHARED_SECRETS` thread-local maps.
