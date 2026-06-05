@@ -96,6 +96,14 @@ describe("regInit", () => {
 		expect(result.opaque_response).toEqual([4, 5, 6]);
 	});
 
+	it("does not send Authorization header (pre-auth endpoint)", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp({ user_id: USER_ID, opaque_response: [] }));
+		await regInit(HANDLE_HASH, OPAQUE_BYTES);
+		const [, init] = fetchMock.mock.calls[0];
+		const headers = init?.headers as Record<string, string> | undefined;
+		expect(headers?.Authorization).toBeUndefined();
+	});
+
 	it("throws server error code on failure", async () => {
 		fetchMock.mockResolvedValueOnce(
 			new Response(JSON.stringify({ code: "conflict" }), { status: 409 }),
@@ -115,6 +123,31 @@ describe("regFinish", () => {
 		expect(init?.method).toBe("POST");
 		expect(result.user_id).toBe(USER_ID);
 		expect(result.device_id).toBe(DEVICE_ID);
+	});
+
+	it("sends user_id, opaque_record, and mls_credential as number arrays (wire shape)", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp({ user_id: USER_ID, device_id: DEVICE_ID }));
+		const mls = new Uint8Array(16).fill(0xcc);
+		await regFinish(USER_ID, OPAQUE_BYTES, mls);
+		const [, init] = fetchMock.mock.calls[0];
+		const body = JSON.parse(init?.body as string) as {
+			user_id: unknown;
+			opaque_record: unknown;
+			mls_credential: unknown;
+		};
+		expect(body.user_id).toBe(USER_ID);
+		expect(Array.isArray(body.opaque_record)).toBe(true);
+		expect((body.opaque_record as number[]).length).toBe(OPAQUE_BYTES.length);
+		expect(Array.isArray(body.mls_credential)).toBe(true);
+		expect((body.mls_credential as number[]).length).toBe(mls.length);
+	});
+
+	it("does not send Authorization header (pre-auth endpoint)", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp({ user_id: USER_ID, device_id: DEVICE_ID }));
+		await regFinish(USER_ID, OPAQUE_BYTES, new Uint8Array(16));
+		const [, init] = fetchMock.mock.calls[0];
+		const headers = init?.headers as Record<string, string> | undefined;
+		expect(headers?.Authorization).toBeUndefined();
 	});
 
 	it("throws server error code on failure", async () => {
@@ -163,6 +196,16 @@ describe("loginInit", () => {
 		expect(init?.body as string).not.toContain("sentinel_plaintext_login");
 	});
 
+	it("does not send Authorization header (pre-auth endpoint)", async () => {
+		fetchMock.mockResolvedValueOnce(
+			jsonResp({ user_id: USER_ID, opaque_ke2: [], login_nonce: NONCE }),
+		);
+		await loginInit(HANDLE_HASH, OPAQUE_BYTES);
+		const [, init] = fetchMock.mock.calls[0];
+		const headers = init?.headers as Record<string, string> | undefined;
+		expect(headers?.Authorization).toBeUndefined();
+	});
+
 	it("throws server error code on failure", async () => {
 		fetchMock.mockResolvedValueOnce(
 			new Response(JSON.stringify({ code: "not_found" }), { status: 404 }),
@@ -193,6 +236,29 @@ describe("loginFinish", () => {
 		);
 	});
 
+	it("sends opaque_ke3 as number array, login_nonce and device_id as strings (wire shape)", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp(TOKEN));
+		await loginFinish(OPAQUE_BYTES, NONCE, DEVICE_ID);
+		const [, init] = fetchMock.mock.calls[0];
+		const body = JSON.parse(init?.body as string) as {
+			opaque_ke3: unknown;
+			login_nonce: unknown;
+			device_id: unknown;
+		};
+		expect(Array.isArray(body.opaque_ke3)).toBe(true);
+		expect((body.opaque_ke3 as number[]).length).toBe(OPAQUE_BYTES.length);
+		expect(body.login_nonce).toBe(NONCE);
+		expect(body.device_id).toBe(DEVICE_ID);
+	});
+
+	it("does not send Authorization header (pre-auth endpoint)", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp(TOKEN));
+		await loginFinish(OPAQUE_BYTES, NONCE, DEVICE_ID);
+		const [, init] = fetchMock.mock.calls[0];
+		const headers = init?.headers as Record<string, string> | undefined;
+		expect(headers?.Authorization).toBeUndefined();
+	});
+
 	it("passes other server error codes through unchanged", async () => {
 		fetchMock.mockResolvedValueOnce(
 			new Response(JSON.stringify({ code: "rate_limited" }), { status: 429 }),
@@ -216,6 +282,13 @@ describe("uploadKeyPackage", () => {
 		expect(body.packages).toHaveLength(1);
 	});
 
+	it("token does not appear in the request URL (Authorization header only)", async () => {
+		fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+		await uploadKeyPackage(TOKEN, DEVICE_ID, KP_BYTES);
+		const [url] = fetchMock.mock.calls[0];
+		expect(url as string).not.toContain(TOKEN);
+	});
+
 	it("does not throw on HTTP failure (non-fatal)", async () => {
 		fetchMock.mockResolvedValueOnce(new Response(null, { status: 500 }));
 		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -230,6 +303,15 @@ describe("uploadKeyPackage", () => {
 		expect(warnSpy).toHaveBeenCalledOnce();
 		// Only the numeric HTTP status is logged — not key material
 		expect(warnSpy.mock.calls[0][1]).toBe(502);
+		warnSpy.mockRestore();
+	});
+
+	it("logs exactly two arguments on failure — prefix string and status code, nothing more", async () => {
+		fetchMock.mockResolvedValueOnce(new Response(null, { status: 503 }));
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		await uploadKeyPackage(TOKEN, DEVICE_ID, KP_BYTES);
+		expect(warnSpy).toHaveBeenCalledOnce();
+		expect(warnSpy.mock.calls[0]).toHaveLength(2);
 		warnSpy.mockRestore();
 	});
 });
