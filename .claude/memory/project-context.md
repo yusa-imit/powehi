@@ -17,6 +17,28 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-05, cycle 97 — FEATURE: KEM handle cap — closes Y-8 (ADR-0003 Phase C))
+- **Cycle 97 (commit c3787c4):** FEATURE — closed Y-8 from cycle-90 crypto-reviewer (unbounded KEM_SHARED_SECRETS growth on repeated decap):
+  - **Y-8 CLOSED:** `MAX_KEM_HANDLES = 256` cap on both `KEM_DECAP_KEYS` and `KEM_SHARED_SECRETS` thread-local maps.
+  - **`kem_cap_check(len) -> Result<(), &'static str>`:** Pure helper function (no JsValue/JsError, callable in native tests). TOCTOU-safe invariant documented in docstring (WASM single-threaded, no `.await` between check and insert).
+  - **Cap check wired in 3 WASM exports:**
+    - `ml_kem_768_keygen_v2`: checks `KEM_DECAP_KEYS.len() < 256` before `kem::generate()` — no wasted CSPRNG on rejected path.
+    - `ml_kem_768_encap_v2`: checks `KEM_SHARED_SECRETS.len() < 256` before `kem::encapsulate()`.
+    - `ml_kem_768_decap_v2`: checks `KEM_SHARED_SECRETS.len() < 256` before `kem::decapsulate()`; old Y-8 deferral comment removed.
+  - **+3 security tests:**
+    - `test_kem_cap_check_boundary`: pure logic test (0, MAX-1, MAX, MAX+1).
+    - `test_kem_decap_keys_cap_and_release`: fills `KEM_DECAP_KEYS` to 256 with dummy bytes, verifies cap fires, drops one, verifies cap releases.
+    - `test_kem_shared_secrets_cap_and_release`: same for `KEM_SHARED_SECRETS`.
+  - **crypto-reviewer:** PASS — GREEN on all 10 correctness criteria. YELLOW-1 (single-thread invariant comment) addressed in docstring. YELLOW-2 (wasm-bindgen integration test for cap → JsError) deferred to next cycle.
+  - **57 WASM tests** (+3; was 54); rustfmt clean; clippy clean.
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+    - ML-KEM-768 Phase C remaining:
+      - Y-5 follow-up: NIST ACVP conformance KAT (official vectors from ACVP-Server)
+      - Y-9: Zeroizing buffer-zero verification in tests (unsafe ptr test, future work)
+      - YELLOW-2 from cycle 97: wasm-bindgen integration test for cap-exceeds-as-JsError
+
 ## Current state (2026-06-05, cycle 96 — FEATURE: KAT for sign_encap_key wire format — closes YELLOW-b)
 - **Cycle 96 (commit 9b3f18c):** FEATURE — closed YELLOW-b from cycle-95 crypto-reviewer (no KAT for ml_kem_sign_encap_key output wire format):
   - **YELLOW-b CLOSED:** New test `sign_encap_key_kat_wire_format` in `kem_credential.rs`:
@@ -32,10 +54,11 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
   - **Remaining deferred security findings (YELLOW):**
     - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
     - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
-    - ML-KEM-768 Phase B/C remaining prerequisites:
+    - ML-KEM-768 Phase C remaining:
       - Y-5 follow-up: NIST ACVP conformance KAT (official vectors from ACVP-Server)
-      - Y-8: Unbounded KEM_SHARED_SECRETS growth on repeated decap (Phase C rate limiting)
+      - Y-8: CLOSED (cycle 97) — KEM handle cap MAX=256 implemented
       - Y-9: Zeroizing buffer-zero verification in tests (unsafe ptr test, future work)
+      - YELLOW-2 from cycle 97: wasm-bindgen integration test for cap-exceeds-as-JsError
 
 ## Current state (2026-06-05, cycle 95 — STABILIZATION: CI red fix + crypto test gap closure)
 - **Cycle 95 (commits a0d4645, 30ffa1a):** STABILIZATION — CI was RED on both Rust + Frontend pipelines since cycle-94 commit (e8bb982). Fixed:
