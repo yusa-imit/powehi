@@ -70,8 +70,28 @@ thread_local! {
     // Raw decap keys and shared secrets never cross the WASM-JS boundary — only
     // string handles are returned to JS.  Both maps use Zeroizing so the heap
     // buffer is zeroed when a handle is dropped or the session is cleared.
+    // ADR-0003 Phase C (Y-8): both maps are capped at MAX_KEM_HANDLES entries.
     static KEM_DECAP_KEYS:     RefCell<HashMap<String, Zeroizing<Vec<u8>>>> = RefCell::new(HashMap::new());
     static KEM_SHARED_SECRETS: RefCell<HashMap<String, Zeroizing<Vec<u8>>>> = RefCell::new(HashMap::new());
+}
+
+/// Maximum simultaneous KEM handles per session (per map: decap keys or shared secrets).
+/// Prevents DoS via handle flooding (ADR-0003 Phase C, Y-8).
+const MAX_KEM_HANDLES: usize = 256;
+
+/// Returns `Ok(())` if `current_len < MAX_KEM_HANDLES`, else `Err` with a static message.
+/// Pure function — no `JsValue`/`JsError` so it is callable in native unit tests.
+///
+/// INVARIANT: callers must perform the check + insert in the same synchronous Rust call
+/// (no `.await` between this call and the subsequent `borrow_mut().insert(...)`). WASM is
+/// single-threaded, so no task can interleave, but an accidental `.await` in a future refactor
+/// would violate the TOCTOU-free guarantee.
+fn kem_cap_check(current_len: usize) -> Result<(), &'static str> {
+    if current_len >= MAX_KEM_HANDLES {
+        Err("KEM handle cap exceeded — drop unused handles before allocating new ones")
+    } else {
+        Ok(())
+    }
 }
 
 // ── JS object helpers ──────────────────────────────────────────────────────────
@@ -615,6 +635,10 @@ pub fn ml_kem_768_decap(decap_key: &[u8], ciphertext: &[u8]) -> Result<JsValue, 
 /// `mls_clear_session()` also drops all decap key handles.
 #[wasm_bindgen]
 pub fn ml_kem_768_keygen_v2() -> Result<JsValue, JsError> {
+    // Y-8: reject when decap key cap is reached (DoS prevention).
+    KEM_DECAP_KEYS
+        .with(|m| kem_cap_check(m.borrow().len()))
+        .map_err(js_err)?;
     let pair = kem::generate();
     let handle = next_id();
     // Build the JS result BEFORE inserting into the map (Y-7 fix): if js_obj fails
@@ -639,6 +663,10 @@ pub fn ml_kem_768_keygen_v2() -> Result<JsValue, JsError> {
 /// Call `ml_kem_768_drop_shared_secret(sharedSecretHandle)` when done.
 #[wasm_bindgen]
 pub fn ml_kem_768_encap_v2(encap_key: &[u8]) -> Result<JsValue, JsError> {
+    // Y-8: reject when shared secret cap is reached (DoS prevention).
+    KEM_SHARED_SECRETS
+        .with(|m| kem_cap_check(m.borrow().len()))
+        .map_err(js_err)?;
     let (ct, ss) = kem::encapsulate(encap_key).map_err(js_err)?;
     let handle = next_id();
     // Y-7 fix: build JS result before inserting so no orphan handle is created on failure.
@@ -665,11 +693,13 @@ pub fn ml_kem_768_encap_v2(encap_key: &[u8]) -> Result<JsValue, JsError> {
 /// Call `ml_kem_768_drop_shared_secret(sharedSecretHandle)` when done.
 #[wasm_bindgen]
 pub fn ml_kem_768_decap_v2(decap_key_handle: &str, ciphertext: &[u8]) -> Result<JsValue, JsError> {
+    // Y-8: reject when shared secret cap is reached (DoS prevention — closes Y-8).
+    KEM_SHARED_SECRETS
+        .with(|m| kem_cap_check(m.borrow().len()))
+        .map_err(js_err)?;
     // Clone the stored key bytes so the handle remains valid for future decap calls.
     // The clone produces a Zeroizing copy; both the clone and the original are zeroed
     // on drop (the clone at the end of this function, the stored copy on drop/clear).
-    // Note (Y-8): a caller flooding repeated decap calls before logout grows
-    // KEM_SHARED_SECRETS unboundedly. Mitigation: caller-side rate limiting (Phase C).
     let dk_bytes = KEM_DECAP_KEYS
         .with(|m| m.borrow().get(decap_key_handle).cloned())
         .ok_or_else(|| js_err("unknown decap key handle"))?;
@@ -1180,6 +1210,85 @@ mod tests {
             0,
             "KEM_SHARED_SECRETS must be empty after mls_clear_session"
         );
+    }
+
+    // ── ML-KEM-768 handle cap (ADR-0003 Phase C, Y-8) ────────────────────────
+
+    /// kem_cap_check boundary: below cap is Ok, at/above cap is Err.
+    #[test]
+    fn test_kem_cap_check_boundary() {
+        assert!(kem_cap_check(0).is_ok(), "empty map must be under cap");
+        assert!(
+            kem_cap_check(MAX_KEM_HANDLES - 1).is_ok(),
+            "one below cap must be ok"
+        );
+        assert!(
+            kem_cap_check(MAX_KEM_HANDLES).is_err(),
+            "at cap must return error"
+        );
+        assert!(
+            kem_cap_check(MAX_KEM_HANDLES + 1).is_err(),
+            "above cap must return error"
+        );
+    }
+
+    /// KEM_DECAP_KEYS cap: filling to MAX_KEM_HANDLES blocks insertion; dropping one releases it.
+    #[test]
+    fn test_kem_decap_keys_cap_and_release() {
+        // Use dummy 1-byte values to avoid expensive key generation for cap-logic testing.
+        let mut handles: Vec<String> = Vec::with_capacity(MAX_KEM_HANDLES);
+        for i in 0..MAX_KEM_HANDLES {
+            let h = format!("cap-dk-test-{i}");
+            handles.push(h.clone());
+            KEM_DECAP_KEYS.with(|m| m.borrow_mut().insert(h, Zeroizing::new(vec![0u8; 1])));
+        }
+        assert_eq!(
+            KEM_DECAP_KEYS.with(|m| m.borrow().len()),
+            MAX_KEM_HANDLES,
+            "map must be at cap"
+        );
+        assert!(
+            kem_cap_check(KEM_DECAP_KEYS.with(|m| m.borrow().len())).is_err(),
+            "cap check must reject when map is full"
+        );
+        // Drop one handle → cap releases
+        KEM_DECAP_KEYS.with(|m| m.borrow_mut().remove(&handles[0]));
+        assert!(
+            kem_cap_check(KEM_DECAP_KEYS.with(|m| m.borrow().len())).is_ok(),
+            "cap check must allow after a drop"
+        );
+        // Cleanup
+        for h in &handles[1..] {
+            KEM_DECAP_KEYS.with(|m| m.borrow_mut().remove(h));
+        }
+    }
+
+    /// KEM_SHARED_SECRETS cap: filling to MAX_KEM_HANDLES blocks insertion; dropping one releases it.
+    #[test]
+    fn test_kem_shared_secrets_cap_and_release() {
+        let mut handles: Vec<String> = Vec::with_capacity(MAX_KEM_HANDLES);
+        for i in 0..MAX_KEM_HANDLES {
+            let h = format!("cap-ss-test-{i}");
+            handles.push(h.clone());
+            KEM_SHARED_SECRETS.with(|m| m.borrow_mut().insert(h, Zeroizing::new(vec![0u8; 1])));
+        }
+        assert_eq!(
+            KEM_SHARED_SECRETS.with(|m| m.borrow().len()),
+            MAX_KEM_HANDLES,
+            "map must be at cap"
+        );
+        assert!(
+            kem_cap_check(KEM_SHARED_SECRETS.with(|m| m.borrow().len())).is_err(),
+            "cap check must reject when map is full"
+        );
+        KEM_SHARED_SECRETS.with(|m| m.borrow_mut().remove(&handles[0]));
+        assert!(
+            kem_cap_check(KEM_SHARED_SECRETS.with(|m| m.borrow().len())).is_ok(),
+            "cap check must allow after a drop"
+        );
+        for h in &handles[1..] {
+            KEM_SHARED_SECRETS.with(|m| m.borrow_mut().remove(h));
+        }
     }
 
     // ── ML-KEM-768 signed encap key (ADR-0003 Phase B, Y-3) ──────────────────
