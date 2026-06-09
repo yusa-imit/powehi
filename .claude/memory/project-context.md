@@ -17,6 +17,23 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-09, cycle 109 — FEATURE: invite acceptance flow — AcceptInviteModal + MLS identity persistence)
+- **Cycle 109 (commit 954df2e):** FEATURE — receiving side of §8.3 contact discovery implemented:
+  - **`app/src/components/AcceptInviteModal.tsx`** (NEW): Full invite accept flow (prd.md §8.3). `handleAccept()` sequence: redeemInvite → fetchKeyPackage → mlsCreateGroup → mlsAddMember → createGroup → addMember → sendWelcome. Idle/loading/accepted/error states. Error kinds: expired / no_key_package / no_identity / generic. Security: invite code in POST body (never URL); Welcome is Uint8Array (MLS ciphertext); server sees only opaque UUIDs.
+  - **`app/src/App.tsx`**: Detect invite code in URL fragment on auth, clear hash via `history.replaceState` after reading (RFC 3986 §3.5 — fragment never sent to server). Renders `<AcceptInviteModal>` when code present + phase=app.
+  - **`app/src/components/Login.tsx`**: MLS identity bytes (16-byte BasicCredential public label, NOT a secret) persisted to IndexedDB as `mlsIdentityB64`; re-initialised on each sign-in via `mlsInitIdentity(bytes)` so KeyPackages across sessions are consistent with same device identity.
+  - **`app/src/store/auth.ts`**: Added `identityId: string | null` (WASM handle) to AuthState; `login()` accepts optional 3rd param.
+  - **`app/src/db/schema.ts`**: v4 migration adds `mlsIdentityId` / `mlsIdentityB64` to LocalIdentity.
+  - **Tests:** 12 new AcceptInviteModal tests (render + 5 success flow + 4 error path + 1 security invariant); 3 new App hash-detection tests; updated auth/schema/base64 tests. **241 frontend tests** total (+22 vs cycle 108). security-auditor: PASS (7/7 categories).
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+    - ML-KEM-768 Phase C remaining:
+      - Y-9: Zeroizing buffer-zero verification in tests (unsafe ptr test, future work)
+    - Invite system backend YELLOWs Y-1 through Y-6 (cycle 107, non-blocking)
+    - Invite frontend YELLOWs Y-1 (DOM code visibility) and Y-2 (origin baseline) — non-blocking
+    - Informational: header-shape coupling in auth API tests
+
 ## Current state (2026-06-09, cycle 108 — FEATURE: frontend invite link UI — closes §8.3 frontend gap)
 - **Cycle 108 (commit cebbfe7):** FEATURE — frontend invite link UI completing the §8.3 contact discovery flow:
   - **`app/src/api/invites.ts`:** `createInvite()`, `redeemInvite()`, `buildInviteUrl()`, `extractInviteCode()`. Code sent in POST body (never URL path); shareable link places code in `#fragment` (browser-standard — never reaches server per RFC 3986).
