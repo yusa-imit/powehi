@@ -17,6 +17,29 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-09, cycle 107 — FEATURE: one-time contact invite codes + Y-ACVP-2 closure)
+- **Cycle 107 (commit a711c83):** FEATURE — contact invite system implemented per prd.md §8.3:
+  - **`POST /v1/invites`** (authenticated): creates 24h one-time invite code. Code = `Uuid::new_v4().simple()` (32 lowercase hex, 122-bit CSPRNG entropy). Stored as `invite:SHA256(code) → DeviceId bytes` in Redis — Redis dump yields no usable tokens.
+  - **`POST /v1/invites/redeem`** (authenticated): atomically redeems code via `GETDEL` (zero-TOCTOU window in production). Returns inviter's `DeviceId` so caller can fetch KeyPackage and initiate MLS Welcome. Returns 404 for expired/unknown codes AND invalid-format codes (no oracle).
+  - **Code validation:** 32 chars, `[0-9a-f]` only — rejects oversized/non-lowercase before any cache lookup.
+  - **Threat model update:** prd.md §3 updated with invite metadata surface (server sees inviter device_id + creation/consumption timestamps; Redis stores H(code) not code; GETDEL ensures no permanent record).
+  - **Y-ACVP-2 CLOSED:** Added Cargo.lock SHA256 provenance comment (`8de49b3d...`) to the NIST ACVP vector block in `kem.rs`.
+  - **security-auditor:** PASS (0 RED; 6 YELLOW deferred — all non-blocking):
+    - Y-1: Self-invite not prevented (caller discarded in handler)
+    - Y-2: DEBUG `invite.redeemed` log leaks (inviter,redeemer) social-graph edge at DEBUG level
+    - Y-3: No route-level body limit on RedeemInviteRequest (global 512KB cap applies)
+    - Y-4: SET not SET-NX for invite creation (UUID collision negligible but not explicit)
+    - Y-5: api_governor shared with all API endpoints; invite-specific per-device quota would be tighter
+    - Y-6: Timing distinguishability between format-reject vs cache-miss (not exploitable)
+  - **393 Rust tests** (+9 invite: 4 invite_service + 5 REST; was 384); clippy clean; rustfmt clean.
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+    - ML-KEM-768 Phase C remaining:
+      - Y-9: Zeroizing buffer-zero verification in tests (unsafe ptr test, future work)
+    - Invite system YELLOWs Y-1 through Y-6 (see above, non-blocking)
+    - Informational: header-shape coupling in auth API tests
+
 ## Current state (2026-06-09, cycle 105 — STABILIZATION: push-subscription auth-bypass tests + RUSTSEC-2026-0173 audit)
 - **Cycle 105 (commit 7ad1b86):** STABILIZATION — CI GREEN, no open issues.
   - **New advisory RUSTSEC-2026-0173:** `proc-macro-error2 2.0.1` unmaintained. Added to `.cargo/audit.toml` ignore list with full impact analysis: compile-time proc-macro dep (hax-lib-macros → hax-lib → libcrux → openmls_rust_crypto 0.5.1), not in any production binary, no CVE or vulnerability. `cargo tree -i proc-macro-error2` returns empty for default targets. Cannot upgrade: upstream openmls_rust_crypto 0.5.1 is the latest. Cargo audit now shows 1 allowed warning (instant/openmls only).
