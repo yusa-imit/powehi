@@ -674,4 +674,43 @@ mod tests {
             );
         }
     }
+
+    // --- Auth-bypass invariant tests (testing-conventions.md: auth bypass impossible) ---
+
+    #[tokio::test]
+    async fn post_push_subscription_without_token_returns_401() {
+        let repo = FakePushSubRepo::new();
+        let router = make_router(repo);
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/push-subscriptions")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&valid_register_body()).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn delete_push_subscription_without_token_returns_401() {
+        let repo = FakePushSubRepo::new();
+        let router = make_router(repo);
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/v1/push-subscriptions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
 }

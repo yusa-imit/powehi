@@ -24,4 +24,13 @@
 # The file smuggling attack requires an adversary to supply a crafted tar archive; Powehi
 # never processes untrusted tar data in any code path. No production binary includes this dep.
 # No fixed version available upstream. Revisit when testcontainers upgrades tokio-tar.
-ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0124", "RUSTSEC-2025-0134", "RUSTSEC-2025-0111"]
+#
+# RUSTSEC-2026-0173: proc-macro-error2 2.0.1 — crate unmaintained
+# Impact: proc-macro-error2 is a COMPILE-TIME proc-macro crate (hax-lib-macros → hax-lib →
+# libcrux → openmls_rust_crypto). It runs on the host machine during build to generate code
+# and is NOT included in any production binary (not in WASM binary, not in server binary).
+# `cargo tree -i proc-macro-error2` shows zero entries for default targets.
+# Maintenance advisory only; no CVE or vulnerability disclosed.
+# Cannot upgrade: openmls_rust_crypto 0.5.1 is the latest release; upstream must release a
+# new version with updated libcrux to resolve. Revisit when openmls_rust_crypto is updated.
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0124", "RUSTSEC-2025-0134", "RUSTSEC-2025-0111", "RUSTSEC-2026-0173"]
