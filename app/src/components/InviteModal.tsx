@@ -1,4 +1,5 @@
-import { useState } from "react";
+import QRCode from "qrcode";
+import { useEffect, useState } from "react";
 import { buildInviteUrl, createInvite } from "../api/invites";
 import { useAuthStore } from "../store/auth";
 import { Icon } from "./Icon";
@@ -15,6 +16,7 @@ export function InviteModal({ open, onClose }: InviteModalProps) {
 	const [step, setStep] = useState<Step>("idle");
 	const [inviteUrl, setInviteUrl] = useState("");
 	const [copied, setCopied] = useState(false);
+	const [qrDataUrl, setQrDataUrl] = useState("");
 
 	const handleCreate = async () => {
 		if (!sessionToken) return;
@@ -43,8 +45,28 @@ export function InviteModal({ open, onClose }: InviteModalProps) {
 		setStep("idle");
 		setInviteUrl("");
 		setCopied(false);
+		setQrDataUrl("");
 		onClose();
 	};
+
+	useEffect(() => {
+		if (!inviteUrl) return;
+		let cancelled = false;
+		QRCode.toDataURL(inviteUrl, {
+			width: 200,
+			margin: 2,
+			color: { dark: "#F2EDE3", light: "#040408" },
+		})
+			.then((url) => {
+				if (!cancelled) setQrDataUrl(url);
+			})
+			.catch(() => {
+				// QR generation failed — modal remains usable via the text link
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [inviteUrl]);
 
 	if (!open) return null;
 
@@ -194,6 +216,34 @@ export function InviteModal({ open, onClose }: InviteModalProps) {
 
 				{step === "ready" && (
 					<div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+						{qrDataUrl && (
+							<div
+								style={{
+									display: "flex",
+									flexDirection: "column",
+									alignItems: "center",
+									gap: 8,
+								}}
+							>
+								<img
+									src={qrDataUrl}
+									alt="QR code for invite link"
+									data-testid="invite-qr"
+									width={200}
+									height={200}
+									style={{ borderRadius: 10, imageRendering: "pixelated" }}
+								/>
+								<span
+									style={{
+										fontSize: 11,
+										color: "var(--fg-4)",
+										letterSpacing: "0.04em",
+									}}
+								>
+									Scan to add contact
+								</span>
+							</div>
+						)}
 						<div
 							style={{
 								background: "var(--bg-elevated)",

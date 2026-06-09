@@ -13,6 +13,19 @@ vi.mock("../api/invites", () => ({
 	extractInviteCode: vi.fn(),
 }));
 
+const QR_DATA_URL =
+	"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+vi.mock("qrcode", () => ({
+	default: {
+		toDataURL: vi
+			.fn()
+			.mockResolvedValue(
+				"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+			),
+	},
+}));
+
 const createInviteSpy = vi.spyOn(InvitesModule, "createInvite");
 
 const TOKEN = "test-session-token";
@@ -150,5 +163,43 @@ describe("InviteModal close", () => {
 		render(<InviteModal open={true} onClose={onClose} />);
 		fireEvent.click(screen.getByRole("dialog"));
 		expect(onClose).toHaveBeenCalledOnce();
+	});
+});
+
+// ── QR code ───────────────────────────────────────────────────────────────────
+
+describe("InviteModal QR code", () => {
+	it("renders QR code image after invite link is created", async () => {
+		render(<InviteModal open={true} onClose={vi.fn()} />);
+		await act(async () => {
+			fireEvent.click(screen.getByText("Create invite link"));
+		});
+		await waitFor(() => {
+			expect(screen.getByTestId("invite-qr")).toBeDefined();
+		});
+	});
+
+	it("QR code image has descriptive alt text for accessibility", async () => {
+		render(<InviteModal open={true} onClose={vi.fn()} />);
+		await act(async () => {
+			fireEvent.click(screen.getByText("Create invite link"));
+		});
+		await waitFor(() => {
+			const img = screen.getByTestId("invite-qr");
+			expect(img.getAttribute("alt")).toBe("QR code for invite link");
+		});
+	});
+
+	it("QR code src is a data URL — never an external URL (security invariant)", async () => {
+		render(<InviteModal open={true} onClose={vi.fn()} />);
+		await act(async () => {
+			fireEvent.click(screen.getByText("Create invite link"));
+		});
+		await waitFor(() => {
+			const img = screen.getByTestId("invite-qr") as HTMLImageElement;
+			expect(img.src).toBe(QR_DATA_URL);
+			expect(img.src).toMatch(/^data:/);
+			expect(img.src).not.toMatch(/^https?:\/\//);
+		});
 	});
 });
