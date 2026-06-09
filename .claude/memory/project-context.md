@@ -17,6 +17,23 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-10, cycle 111 — FEATURE: Welcome message processing — inviter auto-joins group (§8.3))
+- **Cycle 111 (commit eaa88fd):** FEATURE — closes the final §8.3 contact discovery gap: inviter's device now auto-joins the MLS group when acceptee sends a Welcome envelope.
+  - **`app/src/hooks/useWelcomePoller.ts`** (NEW): Global polling hook. Calls `mlsJoinGroup(identityId, welcomeBytes)` on Welcome envelopes. **Ack-after-callback ordering** (R1 fix): `onNewGroup` callback fires BEFORE `ackMessage` so if the callback throws, the envelope stays on the server for redelivery. Commit/Proposal acked silently. Application envelopes skipped (useMessages owns them).
+  - **`app/src/hooks/useMessages.ts`** (MODIFIED): Welcome envelopes are now SKIPPED (no ack) instead of acked silently. Comment updated. useWelcomePoller is the exclusive Welcome acker.
+  - **`app/src/components/ChatLayout.tsx`** (MODIFIED): `useWelcomePoller(identityId, handleNewGroup)` wired. `handleNewGroup` inserts a new `Chat` entry with dedup guard (`mlsGroupId` uniqueness), `mlsGroupId=event.groupId`, `mlsIdentityId=identityId`.
+  - **security-auditor:** GREEN (R1 ack-before-callback fixed; YELLOW Y1/Y3 sinceRef skip advisory, Y2 senderDeviceId UUID shape advisory — all non-blocking).
+  - **254 frontend tests** (+13 useWelcomePoller; +1 ordering invariant; was 241); Biome clean; tsc clean.
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+    - ML-KEM-768 Phase C remaining: Y-9 Zeroizing buffer-zero verification in tests (future work)
+    - Invite system backend YELLOWs Y-1 through Y-6 (cycle 107, non-blocking)
+    - Invite frontend YELLOWs Y-1 (DOM code visibility) and Y-2 (origin baseline) — non-blocking
+    - useWelcomePoller Y1/Y3: sinceRef does not advance for skipped Application/Welcome envelopes (benign, follow-up)
+    - useWelcomePoller Y2: senderDeviceId UUID format not validated client-side (React escaping prevents XSS; advisory)
+    - Informational: header-shape coupling in auth API tests
+
 ## Current state (2026-06-09, cycle 109 — FEATURE: invite acceptance flow — AcceptInviteModal + MLS identity persistence)
 - **Cycle 109 (commit 954df2e):** FEATURE — receiving side of §8.3 contact discovery implemented:
   - **`app/src/components/AcceptInviteModal.tsx`** (NEW): Full invite accept flow (prd.md §8.3). `handleAccept()` sequence: redeemInvite → fetchKeyPackage → mlsCreateGroup → mlsAddMember → createGroup → addMember → sendWelcome. Idle/loading/accepted/error states. Error kinds: expired / no_key_package / no_identity / generic. Security: invite code in POST body (never URL); Welcome is Uint8Array (MLS ciphertext); server sees only opaque UUIDs.
