@@ -17,6 +17,23 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-09, cycle 108 — FEATURE: frontend invite link UI — closes §8.3 frontend gap)
+- **Cycle 108 (commit cebbfe7):** FEATURE — frontend invite link UI completing the §8.3 contact discovery flow:
+  - **`app/src/api/invites.ts`:** `createInvite()`, `redeemInvite()`, `buildInviteUrl()`, `extractInviteCode()`. Code sent in POST body (never URL path); shareable link places code in `#fragment` (browser-standard — never reaches server per RFC 3986).
+  - **`app/src/components/InviteModal.tsx`:** `<dialog>` modal wired to "New chat" (+) button; idle → loading → ready/error flow; copy-to-clipboard button; Escape key + backdrop click close. Security-auditor GREEN.
+  - **`app/src/components/Icon.tsx`:** Added `copy` and `alert` icon paths.
+  - **`app/src/components/ChatLayout.tsx`:** `onNewChat` now opens `InviteModal`.
+  - **security-auditor:** GREEN — 0 RED. 2 YELLOW non-blocking: (Y-1) code rendered in DOM (design intent; 24h/one-use bounds blast radius); (Y-2) `window.location.origin` baseline (build-time VITE var would be tighter but not required).
+  - **219 frontend tests** (+30, was 189): 19 API unit tests (`createInvite`, `redeemInvite`, `buildInviteUrl`, `extractInviteCode`) + 11 modal tests (render/create/copy/close flows). Biome clean; tsc clean.
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+    - ML-KEM-768 Phase C remaining:
+      - Y-9: Zeroizing buffer-zero verification in tests (unsafe ptr test, future work)
+    - Invite system backend YELLOWs Y-1 through Y-6 (cycle 107, non-blocking)
+    - Invite frontend YELLOWs Y-1 (DOM code visibility) and Y-2 (origin baseline) — non-blocking
+    - Informational: header-shape coupling in auth API tests
+
 ## Current state (2026-06-09, cycle 107 — FEATURE: one-time contact invite codes + Y-ACVP-2 closure)
 - **Cycle 107 (commit a711c83):** FEATURE — contact invite system implemented per prd.md §8.3:
   - **`POST /v1/invites`** (authenticated): creates 24h one-time invite code. Code = `Uuid::new_v4().simple()` (32 lowercase hex, 122-bit CSPRNG entropy). Stored as `invite:SHA256(code) → DeviceId bytes` in Redis — Redis dump yields no usable tokens.
