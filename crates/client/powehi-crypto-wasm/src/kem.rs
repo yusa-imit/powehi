@@ -426,6 +426,12 @@ mod kat_tests {
 // Source: RustCrypto/KEMs ml-kem/tests/encap-decap.json (mirrors usnistgov/ACVP-Server@65370b8)
 //   testGroup: ML-KEM-768, tcId 26, deferred: false, reason: "no modification"
 //
+// Provenance (Y-ACVP-2): vectors extracted from ml-kem crate version 0.2.3.
+//   Cargo.lock SHA256(ml-kem-0.2.3.crate) = 8de49b3df74c35498c0232031bb7e85f9389f913e2796169c8ab47a53993a18f
+//   Source file within crate: tests/encap-decap.json
+//   Verify: `cargo fetch` validates this checksum against crates.io; the crate tarball
+//   contains tests/encap-decap.json from which tcId 26 fields were extracted verbatim.
+//
 // Unlike the regression KAT (which pins self-computed values), these expected
 // outputs were independently computed by NIST, breaking the circular dependency.
 // A FIPS 203-non-conformant implementation cannot produce the correct (ct, ss)

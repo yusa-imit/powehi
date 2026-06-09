@@ -175,6 +175,7 @@
 - KeyPackage 업로드/소비 시점
 - 사용자의 `home_region` 및 현재 접속 `region_id`
 - 크로스 리전 envelope 포워딩 타이밍 (리전 간 메시지 전달 시점)
+- **초대 토큰 생성/소비 시점 및 inviter device ID** (§8.3 Contact Discovery): Redis에 24시간 동안 `H(code) → DeviceId` 형태로 임시 저장됨. 코드는 GETDEL로 1회 소비되므로 영구 기록 없음. 그러나 서버는 창 내에서 inviter의 device_id와 소비 시점을 알 수 있음. 이는 전 단계(MLS Welcome 이전)에 한 방향의 소셜 그래프 간선을 드러낼 수 있음. 완화: Redis 저장값은 원본 코드가 아닌 SHA-256(code)이므로 Redis 덤프로 유효한 토큰을 재현할 수 없음.
 
 서버가 **알지 못하는** 것:
 

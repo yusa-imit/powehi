@@ -348,6 +348,22 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl powehi_port_inbound::invite::InviteUseCase for NullUseCase {
+        async fn create_invite(
+            &self,
+            _: &DeviceId,
+        ) -> Result<powehi_port_inbound::invite::CreatedInvite, DomainError> {
+            unimplemented!()
+        }
+        async fn redeem_invite(
+            &self,
+            _: &str,
+        ) -> Result<powehi_port_inbound::invite::RedeemedInvite, DomainError> {
+            unimplemented!()
+        }
+    }
+
     fn make_router(push_sub_repo: Arc<dyn PushSubscriptionRepository>) -> Router {
         use crate::routes;
         use axum::routing::post;
@@ -361,6 +377,7 @@ mod tests {
             key_package: null.clone(),
             media: null.clone(),
             push_sub_repo,
+            invite: null.clone(),
             cache: test_session_cache(),
             handle_rate_limiter: std::sync::Arc::new(crate::rate_limit::HandleRateLimiter::new()),
         };

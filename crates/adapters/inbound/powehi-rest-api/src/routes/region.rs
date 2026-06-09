@@ -222,6 +222,22 @@ mod tests {
             }
         }
 
+        #[async_trait]
+        impl powehi_port_inbound::invite::InviteUseCase for Null {
+            async fn create_invite(
+                &self,
+                _: &DeviceId,
+            ) -> Result<powehi_port_inbound::invite::CreatedInvite, DomainError> {
+                unimplemented!()
+            }
+            async fn redeem_invite(
+                &self,
+                _: &str,
+            ) -> Result<powehi_port_inbound::invite::RedeemedInvite, DomainError> {
+                unimplemented!()
+            }
+        }
+
         use powehi_port_outbound::cache::CachePort;
         use std::collections::HashMap;
         use std::time::Duration;
@@ -257,6 +273,7 @@ mod tests {
             key_package: Arc::new(Null),
             media: Arc::new(Null),
             push_sub_repo: Arc::new(Null),
+            invite: Arc::new(Null),
             cache: Arc::new(EmptyCache),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         }

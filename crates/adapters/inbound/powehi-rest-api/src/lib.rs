@@ -26,8 +26,8 @@ use axum::{
 };
 use metrics_exporter_prometheus::PrometheusHandle;
 use powehi_port_inbound::{
-    auth::AuthUseCase, group::GroupUseCase, key_package::KeyPackageUseCase, media::MediaUseCase,
-    messaging::MessagingUseCase,
+    auth::AuthUseCase, group::GroupUseCase, invite::InviteUseCase, key_package::KeyPackageUseCase,
+    media::MediaUseCase, messaging::MessagingUseCase,
 };
 use powehi_port_outbound::{cache::CachePort, push_subscription_repo::PushSubscriptionRepository};
 use tower_http::trace::TraceLayer;
@@ -47,6 +47,7 @@ pub struct AppState {
     pub key_package: Arc<dyn KeyPackageUseCase>,
     pub media: Arc<dyn MediaUseCase>,
     pub push_sub_repo: Arc<dyn PushSubscriptionRepository>,
+    pub invite: Arc<dyn InviteUseCase>,
     /// Session store: `session:{token}` → DeviceId UUID bytes. Used by the
     /// `AuthenticatedDevice` extractor to validate Bearer tokens.
     pub cache: Arc<dyn CachePort>,
@@ -155,6 +156,8 @@ fn router_inner(
             "/v1/push-subscriptions",
             post(routes::push_subscription::register).delete(routes::push_subscription::unregister),
         )
+        .route("/v1/invites", post(routes::invite::create))
+        .route("/v1/invites/redeem", post(routes::invite::redeem))
         .layer(api_layer);
 
     // Public endpoints — no auth, no per-IP rate limit (like /health).
@@ -215,6 +218,7 @@ mod tests {
         RegistrationFinishRequest, RegistrationFinishResponse, RegistrationInitRequest,
         RegistrationInitResponse, SessionToken,
     };
+    use powehi_port_inbound::invite::{CreatedInvite, RedeemedInvite};
     use powehi_port_inbound::media::MediaUseCase;
     use powehi_port_outbound::push_subscription_repo::PushSubscriptionRepository;
     use tower::ServiceExt; // for `oneshot`
@@ -238,6 +242,21 @@ mod tests {
 
     fn null_push_sub_repo() -> Arc<dyn PushSubscriptionRepository> {
         Arc::new(NullPushSubRepo)
+    }
+
+    struct NoopInvite;
+    #[async_trait]
+    impl InviteUseCase for NoopInvite {
+        async fn create_invite(&self, _: &DeviceId) -> Result<CreatedInvite, DomainError> {
+            unimplemented!()
+        }
+        async fn redeem_invite(&self, _: &str) -> Result<RedeemedInvite, DomainError> {
+            unimplemented!()
+        }
+    }
+
+    fn noop_invite() -> Arc<dyn InviteUseCase> {
+        Arc::new(NoopInvite)
     }
 
     // ── session cache helpers ────────────────────────────────────────────────
@@ -518,6 +537,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
+            invite: noop_invite(),
             cache: test_session_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
@@ -532,6 +552,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
+            invite: noop_invite(),
             cache: empty_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
@@ -750,6 +771,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
+            invite: noop_invite(),
             cache: test_session_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
@@ -764,6 +786,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
+            invite: noop_invite(),
             cache: test_session_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
@@ -778,6 +801,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackageSuccess),
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
+            invite: noop_invite(),
             cache: test_session_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
@@ -792,6 +816,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackageNotFound),
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
+            invite: noop_invite(),
             cache: test_session_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
@@ -868,6 +893,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMediaSuccess),
             push_sub_repo: null_push_sub_repo(),
+            invite: noop_invite(),
             cache: test_session_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
@@ -882,6 +908,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMediaUnauthorized),
             push_sub_repo: null_push_sub_repo(),
+            invite: noop_invite(),
             cache: test_session_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
@@ -901,6 +928,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
+            invite: noop_invite(),
             cache: test_session_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
@@ -1590,6 +1618,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
+            invite: noop_invite(),
             cache: empty_cache(),
             handle_rate_limiter: Arc::clone(&tight_rl),
         };
@@ -1634,6 +1663,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
+            invite: noop_invite(),
             cache: empty_cache(),
             handle_rate_limiter: Arc::clone(&tight_rl),
         };
@@ -1690,6 +1720,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
+            invite: noop_invite(),
             cache: empty_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         }
@@ -1921,6 +1952,7 @@ mod tests {
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
+            invite: noop_invite(),
             cache: empty_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         };

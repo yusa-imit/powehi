@@ -4,8 +4,9 @@ use std::sync::Arc;
 use tracing::info;
 
 use powehi_application::{
-    auth_service::AuthService, group_service::GroupService, key_package_service::KeyPackageService,
-    media_service::MediaService, messaging_service::MessagingService,
+    auth_service::AuthService, group_service::GroupService, invite_service::InviteService,
+    key_package_service::KeyPackageService, media_service::MediaService,
+    messaging_service::MessagingService,
 };
 use powehi_grpc::{RegionGrpcServer, TlsConfig};
 use powehi_opaque::OpaqueServer;
@@ -196,6 +197,9 @@ async fn main() -> Result<()> {
     let media: Arc<dyn powehi_port_inbound::media::MediaUseCase> =
         Arc::new(MediaService::new(media_r2, group_repo_media));
 
+    let invite: Arc<dyn powehi_port_inbound::invite::InviteUseCase> =
+        Arc::new(InviteService::new(cache.clone()));
+
     // ── gRPC inter-region mesh server ──────────────────────────────────────
 
     // Security: refuse to start with plaintext gRPC when peer regions are configured.
@@ -265,6 +269,7 @@ async fn main() -> Result<()> {
         key_package,
         media,
         push_sub_repo,
+        invite,
         cache: Arc::clone(&cache),
         handle_rate_limiter: Arc::clone(&handle_rate_limiter),
     };
