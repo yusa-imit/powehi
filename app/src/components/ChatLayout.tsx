@@ -18,6 +18,7 @@ import { useRegionDetect } from "../hooks/useRegionDetect";
 import { useAuthStore } from "../store/auth";
 import { uint8ToBase64 } from "../utils/base64";
 import { Icon } from "./Icon";
+import { InviteModal } from "./InviteModal";
 import { SafetyNumbers } from "./SafetyNumbers";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -1370,6 +1371,7 @@ export function ChatLayout() {
 	const [activeId, setActiveId] = useState("maya");
 	const [search, setSearch] = useState("");
 	const [infoOpen, setInfoOpen] = useState(false);
+	const [inviteOpen, setInviteOpen] = useState(false);
 	const [disappearingTtl, setDisappearingTtl] = useState<TtlOption>(undefined);
 	const active = chats.find((c) => c.id === activeId);
 
@@ -1487,7 +1489,7 @@ export function ChatLayout() {
 				chats={chats}
 				activeId={activeId}
 				onSelect={setActiveId}
-				onNewChat={() => undefined}
+				onNewChat={() => setInviteOpen(true)}
 				onSettings={() => undefined}
 				searchQuery={search}
 				onSearch={setSearch}
@@ -1526,6 +1528,8 @@ export function ChatLayout() {
 					disappearingTtl={disappearingTtl}
 				/>
 			)}
+
+			<InviteModal open={inviteOpen} onClose={() => setInviteOpen(false)} />
 		</div>
 	);
 }
