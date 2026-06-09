@@ -17,6 +17,29 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-10, cycle 113 — FEATURE: BIP-39 recovery phrase — prd.md §8.5)
+- **Cycle 113 (commit 7d8c216):** FEATURE — §8.5 Recovery Mechanism implemented:
+  - **`crates/client/powehi-crypto-wasm/src/recovery.rs`** (NEW): BIP-39 mnemonic generation (256-bit CSPRNG), PBKDF2-HMAC-SHA512 seed derivation (empty passphrase, by design), HKDF-SHA256 key derivation (salt=None, domain=`b"powehi-mls-signing-v1"`, L=32) → Ed25519 keypair. All secret material in `Zeroizing` wrappers. KAT with two frozen test vectors (all-zero seed, abandon×11+about phrase).
+  - **`crates/client/powehi-crypto-wasm/src/mls_group.rs`** (MODIFIED): New `generate_identity_from_keypair()` — uses `SignatureKeyPair::from_raw` with private/public consistency check (re-derives expected public from private via ed25519-dalek; returns `MlsError::SignatureKey` on mismatch, closing F2 from crypto-reviewer).
+  - **`crates/client/powehi-crypto-wasm/src/wasm_exports.rs`** (MODIFIED): Two new WASM exports — `mls_generate_recovery_phrase()` (returns `{ words: string[] }`), `mls_init_identity_from_phrase(phrase, identity_bytes)` (same shape as `mls_init_identity`). Private key never crosses WASM-JS boundary.
+  - **`app/src/components/RecoveryPhraseModal.tsx`** (NEW): Fixed, non-dismissible modal (no X, no backdrop click, no ESC) showing 24 numbered words in a 4-column grid. Copy-all and confirm buttons. Photon-blue frame (encryption), accretion-orange confirm.
+  - **`app/src/components/Login.tsx`** (MODIFIED): Registration now generates BIP-39 phrase → derives `mlsIdentityBytes` (SHA-256(phrase)[0..16]) → `mlsInitIdentityFromPhrase`. Phrase is a local const (never stored in state/IndexedDB). `login()` deferred until modal confirmed via `pendingLoginRef`.
+  - **`docs/prd.md` §8.5** (MODIFIED): Added implementation decision note — empty BIP-39 passphrase explicit rationale, HKDF domain label, no-storage invariant.
+  - **crypto-reviewer:** YELLOW→fixed. F1 (KAT missing) — pinned HKDF byte constants for 2 vectors. F2 (from_raw no consistency check) — ed25519 re-derivation guard added. F3/F6/F7 advisories addressed in comments + prd.md.
+  - **security-auditor:** PASS (GREEN). Y1: clipboard auto-clear (advisory, non-blocking).
+  - **71 WASM tests** (+12 recovery; was 59); **266 frontend tests** (+9 RecoveryPhraseModal; was 257). Clippy + tsc + Biome clean.
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+    - ML-KEM-768 Phase C remaining: Y-9 Zeroizing buffer-zero verification in tests (unsafe ptr test, future work)
+    - Invite system backend YELLOWs Y-1 through Y-6 (cycle 107, non-blocking)
+    - Invite frontend YELLOWs Y-1 (DOM code visibility) and Y-2 (origin baseline) — non-blocking
+    - useWelcomePoller Y1/Y3: sinceRef does not advance for skipped Application/Welcome envelopes (benign, follow-up)
+    - useWelcomePoller Y2: senderDeviceId UUID format not validated client-side (advisory)
+    - Recovery clipboard auto-clear (advisory, low priority)
+    - Informational: header-shape coupling in auth API tests
+    - Pre-existing vitest GHSA-5xrq-8626-4rwp (vitest UI not exposed; low real-world risk)
+
 ## Current state (2026-06-10, cycle 112 — FEATURE: QR code display in InviteModal — prd.md §8.4)
 - **Cycle 112 (commit d44479d):** FEATURE — §8.4 Contact Discovery QR code implemented:
   - **`app/src/components/InviteModal.tsx`** (MODIFIED): Added `qrcode` 1.5.4 import. New `qrDataUrl` state. `useEffect` generates a PNG data URL (`QRCode.toDataURL`) when `inviteUrl` is set — pure client-side via Canvas API, zero network calls. Design system colors: cream `#F2EDE3` dots on cosmic black `#040408`. Cancellation flag guards stale state updates. `.catch()` prevents unhandled rejection from serializing invite code into global error handlers. Modal close clears `qrDataUrl`.
