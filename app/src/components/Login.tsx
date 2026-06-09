@@ -10,6 +10,7 @@ import {
 import { db } from "../db/schema";
 import { useCryptoWorker } from "../hooks/useCryptoWorker";
 import { useAuthStore } from "../store/auth";
+import { base64ToUint8Array, uint8ToBase64 } from "../utils/base64";
 import { Icon } from "./Icon";
 
 // Logo — Gargantua silhouette (from Atoms.jsx).
@@ -60,11 +61,11 @@ export function Login() {
 		setPassword(e.target.value);
 	};
 
-	/** OPAQUE registration → returns (device_id, session_token). DB key derived inside worker. */
+	/** OPAQUE registration → returns (device_id, session_token, identityId). DB key derived inside worker. */
 	const doRegister = async (
 		pw: Uint8Array,
 		handle_hash: Uint8Array,
-	): Promise<{ device_id: string; token: string }> => {
+	): Promise<{ device_id: string; token: string; identityId: string }> => {
 		if (!cryptoWorker) throw new Error("crypto_unavailable");
 
 		// Step 1: OPAQUE reg start
@@ -81,6 +82,7 @@ export function Login() {
 		);
 
 		// Step 4: MLS identity init — random 16-byte BasicCredential identity (RFC 9420 §5.3).
+		// The identity bytes are a PUBLIC label (included in KeyPackages), not a secret.
 		const mlsIdentityBytes = crypto.getRandomValues(new Uint8Array(16));
 		const { identityId, keyPackage } = await cryptoWorker.mlsInitIdentity(mlsIdentityBytes);
 
@@ -93,10 +95,15 @@ export function Login() {
 		// Step 7: upload initial key package (non-fatal)
 		uploadKeyPackage(token, finishResp.device_id, keyPackage).catch(() => {});
 
-		// Suppress unused warning — identityId stored in WASM context
-		void identityId;
+		// Step 8: persist MLS identity bytes so they can be re-used on future logins.
+		await db.identity.put({
+			id: 1,
+			deviceId: finishResp.device_id,
+			mlsIdentityId: identityId,
+			mlsIdentityB64: uint8ToBase64(mlsIdentityBytes),
+		});
 
-		return { device_id: finishResp.device_id, token };
+		return { device_id: finishResp.device_id, token, identityId };
 	};
 
 	/** OPAQUE login → returns session_token. DB key derived inside worker. */
@@ -147,13 +154,16 @@ export function Login() {
 
 			let device_id: string;
 			let token: string;
+			let identityId: string | null = null;
 
 			if (mode === "create-account") {
 				const result = await doRegister(pw, handle_hash);
 				device_id = result.device_id;
 				token = result.token;
+				identityId = result.identityId;
+				// doRegister persists the identity record (including mlsIdentityB64).
 			} else {
-				// Load stored device_id from IndexedDB LocalIdentity
+				// Load stored device_id and MLS identity bytes from IndexedDB.
 				const identity = await db.identity.get(1);
 				if (!identity?.deviceId) {
 					setPhase("error");
@@ -162,13 +172,24 @@ export function Login() {
 				}
 				device_id = identity.deviceId;
 				({ token } = await doLogin(pw, handle_hash, device_id));
+
+				// Re-initialise MLS identity in the WASM worker using stored bytes.
+				// Each login produces a fresh identityId handle (the WASM map is cleared
+				// on logout), but the signing keys are derived from the same seed bytes
+				// so KeyPackages from this session are associated with this device.
+				if (identity.mlsIdentityB64 && cryptoWorker) {
+					const bytes = base64ToUint8Array(identity.mlsIdentityB64);
+					const { identityId: id, keyPackage } = await cryptoWorker.mlsInitIdentity(bytes);
+					identityId = id;
+					// Update the current session handle in the DB; don't overwrite mlsIdentityB64.
+					await db.identity.update(1, { mlsIdentityId: id });
+					// Upload a fresh KeyPackage for this session (non-fatal).
+					uploadKeyPackage(token, device_id, keyPackage).catch(() => {});
+				}
 			}
 
-			// Persist device_id in IndexedDB (singleton identity record)
-			await db.identity.put({ id: 1, deviceId: device_id });
-
 			// Advance to app phase — DB key was derived inside the crypto worker.
-			login(device_id, token);
+			login(device_id, token, identityId ?? undefined);
 		} catch (err) {
 			setPhase("error");
 			const msg = err instanceof Error ? err.message : "unknown_error";

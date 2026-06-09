@@ -1,11 +1,13 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it } from "vitest";
 import { App } from "./App";
 import { useAuthStore } from "./store/auth";
 
 // Reset Zustand store to login phase between tests.
 beforeEach(() => {
-	useAuthStore.setState({ phase: "login", deviceId: null });
+	useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null, identityId: null });
+	// Clear URL hash so tests don't bleed invite codes into each other.
+	history.replaceState(null, "", "/");
 });
 
 describe("App — login phase", () => {
@@ -52,5 +54,39 @@ describe("App — app phase", () => {
 		useAuthStore.setState({ phase: "app", deviceId: "mock-device-id" });
 		render(<App />);
 		expect(screen.getByPlaceholderText(/search chats/i)).toBeInTheDocument();
+	});
+});
+
+describe("App — invite hash detection", () => {
+	it("shows AcceptInviteModal when authenticated and URL has a valid invite hash", async () => {
+		// Set a valid 32 hex-char invite code in the fragment before mounting.
+		history.pushState(null, "", `/#${"a".repeat(32)}`);
+		useAuthStore.setState({ phase: "app", deviceId: "mock-device-id", identityId: "id-1" });
+
+		await act(async () => {
+			render(<App />);
+		});
+
+		expect(screen.getByRole("dialog", { name: /accept contact invite/i })).toBeInTheDocument();
+	});
+
+	it("does not show AcceptInviteModal when not authenticated", () => {
+		history.pushState(null, "", `/#${"b".repeat(32)}`);
+		// phase stays "login"
+
+		render(<App />);
+
+		expect(screen.queryByRole("dialog", { name: /accept contact invite/i })).toBeNull();
+	});
+
+	it("does not show AcceptInviteModal for an invalid hash", async () => {
+		history.pushState(null, "", "/#not-a-valid-code");
+		useAuthStore.setState({ phase: "app", deviceId: "mock-device-id", identityId: "id-1" });
+
+		await act(async () => {
+			render(<App />);
+		});
+
+		expect(screen.queryByRole("dialog", { name: /accept contact invite/i })).toBeNull();
 	});
 });

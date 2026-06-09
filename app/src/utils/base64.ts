@@ -22,12 +22,17 @@ export function textToBase64(text: string): string {
 	return uint8ToBase64(new TextEncoder().encode(text));
 }
 
-/** Decode a standard base64 string back to UTF-8 text. */
-export function base64ToText(b64: string): string {
+/** Decode a standard base64 string back to a Uint8Array (binary-safe). */
+export function base64ToUint8Array(b64: string): Uint8Array {
 	const binary = atob(b64);
 	const bytes = new Uint8Array(binary.length);
 	for (let i = 0; i < binary.length; i++) {
 		bytes[i] = binary.charCodeAt(i);
 	}
-	return new TextDecoder().decode(bytes);
+	return bytes;
+}
+
+/** Decode a standard base64 string back to UTF-8 text. */
+export function base64ToText(b64: string): string {
+	return new TextDecoder().decode(base64ToUint8Array(b64));
 }

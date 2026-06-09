@@ -25,9 +25,16 @@ export interface GroupRow {
 // LocalIdentity — singleton device identity record.
 // SECURITY: the OPAQUE export key is NOT stored here — it is session-lifetime only
 // (held in the crypto worker). Re-authentication derives a fresh export key.
+// mlsIdentityB64 stores the 16-byte BasicCredential identity bytes (RFC 9420 §5.3).
+// These bytes are a PUBLIC label (included in KeyPackages); they are NOT a cryptographic
+// secret and are safe to persist in IndexedDB.
 export interface LocalIdentity {
 	id: 1; // singleton
 	deviceId: string;
+	/** WASM MLS identity handle for the current session (re-generated each login). */
+	mlsIdentityId?: string;
+	/** base64(16-byte BasicCredential identity bytes) — public label, not a secret. */
+	mlsIdentityB64?: string;
 }
 
 // VerifiedContact — Safety Numbers verification state.
@@ -62,6 +69,15 @@ export class PowehiDb extends Dexie {
 		// v3: removed LocalIdentity.exportKeyB64 — OPAQUE export key must not be
 		// persisted to IndexedDB (crypto-reviewer R1). No index change needed.
 		this.version(3).stores({
+			messages: "id, groupId, epochSeq, receivedAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v4: added mlsIdentityId and mlsIdentityB64 to LocalIdentity — allows
+		// MLS state to be re-initialised on login without generating a new identity.
+		// No index change needed (identity table is singleton, keyed by id=1).
+		this.version(4).stores({
 			messages: "id, groupId, epochSeq, receivedAt",
 			groups: "id, lastActivity",
 			identity: "id",

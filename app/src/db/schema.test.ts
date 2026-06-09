@@ -66,6 +66,18 @@ describe("PowehiDb", () => {
 		// the crypto worker only and must not be persisted (crypto-reviewer R1).
 	});
 
+	it("stores and retrieves mlsIdentityId and mlsIdentityB64 on LocalIdentity (v4)", async () => {
+		await db.identity.put({
+			id: 1,
+			deviceId: "dev-v4",
+			mlsIdentityId: "uuid-mls-123",
+			mlsIdentityB64: "AAAAAAAAAAAAAAAAAAAAAA==",
+		});
+		const found = await db.identity.get(1);
+		expect(found?.mlsIdentityId).toBe("uuid-mls-123");
+		expect(found?.mlsIdentityB64).toBe("AAAAAAAAAAAAAAAAAAAAAA==");
+	});
+
 	it("queries messages by groupId index", async () => {
 		await db.messages.bulkAdd([
 			{

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { base64ToText, textToBase64, uint8ToBase64 } from "./base64";
+import { base64ToText, base64ToUint8Array, textToBase64, uint8ToBase64 } from "./base64";
 
 describe("uint8ToBase64", () => {
 	it("encodes a Uint8Array to standard base64", () => {
@@ -50,5 +50,24 @@ describe("textToBase64 / base64ToText round-trip", () => {
 		// We verify we get proper standard base64 by checking decoding with atob.
 		const result = textToBase64("hello");
 		expect(() => atob(result)).not.toThrow();
+	});
+});
+
+describe("base64ToUint8Array", () => {
+	it("round-trips with uint8ToBase64", () => {
+		const bytes = new Uint8Array([0x00, 0xff, 0x7e, 0x80, 0x42]);
+		expect(base64ToUint8Array(uint8ToBase64(bytes))).toEqual(bytes);
+	});
+
+	it("decodes 16-byte identity-like data correctly", () => {
+		const bytes = new Uint8Array(16).fill(0xab);
+		const b64 = uint8ToBase64(bytes);
+		const decoded = base64ToUint8Array(b64);
+		expect(decoded).toHaveLength(16);
+		expect(decoded.every((v) => v === 0xab)).toBe(true);
+	});
+
+	it("handles empty base64 string", () => {
+		expect(base64ToUint8Array("")).toHaveLength(0);
 	});
 });

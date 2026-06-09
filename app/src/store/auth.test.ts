@@ -3,7 +3,7 @@ import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
 import { useAuthStore } from "./auth";
 
 afterEach(() => {
-	useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null });
+	useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null, identityId: null });
 	vi.restoreAllMocks();
 });
 
@@ -32,13 +32,24 @@ describe("useAuthStore", () => {
 		expect(useAuthStore.getState().sessionToken).toBeNull();
 	});
 
-	it("logout() returns to login phase and clears deviceId and sessionToken", async () => {
+	it("login() stores identityId when provided", () => {
+		useAuthStore.getState().login("device-abc", "tok-xyz", "identity-999");
+		expect(useAuthStore.getState().identityId).toBe("identity-999");
+	});
+
+	it("login() without identityId stores null", () => {
 		useAuthStore.getState().login("device-abc", "tok-xyz");
+		expect(useAuthStore.getState().identityId).toBeNull();
+	});
+
+	it("logout() returns to login phase and clears deviceId, sessionToken and identityId", async () => {
+		useAuthStore.getState().login("device-abc", "tok-xyz", "identity-abc");
 		await useAuthStore.getState().logout();
 		const state = useAuthStore.getState();
 		expect(state.phase).toBe("login");
 		expect(state.deviceId).toBeNull();
 		expect(state.sessionToken).toBeNull();
+		expect(state.identityId).toBeNull();
 	});
 
 	it("login() with empty deviceId still transitions phase", () => {

@@ -2,6 +2,19 @@
 // is called without a factory.  Returns a stable singleton so that React's useEffect
 // dependency array sees the same reference across re-renders.
 const mockWorker = {
+	mlsInitIdentity: async (_identityBytes: Uint8Array) => ({
+		identityId: "mock-identity-id",
+		keyPackage: new Uint8Array(100),
+	}),
+	mlsCreateGroup: async (_identityId: string) => ({
+		groupId: "mock-group-id-00000000-0000-0000-0000-000000000000",
+	}),
+	mlsAddMember: async (_identityId: string, _groupId: string, _keyPackage: Uint8Array) => ({
+		welcome: new Uint8Array(200),
+	}),
+	mlsJoinGroup: async (_identityId: string, _welcome: Uint8Array) => ({
+		groupId: "mock-group-id-00000000-0000-0000-0000-000000000000",
+	}),
 	mlsGroupMembers: async () => [
 		{
 			leafIndex: 0,

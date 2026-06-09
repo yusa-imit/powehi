@@ -1,0 +1,230 @@
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as GroupsApi from "../api/groups";
+import * as InvitesApi from "../api/invites";
+import * as KeyPackagesApi from "../api/key_packages";
+import * as MessagesApi from "../api/messages";
+import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
+import { useAuthStore } from "../store/auth";
+import { AcceptInviteModal } from "./AcceptInviteModal";
+
+// ── Constants ────────────────────────────────────────────────────────────────
+
+const INVITE_CODE = "a".repeat(32);
+const INVITER_DEVICE_ID = "inviter-device-00000000-0000-0000-0000";
+const MOCK_GROUP_ID = "mock-group-id-00000000-0000-0000-0000-000000000000";
+
+// ── Crypto worker mock ───────────────────────────────────────────────────────
+
+const mockCryptoWorker = {
+	mlsCreateGroup: vi.fn(async (_id: string) => ({ groupId: MOCK_GROUP_ID })),
+	mlsAddMember: vi.fn(async () => ({ welcome: new Uint8Array(200) })),
+};
+
+// ── Spies ────────────────────────────────────────────────────────────────────
+
+let redeemInviteSpy: MockInstance<typeof InvitesApi.redeemInvite>;
+let fetchKeyPackageSpy: MockInstance<typeof KeyPackagesApi.fetchKeyPackage>;
+let createGroupSpy: MockInstance<typeof GroupsApi.createGroup>;
+let addMemberSpy: MockInstance<typeof GroupsApi.addMember>;
+let sendWelcomeSpy: MockInstance<typeof MessagesApi.sendWelcome>;
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function renderModal(overrides?: Partial<Parameters<typeof AcceptInviteModal>[0]>) {
+	const onClose = vi.fn();
+	const onAccepted = vi.fn();
+	render(
+		<AcceptInviteModal
+			inviteCode={INVITE_CODE}
+			onClose={onClose}
+			onAccepted={onAccepted}
+			{...overrides}
+		/>,
+	);
+	return { onClose, onAccepted };
+}
+
+// ── Setup ────────────────────────────────────────────────────────────────────
+
+beforeEach(() => {
+	useAuthStore.setState({
+		phase: "app",
+		deviceId: "my-device-id",
+		sessionToken: "tok-test",
+		identityId: "identity-abc",
+	});
+	vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
+		mockCryptoWorker as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
+	);
+	redeemInviteSpy = vi
+		.spyOn(InvitesApi, "redeemInvite")
+		.mockResolvedValue({ device_id: INVITER_DEVICE_ID });
+	fetchKeyPackageSpy = vi
+		.spyOn(KeyPackagesApi, "fetchKeyPackage")
+		.mockResolvedValue(new Uint8Array(200));
+	createGroupSpy = vi.spyOn(GroupsApi, "createGroup").mockResolvedValue(undefined);
+	addMemberSpy = vi.spyOn(GroupsApi, "addMember").mockResolvedValue(undefined);
+	sendWelcomeSpy = vi.spyOn(MessagesApi, "sendWelcome").mockResolvedValue(undefined);
+});
+
+afterEach(() => {
+	useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null, identityId: null });
+	vi.restoreAllMocks();
+});
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+describe("AcceptInviteModal — render", () => {
+	it("renders the dialog with Connect button in idle state", () => {
+		renderModal();
+		expect(screen.getByRole("dialog", { name: /accept contact invite/i })).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: /connect/i })).toBeInTheDocument();
+	});
+
+	it("renders the E2EE notice", () => {
+		renderModal();
+		expect(screen.getByText(/end-to-end encrypted/i)).toBeInTheDocument();
+	});
+
+	it("calls onClose when Close button (X) is clicked", () => {
+		const { onClose } = renderModal();
+		fireEvent.click(screen.getByRole("button", { name: /close/i }));
+		expect(onClose).toHaveBeenCalledOnce();
+	});
+});
+
+describe("AcceptInviteModal — accept flow success", () => {
+	it("shows loading state while accepting", async () => {
+		redeemInviteSpy.mockImplementation(
+			() => new Promise((r) => setTimeout(() => r({ device_id: INVITER_DEVICE_ID }), 50)),
+		);
+		renderModal();
+
+		fireEvent.click(screen.getByRole("button", { name: /connect/i }));
+		expect(await screen.findByText(/establishing encrypted channel/i)).toBeInTheDocument();
+	});
+
+	it("shows success state after full accept flow", async () => {
+		renderModal();
+
+		await act(async () => {
+			fireEvent.click(screen.getByRole("button", { name: /connect/i }));
+		});
+
+		await waitFor(() => {
+			expect(screen.getByText(/encrypted channel established/i)).toBeInTheDocument();
+		});
+	});
+
+	it("calls redeemInvite with the invite code in the request body", async () => {
+		renderModal();
+
+		await act(async () => {
+			fireEvent.click(screen.getByRole("button", { name: /connect/i }));
+		});
+
+		await waitFor(() =>
+			expect(screen.getByText(/encrypted channel established/i)).toBeInTheDocument(),
+		);
+		expect(redeemInviteSpy).toHaveBeenCalledWith("tok-test", INVITE_CODE);
+	});
+
+	it("calls createGroup and addMember with opaque UUIDs (no plaintext)", async () => {
+		renderModal();
+
+		await act(async () => {
+			fireEvent.click(screen.getByRole("button", { name: /connect/i }));
+		});
+
+		await waitFor(() =>
+			expect(screen.getByText(/encrypted channel established/i)).toBeInTheDocument(),
+		);
+		expect(createGroupSpy).toHaveBeenCalledWith("tok-test", MOCK_GROUP_ID);
+		expect(addMemberSpy).toHaveBeenCalledWith("tok-test", MOCK_GROUP_ID, INVITER_DEVICE_ID, 1);
+	});
+
+	it("calls onAccepted with the groupId when Open chat is clicked", async () => {
+		const { onAccepted } = renderModal();
+
+		await act(async () => {
+			fireEvent.click(screen.getByRole("button", { name: /connect/i }));
+		});
+
+		await waitFor(() => screen.getByTestId("open-chat-btn"));
+		fireEvent.click(screen.getByTestId("open-chat-btn"));
+		expect(onAccepted).toHaveBeenCalledWith(MOCK_GROUP_ID);
+	});
+});
+
+describe("AcceptInviteModal — error paths", () => {
+	it("shows 'expired' error when redeemInvite returns invite_not_found", async () => {
+		redeemInviteSpy.mockRejectedValue(new Error("invite_not_found"));
+		renderModal();
+
+		await act(async () => {
+			fireEvent.click(screen.getByRole("button", { name: /connect/i }));
+		});
+
+		await waitFor(() => {
+			expect(screen.getByText(/already been used or has expired/i)).toBeInTheDocument();
+		});
+	});
+
+	it("shows 'no_key_package' error when fetchKeyPackage fails", async () => {
+		fetchKeyPackageSpy.mockRejectedValue(new Error("http_404"));
+		renderModal();
+
+		await act(async () => {
+			fireEvent.click(screen.getByRole("button", { name: /connect/i }));
+		});
+
+		await waitFor(() => {
+			expect(screen.getByText(/encryption key is unavailable/i)).toBeInTheDocument();
+		});
+	});
+
+	it("shows generic error when createGroup fails", async () => {
+		createGroupSpy.mockRejectedValue(new Error("http_500"));
+		renderModal();
+
+		await act(async () => {
+			fireEvent.click(screen.getByRole("button", { name: /connect/i }));
+		});
+
+		await waitFor(() => {
+			expect(screen.getByText(/could not complete the connection/i)).toBeInTheDocument();
+		});
+	});
+
+	it("shows 'no_identity' error when identityId is null", async () => {
+		useAuthStore.setState({ identityId: null });
+		renderModal();
+
+		await act(async () => {
+			fireEvent.click(screen.getByRole("button", { name: /connect/i }));
+		});
+
+		await waitFor(() => {
+			expect(screen.getByText(/secure session not fully initialised/i)).toBeInTheDocument();
+		});
+	});
+
+	it("Welcome bytes are never logged — sendWelcome receives opaque Uint8Array only", async () => {
+		const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		renderModal();
+
+		await act(async () => {
+			fireEvent.click(screen.getByRole("button", { name: /connect/i }));
+		});
+
+		await waitFor(() =>
+			expect(screen.getByText(/encrypted channel established/i)).toBeInTheDocument(),
+		);
+		// sendWelcome must be called with a Uint8Array (opaque bytes) — never logged plaintext
+		expect(sendWelcomeSpy).toHaveBeenCalled();
+		const [, , welcomeArg] = sendWelcomeSpy.mock.calls[0];
+		expect(welcomeArg).toBeInstanceOf(Uint8Array);
+		expect(consoleSpy).not.toHaveBeenCalledWith(expect.anything(), welcomeArg);
+	});
+});
