@@ -17,6 +17,23 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-10, cycle 112 — FEATURE: QR code display in InviteModal — prd.md §8.4)
+- **Cycle 112 (commit d44479d):** FEATURE — §8.4 Contact Discovery QR code implemented:
+  - **`app/src/components/InviteModal.tsx`** (MODIFIED): Added `qrcode` 1.5.4 import. New `qrDataUrl` state. `useEffect` generates a PNG data URL (`QRCode.toDataURL`) when `inviteUrl` is set — pure client-side via Canvas API, zero network calls. Design system colors: cream `#F2EDE3` dots on cosmic black `#040408`. Cancellation flag guards stale state updates. `.catch()` prevents unhandled rejection from serializing invite code into global error handlers. Modal close clears `qrDataUrl`.
+  - **`app/src/components/InviteModal.test.tsx`** (MODIFIED): `vi.mock("qrcode")` returns mock data URL. 3 new tests: QR img rendered after invite creation; descriptive alt text (`"QR code for invite link"`); security invariant — `img.src` is `data:` URL, never `https://`.
+  - **security-auditor:** GREEN (0 RED). Y1: unhandled rejection fixed (`.catch()`). Y2: pre-existing vitest GHSA-5xrq-8626-4rwp advisory (unrelated to this cycle, deferred).
+  - **257 frontend tests** (+3 QR code; was 254); Biome clean; tsc clean.
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+    - ML-KEM-768 Phase C remaining: Y-9 Zeroizing buffer-zero verification in tests (unsafe ptr test, future work)
+    - Invite system backend YELLOWs Y-1 through Y-6 (cycle 107, non-blocking)
+    - Invite frontend YELLOWs Y-1 (DOM code visibility) and Y-2 (origin baseline) — non-blocking
+    - useWelcomePoller Y1/Y3: sinceRef does not advance for skipped Application/Welcome envelopes (benign, follow-up)
+    - useWelcomePoller Y2: senderDeviceId UUID format not validated client-side (advisory)
+    - Informational: header-shape coupling in auth API tests
+    - Pre-existing vitest GHSA-5xrq-8626-4rwp (vitest UI not exposed; low real-world risk)
+
 ## Current state (2026-06-10, cycle 111 — FEATURE: Welcome message processing — inviter auto-joins group (§8.3))
 - **Cycle 111 (commit eaa88fd):** FEATURE — closes the final §8.3 contact discovery gap: inviter's device now auto-joins the MLS group when acceptee sends a Welcome envelope.
   - **`app/src/hooks/useWelcomePoller.ts`** (NEW): Global polling hook. Calls `mlsJoinGroup(identityId, welcomeBytes)` on Welcome envelopes. **Ack-after-callback ordering** (R1 fix): `onNewGroup` callback fires BEFORE `ackMessage` so if the callback throws, the envelope stays on the server for redelivery. Commit/Proposal acked silently. Application envelopes skipped (useMessages owns them).
