@@ -2,9 +2,9 @@
  * useMessages — poll for incoming MLS Application messages for an active group.
  *
  * Polls GET /v1/messages every POLL_INTERVAL_MS.  Application messages are
- * decrypted via the crypto worker and forwarded to `onMessage`.  Welcome and
- * Commit envelopes are acked silently (they carry MLS state consumed by the
- * WASM layer, not display text).
+ * decrypted via the crypto worker and forwarded to `onMessage`.  Commit and
+ * Proposal envelopes are acked silently.  Welcome envelopes are skipped —
+ * useWelcomePoller owns Welcome processing and will ack them after mlsJoinGroup.
  *
  * Security invariants:
  * - Plaintext is never stored in component state; only the decoded string is
@@ -68,8 +68,12 @@ export function useMessages(
 		let cancelled = false;
 
 		const processEnvelope = async (env: Envelope): Promise<void> => {
+			if (env.message_type === "Welcome") {
+				// Welcome envelopes are handled by useWelcomePoller — do not ack here.
+				return;
+			}
 			if (env.message_type !== "Application" || env.group_id !== groupId) {
-				// Ack silently — Welcome/Commit/Proposal are consumed by WASM, not UI.
+				// Commit / Proposal / off-group Application: ack silently.
 				await ackMessage(sessionToken, env.id).catch(() => {});
 				return;
 			}

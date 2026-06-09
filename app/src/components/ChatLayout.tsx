@@ -15,6 +15,7 @@ import { useCryptoWorker } from "../hooks/useCryptoWorker";
 import { type IncomingMessage, useMessages } from "../hooks/useMessages";
 import { usePersistentMessages } from "../hooks/usePersistentMessages";
 import { useRegionDetect } from "../hooks/useRegionDetect";
+import { type NewGroupEvent, useWelcomePoller } from "../hooks/useWelcomePoller";
 import { useAuthStore } from "../store/auth";
 import { uint8ToBase64 } from "../utils/base64";
 import { Icon } from "./Icon";
@@ -1375,7 +1376,7 @@ export function ChatLayout() {
 	const [disappearingTtl, setDisappearingTtl] = useState<TtlOption>(undefined);
 	const active = chats.find((c) => c.id === activeId);
 
-	const { sessionToken } = useAuthStore();
+	const { sessionToken, identityId } = useAuthStore();
 	const cryptoWorker = useCryptoWorker();
 	const { persistIncoming, persistOutgoing } = usePersistentMessages(active?.mlsGroupId);
 
@@ -1414,6 +1415,36 @@ export function ChatLayout() {
 
 	// Poll for incoming messages whenever there's an active MLS group + session.
 	useMessages(active?.mlsIdentityId, active?.mlsGroupId, handleIncoming);
+
+	// Add a new chat entry when another device invites us (Welcome envelope received).
+	const handleNewGroup = useCallback(
+		(event: NewGroupEvent) => {
+			setChats((prev) => {
+				if (prev.some((c) => c.mlsGroupId === event.groupId)) return prev;
+				const shortId = event.senderDeviceId.slice(0, 8);
+				const now = new Date();
+				const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+				return [
+					{
+						id: event.groupId,
+						name: `Contact ${shortId}`,
+						handle: shortId,
+						online: false,
+						last: "",
+						time,
+						unread: 1,
+						messages: [],
+						mlsGroupId: event.groupId,
+						mlsIdentityId: identityId ?? undefined,
+					},
+					...prev,
+				];
+			});
+		},
+		[identityId],
+	);
+	// Global Welcome poller — processes invitations from other devices.
+	useWelcomePoller(identityId, handleNewGroup);
 
 	const sendMessage = async (text: string) => {
 		const now = new Date();

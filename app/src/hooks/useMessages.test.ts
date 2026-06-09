@@ -87,8 +87,22 @@ describe("useMessages", () => {
 		});
 	});
 
-	it("acks non-Application messages silently without calling onMessage", async () => {
+	it("skips Welcome envelopes without acking (useWelcomePoller owns Welcome)", async () => {
 		pollSpy.mockResolvedValueOnce([makeEnvelope({ message_type: "Welcome" })]);
+		const onMessage = vi.fn();
+
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, onMessage));
+
+		await waitFor(() => {
+			expect(pollSpy).toHaveBeenCalled();
+		});
+		await new Promise<void>((r) => setTimeout(r, 10));
+		expect(ackSpy).not.toHaveBeenCalled();
+		expect(onMessage).not.toHaveBeenCalled();
+	});
+
+	it("acks Commit envelopes silently without calling onMessage", async () => {
+		pollSpy.mockResolvedValueOnce([makeEnvelope({ message_type: "Commit" })]);
 		const onMessage = vi.fn();
 
 		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, onMessage));
