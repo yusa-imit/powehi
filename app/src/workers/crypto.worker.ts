@@ -66,6 +66,9 @@ interface WasmModule {
 	mls_group_members: (identityId: string, groupId: string) => MlsGroupMember[];
 	mls_compute_safety_number: (sigKeyA: Uint8Array, sigKeyB: Uint8Array) => MlsSafetyNumberResult;
 	mls_clear_session: () => void;
+	// §8.5 Recovery: BIP-39 phrase generation and phrase-derived identity.
+	mls_generate_recovery_phrase: () => { words: string[] };
+	mls_init_identity_from_phrase: (phrase: string, identityBytes: Uint8Array) => MlsIdentityResult;
 	// Post-quantum KEM (FIPS 203 ML-KEM-768) — ADR-0003 Phase A primitives.
 	ml_kem_768_keygen: () => { encapKey: Uint8Array; decapKey: Uint8Array };
 	ml_kem_768_encap: (encapKey: Uint8Array) => { ciphertext: Uint8Array; sharedSecret: Uint8Array };
@@ -188,6 +191,30 @@ const api = {
 	async mlsInitIdentity(identityBytes: Uint8Array): Promise<MlsIdentityResult> {
 		const wasm = await getWasm();
 		return wasm.mls_init_identity(identityBytes);
+	},
+
+	/**
+	 * Generate 24 BIP-39 recovery words (§8.5).
+	 * Words are returned to the caller for display; they are NEVER stored by this worker.
+	 * The caller must display them once and then discard the array.
+	 */
+	async generateRecoveryPhrase(): Promise<{ words: string[] }> {
+		const wasm = await getWasm();
+		return wasm.mls_generate_recovery_phrase();
+	},
+
+	/**
+	 * Initialise an MLS identity derived from a BIP-39 recovery phrase (§8.5).
+	 * The signing key inside WASM is derived from the full BIP-39 seed; identityBytes
+	 * is a 16-byte public label (SHA-256(phrase)[0..16]) included in the KeyPackage.
+	 * Returns { identityId, keyPackage } — same shape as mlsInitIdentity.
+	 */
+	async mlsInitIdentityFromPhrase(
+		phrase: string,
+		identityBytes: Uint8Array,
+	): Promise<MlsIdentityResult> {
+		const wasm = await getWasm();
+		return wasm.mls_init_identity_from_phrase(phrase, identityBytes);
 	},
 
 	/**

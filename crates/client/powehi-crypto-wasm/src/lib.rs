@@ -11,6 +11,7 @@ pub mod kem;
 pub mod kem_credential;
 pub mod mls_group;
 pub mod opaque;
+pub mod recovery;
 pub mod wasm_exports;
 
 #[wasm_bindgen]

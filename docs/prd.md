@@ -1142,6 +1142,14 @@ https://powehi.app/i/<short-id>#<one-time-token>
 - 신규 디바이스에서 복원 시 사용
 - 단, 메시지 내용 복원이 아닌 **계정/identity 키 복원**만. (메시지 백업은 별도 옵션)
 
+**구현 결정 (cycle 113, crypto-reviewer 검토 완료):**
+- 엔트로피: CSPRNG 256비트 → BIP-39 24단어 (표준 BIP-39)
+- 시드 유도: PBKDF2-HMAC-SHA512 (BIP-39 표준, 반복 2048회)
+- **BIP-39 패스프레이즈 없음 (empty passphrase):** CSPRNG 생성 니모닉은 256비트 엔트로피를 가지므로 추가 패스프레이즈 없이도 무차별 대입 공격에 안전. 24단어 자체가 유일한 복구 비밀.
+- MLS 서명 키 유도: HKDF-SHA256(salt=None, info=b"powehi-mls-signing-v1", L=32) → Ed25519 개인 키
+- 개인 키는 WASM 경계를 절대 넘지 않음; 브라우저 JS로 노출되지 않음
+- 니모닉은 등록 시 1회만 표시되며 절대 저장되지 않음 (IndexedDB/localStorage 저장 금지)
+
 ---
 
 ## 9. 미디어 처리

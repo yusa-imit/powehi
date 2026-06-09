@@ -10,6 +10,7 @@
 // later phase (see CLAUDE.md ciphersuite migration note); the ciphersuite is
 // centralized in [`CIPHERSUITE`] so the migration is a one-line change here.
 
+use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use openmls::prelude::{tls_codec::Deserialize as _, *};
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
@@ -74,6 +75,59 @@ pub fn generate_identity(
     let credential = BasicCredential::new(identity.to_vec());
     let signer = SignatureKeyPair::new(CIPHERSUITE.signature_algorithm())
         .map_err(|_| MlsError::SignatureKey)?;
+    signer
+        .store(provider.storage())
+        .map_err(|_| MlsError::SignatureKey)?;
+    let credential_with_key = CredentialWithKey {
+        credential: credential.into(),
+        signature_key: signer.to_public_vec().into(),
+    };
+    Ok(Identity {
+        credential_with_key,
+        signer,
+    })
+}
+
+/// Generate an MLS identity using a **deterministic** Ed25519 signing keypair —
+/// the §8.5 Recovery Mechanism entry point.
+///
+/// Unlike [`generate_identity`], which mints a fresh keypair from the provider's
+/// CSPRNG, this function reuses an externally derived keypair (e.g. derived from
+/// a BIP-39 recovery phrase via `recovery::derive_signing_keypair`).  The
+/// resulting MLS signing public key is therefore reproducible from the recovery
+/// phrase alone.
+///
+/// `private_key` is 32 bytes of Ed25519 secret-scalar seed (RFC 8032 §5.1.5);
+/// `public_key` is the matching 32-byte verification key (RFC 8032 §5.1.5).
+/// Both are sourced from `recovery::derive_signing_keypair` — never from the
+/// JS / network boundary.  The private bytes are passed by `&[u8; 32]`
+/// reference and immediately moved into the openmls key store; this function
+/// does NOT extend the lifetime of the secret beyond its own scope, but the
+/// caller MUST hold the secret in a `Zeroizing` wrapper so the source buffer
+/// is wiped on drop.
+pub fn generate_identity_from_keypair(
+    identity: &[u8],
+    private_key: &[u8; 32],
+    public_key: &[u8; 32],
+    provider: &impl OpenMlsProvider,
+) -> Result<Identity, MlsError> {
+    // Verify that `public_key` matches the Ed25519 verifying key derived from
+    // `private_key`.  `SignatureKeyPair::from_raw` accepts any byte pair without
+    // internal consistency checks; a mismatch would silently produce signatures
+    // that peers cannot verify (the stored public key would not match the actual
+    // signing key).  This check closes that gap.
+    let expected_pub = Ed25519SigningKey::from_bytes(private_key)
+        .verifying_key()
+        .to_bytes();
+    if &expected_pub != public_key {
+        return Err(MlsError::SignatureKey);
+    }
+    let credential = BasicCredential::new(identity.to_vec());
+    let signer = SignatureKeyPair::from_raw(
+        CIPHERSUITE.signature_algorithm(),
+        private_key.to_vec(),
+        public_key.to_vec(),
+    );
     signer
         .store(provider.storage())
         .map_err(|_| MlsError::SignatureKey)?;

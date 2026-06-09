@@ -27,7 +27,7 @@ use crate::kem;
 use crate::kem_credential;
 use crate::mls_group::{
     add_member, create_group, decrypt_message, encrypt_message, generate_identity,
-    generate_key_package, join_group, Identity,
+    generate_identity_from_keypair, generate_key_package, join_group, Identity,
 };
 use crate::opaque::{self, DefaultCipherSuite, EXPORT_KEY_LEN};
 
@@ -251,6 +251,88 @@ pub fn mls_init_identity(identity_bytes: &[u8]) -> Result<JsValue, JsError> {
         generate_identity(identity_bytes, &provider).map_err(|e| js_err(&e.to_string()))?;
     let bundle = generate_key_package(&identity, &provider).map_err(|e| js_err(&e.to_string()))?;
     // Wrap the KeyPackage in MlsMessageOut for transport (standard MLS KeyPackage format).
+    let key_package = MlsMessageOut::from(bundle)
+        .to_bytes()
+        .map_err(|_| js_err("key package serialization failed"))?;
+    let identity_id = next_id();
+    MLS_CTX.with(|ctx| {
+        ctx.borrow_mut().insert(
+            identity_id.clone(),
+            MlsContext {
+                identity,
+                provider,
+                groups: HashMap::new(),
+            },
+        );
+    });
+    js_obj(&[
+        ("identityId", JsValue::from_str(&identity_id)),
+        ("keyPackage", bytes_js(&key_package)),
+    ])
+}
+
+/// Generate a fresh 24-word BIP-39 recovery phrase (§8.5 Recovery Mechanism).
+///
+/// Returns `{ words: string[] }` — exactly 24 lowercase English BIP-39 words.
+/// The phrase MUST be shown to the user exactly once and NEVER persisted
+/// server-side or in plaintext storage; it is the sole secret that authorizes
+/// reconstruction of the MLS signing key on a new device.
+///
+/// Security:
+/// - 256 bits of CSPRNG entropy are pulled via `getrandom` (browser CSPRNG on wasm32).
+/// - The entropy buffer is wiped from WASM heap on drop (Zeroizing).
+/// - The mnemonic itself crosses the WASM-JS boundary as a JS string array —
+///   the JS caller is responsible for displaying it once and clearing the array.
+#[wasm_bindgen]
+pub fn mls_generate_recovery_phrase() -> Result<JsValue, JsError> {
+    use crate::recovery::generate_mnemonic;
+    let mnemonic = generate_mnemonic().map_err(|e| js_err(&e.to_string()))?;
+    let arr = js_sys::Array::new();
+    for word in mnemonic.words() {
+        arr.push(&JsValue::from_str(word));
+    }
+    js_obj(&[("words", arr.into())])
+}
+
+/// Create an MLS identity with a signing key derived deterministically from a
+/// BIP-39 recovery phrase (§8.5 Recovery Mechanism).
+///
+/// Returns `{ identityId, keyPackage }` — same shape as `mls_init_identity`.
+/// `identity_bytes` is the public BasicCredential label (e.g. a 16-byte device
+/// identifier).  It is NOT secret — it is shipped to peers as part of the
+/// credential and stored server-side.
+///
+/// Security:
+/// - The recovery `phrase` is parsed, expanded to a 64-byte seed via BIP-39
+///   PBKDF2-HMAC-SHA512, then expanded to a 32-byte Ed25519 secret via
+///   HKDF-SHA256 with domain `b"powehi-mls-signing-v1"`.
+/// - The derived private key is stored in the openmls key store and bound to
+///   `Identity::signer`; it NEVER crosses the WASM-JS boundary.
+/// - All intermediate buffers (entropy, seed, OKM) live in `Zeroizing` wrappers
+///   and are wiped on drop.
+/// - On error, no partial state is left in `MLS_CTX` (failures occur before
+///   the insert).
+#[wasm_bindgen]
+pub fn mls_init_identity_from_phrase(
+    phrase: &str,
+    identity_bytes: &[u8],
+) -> Result<JsValue, JsError> {
+    use crate::recovery::{derive_signing_keypair, mnemonic_to_seed, parse_phrase};
+    // Error is intentionally opaque ("invalid recovery phrase") — do not leak
+    // word content, user input, or parse position back to JS (rule: no-plaintext-logging).
+    let mnemonic = parse_phrase(phrase).map_err(|e| js_err(&e.to_string()))?;
+    let seed = mnemonic_to_seed(&mnemonic);
+    let (private_key, public_key) =
+        derive_signing_keypair(&*seed).map_err(|e| js_err(&e.to_string()))?;
+    let provider = OpenMlsRustCrypto::default();
+    let identity = generate_identity_from_keypair(
+        identity_bytes,
+        &private_key,
+        &public_key,
+        &provider,
+    )
+    .map_err(|e| js_err(&e.to_string()))?;
+    let bundle = generate_key_package(&identity, &provider).map_err(|e| js_err(&e.to_string()))?;
     let key_package = MlsMessageOut::from(bundle)
         .to_bytes()
         .map_err(|_| js_err("key package serialization failed"))?;
@@ -1417,6 +1499,96 @@ mod tests {
             sn,
             "689053 337949 184798 288064 134849 362568 560227 765408 921198 315305 693006 807986",
             "safety number derivation must not change silently"
+        );
+    }
+
+    // ── §8.5 Recovery Mechanism ──────────────────────────────────────────────
+    //
+    // Native tests target the internal helpers used by
+    // `mls_init_identity_from_phrase` (the WASM wrapper itself relies on js_sys
+    // and is exercised via wasm-bindgen tests).  The invariants covered here:
+    //
+    //   1. The same recovery phrase produces the same MLS signing public key.
+    //   2. The same phrase + identity label produces a KeyPackage whose
+    //      embedded signing public key bytes are identical across runs.
+    //   3. The derived signing key actually matches openmls's stored signer
+    //      (no off-by-one or copy-direction bug in `from_raw`).
+
+    /// Same recovery phrase → same MLS signing public key (the recovery
+    /// invariant: the device label can differ, but the signing identity is
+    /// reproducible from the phrase alone).
+    #[test]
+    fn test_recovery_phrase_yields_deterministic_signing_public_key() {
+        use crate::recovery::{derive_signing_keypair, mnemonic_to_seed, parse_phrase};
+        // Standard BIP-39 test vector (all-zero entropy).
+        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let m = parse_phrase(phrase).unwrap();
+        let seed = mnemonic_to_seed(&m);
+        let (_priv1, pub1) = derive_signing_keypair(&*seed).unwrap();
+        let (_priv2, pub2) = derive_signing_keypair(&*seed).unwrap();
+        assert_eq!(pub1, pub2, "same phrase must yield same Ed25519 public key");
+    }
+
+    /// `generate_identity_from_keypair` stores a signer whose public bytes
+    /// match the derived public key — i.e. openmls did not re-derive or
+    /// swap the keypair.
+    #[test]
+    fn test_generate_identity_from_keypair_preserves_public_key() {
+        use crate::mls_group::generate_identity_from_keypair;
+        use crate::recovery::{derive_signing_keypair, mnemonic_to_seed, parse_phrase};
+        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let m = parse_phrase(phrase).unwrap();
+        let seed = mnemonic_to_seed(&m);
+        let (priv_key, pub_key) = derive_signing_keypair(&*seed).unwrap();
+        let provider = OpenMlsRustCrypto::default();
+        let identity = generate_identity_from_keypair(
+            b"recovery-test-device",
+            &priv_key,
+            &pub_key,
+            &provider,
+        )
+        .unwrap();
+        assert_eq!(
+            identity.signer.to_public_vec().as_slice(),
+            pub_key.as_slice(),
+            "stored signer public key must equal the derived public key"
+        );
+    }
+
+    /// Two independent identities built from the same phrase + same device
+    /// label must agree on the MLS signing public key.  Different runtime
+    /// `identityId` handles are expected (they index thread-local state).
+    #[test]
+    fn test_recovery_two_identities_same_phrase_same_signing_key() {
+        use crate::mls_group::generate_identity_from_keypair;
+        use crate::recovery::{derive_signing_keypair, mnemonic_to_seed, parse_phrase};
+        let phrase = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+        let m = parse_phrase(phrase).unwrap();
+        let seed = mnemonic_to_seed(&m);
+        let (priv_a, pub_a) = derive_signing_keypair(&*seed).unwrap();
+        let (priv_b, pub_b) = derive_signing_keypair(&*seed).unwrap();
+
+        let provider_a = OpenMlsRustCrypto::default();
+        let id_a = generate_identity_from_keypair(b"device-label", &priv_a, &pub_a, &provider_a)
+            .unwrap();
+        let provider_b = OpenMlsRustCrypto::default();
+        let id_b = generate_identity_from_keypair(b"device-label", &priv_b, &pub_b, &provider_b)
+            .unwrap();
+
+        assert_eq!(
+            id_a.signer.to_public_vec(),
+            id_b.signer.to_public_vec(),
+            "two identities from the same phrase must share the signing public key"
+        );
+    }
+
+    /// Invalid recovery phrase must fail-closed (no partial state, no derived key).
+    #[test]
+    fn test_recovery_invalid_phrase_rejected_by_parser() {
+        use crate::recovery::parse_phrase;
+        assert!(
+            parse_phrase("not a valid bip39 phrase at all").is_err(),
+            "invalid phrase must be rejected before any key material is derived"
         );
     }
 }

@@ -1,4 +1,4 @@
-import { type ChangeEvent, type FormEvent, useState } from "react";
+import { type ChangeEvent, type FormEvent, useRef, useState } from "react";
 import {
 	hashHandle,
 	loginFinish,
@@ -12,6 +12,7 @@ import { useCryptoWorker } from "../hooks/useCryptoWorker";
 import { useAuthStore } from "../store/auth";
 import { base64ToUint8Array, uint8ToBase64 } from "../utils/base64";
 import { Icon } from "./Icon";
+import { RecoveryPhraseModal } from "./RecoveryPhraseModal";
 
 // Logo — Gargantua silhouette (from Atoms.jsx).
 function Logo({ size = 32 }: { size?: number }) {
@@ -40,7 +41,7 @@ function Logo({ size = 32 }: { size?: number }) {
 	);
 }
 
-type LoginPhase = "idle" | "loading" | "error";
+type LoginPhase = "idle" | "loading" | "recovery" | "error";
 type Mode = "sign-in" | "create-account";
 
 export function Login() {
@@ -50,6 +51,13 @@ export function Login() {
 	const [handle, setHandle] = useState("");
 	const [password, setPassword] = useState("");
 	const [phase, setPhase] = useState<LoginPhase>("idle");
+	const [recoveryWords, setRecoveryWords] = useState<string[] | null>(null);
+	// Holds registration credentials until the user confirms the recovery phrase (§8.5).
+	const pendingLoginRef = useRef<{
+		device_id: string;
+		token: string;
+		identityId: string | undefined;
+	} | null>(null);
 	const [errorMsg, setErrorMsg] = useState("");
 	const [mode, setMode] = useState<Mode>("sign-in");
 
@@ -65,7 +73,7 @@ export function Login() {
 	const doRegister = async (
 		pw: Uint8Array,
 		handle_hash: Uint8Array,
-	): Promise<{ device_id: string; token: string; identityId: string }> => {
+	): Promise<{ device_id: string; token: string; identityId: string; recoveryWords: string[] }> => {
 		if (!cryptoWorker) throw new Error("crypto_unavailable");
 
 		// Step 1: OPAQUE reg start
@@ -81,10 +89,21 @@ export function Login() {
 			new Uint8Array(initResp.opaque_response),
 		);
 
-		// Step 4: MLS identity init — random 16-byte BasicCredential identity (RFC 9420 §5.3).
-		// The identity bytes are a PUBLIC label (included in KeyPackages), not a secret.
-		const mlsIdentityBytes = crypto.getRandomValues(new Uint8Array(16));
-		const { identityId, keyPackage } = await cryptoWorker.mlsInitIdentity(mlsIdentityBytes);
+		// Step 4: Generate BIP-39 recovery phrase (§8.5) — NEVER log or store the joined phrase.
+		const { words: recoveryWords } = await cryptoWorker.generateRecoveryPhrase();
+		const phrase = recoveryWords.join(" ");
+
+		// Derive a 16-byte public identity label from SHA-256(phrase)[0..16].
+		// The actual MLS signing key is derived inside WASM from the full BIP-39 seed.
+		const phraseEncoder = new TextEncoder();
+		const phraseHash = await crypto.subtle.digest("SHA-256", phraseEncoder.encode(phrase));
+		const mlsIdentityBytes = new Uint8Array(phraseHash).slice(0, 16);
+
+		const { identityId, keyPackage } = await cryptoWorker.mlsInitIdentityFromPhrase(
+			phrase,
+			mlsIdentityBytes,
+		);
+		// phrase goes out of scope here; the words array is held temporarily for display only.
 
 		// Step 5: server registration finish — creates user + device
 		const finishResp = await regFinish(initResp.user_id, opaque_record, mlsIdentityBytes);
@@ -103,7 +122,7 @@ export function Login() {
 			mlsIdentityB64: uint8ToBase64(mlsIdentityBytes),
 		});
 
-		return { device_id: finishResp.device_id, token, identityId };
+		return { device_id: finishResp.device_id, token, identityId, recoveryWords };
 	};
 
 	/** OPAQUE login → returns session_token. DB key derived inside worker. */
@@ -162,33 +181,44 @@ export function Login() {
 				token = result.token;
 				identityId = result.identityId;
 				// doRegister persists the identity record (including mlsIdentityB64).
-			} else {
-				// Load stored device_id and MLS identity bytes from IndexedDB.
-				const identity = await db.identity.get(1);
-				if (!identity?.deviceId) {
-					setPhase("error");
-					setErrorMsg("No device registered on this browser. Create an account first.");
-					return;
-				}
-				device_id = identity.deviceId;
-				({ token } = await doLogin(pw, handle_hash, device_id));
 
-				// Re-initialise MLS identity in the WASM worker using stored bytes.
-				// Each login produces a fresh identityId handle (the WASM map is cleared
-				// on logout), but the signing keys are derived from the same seed bytes
-				// so KeyPackages from this session are associated with this device.
-				if (identity.mlsIdentityB64 && cryptoWorker) {
-					const bytes = base64ToUint8Array(identity.mlsIdentityB64);
-					const { identityId: id, keyPackage } = await cryptoWorker.mlsInitIdentity(bytes);
-					identityId = id;
-					// Update the current session handle in the DB; don't overwrite mlsIdentityB64.
-					await db.identity.update(1, { mlsIdentityId: id });
-					// Upload a fresh KeyPackage for this session (non-fatal).
-					uploadKeyPackage(token, device_id, keyPackage).catch(() => {});
-				}
+				// §8.5: Show recovery phrase modal before advancing to app.
+				// Store words for display; defer login() until user confirms.
+				setRecoveryWords(result.recoveryWords);
+				setPhase("recovery");
+				// Stash credentials so onConfirmed can call login().
+				pendingLoginRef.current = {
+					device_id,
+					token,
+					identityId: identityId ?? undefined,
+				};
+				return; // login() called from onConfirmed, not here.
+			}
+			// Load stored device_id and MLS identity bytes from IndexedDB.
+			const identity = await db.identity.get(1);
+			if (!identity?.deviceId) {
+				setPhase("error");
+				setErrorMsg("No device registered on this browser. Create an account first.");
+				return;
+			}
+			device_id = identity.deviceId;
+			({ token } = await doLogin(pw, handle_hash, device_id));
+
+			// Re-initialise MLS identity in the WASM worker using stored bytes.
+			// Each login produces a fresh identityId handle (the WASM map is cleared
+			// on logout), but the signing keys are derived from the same seed bytes
+			// so KeyPackages from this session are associated with this device.
+			if (identity.mlsIdentityB64 && cryptoWorker) {
+				const bytes = base64ToUint8Array(identity.mlsIdentityB64);
+				const { identityId: id, keyPackage } = await cryptoWorker.mlsInitIdentity(bytes);
+				identityId = id;
+				// Update the current session handle in the DB; don't overwrite mlsIdentityB64.
+				await db.identity.update(1, { mlsIdentityId: id });
+				// Upload a fresh KeyPackage for this session (non-fatal).
+				uploadKeyPackage(token, device_id, keyPackage).catch(() => {});
 			}
 
-			// Advance to app phase — DB key was derived inside the crypto worker.
+			// Advance to app phase (sign-in path) — DB key was derived inside the crypto worker.
 			login(device_id, token, identityId ?? undefined);
 		} catch (err) {
 			setPhase("error");
@@ -472,6 +502,21 @@ export function Login() {
 					<span style={{ letterSpacing: "0.04em" }}>End-to-end encrypted from the first byte</span>
 				</div>
 			</div>
+
+			{/* §8.5 Recovery phrase confirmation — shown after registration, blocks app entry */}
+			{phase === "recovery" && recoveryWords && (
+				<RecoveryPhraseModal
+					words={recoveryWords}
+					onConfirmed={() => {
+						setRecoveryWords(null);
+						if (pendingLoginRef.current) {
+							const { device_id, token, identityId } = pendingLoginRef.current;
+							pendingLoginRef.current = null;
+							login(device_id, token, identityId);
+						}
+					}}
+				/>
+			)}
 		</div>
 	);
 }

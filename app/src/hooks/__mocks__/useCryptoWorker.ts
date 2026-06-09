@@ -1,3 +1,4 @@
+import { vi } from "vitest";
 // Manual mock for useCryptoWorker — used by Vitest when vi.mock("../hooks/useCryptoWorker")
 // is called without a factory.  Returns a stable singleton so that React's useEffect
 // dependency array sees the same reference across re-renders.
@@ -62,6 +63,14 @@ const mockWorker = {
 		_signature: Uint8Array,
 		_sigPubKey: Uint8Array,
 	) => ({ valid: true }),
+	// §8.5 Recovery: BIP-39 phrase generation and phrase-derived identity.
+	generateRecoveryPhrase: vi.fn().mockResolvedValue({
+		words: Array.from({ length: 24 }, (_, i) => `word${i + 1}`),
+	}),
+	mlsInitIdentityFromPhrase: vi.fn().mockResolvedValue({
+		identityId: "mock-identity-id",
+		keyPackage: new Uint8Array([1, 2, 3]),
+	}),
 };
 
 export const useCryptoWorker = () => mockWorker;

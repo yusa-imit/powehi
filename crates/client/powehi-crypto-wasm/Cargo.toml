@@ -24,6 +24,16 @@ ml-kem = { workspace = true }
 opaque-ke = { workspace = true, features = ["ristretto255-voprf", "argon2", "serde", "std"] }
 # Argon2 KSF type used in the OPAQUE ciphersuite definition.
 argon2 = { workspace = true }
+# HKDF-SHA256 (RFC 5869) — derives the MLS Ed25519 signing key from a BIP-39
+# seed for §8.5 Recovery Mechanism. Approved per crypto-libraries-pinned.md.
+hkdf = { workspace = true }
+# Ed25519 signing key (re-creates the SigningKey from HKDF output bytes for
+# recovery-phrase derivation). Used at runtime by `recovery` module; was a
+# dev-dep before §8.5. Approved per crypto-libraries-pinned.md.
+ed25519-dalek = { workspace = true }
+# BIP-39 mnemonic codes (24-word recovery phrase, PBKDF2-HMAC-SHA512 seed).
+# Only consumed by powehi-crypto-wasm so kept as a direct (non-workspace) dep.
+bip39 = "2"
 
 # MLS (RFC 9420) on native: use the audited OpenMLS RustCrypto provider so the
 # crate builds and tests on the host target (not just wasm32).
@@ -32,6 +42,9 @@ openmls = { workspace = true }
 openmls_rust_crypto = { workspace = true }
 openmls_basic_credential = { workspace = true }
 openmls_traits = { workspace = true }
+# OS CSPRNG used by `recovery::generate_mnemonic` on the native host (cargo test).
+# On wasm32 the same crate is depended on below with the `js` feature.
+getrandom = { version = "0.2" }
 
 # MLS on wasm32: openmls `js` feature wires WASM-safe time/rng shims.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -46,10 +59,8 @@ wasm-bindgen-test = "0.3"
 # Enable deterministic keygen/encap APIs for the FIPS 203 KAT test (test-only;
 # not compiled into the production WASM binary). ADR-0003 Phase B, Y-5.
 ml-kem = { workspace = true, features = ["deterministic"] }
-# Used in kem_credential KAT to derive a deterministic Ed25519 key pair from a
-# fixed seed for the wire-format regression test (YELLOW-b). Test-only; the same
-# version (2.2.0) is already a transitive dep via openmls_basic_credential.
-ed25519-dalek = { workspace = true }
+# Note: ed25519-dalek was previously a dev-dep for the kem_credential KAT; it is
+# now a runtime dep (above) for §8.5 recovery-phrase Ed25519 key derivation.
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-O", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]
