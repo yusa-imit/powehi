@@ -17,6 +17,20 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-09, cycle 105 — STABILIZATION: push-subscription auth-bypass tests + RUSTSEC-2026-0173 audit)
+- **Cycle 105 (commit 7ad1b86):** STABILIZATION — CI GREEN, no open issues.
+  - **New advisory RUSTSEC-2026-0173:** `proc-macro-error2 2.0.1` unmaintained. Added to `.cargo/audit.toml` ignore list with full impact analysis: compile-time proc-macro dep (hax-lib-macros → hax-lib → libcrux → openmls_rust_crypto 0.5.1), not in any production binary, no CVE or vulnerability. `cargo tree -i proc-macro-error2` returns empty for default targets. Cannot upgrade: upstream openmls_rust_crypto 0.5.1 is the latest. Cargo audit now shows 1 allowed warning (instant/openmls only).
+  - **Test gap CLOSED:** `POST /v1/push-subscriptions` and `DELETE /v1/push-subscriptions` both lacked auth-bypass (401) invariant tests. Required by testing-conventions.md: "auth bypass impossible: unauthenticated request to a protected endpoint returns 401." Added `post_push_subscription_without_token_returns_401` and `delete_push_subscription_without_token_returns_401` in `push_subscription.rs`.
+  - **security-auditor:** GREEN on full backend sweep — all handlers use `AuthenticatedDevice`, all SQL parameterized, no plaintext logging, OPAQUE oracle closed, error mapping safe.
+  - **384 Rust tests** (+2, was 382); 189 frontend tests unchanged; clippy clean; rustfmt clean; Biome clean; tsc clean.
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+    - ML-KEM-768 Phase C remaining:
+      - Y-9: Zeroizing buffer-zero verification in tests (unsafe ptr test, future work)
+      - Y-ACVP-2: ACVP vector provenance — upstream encap-decap.json not vendored in-tree
+    - Informational: header-shape coupling in auth API tests (if fetch init migrates to `Headers` instance); lowercase `cookie` and `credentials: "include"` absence assertions
+
 ## Current state (2026-06-06, cycle 104 — FEATURE: close Cookie + case-insensitive auth header advisories)
 - **Cycle 104 (commit a23a5ee):** Closed the two non-blocking advisories filed by security-auditor in cycle 103:
   - **Cookie header absence CLOSED:** `regInit`, `regFinish`, `loginInit`, `loginFinish` each assert `headers?.Cookie` is `undefined` — guards against future refactors that accidentally attach session cookies to unauthenticated requests.
