@@ -93,6 +93,28 @@ impl MessagingService {
             Err(_) => tracing::warn!(error_kind = "push_repo", "push sub lookup failed"),
         }
     }
+
+    /// Fan-out wake-up: push an empty ping to every group member except the
+    /// sender. Sequentially iterates members; individual failures are logged
+    /// but never propagated — push delivery is best-effort.
+    async fn fan_out_push(&self, sender: &DeviceId, group_id: &GroupId) {
+        if self.push_sub_repo.is_none() || self.web_push.is_none() {
+            return;
+        }
+        let members = match self.group_repo.list_members(group_id).await {
+            Ok(m) => m,
+            Err(_) => {
+                tracing::warn!(
+                    error_kind = "push_group_lookup",
+                    "fan-out push: member lookup failed"
+                );
+                return;
+            }
+        };
+        for member in members.iter().filter(|m| &m.device_id != sender) {
+            self.maybe_push(&member.device_id).await;
+        }
+    }
 }
 
 #[async_trait]
@@ -137,9 +159,10 @@ impl MessagingUseCase for MessagingService {
                 at: chrono::Utc::now(),
             })
             .await;
-        // Best-effort wake-up push to the sender itself (group message — no per-device recipient).
-        // In Phase 4+, fan-out to all group members; for now push to sender's devices.
-        self.maybe_push(sender).await;
+        // Fan-out wake-up push to all group members except the sender (they
+        // already know they sent a message). Best-effort: push failure must
+        // never stall the message write path.
+        self.fan_out_push(sender, group_id).await;
         Ok(id)
     }
 
@@ -207,6 +230,9 @@ impl MessagingUseCase for MessagingService {
                 at: chrono::Utc::now(),
             })
             .await;
+        // Wake up all other group members so they can fetch the Commit envelope
+        // and ratchet to the new epoch. Best-effort.
+        self.fan_out_push(sender, group_id).await;
         Ok(new_epoch)
     }
 
@@ -473,14 +499,24 @@ mod tests {
     // ── Push support fakes ────────────────────────────────────────────────────
 
     struct FakePushSubRepo {
-        sub: Option<PushSubscription>,
+        subs: HashMap<DeviceId, PushSubscription>,
     }
     impl FakePushSubRepo {
         fn with_sub(sub: PushSubscription) -> Arc<Self> {
-            Arc::new(Self { sub: Some(sub) })
+            let device = sub.device_id.clone();
+            Arc::new(Self {
+                subs: [(device, sub)].into_iter().collect(),
+            })
+        }
+        fn with_subs(subs: Vec<PushSubscription>) -> Arc<Self> {
+            Arc::new(Self {
+                subs: subs.into_iter().map(|s| (s.device_id.clone(), s)).collect(),
+            })
         }
         fn empty() -> Arc<Self> {
-            Arc::new(Self { sub: None })
+            Arc::new(Self {
+                subs: HashMap::new(),
+            })
         }
     }
     #[async_trait::async_trait]
@@ -490,9 +526,9 @@ mod tests {
         }
         async fn fetch_by_device(
             &self,
-            _device_id: &DeviceId,
+            device_id: &DeviceId,
         ) -> Result<Option<PushSubscription>, DomainError> {
-            Ok(self.sub.clone())
+            Ok(self.subs.get(device_id).cloned())
         }
         async fn delete_by_device(&self, _device_id: &DeviceId) -> Result<(), DomainError> {
             Ok(())
@@ -817,21 +853,31 @@ mod tests {
 
     #[tokio::test]
     async fn maybe_push_notifies_when_subscription_exists() {
+        // Fan-out pushes to non-sender members. Add a receiver so the push fires.
         let sender = DeviceId::new();
+        let receiver = DeviceId::new();
         let group_id = GroupId::new();
-        let sub = make_sub(&sender);
         let push = FakeWebPush::ok();
         let push_ref = Arc::clone(&push);
-        let svc =
-            make_service_with_member(FakeEnvelopeRepo::new(), group_id.clone(), sender.clone())
-                .with_push(FakePushSubRepo::with_sub(sub), push_ref);
+        let subs = FakePushSubRepo::with_subs(vec![make_sub(&sender), make_sub(&receiver)]);
+        let env_repo = FakeEnvelopeRepo::with_memberships(vec![
+            (group_id.clone(), sender.clone()),
+            (group_id.clone(), receiver.clone()),
+        ]);
+        let group_repo = FakeGroupRepo::with_member_list(vec![
+            (group_id.clone(), sender.clone()),
+            (group_id.clone(), receiver.clone()),
+        ]);
+        let svc = MessagingService::new(env_repo, group_repo, Arc::new(FakeEventBus))
+            .with_push(subs, push_ref);
         svc.send_message(&sender, &group_id, Bytes::from_static(b"ct"), None)
             .await
             .unwrap();
+        // Only receiver (not sender) is pushed.
         assert_eq!(
             push.call_count.load(Ordering::SeqCst),
             1,
-            "notify must be called once when subscription exists"
+            "notify must be called once for the receiver"
         );
     }
 
@@ -839,13 +885,21 @@ mod tests {
     async fn maybe_push_failure_does_not_propagate_to_caller() {
         // Push notify() returns Err — send_message must still return Ok (fire-and-forget).
         let sender = DeviceId::new();
+        let receiver = DeviceId::new();
         let group_id = GroupId::new();
-        let sub = make_sub(&sender);
         let push = FakeWebPush::failing();
         let push_ref = Arc::clone(&push);
-        let svc =
-            make_service_with_member(FakeEnvelopeRepo::new(), group_id.clone(), sender.clone())
-                .with_push(FakePushSubRepo::with_sub(sub), push_ref);
+        let subs = FakePushSubRepo::with_subs(vec![make_sub(&sender), make_sub(&receiver)]);
+        let env_repo = FakeEnvelopeRepo::with_memberships(vec![
+            (group_id.clone(), sender.clone()),
+            (group_id.clone(), receiver.clone()),
+        ]);
+        let group_repo = FakeGroupRepo::with_member_list(vec![
+            (group_id.clone(), sender.clone()),
+            (group_id.clone(), receiver.clone()),
+        ]);
+        let svc = MessagingService::new(env_repo, group_repo, Arc::new(FakeEventBus))
+            .with_push(subs, push_ref);
         let result = svc
             .send_message(&sender, &group_id, Bytes::from_static(b"ct"), None)
             .await;
@@ -853,6 +907,7 @@ mod tests {
             result.is_ok(),
             "push failure must not propagate to message caller"
         );
+        // receiver's push was attempted but failed; call count is still 1.
         assert_eq!(push.call_count.load(Ordering::SeqCst), 1);
     }
 
@@ -943,5 +998,122 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::Unauthorized));
+    }
+
+    // ── fan_out_push tests ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn fan_out_notifies_all_members_except_sender() {
+        // Security invariant: sender must NOT receive a push for their own message.
+        // All other group members MUST receive one push each.
+        let sender = DeviceId::new();
+        let member_a = DeviceId::new();
+        let member_b = DeviceId::new();
+        let group_id = GroupId::new();
+
+        let push = FakeWebPush::ok();
+        let push_ref = Arc::clone(&push);
+        let subs = FakePushSubRepo::with_subs(vec![
+            make_sub(&sender),
+            make_sub(&member_a),
+            make_sub(&member_b),
+        ]);
+        let group_repo = FakeGroupRepo::with_member_list(vec![
+            (group_id.clone(), sender.clone()),
+            (group_id.clone(), member_a.clone()),
+            (group_id.clone(), member_b.clone()),
+        ]);
+        let env_repo = FakeEnvelopeRepo::with_memberships(vec![
+            (group_id.clone(), sender.clone()),
+            (group_id.clone(), member_a.clone()),
+            (group_id.clone(), member_b.clone()),
+        ]);
+        let svc = MessagingService::new(env_repo, group_repo, Arc::new(FakeEventBus))
+            .with_push(subs, push_ref);
+        svc.send_message(&sender, &group_id, Bytes::from_static(b"ct"), None)
+            .await
+            .unwrap();
+        // 2 pushes: member_a + member_b. Sender excluded.
+        assert_eq!(
+            push.call_count.load(Ordering::SeqCst),
+            2,
+            "fan-out must notify exactly 2 members (not the sender)"
+        );
+    }
+
+    #[tokio::test]
+    async fn fan_out_sender_not_notified_even_if_subscribed() {
+        // Edge case: only the sender is in the group. Fan-out should fire 0 pushes.
+        let sender = DeviceId::new();
+        let group_id = GroupId::new();
+        let push = FakeWebPush::ok();
+        let push_ref = Arc::clone(&push);
+        let subs = FakePushSubRepo::with_subs(vec![make_sub(&sender)]);
+        let env_repo = FakeEnvelopeRepo::with_memberships(vec![(group_id.clone(), sender.clone())]);
+        let group_repo = FakeGroupRepo::with_member_in(group_id.clone(), sender.clone());
+        let svc = MessagingService::new(env_repo, group_repo, Arc::new(FakeEventBus))
+            .with_push(subs, push_ref);
+        svc.send_message(&sender, &group_id, Bytes::from_static(b"ct"), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            push.call_count.load(Ordering::SeqCst),
+            0,
+            "sender-only group must fire zero fan-out pushes"
+        );
+    }
+
+    #[tokio::test]
+    async fn fan_out_on_send_commit_notifies_members_except_committer() {
+        let committer = DeviceId::new();
+        let peer = DeviceId::new();
+        let group = Group::new(GroupId::new(), RegionId::new("eu-de-1"));
+        let group_id = group.id.clone();
+        let push = FakeWebPush::ok();
+        let push_ref = Arc::clone(&push);
+        let subs = FakePushSubRepo::with_subs(vec![make_sub(&committer), make_sub(&peer)]);
+        let group_repo = FakeGroupRepo::with_group_and_member(group, committer.clone());
+        // Add peer as a second member via add_member so list_members sees both.
+        group_repo
+            .add_member(&powehi_domain::group::GroupMember {
+                group_id: group_id.clone(),
+                device_id: peer.clone(),
+                joined_at_epoch: Epoch(0),
+            })
+            .await
+            .unwrap();
+        let svc =
+            MessagingService::new(FakeEnvelopeRepo::new(), group_repo, Arc::new(FakeEventBus))
+                .with_push(subs, push_ref);
+        svc.send_commit(&committer, &group_id, Bytes::from_static(b"commit"))
+            .await
+            .unwrap();
+        // Only peer (not committer) should be notified.
+        assert_eq!(
+            push.call_count.load(Ordering::SeqCst),
+            1,
+            "send_commit fan-out must notify peer but not committer"
+        );
+    }
+
+    #[tokio::test]
+    async fn fan_out_noop_when_push_not_configured() {
+        // Service with no push config: send_message must still succeed with 0 pushes.
+        let sender = DeviceId::new();
+        let member = DeviceId::new();
+        let group_id = GroupId::new();
+        let env_repo = FakeEnvelopeRepo::with_memberships(vec![
+            (group_id.clone(), sender.clone()),
+            (group_id.clone(), member.clone()),
+        ]);
+        let group_repo = FakeGroupRepo::with_member_list(vec![
+            (group_id.clone(), sender.clone()),
+            (group_id.clone(), member.clone()),
+        ]);
+        let svc = MessagingService::new(env_repo, group_repo, Arc::new(FakeEventBus));
+        svc.send_message(&sender, &group_id, Bytes::from_static(b"ct"), None)
+            .await
+            .unwrap();
+        // No assertion on push count — just verifying no panic/error.
     }
 }
