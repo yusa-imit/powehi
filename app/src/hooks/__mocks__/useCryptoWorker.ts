@@ -3,6 +3,22 @@ import { vi } from "vitest";
 // is called without a factory.  Returns a stable singleton so that React's useEffect
 // dependency array sees the same reference across re-renders.
 const mockWorker = {
+	// OPAQUE registration (§3.2)
+	opaqueRegistrationStart: vi.fn().mockResolvedValue({
+		sessionId: "mock-reg-session-id",
+		message: new Uint8Array(32),
+	}),
+	opaqueRegistrationFinish: vi.fn().mockResolvedValue({
+		upload: new Uint8Array(64),
+	}),
+	// OPAQUE login (§3.3)
+	opaqueLoginStart: vi.fn().mockResolvedValue({
+		sessionId: "mock-login-session-id",
+		message: new Uint8Array(32),
+	}),
+	opaqueLoginFinish: vi.fn().mockResolvedValue({
+		finalization: new Uint8Array(64),
+	}),
 	mlsInitIdentity: async (_identityBytes: Uint8Array) => ({
 		identityId: "mock-identity-id",
 		keyPackage: new Uint8Array(100),
