@@ -104,6 +104,16 @@ const mockWorker = {
 		_blobHash: Uint8Array,
 	) => new Uint8Array(32),
 	mediaDropKey: async (_handle: string) => true,
+	// §9.2 media_message_create: returns mock MLS ciphertext (32 bytes).
+	// Raw media key stays in WASM; this mock returns a fixed-length buffer.
+	mediaMessageCreate: async (
+		_identityId: string,
+		_groupId: string,
+		_mediaKeyHandle: string,
+		_blobId: string,
+		_blobHash: Uint8Array,
+		_iv: Uint8Array,
+	) => ({ ciphertext: new Uint8Array(64) }),
 };
 
 export const useCryptoWorker = () => mockWorker;

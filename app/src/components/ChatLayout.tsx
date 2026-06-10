@@ -12,6 +12,7 @@ import { sendMessage as sendMessageApi } from "../api/messages";
 import { EncryptedPowehiDb } from "../db/encrypted-db";
 import { db } from "../db/schema";
 import { useCryptoWorker } from "../hooks/useCryptoWorker";
+import { useMediaSend } from "../hooks/useMediaSend";
 import { type IncomingMessage, useMessages } from "../hooks/useMessages";
 import { usePersistentMessages } from "../hooks/usePersistentMessages";
 import { useRegionDetect } from "../hooks/useRegionDetect";
@@ -34,6 +35,8 @@ interface ChatMessage {
 	read?: boolean;
 	/** Unix ms — set when sent with a disappearing TTL. Client-side mock only. */
 	expiresAt?: number;
+	/** §9.2 media attachment — present when the message is an encrypted image. */
+	mediaAttachment?: { blobId: string };
 }
 
 interface Chat {
@@ -688,7 +691,22 @@ function MessageBubble({
 							}),
 				}}
 			>
-				{msg.text}
+				{msg.mediaAttachment ? (
+					<div
+						style={{
+							display: "flex",
+							alignItems: "center",
+							gap: 6,
+							fontSize: 13,
+							opacity: 0.9,
+						}}
+					>
+						<Icon name="attach" size={14} />
+						<span>Image attachment</span>
+					</div>
+				) : (
+					msg.text
+				)}
 				{msg.last && msg.time && (
 					<span
 						style={{
@@ -845,11 +863,14 @@ function Composer({
 	partner,
 	ttl,
 	onToggleTtl,
+	onPhoto,
 }: {
 	onSend: (text: string) => void;
 	partner: string;
 	ttl: TtlOption;
 	onToggleTtl: () => void;
+	/** Triggered when the user clicks the Photo button. */
+	onPhoto?: () => void;
 }) {
 	const [text, setText] = useState("");
 	const send = () => {
@@ -885,7 +906,7 @@ function Composer({
 				}}
 			>
 				<IconBtn icon="attach" label="Attach" size={32} />
-				<IconBtn icon="image" label="Photo" size={32} />
+				<IconBtn icon="image" label="Photo" size={32} onClick={onPhoto} />
 				<button
 					type="button"
 					onClick={onToggleTtl}
@@ -1379,6 +1400,11 @@ export function ChatLayout() {
 	const { sessionToken, identityId } = useAuthStore();
 	const cryptoWorker = useCryptoWorker();
 	const { persistIncoming, persistOutgoing } = usePersistentMessages(active?.mlsGroupId);
+	const fileInputRef = useRef<HTMLInputElement>(null);
+	const { sendMedia } = useMediaSend({
+		identityId: active?.mlsIdentityId,
+		groupId: active?.mlsGroupId,
+	});
 
 	const handleToggleTtl = () => setDisappearingTtl((t) => nextTtl(t));
 
@@ -1397,20 +1423,61 @@ export function ChatLayout() {
 							break;
 						}
 					}
+					const displayText = msg.media ? "Image attachment" : msg.text;
 					msgs.push({
 						from: "them",
-						text: msg.text,
+						text: displayText,
 						last: true,
 						time,
 						continued: msgs.length > 0 && msgs[msgs.length - 1].from === "them",
+						mediaAttachment: msg.media ? { blobId: msg.media.blobId } : undefined,
 					});
-					return { ...c, messages: msgs, last: msg.text, time };
+					return { ...c, messages: msgs, last: displayText, time };
 				}),
 			);
 			// Encrypt and persist to IndexedDB — fails closed if encryptedDb unavailable.
 			persistIncoming(msg);
 		},
 		[persistIncoming],
+	);
+
+	/** Handle file selected via the hidden input — encrypt and send as §9.2 media message. */
+	const handleFileSelect = useCallback(
+		(e: React.ChangeEvent<HTMLInputElement>) => {
+			const file = e.target.files?.[0];
+			if (!file) return;
+			// Reset so the same file can be re-selected.
+			e.target.value = "";
+
+			// Optimistic local update showing a placeholder.
+			const now = new Date();
+			const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+			setChats((cs) =>
+				cs.map((c) => {
+					if (c.id !== activeId) return c;
+					const msgs = [...c.messages];
+					for (let i = msgs.length - 1; i >= 0; i--) {
+						if (msgs[i].from === "me" && msgs[i].last) {
+							msgs[i] = { ...msgs[i], last: false, continued: true };
+							break;
+						}
+					}
+					msgs.push({
+						from: "me",
+						text: "Image attachment",
+						last: true,
+						time,
+						read: false,
+						continued: msgs.length > 0 && msgs[msgs.length - 1].from === "me",
+					});
+					return { ...c, messages: msgs, last: "Image attachment", time };
+				}),
+			);
+
+			// Async send — silent failure leaves optimistic placeholder.
+			sendMedia(file).catch(() => {});
+		},
+		[activeId, sendMedia],
 	);
 
 	// Poll for incoming messages whenever there's an active MLS group + session.
@@ -1548,9 +1615,20 @@ export function ChatLayout() {
 						partner={active.name}
 						ttl={disappearingTtl}
 						onToggleTtl={handleToggleTtl}
+						onPhoto={() => fileInputRef.current?.click()}
 					/>
 				</main>
 			)}
+
+			{/* Hidden file input for §9.2 media send — triggered by the Photo button. */}
+			<input
+				ref={fileInputRef}
+				type="file"
+				accept="image/*"
+				aria-label="Select image to send"
+				style={{ display: "none" }}
+				onChange={handleFileSelect}
+			/>
 
 			{infoOpen && active && (
 				<InfoPanel

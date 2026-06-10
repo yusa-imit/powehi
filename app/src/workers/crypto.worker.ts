@@ -105,6 +105,16 @@ interface WasmModule {
 		blobHash: Uint8Array,
 	) => Uint8Array;
 	media_drop_key: (handle: string) => boolean;
+	// §9.2 media_message_create: build + MLS-encrypt a media app message.
+	// Raw media key stays in WASM; only MLS ciphertext crosses the WASM-JS boundary.
+	media_message_create: (
+		identityId: string,
+		groupId: string,
+		mediaKeyHandle: string,
+		blobId: string,
+		blobHash: Uint8Array,
+		iv: Uint8Array,
+	) => { ciphertext: Uint8Array };
 }
 
 // ── IndexedDB key — held inside the worker, never crosses to main thread ─────
@@ -582,6 +592,32 @@ const api = {
 	async mediaDropKey(handle: string): Promise<boolean> {
 		const wasm = await getWasm();
 		return wasm.media_drop_key(handle);
+	},
+
+	/**
+	 * Build and MLS-encrypt a media attachment message (prd.md §9.2 sender path).
+	 *
+	 * The raw 32-byte AES-256-GCM media key is retrieved from the handle inside WASM,
+	 * wrapped in a JSON payload, and MLS-encrypted — the raw key never crosses the
+	 * WASM-JS boundary.  POST the returned ciphertext to /v1/groups/:id/messages.
+	 *
+	 * @param identityId     Local MLS identity handle (from mlsInitIdentity).
+	 * @param groupId        MLS group UUID.
+	 * @param mediaKeyHandle Handle returned by mediaEncrypt.
+	 * @param blobId         MediaId UUID from requestMediaUpload.
+	 * @param blobHash       32-byte SHA-256 of the ciphertext (from mediaEncrypt.blobHash).
+	 * @param iv             12-byte AES-GCM nonce (from mediaEncrypt.iv).
+	 */
+	async mediaMessageCreate(
+		identityId: string,
+		groupId: string,
+		mediaKeyHandle: string,
+		blobId: string,
+		blobHash: Uint8Array,
+		iv: Uint8Array,
+	): Promise<{ ciphertext: Uint8Array }> {
+		const wasm = await getWasm();
+		return wasm.media_message_create(identityId, groupId, mediaKeyHandle, blobId, blobHash, iv);
 	},
 };
 

@@ -1,0 +1,164 @@
+/**
+ * useMediaSend — unit tests (prd.md §9.2).
+ *
+ * Security invariants verified:
+ * - mediaDropKey is ALWAYS called (finally block), even on send failure.
+ * - R2 PUT receives the ciphertext Uint8Array (not the plaintext file bytes).
+ * - sendMessage receives the MLS ciphertext from mediaMessageCreate.
+ */
+
+import { renderHook } from "@testing-library/react";
+import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as mediaApi from "../api/media";
+import * as messagesApi from "../api/messages";
+import { useAuthStore } from "../store/auth";
+import * as CryptoWorkerHook from "./useCryptoWorker";
+import { useMediaSend } from "./useMediaSend";
+
+const TOKEN = "test-token";
+const IDENTITY_ID = "id-1";
+
+// Defined once; cleared in beforeEach so call counts reset between tests.
+const mediaDropKeyFn = vi.fn(async (_handle: string) => true);
+
+const mockWorker = {
+	mediaEncrypt: vi.fn(async (_plaintext: Uint8Array) => ({
+		ciphertext: new Uint8Array(48), // 32 bytes + 16-byte GCM tag
+		mediaKeyHandle: "mock-media-key-handle-0",
+		iv: new Uint8Array(12),
+		blobHash: new Uint8Array(32),
+	})),
+	mediaMessageCreate: vi.fn(
+		async (
+			_identityId: string,
+			_groupId: string,
+			_handle: string,
+			_blobId: string,
+			_blobHash: Uint8Array,
+			_iv: Uint8Array,
+		) => ({ ciphertext: new Uint8Array(64) }),
+	),
+	mediaDropKey: mediaDropKeyFn,
+};
+
+const makeFile = (size = 100): File => {
+	const bytes = new Uint8Array(size);
+	const file = new File([bytes], "photo.jpg", { type: "image/jpeg" });
+	// jsdom does not implement Blob/File.arrayBuffer — attach it explicitly.
+	Object.defineProperty(file, "arrayBuffer", {
+		value: async () => bytes.buffer,
+		configurable: true,
+	});
+	return file;
+};
+
+describe("useMediaSend (prd.md §9.2)", () => {
+	let requestMediaUploadSpy: MockInstance<typeof mediaApi.requestMediaUpload>;
+	let confirmMediaUploadSpy: MockInstance<typeof mediaApi.confirmMediaUpload>;
+	let sendMessageSpy: MockInstance<typeof messagesApi.sendMessage>;
+	const fetchMock = vi.fn();
+
+	beforeEach(() => {
+		requestMediaUploadSpy = vi
+			.spyOn(mediaApi, "requestMediaUpload")
+			.mockResolvedValue({ mediaId: "test-media-id", uploadUrl: "https://r2.test/put" });
+		confirmMediaUploadSpy = vi.spyOn(mediaApi, "confirmMediaUpload").mockResolvedValue(undefined);
+		sendMessageSpy = vi.spyOn(messagesApi, "sendMessage").mockResolvedValue("envelope-id-1");
+
+		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
+			mockWorker as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
+		);
+		useAuthStore.setState({ phase: "app", deviceId: "my-device", sessionToken: TOKEN });
+
+		fetchMock.mockResolvedValue({ ok: true, status: 200 });
+		globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+		// Reset call counts so each test starts clean.
+		mockWorker.mediaEncrypt.mockClear();
+		mockWorker.mediaMessageCreate.mockClear();
+		mediaDropKeyFn.mockClear();
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null });
+		fetchMock.mockReset();
+	});
+
+	it("returns a sendMedia function", () => {
+		const { result } = renderHook(() =>
+			useMediaSend({ identityId: IDENTITY_ID, groupId: "group-1" }),
+		);
+		expect(typeof result.current.sendMedia).toBe("function");
+	});
+
+	it("calls requestMediaUpload with the correct groupId and ciphertext size", async () => {
+		const { result } = renderHook(() =>
+			useMediaSend({ identityId: IDENTITY_ID, groupId: "group-abc" }),
+		);
+		await result.current.sendMedia(makeFile());
+		expect(requestMediaUploadSpy).toHaveBeenCalledWith(
+			TOKEN,
+			expect.any(String),
+			48, // mock ciphertext: 32 bytes + 16-byte GCM tag
+			"group-abc",
+		);
+	});
+
+	it("PUTs ciphertext bytes to the presigned R2 URL (never plaintext)", async () => {
+		const { result } = renderHook(() =>
+			useMediaSend({ identityId: IDENTITY_ID, groupId: "group-1" }),
+		);
+		await result.current.sendMedia(makeFile());
+
+		expect(fetchMock).toHaveBeenCalledWith(
+			"https://r2.test/put",
+			expect.objectContaining({ method: "PUT" }),
+		);
+		const [, opts] = fetchMock.mock.calls[0] as [string, RequestInit];
+		// Body must be a Uint8Array (ciphertext), not a plain string or the raw File.
+		expect(opts.body).toBeInstanceOf(Uint8Array);
+	});
+
+	it("confirms the upload after R2 PUT succeeds", async () => {
+		const { result } = renderHook(() =>
+			useMediaSend({ identityId: IDENTITY_ID, groupId: "group-1" }),
+		);
+		await result.current.sendMedia(makeFile());
+		expect(confirmMediaUploadSpy).toHaveBeenCalledWith(TOKEN, "test-media-id");
+	});
+
+	it("calls sendMessage with the MLS ciphertext Uint8Array (not raw file bytes)", async () => {
+		const { result } = renderHook(() =>
+			useMediaSend({ identityId: IDENTITY_ID, groupId: "group-1" }),
+		);
+		await result.current.sendMedia(makeFile());
+
+		expect(sendMessageSpy).toHaveBeenCalledOnce();
+		const [, , ciphertext] = sendMessageSpy.mock.calls[0] as [string, string, Uint8Array];
+		expect(ciphertext).toBeInstanceOf(Uint8Array);
+		// Mock mediaMessageCreate returns 64 bytes — distinct from file or media ciphertext.
+		expect(ciphertext.length).toBe(64);
+	});
+
+	it("calls mediaDropKey even when sendMessage throws — security invariant", async () => {
+		sendMessageSpy.mockRejectedValueOnce(new Error("network error"));
+
+		const { result } = renderHook(() =>
+			useMediaSend({ identityId: IDENTITY_ID, groupId: "group-1" }),
+		);
+		await expect(result.current.sendMedia(makeFile())).rejects.toThrow("network error");
+
+		// Despite send failure, the key handle must have been released.
+		expect(mediaDropKeyFn).toHaveBeenCalledOnce();
+		expect(mediaDropKeyFn).toHaveBeenCalledWith("mock-media-key-handle-0");
+	});
+
+	it("does nothing when identityId is absent", async () => {
+		const { result } = renderHook(() =>
+			useMediaSend({ identityId: undefined, groupId: "group-1" }),
+		);
+		await result.current.sendMedia(makeFile());
+		expect(requestMediaUploadSpy).not.toHaveBeenCalled();
+	});
+});

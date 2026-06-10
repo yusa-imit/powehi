@@ -21,6 +21,18 @@ import { useCryptoWorker } from "./useCryptoWorker";
 
 const POLL_INTERVAL_MS = 3_000;
 
+/**
+ * Parsed media attachment payload from an §9.2 image message.
+ * mediaKey is the raw 32-byte AES-256-GCM key as a JS number array (from MLS-decrypted JSON).
+ * The caller must zero it via `new Uint8Array(media.mediaKey).fill(0)` after use.
+ */
+export interface MediaPayload {
+	blobId: string;
+	blobHash: number[];
+	mediaKey: number[];
+	iv: number[];
+}
+
 export interface IncomingMessage {
 	/** Raw envelope UUID — use for deduplication. */
 	id: string;
@@ -28,8 +40,10 @@ export interface IncomingMessage {
 	senderId: string;
 	/** MLS group UUID the message belongs to. */
 	groupId: string;
-	/** Decrypted plaintext as a string. */
+	/** Decrypted plaintext as a string; "[image]" when type==="image". */
 	text: string;
+	/** Present when this is an §9.2 media attachment message. */
+	media?: MediaPayload;
 	/** Base64-encoded MLS application ciphertext — used for Dexie persistence. */
 	ciphertextB64: string;
 	/** MLS epoch used as primary sort key for Dexie ordering. */
@@ -81,15 +95,42 @@ export function useMessages(
 			try {
 				const ciphertext = new Uint8Array(env.ciphertext);
 				const { plaintext } = await cryptoWorker.mlsDecrypt(identityId, groupId, ciphertext);
-				const text = new TextDecoder().decode(plaintext);
+				const decoded = new TextDecoder().decode(plaintext);
 				// Base64-encode the wire ciphertext for Dexie persistence (safe loop, no spread).
 				const ciphertextB64 = uint8ToBase64(env.ciphertext);
 				const epochSeq = env.epoch ?? Date.now();
+
+				// §9.2: try JSON-parsing for structured messages (image attachments).
+				// Non-JSON or missing `type` field → treat as legacy plain text.
+				let text = decoded;
+				let media: MediaPayload | undefined;
+				try {
+					const parsed = JSON.parse(decoded) as Record<string, unknown>;
+					if (
+						parsed.type === "image" &&
+						typeof parsed.blobId === "string" &&
+						Array.isArray(parsed.blobHash) &&
+						Array.isArray(parsed.mediaKey) &&
+						Array.isArray(parsed.iv)
+					) {
+						text = "[image]";
+						media = {
+							blobId: parsed.blobId as string,
+							blobHash: parsed.blobHash as number[],
+							mediaKey: parsed.mediaKey as number[],
+							iv: parsed.iv as number[],
+						};
+					}
+				} catch {
+					// Not JSON — plain text message, no action needed.
+				}
+
 				onMessageRef.current({
 					id: env.id,
 					senderId: env.sender,
 					groupId: env.group_id,
 					text,
+					media,
 					ciphertextB64,
 					epochSeq,
 				});
