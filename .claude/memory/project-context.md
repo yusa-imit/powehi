@@ -17,6 +17,16 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-11, cycle 120 — STABILIZATION: CI red fix — rustfmt 1.96.0 + clippy unused_mut in wasm_exports)
+- **Cycle 120 (commit 571545a):** STABILIZATION — CI was RED on Rust Format check since cycle 119. Root cause: two formatting drifts in `wasm_exports.rs` test code introduced by `media_message_create` commit:
+  - `assert!(parsed.get("rawKey").is_none(), "no rawKey field must be present")` → rustfmt 1.96.0 requires 3-line block form for `assert!(cond, msg)`.
+  - `let json_bytes = \n    build_media_payload_json(blob_id, ...)` → rustfmt collapses to single line (fits within 100-char limit with shorter variable names).
+  - Also fixed `let mut group_mut` → `let group_mut` (clippy -D unused_mut; variable is immediately dropped, never actually mutated).
+  - **cargo fmt --all -- --check:** PASS; **cargo clippy --workspace --all-targets -- -D warnings:** PASS.
+  - **93 Rust crypto-wasm tests** (unchanged); **321 frontend tests** (unchanged); **cargo audit:** 1 allowed (instant/openmls, unchanged).
+  - **security-auditor:** GREEN — full backend sweep. No new RED findings. Two YELLOW advisories carried forward (non-blocking): rate-limit XFF ops-gate (infra config), HandleRateLimiter unbounded state growth (future cycle).
+  - **Remaining deferred security findings (YELLOW):** same as cycle 119 — see below.
+
 ## Current state (2026-06-11, cycle 119 — FEATURE: §9.2 media_message_create — MLS-encrypt media payload inside WASM)
 - **Cycle 119 (commit 0da8cc7):** FEATURE — closes the final §9.2 sender-path gap: raw AES-256-GCM media key stays inside WASM throughout the entire send sequence.
   - **`crates/client/powehi-crypto-wasm/src/wasm_exports.rs`** (MODIFIED): new `media_message_create` WASM export — retrieves key by opaque handle from `MEDIA_KEYS`, serialises media payload JSON (type, blobId, blobHash, mediaKey, iv) inside WASM via new `build_media_payload_json` pure helper (validates blob_hash=32 bytes, iv=12 bytes), MLS-encrypts via same `encrypt_message` path as `mls_encrypt`, returns only the MLS ciphertext. Raw 32-byte AES key NEVER crosses WASM-JS boundary.
