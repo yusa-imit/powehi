@@ -17,6 +17,37 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-10, cycle 116 — FEATURE: Web Push fan-out on send_message + send_commit — prd.md §7.5)
+- **Cycle 116 (commit 96755f4):** FEATURE — closes the final §7.5 gap: group message push fan-out.
+  - **Root cause:** `send_message` previously only called `maybe_push(sender)`, meaning only the sender received a push ping (meaningless — they already know they sent). Other group members received no wake-up signal.
+  - **Fix:** New `fan_out_push(sender, group_id)` method in `MessagingService`:
+    - Lists all group members via `group_repo.list_members(group_id)`
+    - Filters out the sender (they don't need a wake-up for their own message)
+    - Calls `maybe_push(device_id)` for each non-sender member (best-effort sequential)
+    - Errors logged with opaque categories only; never propagated to message write path
+  - `send_commit` also calls `fan_out_push` so peers can ratchet to the new epoch
+  - `send_welcome` unchanged — already pushes directly to the Welcome target
+  - **FakePushSubRepo** upgraded from single-sub to `HashMap<DeviceId, PushSubscription>` in tests
+  - **+4 new tests:** `fan_out_notifies_all_members_except_sender`; `fan_out_sender_not_notified_even_if_subscribed`; `fan_out_on_send_commit_notifies_members_except_committer`; `fan_out_noop_when_push_not_configured`
+  - **2 tests updated** to reflect fan-out (non-sender) semantics
+  - **security-auditor:** PASS — GREEN. Y1 (no group-size cap, DoS amplification advisory); Y2 (member list re-fetched twice — informational). Both non-blocking.
+  - **75 application tests** (+4 new; was 71); clippy + rustfmt clean; 393 Rust workspace tests total.
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+    - ML-KEM-768 Phase C remaining: Y-9 Zeroizing buffer-zero verification in tests (unsafe ptr test, future work)
+    - Invite system backend YELLOWs Y-1 through Y-6 (cycle 107, non-blocking)
+    - Invite frontend YELLOWs Y-1 (DOM code visibility) and Y-2 (origin baseline) — non-blocking
+    - useWelcomePoller Y1/Y3: sinceRef does not advance for skipped Application/Welcome envelopes (benign, follow-up)
+    - useWelcomePoller Y2: senderDeviceId UUID format not validated client-side (advisory)
+    - Recovery clipboard auto-clear (advisory, low priority)
+    - Push Y1: silent catch on registerPushSubscription failure (no telemetry, advisory)
+    - Push Y2: token rotation gap — existing sub reused under new session (advisory)
+    - Push Y3 (new): no group-size cap on fan-out — DoS amplification advisory (cycle 116 Y1)
+    - Push Y4 (new): member list re-fetched twice in send_message/send_commit — informational
+    - Informational: header-shape coupling in auth API tests
+    - Pre-existing vitest GHSA-5xrq-8626-4rwp (vitest UI not exposed; low real-world risk)
+
 ## Current state (2026-06-10, cycle 115 — STABILIZATION: BIP-39 registration flow tests + security sweep)
 - **Cycle 115 (commit ce4f60f):** STABILIZATION — CI GREEN (latest 2 runs success), cargo audit clean (1 allowed: instant/openmls), no open GitHub issues.
   - **Test gap CLOSED — prd.md §8.5 Login registration flow:** `Login.test.tsx` always mocked `useCryptoWorker` as null, leaving the full BIP-39 registration path (generateRecoveryPhrase → mlsInitIdentityFromPhrase → RecoveryPhraseModal display → deferred login on confirm) without coverage.
