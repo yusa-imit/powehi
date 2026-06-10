@@ -17,6 +17,17 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-11, cycle 121 — FEATURE: §9.2 media receive path — download, decrypt, display incoming images)
+- **Cycle 121 (commit eda5a82):** FEATURE — closes the final §9.2 receiver-side gap: incoming image messages now download and decrypt from R2 and display inline instead of showing "Image attachment" placeholder.
+  - **`app/src/hooks/useMediaReceive.ts`** (NEW): Hook that takes `MediaPayload | undefined`. Gets presigned R2 download URL via `getMediaDownloadUrl`, fetches ciphertext with `redirect: "error"` (SSRF defense-in-depth), calls `cryptoWorker.mediaDecryptWithRawKey(mediaKey, iv, ct, blobHash)` (WASM verifies SHA-256(ciphertext) === blobHash before AES-GCM decrypt — R-2 blob-swap detection), creates blob object URL (MIME sniffed from magic bytes: jpeg/png/gif/webp/fallback-jpeg). `mediaKey.fill(0)` in `finally` (security invariant). Object URL revoked on unmount or dep change (no memory leak). `cancelled` flag guards all `await` points.
+  - **`app/src/components/MediaImage.tsx`** (NEW): Wrapper around `useMediaReceive` — renders loading placeholder, "Image unavailable" on error, or `<img src={objectUrl} alt="Encrypted attachment">` on success.
+  - **`app/src/components/ChatLayout.tsx`** (MODIFIED): `ChatMessage.mediaAttachment?: { blobId }` replaced with `media?: MediaPayload` (stores full payload including key for on-demand decrypt). `handleIncoming` stores `media: msg.media`. `MessageBubble` renders `<MediaImage media={msg.media} />` instead of icon+text placeholder.
+  - **security-auditor:** PASS — no RED findings. YELLOWs: (a) mediaKey in React state as `number[]` — known cycle-119 advisory, receiver opaque-handle is future work; (b) MIME fallback image/jpeg — browser decoder reliance; (c) `redirect: "error"` applied (audit finding closed). No plaintext logging, no XSS (blob: URL, no dangerouslySetInnerHTML), token only in Authorization header.
+  - **332 frontend tests** (+11 `useMediaReceive` tests; was 321); Biome clean; tsc clean.
+  - **Remaining deferred security findings (YELLOW):** same as cycle 120 plus:
+    - Media §9.2 YELLOW: mediaKey receiver opaque-handle pattern (future work, currently `number[]` in React state)
+    - Media §9.2 YELLOW: MIME fallback image/jpeg (browser decoder risk for unrecognized magic bytes)
+
 ## Current state (2026-06-11, cycle 120 — STABILIZATION: CI red fix — rustfmt 1.96.0 + clippy unused_mut in wasm_exports)
 - **Cycle 120 (commit 571545a):** STABILIZATION — CI was RED on Rust Format check since cycle 119. Root cause: two formatting drifts in `wasm_exports.rs` test code introduced by `media_message_create` commit:
   - `assert!(parsed.get("rawKey").is_none(), "no rawKey field must be present")` → rustfmt 1.96.0 requires 3-line block form for `assert!(cond, msg)`.
