@@ -17,6 +17,27 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-10, cycle 115 — STABILIZATION: BIP-39 registration flow tests + security sweep)
+- **Cycle 115 (commit ce4f60f):** STABILIZATION — CI GREEN (latest 2 runs success), cargo audit clean (1 allowed: instant/openmls), no open GitHub issues.
+  - **Test gap CLOSED — prd.md §8.5 Login registration flow:** `Login.test.tsx` always mocked `useCryptoWorker` as null, leaving the full BIP-39 registration path (generateRecoveryPhrase → mlsInitIdentityFromPhrase → RecoveryPhraseModal display → deferred login on confirm) without coverage.
+    - New `app/src/components/Login.registration.test.tsx` (6 tests): RecoveryPhraseModal appears after registration; all 24 words rendered; auth phase stays "login" until confirmed; phase advances to "app" after confirmation; **security invariant**: recovery words absent from all console output; **security invariant**: regInit receives Uint8Array hash, not plaintext handle.
+    - Also added OPAQUE methods (`opaqueRegistrationStart/Finish`, `opaqueLoginStart/Finish`) to `__mocks__/useCryptoWorker.ts` so future tests can mock the full OPAQUE flow.
+  - **security-auditor:** GREEN on full backend sweep (push-subscription, invite, group-member handlers). 1 informational YELLOW (unused `_caller` in invite redeem — pre-existing by design per cycle 107 YELLOWs).
+  - **288 frontend tests** (+6, was 282); Biome clean; tsc clean; 393 Rust tests unchanged.
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+    - ML-KEM-768 Phase C remaining: Y-9 Zeroizing buffer-zero verification in tests (unsafe ptr test, future work)
+    - Invite system backend YELLOWs Y-1 through Y-6 (cycle 107, non-blocking)
+    - Invite frontend YELLOWs Y-1 (DOM code visibility) and Y-2 (origin baseline) — non-blocking
+    - useWelcomePoller Y1/Y3: sinceRef does not advance for skipped Application/Welcome envelopes (benign, follow-up)
+    - useWelcomePoller Y2: senderDeviceId UUID format not validated client-side (advisory)
+    - Recovery clipboard auto-clear (advisory, low priority)
+    - Push Y1: silent catch on registerPushSubscription failure (no telemetry, advisory)
+    - Push Y2: token rotation gap — existing sub reused under new session (advisory, upsert semantics on backend)
+    - Informational: header-shape coupling in auth API tests
+    - Pre-existing vitest GHSA-5xrq-8626-4rwp (vitest UI not exposed; low real-world risk)
+
 ## Current state (2026-06-10, cycle 114 — FEATURE: Web Push subscription registration — prd.md §7.5)
 - **Cycle 114 (commits cffcf5d, 74b25a4):** Two changes:
   1. **CI rustfmt fix (cffcf5d):** `recovery.rs` and `wasm_exports.rs` had formatting drift after stable 1.96.0 — array literal line breaks in KAT constants, `assert_eq!` expansion with message args, `generate_identity_from_keypair` continuation-line form. Fixed to match stable 1.96.0 output. Rust CI is now GREEN.
