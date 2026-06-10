@@ -1953,7 +1953,10 @@ mod tests {
         let json_bytes =
             build_media_payload_json("blob", &[0u8; 32], &[0u8; 32], &[0u8; 12]).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
-        assert!(parsed.get("rawKey").is_none(), "no rawKey field must be present");
+        assert!(
+            parsed.get("rawKey").is_none(),
+            "no rawKey field must be present"
+        );
         assert!(parsed.get("key").is_none(), "no key field must be present");
     }
 
@@ -1970,8 +1973,7 @@ mod tests {
         let iv = [0xcdu8; 12];
         let blob_id = "test-blob-id";
 
-        let json_bytes =
-            build_media_payload_json(blob_id, &blob_hash, &media_key, &iv).unwrap();
+        let json_bytes = build_media_payload_json(blob_id, &blob_hash, &media_key, &iv).unwrap();
 
         // MLS-encrypt using the internal encrypt_message API (no wasm-bindgen involved).
         let mut group = group;
@@ -1981,7 +1983,7 @@ mod tests {
 
         // MLS-decrypt to verify the payload survives the round-trip.
         // Note: we need a mutable group for decrypt (epoch advance).
-        let mut group_mut = create_group(&identity, &provider).unwrap();
+        let group_mut = create_group(&identity, &provider).unwrap();
         // encrypt with the first group, but we can't decrypt in the same group without
         // MLS handshake — this verifies encryption succeeds and produces non-empty bytes.
         let _ = group_mut; // suppress unused warning
