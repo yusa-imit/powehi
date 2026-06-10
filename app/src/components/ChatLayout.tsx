@@ -13,7 +13,7 @@ import { EncryptedPowehiDb } from "../db/encrypted-db";
 import { db } from "../db/schema";
 import { useCryptoWorker } from "../hooks/useCryptoWorker";
 import { useMediaSend } from "../hooks/useMediaSend";
-import { type IncomingMessage, useMessages } from "../hooks/useMessages";
+import { type IncomingMessage, type MediaPayload, useMessages } from "../hooks/useMessages";
 import { usePersistentMessages } from "../hooks/usePersistentMessages";
 import { useRegionDetect } from "../hooks/useRegionDetect";
 import { type NewGroupEvent, useWelcomePoller } from "../hooks/useWelcomePoller";
@@ -21,6 +21,7 @@ import { useAuthStore } from "../store/auth";
 import { uint8ToBase64 } from "../utils/base64";
 import { Icon } from "./Icon";
 import { InviteModal } from "./InviteModal";
+import { MediaImage } from "./MediaImage";
 import { SafetyNumbers } from "./SafetyNumbers";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -35,8 +36,8 @@ interface ChatMessage {
 	read?: boolean;
 	/** Unix ms — set when sent with a disappearing TTL. Client-side mock only. */
 	expiresAt?: number;
-	/** §9.2 media attachment — present when the message is an encrypted image. */
-	mediaAttachment?: { blobId: string };
+	/** §9.2 media attachment — full payload for download + decrypt on the receiver path. */
+	media?: MediaPayload;
 }
 
 interface Chat {
@@ -691,22 +692,7 @@ function MessageBubble({
 							}),
 				}}
 			>
-				{msg.mediaAttachment ? (
-					<div
-						style={{
-							display: "flex",
-							alignItems: "center",
-							gap: 6,
-							fontSize: 13,
-							opacity: 0.9,
-						}}
-					>
-						<Icon name="attach" size={14} />
-						<span>Image attachment</span>
-					</div>
-				) : (
-					msg.text
-				)}
+				{msg.media ? <MediaImage media={msg.media} /> : msg.text}
 				{msg.last && msg.time && (
 					<span
 						style={{
@@ -1430,7 +1416,7 @@ export function ChatLayout() {
 						last: true,
 						time,
 						continued: msgs.length > 0 && msgs[msgs.length - 1].from === "them",
-						mediaAttachment: msg.media ? { blobId: msg.media.blobId } : undefined,
+						media: msg.media,
 					});
 					return { ...c, messages: msgs, last: displayText, time };
 				}),
