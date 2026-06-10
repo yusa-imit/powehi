@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { registerPushSubscription } from "../api/push";
 
 export interface PushSubscriptionResult {
 	endpoint: string;
@@ -6,9 +7,10 @@ export interface PushSubscriptionResult {
 	auth: string;
 }
 
-// Registers the Service Worker and optionally subscribes to Web Push.
-// The VAPID public key must be injected at runtime (env or server-config endpoint).
-export function useServiceWorker(vapidPublicKey?: string) {
+// Registers the Service Worker and subscribes to Web Push.
+// VAPID public key enables push subscription; session token enables server registration.
+// Both must be present for the full push flow. Missing either silently skips that step.
+export function useServiceWorker(vapidPublicKey?: string, sessionToken?: string) {
 	useEffect(() => {
 		if (!("serviceWorker" in navigator)) return;
 
@@ -25,15 +27,24 @@ export function useServiceWorker(vapidPublicKey?: string) {
 								applicationServerKey: urlBase64ToUint8Array(vapidPublicKey),
 							});
 						})
-						.then((_sub) => {
-							// TODO Phase 5: POST subscription to /v1/push/subscribe
+						.then((sub) => {
+							if (!sessionToken) return;
+							const json = sub.toJSON();
+							const keys = json.keys ?? {};
+							const endpoint = sub.endpoint;
+							const p256dh = keys.p256dh ?? "";
+							const auth = keys.auth ?? "";
+							// Endpoint stays in Authorization header only — never in URL path.
+							return registerPushSubscription(sessionToken, endpoint, p256dh, auth).catch(() => {
+								// Registration failure is non-fatal: app works without push.
+							});
 						});
 				}
 			})
 			.catch((_err) => {
 				// SW registration failure is non-fatal; app still works
 			});
-	}, [vapidPublicKey]);
+	}, [vapidPublicKey, sessionToken]);
 }
 
 function urlBase64ToUint8Array(base64String: string): Uint8Array<ArrayBuffer> {
