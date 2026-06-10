@@ -33,6 +33,15 @@ export type MlKemDecapV2Result = { sharedSecretHandle: string };
 // ADR-0003 Phase B, Y-3: signed encap key credential.
 export type MlKemSignResult = { signature: Uint8Array };
 export type MlKemVerifyResult = { valid: boolean };
+// §9.2 Media encryption: AES-256-GCM opaque-handle types.
+// mediaKeyHandle: the 32-byte AES-256-GCM key stays inside the worker; only the
+// opaque string handle crosses the worker boundary (sender path).
+export type MediaEncryptResult = {
+	ciphertext: Uint8Array;
+	mediaKeyHandle: string;
+	iv: Uint8Array;
+	blobHash: Uint8Array;
+};
 
 // ── Internal WASM raw return types (include exportKey — consumed in worker) ──
 
@@ -86,6 +95,16 @@ interface WasmModule {
 		signature: Uint8Array,
 		sigPubKey: Uint8Array,
 	) => MlKemVerifyResult;
+	// §9.2 Media encryption: AES-256-GCM opaque-handle API.
+	media_encrypt: (plaintext: Uint8Array) => MediaEncryptResult;
+	media_decrypt: (mediaKeyHandle: string, iv: Uint8Array, ciphertext: Uint8Array) => Uint8Array;
+	media_decrypt_with_raw_key: (
+		mediaKey: Uint8Array,
+		iv: Uint8Array,
+		ciphertext: Uint8Array,
+		blobHash: Uint8Array,
+	) => Uint8Array;
+	media_drop_key: (handle: string) => boolean;
 }
 
 // ── IndexedDB key — held inside the worker, never crosses to main thread ─────
@@ -497,6 +516,72 @@ const api = {
 	): Promise<MlKemVerifyResult> {
 		const wasm = await getWasm();
 		return wasm.ml_kem_768_verify_encap_key(encapKey, signature, sigPubKey);
+	},
+
+	// ── §9.2 Media encryption (AES-256-GCM opaque-handle API) ────────────────
+
+	/**
+	 * Encrypt a media file with a fresh AES-256-GCM key and IV (prd.md §9.2).
+	 *
+	 * Returns { ciphertext, mediaKeyHandle, iv, blobHash }.
+	 * Upload `ciphertext` to R2 via the presigned URL from POST /v1/media/upload-url.
+	 * The raw 32-byte AES key stays inside the worker; only the opaque handle crosses.
+	 *
+	 * Call mediaDropKey(mediaKeyHandle) when the handle is no longer needed.
+	 */
+	async mediaEncrypt(plaintext: Uint8Array): Promise<MediaEncryptResult> {
+		const wasm = await getWasm();
+		return wasm.media_encrypt(plaintext);
+	},
+
+	/**
+	 * Decrypt an R2 blob using a stored media key handle (sender re-decrypt path).
+	 *
+	 * @param mediaKeyHandle  handle returned by mediaEncrypt
+	 * @param iv              12-byte nonce returned by mediaEncrypt
+	 * @param ciphertext      encrypted blob from R2
+	 */
+	async mediaDecrypt(
+		mediaKeyHandle: string,
+		iv: Uint8Array,
+		ciphertext: Uint8Array,
+	): Promise<Uint8Array> {
+		const wasm = await getWasm();
+		return wasm.media_decrypt(mediaKeyHandle, iv, ciphertext);
+	},
+
+	/**
+	 * Decrypt an R2 blob using raw key bytes from an MLS-decrypted message (receiver path).
+	 *
+	 * The mediaKey bytes arrive inside the MLS-decrypted application message payload.
+	 * Call this after mls_decrypt to decrypt the R2 ciphertext blob.
+	 *
+	 * R-2 (crypto-reviewer, NIST SP 800-38D §5.2.1.1): blobHash is the SHA-256 of the
+	 * ciphertext embedded in the MLS message by the sender. WASM verifies it before
+	 * AES-GCM decrypt to detect a server-side R2 blob swap without exposing an oracle.
+	 *
+	 * @param mediaKey    32-byte AES-256-GCM key from the MLS message payload
+	 * @param iv          12-byte nonce from the MLS message payload
+	 * @param ciphertext  encrypted blob from R2
+	 * @param blobHash    32-byte SHA-256(ciphertext) from the MLS message payload
+	 */
+	async mediaDecryptWithRawKey(
+		mediaKey: Uint8Array,
+		iv: Uint8Array,
+		ciphertext: Uint8Array,
+		blobHash: Uint8Array,
+	): Promise<Uint8Array> {
+		const wasm = await getWasm();
+		return wasm.media_decrypt_with_raw_key(mediaKey, iv, ciphertext, blobHash);
+	},
+
+	/**
+	 * Explicitly drop a stored media key handle (zeroes the 32-byte key on drop).
+	 * Returns true if the handle was found and removed.
+	 */
+	async mediaDropKey(handle: string): Promise<boolean> {
+		const wasm = await getWasm();
+		return wasm.media_drop_key(handle);
 	},
 };
 

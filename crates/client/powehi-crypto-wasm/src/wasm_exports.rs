@@ -25,6 +25,7 @@ use zeroize::Zeroizing;
 
 use crate::kem;
 use crate::kem_credential;
+use crate::media;
 use crate::mls_group::{
     add_member, create_group, decrypt_message, encrypt_message, generate_identity,
     generate_identity_from_keypair, generate_key_package, join_group, Identity,
@@ -73,11 +74,21 @@ thread_local! {
     // ADR-0003 Phase C (Y-8): both maps are capped at MAX_KEM_HANDLES entries.
     static KEM_DECAP_KEYS:     RefCell<HashMap<String, Zeroizing<Vec<u8>>>> = RefCell::new(HashMap::new());
     static KEM_SHARED_SECRETS: RefCell<HashMap<String, Zeroizing<Vec<u8>>>> = RefCell::new(HashMap::new());
+    // §9.2 Media encryption: AES-256-GCM keys stored as opaque handles.
+    // On the sender path, the raw 32-byte media key never crosses the WASM-JS
+    // boundary — only a string handle is returned.  The key is included in the
+    // MLS-encrypted application message payload (media_message_create, Phase 5+).
+    // Capped at MAX_MEDIA_HANDLES to prevent DoS via handle flooding.
+    static MEDIA_KEYS: RefCell<HashMap<String, Zeroizing<[u8; 32]>>> = RefCell::new(HashMap::new());
 }
 
 /// Maximum simultaneous KEM handles per session (per map: decap keys or shared secrets).
 /// Prevents DoS via handle flooding (ADR-0003 Phase C, Y-8).
 const MAX_KEM_HANDLES: usize = 256;
+
+/// Maximum simultaneous media key handles per session (§9.2 media encryption).
+/// Prevents DoS via handle flooding, consistent with KEM handle cap.
+const MAX_MEDIA_HANDLES: usize = 256;
 
 /// Returns `Ok(())` if `current_len < MAX_KEM_HANDLES`, else `Err` with a static message.
 /// Pure function — no `JsValue`/`JsError` so it is callable in native unit tests.
@@ -871,6 +882,127 @@ pub fn ml_kem_768_verify_encap_key(
     js_obj(&[("valid", JsValue::from_bool(valid))])
 }
 
+// ── §9.2 Media encryption: AES-256-GCM opaque-handle exports ──────────────────
+//
+// Sender path:
+//   1. `media_encrypt(file_bytes)` — generates a fresh AES-256-GCM key + IV,
+//      encrypts the file, stores the key in MEDIA_KEYS under an opaque handle,
+//      returns { ciphertext, mediaKeyHandle, iv, blobHash }.
+//   2. JS uploads `ciphertext` to Cloudflare R2 via the presigned URL from
+//      POST /v1/media/upload-url (see app/src/api/media.ts).
+//   3. `media_message_create` (Phase 5+) reads the stored key from the handle,
+//      wraps { type, blobId, mediaKey, iv } in an MLS application message, and
+//      returns the MLS ciphertext.  The raw media_key bytes only ever appear
+//      inside MLS ciphertext when crossing service boundaries.
+//
+// Receiver path:
+//   After MLS decrypt, the plaintext JSON contains { mediaKey (bytes), iv, blobId }.
+//   `media_decrypt_with_raw_key(mediaKey, iv, ciphertext)` decrypts the R2 blob.
+//   The media_key is already in JS memory (from MLS decrypt) before this call.
+
+/// Encrypt media bytes with a fresh AES-256-GCM key and IV (prd.md §9.2 sender path).
+///
+/// Returns `{ ciphertext: Uint8Array, mediaKeyHandle: string, iv: Uint8Array, blobHash: Uint8Array }`.
+/// - `ciphertext`: encrypted file with 16-byte GCM tag appended. Upload this to R2.
+/// - `mediaKeyHandle`: opaque handle; the raw 32-byte key stays inside the WASM
+///   worker and NEVER crosses the WASM-JS boundary (same pattern as ADR-0003 Phase B).
+/// - `iv`: 12-byte nonce. Store alongside ciphertext (public, non-secret).
+/// - `blobHash`: SHA-256 of the ciphertext. Send to POST /v1/media/upload-url.
+///
+/// Call `media_drop_key(mediaKeyHandle)` once the key is no longer needed.
+/// `mls_clear_session()` also drops all media key handles.
+#[wasm_bindgen]
+pub fn media_encrypt(plaintext: &[u8]) -> Result<JsValue, JsError> {
+    MEDIA_KEYS
+        .with(|m| {
+            let len = m.borrow().len();
+            if len >= MAX_MEDIA_HANDLES {
+                Err("media key cap exceeded")
+            } else {
+                Ok(())
+            }
+        })
+        .map_err(js_err)?;
+
+    let (ciphertext, key, iv, blob_hash) =
+        media::encrypt(plaintext).map_err(|e| js_err(&e.to_string()))?;
+
+    let handle = next_id();
+    // Build JS result BEFORE inserting into the map: if js_obj fails, no orphan
+    // handle entry is created (same Y-7 pattern as KEM Phase B exports).
+    let result = js_obj(&[
+        ("ciphertext", bytes_js(&ciphertext)),
+        ("mediaKeyHandle", JsValue::from_str(&handle)),
+        ("iv", bytes_js(&iv)),
+        ("blobHash", bytes_js(&blob_hash)),
+    ])?;
+    MEDIA_KEYS.with(|m| m.borrow_mut().insert(handle, key));
+    Ok(result)
+}
+
+/// Decrypt an R2 blob using a stored media key handle (sender can re-decrypt).
+///
+/// `media_key_handle`: string returned by `media_encrypt`.
+/// `iv`: 12-byte nonce returned by `media_encrypt`.
+/// `ciphertext`: encrypted blob from R2 (includes 16-byte GCM tag).
+///
+/// Returns the plaintext bytes on success. Errors if the handle is unknown,
+/// the GCM tag fails verification, or `iv` is not exactly 12 bytes.
+#[wasm_bindgen]
+pub fn media_decrypt(
+    media_key_handle: &str,
+    iv: &[u8],
+    ciphertext: &[u8],
+) -> Result<Uint8Array, JsError> {
+    let key = MEDIA_KEYS
+        .with(|m| m.borrow().get(media_key_handle).cloned())
+        .ok_or_else(|| js_err("unknown media key handle"))?;
+    let iv_arr: &[u8; 12] = iv.try_into().map_err(|_| js_err("iv must be 12 bytes"))?;
+    let plaintext = media::decrypt(&key, iv_arr, ciphertext).map_err(|e| js_err(&e.to_string()))?;
+    Ok(Uint8Array::from(plaintext.as_slice()))
+}
+
+/// Decrypt an R2 blob using raw key bytes from an MLS-decrypted message (receiver path).
+///
+/// `media_key`: 32-byte AES-256-GCM key from the MLS application message payload.
+/// `iv`: 12-byte nonce from the same payload.
+/// `ciphertext`: encrypted blob downloaded from R2.
+/// `blob_hash`: 32-byte SHA-256 of the ciphertext embedded in the MLS message.
+///
+/// **R-2 fix (NIST SP 800-38D §5.2.1.1):** `SHA-256(ciphertext)` is re-computed
+/// and compared to `blob_hash` (authenticated inside the MLS envelope) BEFORE
+/// AES-GCM decrypt.  A mismatch means the R2 blob was swapped by a server-side
+/// adversary; reject without decrypting to avoid any oracle.
+///
+/// **Y-2 (crypto-reviewer):** The caller MUST zero `mediaKey` immediately after
+/// this call returns (`mediaKey.fill(0)`).
+///
+/// Returns an error if `media_key` is not 32 bytes, `iv` is not 12 bytes,
+/// `blob_hash` is not 32 bytes, the hash does not match, or the GCM tag fails.
+#[wasm_bindgen]
+pub fn media_decrypt_with_raw_key(
+    media_key: &[u8],
+    iv: &[u8],
+    ciphertext: &[u8],
+    blob_hash: &[u8],
+) -> Result<Uint8Array, JsError> {
+    let blob_hash_arr: &[u8; 32] = blob_hash
+        .try_into()
+        .map_err(|_| js_err("blob_hash must be 32 bytes"))?;
+    let plaintext = media::decrypt_with_raw_key(media_key, iv, ciphertext, blob_hash_arr)
+        .map_err(|e| js_err(&e.to_string()))?;
+    Ok(Uint8Array::from(plaintext.as_slice()))
+}
+
+/// Explicitly drop a stored media key by handle (zeroes the 32-byte heap buffer on drop).
+///
+/// Returns `true` if the handle was found and removed. Silently no-ops on unknown
+/// handles (idempotent / safe to call after `mls_clear_session`).
+#[wasm_bindgen]
+pub fn media_drop_key(handle: &str) -> bool {
+    MEDIA_KEYS.with(|m| m.borrow_mut().remove(handle).is_some())
+}
+
 // ── Session lifecycle ──────────────────────────────────────────────────────────
 
 /// Clear all MLS, OPAQUE, and ML-KEM session state from the WASM heap on logout.
@@ -892,6 +1024,7 @@ pub fn mls_clear_session() {
     OPAQUE_LOGIN.with(|s| s.borrow_mut().clear());
     KEM_DECAP_KEYS.with(|m| m.borrow_mut().clear());
     KEM_SHARED_SECRETS.with(|m| m.borrow_mut().clear());
+    MEDIA_KEYS.with(|m| m.borrow_mut().clear());
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -1582,5 +1715,89 @@ mod tests {
             parse_phrase("not a valid bip39 phrase at all").is_err(),
             "invalid phrase must be rejected before any key material is derived"
         );
+    }
+
+    // ── §9.2 Media encryption handle lifecycle ────────────────────────────────
+
+    /// media_encrypt stores the key as a handle; media_decrypt retrieves it and
+    /// produces the original plaintext (round-trip via thread-local map).
+    #[test]
+    fn test_media_handle_round_trip() {
+        let plaintext = b"media encryption round-trip test";
+        let (ct, key, iv, _hash) = media::encrypt(plaintext).unwrap();
+        let handle = next_id();
+        MEDIA_KEYS.with(|m| m.borrow_mut().insert(handle.clone(), key));
+
+        // Retrieve and decrypt via handle
+        let stored_key = MEDIA_KEYS
+            .with(|m| m.borrow().get(&handle).cloned())
+            .expect("handle must be present");
+        let iv_arr: &[u8; 12] = &iv;
+        let decrypted = media::decrypt(&stored_key, iv_arr, &ct).unwrap();
+        assert_eq!(decrypted, plaintext);
+
+        MEDIA_KEYS.with(|m| m.borrow_mut().remove(&handle));
+    }
+
+    /// After media_drop_key, the handle is gone from MEDIA_KEYS.
+    #[test]
+    fn test_media_drop_key_removes_handle() {
+        let handle = format!("media-drop-test-{}", next_id());
+        MEDIA_KEYS.with(|m| {
+            m.borrow_mut()
+                .insert(handle.clone(), Zeroizing::new([0u8; 32]))
+        });
+        assert!(
+            MEDIA_KEYS.with(|m| m.borrow().contains_key(&handle)),
+            "handle must be present before drop"
+        );
+        let removed = MEDIA_KEYS.with(|m| m.borrow_mut().remove(&handle).is_some());
+        assert!(removed, "drop must return true for known handle");
+        assert!(
+            !MEDIA_KEYS.with(|m| m.borrow().contains_key(&handle)),
+            "handle must be absent after drop"
+        );
+    }
+
+    /// mls_clear_session also clears MEDIA_KEYS.
+    #[test]
+    fn test_clear_session_removes_media_keys() {
+        let handle = format!("media-clear-test-{}", next_id());
+        MEDIA_KEYS.with(|m| {
+            m.borrow_mut()
+                .insert(handle.clone(), Zeroizing::new([0u8; 32]))
+        });
+        assert!(MEDIA_KEYS.with(|m| m.borrow().contains_key(&handle)));
+
+        mls_clear_session();
+
+        assert_eq!(
+            MEDIA_KEYS.with(|m| m.borrow().len()),
+            0,
+            "MEDIA_KEYS must be empty after mls_clear_session"
+        );
+    }
+
+    /// Media key cap: at MAX_MEDIA_HANDLES entries, the cap check rejects insertion.
+    #[test]
+    fn test_media_key_cap_check() {
+        let mut handles: Vec<String> = Vec::with_capacity(MAX_MEDIA_HANDLES);
+        for i in 0..MAX_MEDIA_HANDLES {
+            let h = format!("cap-media-test-{i}");
+            handles.push(h.clone());
+            MEDIA_KEYS.with(|m| m.borrow_mut().insert(h, Zeroizing::new([0u8; 32])));
+        }
+        // At cap: insertion should be rejected
+        let at_cap = MEDIA_KEYS.with(|m| {
+            let len = m.borrow().len();
+            len >= MAX_MEDIA_HANDLES
+        });
+        assert!(at_cap, "map must be at cap");
+
+        // Drop all handles to clean up
+        for h in &handles {
+            MEDIA_KEYS.with(|m| m.borrow_mut().remove(h));
+        }
+        assert_eq!(MEDIA_KEYS.with(|m| m.borrow().len()), 0);
     }
 }

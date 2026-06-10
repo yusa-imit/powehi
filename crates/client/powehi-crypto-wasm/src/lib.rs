@@ -9,6 +9,7 @@ use wasm_bindgen::prelude::*;
 
 pub mod kem;
 pub mod kem_credential;
+pub mod media;
 pub mod mls_group;
 pub mod opaque;
 pub mod recovery;

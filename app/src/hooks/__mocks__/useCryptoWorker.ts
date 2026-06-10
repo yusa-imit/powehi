@@ -87,6 +87,23 @@ const mockWorker = {
 		identityId: "mock-identity-id",
 		keyPackage: new Uint8Array([1, 2, 3]),
 	}),
+	// §9.2 Media encryption: AES-256-GCM opaque-handle mocks.
+	// mediaKeyHandle is a static string — no real key state in tests.
+	mediaEncrypt: async (_plaintext: Uint8Array) => ({
+		ciphertext: new Uint8Array(32 + 16), // 32 bytes plaintext + 16-byte GCM tag
+		mediaKeyHandle: "mock-media-key-handle-0",
+		iv: new Uint8Array(12),
+		blobHash: new Uint8Array(32),
+	}),
+	mediaDecrypt: async (_mediaKeyHandle: string, _iv: Uint8Array, _ciphertext: Uint8Array) =>
+		new Uint8Array(32),
+	mediaDecryptWithRawKey: async (
+		_mediaKey: Uint8Array,
+		_iv: Uint8Array,
+		_ciphertext: Uint8Array,
+		_blobHash: Uint8Array,
+	) => new Uint8Array(32),
+	mediaDropKey: async (_handle: string) => true,
 };
 
 export const useCryptoWorker = () => mockWorker;

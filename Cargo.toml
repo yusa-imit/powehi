@@ -74,6 +74,10 @@ opaque-ke = "3"
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 sha2 = "0.10"
 hmac = "0.12"
+# AES-256-GCM AEAD for client-side media encryption (prd.md §9.2).
+# Pure-Rust implementation; compiles on wasm32-unknown-unknown without hardware AES.
+# Approved per crypto-libraries-pinned.md.
+aes-gcm = "0.10"
 # HKDF (RFC 5869) — approved per crypto-libraries-pinned.md. Used by §8.5
 # recovery-phrase → MLS Ed25519 signing key derivation in powehi-crypto-wasm.
 hkdf = "0.12"

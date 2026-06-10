@@ -24,6 +24,9 @@ ml-kem = { workspace = true }
 opaque-ke = { workspace = true, features = ["ristretto255-voprf", "argon2", "serde", "std"] }
 # Argon2 KSF type used in the OPAQUE ciphersuite definition.
 argon2 = { workspace = true }
+# AES-256-GCM for client-side media encryption (prd.md §9.2, RustCrypto — approved
+# per crypto-libraries-pinned.md). Pure-Rust; works on wasm32-unknown-unknown.
+aes-gcm = { workspace = true }
 # HKDF-SHA256 (RFC 5869) — derives the MLS Ed25519 signing key from a BIP-39
 # seed for §8.5 Recovery Mechanism. Approved per crypto-libraries-pinned.md.
 hkdf = { workspace = true }

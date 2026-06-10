@@ -3704,6 +3704,7 @@ dependencies = [
 name = "powehi-crypto-wasm"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "argon2",
  "bip39",
  "ed25519-dalek",
