@@ -325,13 +325,9 @@ pub fn mls_init_identity_from_phrase(
     let (private_key, public_key) =
         derive_signing_keypair(&*seed).map_err(|e| js_err(&e.to_string()))?;
     let provider = OpenMlsRustCrypto::default();
-    let identity = generate_identity_from_keypair(
-        identity_bytes,
-        &private_key,
-        &public_key,
-        &provider,
-    )
-    .map_err(|e| js_err(&e.to_string()))?;
+    let identity =
+        generate_identity_from_keypair(identity_bytes, &private_key, &public_key, &provider)
+            .map_err(|e| js_err(&e.to_string()))?;
     let bundle = generate_key_package(&identity, &provider).map_err(|e| js_err(&e.to_string()))?;
     let key_package = MlsMessageOut::from(bundle)
         .to_bytes()
@@ -1541,13 +1537,9 @@ mod tests {
         let seed = mnemonic_to_seed(&m);
         let (priv_key, pub_key) = derive_signing_keypair(&*seed).unwrap();
         let provider = OpenMlsRustCrypto::default();
-        let identity = generate_identity_from_keypair(
-            b"recovery-test-device",
-            &priv_key,
-            &pub_key,
-            &provider,
-        )
-        .unwrap();
+        let identity =
+            generate_identity_from_keypair(b"recovery-test-device", &priv_key, &pub_key, &provider)
+                .unwrap();
         assert_eq!(
             identity.signer.to_public_vec().as_slice(),
             pub_key.as_slice(),
@@ -1569,11 +1561,11 @@ mod tests {
         let (priv_b, pub_b) = derive_signing_keypair(&*seed).unwrap();
 
         let provider_a = OpenMlsRustCrypto::default();
-        let id_a = generate_identity_from_keypair(b"device-label", &priv_a, &pub_a, &provider_a)
-            .unwrap();
+        let id_a =
+            generate_identity_from_keypair(b"device-label", &priv_a, &pub_a, &provider_a).unwrap();
         let provider_b = OpenMlsRustCrypto::default();
-        let id_b = generate_identity_from_keypair(b"device-label", &priv_b, &pub_b, &provider_b)
-            .unwrap();
+        let id_b =
+            generate_identity_from_keypair(b"device-label", &priv_b, &pub_b, &provider_b).unwrap();
 
         assert_eq!(
             id_a.signer.to_public_vec(),

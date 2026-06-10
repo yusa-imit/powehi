@@ -237,28 +237,37 @@ mod tests {
             233, 34, 200, 106, 42, 12, 98, 112, 47, 178, 9, 21, 131, 240,
         ];
         const KAT_ZERO_PUB: [u8; 32] = [
-            93, 91, 179, 227, 90, 63, 147, 149, 3, 200, 171, 194, 73, 40, 23, 163, 240, 157,
-            173, 10, 44, 197, 83, 7, 184, 65, 2, 155, 129, 176, 33, 44,
+            93, 91, 179, 227, 90, 63, 147, 149, 3, 200, 171, 194, 73, 40, 23, 163, 240, 157, 173,
+            10, 44, 197, 83, 7, 184, 65, 2, 155, 129, 176, 33, 44,
         ];
 
         let seed_zero = [0u8; 64];
         let (priv_key, pub_key) = derive_signing_keypair(&seed_zero).unwrap();
-        assert_eq!(*priv_key, KAT_ZERO_PRIV, "HKDF output drifted from KAT (zero seed)");
-        assert_eq!(pub_key, KAT_ZERO_PUB, "Ed25519 public key drifted from KAT (zero seed)");
+        assert_eq!(
+            *priv_key, KAT_ZERO_PRIV,
+            "HKDF output drifted from KAT (zero seed)"
+        );
+        assert_eq!(
+            pub_key, KAT_ZERO_PUB,
+            "Ed25519 public key drifted from KAT (zero seed)"
+        );
 
         // --- Vector 2: BIP-39 `abandon × 11 + about` phrase ---
         // Captured: BIP-39 PBKDF2("mnemonic", abandon×11+about, 2048) → 64-byte seed
         // → HKDF-SHA256(salt=None, info=b"powehi-mls-signing-v1", L=32)
         // → Ed25519 public key via ed25519-dalek 2.2.0.
         const KAT_ABANDON_PUB: [u8; 32] = [
-            0, 32, 185, 202, 233, 49, 30, 20, 154, 213, 141, 105, 212, 16, 57, 156, 114, 133,
-            155, 185, 177, 121, 141, 129, 43, 12, 161, 36, 24, 99, 15, 135,
+            0, 32, 185, 202, 233, 49, 30, 20, 154, 213, 141, 105, 212, 16, 57, 156, 114, 133, 155,
+            185, 177, 121, 141, 129, 43, 12, 161, 36, 24, 99, 15, 135,
         ];
         let abandon_phrase =
             "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
         let m = parse_phrase(abandon_phrase).unwrap();
         let seed_ab = mnemonic_to_seed(&m);
         let (_, pub_ab) = derive_signing_keypair(&*seed_ab).unwrap();
-        assert_eq!(pub_ab, KAT_ABANDON_PUB, "Ed25519 public key drifted from KAT (abandon phrase)");
+        assert_eq!(
+            pub_ab, KAT_ABANDON_PUB,
+            "Ed25519 public key drifted from KAT (abandon phrase)"
+        );
     }
 }
