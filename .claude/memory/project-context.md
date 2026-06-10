@@ -17,6 +17,35 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-11, cycle 119 — FEATURE: §9.2 media_message_create — MLS-encrypt media payload inside WASM)
+- **Cycle 119 (commit 0da8cc7):** FEATURE — closes the final §9.2 sender-path gap: raw AES-256-GCM media key stays inside WASM throughout the entire send sequence.
+  - **`crates/client/powehi-crypto-wasm/src/wasm_exports.rs`** (MODIFIED): new `media_message_create` WASM export — retrieves key by opaque handle from `MEDIA_KEYS`, serialises media payload JSON (type, blobId, blobHash, mediaKey, iv) inside WASM via new `build_media_payload_json` pure helper (validates blob_hash=32 bytes, iv=12 bytes), MLS-encrypts via same `encrypt_message` path as `mls_encrypt`, returns only the MLS ciphertext. Raw 32-byte AES key NEVER crosses WASM-JS boundary.
+  - **`app/src/workers/crypto.worker.ts`** (MODIFIED): adds `mediaMessageCreate` to `WasmModule` interface and Comlink `api`.
+  - **`app/src/hooks/useMediaSend.ts`** (NEW): full §9.2 send flow — `mediaEncrypt` → `requestMediaUpload` → PUT ciphertext to R2 → `confirmMediaUpload` → `mediaMessageCreate` → `sendMessage`. `mediaDropKey` always called in `finally` (handle cleanup invariant). No logging of file content, key bytes, or error details.
+  - **`app/src/hooks/useMessages.ts`** (MODIFIED): §9.2 receiver-side JSON parsing — MLS-decrypted payload JSON-parsed for `type=image`; `text` set to `"[image]"`; `MediaPayload` extracted (blobId, blobHash, mediaKey, iv) for downstream download path.
+  - **`app/src/components/ChatLayout.tsx`** (MODIFIED): hidden file input wired to Photo button; optimistic "Image attachment" placeholder; `sendMedia(file).catch(() => {})` silent failure; `MessageBubble` renders icon + "Image attachment" for media msgs.
+  - **`app/src/hooks/__mocks__/useCryptoWorker.ts`** (MODIFIED): adds `mediaMessageCreate` mock stub.
+  - **Tests (+15 Rust + 6 frontend):** `build_media_payload_*` validation tests, `media_message_create` error-path tests (unknown handle/identity/group), encryption smoke test; useMediaSend security invariants (handle always dropped, R2 PUT receives ciphertext not plaintext, etc.).
+  - **crypto-reviewer:** PASS — opaque-handle invariant preserved, no RFC 9420 violations. YELLOWs: json_bytes not Zeroizing (advisory, consistent with mls_encrypt pattern), serde number-array encoding (bandwidth advisory), test name overclaim, caller must drop handle (done in useMediaSend.ts).
+  - **security-auditor:** PASS — no plaintext logging, token not in URL, `media.mediaKey` NOT persisted to Dexie (persistIncoming verified: only stores id/groupId/ciphertextB64/senderDeviceId/epochSeq/receivedAt/plaintextB64("[image]")). YELLOWs: blobId UUID validation (advisory), mediaKey receiver opaque handle (future work), mediaDropKey failure observability (advisory).
+  - **108 Rust crypto-wasm tests** (+15; was 93); **321 frontend tests** (+6; was 315); Biome clean; tsc clean.
+  - **Remaining deferred security findings (YELLOW):**
+    - TOCTOU in group member add/remove (cycle 81, documented, non-blocking)
+    - Post-removal broadcast staleness window (YELLOW-1 from cycle 74, MLS PCS mitigated)
+    - ML-KEM-768 Phase C remaining: Y-9 Zeroizing buffer-zero verification in tests (unsafe ptr test, future work)
+    - Invite system backend YELLOWs Y-1 through Y-6 (cycle 107, non-blocking)
+    - Invite frontend YELLOWs Y-1 (DOM code visibility) and Y-2 (origin baseline) — non-blocking
+    - useWelcomePoller Y1/Y3: sinceRef does not advance for skipped Application/Welcome envelopes (benign, follow-up)
+    - useWelcomePoller Y2: senderDeviceId UUID format not validated client-side (advisory)
+    - Recovery clipboard auto-clear (advisory, low priority)
+    - Push Y1: silent catch on registerPushSubscription failure (no telemetry, advisory)
+    - Push Y2: token rotation gap — existing sub reused under new session (advisory)
+    - Push Y3: no group-size cap on fan-out — DoS amplification advisory (cycle 116 Y1)
+    - Push Y4: member list re-fetched twice in send_message/send_commit — informational
+    - Media §9.2 YELLOWs: json_bytes not Zeroizing (advisory); serde number-array encoding; blobId UUID validation; mediaKey receiver opaque-handle future work; mediaDropKey failure observability
+    - Informational: header-shape coupling in auth API tests
+    - Pre-existing vitest GHSA-5xrq-8626-4rwp (vitest UI not exposed; low real-world risk)
+
 ## Current state (2026-06-10, cycle 116 — FEATURE: Web Push fan-out on send_message + send_commit — prd.md §7.5)
 - **Cycle 116 (commit 96755f4):** FEATURE — closes the final §7.5 gap: group message push fan-out.
   - **Root cause:** `send_message` previously only called `maybe_push(sender)`, meaning only the sender received a push ping (meaningless — they already know they sent). Other group members received no wake-up signal.
