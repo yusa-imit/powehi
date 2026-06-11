@@ -1385,7 +1385,9 @@ export function ChatLayout() {
 
 	const { sessionToken, identityId } = useAuthStore();
 	const cryptoWorker = useCryptoWorker();
-	const { persistIncoming, persistOutgoing } = usePersistentMessages(active?.mlsGroupId);
+	const { persistIncoming, persistOutgoing, purgeExpired } = usePersistentMessages(
+		active?.mlsGroupId,
+	);
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	const { sendMedia } = useMediaSend({
 		identityId: active?.mlsIdentityId,
@@ -1417,6 +1419,7 @@ export function ChatLayout() {
 						time,
 						continued: msgs.length > 0 && msgs[msgs.length - 1].from === "them",
 						media: msg.media,
+						expiresAt: msg.expiresAt,
 					});
 					return { ...c, messages: msgs, last: displayText, time };
 				}),
@@ -1498,6 +1501,23 @@ export function ChatLayout() {
 	);
 	// Global Welcome poller — processes invitations from other devices.
 	useWelcomePoller(identityId, handleNewGroup);
+
+	// Disappearing messages sweep (prd.md §9.4.3): every 30 s filter expired
+	// messages from React state and purge them from Dexie.
+	useEffect(() => {
+		const sweep = () => {
+			const now = Date.now();
+			setChats((cs) =>
+				cs.map((c) => ({
+					...c,
+					messages: c.messages.filter((m) => !m.expiresAt || m.expiresAt > now),
+				})),
+			);
+			purgeExpired();
+		};
+		const handle = setInterval(sweep, 30_000);
+		return () => clearInterval(handle);
+	}, [purgeExpired]);
 
 	const sendMessage = async (text: string) => {
 		const now = new Date();

@@ -48,6 +48,8 @@ export interface IncomingMessage {
 	ciphertextB64: string;
 	/** MLS epoch used as primary sort key for Dexie ordering. */
 	epochSeq: number;
+	/** Unix ms at which this message expires (disappearing messages). undefined = no TTL. */
+	expiresAt?: number;
 }
 
 /**
@@ -125,6 +127,9 @@ export function useMessages(
 					// Not JSON — plain text message, no action needed.
 				}
 
+				// Disappearing messages: parse server-set expires_at into unix ms.
+				const expiresAt = env.expires_at ? new Date(env.expires_at).getTime() : undefined;
+
 				onMessageRef.current({
 					id: env.id,
 					senderId: env.sender,
@@ -133,6 +138,7 @@ export function useMessages(
 					media,
 					ciphertextB64,
 					epochSeq,
+					expiresAt,
 				});
 				await ackMessage(sessionToken, env.id).catch(() => {});
 			} catch {

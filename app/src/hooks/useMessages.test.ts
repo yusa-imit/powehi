@@ -160,6 +160,32 @@ describe("useMessages", () => {
 		expect(onMessage).not.toHaveBeenCalled();
 	});
 
+	it("maps expires_at from envelope to expiresAt unix ms in IncomingMessage", async () => {
+		const EXPIRES_ISO = "2026-12-31T00:00:00.000Z";
+		const expectedMs = new Date(EXPIRES_ISO).getTime();
+		pollSpy.mockResolvedValueOnce([makeEnvelope({ expires_at: EXPIRES_ISO })]);
+
+		const received: IncomingMessage[] = [];
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
+
+		await waitFor(() => {
+			expect(received).toHaveLength(1);
+		});
+		expect(received[0].expiresAt).toBe(expectedMs);
+	});
+
+	it("yields undefined expiresAt when expires_at is null", async () => {
+		pollSpy.mockResolvedValueOnce([makeEnvelope({ expires_at: null })]);
+
+		const received: IncomingMessage[] = [];
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
+
+		await waitFor(() => {
+			expect(received).toHaveLength(1);
+		});
+		expect(received[0].expiresAt).toBeUndefined();
+	});
+
 	it("stops polling after unmount", async () => {
 		vi.useFakeTimers();
 		try {

@@ -24,6 +24,8 @@ export interface PersistedMessages {
 	writeErrorCount: number;
 	persistIncoming: (msg: IncomingMessage) => void;
 	persistOutgoing: (id: string, groupId: string, text: string, ciphertextB64: string) => void;
+	/** Delete expired messages from Dexie and update local rows state. */
+	purgeExpired: () => void;
 }
 
 /**
@@ -73,6 +75,7 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 				epochSeq: msg.epochSeq,
 				receivedAt: Date.now(),
 				plaintextB64: textToBase64(msg.text),
+				expiresAt: msg.expiresAt,
 			};
 			// Optimistically add to local state for immediate UI visibility.
 			setRows((prev) => {
@@ -112,5 +115,14 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 		[encryptedDb, deviceId],
 	);
 
-	return { rows, writeErrorCount, persistIncoming, persistOutgoing };
+	const purgeExpired = useCallback(() => {
+		if (!encryptedDb) return;
+		const now = Date.now();
+		// Remove from local state immediately for responsive UI.
+		setRows((prev) => prev.filter((r) => !r.expiresAt || r.expiresAt > now));
+		// Best-effort Dexie cleanup — errors are non-fatal.
+		encryptedDb.purgeExpiredMessages().catch(() => {});
+	}, [encryptedDb]);
+
+	return { rows, writeErrorCount, persistIncoming, persistOutgoing, purgeExpired };
 }

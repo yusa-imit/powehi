@@ -235,6 +235,59 @@ describe("usePersistentMessages", () => {
 		});
 	});
 
+	it("persistIncoming stores expiresAt in row", async () => {
+		const EXPIRES_AT = Date.now() + 60_000;
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistIncoming(makeIncoming({ expiresAt: EXPIRES_AT }));
+		});
+
+		expect(result.current.rows).toHaveLength(1);
+		expect(result.current.rows[0].expiresAt).toBe(EXPIRES_AT);
+	});
+
+	it("purgeExpired removes expired rows from local state", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		const PAST = Date.now() - 1_000;
+		const FUTURE = Date.now() + 60_000;
+
+		await act(async () => {
+			result.current.persistIncoming(makeIncoming({ id: "expired-msg", expiresAt: PAST }));
+			result.current.persistIncoming(makeIncoming({ id: "live-msg", expiresAt: FUTURE }));
+		});
+
+		expect(result.current.rows).toHaveLength(2);
+
+		await act(async () => {
+			result.current.purgeExpired();
+		});
+
+		expect(result.current.rows).toHaveLength(1);
+		expect(result.current.rows[0].id).toBe("live-msg");
+	});
+
+	it("purgeExpired leaves rows with no expiresAt untouched", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistIncoming(makeIncoming({ id: "no-ttl", expiresAt: undefined }));
+		});
+
+		expect(result.current.rows).toHaveLength(1);
+
+		await act(async () => {
+			result.current.purgeExpired();
+		});
+
+		expect(result.current.rows).toHaveLength(1);
+		expect(result.current.rows[0].id).toBe("no-ttl");
+	});
+
 	it("no plaintext is logged — calls produce no console output", async () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});

@@ -106,6 +106,21 @@ export class EncryptedPowehiDb {
 		return decrypted.sort((a, b) => a.receivedAt - b.receivedAt);
 	}
 
+	/**
+	 * Delete all messages whose expiresAt is defined and in the past.
+	 * Operates across all groups — suitable for background periodic sweeps.
+	 * No decryption required: expiresAt is an unencrypted index field.
+	 * @returns count of deleted rows.
+	 */
+	async purgeExpiredMessages(): Promise<number> {
+		const now = Date.now();
+		// belowOrEqual(now) covers all non-undefined numeric values ≤ now.
+		// Rows with expiresAt = undefined have no index entry and are skipped.
+		const expired = await this.db.messages.where("expiresAt").belowOrEqual(now).primaryKeys();
+		await this.db.messages.bulkDelete(expired as string[]);
+		return expired.length;
+	}
+
 	// ── Groups ─────────────────────────────────────────────────────────────────
 
 	async addGroup(row: GroupRow): Promise<void> {

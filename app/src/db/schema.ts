@@ -12,6 +12,8 @@ export interface MessageRow {
 	epochSeq: number; // epoch<<32 | seq
 	receivedAt: number; // Date.now()
 	plaintextB64?: string; // only after decrypt — optional, user-clearable
+	/** Unix ms at which this message expires (disappearing messages). undefined = no TTL. */
+	expiresAt?: number;
 }
 
 // GroupRow — MLS group state snapshot.
@@ -79,6 +81,14 @@ export class PowehiDb extends Dexie {
 		// No index change needed (identity table is singleton, keyed by id=1).
 		this.version(4).stores({
 			messages: "id, groupId, epochSeq, receivedAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v5: added expiresAt to MessageRow for disappearing messages (prd.md §9.4.3).
+		// Indexed so purgeExpiredMessages() can use a range query instead of full scan.
+		this.version(5).stores({
+			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
 			groups: "id, lastActivity",
 			identity: "id",
 			verifiedContacts: "contactId, verifiedAt",
