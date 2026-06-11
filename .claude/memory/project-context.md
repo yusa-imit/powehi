@@ -17,6 +17,13 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-12, cycle 127 — STABILIZATION: CI red fix — TS 5.8.3 Uint8Array<ArrayBuffer> BlobPart error)
+- **Cycle 127 (commit dc901be):** STABILIZATION — CI was RED on Frontend "Bundle budget check" job since cycle 126 (§9.4.1 encrypted thumbnail).
+  - **Root cause:** TypeScript 5.8.3 tightened `BlobPart` to require `Uint8Array<ArrayBuffer>` (not the default `Uint8Array<ArrayBufferLike>`). `media_thumbnail_decrypt` in `WasmModule` interface and the exported `mediaThumbnailDecrypt` method both had `Uint8Array` (defaulting to `ArrayBufferLike`), causing `tsc -b` (called by `pnpm build`) to fail.
+  - **Fix:** Changed `media_thumbnail_decrypt` WasmModule return type and `mediaThumbnailDecrypt` method return type to `Uint8Array<ArrayBuffer>`. WASM always returns proper `ArrayBuffer`s so this is the correct precise type.
+  - **358 frontend tests** (unchanged); tsc clean; Biome clean.
+  - **Note:** Cycle 126 (§9.4.1 encrypted thumbnail) was committed but the memory entry was in cycle 125 notes. The thumbnail feature is in commit 766a085.
+
 ## Current state (2026-06-11, cycle 125 — STABILIZATION: §5.3 Phase B PQ frontend integration + formatting fixes)
 - **Cycle 125 (commit c7034e0):** STABILIZATION — CI GREEN, no open issues. Committed the PQ hybrid frontend integration that was left uncommitted after cycle 123:
   - **`crates/client/powehi-crypto-wasm/src/wasm_exports.rs`** (MODIFIED): `mls_pq_derive_binding` WASM export — HKDF-SHA256(ikm=ss, salt=None, info=b"powehi-pq-binding-v1"||groupId) → 8 bytes → 16-char hex. Handle removed+Zeroized before derivation (single-use). 4 tests: format check, group-scoping, determinism, KAT (c702693eff3c46bd).
