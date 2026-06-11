@@ -22,6 +22,7 @@ const mockWorker = {
 	mlsInitIdentity: async (_identityBytes: Uint8Array) => ({
 		identityId: "mock-identity-id",
 		keyPackage: new Uint8Array(100),
+		pqDecapKeyHandle: "mock-pq-decap-handle-0",
 	}),
 	mlsCreateGroup: async (_identityId: string) => ({
 		groupId: "mock-group-id-00000000-0000-0000-0000-000000000000",
@@ -86,6 +87,17 @@ const mockWorker = {
 	mlsInitIdentityFromPhrase: vi.fn().mockResolvedValue({
 		identityId: "mock-identity-id",
 		keyPackage: new Uint8Array([1, 2, 3]),
+		pqDecapKeyHandle: "mock-pq-decap-handle-phrase-0",
+	}),
+	// prd.md §5.3 Phase B — extract ML-KEM encap key from a peer's KeyPackage.
+	mlsPqExtractEncapKey: async (_keyPackageBytes: Uint8Array) => ({
+		encapKey: new Uint8Array(1184),
+		signature: new Uint8Array(64),
+	}),
+	// prd.md §5.3 Phase B — extract AND verify (recommended; prevents skipped verification).
+	mlsPqExtractAndVerifyEncapKey: async (_keyPackageBytes: Uint8Array, _sigPubKey: Uint8Array) => ({
+		encapKey: new Uint8Array(1184),
+		signature: new Uint8Array(64),
 	}),
 	// §9.2 Media encryption: AES-256-GCM opaque-handle mocks.
 	// mediaKeyHandle is a static string — no real key state in tests.

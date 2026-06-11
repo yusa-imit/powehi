@@ -141,6 +141,18 @@ pub fn generate_identity_from_keypair(
     })
 }
 
+/// Extension type ID for the Powehi PQ KEM extension.
+///
+/// 0xF001 is in the private-use range 0xF000–0xFFFF defined by RFC 9420 §17.3.
+/// Wire format: `encap_key (1184 bytes) || signature (64 bytes)`.
+/// The signature covers `SIGN_DOMAIN || 0x00 || encap_key` (see `kem_credential.rs`).
+pub const POWEHI_PQ_KEM_EXT_TYPE: u16 = 0xF001;
+
+/// Byte lengths of the PQ extension payload components.
+pub const PQ_EXT_ENCAP_KEY_LEN: usize = 1184; // ML-KEM-768 encapsulation key (FIPS 203 §2.4)
+pub const PQ_EXT_SIG_LEN: usize = 64; // Ed25519 signature
+pub const PQ_EXT_PAYLOAD_LEN: usize = PQ_EXT_ENCAP_KEY_LEN + PQ_EXT_SIG_LEN; // 1248 bytes total
+
 /// Build a [`KeyPackage`] (as a [`KeyPackageBundle`]) for a user. The bundle's
 /// private material is stored in the provider; share `bundle.key_package()`
 /// with peers so they can add this user to a group.
@@ -149,6 +161,56 @@ pub fn generate_key_package(
     provider: &impl OpenMlsProvider,
 ) -> Result<KeyPackageBundle, MlsError> {
     KeyPackage::builder()
+        .build(
+            CIPHERSUITE,
+            provider,
+            &identity.signer,
+            identity.credential_with_key.clone(),
+        )
+        .map_err(|_| MlsError::KeyPackage)
+}
+
+/// Build a [`KeyPackage`] with the Powehi PQ KEM extension attached (prd.md §5.3 Phase B).
+///
+/// `pq_payload` must be exactly [`PQ_EXT_PAYLOAD_LEN`] bytes:
+/// `encap_key (1184 bytes) || signature (64 bytes)`.
+/// The extension type [`POWEHI_PQ_KEM_EXT_TYPE`] (0xF001) is in the RFC 9420 §17.3
+/// private-use range.  The leaf node capabilities are set to declare support for
+/// this extension type so that `KeyPackageIn::validate()` does not reject it.
+///
+/// **Interoperability**: peers that do not implement prd.md §5.3 Phase B will receive
+/// this KeyPackage and attempt to validate it.  Because 0xF001 is in the private-use
+/// range (RFC 9420 §17.3), RFC-compliant implementations MUST treat unknown extension
+/// types as opaque and MAY accept them; openmls does accept them when they appear in
+/// leaf node capabilities.  Peers that pre-date Phase B should still accept this
+/// KeyPackage via `add_members` — see `test_add_member_with_pq_extended_key_package_succeeds`.
+pub fn generate_key_package_with_pq_ext(
+    identity: &Identity,
+    provider: &impl OpenMlsProvider,
+    pq_payload: &[u8],
+) -> Result<KeyPackageBundle, MlsError> {
+    if pq_payload.len() != PQ_EXT_PAYLOAD_LEN {
+        return Err(MlsError::KeyPackage);
+    }
+    let pq_extension = Extension::Unknown(
+        POWEHI_PQ_KEM_EXT_TYPE,
+        UnknownExtension(pq_payload.to_vec()),
+    );
+    let kp_extensions =
+        Extensions::<KeyPackage>::single(pq_extension).map_err(|_| MlsError::KeyPackage)?;
+    // Declare support for our private-use extension type in leaf node capabilities.
+    // openmls validate() requires every KeyPackage extension type to appear in the
+    // leaf node's capabilities.extensions list (RFC 9420 §7.1 invariant).
+    let capabilities = Capabilities::new(
+        None, // versions: use default
+        None, // ciphersuites: use default
+        Some(&[ExtensionType::Unknown(POWEHI_PQ_KEM_EXT_TYPE)]),
+        None, // proposals: use default
+        None, // credentials: use default
+    );
+    KeyPackage::builder()
+        .key_package_extensions(kp_extensions)
+        .leaf_node_capabilities(capabilities)
         .build(
             CIPHERSUITE,
             provider,

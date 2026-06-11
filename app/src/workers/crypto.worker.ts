@@ -18,9 +18,15 @@ import { decryptField, deriveDbKey, encryptField } from "../db/encryption";
 export type OpaqueStartResult = { sessionId: string; message: Uint8Array };
 export type RegFinishResult = { upload: Uint8Array };
 export type LoginFinishResult = { finalization: Uint8Array };
-export type MlsIdentityResult = { identityId: string; keyPackage: Uint8Array };
+export type MlsIdentityResult = {
+	identityId: string;
+	keyPackage: Uint8Array;
+	pqDecapKeyHandle: string;
+};
 export type MlsGroupResult = { groupId: string };
-export type MlsKeyPackageResult = { keyPackage: Uint8Array };
+export type MlsKeyPackageResult = { keyPackage: Uint8Array; pqDecapKeyHandle: string };
+// prd.md §5.3 Phase B — extract ML-KEM encap key from a peer's KeyPackage extension.
+export type MlsPqEncapKeyResult = { encapKey: Uint8Array; signature: Uint8Array };
 export type MlsWelcomeResult = { welcome: Uint8Array };
 export type MlsCiphertextResult = { ciphertext: Uint8Array };
 export type MlsPlaintextResult = { plaintext: Uint8Array };
@@ -115,6 +121,13 @@ interface WasmModule {
 		blobHash: Uint8Array,
 		iv: Uint8Array,
 	) => { ciphertext: Uint8Array };
+	// prd.md §5.3 Phase B — extract PQ KEM encap key + signature from a KeyPackage.
+	mls_pq_extract_encap_key: (keyPackageBytes: Uint8Array) => MlsPqEncapKeyResult;
+	// prd.md §5.3 Phase B — extract AND verify in one step (recommended; prevents skipped verification).
+	mls_pq_extract_and_verify_encap_key: (
+		keyPackageBytes: Uint8Array,
+		sigPubKey: Uint8Array,
+	) => MlsPqEncapKeyResult;
 }
 
 // ── IndexedDB key — held inside the worker, never crosses to main thread ─────
@@ -253,6 +266,30 @@ const api = {
 	async mlsGetKeyPackage(identityId: string): Promise<MlsKeyPackageResult> {
 		const wasm = await getWasm();
 		return wasm.mls_get_key_package(identityId);
+	},
+
+	/**
+	 * Extract the ML-KEM-768 encapsulation key and its Ed25519 signature from a
+	 * peer's KeyPackage (prd.md §5.3 Phase B).  Returns { encapKey, signature }.
+	 * Call mlKem768VerifyEncapKey before using the encap key to add a member.
+	 */
+	async mlsPqExtractEncapKey(keyPackageBytes: Uint8Array): Promise<MlsPqEncapKeyResult> {
+		const wasm = await getWasm();
+		return wasm.mls_pq_extract_encap_key(keyPackageBytes);
+	},
+
+	/**
+	 * Extract AND verify the ML-KEM-768 encapsulation key from a peer's KeyPackage
+	 * in one atomic step (prd.md §5.3 Phase B, ADR-0003 Y-3).
+	 * Preferred over mlsPqExtractEncapKey — verification cannot be accidentally skipped.
+	 * `sigPubKey`: 32-byte Ed25519 public key from the peer's group roster entry.
+	 */
+	async mlsPqExtractAndVerifyEncapKey(
+		keyPackageBytes: Uint8Array,
+		sigPubKey: Uint8Array,
+	): Promise<MlsPqEncapKeyResult> {
+		const wasm = await getWasm();
+		return wasm.mls_pq_extract_and_verify_encap_key(keyPackageBytes, sigPubKey);
 	},
 
 	/**

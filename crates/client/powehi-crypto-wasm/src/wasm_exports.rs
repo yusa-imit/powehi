@@ -28,7 +28,8 @@ use crate::kem_credential;
 use crate::media;
 use crate::mls_group::{
     add_member, create_group, decrypt_message, encrypt_message, generate_identity,
-    generate_identity_from_keypair, generate_key_package, join_group, Identity,
+    generate_identity_from_keypair, generate_key_package_with_pq_ext, join_group, Identity,
+    POWEHI_PQ_KEM_EXT_TYPE, PQ_EXT_ENCAP_KEY_LEN, PQ_EXT_PAYLOAD_LEN,
 };
 use crate::opaque::{self, DefaultCipherSuite, EXPORT_KEY_LEN};
 
@@ -250,18 +251,65 @@ fn group_id_hex(group: &MlsGroup) -> String {
         .collect()
 }
 
+// ── PQ extension helpers ───────────────────────────────────────────────────────
+
+/// Build the PQ KEM extension payload but do NOT commit the decap key yet.
+///
+/// Returns `(payload, decap_key)` where:
+/// - `payload` is `encap_key (1184 bytes) || signature (64 bytes)` ready to embed
+///   as [`POWEHI_PQ_KEM_EXT_TYPE`] in a KeyPackage (prd.md §5.3 Phase B).
+/// - `decap_key` is the `Zeroizing`-wrapped raw decap key.
+///
+/// **Atomicity invariant**: callers MUST call [`commit_pq_decap_key`] with the
+/// returned `decap_key` only after ALL subsequent fallible operations (e.g.
+/// `generate_key_package_with_pq_ext`) have succeeded.  If a later step fails,
+/// the `Zeroizing<Vec<u8>>` is simply dropped (and its memory is zeroed) without
+/// inserting any entry into `KEM_DECAP_KEYS` — no orphaned, unreachable handle.
+///
+/// This two-phase design prevents the atomicity bug where a failed KeyPackage
+/// build would leave a permanent orphan entry consuming a cap slot.
+fn pq_build_payload(
+    signer: &openmls_basic_credential::SignatureKeyPair,
+) -> Result<([u8; PQ_EXT_PAYLOAD_LEN], Zeroizing<Vec<u8>>), JsError> {
+    KEM_DECAP_KEYS
+        .with(|m| kem_cap_check(m.borrow().len()))
+        .map_err(js_err)?;
+    let pair = kem::generate();
+    let signature = kem_credential::sign_encap_key(&pair.encap_key, signer).map_err(js_err)?;
+    let mut payload = [0u8; PQ_EXT_PAYLOAD_LEN];
+    payload[..PQ_EXT_ENCAP_KEY_LEN].copy_from_slice(&pair.encap_key);
+    payload[PQ_EXT_ENCAP_KEY_LEN..].copy_from_slice(&signature);
+    Ok((payload, pair.decap_key))
+}
+
+/// Commit the decap key into `KEM_DECAP_KEYS` and return the opaque handle.
+///
+/// Call this only after all fallible operations that use the PQ payload have
+/// succeeded (see [`pq_build_payload`]). The raw 2400-byte decap key NEVER
+/// crosses the WASM-JS boundary; only the handle string is returned to JS.
+fn commit_pq_decap_key(decap_key: Zeroizing<Vec<u8>>) -> String {
+    let handle = next_id();
+    KEM_DECAP_KEYS.with(|m| m.borrow_mut().insert(handle.clone(), decap_key));
+    handle
+}
+
 /// Create a new MLS identity and return a fresh KeyPackage for distribution.
 ///
-/// Returns `{ identityId: string, keyPackage: Uint8Array }`.
+/// Returns `{ identityId: string, keyPackage: Uint8Array, pqDecapKeyHandle: string }`.
 /// Upload `keyPackage` to the KeyPackage Service.
 /// Keep `identityId` for subsequent MLS calls.
+/// `pqDecapKeyHandle` is the opaque handle for the ML-KEM-768 decap key embedded in
+/// the KeyPackage extension (prd.md §5.3 Phase B); pass it to `ml_kem_768_decap_v2`
+/// when a peer sends an ML-KEM ciphertext in a Welcome message.
 #[wasm_bindgen]
 pub fn mls_init_identity(identity_bytes: &[u8]) -> Result<JsValue, JsError> {
     let provider = OpenMlsRustCrypto::default();
     let identity =
         generate_identity(identity_bytes, &provider).map_err(|e| js_err(&e.to_string()))?;
-    let bundle = generate_key_package(&identity, &provider).map_err(|e| js_err(&e.to_string()))?;
-    // Wrap the KeyPackage in MlsMessageOut for transport (standard MLS KeyPackage format).
+    let (pq_payload, pq_decap_key) = pq_build_payload(&identity.signer)?;
+    let bundle = generate_key_package_with_pq_ext(&identity, &provider, &pq_payload)
+        .map_err(|e| js_err(&e.to_string()))?;
+    let pq_handle = commit_pq_decap_key(pq_decap_key);
     let key_package = MlsMessageOut::from(bundle)
         .to_bytes()
         .map_err(|_| js_err("key package serialization failed"))?;
@@ -279,6 +327,7 @@ pub fn mls_init_identity(identity_bytes: &[u8]) -> Result<JsValue, JsError> {
     js_obj(&[
         ("identityId", JsValue::from_str(&identity_id)),
         ("keyPackage", bytes_js(&key_package)),
+        ("pqDecapKeyHandle", JsValue::from_str(&pq_handle)),
     ])
 }
 
@@ -339,7 +388,10 @@ pub fn mls_init_identity_from_phrase(
     let identity =
         generate_identity_from_keypair(identity_bytes, &private_key, &public_key, &provider)
             .map_err(|e| js_err(&e.to_string()))?;
-    let bundle = generate_key_package(&identity, &provider).map_err(|e| js_err(&e.to_string()))?;
+    let (pq_payload, pq_decap_key) = pq_build_payload(&identity.signer)?;
+    let bundle = generate_key_package_with_pq_ext(&identity, &provider, &pq_payload)
+        .map_err(|e| js_err(&e.to_string()))?;
+    let pq_handle = commit_pq_decap_key(pq_decap_key);
     let key_package = MlsMessageOut::from(bundle)
         .to_bytes()
         .map_err(|_| js_err("key package serialization failed"))?;
@@ -357,27 +409,130 @@ pub fn mls_init_identity_from_phrase(
     js_obj(&[
         ("identityId", JsValue::from_str(&identity_id)),
         ("keyPackage", bytes_js(&key_package)),
+        ("pqDecapKeyHandle", JsValue::from_str(&pq_handle)),
     ])
 }
 
 /// Generate a fresh KeyPackage for an existing identity.
 ///
-/// Returns `{ keyPackage: Uint8Array }`.
+/// Returns `{ keyPackage: Uint8Array, pqDecapKeyHandle: string }`.
 /// Each KeyPackage is single-use; generate one per intended group add.
+/// `pqDecapKeyHandle` is the opaque decap key handle for the fresh ML-KEM-768
+/// encap key embedded in the KeyPackage extension (prd.md §5.3 Phase B).
 #[wasm_bindgen]
 pub fn mls_get_key_package(identity_id: &str) -> Result<JsValue, JsError> {
-    let key_package = MLS_CTX.with(|ctx| -> Result<Vec<u8>, JsError> {
+    let (key_package, pq_handle) = MLS_CTX.with(|ctx| -> Result<(Vec<u8>, String), JsError> {
         let ctx = ctx.borrow();
         let c = ctx
             .get(identity_id)
             .ok_or_else(|| js_err("unknown mls identity"))?;
-        let bundle =
-            generate_key_package(&c.identity, &c.provider).map_err(|e| js_err(&e.to_string()))?;
-        MlsMessageOut::from(bundle)
+        let (pq_payload, pq_decap_key) = pq_build_payload(&c.identity.signer)?;
+        let bundle = generate_key_package_with_pq_ext(&c.identity, &c.provider, &pq_payload)
+            .map_err(|e| js_err(&e.to_string()))?;
+        let kp_bytes = MlsMessageOut::from(bundle)
             .to_bytes()
-            .map_err(|_| js_err("key package serialization failed"))
+            .map_err(|_| js_err("key package serialization failed"))?;
+        let handle = commit_pq_decap_key(pq_decap_key);
+        Ok((kp_bytes, handle))
     })?;
-    js_obj(&[("keyPackage", bytes_js(&key_package))])
+    js_obj(&[
+        ("keyPackage", bytes_js(&key_package)),
+        ("pqDecapKeyHandle", JsValue::from_str(&pq_handle)),
+    ])
+}
+
+/// Extract the ML-KEM-768 encap key and signature from a peer's KeyPackage.
+///
+/// `key_package_bytes`: serialized `MlsMessageOut` (as returned by the KeyPackage Service).
+///
+/// Returns `{ encapKey: Uint8Array (1184 bytes), signature: Uint8Array (64 bytes) }`.
+/// After extraction, call `ml_kem_768_verify_encap_key(encapKey, signature, peerSigPubKey)`
+/// to authenticate the encap key before encapsulating (ADR-0003 Phase B, Y-3).
+///
+/// Returns an error if the KeyPackage does not contain the Powehi PQ KEM extension
+/// (e.g. the peer has not yet upgraded to Phase B; treat as non-PQ-capable peer).
+#[wasm_bindgen]
+pub fn mls_pq_extract_encap_key(key_package_bytes: &[u8]) -> Result<JsValue, JsError> {
+    let msg = MlsMessageIn::tls_deserialize_exact(key_package_bytes)
+        .map_err(|_| js_err("key package deserialization failed"))?;
+    let kp_in = match msg.extract() {
+        MlsMessageBodyIn::KeyPackage(kp) => kp,
+        _ => return Err(js_err("not a key package")),
+    };
+    let provider = OpenMlsRustCrypto::default();
+    let kp = kp_in
+        .validate(provider.crypto(), ProtocolVersion::Mls10)
+        .map_err(|_| js_err("key package validation failed"))?;
+    let ext_payload = kp
+        .extensions()
+        .unknown(POWEHI_PQ_KEM_EXT_TYPE)
+        .map(|e| e.0.as_slice())
+        .ok_or_else(|| js_err("no PQ KEM extension in key package"))?;
+    if ext_payload.len() != PQ_EXT_PAYLOAD_LEN {
+        return Err(js_err("PQ KEM extension has unexpected length"));
+    }
+    let encap_key = &ext_payload[..PQ_EXT_ENCAP_KEY_LEN];
+    let signature = &ext_payload[PQ_EXT_ENCAP_KEY_LEN..];
+    js_obj(&[
+        ("encapKey", bytes_js(encap_key)),
+        ("signature", bytes_js(signature)),
+    ])
+}
+
+/// Extract and verify the ML-KEM-768 encap key from a peer's KeyPackage in one step.
+///
+/// This is the RECOMMENDED entry point (vs. calling `mls_pq_extract_encap_key` and
+/// `ml_kem_768_verify_encap_key` separately) because it enforces verification before
+/// returning the encap key — callers cannot accidentally skip the verification step
+/// (ADR-0003 Phase B, Y-3 crypto-reviewer finding).
+///
+/// `key_package_bytes`: serialized `MlsMessageOut` from the KeyPackage Service.
+/// `sig_pub_key`: 32-byte Ed25519 public key of the expected signer.  Obtain from
+///   `mls_group_members` (`sigKeyHex` field, hex-decoded).  NEVER accept this from
+///   an untrusted source — source it from the authenticated MLS group roster.
+///
+/// Returns `{ encapKey: Uint8Array (1184 bytes), signature: Uint8Array (64 bytes) }`
+/// only if the signature is valid.  Returns an error if:
+/// - The KeyPackage cannot be deserialized or validated (RFC 9420).
+/// - The PQ KEM extension is absent (peer is not Phase B capable).
+/// - The signature does not verify against `sig_pub_key` (key substitution attempt).
+#[wasm_bindgen]
+pub fn mls_pq_extract_and_verify_encap_key(
+    key_package_bytes: &[u8],
+    sig_pub_key: &[u8],
+) -> Result<JsValue, JsError> {
+    let msg = MlsMessageIn::tls_deserialize_exact(key_package_bytes)
+        .map_err(|_| js_err("key package deserialization failed"))?;
+    let kp_in = match msg.extract() {
+        MlsMessageBodyIn::KeyPackage(kp) => kp,
+        _ => return Err(js_err("not a key package")),
+    };
+    let provider = OpenMlsRustCrypto::default();
+    let kp = kp_in
+        .validate(provider.crypto(), ProtocolVersion::Mls10)
+        .map_err(|_| js_err("key package validation failed"))?;
+    let ext_payload = kp
+        .extensions()
+        .unknown(POWEHI_PQ_KEM_EXT_TYPE)
+        .map(|e| e.0.as_slice())
+        .ok_or_else(|| js_err("no PQ KEM extension in key package"))?;
+    if ext_payload.len() != PQ_EXT_PAYLOAD_LEN {
+        return Err(js_err("PQ KEM extension has unexpected length"));
+    }
+    let encap_key = &ext_payload[..PQ_EXT_ENCAP_KEY_LEN];
+    let signature = &ext_payload[PQ_EXT_ENCAP_KEY_LEN..];
+    // Mandatory verification — reject if the encap key was not signed by the expected peer.
+    let valid = kem_credential::verify_encap_key(encap_key, signature, sig_pub_key, &provider)
+        .map_err(js_err)?;
+    if !valid {
+        return Err(js_err(
+            "PQ KEM encap key signature invalid — key substitution attack or wrong peer key",
+        ));
+    }
+    js_obj(&[
+        ("encapKey", bytes_js(encap_key)),
+        ("signature", bytes_js(signature)),
+    ])
 }
 
 /// Create a new MLS group with the identity as sole member.
@@ -1136,6 +1291,7 @@ pub fn mls_clear_session() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mls_group::generate_key_package;
     use opaque_ke::{ClientLogin, ClientRegistration};
 
     // ── OPAQUE session state ──────────────────────────────────────────────────
@@ -1989,5 +2145,180 @@ mod tests {
         let _ = group_mut; // suppress unused warning
         let _ = gid;
         // Round-trip decryption requires a 2-party setup; for now just assert non-empty.
+    }
+
+    // ── PQ extension tests (prd.md §5.3 Phase B) ──────────────────────────────
+    //
+    // Native tests bypass js_sys (panics on non-wasm32). All tests here call
+    // internal functions (generate_identity, generate_key_package_with_pq_ext,
+    // pq_build_payload + commit_pq_decap_key, etc.) and inspect results directly
+    // using openmls and kem_credential APIs — never via the #[wasm_bindgen] exported surfaces.
+
+    #[test]
+    fn test_pq_build_payload_and_commit_stores_decap_key() {
+        // pq_build_payload generates a keypair and signs the encap key without storing;
+        // commit_pq_decap_key stores the decap key and returns an opaque handle.
+        let provider = OpenMlsRustCrypto::default();
+        let identity = generate_identity(b"pq-test-identity", &provider).unwrap();
+        let before_len = KEM_DECAP_KEYS.with(|m| m.borrow().len());
+        let (payload, decap_key) = pq_build_payload(&identity.signer).unwrap();
+        // Payload is exactly PQ_EXT_PAYLOAD_LEN bytes.
+        assert_eq!(
+            payload.len(),
+            PQ_EXT_PAYLOAD_LEN,
+            "PQ payload must be {PQ_EXT_PAYLOAD_LEN} bytes"
+        );
+        // Decap key NOT yet stored (two-phase atomicity invariant).
+        let mid_len = KEM_DECAP_KEYS.with(|m| m.borrow().len());
+        assert_eq!(
+            mid_len, before_len,
+            "KEM_DECAP_KEYS must not grow until commit"
+        );
+        let handle = commit_pq_decap_key(decap_key);
+        // Decap key now stored under the returned handle.
+        let after_len = KEM_DECAP_KEYS.with(|m| m.borrow().len());
+        assert_eq!(
+            after_len,
+            before_len + 1,
+            "KEM_DECAP_KEYS must grow by one after commit"
+        );
+        let stored_len =
+            KEM_DECAP_KEYS.with(|m| m.borrow().get(&handle).map(|v| v.len()).unwrap_or(0));
+        assert_eq!(
+            stored_len,
+            kem::DK_SIZE,
+            "stored decap key must be DK_SIZE bytes"
+        );
+        // Cleanup.
+        KEM_DECAP_KEYS.with(|m| m.borrow_mut().remove(&handle));
+    }
+
+    #[test]
+    fn test_pq_ext_payload_signature_verifies() {
+        // The 64-byte signature in the payload covers
+        // SIGN_DOMAIN || 0x00 || encap_key — verify it with the identity's public key.
+        let provider = OpenMlsRustCrypto::default();
+        let identity = generate_identity(b"pq-sig-verify", &provider).unwrap();
+        let (payload, decap_key) = pq_build_payload(&identity.signer).unwrap();
+        let handle = commit_pq_decap_key(decap_key);
+        let encap_key = &payload[..PQ_EXT_ENCAP_KEY_LEN];
+        let signature = &payload[PQ_EXT_ENCAP_KEY_LEN..];
+        let pub_key = identity.signer.to_public_vec();
+        let valid = kem_credential::verify_encap_key(encap_key, signature, &pub_key, &provider)
+            .expect("verify must not error");
+        assert!(
+            valid,
+            "PQ extension signature must verify with the identity's MLS public key"
+        );
+        KEM_DECAP_KEYS.with(|m| m.borrow_mut().remove(&handle));
+    }
+
+    #[test]
+    fn test_generate_key_package_with_pq_ext_has_extension() {
+        // KeyPackage built with generate_key_package_with_pq_ext must contain the
+        // POWEHI_PQ_KEM_EXT_TYPE extension with exactly PQ_EXT_PAYLOAD_LEN bytes.
+        let provider = OpenMlsRustCrypto::default();
+        let identity = generate_identity(b"kp-pq-ext", &provider).unwrap();
+        let (payload, decap_key) = pq_build_payload(&identity.signer).unwrap();
+        let handle = commit_pq_decap_key(decap_key);
+        let bundle = generate_key_package_with_pq_ext(&identity, &provider, &payload).unwrap();
+        let kp = bundle.key_package();
+        let ext = kp
+            .extensions()
+            .unknown(POWEHI_PQ_KEM_EXT_TYPE)
+            .expect("PQ KEM extension must be present in the built KeyPackage");
+        assert_eq!(
+            ext.0.len(),
+            PQ_EXT_PAYLOAD_LEN,
+            "extension payload must be {PQ_EXT_PAYLOAD_LEN} bytes"
+        );
+        KEM_DECAP_KEYS.with(|m| m.borrow_mut().remove(&handle));
+    }
+
+    #[test]
+    fn test_generate_key_package_with_pq_ext_survives_serialise_deserialise() {
+        // Round-trip: build a PQ-extended KeyPackage, TLS-serialize it (as MlsMessageOut),
+        // then deserialize and validate to confirm the extension survives the wire format.
+        let provider = OpenMlsRustCrypto::default();
+        let identity = generate_identity(b"kp-wire-roundtrip", &provider).unwrap();
+        let (payload, decap_key) = pq_build_payload(&identity.signer).unwrap();
+        let handle = commit_pq_decap_key(decap_key);
+        let bundle = generate_key_package_with_pq_ext(&identity, &provider, &payload).unwrap();
+        let kp_bytes = MlsMessageOut::from(bundle).to_bytes().unwrap();
+        let msg = MlsMessageIn::tls_deserialize_exact(&kp_bytes).unwrap();
+        let kp_in = match msg.extract() {
+            MlsMessageBodyIn::KeyPackage(kp) => kp,
+            _ => panic!("expected KeyPackage body"),
+        };
+        let p2 = OpenMlsRustCrypto::default();
+        let kp = kp_in.validate(p2.crypto(), ProtocolVersion::Mls10).unwrap();
+        let ext = kp
+            .extensions()
+            .unknown(POWEHI_PQ_KEM_EXT_TYPE)
+            .expect("PQ extension must survive wire round-trip");
+        // Both components must be recoverable at their expected offsets.
+        assert_eq!(
+            &ext.0[..PQ_EXT_ENCAP_KEY_LEN],
+            &payload[..PQ_EXT_ENCAP_KEY_LEN]
+        );
+        assert_eq!(
+            &ext.0[PQ_EXT_ENCAP_KEY_LEN..],
+            &payload[PQ_EXT_ENCAP_KEY_LEN..]
+        );
+        KEM_DECAP_KEYS.with(|m| m.borrow_mut().remove(&handle));
+    }
+
+    #[test]
+    fn test_pq_ext_extract_missing_extension_gives_none() {
+        // A KeyPackage built without the PQ extension must return None from .unknown().
+        let provider = OpenMlsRustCrypto::default();
+        let identity = generate_identity(b"kp-no-pq", &provider).unwrap();
+        let bundle = generate_key_package(&identity, &provider).unwrap();
+        let kp_bytes = MlsMessageOut::from(bundle).to_bytes().unwrap();
+        let msg = MlsMessageIn::tls_deserialize_exact(&kp_bytes).unwrap();
+        let kp_in = match msg.extract() {
+            MlsMessageBodyIn::KeyPackage(kp) => kp,
+            _ => panic!(),
+        };
+        let p2 = OpenMlsRustCrypto::default();
+        let kp = kp_in.validate(p2.crypto(), ProtocolVersion::Mls10).unwrap();
+        assert!(
+            kp.extensions().unknown(POWEHI_PQ_KEM_EXT_TYPE).is_none(),
+            "non-PQ KeyPackage must not have the PQ extension"
+        );
+    }
+
+    #[test]
+    fn test_add_member_with_pq_extended_key_package_succeeds() {
+        // Critical interop test: openmls must accept a KeyPackage that contains the
+        // PQ extension (unknown extension type) when Alice calls add_members for Bob.
+        let alice_provider = OpenMlsRustCrypto::default();
+        let alice_id = generate_identity(b"alice-pq-add", &alice_provider).unwrap();
+        let mut alice_group = create_group(&alice_id, &alice_provider).unwrap();
+
+        let bob_provider = OpenMlsRustCrypto::default();
+        let bob_id = generate_identity(b"bob-pq-add", &bob_provider).unwrap();
+        let (pq_payload, decap_key) = pq_build_payload(&bob_id.signer).unwrap();
+        let handle = commit_pq_decap_key(decap_key);
+        let bob_bundle =
+            generate_key_package_with_pq_ext(&bob_id, &bob_provider, &pq_payload).unwrap();
+
+        let (commit_out, welcome, _) = alice_group
+            .add_members(
+                &alice_provider,
+                &alice_id.signer,
+                &[bob_bundle.key_package().clone()],
+            )
+            .expect("add_members must succeed even with a PQ-extended KeyPackage");
+        alice_group.merge_pending_commit(&alice_provider).unwrap();
+        assert!(
+            !commit_out.to_bytes().unwrap().is_empty(),
+            "commit must be non-empty"
+        );
+        assert!(
+            !welcome.to_bytes().unwrap().is_empty(),
+            "Welcome must be non-empty"
+        );
+        KEM_DECAP_KEYS.with(|m| m.borrow_mut().remove(&handle));
     }
 }
