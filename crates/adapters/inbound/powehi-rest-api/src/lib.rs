@@ -29,7 +29,10 @@ use powehi_port_inbound::{
     auth::AuthUseCase, group::GroupUseCase, invite::InviteUseCase, key_package::KeyPackageUseCase,
     media::MediaUseCase, messaging::MessagingUseCase,
 };
-use powehi_port_outbound::{cache::CachePort, push_subscription_repo::PushSubscriptionRepository};
+use powehi_port_outbound::{
+    cache::CachePort, device_repo::DeviceRepository,
+    push_subscription_repo::PushSubscriptionRepository,
+};
 use tower_http::trace::TraceLayer;
 
 /// Global body cap. MLS messages are bounded by RFC 9420 limits; OPAQUE blobs
@@ -48,6 +51,8 @@ pub struct AppState {
     pub media: Arc<dyn MediaUseCase>,
     pub push_sub_repo: Arc<dyn PushSubscriptionRepository>,
     pub invite: Arc<dyn InviteUseCase>,
+    /// Device store: used by device management handlers to resolve DeviceId → UserId.
+    pub device_repo: Arc<dyn DeviceRepository>,
     /// Session store: `session:{token}` → DeviceId UUID bytes. Used by the
     /// `AuthenticatedDevice` extractor to validate Bearer tokens.
     pub cache: Arc<dyn CachePort>,
@@ -120,6 +125,14 @@ fn router_inner(
         .route("/v1/auth/login/finish", post(routes::auth::login_finish))
         .layer(auth_layer);
 
+    // Device management — authenticated, uses api_governor (not auth_governor).
+    let device_routes = Router::new()
+        .route("/v1/auth/devices", post(routes::auth::register_new_device))
+        .route(
+            "/v1/auth/devices/:id",
+            delete(routes::auth::revoke_device_handler),
+        );
+
     // Authenticated API endpoints — general per-IP rate limit.
     let api_routes = Router::new()
         .route("/v1/groups", post(routes::groups::create_group))
@@ -158,6 +171,7 @@ fn router_inner(
         )
         .route("/v1/invites", post(routes::invite::create))
         .route("/v1/invites/redeem", post(routes::invite::redeem))
+        .merge(device_routes)
         .layer(api_layer);
 
     // Public endpoints — no auth, no per-IP rate limit (like /health).
@@ -222,6 +236,30 @@ mod tests {
     use powehi_port_inbound::media::MediaUseCase;
     use powehi_port_outbound::push_subscription_repo::PushSubscriptionRepository;
     use tower::ServiceExt; // for `oneshot`
+
+    use powehi_domain::device::Device;
+    use powehi_port_outbound::device_repo::DeviceRepository;
+
+    struct NullDeviceRepo;
+    #[async_trait]
+    impl DeviceRepository for NullDeviceRepo {
+        async fn save(&self, _device: &Device) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn find_by_id(&self, _id: &DeviceId) -> Result<Option<Device>, DomainError> {
+            Ok(None)
+        }
+        async fn find_by_user(&self, _user_id: &UserId) -> Result<Vec<Device>, DomainError> {
+            Ok(vec![])
+        }
+        async fn delete(&self, _id: &DeviceId) -> Result<(), DomainError> {
+            Ok(())
+        }
+    }
+
+    fn null_device_repo() -> Arc<dyn DeviceRepository> {
+        Arc::new(NullDeviceRepo)
+    }
 
     struct NullPushSubRepo;
     #[async_trait]
@@ -538,6 +576,7 @@ mod tests {
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
             invite: noop_invite(),
+            device_repo: null_device_repo(),
             cache: test_session_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
@@ -553,6 +592,7 @@ mod tests {
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
             invite: noop_invite(),
+            device_repo: null_device_repo(),
             cache: empty_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
@@ -772,6 +812,7 @@ mod tests {
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
             invite: noop_invite(),
+            device_repo: null_device_repo(),
             cache: test_session_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
@@ -787,6 +828,7 @@ mod tests {
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
             invite: noop_invite(),
+            device_repo: null_device_repo(),
             cache: test_session_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
@@ -802,6 +844,7 @@ mod tests {
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
             invite: noop_invite(),
+            device_repo: null_device_repo(),
             cache: test_session_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
@@ -817,6 +860,7 @@ mod tests {
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
             invite: noop_invite(),
+            device_repo: null_device_repo(),
             cache: test_session_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
@@ -894,6 +938,7 @@ mod tests {
             media: Arc::new(MockMediaSuccess),
             push_sub_repo: null_push_sub_repo(),
             invite: noop_invite(),
+            device_repo: null_device_repo(),
             cache: test_session_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
@@ -909,6 +954,7 @@ mod tests {
             media: Arc::new(MockMediaUnauthorized),
             push_sub_repo: null_push_sub_repo(),
             invite: noop_invite(),
+            device_repo: null_device_repo(),
             cache: test_session_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
@@ -929,6 +975,7 @@ mod tests {
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
             invite: noop_invite(),
+            device_repo: null_device_repo(),
             cache: test_session_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
@@ -1619,6 +1666,7 @@ mod tests {
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
             invite: noop_invite(),
+            device_repo: null_device_repo(),
             cache: empty_cache(),
             handle_rate_limiter: Arc::clone(&tight_rl),
         };
@@ -1664,6 +1712,7 @@ mod tests {
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
             invite: noop_invite(),
+            device_repo: null_device_repo(),
             cache: empty_cache(),
             handle_rate_limiter: Arc::clone(&tight_rl),
         };
@@ -1721,6 +1770,7 @@ mod tests {
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
             invite: noop_invite(),
+            device_repo: null_device_repo(),
             cache: empty_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         }
@@ -1953,6 +2003,7 @@ mod tests {
             media: Arc::new(MockMedia),
             push_sub_repo: null_push_sub_repo(),
             invite: noop_invite(),
+            device_repo: null_device_repo(),
             cache: empty_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         };
@@ -2297,6 +2348,191 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri(format!("/v1/groups/{group_id}/members/{device_id}"))
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    // ── Device management endpoint tests ─────────────────────────────────────
+
+    /// FakeDeviceRepo returns a fixed Device when `find_by_id` is called with
+    /// `test_device_id()`. All other IDs return None.
+    struct FakeDeviceRepo {
+        device: powehi_domain::device::Device,
+    }
+
+    impl FakeDeviceRepo {
+        fn new(user_id: UserId) -> Arc<Self> {
+            use chrono::Utc;
+            Arc::new(Self {
+                device: powehi_domain::device::Device {
+                    id: test_device_id(),
+                    user_id,
+                    mls_credential: vec![],
+                    created_at: Utc::now(),
+                    last_seen_at: None,
+                },
+            })
+        }
+    }
+
+    #[async_trait]
+    impl DeviceRepository for FakeDeviceRepo {
+        async fn save(&self, _device: &powehi_domain::device::Device) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn find_by_id(
+            &self,
+            id: &DeviceId,
+        ) -> Result<Option<powehi_domain::device::Device>, DomainError> {
+            if id == &self.device.id {
+                Ok(Some(self.device.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+        async fn find_by_user(
+            &self,
+            _user_id: &UserId,
+        ) -> Result<Vec<powehi_domain::device::Device>, DomainError> {
+            Ok(vec![self.device.clone()])
+        }
+        async fn delete(&self, _id: &DeviceId) -> Result<(), DomainError> {
+            Ok(())
+        }
+    }
+
+    /// Mock AuthUseCase with functional register_device and revoke_device.
+    struct MockAuthDeviceSuccess;
+
+    #[async_trait]
+    impl AuthUseCase for MockAuthDeviceSuccess {
+        async fn register_init(
+            &self,
+            _req: RegistrationInitRequest,
+        ) -> Result<RegistrationInitResponse, DomainError> {
+            unimplemented!()
+        }
+        async fn register_finish(
+            &self,
+            _req: RegistrationFinishRequest,
+        ) -> Result<RegistrationFinishResponse, DomainError> {
+            unimplemented!()
+        }
+        async fn login_init(
+            &self,
+            _req: LoginInitRequest,
+        ) -> Result<LoginInitResponse, DomainError> {
+            unimplemented!()
+        }
+        async fn login_finish(
+            &self,
+            _req: LoginFinishRequest,
+        ) -> Result<SessionToken, DomainError> {
+            unimplemented!()
+        }
+        async fn register_device(
+            &self,
+            _user_id: &UserId,
+            _req: DeviceRegistrationRequest,
+        ) -> Result<DeviceId, DomainError> {
+            Ok(DeviceId::new())
+        }
+        async fn revoke_device(
+            &self,
+            _user_id: &UserId,
+            _device_id: &DeviceId,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+    }
+
+    fn device_router() -> Router {
+        let user_id = UserId::new();
+        router(AppState {
+            region_id: "eu-de-1-test".to_string(),
+            auth: Arc::new(MockAuthDeviceSuccess),
+            group: noop_group(),
+            messaging: Arc::new(MockMessaging),
+            key_package: Arc::new(MockKeyPackage),
+            media: Arc::new(MockMedia),
+            push_sub_repo: null_push_sub_repo(),
+            invite: noop_invite(),
+            device_repo: FakeDeviceRepo::new(user_id),
+            cache: test_session_cache(),
+            handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
+        })
+    }
+
+    #[tokio::test]
+    async fn register_new_device_without_token_returns_401() {
+        let resp = test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/devices")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"mls_credential":[1,2,3]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn revoke_device_without_token_returns_401() {
+        let target = DeviceId::new();
+        let resp = test_router()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/auth/devices/{target}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn register_new_device_authenticated_returns_device_id() {
+        let resp = device_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/devices")
+                    .header("authorization", bearer())
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"mls_credential":[1,2,3]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            json.get("device_id").and_then(|v| v.as_str()).is_some(),
+            "response must include device_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_device_authenticated_returns_204() {
+        let target = DeviceId::new();
+        let resp = device_router()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/auth/devices/{target}"))
                     .header("authorization", bearer())
                     .body(Body::empty())
                     .unwrap(),

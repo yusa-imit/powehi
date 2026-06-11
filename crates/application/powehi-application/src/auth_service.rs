@@ -255,7 +255,7 @@ impl AuthUseCase for AuthService {
         Ok(SessionToken(token))
     }
 
-    #[instrument(skip(self, req), fields(user_id = %user_id))]
+    #[instrument(skip(self, user_id, req))]
     async fn register_device(
         &self,
         user_id: &UserId,
@@ -267,7 +267,7 @@ impl AuthUseCase for AuthService {
         Ok(device_id)
     }
 
-    #[instrument(skip(self), fields(user_id = %user_id, device_id = %device_id))]
+    #[instrument(skip(self, user_id, device_id))]
     async fn revoke_device(
         &self,
         user_id: &UserId,

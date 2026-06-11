@@ -58,7 +58,8 @@ async fn main() -> Result<()> {
 
     let server_config_repo = Arc::new(PgServerConfigRepository::new(pool.clone()));
     let user_repo = Arc::new(PgUserRepository::new(pool.clone()));
-    let device_repo = Arc::new(PgDeviceRepository::new(pool.clone()));
+    let device_repo: Arc<dyn powehi_port_outbound::device_repo::DeviceRepository> =
+        Arc::new(PgDeviceRepository::new(pool.clone()));
     let envelope_repo = Arc::new(PgEnvelopeRepository::new(pool.clone()));
     let group_repo = Arc::new(PgGroupRepository::new(pool.clone()));
     let key_package_repo = Arc::new(PgKeyPackageRepository::new(pool.clone()));
@@ -159,7 +160,7 @@ async fn main() -> Result<()> {
 
     let auth: Arc<dyn powehi_port_inbound::auth::AuthUseCase> = Arc::new(AuthService::new(
         user_repo,
-        device_repo,
+        Arc::clone(&device_repo),
         opaque,
         cache.clone(),
         handle_oracle_secret,
@@ -270,6 +271,7 @@ async fn main() -> Result<()> {
         media,
         push_sub_repo,
         invite,
+        device_repo,
         cache: Arc::clone(&cache),
         handle_rate_limiter: Arc::clone(&handle_rate_limiter),
     };

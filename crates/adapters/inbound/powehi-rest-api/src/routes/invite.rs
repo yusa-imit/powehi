@@ -284,6 +284,28 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl powehi_port_outbound::device_repo::DeviceRepository for NullUseCase {
+        async fn save(&self, _: &powehi_domain::device::Device) -> Result<(), DomainError> {
+            unimplemented!()
+        }
+        async fn find_by_id(
+            &self,
+            _: &DeviceId,
+        ) -> Result<Option<powehi_domain::device::Device>, DomainError> {
+            unimplemented!()
+        }
+        async fn find_by_user(
+            &self,
+            _: &UserId,
+        ) -> Result<Vec<powehi_domain::device::Device>, DomainError> {
+            unimplemented!()
+        }
+        async fn delete(&self, _: &DeviceId) -> Result<(), DomainError> {
+            unimplemented!()
+        }
+    }
+
     // ── Invite-specific mocks ────────────────────────────────────────────────
 
     struct MockInviteSuccess;
@@ -373,6 +395,7 @@ mod tests {
             media: null.clone(),
             push_sub_repo: null.clone(),
             invite,
+            device_repo: null.clone(),
             cache: session_cache(),
             handle_rate_limiter: Arc::new(crate::rate_limit::HandleRateLimiter::new()),
         };

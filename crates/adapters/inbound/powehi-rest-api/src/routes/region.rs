@@ -238,6 +238,28 @@ mod tests {
             }
         }
 
+        #[async_trait]
+        impl powehi_port_outbound::device_repo::DeviceRepository for Null {
+            async fn save(&self, _: &powehi_domain::device::Device) -> Result<(), DomainError> {
+                unimplemented!()
+            }
+            async fn find_by_id(
+                &self,
+                _: &DeviceId,
+            ) -> Result<Option<powehi_domain::device::Device>, DomainError> {
+                unimplemented!()
+            }
+            async fn find_by_user(
+                &self,
+                _: &UserId,
+            ) -> Result<Vec<powehi_domain::device::Device>, DomainError> {
+                unimplemented!()
+            }
+            async fn delete(&self, _: &DeviceId) -> Result<(), DomainError> {
+                unimplemented!()
+            }
+        }
+
         use powehi_port_outbound::cache::CachePort;
         use std::collections::HashMap;
         use std::time::Duration;
@@ -274,6 +296,7 @@ mod tests {
             media: Arc::new(Null),
             push_sub_repo: Arc::new(Null),
             invite: Arc::new(Null),
+            device_repo: Arc::new(Null),
             cache: Arc::new(EmptyCache),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         }

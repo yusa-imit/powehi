@@ -67,6 +67,11 @@ pub struct DeviceRegistrationRequest {
     pub mls_credential: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceRegistrationResponse {
+    pub device_id: DeviceId,
+}
+
 #[async_trait]
 pub trait AuthUseCase: Send + Sync {
     async fn register_init(
