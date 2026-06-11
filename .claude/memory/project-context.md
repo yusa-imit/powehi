@@ -17,6 +17,17 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-12, cycle 129 — FEATURE: GET /v1/region/status — prd.md §6.3)
+- **Cycle 129 (commit e92a3e0):** FEATURE — closes the final prd.md §6.3 missing endpoint:
+  - **`GET /v1/region/status`** (public, no auth): returns `{ "region_id": "eu-de-1", "status": "active", "tier": 1 }`. `tier` is a custom-serialized u8 (1/2/3) stable regardless of Rust enum rename. `status` is always `"active"` (liveness contract).
+  - **`AppState`** gains `region_tier: Tier` populated from `AppConfig.tier` (already in config).
+  - Placed in `public_routes` alongside `/health` and `/v1/region/detect` — no auth, no rate limit. Response contains zero PII or user-derived data.
+  - **security-auditor:** PASS (GREEN). A1: Cloudflare edge cache advisory (infra follow-up, non-blocking). A2: future non-constant status needs re-audit. A3: dead expression in test (cosmetic). All non-blocking.
+  - **462 Rust tests** (+5 in powehi-rest-api: 4 required + 1 tier_as_u8 unit; was 457); clippy clean; rustfmt clean.
+  - **Deferred YELLOW advisories (new):**
+    - Region status A1: no Cloudflare edge cache TTL (infra follow-up)
+    - Region status A2: `status` constant today; future non-constant state needs threat-model-checker pass
+
 ## Current state (2026-06-12, cycle 128 — FEATURE: POST /v1/auth/devices + DELETE /v1/auth/devices/:id — prd.md §6.3)
 - **Cycle 128 (commit 4c4397a):** FEATURE — closes the two missing device-management REST API endpoints from prd.md §6.3:
   - **`POST /v1/auth/devices`** (authenticated): registers an additional device for the current user. Takes `DeviceRegistrationRequest { mls_credential }`, returns `DeviceRegistrationResponse { device_id }`. Server assigns new DeviceId; no session token issued (user must login separately with new device).
