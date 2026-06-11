@@ -131,7 +131,7 @@ interface WasmModule {
 		ct: Uint8Array,
 		key: Uint8Array,
 		iv: Uint8Array,
-	) => { pixels: Uint8Array };
+	) => { pixels: Uint8Array<ArrayBuffer> };
 	media_message_create_with_thumbnail: (
 		identityId: string,
 		groupId: string,
@@ -723,7 +723,7 @@ const api = {
 		ct: Uint8Array,
 		key: Uint8Array,
 		iv: Uint8Array,
-	): Promise<{ pixels: Uint8Array }> {
+	): Promise<{ pixels: Uint8Array<ArrayBuffer> }> {
 		const wasm = await getWasm();
 		return wasm.media_thumbnail_decrypt(ct, key, iv);
 	},
