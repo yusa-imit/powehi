@@ -17,6 +17,16 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-12, cycle 128 — FEATURE: POST /v1/auth/devices + DELETE /v1/auth/devices/:id — prd.md §6.3)
+- **Cycle 128 (commit 4c4397a):** FEATURE — closes the two missing device-management REST API endpoints from prd.md §6.3:
+  - **`POST /v1/auth/devices`** (authenticated): registers an additional device for the current user. Takes `DeviceRegistrationRequest { mls_credential }`, returns `DeviceRegistrationResponse { device_id }`. Server assigns new DeviceId; no session token issued (user must login separately with new device).
+  - **`DELETE /v1/auth/devices/:id`** (authenticated): revokes a device. Ownership check (AuthService.revoke_device verifies device.user_id == caller.user_id). On non-owned/missing target → 401 (oracle closed — NotFound remapped to Unauthorized). Active sessions for the revoked device are invalidated in Redis.
+  - **`AppState`** gains `device_repo: Arc<dyn DeviceRepository>` to resolve `DeviceId → UserId` in handlers. All 16 AppState test constructions updated; new `NullDeviceRepo` / `FakeDeviceRepo` test helpers added.
+  - **`powehi-port-inbound/src/auth.rs`**: Added `DeviceRegistrationResponse { device_id: DeviceId }`.
+  - **`AuthService`**: Fixed `#[instrument]` on `register_device`/`revoke_device` to `skip(self, user_id, ...)` — removes user/device IDs from span fields on failure paths (security-auditor finding 1 / no-plaintext-logging).
+  - **security-auditor:** PASS after fixes. Finding 1 (MEDIUM, span PII) FIXED. Finding 2 (LOW, device enumeration oracle) FIXED. Findings 3-7 advisory/deferred: (3) redundant DB round-trip TOCTOU, (4) missing per-user device count cap, (5) self-revoke response note, (6) rate-limit class mismatch (api_governor vs auth_governor), (7) axum :id syntax note.
+  - **457 Rust tests** (+4: auth-bypass ×2, success ×2); clippy clean; rustfmt clean.
+
 ## Current state (2026-06-12, cycle 127 — STABILIZATION: CI red fix — TS 5.8.3 Uint8Array<ArrayBuffer> BlobPart error)
 - **Cycle 127 (commit dc901be):** STABILIZATION — CI was RED on Frontend "Bundle budget check" job since cycle 126 (§9.4.1 encrypted thumbnail).
   - **Root cause:** TypeScript 5.8.3 tightened `BlobPart` to require `Uint8Array<ArrayBuffer>` (not the default `Uint8Array<ArrayBufferLike>`). `media_thumbnail_decrypt` in `WasmModule` interface and the exported `mediaThumbnailDecrypt` method both had `Uint8Array` (defaulting to `ArrayBufferLike`), causing `tsc -b` (called by `pnpm build`) to fail.
