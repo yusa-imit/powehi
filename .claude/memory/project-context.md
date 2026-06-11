@@ -17,6 +17,27 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-11, cycle 125 — STABILIZATION: §5.3 Phase B PQ frontend integration + formatting fixes)
+- **Cycle 125 (commit c7034e0):** STABILIZATION — CI GREEN, no open issues. Committed the PQ hybrid frontend integration that was left uncommitted after cycle 123:
+  - **`crates/client/powehi-crypto-wasm/src/wasm_exports.rs`** (MODIFIED): `mls_pq_derive_binding` WASM export — HKDF-SHA256(ikm=ss, salt=None, info=b"powehi-pq-binding-v1"||groupId) → 8 bytes → 16-char hex. Handle removed+Zeroized before derivation (single-use). 4 tests: format check, group-scoping, determinism, KAT (c702693eff3c46bd).
+  - **`app/src/components/AcceptInviteModal.tsx`** (MODIFIED): Step 7 PQ send — encaps to peer ML-KEM-768 key, MLS-encrypts `pq_init` JSON payload, derives local binding hex, shows hex badge on success (best-effort, classical E2EE intact on failure).
+  - **`app/src/hooks/useMessages.ts`** (MODIFIED): `pq_init` envelope handler — decaps with `pqDecapKeyHandle` from auth store, derives binding hex, fires `onPqBinding(groupId, bindingHex)`; does NOT forward to `onMessage` (shouldDisplayMessage=false).
+  - **`app/src/components/ChatLayout.tsx`** (MODIFIED): `handlePqBinding` stores `bindingHex` in Chat state. `ConversationHeader` shows "PQ" chip badge when `pqBindingHex` set.
+  - **`app/src/store/auth.ts`** (MODIFIED): `pqDecapKeyHandle` field + `clearPqDecapKeyHandle` action; cleared on logout and after first use.
+  - **`app/src/components/Login.tsx`** (MODIFIED): Threads `pqDecapKeyHandle` from `mlsInitIdentity`/`mlsInitIdentityFromPhrase` into auth store.
+  - **`app/src/hooks/__mocks__/useCryptoWorker.ts`** (MODIFIED): Added `mlsEncrypt`, `mlsDecrypt`, `mlsPqDeriveBinding` mock stubs.
+  - **`app/src/workers/mlsPqExtension.test.ts`** (NEW): 7 PQ extension tests (encapKey size, signature size, argument pass-through, field aliasing, pqDecapKeyHandle mock contracts).
+  - **Formatting fixes:** biome format applied to 6 files (AcceptInviteModal.tsx, Login.tsx, auth.ts, useMessages.test.ts, ChatLayout.tsx, AcceptInviteModal.test.tsx). Fixed TS error: `makePqEnvelope(ct: number[])` unused param removed.
+  - **crypto-reviewer:** PASS (GREEN). HKDF-SHA256 with salt=None RFC 5869 §3.3 compliant. KAT c702693eff3c46bd independently verified. Handle-drop-then-derive correct. 3 YELLOW: Y-B-1 domain prefix-extension concern for future v2 (no length prefix between label and group_id), Y-B-2 group_id string canonicality, Y-B-3 format! allocations in hex conversion.
+  - **security-auditor:** PASS (GREEN). No RED findings. 2 YELLOW: Y-1 decap handle retained on partial HKDF failure (benign — logout+clearSessionState cleans up), Y-2 silent NaN on malformed sigKeyHex in AcceptInviteModal hex parser.
+  - **353 frontend tests** (+16 vs cycle 122); **417 Rust tests**; tsc clean; biome clean.
+  - **Remaining deferred security findings (YELLOW):** same as cycle 122 plus:
+    - PQ binding Y-B-1: domain prefix-extension concern (no length prefix between domain label and group_id in HKDF info)
+    - PQ binding Y-B-2: group_id &str canonicality not validated at WASM boundary
+    - PQ binding Y-B-3: format! allocations in hex conversion (linear memory residue)
+    - PQ frontend Y-1: decap key handle retained in Zustand on partial HKDF failure (benign)
+    - PQ frontend Y-2: silent NaN on malformed peer.sigKeyHex in AcceptInviteModal
+
 ## Current state (2026-06-11, cycle 122 — FEATURE: client-side disappearing message expiry — prd.md §9.4.3)
 - **Cycle 122 (commit efad54f):** FEATURE — closes the client-side gap in the disappearing messages feature (prd.md §9.4.3 + §15.3 Post-MVP "Disappearing Messages"). Backend TTL was already enforced server-side (`expires_at` on envelopes); this cycle wires the signal into the frontend and adds a periodic sweep.
   - **`app/src/hooks/useMessages.ts`** (MODIFIED): Added `expiresAt?: number` (unix ms) to `IncomingMessage`. In `processEnvelope`, parses `env.expires_at` ISO string → unix ms before calling `onMessage`.
