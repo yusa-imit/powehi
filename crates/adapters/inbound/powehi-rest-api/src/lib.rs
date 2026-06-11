@@ -44,6 +44,11 @@ pub struct AppState {
     /// This server's region identifier (e.g. "eu-de-1", "ap-sin-1").
     /// Returned by `GET /v1/region/detect` so clients can confirm their routed region.
     pub region_id: String,
+    /// This server's service tier (Tier1/Tier2/Tier3).
+    /// Returned by `GET /v1/region/status` as a small integer (1/2/3) so clients
+    /// can choose routing/replication behaviour without learning anything about
+    /// users or content. Pure infrastructure metadata — no PII.
+    pub region_tier: powehi_domain::region::Tier,
     pub auth: Arc<dyn AuthUseCase>,
     pub group: Arc<dyn GroupUseCase>,
     pub messaging: Arc<dyn MessagingUseCase>,
@@ -177,7 +182,8 @@ fn router_inner(
     // Public endpoints — no auth, no per-IP rate limit (like /health).
     let public_routes = Router::new()
         .route("/health", get(health))
-        .route("/v1/region/detect", get(routes::region::detect));
+        .route("/v1/region/detect", get(routes::region::detect))
+        .route("/v1/region/status", get(routes::region::status));
 
     Router::new()
         .merge(public_routes)
@@ -569,6 +575,7 @@ mod tests {
     fn groups_router_unauthorized() -> Router {
         router(AppState {
             region_id: "eu-de-1-test".to_string(),
+            region_tier: powehi_domain::region::Tier::Tier1,
             auth: Arc::new(MockAuth),
             group: Arc::new(MockGroupUnauthorized),
             messaging: Arc::new(MockMessaging),
@@ -585,6 +592,7 @@ mod tests {
     fn test_router() -> Router {
         router(AppState {
             region_id: "eu-de-1-test".to_string(),
+            region_tier: powehi_domain::region::Tier::Tier1,
             auth: Arc::new(MockAuth),
             group: noop_group(),
             messaging: Arc::new(MockMessaging),
@@ -805,6 +813,7 @@ mod tests {
     fn messaging_router() -> Router {
         router(AppState {
             region_id: "eu-de-1-test".to_string(),
+            region_tier: powehi_domain::region::Tier::Tier1,
             auth: Arc::new(MockAuth),
             group: noop_group(),
             messaging: Arc::new(MockMessagingSuccess),
@@ -821,6 +830,7 @@ mod tests {
     fn messaging_unauthorized_router() -> Router {
         router(AppState {
             region_id: "eu-de-1-test".to_string(),
+            region_tier: powehi_domain::region::Tier::Tier1,
             auth: Arc::new(MockAuth),
             group: noop_group(),
             messaging: Arc::new(MockMessagingUnauthorized),
@@ -837,6 +847,7 @@ mod tests {
     fn key_package_router() -> Router {
         router(AppState {
             region_id: "eu-de-1-test".to_string(),
+            region_tier: powehi_domain::region::Tier::Tier1,
             auth: Arc::new(MockAuth),
             group: noop_group(),
             messaging: Arc::new(MockMessaging),
@@ -853,6 +864,7 @@ mod tests {
     fn key_package_not_found_router() -> Router {
         router(AppState {
             region_id: "eu-de-1-test".to_string(),
+            region_tier: powehi_domain::region::Tier::Tier1,
             auth: Arc::new(MockAuth),
             group: noop_group(),
             messaging: Arc::new(MockMessaging),
@@ -931,6 +943,7 @@ mod tests {
     fn media_router() -> Router {
         router(AppState {
             region_id: "eu-de-1-test".to_string(),
+            region_tier: powehi_domain::region::Tier::Tier1,
             auth: Arc::new(MockAuth),
             group: noop_group(),
             messaging: Arc::new(MockMessaging),
@@ -947,6 +960,7 @@ mod tests {
     fn media_unauthorized_router() -> Router {
         router(AppState {
             region_id: "eu-de-1-test".to_string(),
+            region_tier: powehi_domain::region::Tier::Tier1,
             auth: Arc::new(MockAuth),
             group: noop_group(),
             messaging: Arc::new(MockMessaging),
@@ -968,6 +982,7 @@ mod tests {
     fn groups_router() -> Router {
         router(AppState {
             region_id: "eu-de-1-test".to_string(),
+            region_tier: powehi_domain::region::Tier::Tier1,
             auth: Arc::new(MockAuth),
             group: noop_group(),
             messaging: Arc::new(MockMessaging),
@@ -1659,6 +1674,7 @@ mod tests {
         let tight_rl = Arc::new(rate_limit::HandleRateLimiter::tight());
         let state = AppState {
             region_id: "eu-de-1-test".to_string(),
+            region_tier: powehi_domain::region::Tier::Tier1,
             auth: Arc::new(MockAuthSuccess),
             group: noop_group(),
             messaging: Arc::new(MockMessaging),
@@ -1705,6 +1721,7 @@ mod tests {
         let tight_rl = Arc::new(rate_limit::HandleRateLimiter::tight());
         let state = AppState {
             region_id: "eu-de-1-test".to_string(),
+            region_tier: powehi_domain::region::Tier::Tier1,
             auth: Arc::new(MockAuthSuccess),
             group: noop_group(),
             messaging: Arc::new(MockMessaging),
@@ -1763,6 +1780,7 @@ mod tests {
     fn minimal_state() -> AppState {
         AppState {
             region_id: "eu-de-1-test".to_string(),
+            region_tier: powehi_domain::region::Tier::Tier1,
             auth: Arc::new(MockAuth),
             group: noop_group(),
             messaging: Arc::new(MockMessaging),
@@ -1996,6 +2014,7 @@ mod tests {
     async fn register_finish_returns_user_id_and_device_id() {
         let state = AppState {
             region_id: "eu-de-1-test".to_string(),
+            region_tier: powehi_domain::region::Tier::Tier1,
             auth: Arc::new(MockAuthSuccess),
             group: noop_group(),
             messaging: Arc::new(MockMessaging),
@@ -2455,6 +2474,7 @@ mod tests {
         let user_id = UserId::new();
         router(AppState {
             region_id: "eu-de-1-test".to_string(),
+            region_tier: powehi_domain::region::Tier::Tier1,
             auth: Arc::new(MockAuthDeviceSuccess),
             group: noop_group(),
             messaging: Arc::new(MockMessaging),

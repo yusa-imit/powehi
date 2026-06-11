@@ -388,6 +388,7 @@ mod tests {
         let null: Arc<NullUseCase> = Arc::new(NullUseCase);
         let state = crate::AppState {
             region_id: "eu-de-1-test".to_string(),
+            region_tier: powehi_domain::region::Tier::Tier1,
             auth: null.clone(),
             group: null.clone(),
             messaging: null.clone(),

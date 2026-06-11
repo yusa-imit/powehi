@@ -264,6 +264,7 @@ async fn main() -> Result<()> {
     let handle_rate_limiter = Arc::new(powehi_rest_api::rate_limit::HandleRateLimiter::new());
     let state = AppState {
         region_id: cfg.region_id.clone(),
+        region_tier: cfg.tier,
         auth,
         group,
         messaging,
