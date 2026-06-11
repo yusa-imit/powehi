@@ -58,6 +58,8 @@ interface Chat {
 	mlsGroupId?: string;
 	/** Local MLS identity ID returned by mls_init_identity. undefined until identity created. */
 	mlsIdentityId?: string;
+	/** 16-char PQ group binding hex (§5.3 Phase B). Set after pq_init exchange completes. */
+	pqBindingHex?: string;
 }
 
 // ── Disappearing messages helpers ──────────────────────────────────────────────
@@ -605,12 +607,14 @@ function ConversationHeader({
 	onVideo,
 	onInfo,
 	infoOpen,
+	pqBindingHex,
 }: {
 	chat: Chat;
 	onCall: () => void;
 	onVideo: () => void;
 	onInfo: () => void;
 	infoOpen: boolean;
+	pqBindingHex?: string;
 }) {
 	return (
 		<header
@@ -630,6 +634,23 @@ function ConversationHeader({
 				<div style={{ display: "flex", alignItems: "center", gap: 8 }}>
 					<span style={{ fontSize: 15, fontWeight: 500, color: "var(--fg-1)" }}>{chat.name}</span>
 					<Icon name="lock" size={11} color="#A8C8FF" />
+					{pqBindingHex && (
+						<span
+							title={`PQ binding: ${pqBindingHex}`}
+							style={{
+								fontSize: 9,
+								fontWeight: 600,
+								letterSpacing: "0.06em",
+								color: "#A8C8FF",
+								background: "rgba(168,200,255,0.12)",
+								border: "1px solid rgba(168,200,255,0.3)",
+								borderRadius: 4,
+								padding: "1px 5px",
+							}}
+						>
+							PQ
+						</span>
+					)}
 				</div>
 				<div style={{ fontSize: 11, color: "var(--fg-3)", marginTop: 1 }}>
 					{chat.online ? "online" : `last seen ${chat.lastSeen ?? "recently"}`}
@@ -1469,8 +1490,15 @@ export function ChatLayout() {
 		[activeId, sendMedia],
 	);
 
+	/** Record the PQ group binding once the pq_init exchange completes (§5.3 Phase B). */
+	const handlePqBinding = useCallback((groupId: string, bindingHex: string) => {
+		setChats((cs) =>
+			cs.map((c) => (c.mlsGroupId === groupId ? { ...c, pqBindingHex: bindingHex } : c)),
+		);
+	}, []);
+
 	// Poll for incoming messages whenever there's an active MLS group + session.
-	useMessages(active?.mlsIdentityId, active?.mlsGroupId, handleIncoming);
+	useMessages(active?.mlsIdentityId, active?.mlsGroupId, handleIncoming, handlePqBinding);
 
 	// Add a new chat entry when another device invites us (Welcome envelope received).
 	const handleNewGroup = useCallback(
@@ -1614,6 +1642,7 @@ export function ChatLayout() {
 						onVideo={() => undefined}
 						onInfo={() => setInfoOpen((v) => !v)}
 						infoOpen={infoOpen}
+						pqBindingHex={active.pqBindingHex}
 					/>
 					<MessageList messages={active.messages} partner={active.name} />
 					<Composer

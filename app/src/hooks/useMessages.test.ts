@@ -6,6 +6,8 @@ import { useAuthStore } from "../store/auth";
 import * as CryptoWorkerHook from "./useCryptoWorker";
 import { type IncomingMessage, useMessages } from "./useMessages";
 
+const PQ_HANDLE = "pq-decap-handle-test";
+
 const IDENTITY_ID = "identity-001";
 const GROUP_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const SENDER_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
@@ -17,6 +19,9 @@ const mockWorker = {
 	mlsDecrypt: vi.fn(async () => ({
 		plaintext: new TextEncoder().encode(DECRYPTED_TEXT),
 	})),
+	mlKem768DecapV2: vi.fn(async () => ({ sharedSecretHandle: "mock-ss-dec-0" })),
+	mlsPqDeriveBinding: vi.fn(async () => ({ bindingHex: "c702693eff3c46bd" })),
+	mlKem768DropDecapKey: vi.fn(async () => {}),
 };
 
 let pollSpy: MockInstance<typeof MessagesModule.pollMessages>;
@@ -35,7 +40,12 @@ beforeEach(() => {
 
 afterEach(() => {
 	vi.restoreAllMocks();
-	useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null });
+	useAuthStore.setState({
+		phase: "login",
+		deviceId: null,
+		sessionToken: null,
+		pqDecapKeyHandle: null,
+	});
 });
 
 function makeEnvelope(overrides: Partial<Envelope> = {}): Envelope {
@@ -209,5 +219,101 @@ describe("useMessages", () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+});
+
+describe("useMessages — pq_init handling (§5.3 Phase B)", () => {
+	function makePqEnvelope(): Envelope {
+		return {
+			id: ENV_ID,
+			group_id: GROUP_ID,
+			sender: SENDER_ID,
+			recipient: null,
+			message_type: "Application",
+			ciphertext: [9, 9, 9],
+			epoch: null,
+			created_at: "2026-06-11T10:00:00Z",
+			expires_at: null,
+		};
+	}
+
+	beforeEach(() => {
+		useAuthStore.setState({ pqDecapKeyHandle: PQ_HANDLE });
+		mockWorker.mlsDecrypt.mockResolvedValue({
+			plaintext: new TextEncoder().encode(JSON.stringify({ type: "pq_init", ct: [1, 2, 3, 4] })),
+		});
+	});
+
+	afterEach(() => {
+		// Restore default mlsDecrypt behaviour for other suites.
+		mockWorker.mlsDecrypt.mockResolvedValue({
+			plaintext: new TextEncoder().encode(DECRYPTED_TEXT),
+		});
+	});
+
+	it("invokes onPqBinding with groupId and bindingHex on pq_init", async () => {
+		pollSpy.mockResolvedValueOnce([makePqEnvelope()]);
+		const onPqBinding = vi.fn();
+
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), onPqBinding));
+
+		await waitFor(() => {
+			expect(onPqBinding).toHaveBeenCalledWith(GROUP_ID, "c702693eff3c46bd");
+		});
+	});
+
+	it("does NOT forward pq_init to onMessage (not a user-visible message)", async () => {
+		pollSpy.mockResolvedValueOnce([makePqEnvelope()]);
+		const onMessage = vi.fn();
+
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, onMessage));
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onMessage).not.toHaveBeenCalled();
+	});
+
+	it("acks the pq_init envelope after processing", async () => {
+		pollSpy.mockResolvedValueOnce([makePqEnvelope()]);
+
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), vi.fn()));
+
+		await waitFor(() => {
+			expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID);
+		});
+	});
+
+	it("calls mlKem768DecapV2 with the pqDecapKeyHandle from auth store", async () => {
+		pollSpy.mockResolvedValueOnce([makePqEnvelope()]);
+
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), vi.fn()));
+
+		await waitFor(() => {
+			expect(mockWorker.mlKem768DecapV2).toHaveBeenCalledWith(PQ_HANDLE, expect.any(Uint8Array));
+		});
+	});
+
+	it("degrades gracefully when mlKem768DecapV2 fails — onMessage still not called", async () => {
+		mockWorker.mlKem768DecapV2.mockRejectedValueOnce(new Error("decap_failed"));
+		pollSpy.mockResolvedValueOnce([makePqEnvelope()]);
+		const onMessage = vi.fn();
+		const onPqBinding = vi.fn();
+
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, onMessage, onPqBinding));
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onMessage).not.toHaveBeenCalled();
+		expect(onPqBinding).not.toHaveBeenCalled();
+	});
+
+	it("skips PQ decap when pqDecapKeyHandle is null (handle already consumed)", async () => {
+		useAuthStore.setState({ pqDecapKeyHandle: null });
+		pollSpy.mockResolvedValueOnce([makePqEnvelope()]);
+		const onPqBinding = vi.fn();
+
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), onPqBinding));
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(mockWorker.mlKem768DecapV2).not.toHaveBeenCalled();
+		expect(onPqBinding).not.toHaveBeenCalled();
 	});
 });

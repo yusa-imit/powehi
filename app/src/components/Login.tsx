@@ -57,6 +57,7 @@ export function Login() {
 		device_id: string;
 		token: string;
 		identityId: string | undefined;
+		pqDecapKeyHandle: string | undefined;
 	} | null>(null);
 	const [errorMsg, setErrorMsg] = useState("");
 	const [mode, setMode] = useState<Mode>("sign-in");
@@ -73,7 +74,13 @@ export function Login() {
 	const doRegister = async (
 		pw: Uint8Array,
 		handle_hash: Uint8Array,
-	): Promise<{ device_id: string; token: string; identityId: string; recoveryWords: string[] }> => {
+	): Promise<{
+		device_id: string;
+		token: string;
+		identityId: string;
+		recoveryWords: string[];
+		pqDecapKeyHandle: string;
+	}> => {
 		if (!cryptoWorker) throw new Error("crypto_unavailable");
 
 		// Step 1: OPAQUE reg start
@@ -99,10 +106,8 @@ export function Login() {
 		const phraseHash = await crypto.subtle.digest("SHA-256", phraseEncoder.encode(phrase));
 		const mlsIdentityBytes = new Uint8Array(phraseHash).slice(0, 16);
 
-		const { identityId, keyPackage } = await cryptoWorker.mlsInitIdentityFromPhrase(
-			phrase,
-			mlsIdentityBytes,
-		);
+		const { identityId, keyPackage, pqDecapKeyHandle } =
+			await cryptoWorker.mlsInitIdentityFromPhrase(phrase, mlsIdentityBytes);
 		// phrase goes out of scope here; the words array is held temporarily for display only.
 
 		// Step 5: server registration finish — creates user + device
@@ -122,7 +127,7 @@ export function Login() {
 			mlsIdentityB64: uint8ToBase64(mlsIdentityBytes),
 		});
 
-		return { device_id: finishResp.device_id, token, identityId, recoveryWords };
+		return { device_id: finishResp.device_id, token, identityId, recoveryWords, pqDecapKeyHandle };
 	};
 
 	/** OPAQUE login → returns session_token. DB key derived inside worker. */
@@ -191,6 +196,7 @@ export function Login() {
 					device_id,
 					token,
 					identityId: identityId ?? undefined,
+					pqDecapKeyHandle: result.pqDecapKeyHandle,
 				};
 				return; // login() called from onConfirmed, not here.
 			}
@@ -208,10 +214,16 @@ export function Login() {
 			// Each login produces a fresh identityId handle (the WASM map is cleared
 			// on logout), but the signing keys are derived from the same seed bytes
 			// so KeyPackages from this session are associated with this device.
+			let pqDecapKeyHandle: string | undefined;
 			if (identity.mlsIdentityB64 && cryptoWorker) {
 				const bytes = base64ToUint8Array(identity.mlsIdentityB64);
-				const { identityId: id, keyPackage } = await cryptoWorker.mlsInitIdentity(bytes);
+				const {
+					identityId: id,
+					keyPackage,
+					pqDecapKeyHandle: pqHandle,
+				} = await cryptoWorker.mlsInitIdentity(bytes);
 				identityId = id;
+				pqDecapKeyHandle = pqHandle;
 				// Update the current session handle in the DB; don't overwrite mlsIdentityB64.
 				await db.identity.update(1, { mlsIdentityId: id });
 				// Upload a fresh KeyPackage for this session (non-fatal).
@@ -219,7 +231,7 @@ export function Login() {
 			}
 
 			// Advance to app phase (sign-in path) — DB key was derived inside the crypto worker.
-			login(device_id, token, identityId ?? undefined);
+			login(device_id, token, identityId ?? undefined, pqDecapKeyHandle);
 		} catch (err) {
 			setPhase("error");
 			const msg = err instanceof Error ? err.message : "unknown_error";
@@ -510,9 +522,9 @@ export function Login() {
 					onConfirmed={() => {
 						setRecoveryWords(null);
 						if (pendingLoginRef.current) {
-							const { device_id, token, identityId } = pendingLoginRef.current;
+							const { device_id, token, identityId, pqDecapKeyHandle } = pendingLoginRef.current;
 							pendingLoginRef.current = null;
-							login(device_id, token, identityId);
+							login(device_id, token, identityId, pqDecapKeyHandle);
 						}
 					}}
 				/>

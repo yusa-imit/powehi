@@ -39,6 +39,8 @@ export type MlKemDecapV2Result = { sharedSecretHandle: string };
 // ADR-0003 Phase B, Y-3: signed encap key credential.
 export type MlKemSignResult = { signature: Uint8Array };
 export type MlKemVerifyResult = { valid: boolean };
+// prd.md §5.3 Phase B — PQ group binding derived from ML-KEM shared secret.
+export type MlsPqBindingResult = { bindingHex: string };
 // §9.2 Media encryption: AES-256-GCM opaque-handle types.
 // mediaKeyHandle: the 32-byte AES-256-GCM key stays inside the worker; only the
 // opaque string handle crosses the worker boundary (sender path).
@@ -128,6 +130,8 @@ interface WasmModule {
 		keyPackageBytes: Uint8Array,
 		sigPubKey: Uint8Array,
 	) => MlsPqEncapKeyResult;
+	// prd.md §5.3 Phase B — derive PQ group binding from a shared-secret handle.
+	mls_pq_derive_binding: (ssHandle: string, groupId: string) => MlsPqBindingResult;
 }
 
 // ── IndexedDB key — held inside the worker, never crosses to main thread ─────
@@ -290,6 +294,19 @@ const api = {
 	): Promise<MlsPqEncapKeyResult> {
 		const wasm = await getWasm();
 		return wasm.mls_pq_extract_and_verify_encap_key(keyPackageBytes, sigPubKey);
+	},
+
+	/**
+	 * Derive an 8-byte PQ group binding (16-char hex) from an ML-KEM shared-secret handle
+	 * and **drop** the handle (prd.md §5.3 Phase B).
+	 *
+	 * HKDF-SHA256(ikm=ss, salt=None, info=b"powehi-pq-binding-v1" || groupId) → 8 bytes.
+	 * Drops the handle from WASM storage regardless of success or error.
+	 * Returns { bindingHex } on success; throws if the handle is unknown.
+	 */
+	async mlsPqDeriveBinding(ssHandle: string, groupId: string): Promise<MlsPqBindingResult> {
+		const wasm = await getWasm();
+		return wasm.mls_pq_derive_binding(ssHandle, groupId);
 	},
 
 	/**

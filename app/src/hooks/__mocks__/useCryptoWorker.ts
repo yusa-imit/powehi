@@ -33,6 +33,12 @@ const mockWorker = {
 	mlsJoinGroup: async (_identityId: string, _welcome: Uint8Array) => ({
 		groupId: "mock-group-id-00000000-0000-0000-0000-000000000000",
 	}),
+	mlsEncrypt: async (_identityId: string, _groupId: string, _plaintext: Uint8Array) => ({
+		ciphertext: new Uint8Array(64),
+	}),
+	mlsDecrypt: async (_identityId: string, _groupId: string, _ciphertext: Uint8Array) => ({
+		plaintext: new TextEncoder().encode("mock plaintext"),
+	}),
 	mlsGroupMembers: async () => [
 		{
 			leafIndex: 0,
@@ -98,6 +104,10 @@ const mockWorker = {
 	mlsPqExtractAndVerifyEncapKey: async (_keyPackageBytes: Uint8Array, _sigPubKey: Uint8Array) => ({
 		encapKey: new Uint8Array(1184),
 		signature: new Uint8Array(64),
+	}),
+	// prd.md §5.3 Phase B — derive PQ group binding from a shared-secret handle.
+	mlsPqDeriveBinding: async (_ssHandle: string, _groupId: string) => ({
+		bindingHex: "mockbindingval1",
 	}),
 	// §9.2 Media encryption: AES-256-GCM opaque-handle mocks.
 	// mediaKeyHandle is a static string — no real key state in tests.

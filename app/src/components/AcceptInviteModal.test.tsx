@@ -19,6 +19,20 @@ const MOCK_GROUP_ID = "mock-group-id-00000000-0000-0000-0000-000000000000";
 const mockCryptoWorker = {
 	mlsCreateGroup: vi.fn(async (_id: string) => ({ groupId: MOCK_GROUP_ID })),
 	mlsAddMember: vi.fn(async () => ({ welcome: new Uint8Array(200) })),
+	mlsGroupMembers: vi.fn(async () => [
+		{ leafIndex: 0, sigKeyHex: "aa".repeat(32) },
+		{ leafIndex: 1, sigKeyHex: "bb".repeat(32) },
+	]),
+	mlsPqExtractAndVerifyEncapKey: vi.fn(async () => ({
+		encapKey: new Uint8Array(1184),
+		signature: new Uint8Array(64),
+	})),
+	mlKem768EncapV2: vi.fn(async () => ({
+		ciphertext: new Uint8Array(1088),
+		sharedSecretHandle: "mock-ss-enc-handle-0",
+	})),
+	mlsEncrypt: vi.fn(async () => ({ ciphertext: new Uint8Array(64) })),
+	mlsPqDeriveBinding: vi.fn(async () => ({ bindingHex: "c702693eff3c46bd" })),
 };
 
 // ── Spies ────────────────────────────────────────────────────────────────────
@@ -28,6 +42,7 @@ let fetchKeyPackageSpy: MockInstance<typeof KeyPackagesApi.fetchKeyPackage>;
 let createGroupSpy: MockInstance<typeof GroupsApi.createGroup>;
 let addMemberSpy: MockInstance<typeof GroupsApi.addMember>;
 let sendWelcomeSpy: MockInstance<typeof MessagesApi.sendWelcome>;
+let sendMessageSpy: MockInstance<typeof MessagesApi.sendMessage>;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -66,10 +81,17 @@ beforeEach(() => {
 	createGroupSpy = vi.spyOn(GroupsApi, "createGroup").mockResolvedValue(undefined);
 	addMemberSpy = vi.spyOn(GroupsApi, "addMember").mockResolvedValue(undefined);
 	sendWelcomeSpy = vi.spyOn(MessagesApi, "sendWelcome").mockResolvedValue(undefined);
+	sendMessageSpy = vi.spyOn(MessagesApi, "sendMessage").mockResolvedValue("mock-envelope-id");
 });
 
 afterEach(() => {
-	useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null, identityId: null });
+	useAuthStore.setState({
+		phase: "login",
+		deviceId: null,
+		sessionToken: null,
+		identityId: null,
+		pqDecapKeyHandle: null,
+	});
 	vi.restoreAllMocks();
 });
 
@@ -226,5 +248,57 @@ describe("AcceptInviteModal — error paths", () => {
 		const [, , welcomeArg] = sendWelcomeSpy.mock.calls[0];
 		expect(welcomeArg).toBeInstanceOf(Uint8Array);
 		expect(consoleSpy).not.toHaveBeenCalledWith(expect.anything(), welcomeArg);
+	});
+});
+
+describe("AcceptInviteModal — PQ binding (§5.3 Phase B)", () => {
+	it("shows PQ badge after successful pq_init exchange", async () => {
+		renderModal();
+
+		await act(async () => {
+			fireEvent.click(screen.getByRole("button", { name: /connect/i }));
+		});
+
+		await waitFor(() =>
+			expect(screen.getByText(/encrypted channel established/i)).toBeInTheDocument(),
+		);
+		// PQ badge is shown with the binding hex value
+		expect(screen.getByText("PQ")).toBeInTheDocument();
+		expect(screen.getByText("c702693eff3c46bd")).toBeInTheDocument();
+	});
+
+	it("sends pq_init Application message after Welcome (pq_init carries ML-KEM ciphertext)", async () => {
+		renderModal();
+
+		await act(async () => {
+			fireEvent.click(screen.getByRole("button", { name: /connect/i }));
+		});
+
+		await waitFor(() =>
+			expect(screen.getByText(/encrypted channel established/i)).toBeInTheDocument(),
+		);
+		// sendMessage is called with the MLS-encrypted pq_init payload
+		expect(sendMessageSpy).toHaveBeenCalledWith("tok-test", MOCK_GROUP_ID, expect.any(Uint8Array));
+		// pq_init ciphertext body must be an opaque Uint8Array — never a JSON string
+		const [, , ctArg] = sendMessageSpy.mock.calls[0];
+		expect(ctArg).toBeInstanceOf(Uint8Array);
+	});
+
+	it("degrades gracefully when peer has no PQ extension", async () => {
+		// Simulate no PQ key in the KeyPackage
+		mockCryptoWorker.mlsPqExtractAndVerifyEncapKey.mockRejectedValue(new Error("no_pq_extension"));
+		renderModal();
+
+		await act(async () => {
+			fireEvent.click(screen.getByRole("button", { name: /connect/i }));
+		});
+
+		await waitFor(() =>
+			expect(screen.getByText(/encrypted channel established/i)).toBeInTheDocument(),
+		);
+		// No PQ badge — graceful degradation
+		expect(screen.queryByText("PQ")).not.toBeInTheDocument();
+		// No pq_init message sent
+		expect(sendMessageSpy).not.toHaveBeenCalled();
 	});
 });

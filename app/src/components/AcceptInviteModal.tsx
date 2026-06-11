@@ -20,7 +20,7 @@ import { useState } from "react";
 import { addMember, createGroup } from "../api/groups";
 import { redeemInvite } from "../api/invites";
 import { fetchKeyPackage } from "../api/key_packages";
-import { sendWelcome } from "../api/messages";
+import { sendMessage, sendWelcome } from "../api/messages";
 import { useCryptoWorker } from "../hooks/useCryptoWorker";
 import { useAuthStore } from "../store/auth";
 import { Icon } from "./Icon";
@@ -56,6 +56,7 @@ export function AcceptInviteModal({ inviteCode, onClose, onAccepted }: AcceptInv
 	const [step, setStep] = useState<Step>("idle");
 	const [errorKind, setErrorKind] = useState<ErrorKind>("generic");
 	const [newGroupId, setNewGroupId] = useState("");
+	const [pqBindingHex, setPqBindingHex] = useState<string | null>(null);
 
 	const handleAccept = async () => {
 		if (!sessionToken || !deviceId) return;
@@ -96,7 +97,41 @@ export function AcceptInviteModal({ inviteCode, onClose, onAccepted }: AcceptInv
 			// Step 6: deliver the Welcome to the inviter (MLS ciphertext — server can't read it)
 			await sendWelcome(sessionToken, groupId, welcome, inviterDeviceId);
 
+			// Step 7 (PQ extension) — §5.3 Phase B: quantum-resistant group confirmation.
+			// We encapsulate to the inviter's ML-KEM-768 key (embedded in their KeyPackage)
+			// and send the ciphertext as a pq_init Application message.  The inviter decaps
+			// on receipt and both sides derive the same HKDF-SHA256 binding hex.
+			// All PQ steps are best-effort — failure leaves the classical E2EE channel intact.
+			let derivedPqBindingHex: string | null = null;
+			try {
+				const members = await cryptoWorker.mlsGroupMembers(identityId, groupId);
+				// Creator (us) is leaf 0; inviter is the other member.
+				const peer = members.find((m) => m.leafIndex !== 0) ?? members[members.length - 1];
+				const sigKeyBytes = new Uint8Array(peer.sigKeyHex.length / 2);
+				for (let i = 0; i < sigKeyBytes.length; i++) {
+					sigKeyBytes[i] = Number.parseInt(peer.sigKeyHex.slice(i * 2, i * 2 + 2), 16);
+				}
+				const { encapKey } = await cryptoWorker.mlsPqExtractAndVerifyEncapKey(
+					keyPackage,
+					sigKeyBytes,
+				);
+				const { ciphertext: pqCt, sharedSecretHandle } =
+					await cryptoWorker.mlKem768EncapV2(encapKey);
+				const pqPayload = JSON.stringify({ type: "pq_init", ct: Array.from(pqCt) });
+				const { ciphertext: mlsCt } = await cryptoWorker.mlsEncrypt(
+					identityId,
+					groupId,
+					new TextEncoder().encode(pqPayload),
+				);
+				await sendMessage(sessionToken, groupId, mlsCt);
+				const { bindingHex } = await cryptoWorker.mlsPqDeriveBinding(sharedSecretHandle, groupId);
+				derivedPqBindingHex = bindingHex;
+			} catch {
+				// PQ extension unavailable or peer has no PQ key — graceful degradation.
+			}
+
 			setNewGroupId(groupId);
+			setPqBindingHex(derivedPqBindingHex);
 			setStep("accepted");
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : "";
@@ -113,6 +148,7 @@ export function AcceptInviteModal({ inviteCode, onClose, onAccepted }: AcceptInv
 		setStep("idle");
 		setErrorKind("generic");
 		setNewGroupId("");
+		setPqBindingHex(null);
 		onClose();
 	};
 
@@ -275,6 +311,26 @@ export function AcceptInviteModal({ inviteCode, onClose, onAccepted }: AcceptInv
 							<Icon name="check" size={14} color="#5EE6A8" />
 							<span>Encrypted channel established.</span>
 						</div>
+						{pqBindingHex && (
+							<div
+								style={{
+									display: "flex",
+									alignItems: "center",
+									gap: 8,
+									padding: "8px 12px",
+									background: "rgba(168,200,255,0.06)",
+									border: "1px solid rgba(168,200,255,0.22)",
+									borderRadius: 10,
+									fontSize: 11,
+								}}
+							>
+								<Icon name="lock" size={11} color="#A8C8FF" />
+								<span style={{ color: "#A8C8FF", fontWeight: 500 }}>PQ</span>
+								<span style={{ color: "var(--fg-3)", fontFamily: "var(--font-mono)" }}>
+									{pqBindingHex}
+								</span>
+							</div>
+						)}
 						<button
 							type="button"
 							data-testid="open-chat-btn"

@@ -19,6 +19,9 @@ import { useAuthStore } from "../store/auth";
 import { uint8ToBase64 } from "../utils/base64";
 import { useCryptoWorker } from "./useCryptoWorker";
 
+// Keep a direct store reference for use inside async callbacks (not a hook call).
+const getAuthState = () => useAuthStore.getState();
+
 const POLL_INTERVAL_MS = 3_000;
 
 /**
@@ -55,15 +58,18 @@ export interface IncomingMessage {
 /**
  * Start polling for messages for the given MLS identity/group pair.
  *
- * @param identityId Local MLS identity ID (from mlsInitIdentity).
- * @param groupId    MLS group UUID to filter and decrypt for.
- * @param onMessage  Stable callback invoked for each decrypted Application message.
- *                   Must be memoized with useCallback — passed as a dep.
+ * @param identityId   Local MLS identity ID (from mlsInitIdentity).
+ * @param groupId      MLS group UUID to filter and decrypt for.
+ * @param onMessage    Stable callback invoked for each decrypted Application message.
+ *                     Must be memoized with useCallback — passed as a dep.
+ * @param onPqBinding  Optional callback invoked when a pq_init envelope is processed
+ *                     (§5.3 Phase B). Receives the groupId and 16-char binding hex.
  */
 export function useMessages(
 	identityId: string | undefined,
 	groupId: string | undefined,
 	onMessage: (msg: IncomingMessage) => void,
+	onPqBinding?: (groupId: string, bindingHex: string) => void,
 ): void {
 	const { sessionToken } = useAuthStore();
 	const cryptoWorker = useCryptoWorker();
@@ -73,6 +79,11 @@ export function useMessages(
 	const onMessageRef = useRef(onMessage);
 	useEffect(() => {
 		onMessageRef.current = onMessage;
+	});
+
+	const onPqBindingRef = useRef(onPqBinding);
+	useEffect(() => {
+		onPqBindingRef.current = onPqBinding;
 	});
 
 	// Track the latest created_at we've seen to avoid re-delivering on restart.
@@ -102,10 +113,11 @@ export function useMessages(
 				const ciphertextB64 = uint8ToBase64(env.ciphertext);
 				const epochSeq = env.epoch ?? Date.now();
 
-				// §9.2: try JSON-parsing for structured messages (image attachments).
+				// §9.2 / §5.3 Phase B: try JSON-parsing for structured messages.
 				// Non-JSON or missing `type` field → treat as legacy plain text.
 				let text = decoded;
 				let media: MediaPayload | undefined;
+				let shouldDisplayMessage = true;
 				try {
 					const parsed = JSON.parse(decoded) as Record<string, unknown>;
 					if (
@@ -122,24 +134,44 @@ export function useMessages(
 							mediaKey: parsed.mediaKey as number[],
 							iv: parsed.iv as number[],
 						};
+					} else if (parsed.type === "pq_init" && Array.isArray(parsed.ct)) {
+						// §5.3 Phase B: PQ invite confirmation — decap ML-KEM ciphertext + derive binding.
+						shouldDisplayMessage = false;
+						const pqHandle = getAuthState().pqDecapKeyHandle;
+						if (pqHandle && cryptoWorker) {
+							try {
+								const ct = new Uint8Array(parsed.ct as number[]);
+								const { sharedSecretHandle } = await cryptoWorker.mlKem768DecapV2(pqHandle, ct);
+								const { bindingHex } = await cryptoWorker.mlsPqDeriveBinding(
+									sharedSecretHandle,
+									groupId,
+								);
+								await cryptoWorker.mlKem768DropDecapKey(pqHandle);
+								getAuthState().clearPqDecapKeyHandle();
+								onPqBindingRef.current?.(groupId, bindingHex);
+							} catch {
+								// PQ failure is non-fatal — classical E2EE channel remains active.
+							}
+						}
 					}
 				} catch {
 					// Not JSON — plain text message, no action needed.
 				}
 
-				// Disappearing messages: parse server-set expires_at into unix ms.
-				const expiresAt = env.expires_at ? new Date(env.expires_at).getTime() : undefined;
-
-				onMessageRef.current({
-					id: env.id,
-					senderId: env.sender,
-					groupId: env.group_id,
-					text,
-					media,
-					ciphertextB64,
-					epochSeq,
-					expiresAt,
-				});
+				if (shouldDisplayMessage) {
+					// Disappearing messages: parse server-set expires_at into unix ms.
+					const expiresAt = env.expires_at ? new Date(env.expires_at).getTime() : undefined;
+					onMessageRef.current({
+						id: env.id,
+						senderId: env.sender,
+						groupId: env.group_id,
+						text,
+						media,
+						ciphertextB64,
+						epochSeq,
+						expiresAt,
+					});
+				}
 				await ackMessage(sessionToken, env.id).catch(() => {});
 			} catch {
 				// Decryption failure (wrong epoch, tampered, etc.) — skip envelope.

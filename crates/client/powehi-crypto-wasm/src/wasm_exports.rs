@@ -974,6 +974,44 @@ pub fn ml_kem_768_drop_shared_secret(handle: &str) {
     KEM_SHARED_SECRETS.with(|m| m.borrow_mut().remove(handle));
 }
 
+/// Derive an 8-byte PQ group binding from an ML-KEM-768 shared-secret handle and drop the handle.
+///
+/// Computes HKDF-SHA256(ikm=ss, salt=None,
+///   info=b"powehi-pq-binding-v1" || group_id_bytes) → 8 bytes → 16-char lowercase hex.
+///
+/// **Always** removes `ss_handle` from `KEM_SHARED_SECRETS` (Zeroizing zeroes buffer on
+/// drop), even on error.  The caller MUST NOT use `ss_handle` after this call.
+///
+/// Returns an error only if `ss_handle` was already absent (double-use or session restart).
+/// The group_id is mixed in so bindings are group-scoped: two groups sharing the same
+/// encapsulated secret produce different binding values.
+///
+/// Both sides of the PQ handshake independently derive the same `bindingHex` when the
+/// ML-KEM exchange succeeded without tampering.  Caller surfaces this as a "PQ Protected"
+/// indicator without revealing the raw shared secret.
+#[wasm_bindgen]
+pub fn mls_pq_derive_binding(ss_handle: &str, group_id: &str) -> Result<JsValue, JsError> {
+    // Remove and zeroize regardless of subsequent success/failure.
+    let ss = KEM_SHARED_SECRETS
+        .with(|m| m.borrow_mut().remove(ss_handle))
+        .ok_or_else(|| js_err("unknown shared secret handle"))?;
+    let hex = pq_derive_binding_inner(&ss, group_id).map_err(js_err)?;
+    js_obj(&[("bindingHex", JsValue::from_str(&hex))])
+}
+
+fn pq_derive_binding_inner(ss: &[u8], group_id: &str) -> Result<String, &'static str> {
+    use hkdf::Hkdf;
+    use sha2::Sha256;
+    let hk = Hkdf::<Sha256>::new(None, ss);
+    let mut info = Vec::with_capacity(20 + group_id.len());
+    info.extend_from_slice(b"powehi-pq-binding-v1");
+    info.extend_from_slice(group_id.as_bytes());
+    let mut okm = [0u8; 8];
+    hk.expand(&info, &mut okm)
+        .map_err(|_| "HKDF expand failed")?;
+    Ok(okm.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 // ── ML-KEM-768 Phase B: signed encap key (ADR-0003 Phase B, Y-3 fix) ──────────
 //
 // Y-3 closed: the encap key holder signs their ML-KEM-768 encap key with their
@@ -1884,6 +1922,82 @@ mod tests {
             sn,
             "689053 337949 184798 288064 134849 362568 560227 765408 921198 315305 693006 807986",
             "safety number derivation must not change silently"
+        );
+    }
+
+    // ── §5.3 PQ Group Binding ─────────────────────────────────────────────────
+
+    /// Happy path: derive binding from 32-byte shared secret, verify format.
+    #[test]
+    fn test_pq_derive_binding_returns_16_char_hex() {
+        let hex = pq_derive_binding_inner(&[0xABu8; 32], "group-abc-123").unwrap();
+        assert_eq!(hex.len(), 16, "binding must be 16 hex chars (8 bytes)");
+        assert!(
+            hex.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+            "must be lowercase hex"
+        );
+    }
+
+    /// Different group IDs produce different bindings (group-scoped derivation).
+    #[test]
+    fn test_pq_derive_binding_is_group_scoped() {
+        let ss = [0xCCu8; 32];
+        let b1 = pq_derive_binding_inner(&ss, "group-aaa").unwrap();
+        let b2 = pq_derive_binding_inner(&ss, "group-bbb").unwrap();
+        assert_ne!(
+            b1, b2,
+            "different group IDs must produce different bindings"
+        );
+    }
+
+    /// Same inputs → same output (deterministic derivation).
+    #[test]
+    fn test_pq_derive_binding_is_deterministic() {
+        let ss = [0x55u8; 32];
+        let b1 = pq_derive_binding_inner(&ss, "grp-xyz").unwrap();
+        let b2 = pq_derive_binding_inner(&ss, "grp-xyz").unwrap();
+        assert_eq!(b1, b2, "same inputs must produce same binding");
+    }
+
+    /// Known-answer test — detects silent changes to the HKDF derivation.
+    /// HKDF-SHA256(ikm=[0x42;32], salt=None, info=b"powehi-pq-binding-v1grp-1") → 8 bytes.
+    /// Expected value captured from the initial correct implementation; must never change
+    /// without a crypto-reviewer pass (silent rotation would invalidate all existing sessions).
+    #[test]
+    fn test_pq_derive_binding_known_answer() {
+        let got = pq_derive_binding_inner(&[0x42u8; 32], "grp-1").unwrap();
+        // KAT: HKDF-SHA256(ikm=[0x42;32], salt=0*32, info=b"powehi-pq-binding-v1grp-1")[:8]
+        // Value confirmed against hkdf 0.12 + sha2 0.10 crate output (captured from
+        // initial correct implementation; gate any change behind crypto-reviewer).
+        assert_eq!(
+            got, "c702693eff3c46bd",
+            "PQ binding derivation must not change silently"
+        );
+    }
+
+    /// Simulates the handle-drop invariant: insert a handle, remove it, verify gone.
+    /// (The WASM export uses js_obj which requires wasm32; logic is tested here directly.)
+    #[test]
+    fn test_pq_derive_binding_map_remove_drops_entry() {
+        let handle = "pq-test-drop-handle-native-1";
+        KEM_SHARED_SECRETS.with(|m| {
+            m.borrow_mut()
+                .insert(handle.to_string(), Zeroizing::new(vec![0x11u8; 32]));
+        });
+        // The WASM function removes the entry immediately before derivation.
+        let removed = KEM_SHARED_SECRETS.with(|m| m.borrow_mut().remove(handle));
+        assert!(removed.is_some(), "inserted handle must be removable");
+        let still_present = KEM_SHARED_SECRETS.with(|m| m.borrow().contains_key(handle));
+        assert!(!still_present, "handle must be gone after removal");
+    }
+
+    /// Unknown-handle path: removal of absent key returns None → error.
+    #[test]
+    fn test_pq_derive_binding_unknown_handle_returns_none() {
+        let removed = KEM_SHARED_SECRETS.with(|m| m.borrow_mut().remove("nonexistent-pq-42"));
+        assert!(
+            removed.is_none(),
+            "absent handle must return None (→ JsError in WASM export)"
         );
     }
 

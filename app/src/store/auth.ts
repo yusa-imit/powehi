@@ -8,7 +8,15 @@ interface AuthState {
 	sessionToken: string | null;
 	/** MLS identity handle in the WASM worker for this session. Re-generated each login. */
 	identityId: string | null;
-	login: (deviceId: string, sessionToken?: string, identityId?: string) => void;
+	/** ML-KEM-768 decap key handle for the Welcome-side PQ binding (§5.3 Phase B). Cleared after use. */
+	pqDecapKeyHandle: string | null;
+	login: (
+		deviceId: string,
+		sessionToken?: string,
+		identityId?: string,
+		pqDecapKeyHandle?: string,
+	) => void;
+	clearPqDecapKeyHandle: () => void;
 	logout: () => Promise<void>;
 }
 
@@ -17,13 +25,21 @@ export const useAuthStore = create<AuthState>()((set) => ({
 	deviceId: null,
 	sessionToken: null,
 	identityId: null,
-	login: (deviceId: string, sessionToken?: string, identityId?: string) =>
+	pqDecapKeyHandle: null,
+	login: (
+		deviceId: string,
+		sessionToken?: string,
+		identityId?: string,
+		pqDecapKeyHandle?: string,
+	) =>
 		set({
 			phase: "app",
 			deviceId,
 			sessionToken: sessionToken ?? null,
 			identityId: identityId ?? null,
+			pqDecapKeyHandle: pqDecapKeyHandle ?? null,
 		}),
+	clearPqDecapKeyHandle: () => set({ pqDecapKeyHandle: null }),
 	logout: async () => {
 		// Await both wipes before clearing auth state (F3): key material must be
 		// gone from the worker heap before a new OPAQUE session can begin.
@@ -32,6 +48,12 @@ export const useAuthStore = create<AuthState>()((set) => ({
 		const proxy = getCryptoWorkerProxy();
 		await proxy?.clearSessionState().catch(() => {});
 		await proxy?.dropDbKey();
-		set({ phase: "login", deviceId: null, sessionToken: null, identityId: null });
+		set({
+			phase: "login",
+			deviceId: null,
+			sessionToken: null,
+			identityId: null,
+			pqDecapKeyHandle: null,
+		});
 	},
 }));
