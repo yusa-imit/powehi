@@ -17,6 +17,19 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-11, cycle 122 — FEATURE: client-side disappearing message expiry — prd.md §9.4.3)
+- **Cycle 122 (commit efad54f):** FEATURE — closes the client-side gap in the disappearing messages feature (prd.md §9.4.3 + §15.3 Post-MVP "Disappearing Messages"). Backend TTL was already enforced server-side (`expires_at` on envelopes); this cycle wires the signal into the frontend and adds a periodic sweep.
+  - **`app/src/hooks/useMessages.ts`** (MODIFIED): Added `expiresAt?: number` (unix ms) to `IncomingMessage`. In `processEnvelope`, parses `env.expires_at` ISO string → unix ms before calling `onMessage`.
+  - **`app/src/db/schema.ts`** (MODIFIED): Added `expiresAt?: number` to `MessageRow`. Dexie v5 migration adds `expiresAt` as indexed field on messages table for efficient range-query purge.
+  - **`app/src/db/encrypted-db.ts`** (MODIFIED): New `purgeExpiredMessages(): Promise<number>` — `db.messages.where("expiresAt").belowOrEqual(now).primaryKeys()` bulk-deletes across all groups. `expiresAt` is intentionally unencrypted (timestamp, not content; same sensitivity class as `receivedAt`/`groupId`).
+  - **`app/src/hooks/usePersistentMessages.ts`** (MODIFIED): `persistIncoming` stores `expiresAt: msg.expiresAt`. New `purgeExpired()` callback filters `rows` state (removes `expiresAt ≤ now`) and calls `encryptedDb.purgeExpiredMessages()` best-effort. `PersistedMessages` interface gains `purgeExpired: () => void`.
+  - **`app/src/components/ChatLayout.tsx`** (MODIFIED): `handleIncoming` passes `expiresAt: msg.expiresAt` to pushed chat message. Added 30s `setInterval` sweep in `useEffect`: filters expired messages from `chats` React state and calls `purgeExpired()` for Dexie cleanup. Returns `clearInterval` on unmount.
+  - **security-auditor:** PASS — no RED. YELLOW-1: 30s cadence vs future sub-30s TTLs (min TTL option is currently 300s; add per-message setTimeout if shorter options added). YELLOW-2: purge failures invisible (no telemetry counter; mirrors pattern of `writeErrorCount` — future work). `expiresAt` not logged, server-authoritative, no XSS, no SSRF.
+  - **337 frontend tests** (+5: 2 `useMessages` expiresAt mapping, 3 `usePersistentMessages` purge/store; was 332); Biome clean; tsc clean.
+  - **Remaining deferred security findings (YELLOW):** same as cycle 121 plus:
+    - Disappearing messages YELLOW-1: sweep cadence vs future sub-30s TTL options
+    - Disappearing messages YELLOW-2: purgeExpired failure invisible (no telemetry counter)
+
 ## Current state (2026-06-11, cycle 121 — FEATURE: §9.2 media receive path — download, decrypt, display incoming images)
 - **Cycle 121 (commit eda5a82):** FEATURE — closes the final §9.2 receiver-side gap: incoming image messages now download and decrypt from R2 and display inline instead of showing "Image attachment" placeholder.
   - **`app/src/hooks/useMediaReceive.ts`** (NEW): Hook that takes `MediaPayload | undefined`. Gets presigned R2 download URL via `getMediaDownloadUrl`, fetches ciphertext with `redirect: "error"` (SSRF defense-in-depth), calls `cryptoWorker.mediaDecryptWithRawKey(mediaKey, iv, ct, blobHash)` (WASM verifies SHA-256(ciphertext) === blobHash before AES-GCM decrypt — R-2 blob-swap detection), creates blob object URL (MIME sniffed from magic bytes: jpeg/png/gif/webp/fallback-jpeg). `mediaKey.fill(0)` in `finally` (security invariant). Object URL revoked on unmount or dep change (no memory leak). `cancelled` flag guards all `await` points.
