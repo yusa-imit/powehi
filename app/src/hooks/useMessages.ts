@@ -25,6 +25,17 @@ const getAuthState = () => useAuthStore.getState();
 const POLL_INTERVAL_MS = 3_000;
 
 /**
+ * Inline encrypted thumbnail from the MLS payload (prd.md §9.4.1).
+ * Arrives alongside the image message; no R2 fetch required for display.
+ * The caller must zero `key` after use: `new Uint8Array(thumb.key).fill(0)`.
+ */
+export interface ThumbnailPayload {
+	ct: number[];
+	key: number[];
+	iv: number[];
+}
+
+/**
  * Parsed media attachment payload from an §9.2 image message.
  * mediaKey is the raw 32-byte AES-256-GCM key as a JS number array (from MLS-decrypted JSON).
  * The caller must zero it via `new Uint8Array(media.mediaKey).fill(0)` after use.
@@ -34,6 +45,8 @@ export interface MediaPayload {
 	blobHash: number[];
 	mediaKey: number[];
 	iv: number[];
+	/** Optional inline thumbnail from §9.4.1. Present when sender used mediaMessageCreateWithThumbnail. */
+	thumbnail?: ThumbnailPayload;
 }
 
 export interface IncomingMessage {
@@ -128,11 +141,28 @@ export function useMessages(
 						Array.isArray(parsed.iv)
 					) {
 						text = "[image]";
+						const thumbRaw = (() => {
+							const t = parsed.thumbnail;
+							if (
+								t !== null &&
+								typeof t === "object" &&
+								Array.isArray((t as Record<string, unknown>).ct) &&
+								Array.isArray((t as Record<string, unknown>).key) &&
+								Array.isArray((t as Record<string, unknown>).iv) &&
+								((t as Record<string, unknown>).ct as number[]).length <= 16_384 &&
+								((t as Record<string, unknown>).key as number[]).length === 32 &&
+								((t as Record<string, unknown>).iv as number[]).length === 12
+							) {
+								return t as ThumbnailPayload;
+							}
+							return undefined;
+						})();
 						media = {
 							blobId: parsed.blobId as string,
 							blobHash: parsed.blobHash as number[],
 							mediaKey: parsed.mediaKey as number[],
 							iv: parsed.iv as number[],
+							thumbnail: thumbRaw,
 						};
 					} else if (parsed.type === "pq_init" && Array.isArray(parsed.ct)) {
 						// §5.3 Phase B: PQ invite confirmation — decap ML-KEM ciphertext + derive binding.

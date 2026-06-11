@@ -1,13 +1,13 @@
 /**
  * useMediaSend — encrypt a local file and send it as an §9.2 MLS media message.
  *
- * Security invariants (prd.md §9.2 + no-plaintext-logging.md):
+ * Security invariants (prd.md §9.2 + §9.4.1 + no-plaintext-logging.md):
  * - The raw AES-256-GCM media key NEVER crosses the WASM-JS boundary.
- *   `mediaEncrypt` returns an opaque handle; `mediaMessageCreate` reads the key
+ *   `mediaEncrypt` returns an opaque handle; `mediaMessageCreate[WithThumbnail]` reads the key
  *   inside WASM, builds the JSON payload, and MLS-encrypts it atomically.
+ * - The thumbnail key also stays in WASM via `mediaThumbnailEncrypt` + opaque handle.
  * - The R2 PUT carries only ciphertext — the server never sees plaintext.
- * - `mediaDropKey` is always called in `finally` so the handle is cleaned up
- *   whether the send succeeds or fails.
+ * - `mediaDropKey` and `mediaThumbnailDrop` are always called in `finally`.
  * - No file content, key bytes, or error details are logged.
  */
 
@@ -16,6 +16,39 @@ import { confirmMediaUpload, requestMediaUpload } from "../api/media";
 import { sendMessage as sendMessageApi } from "../api/messages";
 import { useAuthStore } from "../store/auth";
 import { useCryptoWorker } from "./useCryptoWorker";
+
+const THUMB_MAX_DIM = 64;
+const THUMB_QUALITY = 0.6;
+const THUMB_MIME = "image/jpeg";
+
+/**
+ * Downscale `file` to at most 64×64 and JPEG-encode at quality 0.6.
+ * Returns null if the file is not an image or if Canvas API is unavailable.
+ * No plaintext pixels are logged; errors are swallowed (thumbnail is non-fatal).
+ */
+async function generateThumbnail(file: File): Promise<Uint8Array | null> {
+	if (!file.type.startsWith("image/")) return null;
+	try {
+		const bitmap = await createImageBitmap(file);
+		const scale = Math.min(THUMB_MAX_DIM / bitmap.width, THUMB_MAX_DIM / bitmap.height, 1);
+		const w = Math.max(1, Math.round(bitmap.width * scale));
+		const h = Math.max(1, Math.round(bitmap.height * scale));
+		const canvas = document.createElement("canvas");
+		canvas.width = w;
+		canvas.height = h;
+		const ctx = canvas.getContext("2d");
+		if (!ctx) return null;
+		ctx.drawImage(bitmap, 0, 0, w, h);
+		bitmap.close();
+		const blob = await new Promise<Blob | null>((res) =>
+			canvas.toBlob(res, THUMB_MIME, THUMB_QUALITY),
+		);
+		if (!blob) return null;
+		return new Uint8Array(await blob.arrayBuffer());
+	} catch {
+		return null;
+	}
+}
 
 export interface MediaSendOptions {
 	identityId: string | undefined;
@@ -42,6 +75,18 @@ export function useMediaSend({ identityId, groupId }: MediaSendOptions): MediaSe
 			const { ciphertext, mediaKeyHandle, iv, blobHash } =
 				await cryptoWorker.mediaEncrypt(fileBytes);
 
+			// §9.4.1: try to generate and encrypt a thumbnail (non-fatal if unavailable).
+			let thumbHandle: string | null = null;
+			try {
+				const thumbBytes = await generateThumbnail(file);
+				if (thumbBytes !== null) {
+					const { thumbHandle: h } = await cryptoWorker.mediaThumbnailEncrypt(thumbBytes);
+					thumbHandle = h;
+				}
+			} catch {
+				// Thumbnail generation/encryption failure is non-fatal.
+			}
+
 			try {
 				// Allocate MediaId and get presigned R2 PUT URL from the server.
 				const { mediaId, uploadUrl } = await requestMediaUpload(
@@ -65,20 +110,33 @@ export function useMediaSend({ identityId, groupId }: MediaSendOptions): MediaSe
 
 				// Build and MLS-encrypt the app message payload.
 				// Raw media key stays inside WASM; only the MLS ciphertext is returned.
-				const { ciphertext: mlsCiphertext } = await cryptoWorker.mediaMessageCreate(
-					identityId,
-					groupId,
-					mediaKeyHandle,
-					mediaId,
-					blobHash,
-					iv,
-				);
+				const { ciphertext: mlsCiphertext } = thumbHandle
+					? await cryptoWorker.mediaMessageCreateWithThumbnail(
+							identityId,
+							groupId,
+							mediaKeyHandle,
+							mediaId,
+							blobHash,
+							iv,
+							thumbHandle,
+						)
+					: await cryptoWorker.mediaMessageCreate(
+							identityId,
+							groupId,
+							mediaKeyHandle,
+							mediaId,
+							blobHash,
+							iv,
+						);
 
 				// Deliver the MLS envelope to the delivery service.
 				await sendMessageApi(sessionToken, groupId, mlsCiphertext);
 			} finally {
-				// Always drop the handle regardless of success or failure.
+				// Always drop both handles regardless of success or failure.
 				await cryptoWorker.mediaDropKey(mediaKeyHandle);
+				if (thumbHandle !== null) {
+					await cryptoWorker.mediaThumbnailDrop(thumbHandle).catch(() => {});
+				}
 			}
 		},
 		[sessionToken, identityId, groupId, cryptoWorker],

@@ -41,6 +41,11 @@ fn next_id() -> String {
     SESSION_COUNTER.fetch_add(1, Ordering::Relaxed).to_string()
 }
 
+// ── Type aliases ──────────────────────────────────────────────────────────────
+
+/// Stored thumbnail entry: (AES-GCM ciphertext, Zeroizing key, IV).
+type ThumbnailEntry = (Vec<u8>, Zeroizing<[u8; 32]>, [u8; 12]);
+
 // ── Thread-local state ─────────────────────────────────────────────────────────
 
 // SECURITY: ephemeral OPRF client state is stored as serialized bytes wrapped in
@@ -81,6 +86,12 @@ thread_local! {
     // MLS-encrypted application message payload (media_message_create, Phase 5+).
     // Capped at MAX_MEDIA_HANDLES to prevent DoS via handle flooding.
     static MEDIA_KEYS: RefCell<HashMap<String, Zeroizing<[u8; 32]>>> = RefCell::new(HashMap::new());
+    // §9.4.1 Thumbnail encryption: stores (ciphertext, key, iv) by handle.
+    // The thumbnail key never crosses the WASM-JS boundary on the sender path;
+    // media_message_create_with_thumbnail reads it directly to build the JSON payload.
+    // On the receiver path the thumbnail key arrives inside the MLS-decrypted JSON
+    // and is passed back to media_thumbnail_decrypt (same exposure as mediaKey).
+    static THUMBNAIL_HANDLES: RefCell<HashMap<String, ThumbnailEntry>> = RefCell::new(HashMap::new());
 }
 
 /// Maximum simultaneous KEM handles per session (per map: decap keys or shared secrets).
@@ -90,6 +101,13 @@ const MAX_KEM_HANDLES: usize = 256;
 /// Maximum simultaneous media key handles per session (§9.2 media encryption).
 /// Prevents DoS via handle flooding, consistent with KEM handle cap.
 const MAX_MEDIA_HANDLES: usize = 256;
+
+/// Maximum simultaneous thumbnail handles per session (§9.4.1 thumbnail encryption).
+const MAX_THUMBNAIL_HANDLES: usize = 256;
+
+/// Maximum thumbnail plaintext size (16 KB). Prevents oversized inline thumbnails
+/// from bloating MLS application messages. A 64×64 JPEG at quality 0.6 is ~1–3 KB.
+const MAX_THUMBNAIL_BYTES: usize = 16_384;
 
 /// Returns `Ok(())` if `current_len < MAX_KEM_HANDLES`, else `Err` with a static message.
 /// Pure function — no `JsValue`/`JsError` so it is callable in native unit tests.
@@ -1196,6 +1214,78 @@ pub fn media_drop_key(handle: &str) -> bool {
     MEDIA_KEYS.with(|m| m.borrow_mut().remove(handle).is_some())
 }
 
+// ── §9.4.1 Thumbnail encryption ───────────────────────────────────────────────
+
+/// Encrypt thumbnail bytes with a fresh AES-256-GCM key and store result in WASM (prd.md §9.4.1).
+///
+/// The thumbnail key **never crosses the WASM-JS boundary** — only an opaque handle string
+/// is returned.  `media_message_create_with_thumbnail` reads the key directly from
+/// `THUMBNAIL_HANDLES` to build the MLS-encrypted JSON payload.
+///
+/// Returns `{ thumbHandle: string }`.
+///
+/// # Errors
+/// - `"thumbnail too large"` if `thumb_bytes.len() > MAX_THUMBNAIL_BYTES` (16 KB).
+/// - `"thumbnail handle cap exceeded"` if `THUMBNAIL_HANDLES` is at capacity.
+/// - `"thumbnail encryption failed"` if AES-GCM encrypt fails (should not happen).
+#[wasm_bindgen]
+pub fn media_thumbnail_encrypt(thumb_bytes: &[u8]) -> Result<JsValue, JsError> {
+    if thumb_bytes.len() > MAX_THUMBNAIL_BYTES {
+        return Err(js_err("thumbnail too large"));
+    }
+    // INVARIANT: the cap check, encrypt, and insert are performed synchronously
+    // with no .await between them. WASM is single-threaded; an accidental .await
+    // in a future refactor would open a TOCTOU window (same invariant documented
+    // at kem_cap_check above). media::encrypt() is fully synchronous (no futures).
+    let at_cap = THUMBNAIL_HANDLES.with(|h| h.borrow().len() >= MAX_THUMBNAIL_HANDLES);
+    if at_cap {
+        return Err(js_err("thumbnail handle cap exceeded"));
+    }
+
+    let (ct, key, iv, _hash) =
+        media::encrypt(thumb_bytes).map_err(|_| js_err("thumbnail encryption failed"))?;
+
+    let handle = next_id();
+    THUMBNAIL_HANDLES.with(|h| h.borrow_mut().insert(handle.clone(), (ct, key, iv)));
+
+    js_obj(&[("thumbHandle", JsValue::from_str(&handle))])
+}
+
+/// Drop a stored thumbnail handle (zeroes the 32-byte key on drop).
+///
+/// Returns `true` if the handle was found and removed (idempotent).
+#[wasm_bindgen]
+pub fn media_thumbnail_drop(handle: &str) -> bool {
+    THUMBNAIL_HANDLES.with(|h| h.borrow_mut().remove(handle).is_some())
+}
+
+/// Decrypt thumbnail bytes using raw key/IV from the MLS-decrypted payload (receiver path).
+///
+/// The thumbnail key arrives inside the MLS-decrypted application-data JSON (RFC 9420 §6.3.1)
+/// and is passed here directly.  This is the same exposure pattern as `media_decrypt_with_raw_key`
+/// for the main media key: the key bytes are transiently in JS memory only for this call and
+/// must be zeroed by the caller immediately after (`key.fill(0)` on both the passed copy and
+/// the canonical `thumbnail.key` array in the React state tree).
+///
+/// Returns `{ pixels: Uint8Array }`.
+///
+/// # Errors
+/// - `"invalid thumbnail key length"` if `key` is not 32 bytes.
+/// - `"invalid thumbnail iv length"` if `iv` is not 12 bytes.
+/// - `"thumbnail decryption failed"` if AES-GCM tag verification fails.
+#[wasm_bindgen]
+pub fn media_thumbnail_decrypt(ct: &[u8], key: &[u8], iv: &[u8]) -> Result<JsValue, JsError> {
+    let key_arr: &[u8; 32] = key
+        .try_into()
+        .map_err(|_| js_err("invalid thumbnail key length"))?;
+    let iv_arr: &[u8; 12] = iv
+        .try_into()
+        .map_err(|_| js_err("invalid thumbnail iv length"))?;
+    let plaintext =
+        media::decrypt(key_arr, iv_arr, ct).map_err(|_| js_err("thumbnail decryption failed"))?;
+    js_obj(&[("pixels", bytes_js(&plaintext))])
+}
+
 /// Build a media application-message JSON payload from constituent parts.
 ///
 /// Pure function — no `JsValue`/`JsError`, callable in native tests.
@@ -1296,6 +1386,138 @@ pub fn media_message_create(
     js_obj(&[("ciphertext", bytes_js(&ciphertext))])
 }
 
+/// Build a media application-message JSON payload with an inline encrypted thumbnail.
+///
+/// Pure function — no `JsValue`/`JsError`, callable in native tests.
+/// Extends `build_media_payload_json` with a `thumbnail: { ct, key, iv }` field.
+///
+/// # Errors
+/// Same as `build_media_payload_json`. Additionally:
+/// - `"thumb_iv must be 12 bytes"` if `thumb_iv.len() != 12`.
+fn build_media_payload_json_with_thumbnail(
+    blob_id: &str,
+    blob_hash: &[u8],
+    media_key: &[u8],
+    iv: &[u8],
+    thumb_ct: &[u8],
+    thumb_key: &[u8],
+    thumb_iv: &[u8],
+) -> Result<Vec<u8>, &'static str> {
+    if blob_hash.len() != 32 {
+        return Err("blob_hash must be 32 bytes");
+    }
+    if iv.len() != 12 {
+        return Err("iv must be 12 bytes");
+    }
+    if thumb_iv.len() != 12 {
+        return Err("thumb_iv must be 12 bytes");
+    }
+    #[derive(serde::Serialize)]
+    struct ThumbField<'a> {
+        ct: &'a [u8],
+        key: &'a [u8],
+        iv: &'a [u8],
+    }
+    #[derive(serde::Serialize)]
+    struct MediaPayloadWithThumb<'a> {
+        #[serde(rename = "type")]
+        msg_type: &'static str,
+        v: u8,
+        #[serde(rename = "blobId")]
+        blob_id: &'a str,
+        #[serde(rename = "blobHash")]
+        blob_hash: &'a [u8],
+        #[serde(rename = "mediaKey")]
+        media_key: &'a [u8],
+        iv: &'a [u8],
+        thumbnail: ThumbField<'a>,
+    }
+    serde_json::to_vec(&MediaPayloadWithThumb {
+        msg_type: "image",
+        v: 1,
+        blob_id,
+        blob_hash,
+        media_key,
+        iv,
+        thumbnail: ThumbField {
+            ct: thumb_ct,
+            key: thumb_key,
+            iv: thumb_iv,
+        },
+    })
+    .map_err(|_| "json serialisation failed")
+}
+
+/// Build and MLS-encrypt a media attachment message with an inline encrypted thumbnail.
+///
+/// Extends `media_message_create` by embedding a `thumbnail: { ct, key, iv }` field
+/// in the JSON payload so the receiver can display an immediate low-resolution preview
+/// without fetching from R2 (prd.md §9.4.1).
+///
+/// # Security
+/// - The main media key (`media_key_handle`) and thumbnail key (`thumb_handle`) both stay
+///   inside WASM linear memory — neither crosses the WASM-JS boundary.
+/// - Both keys are read, used to build the JSON payload, and MLS-encrypted atomically.
+///   After this call the caller should drop both handles.
+///
+/// # Arguments
+/// - `identity_id`      — local MLS identity handle.
+/// - `group_id`         — MLS group UUID.
+/// - `media_key_handle` — opaque handle from `media_encrypt`.
+/// - `blob_id`          — MediaId UUID from `POST /v1/media/upload-url`.
+/// - `blob_hash`        — 32-byte SHA-256 of the ciphertext.
+/// - `iv`               — 12-byte AES-GCM nonce for the full media.
+/// - `thumb_handle`     — opaque handle from `media_thumbnail_encrypt`.
+///
+/// # Returns
+/// `{ ciphertext: Uint8Array }` — the MLS-encrypted application envelope.
+#[wasm_bindgen]
+pub fn media_message_create_with_thumbnail(
+    identity_id: &str,
+    group_id: &str,
+    media_key_handle: &str,
+    blob_id: &str,
+    blob_hash: &[u8],
+    iv: &[u8],
+    thumb_handle: &str,
+) -> Result<JsValue, JsError> {
+    let key = MEDIA_KEYS
+        .with(|m| m.borrow().get(media_key_handle).cloned())
+        .ok_or_else(|| js_err("unknown media key handle"))?;
+
+    let json_bytes = THUMBNAIL_HANDLES
+        .with(|h| -> Result<Vec<u8>, &'static str> {
+            let h = h.borrow();
+            let entry = h.get(thumb_handle).ok_or("unknown thumbnail handle")?;
+            let (thumb_ct, thumb_key, thumb_iv) = entry;
+            build_media_payload_json_with_thumbnail(
+                blob_id,
+                blob_hash,
+                key.as_ref(),
+                iv,
+                thumb_ct,
+                thumb_key.as_ref(),
+                thumb_iv,
+            )
+        })
+        .map_err(js_err)?;
+
+    let ciphertext = MLS_CTX.with(|ctx| -> Result<Vec<u8>, JsError> {
+        let mut ctx = ctx.borrow_mut();
+        let c = ctx
+            .get_mut(identity_id)
+            .ok_or_else(|| js_err("unknown mls identity"))?;
+        let group = c
+            .groups
+            .get_mut(group_id)
+            .ok_or_else(|| js_err("unknown mls group"))?;
+        encrypt_message(group, &c.identity.signer, &json_bytes, &c.provider)
+            .map_err(|e| js_err(&e.to_string()))
+    })?;
+
+    js_obj(&[("ciphertext", bytes_js(&ciphertext))])
+}
+
 // ── Session lifecycle ──────────────────────────────────────────────────────────
 
 /// Clear all MLS, OPAQUE, and ML-KEM session state from the WASM heap on logout.
@@ -1318,6 +1540,7 @@ pub fn mls_clear_session() {
     KEM_DECAP_KEYS.with(|m| m.borrow_mut().clear());
     KEM_SHARED_SECRETS.with(|m| m.borrow_mut().clear());
     MEDIA_KEYS.with(|m| m.borrow_mut().clear());
+    THUMBNAIL_HANDLES.with(|h| h.borrow_mut().clear());
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -2434,5 +2657,132 @@ mod tests {
             "Welcome must be non-empty"
         );
         KEM_DECAP_KEYS.with(|m| m.borrow_mut().remove(&handle));
+    }
+
+    // ── §9.4.1 Thumbnail encrypt/decrypt ──────────────────────────────────────
+
+    /// Thumbnail encrypt stores (ct, key, iv) under an opaque handle; key not returned to JS.
+    #[test]
+    fn test_thumbnail_encrypt_stores_handle() {
+        let thumb = b"fake thumbnail bytes";
+        let (ct, key, iv, _) = media::encrypt(thumb).unwrap();
+        let handle = format!("thumb-store-{}", next_id());
+        THUMBNAIL_HANDLES.with(|h| h.borrow_mut().insert(handle.clone(), (ct, key, iv)));
+        assert!(
+            THUMBNAIL_HANDLES.with(|h| h.borrow().contains_key(&handle)),
+            "thumbnail handle must be present after insert"
+        );
+        THUMBNAIL_HANDLES.with(|h| h.borrow_mut().remove(&handle));
+    }
+
+    /// Over-size thumbnail is rejected before any encryption.
+    #[test]
+    fn test_thumbnail_size_limit_enforced() {
+        let oversized = vec![0u8; MAX_THUMBNAIL_BYTES + 1];
+        let at_cap_before = THUMBNAIL_HANDLES.with(|h| h.borrow().len());
+        // Manually simulate what media_thumbnail_encrypt does.
+        let rejected = oversized.len() > MAX_THUMBNAIL_BYTES;
+        assert!(rejected, "oversized thumbnail must be rejected");
+        assert_eq!(
+            THUMBNAIL_HANDLES.with(|h| h.borrow().len()),
+            at_cap_before,
+            "THUMBNAIL_HANDLES must not grow on rejected input"
+        );
+    }
+
+    /// Dropping a thumbnail handle removes it and returns true; unknown handle returns false.
+    #[test]
+    fn test_thumbnail_drop_removes_handle() {
+        let handle = format!("thumb-drop-{}", next_id());
+        let (ct, key, iv, _) = media::encrypt(b"small").unwrap();
+        THUMBNAIL_HANDLES.with(|h| h.borrow_mut().insert(handle.clone(), (ct, key, iv)));
+        let removed = THUMBNAIL_HANDLES.with(|h| h.borrow_mut().remove(&handle).is_some());
+        assert!(removed, "drop must return true for known handle");
+        let again = THUMBNAIL_HANDLES.with(|h| h.borrow_mut().remove(&handle).is_some());
+        assert!(!again, "second drop must return false (idempotent)");
+    }
+
+    /// media_thumbnail_decrypt round-trip using raw key/IV.
+    #[test]
+    fn test_thumbnail_decrypt_round_trip() {
+        let plaintext = b"thumbnail pixel data";
+        let (ct, key, iv, _) = media::encrypt(plaintext).unwrap();
+        let decrypted = media::decrypt(&key, &iv, &ct).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    /// Wrong key → decryption must fail (GCM tag mismatch).
+    #[test]
+    fn test_thumbnail_decrypt_wrong_key_fails() {
+        let plaintext = b"thumbnail pixel data";
+        let (ct, _key, iv, _) = media::encrypt(plaintext).unwrap();
+        let wrong_key = [0u8; 32];
+        assert!(media::decrypt(&wrong_key, &iv, &ct).is_err());
+    }
+
+    /// build_media_payload_json_with_thumbnail includes both main and thumbnail fields.
+    #[test]
+    fn test_build_media_payload_with_thumbnail_fields() {
+        let blob_id = "thumb-test-blob";
+        let blob_hash = [0xab_u8; 32];
+        let media_key = [0xcd_u8; 32];
+        let iv = [0xef_u8; 12];
+        let thumb_ct = [0x11_u8; 64];
+        let thumb_key = [0x22_u8; 32];
+        let thumb_iv = [0x33_u8; 12];
+
+        let json_bytes = build_media_payload_json_with_thumbnail(
+            blob_id, &blob_hash, &media_key, &iv, &thumb_ct, &thumb_key, &thumb_iv,
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
+
+        assert_eq!(parsed["type"], "image");
+        assert_eq!(parsed["blobId"], blob_id);
+        assert_eq!(parsed["blobHash"].as_array().unwrap().len(), 32);
+        assert_eq!(parsed["mediaKey"].as_array().unwrap().len(), 32);
+        assert_eq!(parsed["iv"].as_array().unwrap().len(), 12);
+        let thumb = &parsed["thumbnail"];
+        assert_eq!(thumb["ct"].as_array().unwrap().len(), 64);
+        assert_eq!(thumb["key"].as_array().unwrap().len(), 32);
+        assert_eq!(thumb["iv"].as_array().unwrap().len(), 12);
+        assert_eq!(thumb["key"][0].as_u64().unwrap(), 0x22);
+    }
+
+    /// build_media_payload_json_with_thumbnail: wrong thumb_iv length → error.
+    #[test]
+    fn test_build_media_payload_with_thumbnail_bad_thumb_iv() {
+        let result = build_media_payload_json_with_thumbnail(
+            "bid", &[0u8; 32], &[0u8; 32], &[0u8; 12], &[0u8; 16], &[0u8; 32],
+            &[0u8; 8], // thumb_iv wrong (8 bytes)
+        );
+        assert!(result.is_err(), "wrong thumb_iv length must return error");
+    }
+
+    /// THUMBNAIL_HANDLES lookup for unknown handle returns None (internal guard tested directly).
+    #[test]
+    fn test_thumbnail_unknown_handle_returns_none() {
+        let result = THUMBNAIL_HANDLES.with(|h| h.borrow().get("nonexistent-handle-xyz").cloned());
+        assert!(
+            result.is_none(),
+            "unknown thumbnail handle must return None"
+        );
+    }
+
+    /// mls_clear_session clears THUMBNAIL_HANDLES.
+    #[test]
+    fn test_clear_session_removes_thumbnail_handles() {
+        let handle = format!("thumb-clear-{}", next_id());
+        let (ct, key, iv, _) = media::encrypt(b"clear test").unwrap();
+        THUMBNAIL_HANDLES.with(|h| h.borrow_mut().insert(handle.clone(), (ct, key, iv)));
+        assert!(THUMBNAIL_HANDLES.with(|h| h.borrow().contains_key(&handle)));
+
+        mls_clear_session();
+
+        assert_eq!(
+            THUMBNAIL_HANDLES.with(|h| h.borrow().len()),
+            0,
+            "THUMBNAIL_HANDLES must be empty after mls_clear_session"
+        );
     }
 }

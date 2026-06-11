@@ -123,6 +123,24 @@ interface WasmModule {
 		blobHash: Uint8Array,
 		iv: Uint8Array,
 	) => { ciphertext: Uint8Array };
+	// §9.4.1 Thumbnail encryption: AES-256-GCM opaque-handle API.
+	// Thumbnail key stays in WASM on the sender path (same as mediaKey).
+	media_thumbnail_encrypt: (thumbBytes: Uint8Array) => { thumbHandle: string };
+	media_thumbnail_drop: (handle: string) => boolean;
+	media_thumbnail_decrypt: (
+		ct: Uint8Array,
+		key: Uint8Array,
+		iv: Uint8Array,
+	) => { pixels: Uint8Array };
+	media_message_create_with_thumbnail: (
+		identityId: string,
+		groupId: string,
+		mediaKeyHandle: string,
+		blobId: string,
+		blobHash: Uint8Array,
+		iv: Uint8Array,
+		thumbHandle: string,
+	) => { ciphertext: Uint8Array };
 	// prd.md §5.3 Phase B — extract PQ KEM encap key + signature from a KeyPackage.
 	mls_pq_extract_encap_key: (keyPackageBytes: Uint8Array) => MlsPqEncapKeyResult;
 	// prd.md §5.3 Phase B — extract AND verify in one step (recommended; prevents skipped verification).
@@ -672,6 +690,68 @@ const api = {
 	): Promise<{ ciphertext: Uint8Array }> {
 		const wasm = await getWasm();
 		return wasm.media_message_create(identityId, groupId, mediaKeyHandle, blobId, blobHash, iv);
+	},
+
+	// ── §9.4.1 Thumbnail encryption (AES-256-GCM opaque-handle API) ──────────
+
+	/**
+	 * Encrypt thumbnail bytes with a fresh AES-256-GCM key (prd.md §9.4.1).
+	 * The thumbnail key stays inside the WASM worker — only an opaque handle is returned.
+	 * Call mediaThumbnailDrop(thumbHandle) when done (or after mediaMessageCreateWithThumbnail).
+	 * Returns `{ thumbHandle: string }`.
+	 */
+	async mediaThumbnailEncrypt(thumbBytes: Uint8Array): Promise<{ thumbHandle: string }> {
+		const wasm = await getWasm();
+		return wasm.media_thumbnail_encrypt(thumbBytes);
+	},
+
+	/**
+	 * Drop a stored thumbnail key handle (zeroes the 32-byte key on drop).
+	 * Idempotent: no-ops on unknown handles.
+	 */
+	async mediaThumbnailDrop(handle: string): Promise<boolean> {
+		const wasm = await getWasm();
+		return wasm.media_thumbnail_drop(handle);
+	},
+
+	/**
+	 * Decrypt thumbnail bytes using raw key/IV from the MLS-decrypted payload (receiver path).
+	 * Returns `{ pixels: Uint8Array }`.
+	 * Zero `key` after this call: `key.fill(0)`.
+	 */
+	async mediaThumbnailDecrypt(
+		ct: Uint8Array,
+		key: Uint8Array,
+		iv: Uint8Array,
+	): Promise<{ pixels: Uint8Array }> {
+		const wasm = await getWasm();
+		return wasm.media_thumbnail_decrypt(ct, key, iv);
+	},
+
+	/**
+	 * Build and MLS-encrypt a media message with an inline encrypted thumbnail (prd.md §9.4.1).
+	 * Both the main media key and the thumbnail key stay inside the WASM worker.
+	 * After this call: drop both handles via mediaDropKey + mediaThumbnailDrop.
+	 */
+	async mediaMessageCreateWithThumbnail(
+		identityId: string,
+		groupId: string,
+		mediaKeyHandle: string,
+		blobId: string,
+		blobHash: Uint8Array,
+		iv: Uint8Array,
+		thumbHandle: string,
+	): Promise<{ ciphertext: Uint8Array }> {
+		const wasm = await getWasm();
+		return wasm.media_message_create_with_thumbnail(
+			identityId,
+			groupId,
+			mediaKeyHandle,
+			blobId,
+			blobHash,
+			iv,
+			thumbHandle,
+		);
 	},
 };
 

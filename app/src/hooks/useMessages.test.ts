@@ -317,3 +317,110 @@ describe("useMessages — pq_init handling (§5.3 Phase B)", () => {
 		expect(onPqBinding).not.toHaveBeenCalled();
 	});
 });
+
+describe("useMessages — §9.4.1 thumbnail parsing", () => {
+	function makeImageEnvelope(thumbnailField?: unknown) {
+		const payload: Record<string, unknown> = {
+			type: "image",
+			blobId: "test-blob-id",
+			blobHash: Array.from({ length: 32 }, () => 0xab),
+			mediaKey: Array.from({ length: 32 }, () => 0xcd),
+			iv: Array.from({ length: 12 }, () => 0xef),
+		};
+		if (thumbnailField !== undefined) {
+			payload.thumbnail = thumbnailField;
+		}
+		return {
+			id: ENV_ID,
+			group_id: GROUP_ID,
+			sender: SENDER_ID,
+			recipient: null,
+			message_type: "Application" as const,
+			ciphertext: [1, 2, 3],
+			epoch: null,
+			created_at: "2026-06-11T10:00:00Z",
+			expires_at: null,
+		};
+	}
+
+	beforeEach(() => {
+		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
+			mockWorker as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
+		);
+		useAuthStore.setState({ phase: "app", deviceId: "my-device", sessionToken: TOKEN });
+	});
+	afterEach(() => {
+		vi.restoreAllMocks();
+		useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null });
+	});
+
+	it("parses thumbnail fields from image payload when present", async () => {
+		const thumb = {
+			ct: Array.from({ length: 32 }, (_, i) => i),
+			key: Array.from({ length: 32 }, () => 0xcd),
+			iv: Array.from({ length: 12 }, () => 0xef),
+		};
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({
+					type: "image",
+					blobId: "test-blob",
+					blobHash: Array.from({ length: 32 }, () => 0),
+					mediaKey: Array.from({ length: 32 }, () => 0),
+					iv: Array.from({ length: 12 }, () => 0),
+					thumbnail: thumb,
+				}),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeImageEnvelope(thumb)]);
+
+		const received: IncomingMessage[] = [];
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
+
+		await waitFor(() => expect(received).toHaveLength(1));
+		expect(received[0].media?.thumbnail).toEqual(thumb);
+	});
+
+	it("leaves thumbnail undefined when image payload has no thumbnail field", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({
+					type: "image",
+					blobId: "test-blob",
+					blobHash: Array.from({ length: 32 }, () => 0),
+					mediaKey: Array.from({ length: 32 }, () => 0),
+					iv: Array.from({ length: 12 }, () => 0),
+				}),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeImageEnvelope()]);
+
+		const received: IncomingMessage[] = [];
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
+
+		await waitFor(() => expect(received).toHaveLength(1));
+		expect(received[0].media?.thumbnail).toBeUndefined();
+	});
+
+	it("ignores malformed thumbnail (missing key array) — leaves thumbnail undefined", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({
+					type: "image",
+					blobId: "test-blob",
+					blobHash: Array.from({ length: 32 }, () => 0),
+					mediaKey: Array.from({ length: 32 }, () => 0),
+					iv: Array.from({ length: 12 }, () => 0),
+					thumbnail: { ct: [1, 2, 3], iv: [4, 5, 6] }, // missing key field
+				}),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeImageEnvelope()]);
+
+		const received: IncomingMessage[] = [];
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
+
+		await waitFor(() => expect(received).toHaveLength(1));
+		expect(received[0].media?.thumbnail).toBeUndefined();
+	});
+});
