@@ -1,0 +1,151 @@
+# WS Load Test — Phase 5 DoD: 10 000 concurrent WebSocket connections
+#
+# Trigger: manual only (workflow_dispatch). Never runs on push/PR.
+# Target:  a dedicated load-test environment; NEVER production.
+#
+# Required secrets (set per-environment in GitHub Settings → Environments):
+#   DATABASE_URL  — Postgres DSN for the load-test environment
+#   REDIS_URL     — Redis URL for the load-test environment
+#
+# Hardware notes (infra/k6/ws_load_test.js):
+#   - A standard GitHub runner (2 vCPU / 7 GB) can sustain ~2 000 k6 VUs.
+#   - For the full 10 k run, use a larger runner ("ubuntu-latest-4-cores" or
+#     self-hosted) and/or k6 Operator (distributed) on the staging cluster.
+#   - Set max_vus=50 (smoke mode) for quick CI validation; max_vus=10000 for
+#     the Phase 5 DoD acceptance test.
+
+name: Load Test (WS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment (never use production)'
+        required: true
+        type: choice
+        options: [load-test, staging]
+        default: load-test
+      max_vus:
+        description: 'Peak concurrent VU count'
+        required: false
+        type: choice
+        options: ['50', '500', '2000', '10000']
+        default: '50'
+      smoke:
+        description: 'Run in smoke mode (50 VUs × 2 min, ignores max_vus)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  load-test:
+    name: k6 WS load test (${{ inputs.max_vus }} VUs)
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    timeout-minutes: 45
+
+    env:
+      K6_VERSION: 0.52.0
+      # Grafana signing key fingerprint (k6 apt repo): published at https://dl.k6.io/key.gpg
+      # Verify: gpg --fingerprint C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+      GRAFANA_GPG_KEY: C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4
+
+      - name: Refuse production targets
+        run: |
+          set -euo pipefail
+          ENV="${{ inputs.environment }}"
+          if [[ "$ENV" == "production" ]]; then
+            echo "::error::Load test refused: environment=production is not allowed."
+            exit 1
+          fi
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install seed-script dependencies
+        run: pip install psycopg2-binary redis
+
+      - name: Install k6 v${{ env.K6_VERSION }} (GPG-verified via Grafana apt repo)
+        run: |
+          set -euo pipefail
+          # Import Grafana GPG key and pin the apt source.
+          # Key fingerprint verified at https://grafana.com/docs/k6/latest/set-up/install-k6/
+          sudo gpg --no-default-keyring \
+            --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
+            --keyserver hkp://keyserver.ubuntu.com:80 \
+            --recv-keys ${{ env.GRAFANA_GPG_KEY }}
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
+            | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update -qq
+          sudo apt-get install -y "k6=${{ env.K6_VERSION }}"
+          k6 version
+
+      - name: Seed test sessions
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REDIS_URL:    ${{ secrets.REDIS_URL }}
+        run: |
+          set -euo pipefail
+          COUNT="${{ inputs.max_vus }}"
+          echo "Seeding ${COUNT} test sessions …"
+          python3 infra/k6/tools/seed_load_test.py \
+            --count "${COUNT}" \
+            --output /tmp/k6_tokens.json \
+            --allow-non-prod
+
+      - name: Run k6 WS load test
+        env:
+          K6_BASE_URL:    ${{ vars.K6_BASE_URL }}
+          K6_TOKENS_FILE: /tmp/k6_tokens.json
+          K6_SMOKE:       ${{ inputs.smoke && '1' || '' }}
+        run: |
+          set -euo pipefail
+          k6 run \
+            --out json=/tmp/k6_results.json \
+            infra/k6/ws_load_test.js
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: k6-ws-results-${{ github.run_id }}
+          path: /tmp/k6_results.json
+          retention-days: 30
+
+      - name: Summarise thresholds
+        if: always()
+        run: |
+          if [ -f /tmp/k6_results.json ]; then
+            echo "### k6 WS Load Test Results" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+            python3 - <<'PY'
+          import json, sys
+          results = []
+          with open('/tmp/k6_results.json') as f:
+              for line in f:
+                  try: results.append(json.loads(line.strip()))
+                  except: pass
+          metrics = {}
+          for r in results:
+              if r.get('type') == 'Point' and 'metric' in r:
+                  m = r['metric']
+                  v = r['data']['value']
+                  metrics.setdefault(m, []).append(v)
+          for key in ['ws_connect_success', 'ws_connect_time_ms', 'ws_errors', 'ws_active_connections']:
+              vals = metrics.get(key, [])
+              if vals:
+                  summary = f"count={len(vals)}, last={vals[-1]:.2f}"
+                  print(f"| {key} | {summary} |")
+          PY
+          fi
