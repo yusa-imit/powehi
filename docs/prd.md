@@ -613,17 +613,38 @@ MLS는 그룹의 모든 멤버가 동일한 **TreeKEM** 트리 상태를 유지�
 
 **원칙**: "Harvest now, decrypt later" 공격이 현재 진행형이므로, 신규 프로젝트는 PQ 없이 시작하지 않습니다.
 
-**전략:**
+**전략** (상세 마이그레이션 가이드: `docs/decisions/0003-pq-migration.md`):
 
-1. **Phase A (MVP)**: 클래식 ciphersuite로 출시. 단, 와이어 포맷의 KeyPackage `extensions` 필드에 PQ KEM 키를 위한 자리를 예약.
-2. **Phase B**: OpenMLS의 PQ 하이브리드 ciphersuite가 안정 단계가 되면 Capabilities advertise 시작.
-3. **Phase C**: 사용자 다수가 PQ 지원 클라이언트로 업데이트되면 새 그룹은 PQ 하이브리드 ciphersuite로 강제.
+1. **Phase B interim (현재 배포됨)**: 클래식 MLS ciphersuite(`MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`) 위에 Powehi 전용 KeyPackage extension으로 ML-KEM-768 키를 embed. 그룹 초대 시 PQ 공유 비밀을 교환하고 HKDF-SHA256으로 바인딩을 유도. Raw decap key(2,400 bytes)는 WASM 경계를 절대 벗어나지 않음.
+2. **Phase A (Native MLS PQ)**: `openmls`가 `MLS_128_MLKEM768_AES128GCM_SHA256_MlDsa65` ciphersuite를 stable 릴리스로 제공하면 발동. 새 그룹은 PQ ciphersuite로 생성; 기존 그룹은 클래식 유지 (90일 전환 창). 기능 플래그 `POWEHI_PQ_MLS_NATIVE_ENABLED` 로 점진 롤아웃.
+3. **Phase B (X25519 deprecate)**: 활성 세션의 ≥ 95%가 Phase A 클라이언트를 사용하면 발동. 신규 클래식 KeyPackage 업로드 거부(HTTP 422), 기존 클래식 그룹에 인밴드 마이그레이션 공지.
+4. **Phase C (X25519 제거)**: 활성 세션의 ≤ 0.1%만 클래식 KeyPackage를 보유하면 발동. 서버에서 비-PQ ciphersuite 하드 거부. **비가역적** — 클라이언트 버전 강제 업그레이드 게이트 필요.
 
-**ML-KEM-768 크기 영향:**
-- Encapsulation key: 1,184 bytes (X25519: 32 bytes)
-- Ciphertext: 1,088 bytes (X25519: 32 bytes)
-- 영향: KeyPackage 크기 약 40배. 모바일 데이터 / IndexedDB 용량 고려 필요.
-- 완화: KeyPackage rotation 주기 조정, 클라이언트의 prefetch 캐싱.
+**현재 구현 상태 (Phase B interim):**
+
+| 컴포넌트 | 파일 | 상태 |
+|---|---|---|
+| ML-KEM-768 keygen / encap / decap | `crates/client/powehi-crypto-wasm/src/kem.rs` | 배포 완료 |
+| NIST ACVP FIPS 203 KAT (encap+decap) | `kem.rs` (cfg(test)) | 통과 |
+| PQ extension embed (encap key + Ed25519 sig) | `wasm_exports.rs` `pq_build_payload` | 배포 완료 |
+| PQ encap key 추출 + 서명 검증 | `wasm_exports.rs` `mls_pq_extract_and_verify_encap_key` | 배포 완료 |
+| PQ 바인딩 HKDF 유도 | `wasm_exports.rs` `mls_pq_derive_binding` | 배포 완료 |
+| 초대 수락 시 PQ init 전송 | `app/src/components/AcceptInviteModal.tsx` | 배포 완료 |
+| pq_init 수신 처리 | `app/src/hooks/useMessages.ts` | 배포 완료 |
+
+**ML-KEM-768 크기 영향 (Phase A native 전환 시):**
+- Encapsulation key: 1,184 bytes (X25519: 32 bytes, +1,152 bytes)
+- Ciphertext (Welcome): 1,088 bytes (X25519: 32 bytes, +1,056 bytes)
+- ML-DSA-65 서명: 3,293 bytes (Ed25519: 64 bytes, +3,229 bytes)
+- KeyPackage 총 크기: 약 8,000 bytes (클래식: ~500 bytes, ~16×)
+- 완화: KeyPackage rotation 주기 조정, 클라이언트 prefetch 캐싱, WASM 번들 예산 재검토.
+
+**PQ extension 와이어 포맷 (현재):**
+```
+POWEHI_PQ_KEM_EXT_TYPE extension payload (1,248 bytes):
+  bytes [0..1183]    — ML-KEM-768 encapsulation key (FIPS 203 §5)
+  bytes [1184..1247] — Ed25519 signature (MLS identity key로 encap key에 서명)
+```
 
 ### 5.4 MLS Delivery Service의 책임
 
