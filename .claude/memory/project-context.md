@@ -17,6 +17,26 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-13, cycle 137 — FEATURE: Phase 5 PQ hybrid migration path documented — ADR-0003 Active)
+- **Cycle 137 (commit 2fa32e8):** FEATURE — Phase 5 DoD item: PQ hybrid migration path documented (ML-KEM-768)
+  - **`docs/decisions/0003-pq-migration.md`** (MAJOR UPDATE): ADR-0003 status Proposed → **Active**. Added:
+    - "Current Implementation (Phase B Interim)" table documenting all deployed ML-KEM-768 code
+    - Wire format spec: 1,248-byte `POWEHI_PQ_KEM_EXT_TYPE` extension payload (encap key 1,184B + Ed25519 sig 64B)
+    - PQ binding: HKDF-SHA256(ikm=ss, salt=None, info=b"powehi-pq-binding-v1"||groupId, L=8)
+    - Opaque-handle invariant: raw 2,400-byte decap key never crosses WASM-JS boundary
+    - Phase A trigger: openmls stable `MLS_128_MLKEM768_AES128GCM_SHA256_MlDsa65` ciphersuite
+    - Phase B trigger: ≥95% active sessions on Phase A client (30-day window)
+    - Phase C trigger: ≤0.1% classical KeyPackages remaining (7-day window); **irreversible**
+    - Specific code change checklist for each phase
+    - Rollout (`POWEHI_PQ_MLS_NATIVE_ENABLED` feature flag, 1%→10%→100% over 14 days) + rollback procedure
+    - KeyPackage size table: classical ~500B vs Phase A ~8,000B (~16×)
+    - OPAQUE PQ path: opaque-ke 4.x PQ-hybrid OPRF (Phase B item)
+  - **`docs/prd.md` §5.3** (EXPANDED): current state table, PQ extension wire format, per-phase trigger conditions, ADR-0003 reference
+  - **`docs/phases/phase-5/STATUS.md`**: `[ ] PQ hybrid migration path` → `[x]`
+  - **476 Rust tests** (unchanged); no code changes (docs-only).
+  - **Phase 5 DoD:** `[x] PQ hybrid migration path documented` — ADR-0003 Active, prd.md §5.3 complete.
+  - **Next Phase 5 items:** `[ ] Security audit findings addressed` OR `[ ] Public beta deployment`
+
 ## Current state (2026-06-13, cycle 136 — FEATURE: Phase 5 load test infrastructure — k6 WS + seed tool)
 - **Cycle 136 (commit 6d6cae1):** FEATURE — Phase 5 DoD item: Load testing (target concurrent connections met)
   - **`infra/k6/smoke_ws.js`** (NEW): k6 smoke test — 5 VUs × 30s, single K6_TEST_TOKEN, validates WS upgrade (101) + keepalive ping/pong. Threshold: 100% connect success, p95 < 1000ms.
