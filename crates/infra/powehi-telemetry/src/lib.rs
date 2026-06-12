@@ -243,4 +243,82 @@ mod tests {
         };
         assert_eq!(cfg.service_version, version_from_config);
     }
+
+    // ── OtlpConfig::from_env() Some-branch tests ──────────────────────────────
+    //
+    // These tests mutate the process environment, so a static Mutex serialises
+    // them to avoid races when cargo test runs threads in parallel.
+
+    static ENV_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // RAII guard that restores an env var to its previous value on drop.
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvGuard {
+        // Set key=value; restores original on drop. SAFETY: caller holds ENV_TEST_MUTEX.
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            // SAFETY: serialised by ENV_TEST_MUTEX; no concurrent env access.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, original }
+        }
+
+        // Remove key from env; restores it on drop. SAFETY: caller holds ENV_TEST_MUTEX.
+        fn remove(key: &'static str) -> Self {
+            let original = std::env::var(key).ok();
+            // SAFETY: serialised by ENV_TEST_MUTEX; no concurrent env access.
+            unsafe { std::env::remove_var(key) };
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    #[test]
+    fn otlp_config_from_env_returns_some_when_endpoint_set() {
+        let _lock = ENV_TEST_MUTEX.lock().unwrap();
+        let _ep = EnvGuard::set("OTEL_EXPORTER_OTLP_ENDPOINT", "http://test-collector:4317");
+        // Ensure OTEL_SERVICE_NAME is absent so the default path is exercised.
+        let _sn = EnvGuard::remove("OTEL_SERVICE_NAME");
+
+        let cfg = OtlpConfig::from_env().expect("from_env() must return Some when endpoint is set");
+        assert_eq!(cfg.endpoint, "http://test-collector:4317");
+        assert_eq!(
+            cfg.service_name, "powehi",
+            "service_name must default to 'powehi' when OTEL_SERVICE_NAME is absent"
+        );
+        assert_eq!(
+            cfg.service_version,
+            env!("CARGO_PKG_VERSION"),
+            "service_version must equal CARGO_PKG_VERSION"
+        );
+    }
+
+    #[test]
+    fn otlp_config_from_env_reads_custom_otel_service_name() {
+        let _lock = ENV_TEST_MUTEX.lock().unwrap();
+        let _ep = EnvGuard::set("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317");
+        let _sn = EnvGuard::set("OTEL_SERVICE_NAME", "my-powehi-replica");
+
+        let cfg = OtlpConfig::from_env().expect("Some when endpoint is set");
+        assert_eq!(cfg.service_name, "my-powehi-replica");
+    }
+
+    #[test]
+    fn shutdown_otlp_does_not_panic_without_prior_init() {
+        // global::shutdown_tracer_provider() is a no-op when no provider was
+        // installed; calling it (and a second time for idempotency) must not panic.
+        shutdown_otlp();
+        shutdown_otlp();
+    }
 }
