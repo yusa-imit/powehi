@@ -2561,4 +2561,146 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     }
+
+    // Mocks for error-path device management tests.
+    struct MockAuthDeviceRevokeNotFound;
+    #[async_trait]
+    impl AuthUseCase for MockAuthDeviceRevokeNotFound {
+        async fn register_init(
+            &self,
+            _: RegistrationInitRequest,
+        ) -> Result<RegistrationInitResponse, DomainError> {
+            unimplemented!()
+        }
+        async fn register_finish(
+            &self,
+            _: RegistrationFinishRequest,
+        ) -> Result<RegistrationFinishResponse, DomainError> {
+            unimplemented!()
+        }
+        async fn login_init(&self, _: LoginInitRequest) -> Result<LoginInitResponse, DomainError> {
+            unimplemented!()
+        }
+        async fn login_finish(&self, _: LoginFinishRequest) -> Result<SessionToken, DomainError> {
+            unimplemented!()
+        }
+        async fn register_device(
+            &self,
+            _: &UserId,
+            _: DeviceRegistrationRequest,
+        ) -> Result<DeviceId, DomainError> {
+            unimplemented!()
+        }
+        async fn revoke_device(&self, _: &UserId, _: &DeviceId) -> Result<(), DomainError> {
+            Err(DomainError::NotFound("device".into()))
+        }
+    }
+
+    struct MockAuthDeviceRevokeUnauthorized;
+    #[async_trait]
+    impl AuthUseCase for MockAuthDeviceRevokeUnauthorized {
+        async fn register_init(
+            &self,
+            _: RegistrationInitRequest,
+        ) -> Result<RegistrationInitResponse, DomainError> {
+            unimplemented!()
+        }
+        async fn register_finish(
+            &self,
+            _: RegistrationFinishRequest,
+        ) -> Result<RegistrationFinishResponse, DomainError> {
+            unimplemented!()
+        }
+        async fn login_init(&self, _: LoginInitRequest) -> Result<LoginInitResponse, DomainError> {
+            unimplemented!()
+        }
+        async fn login_finish(&self, _: LoginFinishRequest) -> Result<SessionToken, DomainError> {
+            unimplemented!()
+        }
+        async fn register_device(
+            &self,
+            _: &UserId,
+            _: DeviceRegistrationRequest,
+        ) -> Result<DeviceId, DomainError> {
+            unimplemented!()
+        }
+        async fn revoke_device(&self, _: &UserId, _: &DeviceId) -> Result<(), DomainError> {
+            Err(DomainError::Unauthorized)
+        }
+    }
+
+    fn device_router_with_auth(auth: Arc<dyn AuthUseCase>) -> Router {
+        let user_id = UserId::new();
+        router(AppState {
+            region_id: "eu-de-1-test".to_string(),
+            region_tier: powehi_domain::region::Tier::Tier1,
+            auth,
+            group: noop_group(),
+            messaging: Arc::new(MockMessaging),
+            key_package: Arc::new(MockKeyPackage),
+            media: Arc::new(MockMedia),
+            push_sub_repo: null_push_sub_repo(),
+            invite: noop_invite(),
+            device_repo: FakeDeviceRepo::new(user_id),
+            cache: test_session_cache(),
+            handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
+        })
+    }
+
+    /// Security invariant: when `revoke_device` returns `NotFound`, the handler
+    /// must return 401 (not 404) to prevent device-existence oracle attacks.
+    #[tokio::test]
+    async fn revoke_device_not_found_returns_401_not_404() {
+        let target = DeviceId::new();
+        let resp = device_router_with_auth(Arc::new(MockAuthDeviceRevokeNotFound))
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/auth/devices/{target}"))
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Oracle-closing mapping: DomainError::NotFound → 401 (not 404).
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Security invariant: when `revoke_device` returns `Unauthorized`
+    /// (caller does not own the target device), the handler returns 401.
+    #[tokio::test]
+    async fn revoke_non_owned_device_returns_401() {
+        let target = DeviceId::new();
+        let resp = device_router_with_auth(Arc::new(MockAuthDeviceRevokeUnauthorized))
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/auth/devices/{target}"))
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Input validation: register_new_device with missing body returns 400.
+    #[tokio::test]
+    async fn register_new_device_missing_body_returns_400() {
+        let resp = device_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/devices")
+                    .header("authorization", bearer())
+                    .header("content-type", "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
 }
