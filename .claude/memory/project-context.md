@@ -17,6 +17,27 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-13, cycle 135 — STABILIZATION: telemetry test coverage + backend security sweep)
+- **Cycle 135 (commit b10ec96):** STABILIZATION — CI GREEN, cargo audit clean (1 allowed: instant/openmls). No open GitHub bug issues.
+  - **Test gap CLOSED — `OtlpConfig::from_env()` Some branch** (cycle 133 advisory):
+    - `otlp_config_from_env_returns_some_when_endpoint_set`: tests full Some path — verifies endpoint, default service_name="powehi", service_version=CARGO_PKG_VERSION when OTEL_EXPORTER_OTLP_ENDPOINT set
+    - `otlp_config_from_env_reads_custom_otel_service_name`: verifies OTEL_SERVICE_NAME override reads correctly
+    - `shutdown_otlp_does_not_panic_without_prior_init`: idempotent no-op invariant (two calls, no panic)
+    - Uses static `ENV_TEST_MUTEX` + RAII `EnvGuard` (set/remove with Drop restore) to serialize env-var tests safely under parallel test threads. Uses `unsafe { std::env::set_var }` (required by Rust 1.96.0 API).
+  - **security-auditor:** GREEN (full backend sweep — 30 files). No RED findings. No regression of prior YELLOWs.
+    - **New YELLOW (Y-KP-1):** key-package upload has no explicit per-call count cap. `KeyPackageService::upload` + `routes/key_package.rs` accept unbounded `Vec<Bytes>`. Auth required; 512KB body cap is implicit ceiling (~250 packages). Suggest per-device ceiling (200) + per-call limit (50) before public launch. Severity: LOW.
+    - Known YELLOWs re-confirmed open: fan-out no group-size cap (Y3/cycle 116), no per-user device cap (finding 4/cycle 128), device routes use api_governor not auth_governor (finding 6/cycle 128).
+    - Informational: grpc server DomainError::Internal may surface raw DB driver text in logs (out of scope, future grpc-lead pass).
+  - **476 Rust tests** (+3; was 473); fmt clean; clippy clean.
+  - **Deferred YELLOWs (updated list):**
+    - Fan-out group-size cap (Y3/cycle 116 — no group size cap in fan_out_push): MEDIUM, pre-launch
+    - Per-user device count cap (finding 4/cycle 128): MEDIUM, pre-launch
+    - Device routes rate-limit class (finding 6/cycle 128): LOW, pre-launch
+    - Key-package per-call count cap (Y-KP-1 new/cycle 135): LOW, pre-launch
+    - grpc DomainError::Internal DB text in logs (informational/cycle 135): LOW, future grpc-lead pass
+    - All prior deferred YELLOWs unchanged (see cycle 134 entry)
+  - **Next Phase 5 item:** Load testing (target concurrent connections met) OR PQ hybrid migration path documented.
+
 ## Current state (2026-06-12, cycle 134 — FEATURE: Phase 5 Full threat model review — prd.md §3)
 - **Cycle 134 (commit e35ad89):** FEATURE — Phase 5 DoD item: Full threat model review (threat-model-checker pass)
   - **threat-model-checker:** ran full T1–T7 + §3.3 + §3.4 + §3.5 audit. **Overall verdict: YELLOW → GREEN after R1 fix.** No RED findings. Core non-negotiables all met.
