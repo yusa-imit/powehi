@@ -17,6 +17,21 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-13, cycle 136 — FEATURE: Phase 5 load test infrastructure — k6 WS + seed tool)
+- **Cycle 136 (commit 6d6cae1):** FEATURE — Phase 5 DoD item: Load testing (target concurrent connections met)
+  - **`infra/k6/smoke_ws.js`** (NEW): k6 smoke test — 5 VUs × 30s, single K6_TEST_TOKEN, validates WS upgrade (101) + keepalive ping/pong. Threshold: 100% connect success, p95 < 1000ms.
+  - **`infra/k6/ws_load_test.js`** (NEW): k6 WS load test — ramps to 10k concurrent connections (2m→2k→5k→10k, 10m sustain, 2m down). Reads token JSON array from K6_TOKENS_FILE. Metrics: ws_connect_time_ms (p95 < 500ms), ws_connect_success (≥ 99%), ws_active_connections, ws_errors. K6_SMOKE=1 for 50 VU × 2min mode. Parses WS notification JSON; validates `msg.type` presence.
+  - **`infra/k6/tools/seed_load_test.py`** (NEW): seeds N test devices/sessions in Postgres + Redis, bypassing OPAQUE (test-env only). Guards: `--allow-non-prod` flag required; production hostname pattern check; 0600 umask on token output file. Cleanup DELETE idempotent (removes prior k6 rows before re-seed).
+  - **`.github/workflows/load-test.yml`** (NEW): manual-only `workflow_dispatch`; `max_vus` is `type:choice` [50/500/2k/10k] (prevents shell injection); k6 installed via GPG-verified Grafana apt repo; "Refuse production targets" step; secrets DATABASE_URL + REDIS_URL scoped to environment.
+  - **security-auditor:** YELLOW → addressed all HIGH/MEDIUM findings. LOW/INFO findings deferred: setup-python not SHA-pinned (consistent with CI pattern), error message logging (informational), results artifact (no --http-debug rule documented in workflow).
+  - **476 Rust tests** (unchanged); fmt clean; clippy clean. Phase 5 DoD item is `[~]` (scripts exist, needs staging infra run to fully close).
+  - **Hardware requirements for 10k run:** ≥ 4 vCPU / 16GB RAM runner (single-process k6 limit ~5k VUs; use k6 Operator for true 10k). Target server: ≥ 4 vCPU / 8GB RAM + Redis with 10k+ connections.
+  - **Next Phase 5 items:** PQ hybrid migration path documented (ML-KEM-768) OR staging infra provisioning to execute the full 10k load test.
+  - **Load test deferred YELLOWs:**
+    - setup-python@v5 not SHA-pinned (consistent with CI pattern; LOW)
+    - k6 error message logging in smoke_ws.js (WS close-reason string; informational)
+    - k6 results artifact: document "never --http-debug" in workflow (informational)
+
 ## Current state (2026-06-13, cycle 135 — STABILIZATION: telemetry test coverage + backend security sweep)
 - **Cycle 135 (commit b10ec96):** STABILIZATION — CI GREEN, cargo audit clean (1 allowed: instant/openmls). No open GitHub bug issues.
   - **Test gap CLOSED — `OtlpConfig::from_env()` Some branch** (cycle 133 advisory):

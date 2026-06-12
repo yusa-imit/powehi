@@ -6,7 +6,7 @@
 - [x] SLSA Level 3 reproducible builds verified
 - [x] Container image signing (cosign + Rekor)
 - [x] Full threat model review (threat-model-checker pass) — cycle 134, commit e35ad89
-- [ ] Load testing (target concurrent connections met)
+- [~] Load testing (target concurrent connections met) — k6 scripts + manual CI workflow added (cycle 136, commit 6d6cae1); needs staging infra run to fully close
 - [x] Observability stack deployed (zero-knowledge metrics/logs) — HTTP metrics middleware (cycle 132), OTLP trace export + ServiceMonitor (cycle 133)
 - [ ] PQ hybrid migration path documented (ML-KEM-768)
 - [ ] Security audit findings addressed
