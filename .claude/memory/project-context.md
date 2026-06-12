@@ -17,6 +17,15 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-12, cycle 130 — STABILIZATION: device-mgmt REST security invariant tests)
+- **Cycle 130 (commit 4f0c225):** STABILIZATION — CI GREEN, cargo audit clean (1 allowed: instant/openmls). No open GitHub issues. Security sweep found 3 missing REST-layer test gaps from cycle 128 device management endpoints:
+  - **`revoke_device_not_found_returns_401_not_404`** (NEW): verifies the oracle-closing mapping `DomainError::NotFound → 401` (not 404) in `revoke_device_handler`. Critical security invariant — prevents device-existence timing oracle attacks. New mock `MockAuthDeviceRevokeNotFound`.
+  - **`revoke_non_owned_device_returns_401`** (NEW): verifies `DomainError::Unauthorized` from the service surfaces as 401 at the HTTP boundary. New mock `MockAuthDeviceRevokeUnauthorized`.
+  - **`register_new_device_missing_body_returns_400`** (NEW): input validation gate — empty JSON body rejected (400) before reaching use-case layer.
+  - Also added `device_router_with_auth(Arc<dyn AuthUseCase>) → Router` helper for constructing device test routers with custom auth mocks.
+  - **465 Rust tests** (+3; was 462); clippy clean; rustfmt clean; 358 frontend tests unchanged.
+  - **Deferred YELLOW advisories (unchanged):** same as cycle 129 — see below.
+
 ## Current state (2026-06-12, cycle 129 — FEATURE: GET /v1/region/status — prd.md §6.3)
 - **Cycle 129 (commit e92a3e0):** FEATURE — closes the final prd.md §6.3 missing endpoint:
   - **`GET /v1/region/status`** (public, no auth): returns `{ "region_id": "eu-de-1", "status": "active", "tier": 1 }`. `tier` is a custom-serialized u8 (1/2/3) stable regardless of Rust enum rename. `status` is always `"active"` (liveness contract).
