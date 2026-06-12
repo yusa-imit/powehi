@@ -1,0 +1,35 @@
+{{- if .Values.monitoring.serviceMonitor.enabled }}
+# ---------------------------------------------------------------------------
+# ServiceMonitor — tells the Prometheus Operator to scrape the admin port.
+#
+# Security invariant (prd.md §13.2, no-plaintext-logging rule):
+# The /metrics endpoint emits only aggregate counters and histograms labeled
+# by HTTP method and status code — never URI, device ID, or message content.
+# This ServiceMonitor is scoped to the admin Service port (9090), which is
+# not reachable via the public ingress (NetworkPolicy: ingress-admin allows
+# only the monitoring namespace on that port).
+# ---------------------------------------------------------------------------
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "powehi.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "powehi.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "powehi.selectorLabels" . | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - port: admin
+      path: /metrics
+      interval: {{ .Values.monitoring.serviceMonitor.interval | default "30s" }}
+      scrapeTimeout: {{ .Values.monitoring.serviceMonitor.scrapeTimeout | default "10s" }}
+      scheme: http
+{{- end }}

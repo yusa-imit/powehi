@@ -12,3 +12,9 @@ data:
   POWEHI__GRPC_PORT: {{ .Values.config.grpcPort | quote }}
   POWEHI__GRPC_PEERS: {{ .Values.config.grpcPeers | quote }}
   POWEHI__GRPC_TLS_ENABLED: {{ .Values.config.grpcTlsEnabled | quote }}
+  {{- if .Values.otlp.endpoint }}
+  # OTLP/gRPC collector endpoint for distributed trace export (prd.md §13.3).
+  # Absent when otlp.endpoint is empty — app falls back to Prometheus-only mode.
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.otlp.endpoint | quote }}
+  OTEL_SERVICE_NAME: {{ .Values.otlp.serviceName | default "powehi" | quote }}
+  {{- end }}

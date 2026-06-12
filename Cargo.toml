@@ -50,6 +50,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # metrics / observability — zero-knowledge: labels carry only aggregate counts, no user PII
 metrics = "0.23"
 metrics-exporter-prometheus = "0.15"
+# OpenTelemetry OTLP trace export (prd.md §13.3). grpc-tonic reuses the tonic 0.12 dep already in workspace.
+# Spans carry only operation names + status codes — no message content, no user PII (no-plaintext-logging rule).
+opentelemetry = "0.26"
+opentelemetry-otlp = { version = "0.26", features = ["grpc-tonic"] }
+opentelemetry_sdk = { version = "0.26", features = ["rt-tokio"] }
+tracing-opentelemetry = "0.27"
 # web framework
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.4"

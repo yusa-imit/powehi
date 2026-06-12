@@ -38,6 +38,23 @@ config:
   grpcPeers: ""         # CSV: https://peer1:50051,https://peer2:50051
   grpcTlsEnabled: "true"
 
+# Prometheus Operator ServiceMonitor for scraping /metrics on the admin port.
+# Set monitoring.serviceMonitor.enabled=true when kube-prometheus-stack is installed.
+monitoring:
+  serviceMonitor:
+    enabled: false
+    interval: "30s"
+    scrapeTimeout: "10s"
+    # Additional labels to attach to the ServiceMonitor (e.g. for Prometheus selector).
+    additionalLabels: {}
+
+# OpenTelemetry OTLP trace export (prd.md §13.3).
+# Set otlp.endpoint to the OTLP/gRPC collector address to enable trace export.
+# Leave blank to disable OTLP (Prometheus pull-only mode).
+otlp:
+  endpoint: ""          # e.g. "http://otel-collector.monitoring:4317"
+  serviceName: "powehi"
+
 externalSecrets:
   enabled: true
   refreshInterval: "1h"

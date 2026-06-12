@@ -215,4 +215,31 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.service.grpcPort }}
+{{- if .Values.otlp.endpoint }}
+---
+# 10. Egress: allow OTLP/gRPC trace export (port 4317) to the OpenTelemetry
+# Collector in the monitoring namespace (prd.md §13.3).
+# Guarded by .Values.otlp.endpoint — absent when OTLP is disabled.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "powehi.fullname" . }}-egress-otlp
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "powehi.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "powehi.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 4317
+{{- end }}
 {{- end }}
