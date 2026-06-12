@@ -17,6 +17,23 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-12, cycle 134 — FEATURE: Phase 5 Full threat model review — prd.md §3)
+- **Cycle 134 (commit e35ad89):** FEATURE — Phase 5 DoD item: Full threat model review (threat-model-checker pass)
+  - **threat-model-checker:** ran full T1–T7 + §3.3 + §3.4 + §3.5 audit. **Overall verdict: YELLOW → GREEN after R1 fix.** No RED findings. Core non-negotiables all met.
+  - **Finding T3-1 (YELLOW, fixed):** `group_members(group_id, device_id, joined_at_epoch)` table contradicted prd.md §3.3 which claimed server doesn't know group membership. FIXED: prd.md §3.3 updated.
+  - **Finding T3-2 (YELLOW, documented):** `device.user_id` FK exposes user↔device mapping. Documented in §3.3.
+  - **Push endpoint host (YELLOW, documented):** FCM/Mozilla/APNs endpoint host unavoidable per RFC 8291. Documented in §3.3.
+  - **`docs/prd.md`** (MODIFIED):
+    - §3.3 "server inevitably learns": added `(group_id, device_id, joined_at_epoch)` group topology, user↔device mapping, push subscription endpoint host
+    - §3.3 "server does not know": replaced "group member list" (inaccurate) with "MLS LeafNode crypto material" (correct)
+    - §3.5.1: added `group_members` to regional authority metadata exposure list
+    - §5.4: clarified server knows device_id membership but not MLS LeafNode crypto material
+    - DB schema comment line 1269: fixed "멤버 명단은 모름" → accurate description
+  - **R4 advisory confirmed not needed:** `delete_expired` sweeper already wired in `bin/powehi-server/src/main.rs:306-316` (every 300s, logs only count, no content).
+  - **473 Rust tests** (unchanged); fmt clean; clippy clean.
+  - **Phase 5 DoD:** `[x] Full threat model review` — threat-model-checker YELLOW→GREEN (R1 fix applied this cycle).
+  - **Next Phase 5 item:** Load testing (target concurrent connections met) OR PQ hybrid migration path documented.
+
 ## Current state (2026-06-12, cycle 133 — FEATURE: Phase 5 OTLP trace export + ServiceMonitor — prd.md §13.3)
 - **Cycle 133 (commit eab89b3):** FEATURE — Phase 5 observability: OTLP trace export + Prometheus ServiceMonitor
   - **`crates/infra/powehi-telemetry/src/lib.rs`** (MODIFIED): `OtlpConfig { endpoint, service_name, service_version }` + `from_env()` (reads `OTEL_EXPORTER_OTLP_ENDPOINT`/`OTEL_SERVICE_NAME`). `init_with_otlp(config)` installs opentelemetry-otlp 0.26 gRPC exporter (tonic transport), registers global `TracerProvider`, wires `tracing-opentelemetry 0.27` layer over JSON subscriber. `shutdown_otlp()` for graceful flush. Workspace deps: opentelemetry 0.26, opentelemetry-otlp 0.26, opentelemetry_sdk 0.26, tracing-opentelemetry 0.27.

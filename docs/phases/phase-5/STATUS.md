@@ -5,7 +5,7 @@
 ## Definition of Done
 - [x] SLSA Level 3 reproducible builds verified
 - [x] Container image signing (cosign + Rekor)
-- [ ] Full threat model review (threat-model-checker pass)
+- [x] Full threat model review (threat-model-checker pass) — cycle 134, commit e35ad89
 - [ ] Load testing (target concurrent connections met)
 - [x] Observability stack deployed (zero-knowledge metrics/logs) — HTTP metrics middleware (cycle 132), OTLP trace export + ServiceMonitor (cycle 133)
 - [ ] PQ hybrid migration path documented (ML-KEM-768)
