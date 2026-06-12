@@ -7,7 +7,7 @@
 - [x] Container image signing (cosign + Rekor)
 - [ ] Full threat model review (threat-model-checker pass)
 - [ ] Load testing (target concurrent connections met)
-- [~] Observability stack deployed (zero-knowledge metrics/logs) — HTTP metrics middleware done (cycle 132); OTLP export + Grafana stack deployment pending
+- [x] Observability stack deployed (zero-knowledge metrics/logs) — HTTP metrics middleware (cycle 132), OTLP trace export + ServiceMonitor (cycle 133)
 - [ ] PQ hybrid migration path documented (ML-KEM-768)
 - [ ] Security audit findings addressed
 - [ ] Public beta deployment

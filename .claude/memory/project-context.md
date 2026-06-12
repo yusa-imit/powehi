@@ -17,6 +17,18 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-12, cycle 133 — FEATURE: Phase 5 OTLP trace export + ServiceMonitor — prd.md §13.3)
+- **Cycle 133 (commit eab89b3):** FEATURE — Phase 5 observability: OTLP trace export + Prometheus ServiceMonitor
+  - **`crates/infra/powehi-telemetry/src/lib.rs`** (MODIFIED): `OtlpConfig { endpoint, service_name, service_version }` + `from_env()` (reads `OTEL_EXPORTER_OTLP_ENDPOINT`/`OTEL_SERVICE_NAME`). `init_with_otlp(config)` installs opentelemetry-otlp 0.26 gRPC exporter (tonic transport), registers global `TracerProvider`, wires `tracing-opentelemetry 0.27` layer over JSON subscriber. `shutdown_otlp()` for graceful flush. Workspace deps: opentelemetry 0.26, opentelemetry-otlp 0.26, opentelemetry_sdk 0.26, tracing-opentelemetry 0.27.
+  - **`infra/helm/powehi/templates/servicemonitor.yaml`** (NEW): ServiceMonitor CRD for kube-prometheus-stack targeting admin port 9090 `/metrics` at 30s; guarded by `monitoring.serviceMonitor.enabled` (default `false`).
+  - **NetworkPolicy #10** (MODIFIED): egress to monitoring namespace port 4317 (OTLP/gRPC); guarded by `.Values.otlp.endpoint`; separator inside if-guard (empty-doc fix by infra-lead).
+  - **ConfigMap** gains `OTEL_EXPORTER_OTLP_ENDPOINT` + `OTEL_SERVICE_NAME` when endpoint set. **values.yaml** gains `monitoring.serviceMonitor` + `otlp` blocks.
+  - **security-auditor:** GREEN. YELLOW: in-memory span exporter test for PII-absence assertion (advisory — upstream `#[instrument(skip)]` enforces correctness).
+  - **infra (Helm):** GREEN. YELLOW: `Chart.yaml` missing `icon` (advisory). `helm lint 0 failed`.
+  - **473 Rust tests** (+4; was 469); fmt clean; clippy clean.
+  - **Phase 5 DoD:** `[x] Observability stack deployed` — HTTP metrics middleware (cycle 132) + OTLP + ServiceMonitor (cycle 133).
+  - **Next Phase 5 item:** Full threat model review (threat-model-checker pass).
+
 ## Current state (2026-06-12, cycle 132 — FEATURE: Phase 5 zero-knowledge HTTP metrics middleware — prd.md §13.2)
 - **Cycle 132 (commit TBD):** FEATURE — Phase 5 observability: HTTP request metrics middleware
   - **`crates/adapters/inbound/powehi-rest-api/src/http_metrics.rs`** (NEW): `record_http_metrics` Tower middleware — records `http_requests_total{method, status}` counter + `http_request_duration_seconds{method, status}` histogram via `metrics` crate on every request.
