@@ -4,10 +4,10 @@
 
 ## Definition of Done
 - [x] SLSA Level 3 reproducible builds verified
-- [ ] Container image signing (cosign + Rekor)
+- [x] Container image signing (cosign + Rekor)
 - [ ] Full threat model review (threat-model-checker pass)
 - [ ] Load testing (target concurrent connections met)
-- [ ] Observability stack deployed (zero-knowledge metrics/logs)
+- [~] Observability stack deployed (zero-knowledge metrics/logs) — HTTP metrics middleware done (cycle 132); OTLP export + Grafana stack deployment pending
 - [ ] PQ hybrid migration path documented (ML-KEM-768)
 - [ ] Security audit findings addressed
 - [ ] Public beta deployment

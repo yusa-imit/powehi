@@ -9,6 +9,7 @@
 //! session maps `session:{token}` → DeviceId UUID bytes (16 bytes).
 
 pub mod error;
+pub mod http_metrics;
 pub mod middleware;
 pub mod rate_limit;
 pub mod routes;
@@ -206,6 +207,9 @@ fn router_inner(
             }),
         )
         .layer(from_fn(security_headers::set_security_headers))
+        // Outermost layer: zero-knowledge HTTP metrics (prd.md §13.2).
+        // Records only {method, status} labels — no URI/path = no device/envelope ID leakage.
+        .layer(from_fn(http_metrics::record_http_metrics))
 }
 
 async fn health() -> &'static str {
