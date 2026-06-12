@@ -176,12 +176,14 @@
 - 사용자의 `home_region` 및 현재 접속 `region_id`
 - 크로스 리전 envelope 포워딩 타이밍 (리전 간 메시지 전달 시점)
 - **초대 토큰 생성/소비 시점 및 inviter device ID** (§8.3 Contact Discovery): Redis에 24시간 동안 `H(code) → DeviceId` 형태로 임시 저장됨. 코드는 GETDEL로 1회 소비되므로 영구 기록 없음. 그러나 서버는 창 내에서 inviter의 device_id와 소비 시점을 알 수 있음. 이는 전 단계(MLS Welcome 이전)에 한 방향의 소셜 그래프 간선을 드러낼 수 있음. 완화: Redis 저장값은 원본 코드가 아닌 SHA-256(code)이므로 Redis 덤프로 유효한 토큰을 재현할 수 없음.
+- **`(group_id, device_id, joined_at_epoch)` — MLS 그룹 토폴로지** (fan-out 푸시 및 미디어 ACL 정합성에 필요): 서버는 어떤 device_id가 어떤 그룹의 멤버인지를 `group_members` 테이블에 영구 저장함. `device.user_id` FK를 통해 서버는 사용자↔디바이스↔그룹 전체 그래프를 보유. 단, MLS LeafNode 암호화 자료(공개 키, 서명 자료)는 포함되지 않으며 서버가 알지 못함. 완화: device_id는 opaque UUID이나 device ↔ user 매핑이 존재하므로 소셜 그래프 노출로 간주할 수 있음.
+- **Push subscription endpoint host** (FCM / Mozilla autopush / Apple APNs 등): RFC 8291 Web Push 운영상 불가피하게 push provider 식별자가 노출됨.
 
 서버가 **알지 못하는** 것:
 
 - 메시지 내용
 - 미디어 내용
-- 그룹 멤버 명단 (MLS의 commit/welcome 흐름 안에서만 보임)
+- **MLS LeafNode 암호화 자료** (그룹 멤버의 공개 키, 서명 키, credential bytes): 서버는 `(group_id, device_id)` 매핑은 알지만 MLS GroupContext 내의 암호화된 신원 자료는 알지 못함
 - 사용자의 연락처 목록
 - 발신자가 누구인지 (Sealed Sender 적용 시 — 단, 후술하는 한계 있음)
 
@@ -201,7 +203,7 @@ Sealed Sender는 "envelope 안에 송신자 인증서를 함께 암호화하여 
 
 **3.5.1 법적 강제 (Legal Compulsion)**
 
-특정 리전의 정부가 해당 리전 인프라에 대한 완전한 접근을 법적으로 강제할 수 있습니다. **대응**: E2EE 보장이 리전 독립적이므로 인프라 접근만으로는 plaintext 획득 불가. 단, 해당 리전의 메타데이터(접속 시점, IP, group_id, home_region)는 노출됨.
+특정 리전의 정부가 해당 리전 인프라에 대한 완전한 접근을 법적으로 강제할 수 있습니다. **대응**: E2EE 보장이 리전 독립적이므로 인프라 접근만으로는 plaintext 획득 불가. 단, 해당 리전의 메타데이터(접속 시점, IP, group_id, home_region, **해당 리전 home 그룹의 group_members 명단**)는 노출됨.
 
 **3.5.2 리전 간 트래픽 분석**
 
@@ -632,7 +634,7 @@ MLS는 그룹의 모든 멤버가 동일한 **TreeKEM** 트리 상태를 유지�
 3. **Fan-out**: 그룹 멤버에게 메시지 배포 (sender 제외)
 4. **외부 commit 검증**: 외부에서 그룹 가입(예: 링크) 시의 commit 검증
 
-서버는 그룹 멤버 명단(MLS의 `LeafNode`)을 평문으로 **알지 못합니다**. 그룹 상태 전체가 MLS의 암호화된 GroupContext 안에 있습니다.
+서버는 `(group_id, device_id)` 멤버십 매핑을 fan-out 및 미디어 ACL 목적으로 알고 있습니다. 단, MLS의 `LeafNode` 암호화 자료(공개 키, 서명 키, credential bytes 등 GroupContext 내 암호화 자료)는 평문으로 **알지 못합니다**. MLS GroupContext 전체가 클라이언트 측 암호화된 상태로만 처리됩니다. (§3.3 참고)
 
 ### 5.5 인증: OPAQUE (RFC 9807)
 
@@ -1264,7 +1266,7 @@ CREATE TABLE key_packages (
 );
 CREATE INDEX ON key_packages (device_id) WHERE consumed_at IS NULL;
 
--- MLS 그룹: 서버는 group_id와 epoch만 알고, 멤버 명단은 모름
+-- MLS 그룹: groups 테이블은 group_id, epoch만 저장. 멤버 목록은 아래 group_members 테이블에 별도 저장 (§3.3 참고)
 CREATE TABLE groups (
     id              UUID PRIMARY KEY,
     home_region     TEXT NOT NULL,                 -- MLS commit 직렬화 리전 (v3)
