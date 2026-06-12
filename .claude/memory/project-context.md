@@ -17,6 +17,21 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-12, cycle 131 — FEATURE: Phase 5 SLSA L3 — rust-toolchain.toml + WASM provenance)
+- **Cycle 131 (commit 348d497):** FEATURE — Phase 5 DoD item 1: SLSA Level 3 reproducible builds (prd.md §12.6)
+  - **`rust-toolchain.toml`** (NEW): pins Rust `1.96.0` (confirmed-working CI version; 1.87 was below transitive-dep minimum; darling/time/aws-smithy require ≥1.88–1.91). Components: rustfmt, clippy. Targets: wasm32-unknown-unknown.
+  - **`Dockerfile`** (MODIFIED): `FROM rust:1.83.0-bookworm` → `FROM rust:1.96.0-bookworm` — aligns with toolchain file; 1.83.0 predated MSRV for full workspace.
+  - **`.github/workflows/release.yml`** (EXTENDED):
+    - All third-party actions SHA-pinned (supply-chain hardening — security-auditor R1): checkout, upload-artifact, rust-cache, docker/*, cosign-installer, dtolnay/rust-toolchain (all by 40-char SHA; slsa-framework reusable workflows stay at @v2.0.0 per upstream policy)
+    - `build-wasm` job (NEW): wasm-pack 0.13.1 `--locked`, `SOURCE_DATE_EPOCH=0`, Rust 1.96.0
+    - `wasm-provenance` job (NEW): SLSA L3 attestation for WASM module; SLSA subjects cover both `*_bg.wasm` AND `*.js` glue (R3 fix — JS glue controls WASM exports, must be attested)
+    - GHA layer cache disabled in `build-push-container` (R2 cache-poisoning fix)
+    - `build-binary` toolchain 1.83.0 → 1.96.0 (consistent with Dockerfile)
+  - **security-auditor:** PASS after 3 RED fixes. Deferred YELLOWs: (Y1) `--remap-path-prefix` advisory for full binary reproducibility (L4 territory, non-blocking); (Y2) apt-get unpinned runtime stage packages (affects image hash, not binary SLSA subject)
+  - **465 Rust tests** (unchanged); 358 frontend tests unchanged; fmt clean; clippy clean.
+  - **Phase 5 DoD checklist:** `[x] SLSA Level 3 reproducible builds verified`
+  - **Next Phase 5 item:** Container image signing (cosign + Rekor) — already in release.yml, may be complete; verify on next release tag push.
+
 ## Current state (2026-06-12, cycle 130 — STABILIZATION: device-mgmt REST security invariant tests)
 - **Cycle 130 (commit 4f0c225):** STABILIZATION — CI GREEN, cargo audit clean (1 allowed: instant/openmls). No open GitHub issues. Security sweep found 3 missing REST-layer test gaps from cycle 128 device management endpoints:
   - **`revoke_device_not_found_returns_401_not_404`** (NEW): verifies the oracle-closing mapping `DomainError::NotFound → 401` (not 404) in `revoke_device_handler`. Critical security invariant — prevents device-existence timing oracle attacks. New mock `MockAuthDeviceRevokeNotFound`.
