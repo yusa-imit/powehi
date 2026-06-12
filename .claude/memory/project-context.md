@@ -17,6 +17,19 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-12, cycle 132 — FEATURE: Phase 5 zero-knowledge HTTP metrics middleware — prd.md §13.2)
+- **Cycle 132 (commit TBD):** FEATURE — Phase 5 observability: HTTP request metrics middleware
+  - **`crates/adapters/inbound/powehi-rest-api/src/http_metrics.rs`** (NEW): `record_http_metrics` Tower middleware — records `http_requests_total{method, status}` counter + `http_request_duration_seconds{method, status}` histogram via `metrics` crate on every request.
+  - **Security invariant (prd.md §13.2 + no-plaintext-logging):** Labels are ONLY `request.method().as_str()` (fixed ASCII HTTP verb vocabulary) and `response.status().as_u16().to_string()` (bounded 3-digit integer). URI/path is deliberately absent — routes like `/v1/messages/:id` and `/v1/auth/devices/:id` embed UUID path params that would expose device/envelope IDs.
+  - **Layer positioning:** Outermost layer in `router_inner` — measures full request lifecycle including `DefaultBodyLimit`, `TraceLayer`, security headers, rate-limit layers, auth extractor, and handler. Correctly records 413/429/401 rejection metrics.
+  - **security-auditor:** PASS (GREEN). One YELLOW advisory: histogram latency distinguishability for OPAQUE login paths (not worsened vs TCP-level timing; method+status aggregation reduces distinguishability vs URI-labeled design — advisory in threat model, not blocking).
+  - **4 new tests:** `response_passes_through_with_correct_200_status`, `not_found_response_passes_through_unchanged`, `path_param_route_passes_through_without_leaking_path_into_labels`, `delete_method_passes_through`. No global Prometheus recorder conflict (tests are behavior-only, recorder tests live in lib.rs).
+  - **469 Rust tests** (+4; was 465); fmt clean; clippy clean.
+  - **Phase 5 DoD checklist updated:**
+    - `[x] Container image signing (cosign + Rekor)` — verified already in release.yml (cosign keyless + Rekor + container-provenance SLSA L3)
+    - `[~] Observability stack deployed` — HTTP metrics middleware done; OTLP export + Grafana stack deployment pending
+  - **Next Phase 5 item:** Full threat model review (threat-model-checker pass) OR OTLP exporter configuration for Prometheus → Grafana pipeline.
+
 ## Current state (2026-06-12, cycle 131 — FEATURE: Phase 5 SLSA L3 — rust-toolchain.toml + WASM provenance)
 - **Cycle 131 (commit 348d497):** FEATURE — Phase 5 DoD item 1: SLSA Level 3 reproducible builds (prd.md §12.6)
   - **`rust-toolchain.toml`** (NEW): pins Rust `1.96.0` (confirmed-working CI version; 1.87 was below transitive-dep minimum; darling/time/aws-smithy require ≥1.88–1.91). Components: rustfmt, clippy. Targets: wasm32-unknown-unknown.
