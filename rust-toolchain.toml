@@ -1,0 +1,8 @@
+[toolchain]
+# Pinned to the compiler version used in CI and verified by the full workspace
+# test suite (see project-context.md, cycles 101+). This is higher than the
+# workspace rust-version (1.87) because transitive deps (aws-smithy, time,
+# serde_with) require ≥1.91.1 as of June 2026.
+channel    = "1.96.0"
+components = ["rustfmt", "clippy"]
+targets    = ["wasm32-unknown-unknown"]
