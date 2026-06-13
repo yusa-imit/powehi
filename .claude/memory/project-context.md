@@ -17,6 +17,23 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-13, cycle 140 — STABILIZATION: gRPC RED-1 + RED-2 security fixes)
+- **Cycle 140 (commit d2ed12a):** STABILIZATION — CI GREEN, cargo audit clean (1 allowed: instant/openmls). No open bug issues. Phase 5 and Phase 6 both COMPLETE.
+  - **security-auditor sweep on Phase 6 gRPC code:** Found 2 RED + 15 YELLOW findings.
+  - **RED-1 FIXED (DoS / memory exhaustion):** Added `MAX_CIPHERTEXT_BYTES = 1 MiB` cap in `forward_envelope` and `forward_commit` before `.to_vec()` allocation. Added `MAX_SYNC_MEMBERS = 10,000` cap in `sync_group_membership` before DB writes. Returns `InvalidArgument` on violation.
+  - **RED-2 FIXED (authorization bypass):** `forward_envelope` and `forward_commit` now call `verify_peer_region` against the group's `home_region` (looked up from `group_repo`). When `tls_required=true`, requests without matching `TlsConnectInfo` are rejected with `PermissionDenied` even if sender is a known member. Uses `request.into_parts()` pattern (same as `sync_group_membership`).
+  - **+5 tests:** `forward_envelope_oversized_ciphertext`, `forward_commit_oversized_commit`, `sync_group_membership_too_many_members` (RED-1); `forward_envelope_no_tls_info_rejected_when_group_known_and_tls_required`, `forward_commit_no_tls_info_rejected_when_group_known_and_tls_required` (RED-2).
+  - **485 Rust tests** (+5; was 480); **358 frontend tests** (unchanged); clippy clean; rustfmt clean.
+  - **Deferred YELLOWs from gRPC audit (non-blocking):**
+    - Y-1: `forward_commit` client sends empty `sender_device_id` — cross-region ForwardCommit will fail with InvalidArgument until client fills this field
+    - Y-2: Retry on all error codes incl. non-retryable (InvalidArgument, PermissionDenied) — burns retry budget
+    - Y-7: `peer_cert_matches_region` uses case-sensitive string equality; DNS names are case-insensitive (RFC 6125)
+    - Y-9: No explicit TLS 1.3 min-version pinning in `tls.rs`; no cert expiration logging
+    - Y-14: `created_at` accepts attacker-controlled timestamp from peer — no skew clamp
+    - Y-15: `sync_group_membership` member upsert is non-atomic (N sequential add_member calls, no transaction)
+    - All other YELLOWs (Y-3 through Y-8, Y-10 through Y-13) deferred as advisory/non-blocking
+  - **Next cycle:** Phase 6 fully complete. Post-MVP items: PQ hybrid activation (ADR-0003 Phase A), disappearing messages enhancements, or mobile app scaffold.
+
 ## Current state (2026-06-13, cycle 139 — FEATURE: Phase 5 COMPLETE — Public beta deployment GitOps artifacts)
 - **Cycle 139 (commit 66b8ca3):** FEATURE — Phase 5 DoD final item: Public beta deployment (prd.md §12.4–§12.5)
   - **`infra/argocd/project.yaml`** (NEW): Argo CD AppProject — 4 destination clusters (staging, prod-eu, prod-ap, in-cluster), namespaceResourceWhitelist (Secret excluded → ExternalSecrets only), CI role sync+get only.
