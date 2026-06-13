@@ -30,6 +30,12 @@ impl TlsConfig {
     }
 
     /// Build a tonic `ServerTlsConfig` for mutual TLS.
+    ///
+    /// TLS version: tonic/rustls negotiates TLS 1.2 or 1.3; TLS 1.3 is preferred when
+    /// both sides support it. Pinning TLS 1.3 minimum requires building a custom
+    /// `rustls::ServerConfig` with protocol versions restricted — tracked as future
+    /// hardening (Y-TLS-VERSION). For the current inter-region mesh all peers run the
+    /// same binary so TLS 1.3 is effectively guaranteed.
     pub fn server_tls(&self) -> anyhow::Result<ServerTlsConfig> {
         let identity = Identity::from_pem(&self.cert_pem, &self.key_pem);
         let ca = Certificate::from_pem(&self.ca_cert_pem);

@@ -37,6 +37,11 @@ const MAX_CIPHERTEXT_BYTES: usize = 1024 * 1024; // 1 MiB
 /// Prevents amplified DB writes from a malicious or misconfigured peer.
 const MAX_SYNC_MEMBERS: usize = 10_000;
 
+/// Maximum allowed clock skew for `sent_at_unix_ms` in ForwardEnvelope (Y-14 closure).
+/// Timestamps outside ±5 minutes of server-local time are clamped to now, preventing
+/// a compromised peer from manipulating envelope ordering via far-past/future timestamps.
+const MAX_SENT_AT_SKEW_SECS: i64 = 300; // 5 minutes
+
 pub struct RegionGrpcServer {
     pub local_region: RegionId,
     pub envelope_repo: Arc<dyn EnvelopeRepository>,
@@ -123,6 +128,12 @@ impl RegionGrpcServer {
             return Err(Status::permission_denied("peer certificate required"));
         };
 
+        // Y-9: warn if the peer's mTLS cert is expired or expiring soon.
+        // Primary expiry enforcement is done by rustls during the TLS handshake; this
+        // is a secondary operational signal so operators get advance notice before
+        // rustls starts rejecting connections.
+        inspect_cert_expiry(first_cert.as_ref(), expected_region);
+
         match peer_cert_matches_region(first_cert.as_ref(), expected_region) {
             Ok(true) => Ok(()),
             Ok(false) => {
@@ -202,8 +213,35 @@ fn proto_type_to_domain(t: i32) -> Option<MessageType> {
     }
 }
 
+/// Log a warning if the peer's certificate is expired or expiring within 30 days.
+/// Parsing failures are silently ignored (the TLS handshake already validated the cert).
+fn inspect_cert_expiry(der: &[u8], expected_region: &str) {
+    use x509_parser::prelude::{FromDer, X509Certificate};
+
+    let Ok((_, cert)) = X509Certificate::from_der(der) else {
+        return;
+    };
+    let not_after = cert.validity().not_after.timestamp();
+    let now = chrono::Utc::now().timestamp();
+
+    if now > not_after {
+        // Should be impossible: rustls rejects expired certs during handshake.
+        // Log at warn for defense-in-depth visibility.
+        warn!(expected_region, "peer mTLS certificate is expired");
+    } else {
+        let days_until_expiry = (not_after - now) / 86_400;
+        if days_until_expiry < 30 {
+            warn!(
+                expected_region,
+                days_until_expiry, "peer mTLS certificate expires soon — rotate before expiry"
+            );
+        }
+    }
+}
+
 /// Parse a DER-encoded X.509 certificate and check if any Subject CN or DNS SAN
-/// matches `region`. Matching is exact string equality (case-sensitive).
+/// matches `region`. Matching is case-insensitive per RFC 6125 §6.4.1 (DNS names
+/// and CNs used as hostnames are case-insensitive).
 ///
 /// This is a parser-only helper. It does NOT perform any cryptographic operations
 /// (no signature verification, no chain validation) — chain trust is enforced one
@@ -216,11 +254,12 @@ fn peer_cert_matches_region(der: &[u8], region: &str) -> Result<bool, String> {
     let (_, cert) = X509Certificate::from_der(der).map_err(|e| format!("DER parse error: {e}"))?;
 
     // Check Subject CN — any RDN whose AttributeType is commonName.
+    // Case-insensitive: RFC 6125 §6.4.1 states DNS name comparison is case-insensitive.
     for rdn in cert.subject().iter_rdn() {
         for attr in rdn.iter() {
             if attr.attr_type() == &OID_X509_COMMON_NAME {
                 if let Ok(cn) = attr.as_str() {
-                    if cn == region {
+                    if cn.eq_ignore_ascii_case(region) {
                         return Ok(true);
                     }
                 }
@@ -228,11 +267,11 @@ fn peer_cert_matches_region(der: &[u8], region: &str) -> Result<bool, String> {
         }
     }
 
-    // Check SAN DNS names.
+    // Check SAN DNS names — also case-insensitive per RFC 6125.
     if let Ok(Some(san_ext)) = cert.subject_alternative_name() {
         for name in &san_ext.value.general_names {
             if let GeneralName::DNSName(dns) = name {
-                if *dns == region {
+                if dns.eq_ignore_ascii_case(region) {
                     return Ok(true);
                 }
             }
@@ -278,8 +317,17 @@ impl RegionService for RegionGrpcServer {
         };
         let message_type = proto_type_to_domain(req.envelope_type)
             .ok_or_else(|| Status::invalid_argument("envelope_type unspecified"))?;
-        let created_at =
-            DateTime::from_timestamp_millis(req.sent_at_unix_ms).unwrap_or_else(chrono::Utc::now);
+        // Y-14: clamp peer-supplied timestamp to ±MAX_SENT_AT_SKEW_SECS from now.
+        // A compromised peer could manipulate `sent_at_unix_ms` to shift envelope
+        // ordering (e.g., far-past to appear ancient, far-future to appear newer
+        // than currently-delivered messages). Clamping to server-local time neutralises
+        // this without hard-rejecting envelopes that arrive with small clock skew.
+        let created_at = {
+            let now = chrono::Utc::now();
+            DateTime::from_timestamp_millis(req.sent_at_unix_ms)
+                .filter(|&ts| (ts - now).num_seconds().abs() <= MAX_SENT_AT_SKEW_SECS)
+                .unwrap_or(now)
+        };
 
         // RED-2: verify the calling peer's mTLS cert matches the group's home_region.
         // If the group is unknown locally, check_sender_is_member will reject with
@@ -567,6 +615,46 @@ mod tests {
     #[async_trait]
     impl EnvelopeRepository for NoopEnvelopeRepo {
         async fn save(&self, _envelope: &Envelope) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn find_pending(
+            &self,
+            _device_id: &DeviceId,
+            _since: Option<DateTime<Utc>>,
+        ) -> Result<Vec<Envelope>, DomainError> {
+            Ok(vec![])
+        }
+        async fn find_by_id(&self, _id: &EnvelopeId) -> Result<Option<Envelope>, DomainError> {
+            Ok(None)
+        }
+        async fn delete(&self, _id: &EnvelopeId) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn delete_expired(&self) -> Result<u64, DomainError> {
+            Ok(0)
+        }
+    }
+
+    struct CaptureEnvelopeRepo {
+        captured: std::sync::Mutex<Vec<Envelope>>,
+    }
+
+    impl CaptureEnvelopeRepo {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                captured: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn last_created_at(&self) -> Option<DateTime<Utc>> {
+            self.captured.lock().unwrap().last().map(|e| e.created_at)
+        }
+    }
+
+    #[async_trait]
+    impl EnvelopeRepository for CaptureEnvelopeRepo {
+        async fn save(&self, envelope: &Envelope) -> Result<(), DomainError> {
+            self.captured.lock().unwrap().push(envelope.clone());
             Ok(())
         }
         async fn find_pending(
@@ -1524,6 +1612,213 @@ mod tests {
             err.code(),
             tonic::Code::PermissionDenied,
             "missing TlsConnectInfo must be rejected when group is known and tls_required=true"
+        );
+    }
+
+    // ── Y-7: RFC 6125 case-insensitive CN/SAN matching ────────────────────────
+
+    #[test]
+    fn peer_cert_matches_region_case_insensitive_cn() {
+        // eu-de-1 cert (CN=eu-de-1) must also match "EU-DE-1" per RFC 6125 §6.4.1.
+        assert!(
+            peer_cert_matches_region(EU_DE_1_CN_DER, "EU-DE-1").unwrap(),
+            "CN comparison must be case-insensitive"
+        );
+    }
+
+    #[test]
+    fn peer_cert_matches_region_case_insensitive_san() {
+        // eu-de-1 SAN cert (CN=some-other-cn, SAN DNS=eu-de-1) must match "EU-DE-1".
+        assert!(
+            peer_cert_matches_region(EU_DE_1_SAN_DER, "EU-DE-1").unwrap(),
+            "SAN DNS comparison must be case-insensitive"
+        );
+    }
+
+    #[test]
+    fn peer_cert_does_not_match_different_region_regardless_of_case() {
+        // ap-sin-1 cert (CN=ap-sin-1) must NOT match "EU-DE-1" in any case form.
+        assert!(!peer_cert_matches_region(AP_SIN_1_CN_DER, "EU-DE-1").unwrap());
+    }
+
+    // ── Y-14: sent_at_unix_ms skew clamp tests ────────────────────────────────
+
+    #[tokio::test]
+    async fn forward_envelope_far_future_timestamp_clamped_to_now() {
+        let group_id = GroupId::from(Uuid::new_v4());
+        let sender = DeviceId::new();
+        let capture_repo = CaptureEnvelopeRepo::new();
+        let server = RegionGrpcServer::new(
+            RegionId::new("eu-central-1"),
+            capture_repo.clone(),
+            Arc::new(NoopEventBus),
+            FakeKpRepo::new(),
+            FakeGroupRepo::with_member(group_id.clone(), sender.clone()),
+            false,
+        );
+        let now = chrono::Utc::now();
+        // 1 year in the future — well outside the ±5 minute skew window.
+        let far_future_ms = (now + chrono::Duration::days(365)).timestamp_millis();
+        let req = Request::new(ForwardEnvelopeRequest {
+            envelope_id: Uuid::new_v4().to_string(),
+            group_id: group_id.as_uuid().to_string(),
+            sender_device_id: sender.as_uuid().to_string(),
+            recipient_device_id: String::new(),
+            ciphertext: vec![0xca, 0xfe],
+            envelope_type: EnvelopeType::Application as i32,
+            sent_at_unix_ms: far_future_ms,
+        });
+        let resp = server.forward_envelope(req).await.unwrap();
+        assert_eq!(resp.into_inner().status, ForwardStatus::Accepted as i32);
+        // created_at must be clamped to near server-local time, not peer-supplied far-future.
+        let stored_at = capture_repo.last_created_at().unwrap();
+        let skew_secs = (stored_at - now).num_seconds().abs();
+        assert!(
+            skew_secs <= 5,
+            "far-future timestamp must be clamped to near-now (skew={skew_secs}s)"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_envelope_far_past_timestamp_clamped_to_now() {
+        let group_id = GroupId::from(Uuid::new_v4());
+        let sender = DeviceId::new();
+        let capture_repo = CaptureEnvelopeRepo::new();
+        let server = RegionGrpcServer::new(
+            RegionId::new("eu-central-1"),
+            capture_repo.clone(),
+            Arc::new(NoopEventBus),
+            FakeKpRepo::new(),
+            FakeGroupRepo::with_member(group_id.clone(), sender.clone()),
+            false,
+        );
+        let now = chrono::Utc::now();
+        // 2023-11-14 — well over 5 minutes in the past.
+        let far_past_ms: i64 = 1_700_000_000_000;
+        let req = Request::new(ForwardEnvelopeRequest {
+            envelope_id: Uuid::new_v4().to_string(),
+            group_id: group_id.as_uuid().to_string(),
+            sender_device_id: sender.as_uuid().to_string(),
+            recipient_device_id: String::new(),
+            ciphertext: vec![0xca, 0xfe],
+            envelope_type: EnvelopeType::Application as i32,
+            sent_at_unix_ms: far_past_ms,
+        });
+        let resp = server.forward_envelope(req).await.unwrap();
+        assert_eq!(resp.into_inner().status, ForwardStatus::Accepted as i32);
+        // created_at must be clamped to near server-local time, not 2023.
+        let stored_at = capture_repo.last_created_at().unwrap();
+        let skew_secs = (stored_at - now).num_seconds().abs();
+        assert!(
+            skew_secs <= 5,
+            "far-past timestamp must be clamped to near-now (skew={skew_secs}s)"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_envelope_recent_timestamp_preserved() {
+        // A timestamp within the skew window must be accepted as-is (not clamped).
+        let group_id = GroupId::from(Uuid::new_v4());
+        let sender = DeviceId::new();
+        let capture_repo = CaptureEnvelopeRepo::new();
+        let server = RegionGrpcServer::new(
+            RegionId::new("eu-central-1"),
+            capture_repo.clone(),
+            Arc::new(NoopEventBus),
+            FakeKpRepo::new(),
+            FakeGroupRepo::with_member(group_id.clone(), sender.clone()),
+            false,
+        );
+        let now = chrono::Utc::now();
+        // 30 seconds in the past — well within the ±5 minute window.
+        let recent_ms = (now - chrono::Duration::seconds(30)).timestamp_millis();
+        let req = Request::new(ForwardEnvelopeRequest {
+            envelope_id: Uuid::new_v4().to_string(),
+            group_id: group_id.as_uuid().to_string(),
+            sender_device_id: sender.as_uuid().to_string(),
+            recipient_device_id: String::new(),
+            ciphertext: vec![0xca, 0xfe],
+            envelope_type: EnvelopeType::Application as i32,
+            sent_at_unix_ms: recent_ms,
+        });
+        let resp = server.forward_envelope(req).await.unwrap();
+        assert_eq!(resp.into_inner().status, ForwardStatus::Accepted as i32);
+        // created_at should reflect the peer-supplied timestamp (within skew window).
+        let stored_at = capture_repo.last_created_at().unwrap();
+        let diff_ms = (stored_at.timestamp_millis() - recent_ms).unsigned_abs();
+        assert!(
+            diff_ms < 100,
+            "timestamp within skew window must be stored as-is (diff={diff_ms}ms)"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_envelope_extreme_timestamp_i64_min_clamped_to_now() {
+        // i64::MIN cannot be represented as a valid DateTime; from_timestamp_millis returns None.
+        // The clamp must fall through to now without panicking.
+        let group_id = GroupId::from(Uuid::new_v4());
+        let sender = DeviceId::new();
+        let capture_repo = CaptureEnvelopeRepo::new();
+        let server = RegionGrpcServer::new(
+            RegionId::new("eu-central-1"),
+            capture_repo.clone(),
+            Arc::new(NoopEventBus),
+            FakeKpRepo::new(),
+            FakeGroupRepo::with_member(group_id.clone(), sender.clone()),
+            false,
+        );
+        let now = chrono::Utc::now();
+        let req = Request::new(ForwardEnvelopeRequest {
+            envelope_id: Uuid::new_v4().to_string(),
+            group_id: group_id.as_uuid().to_string(),
+            sender_device_id: sender.as_uuid().to_string(),
+            recipient_device_id: String::new(),
+            ciphertext: vec![0xca, 0xfe],
+            envelope_type: EnvelopeType::Application as i32,
+            sent_at_unix_ms: i64::MIN,
+        });
+        let resp = server.forward_envelope(req).await.unwrap();
+        assert_eq!(resp.into_inner().status, ForwardStatus::Accepted as i32);
+        let stored_at = capture_repo.last_created_at().unwrap();
+        let skew_secs = (stored_at - now).num_seconds().abs();
+        assert!(
+            skew_secs <= 5,
+            "i64::MIN timestamp must be clamped to near-now"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_envelope_extreme_timestamp_i64_max_clamped_to_now() {
+        // i64::MAX in millis is beyond chrono's representable range; from_timestamp_millis
+        // returns None → fall through to now. Must not panic.
+        let group_id = GroupId::from(Uuid::new_v4());
+        let sender = DeviceId::new();
+        let capture_repo = CaptureEnvelopeRepo::new();
+        let server = RegionGrpcServer::new(
+            RegionId::new("eu-central-1"),
+            capture_repo.clone(),
+            Arc::new(NoopEventBus),
+            FakeKpRepo::new(),
+            FakeGroupRepo::with_member(group_id.clone(), sender.clone()),
+            false,
+        );
+        let now = chrono::Utc::now();
+        let req = Request::new(ForwardEnvelopeRequest {
+            envelope_id: Uuid::new_v4().to_string(),
+            group_id: group_id.as_uuid().to_string(),
+            sender_device_id: sender.as_uuid().to_string(),
+            recipient_device_id: String::new(),
+            ciphertext: vec![0xca, 0xfe],
+            envelope_type: EnvelopeType::Application as i32,
+            sent_at_unix_ms: i64::MAX,
+        });
+        let resp = server.forward_envelope(req).await.unwrap();
+        assert_eq!(resp.into_inner().status, ForwardStatus::Accepted as i32);
+        let stored_at = capture_repo.last_created_at().unwrap();
+        let skew_secs = (stored_at - now).num_seconds().abs();
+        assert!(
+            skew_secs <= 5,
+            "i64::MAX timestamp must be clamped to near-now"
         );
     }
 }
