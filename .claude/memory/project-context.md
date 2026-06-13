@@ -17,6 +17,19 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-14, cycle 144 — FEATURE: Y-1 + Y-2 CLOSED — sender_device_id in forward_commit + non-retryable retry guard)
+- **Cycle 144 (commit 06d9416):** FEATURE — closed two deferred gRPC YELLOW findings from cycle 140 audit.
+  - **Y-1 CLOSED (sender_device_id in forward_commit):** `RegionRouter::forward_commit` port trait now requires `sender_device_id: &DeviceId` parameter. `RegionGrpcRouter::forward_commit` passes `sender_device_id.to_string()` in `ForwardCommitRequest`. Previously sent `String::new()` → peer's fail-closed group-membership check always returned INVALID_ARGUMENT. Added doc invariant to trait: "caller must supply the locally-authenticated device ID".
+  - **Y-2 CLOSED (non-retryable retry guard):** Added `is_retryable(code: tonic::Code) -> bool` function. `with_retry` now short-circuits on non-retryable codes (INVALID_ARGUMENT, NOT_FOUND, ALREADY_EXISTS, PERMISSION_DENIED, UNAUTHENTICATED, FAILED_PRECONDITION, UNIMPLEMENTED, OUT_OF_RANGE) — returns error immediately without retrying and without incrementing the circuit breaker failure count (peer is healthy; request is rejected on principle).
+  - **+7 tests:** `forward_commit_returns_error_for_unknown_region` (Y-1 smoke), `with_retry_does_not_retry_invalid_argument`, `with_retry_does_not_retry_permission_denied`, `with_retry_does_not_retry_unauthenticated`, `with_retry_retries_unavailable` (regression guard), `is_retryable_returns_false_for_non_retryable_codes`, `is_retryable_returns_true_for_transient_codes`.
+  - **security-auditor:** GREEN (no RED). Deferred YELLOWs: `last_err.unwrap()` accumulator (pre-existing, structurally safe); circuit re-check inside backoff loop (pre-existing); no per-code metric for non-retryable exits (future observability).
+  - **509 Rust tests** (+5 net; was 504); **358 frontend tests** (unchanged); clippy clean; rustfmt clean.
+  - **Remaining deferred gRPC YELLOWs (still open):**
+    - Y-TLS-CLIENT: `client_rustls_config()` not yet wired (tonic 0.12 limitation; deferred to tonic upgrade)
+    - Y-TLS-1.2-TEST: integration test for TLS 1.2 ClientHello rejection (future cycle)
+    - All other YELLOWs (Y-3 through Y-8, Y-10 through Y-13) still deferred as advisory/non-blocking
+  - **Next cycle:** Post-MVP items: PQ hybrid activation (ADR-0003 Phase A triggers on openmls stable MLS_128_MLKEM768 ciphersuite), disappearing messages enhancements, mobile app scaffold, or Y-TLS-CLIENT (requires tonic upgrade or custom hyper-based gRPC client).
+
 ## Current state (2026-06-14, cycle 143 — FEATURE: Y-TLS-VERSION CLOSED — TLS 1.3 minimum for gRPC)
 - **Cycle 143 (commit 791f40c):** FEATURE — closed deferred gRPC YELLOW Y-TLS-VERSION: explicit TLS 1.3 minimum for inter-region gRPC listener.
   - **Y-TLS-VERSION CLOSED:** tonic 0.12's `ServerTlsConfig` doesn't expose protocol-version selection. Built custom `rustls::ServerConfig` via `builder_with_provider(ring).with_protocol_versions(&[&TLS13])`. Used `serve_with_incoming` with `tokio_rustls::TlsAcceptor` — `TlsStream<TcpStream>: Connected` is implemented by tonic 0.12.3, so `TlsConnectInfo` injection is preserved and `verify_peer_region()` works unchanged.
