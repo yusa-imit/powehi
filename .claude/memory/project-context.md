@@ -17,6 +17,22 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-13, cycle 142 — FEATURE: gRPC Y-15 CLOSED — atomic sync_group_membership)
+- **Cycle 142 (commit f1f4b03):** FEATURE — closed deferred gRPC YELLOW Y-15: non-atomic member upsert.
+  - **Y-15 CLOSED (atomic batch upsert):** Added `GroupRepository::upsert_members(group, members)` port method. `PgGroupRepository` implements it with `pool.begin()` / `tx.commit()` wrapping all INSERTs in a single transaction. Both group row and member rows use `ON CONFLICT DO NOTHING` (idempotent, epoch-preserving).
+  - **YELLOW-2 CLOSED (dedup amplification):** Added `HashSet` dedup over `member_device_ids` before building INSERT list. A peer sending the same UUID N times (up to MAX_SYNC_MEMBERS=10k) now results in only 1 INSERT instead of N no-op writes.
+  - **YELLOW-1 CLOSED (test fidelity):** `FakeGroupRepo::upsert_members` in server.rs models `DO NOTHING` semantics — skips save if group already present, preserving any higher locally-tracked epoch. Matching change in messaging_service.rs and group_service.rs fakes.
+  - **`sync_group_membership` handler simplified:** removed conditional `find_by_id` + `save` + N-call loop; replaced with single `upsert_members` call.
+  - **+3 tests:** `sync_group_membership_all_members_persisted_atomically` (3 members all accepted by forward_envelope after batch upsert), `sync_group_membership_zero_members_creates_group_stub` (empty list → Accepted), `sync_group_membership_duplicate_device_ids_are_deduped` (same UUID ×3 → 1 member accepted).
+  - **security-auditor:** PASS (GREEN). Both YELLOWs addressed before commit (Y-1 FakeGroupRepo epoch-preservation, Y-2 dedup). clippy clean; rustfmt clean.
+  - **498 Rust tests** (+3; was 495); **358 frontend tests** (unchanged).
+  - **Remaining deferred gRPC YELLOWs (still open):**
+    - Y-1: `forward_commit` client sends empty `sender_device_id` (cross-region client-side fix needed)
+    - Y-2: Retry on non-retryable error codes burns retry budget (client-side fix)
+    - Y-TLS-VERSION: Explicit TLS 1.3 minimum requires custom `rustls::ServerConfig`
+    - All other YELLOWs (Y-3 through Y-8, Y-10 through Y-13) still deferred as advisory/non-blocking
+  - **Next cycle:** Post-MVP items: PQ hybrid activation (ADR-0003 Phase A triggers on openmls stable MLS_128_MLKEM768 ciphersuite), disappearing messages enhancements, mobile app scaffold, or Y-TLS-VERSION (explicit TLS 1.3 min via custom rustls::ServerConfig).
+
 ## Current state (2026-06-13, cycle 141 — FEATURE: gRPC Y-7/Y-9/Y-14 security hardening)
 - **Cycle 141 (commit 72c2fa5):** FEATURE — closed three deferred gRPC YELLOW findings from cycle 140 audit.
   - **Y-7 CLOSED (RFC 6125 compliance):** `peer_cert_matches_region` now uses `.eq_ignore_ascii_case()` for Subject CN and SAN DNS name comparison. Case-sensitive `==` was a latent bypass (RFC 6125 §6.4.1 mandates case-insensitive DNS label comparison).
