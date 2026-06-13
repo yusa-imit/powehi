@@ -17,6 +17,27 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-14, cycle 143 — FEATURE: Y-TLS-VERSION CLOSED — TLS 1.3 minimum for gRPC)
+- **Cycle 143 (commit 791f40c):** FEATURE — closed deferred gRPC YELLOW Y-TLS-VERSION: explicit TLS 1.3 minimum for inter-region gRPC listener.
+  - **Y-TLS-VERSION CLOSED:** tonic 0.12's `ServerTlsConfig` doesn't expose protocol-version selection. Built custom `rustls::ServerConfig` via `builder_with_provider(ring).with_protocol_versions(&[&TLS13])`. Used `serve_with_incoming` with `tokio_rustls::TlsAcceptor` — `TlsStream<TcpStream>: Connected` is implemented by tonic 0.12.3, so `TlsConnectInfo` injection is preserved and `verify_peer_region()` works unchanged.
+  - **security-auditor F1 FIXED (slow-loris DoS):** 10s `tokio::time::timeout` on TLS handshake — partial ClientHello can no longer block the accept loop indefinitely.
+  - **security-auditor F2 FIXED (silent rejection):** `warn!(error_kind = "tls_handshake")` and `warn!(error_kind = "tls_handshake_timeout")` — operators can observe TLS 1.2 downgrade attempts and timeout events without PII or ciphertext in logs.
+  - **security-auditor F3 FIXED (accept-error terminates serve):** non-transient `listener.accept()` errors now `warn+continue` instead of returning from the stream, preventing silent shutdown of the HTTP+admin servers via `try_join!`.
+  - **opaque-ke argon2 feature FIXED (pre-existing):** `powehi-opaque/Cargo.toml` — `opaque-ke = { features = ["argon2"] }` — `Argon2<'static>: Ksf` trait bound was unsatisfied without explicit feature; `cargo build -p powehi-server` was broken.
+  - **`server_tls()` deprecated** with `#[deprecated]` — prevents callers from silently using the unpinned TLS path.
+  - **`client_rustls_config()` added** — TLS 1.3 minimum client config for future hyper-based gRPC clients (tonic 0.12 `ClientTlsConfig` doesn't support version pinning).
+  - **+6 tls.rs tests:** builds-without-error, h2-ALPN, missing-CA rejection, client config, PEM parsers.
+  - **security-auditor:** YELLOW→GREEN (F1/F2/F3 fixed). Remaining deferred:
+    - Y-TLS-CLIENT: `client_rustls_config()` not yet wired (tonic 0.12 `ClientTlsConfig` no `rustls_client_config()`; deferred to tonic upgrade)
+    - Y-TLS-1.2-TEST: integration test for TLS 1.2 ClientHello rejection (future cycle)
+  - **504 Rust tests** (+6; was 498); **358 frontend tests** (unchanged); clippy clean; rustfmt clean.
+  - **Remaining deferred gRPC YELLOWs (still open):**
+    - Y-1: `forward_commit` client sends empty `sender_device_id` (cross-region client-side fix needed)
+    - Y-2: Retry on non-retryable error codes burns retry budget (client-side fix)
+    - Y-TLS-CLIENT: `client_rustls_config()` not yet wired (tonic 0.12 limitation)
+    - All other YELLOWs (Y-3 through Y-8, Y-10 through Y-13) still deferred as advisory/non-blocking
+  - **Next cycle:** Post-MVP items: PQ hybrid activation (ADR-0003 Phase A triggers on openmls stable MLS_128_MLKEM768 ciphersuite), disappearing messages enhancements, mobile app scaffold, or Y-TLS-CLIENT (requires tonic upgrade or custom hyper-based gRPC client).
+
 ## Current state (2026-06-13, cycle 142 — FEATURE: gRPC Y-15 CLOSED — atomic sync_group_membership)
 - **Cycle 142 (commit f1f4b03):** FEATURE — closed deferred gRPC YELLOW Y-15: non-atomic member upsert.
   - **Y-15 CLOSED (atomic batch upsert):** Added `GroupRepository::upsert_members(group, members)` port method. `PgGroupRepository` implements it with `pool.begin()` / `tx.commit()` wrapping all INSERTs in a single transaction. Both group row and member rows use `ON CONFLICT DO NOTHING` (idempotent, epoch-preserving).
