@@ -5,6 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use powehi_domain::{
+    device::DeviceId,
     envelope::Envelope,
     error::DomainError,
     group::{Epoch, GroupId},
@@ -181,6 +182,7 @@ impl RegionRouter for RegionGrpcRouter {
         &self,
         target_region: &RegionId,
         group_id: &GroupId,
+        sender_device_id: &DeviceId,
         commit: Bytes,
     ) -> Result<Epoch, DomainError> {
         let peer = self
@@ -188,16 +190,18 @@ impl RegionRouter for RegionGrpcRouter {
             .ok_or_else(|| DomainError::Internal(format!("no peer for region {target_region}")))?;
 
         let group_str = group_id.to_string();
+        let sender_str = sender_device_id.to_string();
         let commit_bytes = commit.clone();
 
         with_retry(peer, RETRY_MAX, RETRY_BASE_MS, move |mut client| {
             let gid = group_str.clone();
+            let sid = sender_str.clone();
             let cb = commit_bytes.clone();
             Box::pin(async move {
                 let resp = client
                     .forward_commit(tonic::Request::new(ForwardCommitRequest {
                         group_id: gid,
-                        sender_device_id: String::new(),
+                        sender_device_id: sid,
                         commit: cb.to_vec(),
                         expected_epoch: 0,
                     }))
@@ -222,6 +226,23 @@ impl RegionRouter for RegionGrpcRouter {
 use crate::error::GrpcError;
 use std::future::Future;
 use std::pin::Pin;
+
+/// Non-retryable gRPC codes are deterministic client errors: retrying cannot
+/// succeed without the caller fixing the request. Retrying these burns quota
+/// and can mask bugs (Y-2 advisory, cycle 140).
+fn is_retryable(code: tonic::Code) -> bool {
+    !matches!(
+        code,
+        tonic::Code::InvalidArgument
+            | tonic::Code::NotFound
+            | tonic::Code::AlreadyExists
+            | tonic::Code::PermissionDenied
+            | tonic::Code::Unauthenticated
+            | tonic::Code::FailedPrecondition
+            | tonic::Code::Unimplemented
+            | tonic::Code::OutOfRange
+    )
+}
 
 async fn with_retry<T, F, Fut>(
     peer: Arc<tokio::sync::Mutex<PeerState>>,
@@ -251,6 +272,11 @@ where
                 return Ok(v);
             }
             Err(e) => {
+                if !is_retryable(e.code()) {
+                    // Non-retryable: do not count as circuit failure — the
+                    // peer is healthy but the request is malformed or rejected.
+                    return Err(GrpcError::Status(e));
+                }
                 warn!(code = ?e.code(), "gRPC call failed, will retry");
                 last_err = Some(e);
                 if delay_ms > 0 {
@@ -379,5 +405,184 @@ mod tests {
             peer_ref.lock().await.circuit.is_open(),
             "circuit must be open after all retries failed"
         );
+    }
+
+    // ── Y-1: forward_commit includes sender_device_id ─────────────────────
+
+    /// forward_commit returns Internal for unknown regions regardless of
+    /// sender_device_id — confirms the new parameter is accepted.
+    #[tokio::test]
+    async fn forward_commit_returns_error_for_unknown_region() {
+        let router = RegionGrpcRouter {
+            local_region: RegionId::new("eu-central-1"),
+            peers: HashMap::new(),
+        };
+        let group_id = GroupId::new();
+        let sender = DeviceId::new();
+        let result = router
+            .forward_commit(
+                &RegionId::new("unknown"),
+                &group_id,
+                &sender,
+                bytes::Bytes::from(vec![0xca, 0xfe]),
+            )
+            .await;
+        assert!(matches!(result, Err(DomainError::Internal(_))));
+    }
+
+    // ── Y-2: non-retryable codes must not be retried ──────────────────────
+
+    /// INVALID_ARGUMENT must be returned immediately without retrying. A request
+    /// that the server rejects as malformed will never succeed on retry; retrying
+    /// would burn the retry budget and inflate latency (Y-2, cycle 140).
+    #[tokio::test]
+    async fn with_retry_does_not_retry_invalid_argument() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let circuit = CircuitBreaker::new(5, Duration::from_secs(60));
+        let peer = Arc::new(tokio::sync::Mutex::new(PeerState {
+            client: RegionServiceClient::new(channel),
+            circuit,
+        }));
+        let peer_ref = Arc::clone(&peer);
+        let call_count = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&call_count);
+
+        let result: Result<(), GrpcError> = with_retry(peer, 3, 0, move |_client| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err::<(), _>(tonic::Status::invalid_argument("bad request")) })
+        })
+        .await;
+
+        assert!(result.is_err(), "expected error on InvalidArgument");
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "InvalidArgument must not be retried"
+        );
+        assert!(
+            !peer_ref.lock().await.circuit.is_open(),
+            "circuit must stay closed — peer is healthy, request is malformed"
+        );
+    }
+
+    /// PERMISSION_DENIED must be returned immediately without retrying.
+    /// Authorization status is stable; retrying cannot change the outcome.
+    #[tokio::test]
+    async fn with_retry_does_not_retry_permission_denied() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let circuit = CircuitBreaker::new(5, Duration::from_secs(60));
+        let peer = Arc::new(tokio::sync::Mutex::new(PeerState {
+            client: RegionServiceClient::new(channel),
+            circuit,
+        }));
+        let call_count = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&call_count);
+
+        let result: Result<(), GrpcError> = with_retry(peer, 3, 0, move |_client| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err::<(), _>(tonic::Status::permission_denied("forbidden")) })
+        })
+        .await;
+
+        assert!(result.is_err(), "expected error on PermissionDenied");
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "PermissionDenied must not be retried"
+        );
+    }
+
+    /// UNAUTHENTICATED must be returned immediately without retrying.
+    #[tokio::test]
+    async fn with_retry_does_not_retry_unauthenticated() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let circuit = CircuitBreaker::new(5, Duration::from_secs(60));
+        let peer = Arc::new(tokio::sync::Mutex::new(PeerState {
+            client: RegionServiceClient::new(channel),
+            circuit,
+        }));
+        let call_count = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&call_count);
+
+        let result: Result<(), GrpcError> = with_retry(peer, 3, 0, move |_client| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err::<(), _>(tonic::Status::unauthenticated("no token")) })
+        })
+        .await;
+
+        assert!(result.is_err(), "expected error on Unauthenticated");
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "Unauthenticated must not be retried"
+        );
+    }
+
+    /// UNAVAILABLE is retryable — circuit breaker should trip after all retries.
+    /// Regression guard: ensure is_retryable still allows retry for transient errors.
+    #[tokio::test]
+    async fn with_retry_retries_unavailable() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let circuit = CircuitBreaker::new(10, Duration::from_secs(60));
+        let peer = Arc::new(tokio::sync::Mutex::new(PeerState {
+            client: RegionServiceClient::new(channel),
+            circuit,
+        }));
+        let call_count = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&call_count);
+
+        let result: Result<(), GrpcError> = with_retry(
+            peer,
+            2, // max_retries=2 → 3 total attempts
+            0,
+            move |_client| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Err::<(), _>(tonic::Status::unavailable("transient")) })
+            },
+        )
+        .await;
+
+        assert!(result.is_err(), "expected error after retries exhausted");
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            3,
+            "Unavailable must be retried up to max_retries+1 times"
+        );
+    }
+
+    // ── is_retryable unit tests ────────────────────────────────────────────
+
+    #[test]
+    fn is_retryable_returns_false_for_non_retryable_codes() {
+        let non_retryable = [
+            tonic::Code::InvalidArgument,
+            tonic::Code::NotFound,
+            tonic::Code::AlreadyExists,
+            tonic::Code::PermissionDenied,
+            tonic::Code::Unauthenticated,
+            tonic::Code::FailedPrecondition,
+            tonic::Code::Unimplemented,
+            tonic::Code::OutOfRange,
+        ];
+        for code in non_retryable {
+            assert!(!is_retryable(code), "{code:?} should not be retryable");
+        }
+    }
+
+    #[test]
+    fn is_retryable_returns_true_for_transient_codes() {
+        let retryable = [
+            tonic::Code::Unavailable,
+            tonic::Code::Internal,
+            tonic::Code::DeadlineExceeded,
+            tonic::Code::ResourceExhausted,
+        ];
+        for code in retryable {
+            assert!(is_retryable(code), "{code:?} should be retryable");
+        }
     }
 }
