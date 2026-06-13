@@ -17,6 +17,20 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-13, cycle 138 — FEATURE: Phase 5 Security audit findings addressed — Y3/F4/F6/Y-KP-1 closed)
+- **Cycle 138 (commit 9629f23):** FEATURE — Phase 5 DoD item: Security audit findings addressed
+  - **`messaging_service.rs`** (MODIFIED): `MAX_FAN_OUT_RECIPIENTS=512` cap in `fan_out_push`. Members beyond cap still poll; warn log is content-free (cap= field only). Test: `fan_out_caps_at_max_recipients` (514-member group → exactly 512 pushes). Closes Y3/cycle 116.
+  - **`auth_service.rs`** (MODIFIED): `MAX_DEVICES_PER_USER=10` check in `register_device` — rejects with `DomainError::InvalidInput("device_limit_exceeded")` if user already has 10 devices. Soft cap (TOCTOU acknowledged; hard DB invariant is future hardening). Test: `register_device_rejects_when_user_at_device_limit`. Closes finding 4/cycle 128.
+  - **`lib.rs`** (MODIFIED): Device routes (`POST/DELETE /v1/auth/devices`) moved from `api_governor` (burst=60) to `auth_governor` (burst=5, shared token bucket via `.clone()`). Strictly tighter: login + device ops share same per-IP allowance. Closes finding 6/cycle 128.
+  - **`key_package_service.rs`** (MODIFIED): `MAX_KEY_PACKAGES_PER_CALL=50` (pre-DB check) and `MAX_KEY_PACKAGES_PER_DEVICE=200` (count_available + new ≤ 200). Soft cap, TOCTOU acknowledged. Tests: `upload_rejects_oversized_batch`, `upload_rejects_when_device_at_storage_limit`. Closes Y-KP-1/cycle 135.
+  - **security-auditor:** YELLOW (no RED). TOCTOU in device cap and KP cap are soft caps — hard DB invariants require transactional adapter changes (future hardening). GovernorLayer clone shares token bucket (intentionally stricter). All findings advisory/non-blocking.
+  - **480 Rust tests** (+4; was 476); fmt clean; clippy clean.
+  - **Phase 5 DoD:** `[x] Security audit findings addressed` — Y3/F4/F6/Y-KP-1 all closed.
+  - **Remaining Phase 5 item:** `[ ] Public beta deployment`
+  - **New deferred YELLOWs (soft caps, future hardening):**
+    - Device cap TOCTOU: hard invariant needs serializable transaction in outbound adapter
+    - KP cap TOCTOU: hard invariant needs atomic INSERT-with-precondition in outbound adapter
+
 ## Current state (2026-06-13, cycle 137 — FEATURE: Phase 5 PQ hybrid migration path documented — ADR-0003 Active)
 - **Cycle 137 (commit 2fa32e8):** FEATURE — Phase 5 DoD item: PQ hybrid migration path documented (ML-KEM-768)
   - **`docs/decisions/0003-pq-migration.md`** (MAJOR UPDATE): ADR-0003 status Proposed → **Active**. Added:
