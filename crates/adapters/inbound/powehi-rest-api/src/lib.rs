@@ -129,15 +129,19 @@ fn router_inner(
         )
         .route("/v1/auth/login/init", post(routes::auth::login_init))
         .route("/v1/auth/login/finish", post(routes::auth::login_finish))
-        .layer(auth_layer);
+        .layer(auth_layer.clone());
 
-    // Device management — authenticated, uses api_governor (not auth_governor).
+    // Device management — uses auth_governor (same class as OPAQUE endpoints,
+    // shared token bucket via clone) because adding/revoking devices changes
+    // auth state. Shared bucket is intentionally stricter: login + device ops
+    // draw from the same per-IP allowance, preventing budget-doubling.
     let device_routes = Router::new()
         .route("/v1/auth/devices", post(routes::auth::register_new_device))
         .route(
             "/v1/auth/devices/:id",
             delete(routes::auth::revoke_device_handler),
-        );
+        )
+        .layer(auth_layer);
 
     // Authenticated API endpoints — general per-IP rate limit.
     let api_routes = Router::new()
@@ -177,7 +181,6 @@ fn router_inner(
         )
         .route("/v1/invites", post(routes::invite::create))
         .route("/v1/invites/redeem", post(routes::invite::redeem))
-        .merge(device_routes)
         .layer(api_layer);
 
     // Public endpoints — no auth, no per-IP rate limit (like /health).
@@ -189,6 +192,7 @@ fn router_inner(
     Router::new()
         .merge(public_routes)
         .merge(auth_routes)
+        .merge(device_routes)
         .merge(api_routes)
         .with_state(state)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))

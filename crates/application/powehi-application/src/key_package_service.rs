@@ -11,6 +11,13 @@ use powehi_port_inbound::key_package::KeyPackageUseCase;
 use powehi_port_outbound::key_package_repo::KeyPackageRepository;
 use tracing::instrument;
 
+/// Maximum KeyPackages accepted in a single upload call. Prevents large request
+/// bursts and aligns with typical client replenishment batch size.
+const MAX_KEY_PACKAGES_PER_CALL: usize = 50;
+/// Maximum KeyPackages stored per device at any time. Prevents unbounded
+/// per-device storage growth; ~200 packages supports months of offline usage.
+const MAX_KEY_PACKAGES_PER_DEVICE: u64 = 200;
+
 pub struct KeyPackageService {
     kp_repo: Arc<dyn KeyPackageRepository>,
 }
@@ -29,6 +36,22 @@ impl KeyPackageUseCase for KeyPackageService {
         device_id: &DeviceId,
         packages: Vec<Bytes>,
     ) -> Result<Vec<KeyPackageId>, DomainError> {
+        if packages.len() > MAX_KEY_PACKAGES_PER_CALL {
+            return Err(DomainError::InvalidInput(
+                "too_many_key_packages_per_call".into(),
+            ));
+        }
+        // Soft cap: count-then-insert races are possible under concurrent
+        // uploads from the same device. The practical window is narrow (same
+        // device, same instant) and mitigated by the per-call limit above.
+        // A hard invariant would require an atomic INSERT-with-precondition in
+        // the outbound adapter (future hardening).
+        let current = self.kp_repo.count_available(device_id).await?;
+        if current + packages.len() as u64 > MAX_KEY_PACKAGES_PER_DEVICE {
+            return Err(DomainError::InvalidInput(
+                "key_package_device_limit_exceeded".into(),
+            ));
+        }
         let mut ids = Vec::with_capacity(packages.len());
         for data in packages {
             let kp = KeyPackage::new(device_id.clone(), data.to_vec());
@@ -156,6 +179,44 @@ mod tests {
         let svc = KeyPackageService::new(FakeKpRepo::new());
         let err = svc.fetch_one(&DeviceId::new()).await.unwrap_err();
         assert!(matches!(err, DomainError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_oversized_batch() {
+        let svc = KeyPackageService::new(FakeKpRepo::new());
+        let device = DeviceId::new();
+        let too_many: Vec<Bytes> = (0..=MAX_KEY_PACKAGES_PER_CALL)
+            .map(|_| Bytes::from_static(b"kp"))
+            .collect();
+        let err = svc.upload(&device, too_many).await.unwrap_err();
+        assert!(
+            matches!(err, DomainError::InvalidInput(ref s) if s.contains("too_many_key_packages_per_call")),
+            "expected too_many_key_packages_per_call, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_when_device_at_storage_limit() {
+        let repo = FakeKpRepo::new();
+        let svc = KeyPackageService::new(repo.clone());
+        let device = DeviceId::new();
+        // Fill to the limit in batches of MAX_KEY_PACKAGES_PER_CALL.
+        let batch: Vec<Bytes> = (0..MAX_KEY_PACKAGES_PER_CALL)
+            .map(|_| Bytes::from_static(b"kp"))
+            .collect();
+        let iterations = MAX_KEY_PACKAGES_PER_DEVICE as usize / MAX_KEY_PACKAGES_PER_CALL;
+        for _ in 0..iterations {
+            svc.upload(&device, batch.clone()).await.unwrap();
+        }
+        // One more package must be rejected.
+        let err = svc
+            .upload(&device, vec![Bytes::from_static(b"one-more")])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DomainError::InvalidInput(ref s) if s.contains("key_package_device_limit_exceeded")),
+            "expected key_package_device_limit_exceeded, got: {err:?}"
+        );
     }
 
     #[tokio::test]

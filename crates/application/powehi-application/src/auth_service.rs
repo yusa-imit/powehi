@@ -28,6 +28,9 @@ const LOGIN_NONCE_TTL: Duration = Duration::from_secs(300);
 const SESSION_TTL: Duration = Duration::from_secs(86_400);
 /// Buffer added to `device_sessions` set TTL so it outlives any session it tracks.
 const DEVICE_SESSIONS_TTL: Duration = Duration::from_secs(86_400 + 300);
+/// Maximum number of devices a single user account may register. Prevents
+/// unbounded device proliferation and limits per-user KeyPackage storage.
+const MAX_DEVICES_PER_USER: usize = 10;
 
 pub struct AuthService {
     user_repo: Arc<dyn UserRepository>,
@@ -261,6 +264,17 @@ impl AuthUseCase for AuthService {
         user_id: &UserId,
         req: DeviceRegistrationRequest,
     ) -> Result<DeviceId, DomainError> {
+        // Soft cap: count-then-insert is not wrapped in a serializable
+        // transaction, so a race between two concurrent registrations could
+        // temporarily exceed MAX_DEVICES_PER_USER by one. This is acceptable
+        // at the application layer — a hard DB-level invariant would require a
+        // serializable transaction in the outbound adapter (future hardening).
+        // Practical risk is very low: registration requires an active session
+        // and is governed by auth_governor (burst=5, 1 token/6s).
+        let existing = self.device_repo.find_by_user(user_id).await?;
+        if existing.len() >= MAX_DEVICES_PER_USER {
+            return Err(DomainError::InvalidInput("device_limit_exceeded".into()));
+        }
         let device_id = DeviceId::new();
         let device = Device::new(device_id.clone(), user_id.clone(), req.mls_credential);
         self.device_repo.save(&device).await?;
@@ -1050,6 +1064,37 @@ mod tests {
             .expect("device saved");
         assert_eq!(stored.user_id, uid);
         assert_eq!(stored.mls_credential, vec![1u8; 16]);
+    }
+
+    #[tokio::test]
+    async fn register_device_rejects_when_user_at_device_limit() {
+        let (svc, _, _, _) = make_svc();
+        let uid = UserId::new();
+        // Fill up to MAX_DEVICES_PER_USER successfully.
+        for _ in 0..MAX_DEVICES_PER_USER {
+            svc.register_device(
+                &uid,
+                DeviceRegistrationRequest {
+                    mls_credential: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        }
+        // The next registration must be rejected.
+        let err = svc
+            .register_device(
+                &uid,
+                DeviceRegistrationRequest {
+                    mls_credential: vec![],
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DomainError::InvalidInput(ref s) if s.contains("device_limit_exceeded")),
+            "expected device_limit_exceeded, got: {err:?}"
+        );
     }
 
     #[tokio::test]

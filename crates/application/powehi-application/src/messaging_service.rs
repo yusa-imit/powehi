@@ -22,6 +22,11 @@ use tracing::instrument;
 const MIN_TTL_SECONDS: u32 = 30;
 /// Maximum disappearing-message TTL: 7 days.
 const MAX_TTL_SECONDS: u32 = 604_800;
+/// Maximum number of push notifications sent per message fan-out. Caps DoS
+/// amplification: a single message cannot trigger more than this many pushes
+/// regardless of group size. Members beyond the cap receive no push ping but
+/// still receive the envelope on their next poll.
+const MAX_FAN_OUT_RECIPIENTS: usize = 512;
 
 pub struct MessagingService {
     envelope_repo: Arc<dyn EnvelopeRepository>,
@@ -111,7 +116,14 @@ impl MessagingService {
                 return;
             }
         };
-        for member in members.iter().filter(|m| &m.device_id != sender) {
+        let recipients: Vec<_> = members.iter().filter(|m| &m.device_id != sender).collect();
+        if recipients.len() > MAX_FAN_OUT_RECIPIENTS {
+            tracing::warn!(
+                cap = MAX_FAN_OUT_RECIPIENTS,
+                "fan-out push: group size cap reached; excess members will not receive push ping"
+            );
+        }
+        for member in recipients.iter().take(MAX_FAN_OUT_RECIPIENTS) {
             self.maybe_push(&member.device_id).await;
         }
     }
@@ -1115,5 +1127,45 @@ mod tests {
             .await
             .unwrap();
         // No assertion on push count — just verifying no panic/error.
+    }
+
+    #[tokio::test]
+    async fn fan_out_caps_at_max_recipients() {
+        // Security invariant: a group with more than MAX_FAN_OUT_RECIPIENTS members
+        // must not trigger more than MAX_FAN_OUT_RECIPIENTS pushes — DoS amplification cap.
+        let sender = DeviceId::new();
+        let group_id = GroupId::new();
+
+        // Create MAX_FAN_OUT_RECIPIENTS + 2 peers (beyond the cap).
+        let peers: Vec<DeviceId> = (0..MAX_FAN_OUT_RECIPIENTS + 2)
+            .map(|_| DeviceId::new())
+            .collect();
+
+        let mut all_subs: Vec<PushSubscription> = peers.iter().map(make_sub).collect();
+        all_subs.push(make_sub(&sender));
+
+        let mut all_pairs: Vec<(GroupId, DeviceId)> = peers
+            .iter()
+            .map(|p| (group_id.clone(), p.clone()))
+            .collect();
+        all_pairs.push((group_id.clone(), sender.clone()));
+
+        let push = FakeWebPush::ok();
+        let push_ref = Arc::clone(&push);
+        let subs = FakePushSubRepo::with_subs(all_subs);
+        let group_repo = FakeGroupRepo::with_member_list(all_pairs.clone());
+        let env_repo = FakeEnvelopeRepo::with_memberships(all_pairs);
+        let svc = MessagingService::new(env_repo, group_repo, Arc::new(FakeEventBus))
+            .with_push(subs, push_ref);
+
+        svc.send_message(&sender, &group_id, Bytes::from_static(b"ct"), None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            push.call_count.load(Ordering::SeqCst),
+            MAX_FAN_OUT_RECIPIENTS,
+            "fan-out must be capped at MAX_FAN_OUT_RECIPIENTS to prevent DoS amplification"
+        );
     }
 }
