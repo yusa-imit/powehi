@@ -143,6 +143,46 @@ impl GroupRepository for PgGroupRepository {
         .map_err(map_err)?;
         Ok(rows.into_iter().map(GroupId::from).collect())
     }
+
+    async fn upsert_members(
+        &self,
+        group: &Group,
+        members: &[GroupMember],
+    ) -> Result<(), DomainError> {
+        let mut tx = self.pool.begin().await.map_err(map_err)?;
+
+        // Insert group stub. DO NOTHING on conflict preserves an existing epoch so
+        // a remote peer cannot downgrade a locally-tracked epoch by re-syncing.
+        sqlx::query(
+            "INSERT INTO groups (id, home_region, epoch, created_at)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(group.id.as_uuid())
+        .bind(group.home_region.as_str())
+        .bind(group.epoch.0 as i64)
+        .bind(group.created_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_err)?;
+
+        for member in members {
+            sqlx::query(
+                "INSERT INTO group_members (group_id, device_id, joined_at_epoch)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (group_id, device_id) DO NOTHING",
+            )
+            .bind(member.group_id.as_uuid())
+            .bind(member.device_id.as_uuid())
+            .bind(member.joined_at_epoch.0 as i64)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_err)?;
+        }
+
+        tx.commit().await.map_err(map_err)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

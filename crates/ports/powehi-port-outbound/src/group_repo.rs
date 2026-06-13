@@ -21,4 +21,12 @@ pub trait GroupRepository: Send + Sync {
         &self,
         device_id: &DeviceId,
     ) -> Result<Vec<GroupId>, DomainError>;
+    /// Atomically upsert a group stub and insert all members in a single transaction.
+    /// Uses ON CONFLICT DO NOTHING for both the group row and each member row, so
+    /// re-syncing an already-known group is idempotent and safe under concurrent calls.
+    async fn upsert_members(
+        &self,
+        group: &Group,
+        members: &[GroupMember],
+    ) -> Result<(), DomainError>;
 }

@@ -475,50 +475,42 @@ impl RegionService for RegionGrpcServer {
             ));
         }
 
-        // Validate and collect all device IDs before any DB writes (fail-fast)
+        // Validate, collect, and deduplicate device IDs before any DB writes (fail-fast).
+        // Dedup prevents a peer from amplifying transaction cost by repeating the same UUID
+        // up to MAX_SYNC_MEMBERS times (each would be a no-op INSERT but still costs I/O).
+        let mut seen = std::collections::HashSet::with_capacity(req.member_device_ids.len());
         let mut device_ids: Vec<DeviceId> = Vec::with_capacity(req.member_device_ids.len());
         for did in &req.member_device_ids {
-            device_ids.push(
-                parse_device_id(did)
-                    .ok_or_else(|| Status::invalid_argument("invalid member_device_id UUID"))?,
-            );
+            let parsed = parse_device_id(did)
+                .ok_or_else(|| Status::invalid_argument("invalid member_device_id UUID"))?;
+            if seen.insert(parsed.as_uuid()) {
+                device_ids.push(parsed);
+            }
         }
 
-        // Ensure the group record exists before inserting members (FK constraint).
-        // If the group is unknown locally, create a stub record with epoch 0.
-        // We do NOT update epoch on conflict to avoid downgrading a locally-tracked epoch.
-        if self
-            .group_repo
-            .find_by_id(&group_id)
-            .await
-            .map_err(|e| domain_err_to_status(&e))?
-            .is_none()
-        {
-            let group = Group {
-                id: group_id.clone(),
-                home_region: RegionId::new(req.home_region.clone()),
-                epoch: Epoch(0),
-                created_at: chrono::Utc::now(),
-            };
-            self.group_repo
-                .save(&group)
-                .await
-                .map_err(|e| domain_err_to_status(&e))?;
-        }
-
-        let member_count = device_ids.len();
-        // Upsert members (add_member uses ON CONFLICT DO NOTHING)
-        for device_id in device_ids {
-            let member = GroupMember {
+        // Build the group stub and member list, then upsert atomically.
+        // upsert_members uses ON CONFLICT DO NOTHING for both the group row and
+        // each member row, so a remote peer cannot downgrade a locally-tracked epoch
+        // and re-syncing an already-known group is idempotent. Y-15 CLOSED.
+        let group_stub = Group {
+            id: group_id.clone(),
+            home_region: RegionId::new(req.home_region.clone()),
+            epoch: Epoch(0),
+            created_at: chrono::Utc::now(),
+        };
+        let members: Vec<GroupMember> = device_ids
+            .into_iter()
+            .map(|device_id| GroupMember {
                 group_id: group_id.clone(),
                 device_id,
                 joined_at_epoch: Epoch(0),
-            };
-            self.group_repo
-                .add_member(&member)
-                .await
-                .map_err(|e| domain_err_to_status(&e))?;
-        }
+            })
+            .collect();
+        let member_count = members.len();
+        self.group_repo
+            .upsert_members(&group_stub, &members)
+            .await
+            .map_err(|e| domain_err_to_status(&e))?;
 
         tracing::debug!(
             group_id = %group_id.as_uuid(),
@@ -838,6 +830,20 @@ mod tests {
                     }
                 })
                 .collect())
+        }
+        async fn upsert_members(
+            &self,
+            group: &Group,
+            members: &[GroupMember],
+        ) -> Result<(), DomainError> {
+            // Mirror ON CONFLICT DO NOTHING for the group row: only insert if absent.
+            if self.find_by_id(&group.id).await?.is_none() {
+                self.save(group).await?;
+            }
+            for m in members {
+                self.add_member(m).await?;
+            }
+            Ok(())
         }
     }
 
@@ -1820,5 +1826,85 @@ mod tests {
             skew_secs <= 5,
             "i64::MAX timestamp must be clamped to near-now"
         );
+    }
+
+    // ── Y-15: sync_group_membership uses upsert_members (atomic batch) ────────
+
+    #[tokio::test]
+    async fn sync_group_membership_all_members_persisted_atomically() {
+        // Three members in one sync call — all must be stored and any subsequent
+        // forward from any member must be accepted (verifies batch upsert path).
+        let server = make_server();
+        let group_id = Uuid::new_v4();
+        let member_ids: Vec<String> = (0..3).map(|_| Uuid::new_v4().to_string()).collect();
+        let req = Request::new(SyncGroupMembershipRequest {
+            group_id: group_id.to_string(),
+            home_region: "eu-de-1".to_string(),
+            member_device_ids: member_ids.clone(),
+        });
+        let resp = server.sync_group_membership(req).await.unwrap();
+        assert_eq!(resp.into_inner().status, ForwardStatus::Accepted as i32);
+
+        // Every member in the batch must be individually accepted by forward_envelope.
+        for sender_id in &member_ids {
+            let fwd_req = Request::new(ForwardEnvelopeRequest {
+                envelope_id: Uuid::new_v4().to_string(),
+                group_id: group_id.to_string(),
+                sender_device_id: sender_id.clone(),
+                recipient_device_id: String::new(),
+                ciphertext: vec![0xab, 0xcd],
+                envelope_type: EnvelopeType::Application as i32,
+                sent_at_unix_ms: 1_700_000_000_000,
+            });
+            let fwd_resp = server.forward_envelope(fwd_req).await.unwrap();
+            assert_eq!(
+                fwd_resp.into_inner().status,
+                ForwardStatus::Accepted as i32,
+                "member {sender_id} must be accepted after batch upsert"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_group_membership_zero_members_creates_group_stub() {
+        // An empty member list is valid: creates only the group stub.
+        let server = make_server();
+        let group_id = Uuid::new_v4();
+        let req = Request::new(SyncGroupMembershipRequest {
+            group_id: group_id.to_string(),
+            home_region: "eu-de-1".to_string(),
+            member_device_ids: vec![],
+        });
+        let resp = server.sync_group_membership(req).await.unwrap();
+        assert_eq!(resp.into_inner().status, ForwardStatus::Accepted as i32);
+    }
+
+    #[tokio::test]
+    async fn sync_group_membership_duplicate_device_ids_are_deduped() {
+        // Peer sends the same UUID 3 times — only one membership row must result.
+        // Verifies YELLOW-2 closure: dedup before INSERT prevents amplified no-op writes.
+        let server = make_server();
+        let group_id = Uuid::new_v4();
+        let member_id = Uuid::new_v4().to_string();
+        let req = Request::new(SyncGroupMembershipRequest {
+            group_id: group_id.to_string(),
+            home_region: "eu-de-1".to_string(),
+            member_device_ids: vec![member_id.clone(), member_id.clone(), member_id.clone()],
+        });
+        let resp = server.sync_group_membership(req).await.unwrap();
+        assert_eq!(resp.into_inner().status, ForwardStatus::Accepted as i32);
+
+        // The deduplicated member must still be accepted by forward_envelope.
+        let fwd_req = Request::new(ForwardEnvelopeRequest {
+            envelope_id: Uuid::new_v4().to_string(),
+            group_id: group_id.to_string(),
+            sender_device_id: member_id,
+            recipient_device_id: String::new(),
+            ciphertext: vec![0xef, 0x01],
+            envelope_type: EnvelopeType::Application as i32,
+            sent_at_unix_ms: 1_700_000_000_000,
+        });
+        let fwd_resp = server.forward_envelope(fwd_req).await.unwrap();
+        assert_eq!(fwd_resp.into_inner().status, ForwardStatus::Accepted as i32);
     }
 }

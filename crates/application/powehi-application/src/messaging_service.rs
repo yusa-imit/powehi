@@ -478,6 +478,19 @@ mod tests {
                 .map(|m| m.group_id.clone())
                 .collect())
         }
+        async fn upsert_members(
+            &self,
+            group: &Group,
+            members: &[powehi_domain::group::GroupMember],
+        ) -> Result<(), DomainError> {
+            if self.find_by_id(&group.id).await?.is_none() {
+                self.save(group).await?;
+            }
+            for m in members {
+                self.add_member(m).await?;
+            }
+            Ok(())
+        }
     }
 
     struct FakeEventBus;

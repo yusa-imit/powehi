@@ -265,6 +265,13 @@ mod tests {
                 .map(|(gid, _)| gid.clone())
                 .collect())
         }
+        async fn upsert_members(
+            &self,
+            _group: &Group,
+            _members: &[GroupMember],
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
     }
 
     fn svc(repo: Arc<MockMediaRepo>) -> MediaService {
