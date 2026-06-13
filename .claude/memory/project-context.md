@@ -17,6 +17,20 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-14, cycle 145 — STABILIZATION: gRPC error boundary security invariant tests)
+- **Cycle 145 (commit 953fef5):** STABILIZATION — CI GREEN, cargo audit clean (1 allowed: instant/openmls). No open bug issues.
+  - **Test gap CLOSED — `error.rs` gRPC error boundary:** `domain_err_to_status()` and `GrpcError→DomainError` conversion were completely untested. Added 14 new tests:
+    - **Status code mapping (7 tests):** All `DomainError` variants → correct `tonic::Code` (NotFound→not_found, AlreadyExists→already_exists, Unauthorized→unauthenticated, InvalidInput→invalid_argument, EpochMismatch→failed_precondition, RegionMismatch→failed_precondition, Internal→internal)
+    - **Security invariants (3 tests):** `epoch_mismatch_does_not_leak_epoch_numbers` (assert `!msg.contains("42")` etc.), `region_mismatch_does_not_leak_region_identifiers`, `internal_error_does_not_leak_details_to_peer` (also pins sentinel: `msg == "internal error"`)
+    - **GrpcError→DomainError conversion (4 tests):** CircuitOpen→Internal, InvalidRequest→InvalidInput (message preserved), Status(not_found)→Internal (catch-all), transport path (compile-time coverage)
+  - **security-auditor:** GREEN. No findings. Assertions point in correct direction (negative-contains + positive sentinel lock). No new attack surface (tests are pure in-process, no sockets/I/O/unsafe).
+  - **523 Rust tests** (+14; was 509); **358 frontend tests** (unchanged); clippy clean; rustfmt clean.
+  - **Next cycle:** Post-MVP items: PQ hybrid activation (ADR-0003 Phase A triggers on openmls stable MLS_128_MLKEM768 ciphersuite), disappearing messages enhancements, mobile app scaffold, or Y-TLS-CLIENT (requires tonic upgrade or custom hyper-based gRPC client).
+  - **Remaining deferred gRPC YELLOWs (still open):**
+    - Y-TLS-CLIENT: `client_rustls_config()` not yet wired (tonic 0.12 limitation; deferred to tonic upgrade)
+    - Y-TLS-1.2-TEST: integration test for TLS 1.2 ClientHello rejection — NOTE: rustls in workspace has no `tls12` feature, so TLS 1.2 is compile-time disabled (build-time guarantee); integration test would need a separate test binary with `tls12` feature enabled
+    - All other YELLOWs (Y-3 through Y-8, Y-10 through Y-13) still deferred as advisory/non-blocking
+
 ## Current state (2026-06-14, cycle 144 — FEATURE: Y-1 + Y-2 CLOSED — sender_device_id in forward_commit + non-retryable retry guard)
 - **Cycle 144 (commit 06d9416):** FEATURE — closed two deferred gRPC YELLOW findings from cycle 140 audit.
   - **Y-1 CLOSED (sender_device_id in forward_commit):** `RegionRouter::forward_commit` port trait now requires `sender_device_id: &DeviceId` parameter. `RegionGrpcRouter::forward_commit` passes `sender_device_id.to_string()` in `ForwardCommitRequest`. Previously sent `String::new()` → peer's fail-closed group-membership check always returned INVALID_ARGUMENT. Added doc invariant to trait: "caller must supply the locally-authenticated device ID".
