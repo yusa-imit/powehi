@@ -1,0 +1,37 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: powehi-staging-eu
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: powehi
+    app.kubernetes.io/instance: staging-eu
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: powehi
+  source:
+    repoURL: https://github.com/yusa-imit/powehi
+    targetRevision: HEAD
+    path: infra/helm/powehi
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-staging.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: powehi-staging
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+  revisionHistoryLimit: 5

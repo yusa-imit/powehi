@@ -1,0 +1,51 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: powehi
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  description: Powehi E2EE messenger — multi-region GitOps project (prd.md §12.4)
+  sourceRepos:
+    - https://github.com/yusa-imit/powehi
+  destinations:
+    - namespace: powehi-staging
+      server: https://kubernetes.default.svc
+    - namespace: powehi
+      server: https://kubernetes.default.svc
+    - namespace: powehi
+      server: https://k3s-prod-eu.powehi.internal:6443
+    - namespace: powehi
+      server: https://k3s-prod-ap.powehi.internal:6443
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+  namespaceResourceWhitelist:
+    - group: apps
+      kind: Deployment
+    - group: apps
+      kind: ReplicaSet
+    - group: ""
+      kind: ConfigMap
+    - group: ""
+      kind: Service
+    - group: ""
+      kind: ServiceAccount
+    - group: autoscaling
+      kind: HorizontalPodAutoscaler
+    - group: networking.k8s.io
+      kind: NetworkPolicy
+    - group: external-secrets.io
+      kind: ExternalSecret
+    - group: monitoring.coreos.com
+      kind: ServiceMonitor
+  roles:
+    - name: ci
+      description: GitHub Actions deployer — sync only, no create/delete
+      policies:
+        - p, proj:powehi:ci, applications, sync, powehi/*, allow
+        - p, proj:powehi:ci, applications, get, powehi/*, allow
+      jwtTokens: []
+  orphanedResources:
+    warn: true

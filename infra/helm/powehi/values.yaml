@@ -31,6 +31,10 @@ networkPolicy:
 # REQUIRED: eu-frankfurt | ap-seoul
 region: ""
 
+# Region tier for capacity routing and API response headers (prd.md §4A).
+# Tier1 = full R/W primary; Tier2 = read-replica + relay write forwarding.
+tier: "Tier1"
+
 config:
   logLevel: "info"
   adminPort: "9090"

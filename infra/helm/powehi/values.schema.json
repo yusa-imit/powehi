@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "Powehi Helm values schema",
+  "type": "object",
+  "properties": {
+    "replicaCount": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": { "type": "string" },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        },
+        "tag": { "type": "string" }
+      }
+    },
+    "region": {
+      "type": "string",
+      "enum": ["eu-frankfurt", "ap-seoul", "ap-tokyo", ""]
+    },
+    "tier": {
+      "type": "string",
+      "enum": ["Tier1", "Tier2"],
+      "description": "Region tier: Tier1=full R/W primary, Tier2=read-replica relay (prd.md §4A)"
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "logLevel": {
+          "type": "string",
+          "enum": ["error", "warn", "info", "debug", "trace"]
+        },
+        "grpcTlsEnabled": {
+          "type": "string",
+          "enum": ["true", "false"]
+        }
+      }
+    },
+    "autoscaling": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minReplicas": { "type": "integer", "minimum": 1 },
+        "maxReplicas": { "type": "integer", "minimum": 1 },
+        "targetCPUUtilizationPercentage": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "required": ["limits", "requests"],
+      "properties": {
+        "limits": {
+          "type": "object",
+          "required": ["cpu", "memory"]
+        },
+        "requests": {
+          "type": "object",
+          "required": ["cpu", "memory"]
+        }
+      }
+    }
+  }
+}

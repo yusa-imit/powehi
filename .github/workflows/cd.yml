@@ -1,0 +1,216 @@
+name: CD — Progressive Deploy (Staging → Prod EU → Prod AP)
+
+# Triggered automatically on release publish (staging only).
+# Use workflow_dispatch to promote a specific tag to a specific environment.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to deploy (e.g. v0.1.0)"
+        required: true
+        type: string
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options:
+          - staging-eu
+          - prod-eu
+          - prod-ap
+        default: staging-eu
+
+permissions: {}
+
+concurrency:
+  group: cd-${{ github.event.inputs.environment || 'staging-eu' }}
+  cancel-in-progress: false
+
+env:
+  # argocd CLI version — kept in sync with the cluster-installed version.
+  # Update together; mismatch in minor versions is safe but major is not.
+  ARGOCD_VERSION: "v2.13.5"
+
+jobs:
+  # ── Resolve the tag once so both deploy jobs can share it ────────────────────
+  resolve-tag:
+    name: Resolve image tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Determine image tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          else
+            TAG="${{ github.event.inputs.tag }}"
+          fi
+          # Validate semver format — prevents shell injection via malformed tag input.
+          if ! echo "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
+            echo "::error::Tag '$TAG' does not match expected semver pattern (vX.Y.Z[-pre])"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  # ── Deploy to staging-eu ──────────────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy — staging-eu
+    runs-on: ubuntu-latest
+    needs: resolve-tag
+    environment: staging-eu
+    if: >
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging-eu')
+    permissions:
+      contents: read
+    steps:
+      - name: Install argocd CLI (SHA-verified)
+        run: |
+          curl -sSfL -o argocd \
+            "https://github.com/argoproj/argo-cd/releases/download/${ARGOCD_VERSION}/argocd-linux-amd64"
+          curl -sSfL -o argocd.sha256 \
+            "https://github.com/argoproj/argo-cd/releases/download/${ARGOCD_VERSION}/argocd-linux-amd64.sha256"
+          sha256sum --check argocd.sha256
+          chmod +x argocd
+          sudo mv argocd /usr/local/bin/argocd
+
+      - name: Set image tag on staging
+        env:
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+          ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
+        run: |
+          argocd app set powehi-staging-eu \
+            --helm-set "image.tag=${{ needs.resolve-tag.outputs.tag }}" \
+            --grpc-web
+
+      - name: Wait for staging sync + health
+        env:
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+          ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
+        run: |
+          argocd app wait powehi-staging-eu \
+            --sync \
+            --health \
+            --timeout 300 \
+            --grpc-web
+
+      - name: Smoke test — staging health endpoint
+        env:
+          STAGING_URL: ${{ secrets.STAGING_URL }}
+        run: |
+          # Retry /health up to 12 × 10s = 2 minutes (pod warm-up).
+          for i in $(seq 1 12); do
+            STATUS=$(curl -sSf -o /dev/null -w "%{http_code}" "${STAGING_URL}/health" || echo 000)
+            if [ "$STATUS" = "200" ]; then
+              echo "Smoke test passed (attempt $i)"
+              exit 0
+            fi
+            echo "Attempt $i: status=$STATUS, retrying in 10s…"
+            sleep 10
+          done
+          echo "::error::Staging /health did not return 200 after 12 attempts"
+          exit 1
+
+  # ── Promote to prod-eu (requires manual approval via environment protection) ──
+  deploy-prod-eu:
+    name: Deploy — prod-eu
+    runs-on: ubuntu-latest
+    needs: [resolve-tag, deploy-staging]
+    environment: prod-eu
+    if: >
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod-eu')
+    permissions:
+      contents: read
+    steps:
+      - name: Install argocd CLI (SHA-verified)
+        run: |
+          curl -sSfL -o argocd \
+            "https://github.com/argoproj/argo-cd/releases/download/${ARGOCD_VERSION}/argocd-linux-amd64"
+          curl -sSfL -o argocd.sha256 \
+            "https://github.com/argoproj/argo-cd/releases/download/${ARGOCD_VERSION}/argocd-linux-amd64.sha256"
+          sha256sum --check argocd.sha256
+          chmod +x argocd
+          sudo mv argocd /usr/local/bin/argocd
+
+      - name: Set image tag on prod-eu
+        env:
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER_PROD_EU }}
+          ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN_PROD_EU }}
+        run: |
+          argocd app set powehi-prod-eu \
+            --helm-set "image.tag=${{ needs.resolve-tag.outputs.tag }}" \
+            --grpc-web
+
+      - name: Sync prod-eu
+        env:
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER_PROD_EU }}
+          ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN_PROD_EU }}
+        run: |
+          argocd app sync powehi-prod-eu \
+            --grpc-web
+
+      - name: Wait for prod-eu sync + health
+        env:
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER_PROD_EU }}
+          ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN_PROD_EU }}
+        run: |
+          argocd app wait powehi-prod-eu \
+            --sync \
+            --health \
+            --timeout 600 \
+            --grpc-web
+
+  # ── Promote to prod-ap (requires separate manual approval) ───────────────────
+  deploy-prod-ap:
+    name: Deploy — prod-ap
+    runs-on: ubuntu-latest
+    needs: [resolve-tag, deploy-prod-eu]
+    environment: prod-ap
+    if: >
+      github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod-ap'
+    permissions:
+      contents: read
+    steps:
+      - name: Install argocd CLI (SHA-verified)
+        run: |
+          curl -sSfL -o argocd \
+            "https://github.com/argoproj/argo-cd/releases/download/${ARGOCD_VERSION}/argocd-linux-amd64"
+          curl -sSfL -o argocd.sha256 \
+            "https://github.com/argoproj/argo-cd/releases/download/${ARGOCD_VERSION}/argocd-linux-amd64.sha256"
+          sha256sum --check argocd.sha256
+          chmod +x argocd
+          sudo mv argocd /usr/local/bin/argocd
+
+      - name: Set image tag on prod-ap
+        env:
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER_PROD_AP }}
+          ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN_PROD_AP }}
+        run: |
+          argocd app set powehi-prod-ap \
+            --helm-set "image.tag=${{ needs.resolve-tag.outputs.tag }}" \
+            --grpc-web
+
+      - name: Sync prod-ap
+        env:
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER_PROD_AP }}
+          ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN_PROD_AP }}
+        run: |
+          argocd app sync powehi-prod-ap \
+            --grpc-web
+
+      - name: Wait for prod-ap sync + health
+        env:
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER_PROD_AP }}
+          ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN_PROD_AP }}
+        run: |
+          argocd app wait powehi-prod-ap \
+            --sync \
+            --health \
+            --timeout 600 \
+            --grpc-web

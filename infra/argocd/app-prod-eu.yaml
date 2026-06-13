@@ -1,0 +1,32 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: powehi-prod-eu
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: powehi
+    app.kubernetes.io/instance: prod-eu
+spec:
+  project: powehi
+  source:
+    repoURL: https://github.com/yusa-imit/powehi
+    targetRevision: HEAD
+    path: infra/helm/powehi
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-prod-eu.yaml
+  destination:
+    server: https://k3s-prod-eu.powehi.internal:6443
+    namespace: powehi
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+  revisionHistoryLimit: 10

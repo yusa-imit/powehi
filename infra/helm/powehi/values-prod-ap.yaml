@@ -1,0 +1,51 @@
+replicaCount: 2
+
+image:
+  pullPolicy: IfNotPresent
+
+resources:
+  limits:
+    cpu: "2"
+    memory: "1Gi"
+  requests:
+    cpu: "200m"
+    memory: "256Mi"
+
+autoscaling:
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 60
+
+region: ap-seoul
+tier: "Tier1"
+
+config:
+  logLevel: "info"
+  grpcTlsEnabled: "true"
+  grpcPeers: ""
+
+monitoring:
+  serviceMonitor:
+    enabled: true
+    interval: "30s"
+    additionalLabels:
+      release: kube-prometheus-stack
+
+otlp:
+  endpoint: "http://otel-collector.monitoring.svc.cluster.local:4317"
+  serviceName: "powehi-ap"
+
+externalSecrets:
+  refreshInterval: "1h"
+  secretStoreRef:
+    name: "powehi-secret-store"
+    kind: "ClusterSecretStore"
+  remoteRefs:
+    databaseUrl: "powehi/prod-ap/database-url"
+    redisUrl: "powehi/prod-ap/redis-url"
+    r2AccessKeyId: "powehi/prod-ap/r2-access-key-id"
+    r2SecretAccessKey: "powehi/prod-ap/r2-secret-access-key"
+    vapidPrivateKey: "powehi/prod-ap/vapid-private-key"
+    grpcTlsCert: "powehi/prod-ap/grpc-tls-cert"
+    grpcTlsKey: "powehi/prod-ap/grpc-tls-key"
+    grpcTlsCa: "powehi/prod-ap/grpc-tls-ca"
