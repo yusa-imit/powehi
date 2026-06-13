@@ -17,6 +17,28 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-13, cycle 139 — FEATURE: Phase 5 COMPLETE — Public beta deployment GitOps artifacts)
+- **Cycle 139 (commit 66b8ca3):** FEATURE — Phase 5 DoD final item: Public beta deployment (prd.md §12.4–§12.5)
+  - **`infra/argocd/project.yaml`** (NEW): Argo CD AppProject — 4 destination clusters (staging, prod-eu, prod-ap, in-cluster), namespaceResourceWhitelist (Secret excluded → ExternalSecrets only), CI role sync+get only.
+  - **`infra/argocd/app-staging-eu.yaml`** (NEW): automated prune+selfHeal sync from HEAD → `powehi-staging` namespace.
+  - **`infra/argocd/app-prod-eu.yaml`** + **`app-prod-ap.yaml`** (NEW): manual sync only (no `automated` block) — prod requires human approval via GitHub Environment protection.
+  - **`infra/helm/powehi/values-staging.yaml`** (NEW): EU-Frankfurt staging — 1-3 replicas, info logging, grpcTLS on, 5m ExternalSecrets refresh.
+  - **`infra/helm/powehi/values-prod-eu.yaml`** (NEW): EU-Frankfurt Tier1 — 3-15 replicas, 60% CPU HPA, separate secret paths `powehi/prod-eu/`.
+  - **`infra/helm/powehi/values-prod-ap.yaml`** (NEW): AP-Seoul Tier1 — 2-10 replicas, `powehi/prod-ap/` secrets.
+  - **`infra/helm/powehi/values.schema.json`** (NEW): JSON Schema — tier enum (Tier1|Tier2), logLevel enum, required resource limits. Schema error on invalid values at `helm lint`.
+  - **`infra/helm/powehi/values.yaml`** (MODIFIED): `tier: "Tier1"` field added.
+  - **`infra/helm/powehi/templates/configmap.yaml`** (MODIFIED): `POWEHI__TIER` emitted.
+  - **`.github/workflows/cd.yml`** (NEW): progressive deploy staging-eu→prod-eu→prod-ap. Semver validation. ARGOCD_AUTH_TOKEN in env vars only (not CLI flags — R1). Staging smoke test /health retry. SHA-verified argocd CLI install.
+  - **security-auditor:** YELLOW (no RED). R1 (env-var-only token) + R2 (grpcTlsEnabled=true on staging) both closed. 3 deferred pre-launch YELLOWs: targetRevision pin, commit signing, SHA inline-pin.
+  - **infra-test:** 0 FAILs. Helm lint clean, all 3 env renders correct, schema validation confirmed.
+  - **480 Rust tests** (unchanged); **358 frontend tests** (unchanged).
+  - **Phase 5 DoD:** ALL ITEMS COMPLETE ✓. Phase 5 STATUS.md: COMPLETE.
+  - **Next phase:** Phase 6: Global Infrastructure (gRPC mesh + mTLS inter-region, AP-Seoul Tier1 independence, cross-region round-trip p99 <200ms, failover RTO <5m).
+  - **Pre-launch YELLOW follow-ups (before first prod Argo CD sync):**
+    - Pin `targetRevision` in app-prod-eu/prod-ap.yaml to release tag (not HEAD)
+    - Configure `signatureKeys` in AppProject for signed-commit enforcement
+    - Pin argocd CLI SHA inline in cd.yml (not from downloaded .sha256 file)
+
 ## Current state (2026-06-13, cycle 138 — FEATURE: Phase 5 Security audit findings addressed — Y3/F4/F6/Y-KP-1 closed)
 - **Cycle 138 (commit 9629f23):** FEATURE — Phase 5 DoD item: Security audit findings addressed
   - **`messaging_service.rs`** (MODIFIED): `MAX_FAN_OUT_RECIPIENTS=512` cap in `fan_out_push`. Members beyond cap still poll; warn log is content-free (cap= field only). Test: `fan_out_caps_at_max_recipients` (514-member group → exactly 512 pushes). Closes Y3/cycle 116.
