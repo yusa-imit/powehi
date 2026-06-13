@@ -17,6 +17,22 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-13, cycle 141 — FEATURE: gRPC Y-7/Y-9/Y-14 security hardening)
+- **Cycle 141 (commit 72c2fa5):** FEATURE — closed three deferred gRPC YELLOW findings from cycle 140 audit.
+  - **Y-7 CLOSED (RFC 6125 compliance):** `peer_cert_matches_region` now uses `.eq_ignore_ascii_case()` for Subject CN and SAN DNS name comparison. Case-sensitive `==` was a latent bypass (RFC 6125 §6.4.1 mandates case-insensitive DNS label comparison).
+  - **Y-9 CLOSED (cert expiry alerting):** Added `inspect_cert_expiry()` helper called from `verify_peer_region()`. Logs `warn!` if peer mTLS cert is expired or expiring within 30 days. Defense-in-depth — primary expiry enforcement is rustls at TLS handshake. Also renamed misleading Y-9 reference in `tls.rs` to Y-TLS-VERSION (open TLS 1.3 min-version pinning work).
+  - **Y-14 CLOSED (timestamp skew clamp):** `forward_envelope` now clamps `sent_at_unix_ms` to ±300s from server-local time. Values outside the window (including i64::MIN/MAX, far-past, far-future) fall through to `Utc::now()`. Prevents ordering manipulation via attacker-controlled timestamps.
+  - **+10 tests:** case-insensitive CN/SAN (3), far-future clamp, far-past clamp, recent-preserved, i64::MIN, i64::MAX; `CaptureEnvelopeRepo` test helper added.
+  - **security-auditor:** PASS (GREEN). 6 YELLOW advisories (all non-blocking): boundary tests for ±300s edge (advisory), expiry warning unit test (advisory), intermediate CA expiry not logged (advisory), tls.rs comment naming fixed (Y4 closed), pre-existing warn! on DER error (advisory), CN vs SAN priority per RFC 6125 §6.4.4 (advisory).
+  - **495 Rust tests** (+10; was 485); **358 frontend tests** (unchanged); clippy clean; rustfmt clean.
+  - **Remaining deferred gRPC YELLOWs (still open):**
+    - Y-1: `forward_commit` client sends empty `sender_device_id` (cross-region client-side fix needed)
+    - Y-2: Retry on non-retryable error codes burns retry budget (client-side fix)
+    - Y-TLS-VERSION: Explicit TLS 1.3 minimum requires custom `rustls::ServerConfig`
+    - Y-15: `sync_group_membership` member upsert non-atomic (N sequential add_member calls)
+    - All other YELLOWs (Y-3 through Y-8, Y-10 through Y-13) still deferred as advisory/non-blocking
+  - **Next cycle:** Post-MVP items: PQ hybrid activation (ADR-0003 Phase A triggers on openmls stable MLS_128_MLKEM768 ciphersuite), disappearing messages enhancements, mobile app scaffold, or close remaining gRPC YELLOWs (Y-15 atomic upsert).
+
 ## Current state (2026-06-13, cycle 140 — STABILIZATION: gRPC RED-1 + RED-2 security fixes)
 - **Cycle 140 (commit d2ed12a):** STABILIZATION — CI GREEN, cargo audit clean (1 allowed: instant/openmls). No open bug issues. Phase 5 and Phase 6 both COMPLETE.
   - **security-auditor sweep on Phase 6 gRPC code:** Found 2 RED + 15 YELLOW findings.
