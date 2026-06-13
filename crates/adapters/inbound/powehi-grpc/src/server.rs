@@ -27,6 +27,16 @@ use powehi_proto::region::{
 
 use crate::error::domain_err_to_status;
 
+/// Maximum ciphertext / commit bytes accepted per gRPC call (RED-1 closure).
+/// Prevents memory-exhaustion via oversized payloads from compromised peers.
+/// MLS ApplicationMessage ciphertext is bounded by the plaintext budget plus
+/// roughly 80 bytes of AEAD + MLS framing overhead — 1 MiB is a generous cap.
+const MAX_CIPHERTEXT_BYTES: usize = 1024 * 1024; // 1 MiB
+
+/// Maximum number of device members accepted per SyncGroupMembership call (RED-1 closure).
+/// Prevents amplified DB writes from a malicious or misconfigured peer.
+const MAX_SYNC_MEMBERS: usize = 10_000;
+
 pub struct RegionGrpcServer {
     pub local_region: RegionId,
     pub envelope_repo: Arc<dyn EnvelopeRepository>,
@@ -245,7 +255,13 @@ impl RegionService for RegionGrpcServer {
         &self,
         request: Request<ForwardEnvelopeRequest>,
     ) -> Result<Response<ForwardEnvelopeResponse>, Status> {
-        let req = request.into_inner();
+        let (_metadata, request_exts, req) = request.into_parts();
+
+        // RED-1: cap ciphertext size before any allocation into owned Vec.
+        if req.ciphertext.len() > MAX_CIPHERTEXT_BYTES {
+            return Err(Status::invalid_argument("ciphertext exceeds maximum size"));
+        }
+
         let group_id = parse_group_id(&req.group_id)
             .ok_or_else(|| Status::invalid_argument("invalid group_id UUID"))?;
         let envelope_id = parse_envelope_id(&req.envelope_id)
@@ -264,6 +280,18 @@ impl RegionService for RegionGrpcServer {
             .ok_or_else(|| Status::invalid_argument("envelope_type unspecified"))?;
         let created_at =
             DateTime::from_timestamp_millis(req.sent_at_unix_ms).unwrap_or_else(chrono::Utc::now);
+
+        // RED-2: verify the calling peer's mTLS cert matches the group's home_region.
+        // If the group is unknown locally, check_sender_is_member will reject with
+        // PermissionDenied (no members); no extra cert check is needed for that path.
+        if let Some(group) = self
+            .group_repo
+            .find_by_id(&group_id)
+            .await
+            .map_err(|e| domain_err_to_status(&e))?
+        {
+            self.verify_peer_region(&request_exts, &group.home_region.to_string())?;
+        }
 
         self.check_sender_is_member(&group_id, &sender).await?;
 
@@ -309,7 +337,13 @@ impl RegionService for RegionGrpcServer {
         &self,
         request: Request<ForwardCommitRequest>,
     ) -> Result<Response<ForwardCommitResponse>, Status> {
-        let req = request.into_inner();
+        let (_metadata, request_exts, req) = request.into_parts();
+
+        // RED-1: cap commit bytes before any allocation into owned Vec.
+        if req.commit.len() > MAX_CIPHERTEXT_BYTES {
+            return Err(Status::invalid_argument("commit exceeds maximum size"));
+        }
+
         let group_id = parse_group_id(&req.group_id)
             .ok_or_else(|| Status::invalid_argument("invalid group_id UUID"))?;
 
@@ -317,6 +351,16 @@ impl RegionService for RegionGrpcServer {
         // The commit bytes are opaque — we do not decrypt them.
         let sender = parse_device_id(&req.sender_device_id)
             .ok_or_else(|| Status::invalid_argument("invalid sender_device_id UUID"))?;
+
+        // RED-2: verify calling peer's mTLS cert matches the group's home_region.
+        if let Some(group) = self
+            .group_repo
+            .find_by_id(&group_id)
+            .await
+            .map_err(|e| domain_err_to_status(&e))?
+        {
+            self.verify_peer_region(&request_exts, &group.home_region.to_string())?;
+        }
 
         self.check_sender_is_member(&group_id, &sender).await?;
 
@@ -375,6 +419,13 @@ impl RegionService for RegionGrpcServer {
         // declare membership for a given group_id; without this, any peer inside the mTLS
         // perimeter could synthesise membership and pivot to ForwardEnvelope acceptance.
         self.verify_peer_region(&request_exts, &req.home_region)?;
+
+        // RED-1: cap member count before any DB writes.
+        if req.member_device_ids.len() > MAX_SYNC_MEMBERS {
+            return Err(Status::invalid_argument(
+                "member_device_ids exceeds maximum count",
+            ));
+        }
 
         // Validate and collect all device IDs before any DB writes (fail-fast)
         let mut device_ids: Vec<DeviceId> = Vec::with_capacity(req.member_device_ids.len());
@@ -1366,5 +1417,113 @@ mod tests {
         // No TlsConnectInfo in extensions but tls_required=false → warn + pass.
         let resp = server.sync_group_membership(req).await.unwrap();
         assert_eq!(resp.into_inner().status, ForwardStatus::Accepted as i32);
+    }
+
+    // ── RED-1 size-cap tests (DoS / memory-exhaustion closure) ────────────────
+
+    #[tokio::test]
+    async fn forward_envelope_oversized_ciphertext_returns_invalid_argument() {
+        let server = make_server();
+        let req = Request::new(ForwardEnvelopeRequest {
+            envelope_id: Uuid::new_v4().to_string(),
+            group_id: Uuid::new_v4().to_string(),
+            sender_device_id: Uuid::new_v4().to_string(),
+            recipient_device_id: String::new(),
+            ciphertext: vec![0u8; MAX_CIPHERTEXT_BYTES + 1],
+            envelope_type: EnvelopeType::Application as i32,
+            sent_at_unix_ms: 1_700_000_000_000,
+        });
+        let err = server.forward_envelope(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn forward_commit_oversized_commit_returns_invalid_argument() {
+        let server = make_server();
+        let req = Request::new(ForwardCommitRequest {
+            group_id: Uuid::new_v4().to_string(),
+            sender_device_id: Uuid::new_v4().to_string(),
+            commit: vec![0u8; MAX_CIPHERTEXT_BYTES + 1],
+            expected_epoch: 0,
+        });
+        let err = server.forward_commit(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn sync_group_membership_too_many_members_returns_invalid_argument() {
+        let server = make_server();
+        let member_ids: Vec<String> = (0..=MAX_SYNC_MEMBERS)
+            .map(|_| Uuid::new_v4().to_string())
+            .collect();
+        let req = Request::new(SyncGroupMembershipRequest {
+            group_id: Uuid::new_v4().to_string(),
+            home_region: "eu-de-1".to_string(),
+            member_device_ids: member_ids,
+        });
+        let err = server.sync_group_membership(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    // ── RED-2 peer-region enforcement on forward_* (tls_required=true path) ──
+
+    #[tokio::test]
+    async fn forward_envelope_no_tls_info_rejected_when_group_known_and_tls_required() {
+        // When tls_required=true AND the group is already known locally, forward_envelope
+        // must verify the peer's cert against home_region. A plain Request (no TlsConnectInfo)
+        // must be rejected with PermissionDenied.
+        let group_id = GroupId::from(Uuid::new_v4());
+        let sender = DeviceId::new();
+        let group_repo = FakeGroupRepo::with_member(group_id.clone(), sender.clone());
+        let server = RegionGrpcServer::new(
+            RegionId::new("eu-central-1"),
+            Arc::new(NoopEnvelopeRepo),
+            Arc::new(NoopEventBus),
+            FakeKpRepo::new(),
+            group_repo,
+            true, // tls_required
+        );
+        let req = Request::new(ForwardEnvelopeRequest {
+            envelope_id: Uuid::new_v4().to_string(),
+            group_id: group_id.as_uuid().to_string(),
+            sender_device_id: sender.as_uuid().to_string(),
+            recipient_device_id: String::new(),
+            ciphertext: vec![0xca, 0xfe],
+            envelope_type: EnvelopeType::Application as i32,
+            sent_at_unix_ms: 1_700_000_000_000,
+        });
+        let err = server.forward_envelope(req).await.unwrap_err();
+        assert_eq!(
+            err.code(),
+            tonic::Code::PermissionDenied,
+            "missing TlsConnectInfo must be rejected when group is known and tls_required=true"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_commit_no_tls_info_rejected_when_group_known_and_tls_required() {
+        let group_id = GroupId::from(Uuid::new_v4());
+        let sender = DeviceId::new();
+        let group_repo = FakeGroupRepo::with_member(group_id.clone(), sender.clone());
+        let server = RegionGrpcServer::new(
+            RegionId::new("eu-central-1"),
+            Arc::new(NoopEnvelopeRepo),
+            Arc::new(NoopEventBus),
+            FakeKpRepo::new(),
+            group_repo,
+            true, // tls_required
+        );
+        let req = Request::new(ForwardCommitRequest {
+            group_id: group_id.as_uuid().to_string(),
+            sender_device_id: sender.as_uuid().to_string(),
+            commit: vec![0x01, 0x02],
+            expected_epoch: 0,
+        });
+        let err = server.forward_commit(req).await.unwrap_err();
+        assert_eq!(
+            err.code(),
+            tonic::Code::PermissionDenied,
+            "missing TlsConnectInfo must be rejected when group is known and tls_required=true"
+        );
     }
 }
