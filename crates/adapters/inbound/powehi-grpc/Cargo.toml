@@ -24,5 +24,11 @@ http = "1"
 # X.509 peer-cert parsing for mTLS region binding (RED-2/RED-3)
 x509-parser = { workspace = true }
 
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+tokio-rustls = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+# rcgen: cert generation for TLS unit tests only — not in production binary
+rcgen = "0.13"

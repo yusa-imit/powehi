@@ -32,3 +32,7 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 sha2 = { workspace = true }
 uuid = { workspace = true }
+# TLS 1.3 minimum for gRPC inter-region listener (Y-TLS-VERSION closure)
+tokio-rustls = { workspace = true }
+tokio-stream = { workspace = true }
+async-stream = { workspace = true }

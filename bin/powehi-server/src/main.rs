@@ -1,7 +1,21 @@
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tracing::info;
+use tracing::{info, warn};
+
+/// TLS handshake timeout for inbound gRPC connections (finding 1 / slow-loris DoS mitigation).
+/// A peer that sends a partial ClientHello and stalls would block the accept loop indefinitely
+/// without this cap. 10 s is generous for any legitimate peer on the inter-region mesh.
+const GRPC_TLS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Returns `true` for transient socket errors that should not crash the gRPC accept loop.
+fn is_transient_accept_error(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind::*;
+    matches!(
+        e.kind(),
+        ConnectionAborted | ConnectionReset | BrokenPipe | Interrupted
+    )
+}
 
 use powehi_application::{
     auth_service::AuthService, group_service::GroupService, invite_service::InviteService,
@@ -238,20 +252,66 @@ async fn main() -> Result<()> {
     let grpc_addr: std::net::SocketAddr = format!("0.0.0.0:{}", cfg.grpc_port)
         .parse()
         .context("parse gRPC listen addr")?;
-    info!(grpc_addr = %grpc_addr, tls = cfg.grpc_tls_enabled(), "gRPC region service listening");
-
+    // Y-TLS-VERSION: pin the gRPC inter-region listener to TLS 1.3 minimum.
+    // tonic 0.12's ServerTlsConfig doesn't expose protocol-version selection, so we
+    // bypass it and drive the TLS handshake via tokio-rustls with a custom ServerConfig.
+    // tokio_rustls::server::TlsStream<TcpStream> implements tonic's `Connected` trait,
+    // so TlsConnectInfo (peer certs) is injected identically to tonic's own TLS path.
     let grpc_future: std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<(), tonic::transport::Error>> + Send>,
     > = if let Some(tls) = &tls_cfg {
-        let tls_config = tls.server_tls().context("build server TLS config")?;
+        let rustls_cfg = tls
+            .server_rustls_config()
+            .context("build TLS 1.3 gRPC server config")?;
+        let acceptor = tokio_rustls::TlsAcceptor::from(rustls_cfg);
+        let listener = tokio::net::TcpListener::bind(grpc_addr)
+            .await
+            .context("bind gRPC TLS listener")?;
+        info!(grpc_addr = %grpc_addr, tls = true, "gRPC region service listening (TLS 1.3 minimum)");
+
+        let tls_incoming = async_stream::stream! {
+            loop {
+                let (tcp, _) = match listener.accept().await {
+                    Ok(pair) => pair,
+                    Err(e) if is_transient_accept_error(&e) => continue,
+                    // Non-transient accept errors (e.g. EMFILE, ENOMEM): log the error kind
+                    // and continue rather than terminating serve_with_incoming (finding 3).
+                    // serve_with_incoming returning Ok(()) would cause tokio::try_join! to
+                    // silently shut down the HTTP+admin servers — keep the loop alive instead.
+                    Err(e) => {
+                        warn!(error_kind = %e.kind(), "gRPC accept error — continuing");
+                        continue;
+                    }
+                };
+                // Enforce a handshake timeout to prevent slow-loris DoS (finding 1).
+                // A stalled partial ClientHello would block the accept loop without this cap.
+                let handshake = tokio::time::timeout(
+                    GRPC_TLS_HANDSHAKE_TIMEOUT,
+                    acceptor.accept(tcp),
+                );
+                match handshake.await {
+                    Ok(Ok(stream)) => yield Ok::<_, std::io::Error>(stream),
+                    // TLS handshake rejected (TLS 1.2 ClientHello, bad cert, timeout).
+                    // Emit a structured warning so operators can observe TLS 1.2 rejection
+                    // attempts without logging plaintext or PII (finding 2).
+                    Ok(Err(_)) => {
+                        warn!(error_kind = "tls_handshake", "gRPC TLS handshake failed — peer rejected");
+                        continue;
+                    }
+                    Err(_elapsed) => {
+                        warn!(error_kind = "tls_handshake_timeout", "gRPC TLS handshake timed out");
+                        continue;
+                    }
+                }
+            }
+        };
         Box::pin(
             tonic::transport::Server::builder()
-                .tls_config(tls_config)
-                .context("apply gRPC TLS")?
                 .add_service(grpc_svc)
-                .serve(grpc_addr),
+                .serve_with_incoming(tls_incoming),
         )
     } else {
+        info!(grpc_addr = %grpc_addr, tls = false, "gRPC region service listening");
         Box::pin(
             tonic::transport::Server::builder()
                 .add_service(grpc_svc)
