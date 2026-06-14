@@ -17,6 +17,19 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-14, cycle 147 — FEATURE: client-side in-conversation message search)
+- **Cycle 147 (commit ab09712):** FEATURE — Post-MVP UX: local-only message search within the active conversation.
+  - **`app/src/components/ChatLayout.tsx`** (MODIFIED):
+    - `HighlightedText` component: splits `msg.text` by query using `String.indexOf` (no ReDoS), renders matching spans as `<mark>` elements via JSX (no XSS). Pure client-side, no API calls.
+    - `ConversationHeader`: new search button toggles inline search input. `searchOpen` boolean owned locally; resets via `useEffect([chat.id])` on conversation switch. Calls `onMsgSearch` callback to lift query to `ChatLayout`.
+    - `MessageList`: new `searchQuery?: string` prop; computes `matchCount` via `messages.filter()`; shows match count `aria-live` badge; passes `highlight={searchQuery}` to each `MessageBubble`.
+    - `MessageBubble`: new `highlight?: string` prop; renders `<HighlightedText>` instead of raw `msg.text` for non-media messages.
+    - `ChatLayout`: `msgSearch: string` state; reset to `""` on `activeId` change; passed down to `ConversationHeader` and `MessageList`.
+  - **Security invariants verified:** Zero new server-visible metadata (no API calls during search). `msgSearch` never logged (no-plaintext-logging). Search operates on already-decrypted `msg.text` in React memory — no new IndexedDB reads. Not persisted (ephemeral React state). JSX rendering not innerHTML (no XSS). `indexOf` not RegExp (no ReDoS).
+  - **security-auditor:** GREEN (no RED). YELLOW advisories: `buildGroups` key uses `m.text.slice(0,8)` (pre-existing, not introduced by diff), `matchCount` not memoized (performance advisory, not security concern).
+  - **367 frontend tests** (+5: search button renders, search input shows, mark elements on match, close clears highlights, switching chat resets search; was 362); tsc clean; biome clean.
+  - **Next cycle:** Post-MVP items: PQ hybrid activation (ADR-0003 Phase A — triggers when openmls gains stable MLS_128_MLKEM768; not yet in openmls 0.8), mobile app scaffold (Tauri 2.x), or unread message count badge in sidebar.
+
 ## Current state (2026-06-14, cycle 146 — FEATURE: persistent per-conversation disappearing timer)
 - **Cycle 146 (commit cc65134):** FEATURE — Post-MVP disappearing messages enhancement: persist the per-conversation TTL setting in IndexedDB so it survives group switching and page reloads.
   - **`app/src/db/schema.ts`** (MODIFIED): Added `disappearingTtlSeconds?: number` to `GroupRow`. Added Dexie v6 migration (same index schema; documents new non-indexed, non-sensitive field).
