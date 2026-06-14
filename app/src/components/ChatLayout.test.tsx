@@ -1,9 +1,11 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as MessagesApiModule from "../api/messages";
 import { db } from "../db/schema";
 import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
 import * as UseMessagesModule from "../hooks/useMessages";
 import type { IncomingMessage } from "../hooks/useMessages";
+import { useAuthStore } from "../store/auth";
 import { ChatLayout } from "./ChatLayout";
 
 // The stable mock worker singleton — same reference on every useCryptoWorker() call
@@ -562,6 +564,94 @@ describe("ChatLayout", () => {
 
 			fireEvent.click(screen.getByTestId("reaction-trigger"));
 			expect(screen.getByTestId("reaction-picker")).toBeInTheDocument();
+		});
+	});
+
+	describe("read receipts", () => {
+		it("incoming read_receipt is NOT added to the message list as a new bubble", async () => {
+			let capturedOnReadReceipt:
+				| ((groupId: string, messageIds: string[], readAt: number, senderDeviceId: string) => void)
+				| undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(_id, _gid, _onMsg, _onPq, _onTyping, _onReaction, onReadReceipt) => {
+					capturedOnReadReceipt = onReadReceipt;
+				},
+			);
+			render(<ChatLayout />);
+
+			const RECEIPT_MSG_ID = "11112222-3333-4444-5555-666677778888";
+			await act(async () => {
+				capturedOnReadReceipt?.(
+					"11111111-1111-1111-1111-111111111111",
+					[RECEIPT_MSG_ID],
+					Date.now(),
+					"peer-device-z",
+				);
+			});
+
+			// No new message bubble should appear from a read receipt
+			expect(screen.queryByText(/read_receipt/i)).not.toBeInTheDocument();
+		});
+
+		it("seed me-messages with read: true show Read aria-label on double-check", () => {
+			// Seed data in ChatLayout has multiple me-messages with read: true.
+			// Verify the aria-label is correctly set without any async overhead.
+			render(<ChatLayout />);
+			const readIndicators = screen
+				.queryAllByTestId("read-indicator")
+				.filter((el) => el.getAttribute("aria-label") === "Read");
+			expect(readIndicators.length).toBeGreaterThan(0);
+		});
+
+		it("sent message gets Read indicator after sendMessage assigns envelopeId and receipt arrives", async () => {
+			let capturedOnReadReceipt:
+				| ((groupId: string, messageIds: string[], readAt: number, senderDeviceId: string) => void)
+				| undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(_id, _gid, _onMsg, _onPq, _onTyping, _onReaction, onReadReceipt) => {
+					capturedOnReadReceipt = onReadReceipt;
+				},
+			);
+			// Provide a session token so the MLS encrypt + send path runs.
+			useAuthStore.setState({ phase: "app", deviceId: "my-device-99", sessionToken: "tok-99" });
+
+			const sendSpy = vi
+				.spyOn(MessagesApiModule, "sendMessage")
+				.mockResolvedValue("env-receipt-test-1");
+
+			render(<ChatLayout />);
+
+			const textarea = screen.getByPlaceholderText(/encrypted/i);
+			fireEvent.change(textarea, { target: { value: "hello from me" } });
+			fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+
+			// Wait for the envelopeId to be backfilled into the optimistic message.
+			await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+			await act(async () => {});
+
+			// Before receipt: the new "me" message has read: false (default).
+			// Seed messages have various read states; count "Sent" indicators for new message.
+			const beforeRead = screen
+				.queryAllByTestId("read-indicator")
+				.filter((el) => el.getAttribute("aria-label") === "Read").length;
+
+			// Simulate incoming read receipt for our just-sent message.
+			await act(async () => {
+				capturedOnReadReceipt?.(
+					"11111111-1111-1111-1111-111111111111",
+					["env-receipt-test-1"],
+					Date.now(),
+					"peer-device-abc",
+				);
+			});
+
+			const afterRead = screen
+				.queryAllByTestId("read-indicator")
+				.filter((el) => el.getAttribute("aria-label") === "Read").length;
+			expect(afterRead).toBeGreaterThan(beforeRead);
+
+			sendSpy.mockRestore();
+			useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null });
 		});
 	});
 });

@@ -838,11 +838,13 @@ function MessageBubble({
 							>
 								{msg.time}
 								{isMe && (
-									<Icon
-										name="doublecheck"
-										size={12}
-										color={msg.read ? "#A8C8FF" : "currentColor"}
-									/>
+									<span data-testid="read-indicator" aria-label={msg.read ? "Read" : "Sent"}>
+										<Icon
+											name="doublecheck"
+											size={12}
+											color={msg.read ? "#A8C8FF" : "currentColor"}
+										/>
+									</span>
 								)}
 							</span>
 						)}
@@ -1703,6 +1705,10 @@ export function ChatLayout() {
 	// Throttle ref for outgoing typing indicator signals (leading-edge, 3 s window).
 	const typingThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+	// Ref holds the latest sendReadReceipt closure so handleIncoming (stable useCallback)
+	// can call it without taking a dep on active/sessionToken/cryptoWorker.
+	const sendReadReceiptRef = useRef<(ids: string[]) => void>(() => {});
+
 	// Reset in-conversation search when switching chats.
 	// biome-ignore lint/correctness/useExhaustiveDependencies: activeId is the trigger; setMsgSearch is stable
 	useEffect(() => {
@@ -1795,6 +1801,8 @@ export function ChatLayout() {
 			);
 			// Encrypt and persist to IndexedDB — fails closed if encryptedDb unavailable.
 			persistIncoming(msg);
+			// Notify sender that we read the message (best-effort, fire-and-forget).
+			sendReadReceiptRef.current([msg.id]);
 		},
 		[persistIncoming],
 	);
@@ -1910,6 +1918,50 @@ export function ChatLayout() {
 	);
 
 	/**
+	 * Mark messages as read when a peer's read_receipt arrives.
+	 * Updates `read: true` on all messages (regardless of `from`) whose `id` is in `messageIds`.
+	 * The read indicator UI only renders for `from === "me"` messages, so the update is harmless
+	 * for peer messages that happen to share an ID with a receipt.
+	 */
+	const handleIncomingReadReceipt = useCallback(
+		(gId: string, messageIds: string[], _readAt: number, _senderDeviceId: string) => {
+			const idSet = new Set(messageIds);
+			setChats((cs) =>
+				cs.map((c) => {
+					if (c.mlsGroupId !== gId) return c;
+					const msgs = c.messages.map((m) => (m.id && idSet.has(m.id) ? { ...m, read: true } : m));
+					return { ...c, messages: msgs };
+				}),
+			);
+		},
+		[],
+	);
+
+	/**
+	 * Send a read_receipt to the active MLS group for the given envelope IDs.
+	 * Fire-and-forget — a failed receipt is non-fatal (the UI shows "sent" vs "read" state).
+	 * Not a useCallback: re-created each render so it always closes over current state.
+	 * Exposed via sendReadReceiptRef so stable callbacks (handleIncoming) can call it.
+	 */
+	const sendReadReceipt = (messageIds: string[]) => {
+		if (!sessionToken || !active?.mlsGroupId || !active?.mlsIdentityId || !cryptoWorker) return;
+		const { mlsGroupId, mlsIdentityId } = active;
+		const plaintext = new TextEncoder().encode(
+			JSON.stringify({ type: "read_receipt", messageIds, readAt: Date.now() }),
+		);
+		cryptoWorker
+			.mlsEncrypt(mlsIdentityId, mlsGroupId, plaintext)
+			.then(({ ciphertext }) => sendMessageApi(sessionToken, mlsGroupId, ciphertext, undefined))
+			.catch(() => {})
+			.finally(() => plaintext.fill(0));
+	};
+
+	// Keep the ref fresh every render so handleIncoming always invokes the latest closure.
+	useEffect(() => {
+		sendReadReceiptRef.current = sendReadReceipt;
+	});
+
+	/**
 	 * Send a typing_indicator signal to the active MLS group.
 	 * Leading-edge throttled to once per 3 s (matches the receiver's display window).
 	 * Fire-and-forget — failure is silently ignored (non-fatal UX signal).
@@ -1939,6 +1991,7 @@ export function ChatLayout() {
 		handlePqBinding,
 		handleIncomingTyping,
 		handleIncomingReaction,
+		handleIncomingReadReceipt,
 	);
 
 	/** Select a chat and clear its unread badge atomically. */
@@ -2038,6 +2091,22 @@ export function ChatLayout() {
 					active.mlsGroupId,
 					ciphertext,
 					disappearingTtl,
+				);
+				// Backfill the server-assigned envelope ID onto the optimistic "me" message so
+				// an incoming read_receipt can match it by ID.
+				const chatId = activeId;
+				setChats((cs) =>
+					cs.map((c) => {
+						if (c.id !== chatId) return c;
+						const msgs = [...c.messages];
+						for (let i = msgs.length - 1; i >= 0; i--) {
+							if (msgs[i].from === "me" && !msgs[i].id) {
+								msgs[i] = { ...msgs[i], id: envelopeId };
+								break;
+							}
+						}
+						return { ...c, messages: msgs };
+					}),
 				);
 				// Persist the sent message to Dexie (encrypted at rest).
 				// uint8ToBase64 uses a safe byte-at-a-time loop — no spread/RangeError risk.

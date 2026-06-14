@@ -592,3 +592,139 @@ describe("useMessages — reaction handling", () => {
 		}
 	});
 });
+
+describe("useMessages — read_receipt handling", () => {
+	const MSG_ID_A = "aaaaaaaa-aaaa-aaaa-aaaa-000000000001";
+	const MSG_ID_B = "aaaaaaaa-aaaa-aaaa-aaaa-000000000002";
+	const READ_AT = 1_718_000_000_000;
+
+	function makeReadReceiptEnvelope(overrides: Partial<Envelope> = {}): Envelope {
+		return {
+			id: ENV_ID,
+			group_id: GROUP_ID,
+			sender: SENDER_ID,
+			recipient: null,
+			message_type: "Application",
+			ciphertext: [7, 8, 9],
+			epoch: null,
+			created_at: "2026-06-15T10:00:00Z",
+			expires_at: null,
+			...overrides,
+		};
+	}
+
+	afterEach(() => {
+		mockWorker.mlsDecrypt.mockResolvedValue({
+			plaintext: new TextEncoder().encode(DECRYPTED_TEXT),
+		});
+	});
+
+	it("invokes onReadReceipt with groupId, messageIds, readAt, and senderDeviceId", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "read_receipt", messageIds: [MSG_ID_A, MSG_ID_B], readAt: READ_AT }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeReadReceiptEnvelope()]);
+		const onReadReceipt = vi.fn();
+
+		renderHook(() =>
+			useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, undefined, onReadReceipt),
+		);
+
+		await waitFor(() => {
+			expect(onReadReceipt).toHaveBeenCalledWith(
+				GROUP_ID,
+				[MSG_ID_A, MSG_ID_B],
+				READ_AT,
+				SENDER_ID,
+			);
+		});
+	});
+
+	it("does NOT forward read_receipt envelope to onMessage", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "read_receipt", messageIds: [MSG_ID_A], readAt: READ_AT }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeReadReceiptEnvelope()]);
+		const onMessage = vi.fn();
+
+		renderHook(() =>
+			useMessages(IDENTITY_ID, GROUP_ID, onMessage, undefined, undefined, undefined, vi.fn()),
+		);
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onMessage).not.toHaveBeenCalled();
+	});
+
+	it("acks the read_receipt envelope after processing", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "read_receipt", messageIds: [MSG_ID_A], readAt: READ_AT }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeReadReceiptEnvelope()]);
+
+		renderHook(() =>
+			useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, undefined, vi.fn()),
+		);
+
+		await waitFor(() => {
+			expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID);
+		});
+	});
+
+	it("does NOT call onReadReceipt when messageIds array is empty", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "read_receipt", messageIds: [], readAt: READ_AT }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeReadReceiptEnvelope()]);
+		const onReadReceipt = vi.fn();
+
+		renderHook(() =>
+			useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, undefined, onReadReceipt),
+		);
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onReadReceipt).not.toHaveBeenCalled();
+	});
+
+	it("does NOT call onReadReceipt when messageIds exceeds 100-item cap", async () => {
+		const tooMany = Array.from({ length: 101 }, (_, i) => `id-${String(i).padStart(3, "0")}`);
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "read_receipt", messageIds: tooMany, readAt: READ_AT }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeReadReceiptEnvelope()]);
+		const onReadReceipt = vi.fn();
+
+		renderHook(() =>
+			useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, undefined, onReadReceipt),
+		);
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onReadReceipt).not.toHaveBeenCalled();
+	});
+
+	it("does NOT call onReadReceipt when messageIds contains non-string entries", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "read_receipt", messageIds: [42, null, MSG_ID_A], readAt: READ_AT }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeReadReceiptEnvelope()]);
+		const onReadReceipt = vi.fn();
+
+		renderHook(() =>
+			useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, undefined, onReadReceipt),
+		);
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onReadReceipt).not.toHaveBeenCalled();
+	});
+});
