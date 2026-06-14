@@ -17,6 +17,16 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-15, cycle 152 — STABILIZATION: CI RED fix — biome format in reaction test files)
+- **Cycle 152 (commit 0eda4a2):** STABILIZATION — CI was RED on Frontend (Biome lint) from cycle 151 emoji reactions commit.
+  - **Root cause:** Two test files had multi-line function calls that biome collapses to single-line form when they fit under the print-width limit:
+    - `app/src/components/ChatLayout.test.tsx`: `capturedOnReaction?.("...", ..., "👍", "...")` calls written in multi-line form
+    - `app/src/hooks/useMessages.test.ts`: `renderHook(() => useMessages(...))` calls written in multi-line form
+  - **Fix:** Ran `biome format --write` on both files; biome collapsed the calls to single-line form.
+  - **390 frontend tests** (unchanged); biome clean; CI pushed and should be GREEN.
+  - **Recurring pattern:** Biome collapses multi-arg calls to single-line when they fit. Test file authors should run `pnpm exec biome format --write` before committing.
+  - **Next cycle:** Post-MVP items: PQ hybrid activation (ADR-0003 Phase A — waits for openmls stable MLS_128_MLKEM768), mobile app scaffold (Tauri 2.x), message delivery receipts (read receipts).
+
 ## Current state (2026-06-15, cycle 151 — FEATURE: E2EE emoji reactions via MLS reaction messages)
 - **Cycle 151 (commit 123b120):** FEATURE — Post-MVP UX: end-to-end encrypted emoji reactions.
   - **CI fix (commit eeb80db):** CI was RED (rustfmt + clippy) on commit fae21bd from cycle 150:
