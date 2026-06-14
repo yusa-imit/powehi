@@ -177,6 +177,24 @@ pub async fn poll(
     Ok(Json(envelopes))
 }
 
+pub async fn ack(
+    State(state): State<AppState>,
+    AuthenticatedDevice(device_id): AuthenticatedDevice,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let envelope_id = id.parse::<EnvelopeId>().map_err(|_| bad_input())?;
+    tracing::info!(
+        device_id = %device_id,
+        envelope_id = %envelope_id,
+        "messaging.ack"
+    );
+    state
+        .messaging
+        .ack_envelope(&device_id, &envelope_id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::size_bucket;
@@ -208,22 +226,4 @@ mod tests {
     fn size_bucket_large_payload() {
         assert_eq!(size_bucket(usize::MAX), ">100KB");
     }
-}
-
-pub async fn ack(
-    State(state): State<AppState>,
-    AuthenticatedDevice(device_id): AuthenticatedDevice,
-    Path(id): Path<String>,
-) -> Result<StatusCode, ApiError> {
-    let envelope_id = id.parse::<EnvelopeId>().map_err(|_| bad_input())?;
-    tracing::info!(
-        device_id = %device_id,
-        envelope_id = %envelope_id,
-        "messaging.ack"
-    );
-    state
-        .messaging
-        .ack_envelope(&device_id, &envelope_id)
-        .await?;
-    Ok(StatusCode::NO_CONTENT)
 }

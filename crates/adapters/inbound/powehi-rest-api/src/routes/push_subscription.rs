@@ -724,14 +724,26 @@ mod tests {
 
     #[test]
     fn extract_host_strips_scheme_and_path() {
-        assert_eq!(extract_host("https://push.example.com/abc"), Some("push.example.com"));
-        assert_eq!(extract_host("https://push.example.com"), Some("push.example.com"));
+        assert_eq!(
+            extract_host("https://push.example.com/abc"),
+            Some("push.example.com")
+        );
+        assert_eq!(
+            extract_host("https://push.example.com"),
+            Some("push.example.com")
+        );
     }
 
     #[test]
     fn extract_host_strips_port() {
-        assert_eq!(extract_host("https://push.example.com:443/abc"), Some("push.example.com"));
-        assert_eq!(extract_host("https://push.example.com:8443"), Some("push.example.com"));
+        assert_eq!(
+            extract_host("https://push.example.com:443/abc"),
+            Some("push.example.com")
+        );
+        assert_eq!(
+            extract_host("https://push.example.com:8443"),
+            Some("push.example.com")
+        );
     }
 
     #[test]
@@ -744,8 +756,14 @@ mod tests {
     fn extract_host_strips_userinfo_y1_regression() {
         // Y-1 fix: userinfo before @ must be stripped so the SSRF guard sees
         // the real host, not the attacker-controlled userinfo segment.
-        assert_eq!(extract_host("https://attacker@127.0.0.1/x"), Some("127.0.0.1"));
-        assert_eq!(extract_host("https://user:pass@192.168.1.1/push"), Some("192.168.1.1"));
+        assert_eq!(
+            extract_host("https://attacker@127.0.0.1/x"),
+            Some("127.0.0.1")
+        );
+        assert_eq!(
+            extract_host("https://user:pass@192.168.1.1/push"),
+            Some("192.168.1.1")
+        );
         assert_eq!(extract_host("https://evil@10.0.0.1/"), Some("10.0.0.1"));
     }
 
@@ -767,15 +785,27 @@ mod tests {
         // 172.16.0.0/12 covers 172.16.0.0–172.31.255.255 — tested only at corners
         // in the HTTP-level tests; explicit unit tests here ensure no regression if
         // the `is_private()` stdlib call changes or is manually reimplemented.
-        assert!(is_private_host("172.16.0.1"), "172.16.0.1 is RFC-1918 private");
-        assert!(is_private_host("172.31.255.255"), "172.31.255.255 is RFC-1918 private");
-        assert!(is_private_host("172.20.0.1"), "172.20.0.1 is RFC-1918 private");
+        assert!(
+            is_private_host("172.16.0.1"),
+            "172.16.0.1 is RFC-1918 private"
+        );
+        assert!(
+            is_private_host("172.31.255.255"),
+            "172.31.255.255 is RFC-1918 private"
+        );
+        assert!(
+            is_private_host("172.20.0.1"),
+            "172.20.0.1 is RFC-1918 private"
+        );
     }
 
     #[test]
     fn is_private_host_blocks_unspecified_and_broadcast() {
         assert!(is_private_host("0.0.0.0"), "0.0.0.0 is unspecified");
-        assert!(is_private_host("255.255.255.255"), "255.255.255.255 is broadcast");
+        assert!(
+            is_private_host("255.255.255.255"),
+            "255.255.255.255 is broadcast"
+        );
     }
 
     #[test]
@@ -785,9 +815,18 @@ mod tests {
 
     #[test]
     fn is_private_host_allows_public_ips() {
-        assert!(!is_private_host("8.8.8.8"), "8.8.8.8 (Google DNS) is public");
-        assert!(!is_private_host("1.1.1.1"), "1.1.1.1 (Cloudflare DNS) is public");
-        assert!(!is_private_host("push.example.com"), "domain name is not an IP");
+        assert!(
+            !is_private_host("8.8.8.8"),
+            "8.8.8.8 (Google DNS) is public"
+        );
+        assert!(
+            !is_private_host("1.1.1.1"),
+            "1.1.1.1 (Cloudflare DNS) is public"
+        );
+        assert!(
+            !is_private_host("push.example.com"),
+            "domain name is not an IP"
+        );
     }
 
     #[tokio::test]
