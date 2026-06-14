@@ -177,6 +177,39 @@ pub async fn poll(
     Ok(Json(envelopes))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::size_bucket;
+
+    #[test]
+    fn size_bucket_zero_bytes_is_1kb() {
+        assert_eq!(size_bucket(0), "<=1KB");
+    }
+
+    #[test]
+    fn size_bucket_1kb_boundary() {
+        assert_eq!(size_bucket(1_024), "<=1KB");
+        assert_eq!(size_bucket(1_025), "<=10KB");
+    }
+
+    #[test]
+    fn size_bucket_10kb_boundary() {
+        assert_eq!(size_bucket(10_240), "<=10KB");
+        assert_eq!(size_bucket(10_241), "<=100KB");
+    }
+
+    #[test]
+    fn size_bucket_100kb_boundary() {
+        assert_eq!(size_bucket(102_400), "<=100KB");
+        assert_eq!(size_bucket(102_401), ">100KB");
+    }
+
+    #[test]
+    fn size_bucket_large_payload() {
+        assert_eq!(size_bucket(usize::MAX), ">100KB");
+    }
+}
+
 pub async fn ack(
     State(state): State<AppState>,
     AuthenticatedDevice(device_id): AuthenticatedDevice,

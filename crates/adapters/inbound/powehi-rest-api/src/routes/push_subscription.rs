@@ -81,6 +81,10 @@ fn extract_host(endpoint: &str) -> Option<&str> {
     let rest = endpoint.strip_prefix("https://")?;
     // The authority ends at the first `/` or end-of-string.
     let authority = rest.split('/').next()?;
+    // Strip optional userinfo (`user:pass@host`). Without this, a crafted
+    // endpoint like `https://attacker@127.0.0.1/` would parse "attacker" as
+    // the host and bypass the SSRF guard (Y-1 finding from security-auditor).
+    let authority = authority.rsplit('@').next()?;
     // Strip optional port suffix.
     let host = if authority.contains('[') {
         // IPv6 literal: [::1]:port — extract inside brackets
@@ -712,6 +716,114 @@ mod tests {
                 resp.status(),
                 StatusCode::BAD_REQUEST,
                 "SSRF guard must block IPv6 address: {bad_endpoint}"
+            );
+        }
+    }
+
+    // --- Direct unit tests for pure helper functions ---
+
+    #[test]
+    fn extract_host_strips_scheme_and_path() {
+        assert_eq!(extract_host("https://push.example.com/abc"), Some("push.example.com"));
+        assert_eq!(extract_host("https://push.example.com"), Some("push.example.com"));
+    }
+
+    #[test]
+    fn extract_host_strips_port() {
+        assert_eq!(extract_host("https://push.example.com:443/abc"), Some("push.example.com"));
+        assert_eq!(extract_host("https://push.example.com:8443"), Some("push.example.com"));
+    }
+
+    #[test]
+    fn extract_host_handles_ipv6_literal() {
+        assert_eq!(extract_host("https://[::1]/push"), Some("::1"));
+        assert_eq!(extract_host("https://[::1]:443/push"), Some("::1"));
+    }
+
+    #[test]
+    fn extract_host_strips_userinfo_y1_regression() {
+        // Y-1 fix: userinfo before @ must be stripped so the SSRF guard sees
+        // the real host, not the attacker-controlled userinfo segment.
+        assert_eq!(extract_host("https://attacker@127.0.0.1/x"), Some("127.0.0.1"));
+        assert_eq!(extract_host("https://user:pass@192.168.1.1/push"), Some("192.168.1.1"));
+        assert_eq!(extract_host("https://evil@10.0.0.1/"), Some("10.0.0.1"));
+    }
+
+    #[test]
+    fn extract_host_returns_none_for_non_https() {
+        assert_eq!(extract_host("http://push.example.com/abc"), None);
+        assert_eq!(extract_host("ftp://push.example.com"), None);
+        assert_eq!(extract_host("//push.example.com"), None);
+    }
+
+    #[test]
+    fn extract_host_returns_none_for_empty_host() {
+        assert_eq!(extract_host("https:///path"), None);
+        assert_eq!(extract_host("https://"), None);
+    }
+
+    #[test]
+    fn is_private_host_blocks_rfc1918_172_range() {
+        // 172.16.0.0/12 covers 172.16.0.0–172.31.255.255 — tested only at corners
+        // in the HTTP-level tests; explicit unit tests here ensure no regression if
+        // the `is_private()` stdlib call changes or is manually reimplemented.
+        assert!(is_private_host("172.16.0.1"), "172.16.0.1 is RFC-1918 private");
+        assert!(is_private_host("172.31.255.255"), "172.31.255.255 is RFC-1918 private");
+        assert!(is_private_host("172.20.0.1"), "172.20.0.1 is RFC-1918 private");
+    }
+
+    #[test]
+    fn is_private_host_blocks_unspecified_and_broadcast() {
+        assert!(is_private_host("0.0.0.0"), "0.0.0.0 is unspecified");
+        assert!(is_private_host("255.255.255.255"), "255.255.255.255 is broadcast");
+    }
+
+    #[test]
+    fn is_private_host_blocks_ipv6_unspecified() {
+        assert!(is_private_host("::"), ":: is IPv6 unspecified");
+    }
+
+    #[test]
+    fn is_private_host_allows_public_ips() {
+        assert!(!is_private_host("8.8.8.8"), "8.8.8.8 (Google DNS) is public");
+        assert!(!is_private_host("1.1.1.1"), "1.1.1.1 (Cloudflare DNS) is public");
+        assert!(!is_private_host("push.example.com"), "domain name is not an IP");
+    }
+
+    #[tokio::test]
+    async fn post_userinfo_ssrf_attempt_returns_400() {
+        // Y-1 regression: `https://attacker@127.0.0.1/x` must be blocked; without
+        // the `rsplit('@')` fix in extract_host, the guard would see "attacker" as
+        // the host and pass it (attacker is not a private IP literal).
+        for bad_endpoint in &[
+            "https://attacker@127.0.0.1/x",
+            "https://user:pass@192.168.1.1/push",
+            "https://evil@10.0.0.1/push",
+            "https://x@169.254.169.254/latest/metadata",
+        ] {
+            let body = serde_json::json!({
+                "endpoint": bad_endpoint,
+                "p256dh": base64ct::Base64UrlUnpadded::encode_string(&[4u8; 65]),
+                "auth": base64ct::Base64UrlUnpadded::encode_string(&[0u8; 16]),
+            });
+            let repo = FakePushSubRepo::new();
+            let router = make_router(repo);
+            let resp = router
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/push-subscriptions")
+                        .header("Content-Type", "application/json")
+                        .header("Authorization", bearer_header())
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "SSRF userinfo bypass must be blocked: {bad_endpoint}"
             );
         }
     }
