@@ -17,6 +17,22 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-14, cycle 149 — FEATURE: real-time typing indicator via MLS)
+- **Cycle 149 (commit 8f87eba):** FEATURE — Post-MVP UX: real-time "X is typing..." indicator using MLS-encrypted `typing_indicator` messages.
+  - **`app/src/hooks/useMessages.ts`** (MODIFIED):
+    - Added 5th param `onTyping?: (groupId: string) => void` + stable `onTypingRef` (same pattern as `onPqBindingRef`).
+    - `processEnvelope`: when decrypted JSON has `type === "typing_indicator"`, sets `shouldDisplayMessage = false` and calls `onTypingRef.current?.(groupId)`. Envelope is still acked normally.
+  - **`app/src/components/ChatLayout.tsx`** (MODIFIED):
+    - `typingTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>()` — per-groupId auto-clear timers; all cleared on component unmount.
+    - `typingThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null)` — leading-edge throttle for outgoing signals.
+    - `handleIncomingTyping(groupId)`: debounce-resets timer, sets `chat.typing = true`, schedules 3 s auto-clear.
+    - `sendTypingIndicator()`: plain function (not useCallback); leading-edge throttled to 1/3 s; MLS-encrypts `{"type":"typing_indicator"}` via `cryptoWorker.mlsEncrypt`; sends only ciphertext via `sendMessageApi`; `plaintext.fill(0)` in `.finally()`.
+    - `Composer`: `onTyping` prop, called on `onChange`.
+    - `useMessages` called with `handleIncomingTyping` as 5th arg.
+  - **Security invariants verified:** Server only receives MLS ciphertext — `"typing_indicator"` never sent in plaintext. No PII logging. `plaintext.fill(0)` in finally. Incoming handler gated behind successful MLS decryption (RFC 9420 authentication). Timer cleanup on unmount. security-auditor: GREEN. YELLOW-1: traffic-analysis side channel (burst of envelopes during typing is a new timing signal — advisory, non-blocking). YELLOW-2: `typingThrottleRef` not cleared on unmount (benign — callback only nulls a ref, no state). YELLOW-3: `parsed.type` dispatch should be promoted to exhaustive union as types proliferate (future cleanup).
+  - **379 frontend tests** (+7: 3 in useMessages typing_indicator suite, 4 in ChatLayout typing suite; was 372); tsc clean; Biome clean.
+  - **Next cycle:** Post-MVP items: PQ hybrid activation (ADR-0003 Phase A — waits for openmls stable MLS_128_MLKEM768), mobile app scaffold (Tauri 2.x), emoji reactions, or message delivery receipts.
+
 ## Current state (2026-06-14, cycle 148 — FEATURE: unread message count badge in sidebar)
 - **Cycle 148 (commit 4bca53c):** FEATURE — Post-MVP UX: real-time unread message count badge in sidebar.
   - **`app/src/components/ChatLayout.tsx`** (MODIFIED):
