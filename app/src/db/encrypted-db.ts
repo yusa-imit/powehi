@@ -143,6 +143,25 @@ export class EncryptedPowehiDb {
 		return Promise.all(rows.map((r) => decRow(this.encryptor, r, "groups")));
 	}
 
+	/**
+	 * Read the per-conversation disappearing timer for a group.
+	 * disappearingTtlSeconds is not sensitive — reads directly from the raw row
+	 * without decrypting mlsStateB64 (no wasted crypto ops).
+	 */
+	async getGroupDisappearingTtl(groupId: string): Promise<number | undefined> {
+		const row = await this.db.groups.get(groupId);
+		return row?.disappearingTtlSeconds;
+	}
+
+	/**
+	 * Persist the per-conversation disappearing timer setting.
+	 * Uses a partial Dexie update so mlsStateB64 (encrypted at rest) is never
+	 * touched. Silently no-ops if the group row does not exist yet.
+	 */
+	async setGroupDisappearingTtl(groupId: string, ttl: number | undefined): Promise<void> {
+		await this.db.groups.update(groupId, { disappearingTtlSeconds: ttl });
+	}
+
 	// ── Identity ───────────────────────────────────────────────────────────────
 
 	async setIdentity(row: LocalIdentity): Promise<void> {

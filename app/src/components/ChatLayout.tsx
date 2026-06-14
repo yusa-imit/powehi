@@ -1415,7 +1415,38 @@ export function ChatLayout() {
 		groupId: active?.mlsGroupId,
 	});
 
-	const handleToggleTtl = () => setDisappearingTtl((t) => nextTtl(t));
+	// Load persisted disappearing timer when the active conversation changes.
+	useEffect(() => {
+		let cancelled = false;
+		if (!active?.mlsGroupId) {
+			setDisappearingTtl(undefined);
+			return;
+		}
+		const groupId = active.mlsGroupId;
+		db.groups
+			.get(groupId)
+			.then((row) => {
+				if (cancelled) return;
+				const persisted = row?.disappearingTtlSeconds;
+				setDisappearingTtl(
+					TTL_OPTIONS.includes(persisted as TtlOption) ? (persisted as TtlOption) : undefined,
+				);
+			})
+			.catch(() => {
+				if (!cancelled) setDisappearingTtl(undefined);
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [active?.mlsGroupId]);
+
+	const handleToggleTtl = () => {
+		const next = nextTtl(disappearingTtl);
+		setDisappearingTtl(next);
+		if (active?.mlsGroupId) {
+			db.groups.update(active.mlsGroupId, { disappearingTtlSeconds: next }).catch(() => {});
+		}
+	};
 
 	/** Append a received message to the correct chat and persist it to Dexie. */
 	const handleIncoming = useCallback(

@@ -22,6 +22,8 @@ export interface GroupRow {
 	name: string;
 	mlsStateB64: string; // serialized MLS group state
 	lastActivity: number;
+	/** Per-conversation disappearing timer in seconds. undefined = off. Not sensitive. */
+	disappearingTtlSeconds?: number;
 }
 
 // LocalIdentity — singleton device identity record.
@@ -88,6 +90,14 @@ export class PowehiDb extends Dexie {
 		// v5: added expiresAt to MessageRow for disappearing messages (prd.md §9.4.3).
 		// Indexed so purgeExpiredMessages() can use a range query instead of full scan.
 		this.version(5).stores({
+			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v6: added disappearingTtlSeconds to GroupRow — per-conversation timer
+		// setting (prd.md §9.4.3). Not sensitive (bounded enum, not content); not indexed.
+		this.version(6).stores({
 			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
 			groups: "id, lastActivity",
 			identity: "id",

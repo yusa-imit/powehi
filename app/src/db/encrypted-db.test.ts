@@ -133,4 +133,47 @@ describe("EncryptedPowehiDb", () => {
 		// Reading with a different key should throw (AES-GCM auth failure).
 		await expect(encDbB.getGroup("grp-x")).rejects.toThrow();
 	});
+
+	it("getGroupDisappearingTtl returns undefined for unknown group", async () => {
+		const ttl = await encDb.getGroupDisappearingTtl("no-such-group");
+		expect(ttl).toBeUndefined();
+	});
+
+	it("setGroupDisappearingTtl persists and getGroupDisappearingTtl reads it back", async () => {
+		await encDb.addGroup({
+			id: "grp-ttl",
+			name: "TTL Group",
+			mlsStateB64: "c3RhdGU=",
+			lastActivity: 1000,
+		});
+		await encDb.setGroupDisappearingTtl("grp-ttl", 3600);
+		const ttl = await encDb.getGroupDisappearingTtl("grp-ttl");
+		expect(ttl).toBe(3600);
+	});
+
+	it("setGroupDisappearingTtl can clear the timer (undefined)", async () => {
+		await encDb.addGroup({
+			id: "grp-ttl2",
+			name: "TTL Group 2",
+			mlsStateB64: "c3RhdGUy",
+			lastActivity: 2000,
+		});
+		await encDb.setGroupDisappearingTtl("grp-ttl2", 86400);
+		await encDb.setGroupDisappearingTtl("grp-ttl2", undefined);
+		const ttl = await encDb.getGroupDisappearingTtl("grp-ttl2");
+		expect(ttl).toBeUndefined();
+	});
+
+	it("setGroupDisappearingTtl does not disturb encrypted mlsStateB64", async () => {
+		await encDb.addGroup({
+			id: "grp-ttl3",
+			name: "State-Check Group",
+			mlsStateB64: "c2Vuc2l0aXZlLXN0YXRl",
+			lastActivity: 3000,
+		});
+		await encDb.setGroupDisappearingTtl("grp-ttl3", 604800);
+		const group = await encDb.getGroup("grp-ttl3");
+		expect(group?.mlsStateB64).toBe("c2Vuc2l0aXZlLXN0YXRl");
+		expect(group?.disappearingTtlSeconds).toBe(604800);
+	});
 });
