@@ -439,12 +439,7 @@ describe("ChatLayout", () => {
 			});
 
 			await act(async () => {
-				capturedOnReaction?.(
-					"11111111-1111-1111-1111-111111111111",
-					MSG_ID,
-					"👍",
-					"peer-device-1",
-				);
+				capturedOnReaction?.("11111111-1111-1111-1111-111111111111", MSG_ID, "👍", "peer-device-1");
 			});
 
 			expect(screen.getByTestId("reaction-chips")).toBeInTheDocument();
@@ -512,12 +507,7 @@ describe("ChatLayout", () => {
 			});
 
 			await act(async () => {
-				capturedOnReaction?.(
-					"11111111-1111-1111-1111-111111111111",
-					MSG_ID,
-					"😮",
-					"peer-device-x",
-				);
+				capturedOnReaction?.("11111111-1111-1111-1111-111111111111", MSG_ID, "😮", "peer-device-x");
 			});
 
 			// The reaction emoji appears only in a chip button, not as a standalone message text
@@ -533,11 +523,9 @@ describe("ChatLayout", () => {
 
 		it("reaction trigger button is visible for messages with an id", async () => {
 			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
-			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
-				(_id, _gid, onMsg) => {
-					capturedOnMessage = onMsg;
-				},
-			);
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_id, _gid, onMsg) => {
+				capturedOnMessage = onMsg;
+			});
 			render(<ChatLayout />);
 
 			await act(async () => {
@@ -556,11 +544,9 @@ describe("ChatLayout", () => {
 
 		it("clicking reaction trigger opens the emoji picker", async () => {
 			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
-			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
-				(_id, _gid, onMsg) => {
-					capturedOnMessage = onMsg;
-				},
-			);
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_id, _gid, onMsg) => {
+				capturedOnMessage = onMsg;
+			});
 			render(<ChatLayout />);
 
 			await act(async () => {

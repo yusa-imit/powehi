@@ -517,9 +517,7 @@ describe("useMessages — reaction handling", () => {
 		pollSpy.mockResolvedValueOnce([makeReactionEnvelope()]);
 		const onReaction = vi.fn();
 
-		renderHook(() =>
-			useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, onReaction),
-		);
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, onReaction));
 
 		await waitFor(() => {
 			expect(onReaction).toHaveBeenCalledWith(GROUP_ID, TARGET_ID, "👍", SENDER_ID);
@@ -565,9 +563,7 @@ describe("useMessages — reaction handling", () => {
 		pollSpy.mockResolvedValueOnce([makeReactionEnvelope()]);
 		const onReaction = vi.fn();
 
-		renderHook(() =>
-			useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, onReaction),
-		);
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, onReaction));
 
 		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
 		expect(onReaction).not.toHaveBeenCalled();
@@ -582,9 +578,7 @@ describe("useMessages — reaction handling", () => {
 		pollSpy.mockResolvedValueOnce([makeReactionEnvelope()]);
 		const onReaction = vi.fn();
 
-		renderHook(() =>
-			useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, onReaction),
-		);
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, onReaction));
 
 		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
 		expect(onReaction).not.toHaveBeenCalled();
