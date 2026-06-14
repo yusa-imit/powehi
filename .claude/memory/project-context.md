@@ -17,6 +17,15 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-14, cycle 146 — FEATURE: persistent per-conversation disappearing timer)
+- **Cycle 146 (commit cc65134):** FEATURE — Post-MVP disappearing messages enhancement: persist the per-conversation TTL setting in IndexedDB so it survives group switching and page reloads.
+  - **`app/src/db/schema.ts`** (MODIFIED): Added `disappearingTtlSeconds?: number` to `GroupRow`. Added Dexie v6 migration (same index schema; documents new non-indexed, non-sensitive field).
+  - **`app/src/db/encrypted-db.ts`** (MODIFIED): Added `getGroupDisappearingTtl(groupId)` and `setGroupDisappearingTtl(groupId, ttl)` to `EncryptedPowehiDb`. Use Dexie `.update(key, {disappearingTtlSeconds})` (partial update) — mlsStateB64 encrypted at rest is never touched.
+  - **`app/src/components/ChatLayout.tsx`** (MODIFIED): Added `useEffect` that loads persisted TTL from Dexie when `active.mlsGroupId` changes. Cancelled flag guards the async resolve against stale-state overwrite on rapid group switches (security-auditor Y2 fix). Updated `handleToggleTtl` to persist new TTL via `db.groups.update`.
+  - **security-auditor:** GREEN. `disappearingTtlSeconds` correctly classified as non-sensitive (server already learns TTL from `ttl_seconds` per-message). Dexie partial-update does not corrupt encrypted mlsStateB64. TTL_OPTIONS whitelist validation prevents arbitrary values from IndexedDB. No plaintext logging. Deferred YELLOWs: Y1 encryption-wrapper bypass pattern (architectural advisory, safe), Y2 cancelled flag added (fixed).
+  - **362 frontend tests** (+4: getGroupDisappearingTtl unknown group, round-trip, clear to undefined, mlsStateB64 undisturbed; was 358); tsc clean; Biome clean.
+  - **Next cycle:** Post-MVP items: PQ hybrid activation (ADR-0003 Phase A), mobile app scaffold (Tauri vs React Native), or Y-TLS-CLIENT (tonic upgrade).
+
 ## Current state (2026-06-14, cycle 145 — STABILIZATION: gRPC error boundary security invariant tests)
 - **Cycle 145 (commit 953fef5):** STABILIZATION — CI GREEN, cargo audit clean (1 allowed: instant/openmls). No open bug issues.
   - **Test gap CLOSED — `error.rs` gRPC error boundary:** `domain_err_to_status()` and `GrpcError→DomainError` conversion were completely untested. Added 14 new tests:
