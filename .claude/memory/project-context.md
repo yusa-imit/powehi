@@ -17,6 +17,24 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-15, cycle 153 — FEATURE: E2EE read receipts via MLS read_receipt messages)
+- **Cycle 153 (commit 0fde7b5):** FEATURE — Post-MVP UX: end-to-end encrypted read receipts.
+  - **`app/src/hooks/useMessages.ts`** (MODIFIED):
+    - Added 7th param `onReadReceipt?: (groupId, messageIds, readAt, senderDeviceId) => void` + stable `onReadReceiptRef`
+    - `type === "read_receipt"` handler: validates `Array.isArray(messageIds)`, `length in [1,100]`, every item is `string` with `length in [1,36]`, `typeof readAt === "number"`, `Number.isFinite(readAt)`; sets `shouldDisplayMessage = false`; calls `onReadReceiptRef.current`
+  - **`app/src/components/ChatLayout.tsx`** (MODIFIED):
+    - `sendReadReceiptRef = useRef<(ids: string[]) => void>(() => {})` + `useEffect` to keep fresh every render (same ref pattern as `onTypingRef` etc.)
+    - `sendReadReceipt(messageIds)`: MLS-encrypts `{type:"read_receipt", messageIds, readAt: Date.now()}`; sends ciphertext via `sendMessageApi`; `plaintext.fill(0)` in `.finally()`
+    - `handleIncoming`: calls `sendReadReceiptRef.current([msg.id])` after each incoming message (fire-and-forget read acknowledgement to peer)
+    - `handleIncomingReadReceipt(gId, messageIds, _readAt, _senderDeviceId)`: creates `idSet = new Set(messageIds)`; updates `{ ...m, read: true }` on matching messages in matching group
+    - `sendMessage`: after getting server `envelopeId`, backfills `id: envelopeId` onto the most recent unbacked optimistic "me" message → enables incoming read_receipt to match by ID
+    - `MessageBubble`: wraps double-check Icon with `data-testid="read-indicator"` + `aria-label="Read"|"Sent"` span
+    - `useMessages` call: 7th arg `handleIncomingReadReceipt`
+  - **Security invariants verified:** Server only receives MLS ciphertext — `messageIds` and `readAt` never sent in plaintext. Validation cap (100 ids, each ≤ 36 chars) prevents DoS. `plaintext.fill(0)` in finally. No content logging. No XSS (aria-label is "Read"/"Sent" literals). `handleIncomingReadReceipt` only touches `read: boolean` field. security-auditor: GREEN. YELLOW-1: messageIds not validated as UUID format (len [1,36] accepts non-UUID strings; collisions only affect local UI `read` state, non-blocking). YELLOW-2: read-presence timing oracle — receipt sent immediately even for background chats (no viewport gating; product/threat-model decision, non-blocking).
+  - **399 frontend tests** (+9: 6 in useMessages read_receipt suite, 3 in ChatLayout read receipts; was 390); tsc clean; Biome clean.
+  - **Recurring pattern (from cycle 152):** Biome collapses multi-arg calls to single-line when they fit under print-width. Always run `pnpm exec biome format --write` before committing test files.
+  - **Next cycle:** Post-MVP items: PQ hybrid activation (ADR-0003 Phase A — waits for openmls stable MLS_128_MLKEM768), mobile app scaffold (Tauri 2.x), message delivery status (sent→delivered→read full state machine with server ack).
+
 ## Current state (2026-06-15, cycle 152 — STABILIZATION: CI RED fix — biome format in reaction test files)
 - **Cycle 152 (commit 0eda4a2):** STABILIZATION — CI was RED on Frontend (Biome lint) from cycle 151 emoji reactions commit.
   - **Root cause:** Two test files had multi-line function calls that biome collapses to single-line form when they fit under the print-width limit:
