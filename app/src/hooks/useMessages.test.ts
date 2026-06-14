@@ -424,3 +424,62 @@ describe("useMessages — §9.4.1 thumbnail parsing", () => {
 		expect(received[0].media?.thumbnail).toBeUndefined();
 	});
 });
+
+describe("useMessages — typing_indicator handling", () => {
+	function makeTypingEnvelope(): Envelope {
+		return {
+			id: ENV_ID,
+			group_id: GROUP_ID,
+			sender: SENDER_ID,
+			recipient: null,
+			message_type: "Application",
+			ciphertext: [7, 7, 7],
+			epoch: null,
+			created_at: "2026-06-14T09:00:00Z",
+			expires_at: null,
+		};
+	}
+
+	beforeEach(() => {
+		mockWorker.mlsDecrypt.mockResolvedValue({
+			plaintext: new TextEncoder().encode(JSON.stringify({ type: "typing_indicator" })),
+		});
+	});
+
+	afterEach(() => {
+		mockWorker.mlsDecrypt.mockResolvedValue({
+			plaintext: new TextEncoder().encode(DECRYPTED_TEXT),
+		});
+	});
+
+	it("invokes onTyping with groupId when typing_indicator is received", async () => {
+		pollSpy.mockResolvedValueOnce([makeTypingEnvelope()]);
+		const onTyping = vi.fn();
+
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, onTyping));
+
+		await waitFor(() => {
+			expect(onTyping).toHaveBeenCalledWith(GROUP_ID);
+		});
+	});
+
+	it("does NOT forward typing_indicator to onMessage", async () => {
+		pollSpy.mockResolvedValueOnce([makeTypingEnvelope()]);
+		const onMessage = vi.fn();
+
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, onMessage, undefined, vi.fn()));
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onMessage).not.toHaveBeenCalled();
+	});
+
+	it("acks the typing_indicator envelope after processing", async () => {
+		pollSpy.mockResolvedValueOnce([makeTypingEnvelope()]);
+
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, vi.fn()));
+
+		await waitFor(() => {
+			expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID);
+		});
+	});
+});

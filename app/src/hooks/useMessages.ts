@@ -77,12 +77,15 @@ export interface IncomingMessage {
  *                     Must be memoized with useCallback — passed as a dep.
  * @param onPqBinding  Optional callback invoked when a pq_init envelope is processed
  *                     (§5.3 Phase B). Receives the groupId and 16-char binding hex.
+ * @param onTyping     Optional callback invoked when a typing_indicator envelope is
+ *                     received. Receives the groupId. Not forwarded to onMessage.
  */
 export function useMessages(
 	identityId: string | undefined,
 	groupId: string | undefined,
 	onMessage: (msg: IncomingMessage) => void,
 	onPqBinding?: (groupId: string, bindingHex: string) => void,
+	onTyping?: (groupId: string) => void,
 ): void {
 	const { sessionToken } = useAuthStore();
 	const cryptoWorker = useCryptoWorker();
@@ -97,6 +100,11 @@ export function useMessages(
 	const onPqBindingRef = useRef(onPqBinding);
 	useEffect(() => {
 		onPqBindingRef.current = onPqBinding;
+	});
+
+	const onTypingRef = useRef(onTyping);
+	useEffect(() => {
+		onTypingRef.current = onTyping;
 	});
 
 	// Track the latest created_at we've seen to avoid re-delivering on restart.
@@ -164,6 +172,10 @@ export function useMessages(
 							iv: parsed.iv as number[],
 							thumbnail: thumbRaw,
 						};
+					} else if (parsed.type === "typing_indicator") {
+						// Peer is typing — notify ChatLayout; never displayed as a message.
+						shouldDisplayMessage = false;
+						onTypingRef.current?.(groupId);
 					} else if (parsed.type === "pq_init" && Array.isArray(parsed.ct)) {
 						// §5.3 Phase B: PQ invite confirmation — decap ML-KEM ciphertext + derive binding.
 						shouldDisplayMessage = false;

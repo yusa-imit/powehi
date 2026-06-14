@@ -987,6 +987,7 @@ function Composer({
 	ttl,
 	onToggleTtl,
 	onPhoto,
+	onTyping,
 }: {
 	onSend: (text: string) => void;
 	partner: string;
@@ -994,6 +995,8 @@ function Composer({
 	onToggleTtl: () => void;
 	/** Triggered when the user clicks the Photo button. */
 	onPhoto?: () => void;
+	/** Called on each keystroke so ChatLayout can throttle-send typing_indicator messages. */
+	onTyping?: () => void;
 }) {
 	const [text, setText] = useState("");
 	const send = () => {
@@ -1057,7 +1060,10 @@ function Composer({
 				</button>
 				<textarea
 					value={text}
-					onChange={(e) => setText(e.target.value)}
+					onChange={(e) => {
+						setText(e.target.value);
+						onTyping?.();
+					}}
 					onKeyDown={handleKeyDown}
 					placeholder={`Message ${partner.split(" ")[0]} — encrypted`}
 					rows={1}
@@ -1527,6 +1533,19 @@ export function ChatLayout() {
 		activeIdRef.current = activeId;
 	}, [activeId]);
 
+	// Tracks auto-clear timers for peer typing indicators, keyed by mlsGroupId.
+	// Stored in a ref so setChats callbacks can mutate it without triggering re-renders.
+	const typingTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+	useEffect(() => {
+		const timers = typingTimersRef.current;
+		return () => {
+			for (const handle of timers.values()) clearTimeout(handle);
+		};
+	}, []);
+
+	// Throttle ref for outgoing typing indicator signals (leading-edge, 3 s window).
+	const typingThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
 	// Reset in-conversation search when switching chats.
 	// biome-ignore lint/correctness/useExhaustiveDependencies: activeId is the trigger; setMsgSearch is stable
 	useEffect(() => {
@@ -1668,8 +1687,51 @@ export function ChatLayout() {
 		);
 	}, []);
 
+	/**
+	 * Show "typing..." for the peer in the matching chat. Auto-clears after 3 s.
+	 * Multiple signals within the 3 s window reset the timer (debounced clear).
+	 */
+	const handleIncomingTyping = useCallback((gId: string) => {
+		const existing = typingTimersRef.current.get(gId);
+		if (existing !== undefined) clearTimeout(existing);
+		setChats((cs) => cs.map((c) => (c.mlsGroupId === gId ? { ...c, typing: true } : c)));
+		const handle = setTimeout(() => {
+			typingTimersRef.current.delete(gId);
+			setChats((cs) => cs.map((c) => (c.mlsGroupId === gId ? { ...c, typing: false } : c)));
+		}, 3_000);
+		typingTimersRef.current.set(gId, handle);
+	}, []);
+
+	/**
+	 * Send a typing_indicator signal to the active MLS group.
+	 * Leading-edge throttled to once per 3 s (matches the receiver's display window).
+	 * Fire-and-forget — failure is silently ignored (non-fatal UX signal).
+	 */
+	const sendTypingIndicator = () => {
+		if (typingThrottleRef.current) return;
+		if (!sessionToken || !active?.mlsGroupId || !active?.mlsIdentityId || !cryptoWorker) return;
+		const { mlsGroupId, mlsIdentityId } = active;
+
+		typingThrottleRef.current = setTimeout(() => {
+			typingThrottleRef.current = null;
+		}, 3_000);
+
+		const plaintext = new TextEncoder().encode(JSON.stringify({ type: "typing_indicator" }));
+		cryptoWorker
+			.mlsEncrypt(mlsIdentityId, mlsGroupId, plaintext)
+			.then(({ ciphertext }) => sendMessageApi(sessionToken, mlsGroupId, ciphertext, undefined))
+			.catch(() => {})
+			.finally(() => plaintext.fill(0));
+	};
+
 	// Poll for incoming messages whenever there's an active MLS group + session.
-	useMessages(active?.mlsIdentityId, active?.mlsGroupId, handleIncoming, handlePqBinding);
+	useMessages(
+		active?.mlsIdentityId,
+		active?.mlsGroupId,
+		handleIncoming,
+		handlePqBinding,
+		handleIncomingTyping,
+	);
 
 	/** Select a chat and clear its unread badge atomically. */
 	const handleSelectChat = useCallback((id: string) => {
@@ -1830,6 +1892,7 @@ export function ChatLayout() {
 						ttl={disappearingTtl}
 						onToggleTtl={handleToggleTtl}
 						onPhoto={() => fileInputRef.current?.click()}
+						onTyping={sendTypingIndicator}
 					/>
 				</main>
 			)}

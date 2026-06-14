@@ -338,4 +338,69 @@ describe("ChatLayout", () => {
 		const badges = screen.getAllByTestId("unread-badge");
 		expect(badges.some((b) => b.textContent === "9+")).toBe(true);
 	});
+
+	// ── Typing indicator ─────────────────────────────────────────────────────────
+
+	it("seed chat Sam shows 'typing...' in sidebar", () => {
+		render(<ChatLayout />);
+		// Sam has typing: true in SEED_CHATS; sidebar should show italicised "typing..."
+		expect(screen.getByText("typing...")).toBeInTheDocument();
+	});
+
+	it("incoming typing signal shows '· typing' in the conversation header for the active chat", async () => {
+		let capturedOnTyping: ((groupId: string) => void) | undefined;
+		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+			(_identityId, _groupId, _onMessage, _onPqBinding, onTyping) => {
+				capturedOnTyping = onTyping;
+			},
+		);
+		render(<ChatLayout />);
+		expect(capturedOnTyping).toBeDefined();
+
+		// Maya is active; fire a typing signal for her group
+		await act(async () => {
+			capturedOnTyping?.("11111111-1111-1111-1111-111111111111");
+		});
+
+		// The ConversationHeader should now show "· typing"
+		expect(screen.getByText(/·\s*typing/i)).toBeInTheDocument();
+	});
+
+	it("typing indicator auto-clears after 3 seconds", async () => {
+		vi.useFakeTimers();
+		try {
+			let capturedOnTyping: ((groupId: string) => void) | undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(_identityId, _groupId, _onMessage, _onPqBinding, onTyping) => {
+					capturedOnTyping = onTyping;
+				},
+			);
+			render(<ChatLayout />);
+
+			// Trigger typing signal
+			await act(async () => {
+				capturedOnTyping?.("11111111-1111-1111-1111-111111111111");
+			});
+			expect(screen.getByText(/·\s*typing/i)).toBeInTheDocument();
+
+			// Advance timers past the 3 s auto-clear
+			await act(async () => {
+				vi.advanceTimersByTime(3_100);
+			});
+			expect(screen.queryByText(/·\s*typing/i)).not.toBeInTheDocument();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("typing in the composer triggers the outgoing typing signal", () => {
+		// sendTypingIndicator requires sessionToken/MLS context which aren't set in this test;
+		// verify that onChange fires without throwing (graceful no-op in unauthenticated state).
+		render(<ChatLayout />);
+		const textarea = screen.getByPlaceholderText(/encrypted/i);
+		// Should not throw even without a session
+		expect(() => {
+			fireEvent.change(textarea, { target: { value: "a" } });
+		}).not.toThrow();
+	});
 });
