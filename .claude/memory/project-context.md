@@ -17,6 +17,28 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-15, cycle 151 — FEATURE: E2EE emoji reactions via MLS reaction messages)
+- **Cycle 151 (commit 123b120):** FEATURE — Post-MVP UX: end-to-end encrypted emoji reactions.
+  - **CI fix (commit eeb80db):** CI was RED (rustfmt + clippy) on commit fae21bd from cycle 150:
+    - `push_subscription.rs`: rustfmt reformats `assert_eq!` calls exceeding 100-char limit
+    - `messaging.rs`: moved `pub async fn ack` before `mod tests` (clippy::items_after_test_module)
+  - **`app/src/hooks/useMessages.ts`** (MODIFIED):
+    - `ALLOWED_REACTION_EMOJIS = ["👍","❤️","😂","😮","😢","😡"]` constant exported
+    - `onReaction?: (groupId, targetId, emoji, senderId) => void` as 6th param + stable `onReactionRef`
+    - `type === "reaction"` handler: validates `emoji` against whitelist + `targetMessageId` is non-empty string; sets `shouldDisplayMessage = false`; calls `onReactionRef.current`
+  - **`app/src/components/ChatLayout.tsx`** (MODIFIED):
+    - `ChatMessage` gains `id?: string` (envelope UUID) and `reactions?: Record<string, string[]>` (emoji → [senderDeviceId])
+    - `handleIncoming`: stores `id: msg.id` on pushed messages
+    - `handleIncomingReaction(gId, targetId, emoji, senderId)`: deduplicates by `senders.includes(senderId)` before appending
+    - `sendReaction(targetId, emoji)`: whitelist guard on send side; optimistic local update using `useAuthStore.getState().deviceId`; MLS-encrypts `{type:"reaction", emoji, targetMessageId}`; `plaintext.fill(0)` in `.finally()`
+    - `MessageBubble`: reaction chips row (emoji + count, clickable to re-react); reaction trigger "+" button per message with id; emoji picker popover (ALLOWED_REACTION_EMOJIS); `data-testid` on all interactive elements
+    - `MessageList`: `onReact?: (msgId, emoji) => void` prop threaded to `MessageBubble`
+    - `MessageList` call site: `onReact={sendReaction}`
+    - `useMessages` call: 6th arg `handleIncomingReaction`
+  - **Security invariants verified:** Server only receives MLS ciphertext — emoji and targetMessageId never sent in plaintext. `ALLOWED_REACTION_EMOJIS` whitelist enforced both on receive (useMessages) and send (sendReaction). No content logging. `plaintext.fill(0)` in finally. Deduplication prevents sender inflation. No XSS (JSX text children, not innerHTML). No SSRF (no network calls from reaction receive path). security-auditor: GREEN. YELLOW-2: unbounded reactions per message (bounded by MLS group size, non-blocking). YELLOW-4: JSON.stringify transient string (consistent with existing pattern, non-blocking).
+  - **390 frontend tests** (+11: 6 in useMessages reaction suite, 5 in ChatLayout reaction suite; was 379); tsc clean; Biome clean.
+  - **Next cycle:** Post-MVP items: PQ hybrid activation (ADR-0003 Phase A — waits for openmls stable MLS_128_MLKEM768), mobile app scaffold (Tauri 2.x), message delivery receipts (read receipts).
+
 ## Current state (2026-06-14, cycle 149 — FEATURE: real-time typing indicator via MLS)
 - **Cycle 149 (commit 8f87eba):** FEATURE — Post-MVP UX: real-time "X is typing..." indicator using MLS-encrypted `typing_indicator` messages.
   - **`app/src/hooks/useMessages.ts`** (MODIFIED):
