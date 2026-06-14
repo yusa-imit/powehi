@@ -1,7 +1,9 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db/schema";
 import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
+import * as UseMessagesModule from "../hooks/useMessages";
+import type { IncomingMessage } from "../hooks/useMessages";
 import { ChatLayout } from "./ChatLayout";
 
 // The stable mock worker singleton — same reference on every useCryptoWorker() call
@@ -233,5 +235,107 @@ describe("ChatLayout", () => {
 		fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
 		// Search input should be gone after switching chats
 		expect(screen.queryByPlaceholderText(/search in conversation/i)).not.toBeInTheDocument();
+	});
+
+	// ── Unread message count badge ────────────────────────────────────────────────
+
+	it("shows unread badge with count 2 for Jordan from seed data", () => {
+		render(<ChatLayout />);
+		// Jordan starts with unread: 2 in SEED_CHATS
+		const badges = screen.getAllByTestId("unread-badge");
+		expect(badges.some((b) => b.textContent === "2")).toBe(true);
+	});
+
+	it("selecting Jordan clears its unread badge", () => {
+		render(<ChatLayout />);
+		// Badge visible before selection
+		expect(screen.getAllByTestId("unread-badge").some((b) => b.textContent === "2")).toBe(true);
+		fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+		// No badge with "2" after selection (unread reset to 0)
+		const badges = screen.queryAllByTestId("unread-badge");
+		expect(badges.every((b) => b.textContent !== "2")).toBe(true);
+	});
+
+	it("receiving a message for an inactive chat increments its unread badge", async () => {
+		// Capture the onMessage callback injected into useMessages
+		let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+			(_identityId, _groupId, onMessage) => {
+				capturedOnMessage = onMessage;
+			},
+		);
+		render(<ChatLayout />);
+		expect(capturedOnMessage).toBeDefined();
+
+		// Jordan's mlsGroupId matches SEED_CHATS entry; Maya is currently active
+		await act(async () => {
+			capturedOnMessage?.({
+				id: "env-001",
+				senderId: "device-abc",
+				groupId: "33333333-3333-3333-3333-333333333333",
+				text: "hey there",
+				ciphertextB64: "Y2lwaGVydGV4dA==",
+				epochSeq: 1,
+			});
+		});
+
+		// Jordan's unread should go from 2 → 3
+		const badges = screen.getAllByTestId("unread-badge");
+		expect(badges.some((b) => b.textContent === "3")).toBe(true);
+	});
+
+	it("messages for the active chat do not increment its unread badge", async () => {
+		let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+			(_identityId, _groupId, onMessage) => {
+				capturedOnMessage = onMessage;
+			},
+		);
+		render(<ChatLayout />);
+
+		// Maya is active; her mlsGroupId is in SEED_CHATS
+		await act(async () => {
+			capturedOnMessage?.({
+				id: "env-002",
+				senderId: "device-xyz",
+				groupId: "11111111-1111-1111-1111-111111111111",
+				text: "hello maya",
+				ciphertextB64: "Y2lwaGVydGV4dA==",
+				epochSeq: 1,
+			});
+		});
+
+		// Maya has no unread badge (active chat — count stays 0)
+		const badges = screen.queryAllByTestId("unread-badge");
+		// Only Jordan's badge (= "2") should remain; Maya's count stays 0 (no badge)
+		expect(badges.every((b) => b.textContent !== "0")).toBe(true);
+	});
+
+	it("unread badge displays 9+ when count exceeds 9", async () => {
+		let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+			(_identityId, _groupId, onMessage) => {
+				capturedOnMessage = onMessage;
+			},
+		);
+		render(<ChatLayout />);
+		expect(capturedOnMessage).toBeDefined();
+
+		// Jordan starts with unread: 2 — send 8 more to exceed 9 (total 10)
+		await act(async () => {
+			for (let i = 0; i < 8; i++) {
+				capturedOnMessage?.({
+					id: `env-${i + 10}`,
+					senderId: "device-abc",
+					groupId: "33333333-3333-3333-3333-333333333333",
+					text: `msg ${i}`,
+					ciphertextB64: "Y2lwaGVydGV4dA==",
+					epochSeq: i + 2,
+				});
+			}
+		});
+
+		const badges = screen.getAllByTestId("unread-badge");
+		expect(badges.some((b) => b.textContent === "9+")).toBe(true);
 	});
 });

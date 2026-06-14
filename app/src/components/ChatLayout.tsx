@@ -132,6 +132,7 @@ const SEED_CHATS: Chat[] = [
 		last: "receipt.pdf",
 		time: "12:08",
 		unread: 2,
+		mlsGroupId: "33333333-3333-3333-3333-333333333333",
 		messages: [
 			{ day: "Today", from: "them", text: "split for last night" },
 			{ from: "them", text: "receipt.pdf", continued: true, last: true, time: "12:08" },
@@ -464,6 +465,7 @@ function ChatRow({
 					)}
 					{chat.unread > 0 && (
 						<span
+							data-testid="unread-badge"
 							style={{
 								background: "#FF8A3D",
 								color: "#2A0A00",
@@ -474,7 +476,7 @@ function ChatRow({
 								flex: "none",
 							}}
 						>
-							{chat.unread}
+							{chat.unread > 9 ? "9+" : chat.unread}
 						</span>
 					)}
 				</div>
@@ -1518,6 +1520,13 @@ export function ChatLayout() {
 	const [disappearingTtl, setDisappearingTtl] = useState<TtlOption>(undefined);
 	const [msgSearch, setMsgSearch] = useState("");
 
+	// Stable ref so handleIncoming (useCallback) can read current activeId without
+	// re-creating on every chat switch — avoids restarting the polling hook.
+	const activeIdRef = useRef(activeId);
+	useEffect(() => {
+		activeIdRef.current = activeId;
+	}, [activeId]);
+
 	// Reset in-conversation search when switching chats.
 	// biome-ignore lint/correctness/useExhaustiveDependencies: activeId is the trigger; setMsgSearch is stable
 	useEffect(() => {
@@ -1594,7 +1603,17 @@ export function ChatLayout() {
 						media: msg.media,
 						expiresAt: msg.expiresAt,
 					});
-					return { ...c, messages: msgs, last: displayText, time };
+					// Increment unread only when the message arrives for a background chat.
+					// activeIdRef.current reflects the current selection without making this
+					// callback re-create on every chat switch.
+					const isActive = c.id === activeIdRef.current;
+					return {
+						...c,
+						messages: msgs,
+						last: displayText,
+						time,
+						unread: isActive ? 0 : c.unread + 1,
+					};
 				}),
 			);
 			// Encrypt and persist to IndexedDB — fails closed if encryptedDb unavailable.
@@ -1651,6 +1670,12 @@ export function ChatLayout() {
 
 	// Poll for incoming messages whenever there's an active MLS group + session.
 	useMessages(active?.mlsIdentityId, active?.mlsGroupId, handleIncoming, handlePqBinding);
+
+	/** Select a chat and clear its unread badge atomically. */
+	const handleSelectChat = useCallback((id: string) => {
+		setActiveId(id);
+		setChats((cs) => cs.map((c) => (c.id === id ? { ...c, unread: 0 } : c)));
+	}, []);
 
 	// Add a new chat entry when another device invites us (Welcome envelope received).
 	const handleNewGroup = useCallback(
@@ -1772,7 +1797,7 @@ export function ChatLayout() {
 			<Sidebar
 				chats={chats}
 				activeId={activeId}
-				onSelect={setActiveId}
+				onSelect={handleSelectChat}
 				onNewChat={() => setInviteOpen(true)}
 				onSettings={() => undefined}
 				searchQuery={search}
