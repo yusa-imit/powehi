@@ -251,6 +251,37 @@ function Avatar({
 	);
 }
 
+// ── HighlightedText ───────────────────────────────────────────────────────────
+
+function HighlightedText({ text, highlight }: { text: string; highlight: string }) {
+	if (!highlight) return <>{text}</>;
+	const lc = text.toLowerCase();
+	const hlLc = highlight.toLowerCase();
+	const parts: React.ReactNode[] = [];
+	let cursor = 0;
+	let idx = lc.indexOf(hlLc, cursor);
+	while (idx !== -1) {
+		if (idx > cursor) parts.push(text.slice(cursor, idx));
+		parts.push(
+			<mark
+				key={`${idx}-${cursor}`}
+				style={{
+					background: "rgba(255,138,61,0.35)",
+					color: "inherit",
+					borderRadius: 2,
+					padding: "0 1px",
+				}}
+			>
+				{text.slice(idx, idx + highlight.length)}
+			</mark>,
+		);
+		cursor = idx + highlight.length;
+		idx = lc.indexOf(hlLc, cursor);
+	}
+	if (cursor < text.length) parts.push(text.slice(cursor));
+	return <>{parts}</>;
+}
+
 // ── Logo ──────────────────────────────────────────────────────────────────────
 
 function Logo({ size = 28 }: { size?: number }) {
@@ -608,6 +639,8 @@ function ConversationHeader({
 	onInfo,
 	infoOpen,
 	pqBindingHex,
+	msgSearch,
+	onMsgSearch,
 }: {
 	chat: Chat;
 	onCall: () => void;
@@ -615,7 +648,23 @@ function ConversationHeader({
 	onInfo: () => void;
 	infoOpen: boolean;
 	pqBindingHex?: string;
+	msgSearch: string;
+	onMsgSearch: (q: string) => void;
 }) {
+	const [searchOpen, setSearchOpen] = useState(false);
+
+	// Close search when switching conversations so the header resets cleanly.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: chat.id is the trigger; setSearchOpen is stable
+	useEffect(() => {
+		setSearchOpen(false);
+	}, [chat.id]);
+
+	const handleOpenSearch = () => setSearchOpen(true);
+	const handleCloseSearch = () => {
+		setSearchOpen(false);
+		onMsgSearch("");
+	};
+
 	return (
 		<header
 			style={{
@@ -629,41 +678,71 @@ function ConversationHeader({
 				background: "var(--bg-void)",
 			}}
 		>
-			<Avatar name={chat.name} size={38} online={chat.online} />
-			<div style={{ flex: 1, minWidth: 0 }}>
-				<div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-					<span style={{ fontSize: 15, fontWeight: 500, color: "var(--fg-1)" }}>{chat.name}</span>
-					<Icon name="lock" size={11} color="#A8C8FF" />
-					{pqBindingHex && (
-						<span
-							title={`PQ binding: ${pqBindingHex}`}
-							style={{
-								fontSize: 9,
-								fontWeight: 600,
-								letterSpacing: "0.06em",
-								color: "#A8C8FF",
-								background: "rgba(168,200,255,0.12)",
-								border: "1px solid rgba(168,200,255,0.3)",
-								borderRadius: 4,
-								padding: "1px 5px",
-							}}
-						>
-							PQ
-						</span>
-					)}
-				</div>
-				<div style={{ fontSize: 11, color: "var(--fg-3)", marginTop: 1 }}>
-					{chat.online ? "online" : `last seen ${chat.lastSeen ?? "recently"}`}
-					{chat.typing && (
-						<span style={{ color: "#FF9E52", marginLeft: 8, fontStyle: "italic" }}>· typing</span>
-					)}
-				</div>
-			</div>
-			<div style={{ display: "flex", gap: 2 }}>
-				<IconBtn icon="phone" onClick={onCall} label="Voice call" />
-				<IconBtn icon="video" onClick={onVideo} label="Video call" />
-				<IconBtn icon="more-horizontal" onClick={onInfo} active={infoOpen} label="Info" />
-			</div>
+			{searchOpen ? (
+				<>
+					<Icon name="search" size={16} color="var(--fg-3)" />
+					<input
+						value={msgSearch}
+						onChange={(e) => onMsgSearch(e.target.value)}
+						placeholder="Search in conversation..."
+						// biome-ignore lint/a11y/noAutofocus: search input opened by explicit user action
+						autoFocus
+						style={{
+							flex: 1,
+							background: "transparent",
+							border: "none",
+							outline: "none",
+							color: "var(--fg-1)",
+							fontFamily: "var(--font-sans)",
+							fontSize: 14,
+						}}
+					/>
+					<IconBtn icon="x" onClick={handleCloseSearch} label="Close search" size={28} />
+				</>
+			) : (
+				<>
+					<Avatar name={chat.name} size={38} online={chat.online} />
+					<div style={{ flex: 1, minWidth: 0 }}>
+						<div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+							<span style={{ fontSize: 15, fontWeight: 500, color: "var(--fg-1)" }}>
+								{chat.name}
+							</span>
+							<Icon name="lock" size={11} color="#A8C8FF" />
+							{pqBindingHex && (
+								<span
+									title={`PQ binding: ${pqBindingHex}`}
+									style={{
+										fontSize: 9,
+										fontWeight: 600,
+										letterSpacing: "0.06em",
+										color: "#A8C8FF",
+										background: "rgba(168,200,255,0.12)",
+										border: "1px solid rgba(168,200,255,0.3)",
+										borderRadius: 4,
+										padding: "1px 5px",
+									}}
+								>
+									PQ
+								</span>
+							)}
+						</div>
+						<div style={{ fontSize: 11, color: "var(--fg-3)", marginTop: 1 }}>
+							{chat.online ? "online" : `last seen ${chat.lastSeen ?? "recently"}`}
+							{chat.typing && (
+								<span style={{ color: "#FF9E52", marginLeft: 8, fontStyle: "italic" }}>
+									· typing
+								</span>
+							)}
+						</div>
+					</div>
+					<div style={{ display: "flex", gap: 2 }}>
+						<IconBtn icon="search" onClick={handleOpenSearch} label="Search in conversation" />
+						<IconBtn icon="phone" onClick={onCall} label="Voice call" />
+						<IconBtn icon="video" onClick={onVideo} label="Video call" />
+						<IconBtn icon="more-horizontal" onClick={onInfo} active={infoOpen} label="Info" />
+					</div>
+				</>
+			)}
 		</header>
 	);
 }
@@ -671,9 +750,11 @@ function ConversationHeader({
 function MessageBubble({
 	msg,
 	partner,
+	highlight,
 }: {
 	msg: ChatMessage;
 	partner: string;
+	highlight?: string;
 }) {
 	const isMe = msg.from === "me";
 	return (
@@ -713,7 +794,11 @@ function MessageBubble({
 							}),
 				}}
 			>
-				{msg.media ? <MediaImage media={msg.media} /> : msg.text}
+				{msg.media ? (
+					<MediaImage media={msg.media} />
+				) : (
+					<HighlightedText text={msg.text} highlight={highlight ?? ""} />
+				)}
 				{msg.last && msg.time && (
 					<span
 						style={{
@@ -782,9 +867,11 @@ function buildGroups(messages: ChatMessage[]): Group[] {
 function MessageList({
 	messages,
 	partner,
+	searchQuery,
 }: {
 	messages: ChatMessage[];
 	partner: string;
+	searchQuery?: string;
 }) {
 	const ref = useRef<HTMLDivElement>(null);
 
@@ -793,6 +880,11 @@ function MessageList({
 	});
 
 	const groups = buildGroups(messages);
+
+	const matchCount = searchQuery
+		? messages.filter((m) => !m.media && m.text.toLowerCase().includes(searchQuery.toLowerCase()))
+				.length
+		: 0;
 
 	return (
 		<div
@@ -808,6 +900,28 @@ function MessageList({
 					"radial-gradient(ellipse 100% 60% at 50% 110%, rgba(255,138,61,0.07), transparent 60%), var(--bg-void)",
 			}}
 		>
+			{/* Search results count — shown when in-conversation search is active */}
+			{searchQuery && (
+				<div
+					style={{
+						alignSelf: "center",
+						padding: "5px 14px",
+						marginBottom: 8,
+						background: "rgba(255,138,61,0.08)",
+						border: "1px solid rgba(255,138,61,0.22)",
+						borderRadius: 20,
+						fontSize: 11,
+						color: "var(--fg-2)",
+						letterSpacing: "0.03em",
+					}}
+					aria-live="polite"
+				>
+					{matchCount === 0
+						? "No matches"
+						: `${matchCount} ${matchCount === 1 ? "match" : "matches"}`}
+				</div>
+			)}
+
 			{/* E2EE notice */}
 			<div
 				style={{
@@ -858,7 +972,7 @@ function MessageList({
 						{g.label}
 					</div>
 				) : (
-					<MessageBubble key={g.key} msg={g.msg} partner={partner} />
+					<MessageBubble key={g.key} msg={g.msg} partner={partner} highlight={searchQuery} />
 				),
 			)}
 		</div>
@@ -1402,6 +1516,13 @@ export function ChatLayout() {
 	const [infoOpen, setInfoOpen] = useState(false);
 	const [inviteOpen, setInviteOpen] = useState(false);
 	const [disappearingTtl, setDisappearingTtl] = useState<TtlOption>(undefined);
+	const [msgSearch, setMsgSearch] = useState("");
+
+	// Reset in-conversation search when switching chats.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: activeId is the trigger; setMsgSearch is stable
+	useEffect(() => {
+		setMsgSearch("");
+	}, [activeId]);
 	const active = chats.find((c) => c.id === activeId);
 
 	const { sessionToken, identityId } = useAuthStore();
@@ -1674,8 +1795,10 @@ export function ChatLayout() {
 						onInfo={() => setInfoOpen((v) => !v)}
 						infoOpen={infoOpen}
 						pqBindingHex={active.pqBindingHex}
+						msgSearch={msgSearch}
+						onMsgSearch={setMsgSearch}
 					/>
-					<MessageList messages={active.messages} partner={active.name} />
+					<MessageList messages={active.messages} partner={active.name} searchQuery={msgSearch} />
 					<Composer
 						onSend={sendMessage}
 						partner={active.name}

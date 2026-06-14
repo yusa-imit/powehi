@@ -186,4 +186,52 @@ describe("ChatLayout", () => {
 			expect(allRecords).toHaveLength(0);
 		});
 	});
+
+	// ── In-conversation message search ───────────────────────────────────────────
+
+	it("renders search button in conversation header", () => {
+		render(<ChatLayout />);
+		expect(screen.getByRole("button", { name: /search in conversation/i })).toBeInTheDocument();
+	});
+
+	it("clicking search button shows search input", () => {
+		render(<ChatLayout />);
+		fireEvent.click(screen.getByRole("button", { name: /search in conversation/i }));
+		expect(screen.getByPlaceholderText(/search in conversation/i)).toBeInTheDocument();
+	});
+
+	it("typing in message search highlights matching text with mark elements", () => {
+		render(<ChatLayout />);
+		fireEvent.click(screen.getByRole("button", { name: /search in conversation/i }));
+		const searchInput = screen.getByPlaceholderText(/search in conversation/i);
+		// "cafe" appears in Maya's seed messages ("9am at the corner cafe?")
+		fireEvent.change(searchInput, { target: { value: "cafe" } });
+		const marks = document.querySelectorAll("mark");
+		expect(marks.length).toBeGreaterThan(0);
+		expect(Array.from(marks).some((m) => m.textContent === "cafe")).toBe(true);
+	});
+
+	it("closing message search removes the search input and clears highlights", () => {
+		render(<ChatLayout />);
+		fireEvent.click(screen.getByRole("button", { name: /search in conversation/i }));
+		const searchInput = screen.getByPlaceholderText(/search in conversation/i);
+		fireEvent.change(searchInput, { target: { value: "cafe" } });
+		// Highlights should be present
+		expect(document.querySelectorAll("mark").length).toBeGreaterThan(0);
+		// Close search
+		fireEvent.click(screen.getByRole("button", { name: /close search/i }));
+		expect(screen.queryByPlaceholderText(/search in conversation/i)).not.toBeInTheDocument();
+		expect(document.querySelectorAll("mark").length).toBe(0);
+	});
+
+	it("switching active conversation resets message search", () => {
+		render(<ChatLayout />);
+		// Open message search in Maya's conversation
+		fireEvent.click(screen.getByRole("button", { name: /search in conversation/i }));
+		expect(screen.getByPlaceholderText(/search in conversation/i)).toBeInTheDocument();
+		// Switch to Jordan — the chat row button's accessible name includes "Jordan"
+		fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+		// Search input should be gone after switching chats
+		expect(screen.queryByPlaceholderText(/search in conversation/i)).not.toBeInTheDocument();
+	});
 });
