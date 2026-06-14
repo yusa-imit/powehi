@@ -4,7 +4,7 @@ import * as MessagesModule from "../api/messages";
 import type { Envelope } from "../api/messages";
 import { useAuthStore } from "../store/auth";
 import * as CryptoWorkerHook from "./useCryptoWorker";
-import { type IncomingMessage, useMessages } from "./useMessages";
+import { ALLOWED_REACTION_EMOJIS, type IncomingMessage, useMessages } from "./useMessages";
 
 const PQ_HANDLE = "pq-decap-handle-test";
 
@@ -481,5 +481,120 @@ describe("useMessages — typing_indicator handling", () => {
 		await waitFor(() => {
 			expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID);
 		});
+	});
+});
+
+describe("useMessages — reaction handling", () => {
+	const TARGET_ID = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+
+	function makeReactionEnvelope(overrides: Partial<Envelope> = {}): Envelope {
+		return {
+			id: ENV_ID,
+			group_id: GROUP_ID,
+			sender: SENDER_ID,
+			recipient: null,
+			message_type: "Application",
+			ciphertext: [9, 9, 9],
+			epoch: null,
+			created_at: "2026-06-15T09:00:00Z",
+			expires_at: null,
+			...overrides,
+		};
+	}
+
+	afterEach(() => {
+		mockWorker.mlsDecrypt.mockResolvedValue({
+			plaintext: new TextEncoder().encode(DECRYPTED_TEXT),
+		});
+	});
+
+	it("invokes onReaction with groupId, targetId, emoji and senderId for a valid reaction", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "reaction", emoji: "👍", targetMessageId: TARGET_ID }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeReactionEnvelope()]);
+		const onReaction = vi.fn();
+
+		renderHook(() =>
+			useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, onReaction),
+		);
+
+		await waitFor(() => {
+			expect(onReaction).toHaveBeenCalledWith(GROUP_ID, TARGET_ID, "👍", SENDER_ID);
+		});
+	});
+
+	it("does NOT forward a reaction envelope to onMessage", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "reaction", emoji: "❤️", targetMessageId: TARGET_ID }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeReactionEnvelope()]);
+		const onMessage = vi.fn();
+
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, onMessage, undefined, undefined, vi.fn()));
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onMessage).not.toHaveBeenCalled();
+	});
+
+	it("acks the reaction envelope after processing", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "reaction", emoji: "😂", targetMessageId: TARGET_ID }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeReactionEnvelope()]);
+
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, vi.fn()));
+
+		await waitFor(() => {
+			expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID);
+		});
+	});
+
+	it("does NOT call onReaction for an emoji not in the whitelist", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "reaction", emoji: "🤖", targetMessageId: TARGET_ID }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeReactionEnvelope()]);
+		const onReaction = vi.fn();
+
+		renderHook(() =>
+			useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, onReaction),
+		);
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onReaction).not.toHaveBeenCalled();
+	});
+
+	it("does NOT call onReaction when targetMessageId is empty", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "reaction", emoji: "👍", targetMessageId: "" }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeReactionEnvelope()]);
+		const onReaction = vi.fn();
+
+		renderHook(() =>
+			useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, onReaction),
+		);
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onReaction).not.toHaveBeenCalled();
+	});
+
+	it("ALLOWED_REACTION_EMOJIS has exactly 6 entries and all are strings", () => {
+		expect(ALLOWED_REACTION_EMOJIS).toHaveLength(6);
+		for (const e of ALLOWED_REACTION_EMOJIS) {
+			expect(typeof e).toBe("string");
+			expect(e.length).toBeGreaterThan(0);
+		}
 	});
 });

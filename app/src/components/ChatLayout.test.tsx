@@ -403,4 +403,179 @@ describe("ChatLayout", () => {
 			fireEvent.change(textarea, { target: { value: "a" } });
 		}).not.toThrow();
 	});
+
+	describe("emoji reactions", () => {
+		it("reaction chips are rendered when a message has reactions", async () => {
+			let capturedOnReaction:
+				| ((groupId: string, targetId: string, emoji: string, senderId: string) => void)
+				| undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(_id, _gid, _onMsg, _onPq, _onTyping, onReaction) => {
+					capturedOnReaction = onReaction;
+				},
+			);
+			render(<ChatLayout />);
+
+			// Simulate an incoming message so it has an id, then a reaction for it
+			const MSG_ID = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(_id, _gid, onMsg, _onPq, _onTyping, onReaction) => {
+					capturedOnMessage = onMsg;
+					capturedOnReaction = onReaction;
+				},
+			);
+			render(<ChatLayout />);
+
+			await act(async () => {
+				capturedOnMessage?.({
+					id: MSG_ID,
+					groupId: "11111111-1111-1111-1111-111111111111",
+					senderId: "sender-1",
+					text: "hello reaction",
+					ciphertextB64: "Zg==",
+					epochSeq: 1,
+				});
+			});
+
+			await act(async () => {
+				capturedOnReaction?.(
+					"11111111-1111-1111-1111-111111111111",
+					MSG_ID,
+					"👍",
+					"peer-device-1",
+				);
+			});
+
+			expect(screen.getByTestId("reaction-chips")).toBeInTheDocument();
+			expect(screen.getByTestId("reaction-chip-👍")).toBeInTheDocument();
+		});
+
+		it("reaction chip shows count of senders", async () => {
+			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+			let capturedOnReaction:
+				| ((groupId: string, targetId: string, emoji: string, senderId: string) => void)
+				| undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(_id, _gid, onMsg, _onPq, _onTyping, onReaction) => {
+					capturedOnMessage = onMsg;
+					capturedOnReaction = onReaction;
+				},
+			);
+			render(<ChatLayout />);
+
+			const MSG_ID = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+			await act(async () => {
+				capturedOnMessage?.({
+					id: MSG_ID,
+					groupId: "11111111-1111-1111-1111-111111111111",
+					senderId: "sender-1",
+					text: "count me",
+					ciphertextB64: "Zg==",
+					epochSeq: 2,
+				});
+			});
+
+			await act(async () => {
+				capturedOnReaction?.("11111111-1111-1111-1111-111111111111", MSG_ID, "❤️", "dev-a");
+				capturedOnReaction?.("11111111-1111-1111-1111-111111111111", MSG_ID, "❤️", "dev-b");
+			});
+
+			const chip = screen.getByTestId("reaction-chip-❤️");
+			// Count is 2
+			expect(chip.textContent).toContain("2");
+		});
+
+		it("incoming reaction is NOT forwarded to the message list as a new message", async () => {
+			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+			let capturedOnReaction:
+				| ((groupId: string, targetId: string, emoji: string, senderId: string) => void)
+				| undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(_id, _gid, onMsg, _onPq, _onTyping, onReaction) => {
+					capturedOnMessage = onMsg;
+					capturedOnReaction = onReaction;
+				},
+			);
+			render(<ChatLayout />);
+
+			const MSG_ID = "aaaabbbb-cccc-dddd-eeee-ffffgggggggg";
+			await act(async () => {
+				capturedOnMessage?.({
+					id: MSG_ID,
+					groupId: "11111111-1111-1111-1111-111111111111",
+					senderId: "sender-1",
+					text: "only one",
+					ciphertextB64: "Zg==",
+					epochSeq: 3,
+				});
+			});
+
+			await act(async () => {
+				capturedOnReaction?.(
+					"11111111-1111-1111-1111-111111111111",
+					MSG_ID,
+					"😮",
+					"peer-device-x",
+				);
+			});
+
+			// The reaction emoji appears only in a chip button, not as a standalone message text
+			const chipEl = screen.queryByTestId("reaction-chip-😮");
+			expect(chipEl).toBeInTheDocument();
+			// The emoji text rendered should be confined to the chip, not a new message bubble
+			const allWithEmoji = screen.queryAllByText(/😮/);
+			for (const el of allWithEmoji) {
+				// Each element containing the emoji should be within a reaction chip
+				expect(el.closest("[data-testid='reaction-chips']")).not.toBeNull();
+			}
+		});
+
+		it("reaction trigger button is visible for messages with an id", async () => {
+			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(_id, _gid, onMsg) => {
+					capturedOnMessage = onMsg;
+				},
+			);
+			render(<ChatLayout />);
+
+			await act(async () => {
+				capturedOnMessage?.({
+					id: "msg-with-id-111",
+					groupId: "11111111-1111-1111-1111-111111111111",
+					senderId: "sender-1",
+					text: "reactable message",
+					ciphertextB64: "Zg==",
+					epochSeq: 4,
+				});
+			});
+
+			expect(screen.getByTestId("reaction-trigger")).toBeInTheDocument();
+		});
+
+		it("clicking reaction trigger opens the emoji picker", async () => {
+			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(_id, _gid, onMsg) => {
+					capturedOnMessage = onMsg;
+				},
+			);
+			render(<ChatLayout />);
+
+			await act(async () => {
+				capturedOnMessage?.({
+					id: "msg-with-id-222",
+					groupId: "11111111-1111-1111-1111-111111111111",
+					senderId: "sender-1",
+					text: "open picker",
+					ciphertextB64: "Zg==",
+					epochSeq: 5,
+				});
+			});
+
+			fireEvent.click(screen.getByTestId("reaction-trigger"));
+			expect(screen.getByTestId("reaction-picker")).toBeInTheDocument();
+		});
+	});
 });

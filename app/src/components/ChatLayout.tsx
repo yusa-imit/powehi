@@ -13,7 +13,12 @@ import { EncryptedPowehiDb } from "../db/encrypted-db";
 import { db } from "../db/schema";
 import { useCryptoWorker } from "../hooks/useCryptoWorker";
 import { useMediaSend } from "../hooks/useMediaSend";
-import { type IncomingMessage, type MediaPayload, useMessages } from "../hooks/useMessages";
+import {
+	ALLOWED_REACTION_EMOJIS,
+	type IncomingMessage,
+	type MediaPayload,
+	useMessages,
+} from "../hooks/useMessages";
 import { usePersistentMessages } from "../hooks/usePersistentMessages";
 import { useRegionDetect } from "../hooks/useRegionDetect";
 import { type NewGroupEvent, useWelcomePoller } from "../hooks/useWelcomePoller";
@@ -27,6 +32,8 @@ import { SafetyNumbers } from "./SafetyNumbers";
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 interface ChatMessage {
+	/** Envelope UUID — used as stable key for targeting reactions. Absent on optimistic sent msgs. */
+	id?: string;
 	day?: string;
 	from: "me" | "them";
 	text: string;
@@ -38,6 +45,8 @@ interface ChatMessage {
 	expiresAt?: number;
 	/** §9.2 media attachment — full payload for download + decrypt on the receiver path. */
 	media?: MediaPayload;
+	/** Emoji reactions: emoji → array of sender device IDs (deduped). */
+	reactions?: Record<string, string[]>;
 }
 
 interface Chat {
@@ -753,90 +762,223 @@ function MessageBubble({
 	msg,
 	partner,
 	highlight,
+	onReact,
 }: {
 	msg: ChatMessage;
 	partner: string;
 	highlight?: string;
+	onReact?: (emoji: string) => void;
 }) {
 	const isMe = msg.from === "me";
+	const [pickerOpen, setPickerOpen] = useState(false);
+	const reactionEntries = msg.reactions ? Object.entries(msg.reactions) : [];
+
 	return (
 		<div
 			style={{
 				display: "flex",
-				justifyContent: isMe ? "flex-end" : "flex-start",
-				alignItems: "flex-end",
-				gap: 8,
+				flexDirection: "column",
+				alignItems: isMe ? "flex-end" : "flex-start",
 				marginTop: msg.continued ? 2 : 8,
 			}}
 		>
-			{!isMe && (
-				<div style={{ width: 28, flex: "none" }}>
-					{!msg.continued && <Avatar name={partner} size={28} />}
-				</div>
-			)}
 			<div
 				style={{
-					maxWidth: "72%",
-					padding: "10px 14px",
-					fontSize: 14,
-					lineHeight: 1.45,
-					borderRadius: 18,
-					...(isMe
-						? {
-								background: "linear-gradient(135deg, #FF9E52, #F26F1F)",
-								color: "#2A1100",
-								borderBottomRightRadius: msg.last ? 6 : 18,
-								boxShadow: "0 0 18px rgba(255,138,61,0.18)",
-							}
-						: {
-								background: "var(--bg-elevated)",
-								color: "var(--fg-1)",
-								border: "1px solid var(--border-faint)",
-								borderBottomLeftRadius: msg.last ? 6 : 18,
-							}),
+					display: "flex",
+					justifyContent: isMe ? "flex-end" : "flex-start",
+					alignItems: "flex-end",
+					gap: 8,
+					width: "100%",
 				}}
 			>
-				{msg.media ? (
-					<MediaImage media={msg.media} />
-				) : (
-					<HighlightedText text={msg.text} highlight={highlight ?? ""} />
-				)}
-				{msg.last && msg.time && (
-					<span
-						style={{
-							display: "inline-flex",
-							alignItems: "center",
-							gap: 4,
-							marginLeft: 8,
-							opacity: 0.7,
-							fontSize: 10,
-							fontFamily: "var(--font-mono)",
-							verticalAlign: "2px",
-						}}
-					>
-						{msg.time}
-						{isMe && (
-							<Icon name="doublecheck" size={12} color={msg.read ? "#A8C8FF" : "currentColor"} />
-						)}
-					</span>
-				)}
-				{msg.expiresAt && (
-					<div
-						style={{
-							display: "flex",
-							alignItems: "center",
-							gap: 3,
-							marginTop: 4,
-							fontSize: 10,
-							color: "#FF9E52",
-							opacity: 0.85,
-						}}
-					>
-						<Icon name="timer" size={10} color="#FF9E52" />
-						<span>Disappearing</span>
+				{!isMe && (
+					<div style={{ width: 28, flex: "none" }}>
+						{!msg.continued && <Avatar name={partner} size={28} />}
 					</div>
 				)}
+				<div style={{ position: "relative", maxWidth: "72%" }}>
+					<div
+						style={{
+							padding: "10px 14px",
+							fontSize: 14,
+							lineHeight: 1.45,
+							borderRadius: 18,
+							...(isMe
+								? {
+										background: "linear-gradient(135deg, #FF9E52, #F26F1F)",
+										color: "#2A1100",
+										borderBottomRightRadius: msg.last ? 6 : 18,
+										boxShadow: "0 0 18px rgba(255,138,61,0.18)",
+									}
+								: {
+										background: "var(--bg-elevated)",
+										color: "var(--fg-1)",
+										border: "1px solid var(--border-faint)",
+										borderBottomLeftRadius: msg.last ? 6 : 18,
+									}),
+						}}
+					>
+						{msg.media ? (
+							<MediaImage media={msg.media} />
+						) : (
+							<HighlightedText text={msg.text} highlight={highlight ?? ""} />
+						)}
+						{msg.last && msg.time && (
+							<span
+								style={{
+									display: "inline-flex",
+									alignItems: "center",
+									gap: 4,
+									marginLeft: 8,
+									opacity: 0.7,
+									fontSize: 10,
+									fontFamily: "var(--font-mono)",
+									verticalAlign: "2px",
+								}}
+							>
+								{msg.time}
+								{isMe && (
+									<Icon
+										name="doublecheck"
+										size={12}
+										color={msg.read ? "#A8C8FF" : "currentColor"}
+									/>
+								)}
+							</span>
+						)}
+						{msg.expiresAt && (
+							<div
+								style={{
+									display: "flex",
+									alignItems: "center",
+									gap: 3,
+									marginTop: 4,
+									fontSize: 10,
+									color: "#FF9E52",
+									opacity: 0.85,
+								}}
+							>
+								<Icon name="timer" size={10} color="#FF9E52" />
+								<span>Disappearing</span>
+							</div>
+						)}
+					</div>
+
+					{/* Reaction picker trigger — only shown when message has a stable ID */}
+					{onReact && msg.id && (
+						<div
+							style={{
+								position: "absolute",
+								bottom: -10,
+								...(isMe ? { left: -28 } : { right: -28 }),
+							}}
+						>
+							<button
+								type="button"
+								onClick={() => setPickerOpen((p) => !p)}
+								aria-label="Add reaction"
+								data-testid="reaction-trigger"
+								style={{
+									width: 22,
+									height: 22,
+									borderRadius: "50%",
+									border: "1px solid var(--border-faint)",
+									background: "var(--bg-elevated)",
+									color: "var(--fg-3)",
+									fontSize: 11,
+									cursor: "pointer",
+									display: "flex",
+									alignItems: "center",
+									justifyContent: "center",
+									padding: 0,
+								}}
+							>
+								+
+							</button>
+
+							{pickerOpen && (
+								<div
+									data-testid="reaction-picker"
+									style={{
+										position: "absolute",
+										bottom: 28,
+										...(isMe ? { right: 0 } : { left: 0 }),
+										display: "flex",
+										gap: 4,
+										padding: "6px 8px",
+										background: "var(--bg-elevated)",
+										border: "1px solid var(--border-faint)",
+										borderRadius: 20,
+										boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
+										zIndex: 10,
+									}}
+								>
+									{ALLOWED_REACTION_EMOJIS.map((e) => (
+										<button
+											key={e}
+											type="button"
+											onClick={() => {
+												onReact(e);
+												setPickerOpen(false);
+											}}
+											data-testid={`reaction-emoji-${e}`}
+											style={{
+												background: "none",
+												border: "none",
+												cursor: "pointer",
+												fontSize: 18,
+												padding: "2px 3px",
+												borderRadius: 6,
+												lineHeight: 1,
+											}}
+										>
+											{e}
+										</button>
+									))}
+								</div>
+							)}
+						</div>
+					)}
+				</div>
 			</div>
+
+			{/* Reaction chips row — rendered below the bubble */}
+			{reactionEntries.length > 0 && (
+				<div
+					data-testid="reaction-chips"
+					style={{
+						display: "flex",
+						gap: 4,
+						marginTop: 4,
+						flexWrap: "wrap",
+						paddingLeft: isMe ? 0 : 36,
+					}}
+				>
+					{reactionEntries.map(([emoji, senders]) => (
+						<button
+							key={emoji}
+							type="button"
+							onClick={() => onReact?.(emoji)}
+							data-testid={`reaction-chip-${emoji}`}
+							style={{
+								background: "rgba(255,255,255,0.06)",
+								border: "1px solid rgba(255,255,255,0.12)",
+								borderRadius: 12,
+								padding: "2px 8px",
+								fontSize: 12,
+								cursor: "pointer",
+								display: "inline-flex",
+								alignItems: "center",
+								gap: 4,
+								color: "var(--fg-2)",
+							}}
+						>
+							{emoji}
+							<span style={{ fontSize: 10, opacity: 0.75 }}>{senders.length}</span>
+						</button>
+					))}
+				</div>
+			)}
 		</div>
 	);
 }
@@ -870,10 +1012,12 @@ function MessageList({
 	messages,
 	partner,
 	searchQuery,
+	onReact,
 }: {
 	messages: ChatMessage[];
 	partner: string;
 	searchQuery?: string;
+	onReact?: (msgId: string, emoji: string) => void;
 }) {
 	const ref = useRef<HTMLDivElement>(null);
 
@@ -974,7 +1118,20 @@ function MessageList({
 						{g.label}
 					</div>
 				) : (
-					<MessageBubble key={g.key} msg={g.msg} partner={partner} highlight={searchQuery} />
+					<MessageBubble
+						key={g.key}
+						msg={g.msg}
+						partner={partner}
+						highlight={searchQuery}
+						onReact={
+							g.msg.id && onReact
+								? (emoji) => {
+										const id = g.msg.id;
+										if (id) onReact(id, emoji);
+									}
+								: undefined
+						}
+					/>
 				),
 			)}
 		</div>
@@ -1614,6 +1771,7 @@ export function ChatLayout() {
 					}
 					const displayText = msg.media ? "Image attachment" : msg.text;
 					msgs.push({
+						id: msg.id,
 						from: "them",
 						text: displayText,
 						last: true,
@@ -1703,6 +1861,55 @@ export function ChatLayout() {
 	}, []);
 
 	/**
+	 * Apply an incoming emoji reaction to the target message in the matching chat.
+	 * Deduplicates: a sender reacting twice with the same emoji is a no-op.
+	 */
+	const handleIncomingReaction = useCallback(
+		(gId: string, targetId: string, emoji: string, senderId: string) => {
+			setChats((cs) =>
+				cs.map((c) => {
+					if (c.mlsGroupId !== gId) return c;
+					const msgs = c.messages.map((m) => {
+						if (m.id !== targetId) return m;
+						const existing = m.reactions ?? {};
+						const senders = existing[emoji] ?? [];
+						if (senders.includes(senderId)) return m;
+						return { ...m, reactions: { ...existing, [emoji]: [...senders, senderId] } };
+					});
+					return { ...c, messages: msgs };
+				}),
+			);
+		},
+		[],
+	);
+
+	/**
+	 * Send an emoji reaction to the active MLS group targeting a specific message.
+	 * Optimistically applies the reaction locally before the server echo arrives.
+	 * Fire-and-forget — failure leaves the optimistic update in place (best-effort UX).
+	 */
+	const sendReaction = useCallback(
+		(targetId: string, emoji: string) => {
+			if (!(ALLOWED_REACTION_EMOJIS as readonly string[]).includes(emoji)) return;
+			if (!sessionToken || !active?.mlsGroupId || !active?.mlsIdentityId || !cryptoWorker) return;
+			const { mlsGroupId, mlsIdentityId } = active;
+			const myDeviceId = useAuthStore.getState().deviceId;
+			if (myDeviceId) {
+				handleIncomingReaction(mlsGroupId, targetId, emoji, myDeviceId);
+			}
+			const plaintext = new TextEncoder().encode(
+				JSON.stringify({ type: "reaction", emoji, targetMessageId: targetId }),
+			);
+			cryptoWorker
+				.mlsEncrypt(mlsIdentityId, mlsGroupId, plaintext)
+				.then(({ ciphertext }) => sendMessageApi(sessionToken, mlsGroupId, ciphertext, undefined))
+				.catch(() => {})
+				.finally(() => plaintext.fill(0));
+		},
+		[active, cryptoWorker, handleIncomingReaction, sessionToken],
+	);
+
+	/**
 	 * Send a typing_indicator signal to the active MLS group.
 	 * Leading-edge throttled to once per 3 s (matches the receiver's display window).
 	 * Fire-and-forget — failure is silently ignored (non-fatal UX signal).
@@ -1731,6 +1938,7 @@ export function ChatLayout() {
 		handleIncoming,
 		handlePqBinding,
 		handleIncomingTyping,
+		handleIncomingReaction,
 	);
 
 	/** Select a chat and clear its unread badge atomically. */
@@ -1885,7 +2093,12 @@ export function ChatLayout() {
 						msgSearch={msgSearch}
 						onMsgSearch={setMsgSearch}
 					/>
-					<MessageList messages={active.messages} partner={active.name} searchQuery={msgSearch} />
+					<MessageList
+						messages={active.messages}
+						partner={active.name}
+						searchQuery={msgSearch}
+						onReact={sendReaction}
+					/>
 					<Composer
 						onSend={sendMessage}
 						partner={active.name}

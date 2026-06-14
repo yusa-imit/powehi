@@ -69,6 +69,13 @@ export interface IncomingMessage {
 }
 
 /**
+ * Allowed emoji for reactions. Validated server-side before calling onReaction.
+ * Kept small and explicit to prevent free-form data smuggling via the emoji field.
+ */
+export const ALLOWED_REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "😡"] as const;
+export type ReactionEmoji = (typeof ALLOWED_REACTION_EMOJIS)[number];
+
+/**
  * Start polling for messages for the given MLS identity/group pair.
  *
  * @param identityId   Local MLS identity ID (from mlsInitIdentity).
@@ -79,6 +86,9 @@ export interface IncomingMessage {
  *                     (§5.3 Phase B). Receives the groupId and 16-char binding hex.
  * @param onTyping     Optional callback invoked when a typing_indicator envelope is
  *                     received. Receives the groupId. Not forwarded to onMessage.
+ * @param onReaction   Optional callback invoked when a reaction envelope is received.
+ *                     Receives groupId, targetMessageId, emoji (from ALLOWED_REACTION_EMOJIS),
+ *                     and the sender device ID. Not forwarded to onMessage.
  */
 export function useMessages(
 	identityId: string | undefined,
@@ -86,6 +96,7 @@ export function useMessages(
 	onMessage: (msg: IncomingMessage) => void,
 	onPqBinding?: (groupId: string, bindingHex: string) => void,
 	onTyping?: (groupId: string) => void,
+	onReaction?: (groupId: string, targetId: string, emoji: string, senderId: string) => void,
 ): void {
 	const { sessionToken } = useAuthStore();
 	const cryptoWorker = useCryptoWorker();
@@ -105,6 +116,11 @@ export function useMessages(
 	const onTypingRef = useRef(onTyping);
 	useEffect(() => {
 		onTypingRef.current = onTyping;
+	});
+
+	const onReactionRef = useRef(onReaction);
+	useEffect(() => {
+		onReactionRef.current = onReaction;
 	});
 
 	// Track the latest created_at we've seen to avoid re-delivering on restart.
@@ -176,6 +192,16 @@ export function useMessages(
 						// Peer is typing — notify ChatLayout; never displayed as a message.
 						shouldDisplayMessage = false;
 						onTypingRef.current?.(groupId);
+					} else if (
+						parsed.type === "reaction" &&
+						typeof parsed.emoji === "string" &&
+						typeof parsed.targetMessageId === "string" &&
+						(ALLOWED_REACTION_EMOJIS as readonly string[]).includes(parsed.emoji) &&
+						parsed.targetMessageId.length > 0
+					) {
+						// Emoji reaction — update target message reactions; never displayed as a standalone message.
+						shouldDisplayMessage = false;
+						onReactionRef.current?.(groupId, parsed.targetMessageId, parsed.emoji, env.sender);
 					} else if (parsed.type === "pq_init" && Array.isArray(parsed.ct)) {
 						// §5.3 Phase B: PQ invite confirmation — decap ML-KEM ciphertext + derive binding.
 						shouldDisplayMessage = false;
