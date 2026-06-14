@@ -17,6 +17,19 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-14, cycle 148 — FEATURE: unread message count badge in sidebar)
+- **Cycle 148 (commit 4bca53c):** FEATURE — Post-MVP UX: real-time unread message count badge in sidebar.
+  - **`app/src/components/ChatLayout.tsx`** (MODIFIED):
+    - `activeIdRef = useRef(activeId)` + `useEffect` sync — stable ref lets `handleIncoming` read current active chat ID without becoming a dep in `useCallback` (avoids restarting the polling hook on every chat switch).
+    - `handleIncoming`: added `isActive = c.id === activeIdRef.current` check; returns `unread: isActive ? 0 : c.unread + 1` — only non-active chats get their badge incremented on incoming message.
+    - `handleSelectChat` (NEW): wraps `setActiveId` + `setChats(cs => cs.map(c => c.id === id ? {...c, unread: 0} : c))` — resets unread badge atomically when a chat is opened.
+    - `Sidebar`: `onSelect={handleSelectChat}` (was `setActiveId`).
+    - `ChatRow` badge: `{chat.unread > 9 ? "9+" : chat.unread}` — caps display at "9+"; `data-testid="unread-badge"` for testability.
+    - Jordan seed chat: added `mlsGroupId: "33333333-3333-3333-3333-333333333333"` to make incoming-message test path reachable.
+  - **Security invariants verified:** Zero new server-visible metadata — `handleSelectChat` calls only React state setters (no fetch, no mark-as-read RPC). No plaintext logging of message content. `unread` is an integer count (no message content exposure). `data-testid` is a static literal. No new network calls. security-auditor: GREEN.
+  - **372 frontend tests** (+5: badge renders from seed data, resets on select, increments for inactive group, stays zero for active group, shows 9+ above threshold; was 367); tsc clean; Biome clean.
+  - **Next cycle:** Post-MVP items: PQ hybrid activation (ADR-0003 Phase A — waits for openmls stable MLS_128_MLKEM768), mobile app scaffold (Tauri 2.x), or typing indicator UX.
+
 ## Current state (2026-06-14, cycle 147 — FEATURE: client-side in-conversation message search)
 - **Cycle 147 (commit ab09712):** FEATURE — Post-MVP UX: local-only message search within the active conversation.
   - **`app/src/components/ChatLayout.tsx`** (MODIFIED):
