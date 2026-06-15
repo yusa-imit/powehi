@@ -1333,3 +1333,167 @@ describe("useMessages — edit handling", () => {
 		expect(onEdit).not.toHaveBeenCalled();
 	});
 });
+
+describe("useMessages — delete handling", () => {
+	const TARGET_MSG_ID = "dddddddd-dddd-dddd-dddd-000000000001";
+
+	function makeDeleteEnvelope(): Envelope {
+		return {
+			id: ENV_ID,
+			group_id: GROUP_ID,
+			sender: SENDER_ID,
+			recipient: null,
+			message_type: "Application",
+			ciphertext: [30, 31, 32],
+			epoch: null,
+			created_at: "2026-06-16T12:00:00Z",
+			expires_at: null,
+		};
+	}
+
+	afterEach(() => {
+		mockWorker.mlsDecrypt.mockResolvedValue({
+			plaintext: new TextEncoder().encode(DECRYPTED_TEXT),
+		});
+	});
+
+	it("invokes onDelete with groupId and targetMessageId", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "delete", targetMessageId: TARGET_MSG_ID }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeDeleteEnvelope()]);
+		const onDelete = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onDelete,
+			),
+		);
+
+		await waitFor(() => {
+			expect(onDelete).toHaveBeenCalledWith(GROUP_ID, TARGET_MSG_ID);
+		});
+	});
+
+	it("does NOT forward delete envelope to onMessage", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "delete", targetMessageId: TARGET_MSG_ID }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeDeleteEnvelope()]);
+		const onMessage = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				onMessage,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				vi.fn(),
+			),
+		);
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onMessage).not.toHaveBeenCalled();
+	});
+
+	it("does NOT call onDelete when targetMessageId is empty string", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(JSON.stringify({ type: "delete", targetMessageId: "" })),
+		});
+		pollSpy.mockResolvedValueOnce([makeDeleteEnvelope()]);
+		const onDelete = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onDelete,
+			),
+		);
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onDelete).not.toHaveBeenCalled();
+		await act(async () => {});
+	});
+
+	it("does NOT call onDelete when targetMessageId exceeds 36 chars", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "delete", targetMessageId: "x".repeat(37) }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeDeleteEnvelope()]);
+		const onDelete = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onDelete,
+			),
+		);
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onDelete).not.toHaveBeenCalled();
+		await act(async () => {});
+	});
+
+	it("does NOT call onDelete when targetMessageId is missing", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(JSON.stringify({ type: "delete" })),
+		});
+		pollSpy.mockResolvedValueOnce([makeDeleteEnvelope()]);
+		const onDelete = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onDelete,
+			),
+		);
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onDelete).not.toHaveBeenCalled();
+		await act(async () => {});
+	});
+});

@@ -1101,4 +1101,143 @@ describe("ChatLayout", () => {
 			expect(screen.queryByText("hacked content")).not.toBeInTheDocument();
 		});
 	});
+
+	describe("message deletion", () => {
+		it("delete button appears on hover for own message with a stable envelope id", async () => {
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(() => {});
+			// Provide a session token so the MLS encrypt + send path runs and backfills the id.
+			useAuthStore.setState({
+				phase: "app",
+				deviceId: "my-device-del-1",
+				sessionToken: "tok-del-1",
+			});
+
+			const sendSpy = vi
+				.spyOn(MessagesApiModule, "sendMessage")
+				.mockResolvedValue("del-test-env-1");
+			render(<ChatLayout />);
+
+			const textarea = screen.getByPlaceholderText(/encrypted/i);
+			fireEvent.change(textarea, { target: { value: "message to delete" } });
+			fireEvent.click(screen.getByRole("button", { name: /send message/i }));
+
+			// Wait for the envelopeId to be backfilled onto the optimistic message.
+			await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+			await act(async () => {});
+
+			// Hover the last bubble (the sent "me" message with id now set).
+			const bubbles = screen.getAllByTestId("message-bubble");
+			const lastBubble = bubbles[bubbles.length - 1];
+			fireEvent.mouseEnter(lastBubble);
+
+			expect(screen.getByTestId("delete-button")).toBeInTheDocument();
+		});
+
+		it("clicking delete button marks own message as deleted (shows placeholder)", async () => {
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(() => {});
+			useAuthStore.setState({
+				phase: "app",
+				deviceId: "my-device-del-2",
+				sessionToken: "tok-del-2",
+			});
+
+			const sendSpy = vi
+				.spyOn(MessagesApiModule, "sendMessage")
+				.mockResolvedValue("del-test-env-2");
+			render(<ChatLayout />);
+
+			const textarea = screen.getByPlaceholderText(/encrypted/i);
+			fireEvent.change(textarea, { target: { value: "to be deleted" } });
+			fireEvent.click(screen.getByRole("button", { name: /send message/i }));
+
+			await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+			await act(async () => {});
+
+			const bubbles = screen.getAllByTestId("message-bubble");
+			const lastBubble = bubbles[bubbles.length - 1];
+			fireEvent.mouseEnter(lastBubble);
+			fireEvent.click(screen.getByTestId("delete-button"));
+
+			expect(screen.getByTestId("deleted-placeholder")).toBeInTheDocument();
+		});
+
+		it("incoming delete marks peer message as deleted and shows placeholder", async () => {
+			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+			let capturedOnDelete: ((groupId: string, targetMessageId: string) => void) | undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(
+					_id,
+					_gid,
+					onMsg,
+					_onPq,
+					_onTyping,
+					_onReaction,
+					_onRead,
+					_onDelivery,
+					_onEdit,
+					onDelete,
+				) => {
+					capturedOnMessage = onMsg;
+					capturedOnDelete = onDelete;
+				},
+			);
+			render(<ChatLayout />);
+
+			const PEER_MSG_ID = "delete-peer-uuid-1111-111111111111";
+			await act(async () => {
+				capturedOnMessage?.({
+					id: PEER_MSG_ID,
+					groupId: "11111111-1111-1111-1111-111111111111",
+					senderId: "peer-device-1",
+					text: "peer message text",
+					ciphertextB64: "Zg==",
+					epochSeq: 1,
+				});
+			});
+
+			expect(screen.getAllByText("peer message text").length).toBeGreaterThan(0);
+
+			await act(async () => {
+				capturedOnDelete?.("11111111-1111-1111-1111-111111111111", PEER_MSG_ID);
+			});
+
+			// Deleted placeholder must be present in the message bubble area.
+			expect(screen.getByTestId("deleted-placeholder")).toBeInTheDocument();
+		});
+
+		it("incoming delete does NOT erase own 'me' messages", async () => {
+			let capturedOnDelete: ((groupId: string, targetMessageId: string) => void) | undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(
+					_id,
+					_gid,
+					_onMsg,
+					_onPq,
+					_onTyping,
+					_onReaction,
+					_onRead,
+					_onDelivery,
+					_onEdit,
+					onDelete,
+				) => {
+					capturedOnDelete = onDelete;
+				},
+			);
+			render(<ChatLayout />);
+
+			const textarea = screen.getByPlaceholderText(/encrypted/i);
+			fireEvent.change(textarea, { target: { value: "my own message" } });
+			fireEvent.click(screen.getByRole("button", { name: /send message/i }));
+			expect(screen.getAllByText("my own message").length).toBeGreaterThan(0);
+
+			// Peer sends a delete targeting a fake id — should be a no-op for own messages
+			await act(async () => {
+				capturedOnDelete?.("11111111-1111-1111-1111-111111111111", "fake-id-0000-0000-0000");
+			});
+
+			expect(screen.getAllByText("my own message").length).toBeGreaterThan(0);
+			expect(screen.queryByTestId("deleted-placeholder")).not.toBeInTheDocument();
+			await act(async () => {});
+		});
+	});
 });

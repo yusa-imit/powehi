@@ -55,6 +55,8 @@ interface ChatMessage {
 	replyTo?: ReplyContext;
 	/** True when the message has been edited after sending. */
 	edited?: boolean;
+	/** True when the message has been deleted (unsent) by the sender. */
+	deleted?: boolean;
 }
 
 interface Chat {
@@ -805,6 +807,7 @@ function MessageBubble({
 	onReact,
 	onReply,
 	onEdit,
+	onDelete,
 }: {
 	msg: ChatMessage;
 	partner: string;
@@ -812,6 +815,7 @@ function MessageBubble({
 	onReact?: (emoji: string) => void;
 	onReply?: () => void;
 	onEdit?: () => void;
+	onDelete?: () => void;
 }) {
 	const isMe = msg.from === "me";
 	const [pickerOpen, setPickerOpen] = useState(false);
@@ -866,95 +870,139 @@ function MessageBubble({
 									}),
 						}}
 					>
-						{msg.replyTo && (
-							<div
-								data-testid="reply-quote"
-								style={{
-									borderLeft: `2px solid ${isMe ? "rgba(42,17,0,0.4)" : "rgba(168,200,255,0.5)"}`,
-									paddingLeft: 8,
-									marginBottom: 6,
-									fontSize: 12,
-									lineHeight: 1.4,
-									color: isMe ? "rgba(42,17,0,0.65)" : "var(--fg-3)",
-									overflow: "hidden",
-									textOverflow: "ellipsis",
-									whiteSpace: "nowrap",
-									maxWidth: "100%",
-								}}
+						{msg.deleted ? (
+							<span
+								data-testid="deleted-placeholder"
+								style={{ fontStyle: "italic", opacity: 0.55, fontSize: 13 }}
 							>
-								{msg.replyTo.excerpt}
-							</div>
-						)}
-						{msg.media ? (
-							<MediaImage media={msg.media} />
+								This message was deleted
+							</span>
 						) : (
-							<HighlightedText text={msg.text} highlight={highlight ?? ""} />
-						)}
-						{msg.last && msg.time && (
-							<span
-								style={{
-									display: "inline-flex",
-									alignItems: "center",
-									gap: 4,
-									marginLeft: 8,
-									opacity: 0.7,
-									fontSize: 10,
-									fontFamily: "var(--font-mono)",
-									verticalAlign: "2px",
-								}}
-							>
-								{msg.time}
-								{isMe &&
-									(msg.read ? (
-										<span data-testid="read-indicator" aria-label="Read">
-											<Icon name="doublecheck" size={12} color="#A8C8FF" />
-										</span>
-									) : msg.delivered ? (
-										<span data-testid="read-indicator" aria-label="Delivered">
-											<Icon name="doublecheck" size={12} color="currentColor" />
-										</span>
-									) : msg.id ? (
-										<span data-testid="read-indicator" aria-label="Sent">
-											<Icon name="check" size={12} color="currentColor" />
-										</span>
-									) : null)}
-							</span>
-						)}
-						{msg.edited && (
-							<span
-								data-testid="edited-badge"
-								style={{
-									display: "inline-block",
-									marginLeft: 6,
-									fontSize: 10,
-									opacity: 0.6,
-									fontStyle: "italic",
-									verticalAlign: "2px",
-								}}
-							>
-								edited
-							</span>
-						)}
-						{msg.expiresAt && (
-							<div
-								style={{
-									display: "flex",
-									alignItems: "center",
-									gap: 3,
-									marginTop: 4,
-									fontSize: 10,
-									color: "#FF9E52",
-									opacity: 0.85,
-								}}
-							>
-								<Icon name="timer" size={10} color="#FF9E52" />
-								<span>Disappearing</span>
-							</div>
+							<>
+								{msg.replyTo && (
+									<div
+										data-testid="reply-quote"
+										style={{
+											borderLeft: `2px solid ${isMe ? "rgba(42,17,0,0.4)" : "rgba(168,200,255,0.5)"}`,
+											paddingLeft: 8,
+											marginBottom: 6,
+											fontSize: 12,
+											lineHeight: 1.4,
+											color: isMe ? "rgba(42,17,0,0.65)" : "var(--fg-3)",
+											overflow: "hidden",
+											textOverflow: "ellipsis",
+											whiteSpace: "nowrap",
+											maxWidth: "100%",
+										}}
+									>
+										{msg.replyTo.excerpt}
+									</div>
+								)}
+								{msg.media ? (
+									<MediaImage media={msg.media} />
+								) : (
+									<HighlightedText text={msg.text} highlight={highlight ?? ""} />
+								)}
+								{msg.last && msg.time && (
+									<span
+										style={{
+											display: "inline-flex",
+											alignItems: "center",
+											gap: 4,
+											marginLeft: 8,
+											opacity: 0.7,
+											fontSize: 10,
+											fontFamily: "var(--font-mono)",
+											verticalAlign: "2px",
+										}}
+									>
+										{msg.time}
+										{isMe &&
+											(msg.read ? (
+												<span data-testid="read-indicator" aria-label="Read">
+													<Icon name="doublecheck" size={12} color="#A8C8FF" />
+												</span>
+											) : msg.delivered ? (
+												<span data-testid="read-indicator" aria-label="Delivered">
+													<Icon name="doublecheck" size={12} color="currentColor" />
+												</span>
+											) : msg.id ? (
+												<span data-testid="read-indicator" aria-label="Sent">
+													<Icon name="check" size={12} color="currentColor" />
+												</span>
+											) : null)}
+									</span>
+								)}
+								{msg.edited && (
+									<span
+										data-testid="edited-badge"
+										style={{
+											display: "inline-block",
+											marginLeft: 6,
+											fontSize: 10,
+											opacity: 0.6,
+											fontStyle: "italic",
+											verticalAlign: "2px",
+										}}
+									>
+										edited
+									</span>
+								)}
+								{msg.expiresAt && (
+									<div
+										style={{
+											display: "flex",
+											alignItems: "center",
+											gap: 3,
+											marginTop: 4,
+											fontSize: 10,
+											color: "#FF9E52",
+											opacity: 0.85,
+										}}
+									>
+										<Icon name="timer" size={10} color="#FF9E52" />
+										<span>Disappearing</span>
+									</div>
+								)}
+							</>
 						)}
 					</div>
 
-					{/* Edit button — appears on hover for own messages only */}
-					{onEdit && isMe && hovered && (
+					{/* Delete button — appears on hover for own messages with a stable id, when not already deleted */}
+					{onDelete && isMe && hovered && msg.id && !msg.deleted && (
+						<div
+							style={{
+								position: "absolute",
+								top: -10,
+								right: 26,
+							}}
+						>
+							<button
+								type="button"
+								onClick={onDelete}
+								aria-label="Delete message"
+								data-testid="delete-button"
+								style={{
+									width: 22,
+									height: 22,
+									borderRadius: "50%",
+									border: "1px solid var(--border-faint)",
+									background: "var(--bg-elevated)",
+									color: "var(--fg-3)",
+									cursor: "pointer",
+									display: "flex",
+									alignItems: "center",
+									justifyContent: "center",
+									padding: 0,
+								}}
+							>
+								<Icon name="trash" size={11} />
+							</button>
+						</div>
+					)}
+
+					{/* Edit button — appears on hover for own messages only, when not deleted */}
+					{onEdit && isMe && hovered && !msg.deleted && (
 						<div
 							style={{
 								position: "absolute",
@@ -986,8 +1034,8 @@ function MessageBubble({
 						</div>
 					)}
 
-					{/* Reply button — appears on hover, aligned opposite to reaction trigger */}
-					{onReply && hovered && (
+					{/* Reply button — appears on hover, hidden for deleted messages */}
+					{onReply && hovered && !msg.deleted && (
 						<div
 							style={{
 								position: "absolute",
@@ -1019,8 +1067,8 @@ function MessageBubble({
 						</div>
 					)}
 
-					{/* Reaction picker trigger — only shown when message has a stable ID */}
-					{onReact && msg.id && (
+					{/* Reaction picker trigger — only shown when message has a stable ID and is not deleted */}
+					{onReact && msg.id && !msg.deleted && (
 						<div
 							style={{
 								position: "absolute",
@@ -1177,6 +1225,7 @@ function MessageList({
 	onReact,
 	onReply,
 	onEdit,
+	onDelete,
 	firstUnreadIndex,
 }: {
 	messages: ChatMessage[];
@@ -1185,6 +1234,7 @@ function MessageList({
 	onReact?: (msgId: string, emoji: string) => void;
 	onReply?: (msg: ChatMessage) => void;
 	onEdit?: (msg: ChatMessage) => void;
+	onDelete?: (msgId: string) => void;
 	firstUnreadIndex?: number;
 }) {
 	const ref = useRef<HTMLDivElement>(null);
@@ -1339,6 +1389,10 @@ function MessageList({
 						}
 						onReply={onReply ? () => onReply(g.msg) : undefined}
 						onEdit={g.msg.from === "me" && onEdit ? () => onEdit(g.msg) : undefined}
+						onDelete={(() => {
+							const msgId = g.msg.id;
+							return msgId && g.msg.from === "me" && onDelete ? () => onDelete(msgId) : undefined;
+						})()}
 					/>
 				),
 			)}
@@ -2356,6 +2410,56 @@ export function ChatLayout() {
 	);
 
 	/**
+	 * Apply an incoming delete signal: marks the target peer message as deleted.
+	 * Only applies to messages from the peer (`from === "them"`) — prevents a
+	 * malicious delete envelope from erasing our own sent messages.
+	 */
+	const handleIncomingDelete = useCallback((gId: string, targetMessageId: string) => {
+		setChats((cs) =>
+			cs.map((c) => {
+				if (c.mlsGroupId !== gId) return c;
+				const msgs = c.messages.map((m) => {
+					if (m.id !== targetMessageId || m.from !== "them") return m;
+					return { ...m, deleted: true };
+				});
+				return { ...c, messages: msgs };
+			}),
+		);
+	}, []);
+
+	/**
+	 * Delete a previously sent "me" message: optimistically mark it deleted locally,
+	 * then MLS-encrypt `{type:"delete", targetMessageId}` and broadcast to peers.
+	 * Fire-and-forget — optimistic deleted state stays on failure.
+	 */
+	const sendDelete = useCallback(
+		(targetMessageId: string) => {
+			if (!sessionToken || !active?.mlsGroupId || !active?.mlsIdentityId || !cryptoWorker) return;
+			const { mlsGroupId, mlsIdentityId } = active;
+			// Optimistic local update: mark own message deleted immediately.
+			setChats((cs) =>
+				cs.map((c) => {
+					if (c.id !== activeId) return c;
+					const msgs = c.messages.map((m) => {
+						if (m.id !== targetMessageId || m.from !== "me") return m;
+						return { ...m, deleted: true };
+					});
+					return { ...c, messages: msgs };
+				}),
+			);
+			const plaintext = new TextEncoder().encode(
+				JSON.stringify({ type: "delete", targetMessageId }),
+			);
+			cryptoWorker
+				.mlsEncrypt(mlsIdentityId, mlsGroupId, plaintext)
+				.then(({ ciphertext }) => sendMessageApi(sessionToken, mlsGroupId, ciphertext, undefined))
+				.catch(() => {})
+				.finally(() => plaintext.fill(0));
+		},
+		[active, activeId, cryptoWorker, sessionToken],
+	);
+
+	/**
 	 * Send a read_receipt to the active MLS group for the given envelope IDs.
 	 * Fire-and-forget — a failed receipt is non-fatal (the UI shows "sent" vs "read" state).
 	 * Not a useCallback: re-created each render so it always closes over current state.
@@ -2432,6 +2536,7 @@ export function ChatLayout() {
 		handleIncomingReadReceipt,
 		handleIncomingDeliveryReceipt,
 		handleIncomingEdit,
+		handleIncomingDelete,
 	);
 
 	/** Select a chat and clear its unread badge.
@@ -2630,6 +2735,7 @@ export function ChatLayout() {
 						onReact={sendReaction}
 						onReply={setReplyingTo}
 						onEdit={setEditingMessage}
+						onDelete={sendDelete}
 						firstUnreadIndex={active.firstUnreadAt}
 					/>
 					<Composer

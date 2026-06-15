@@ -111,6 +111,8 @@ export type ReactionEmoji = (typeof ALLOWED_REACTION_EMOJIS)[number];
  * @param onEdit             Optional callback invoked when an edit envelope is received.
  *                           Receives groupId, targetMessageId (≤36 chars), newText (≤10000 chars),
  *                           and senderDeviceId. Not forwarded to onMessage.
+ * @param onDelete           Optional callback invoked when a delete envelope is received.
+ *                           Receives groupId and targetMessageId (≤36 chars). Not forwarded to onMessage.
  */
 export function useMessages(
 	identityId: string | undefined,
@@ -132,6 +134,7 @@ export function useMessages(
 		newText: string,
 		senderDeviceId: string,
 	) => void,
+	onDelete?: (groupId: string, targetMessageId: string) => void,
 ): void {
 	const { sessionToken } = useAuthStore();
 	const cryptoWorker = useCryptoWorker();
@@ -171,6 +174,11 @@ export function useMessages(
 	const onEditRef = useRef(onEdit);
 	useEffect(() => {
 		onEditRef.current = onEdit;
+	});
+
+	const onDeleteRef = useRef(onDelete);
+	useEffect(() => {
+		onDeleteRef.current = onDelete;
 	});
 
 	// Track the latest created_at we've seen to avoid re-delivering on restart.
@@ -299,6 +307,16 @@ export function useMessages(
 							parsed.newText.length <= 10_000
 						) {
 							onEditRef.current?.(groupId, parsed.targetMessageId, parsed.newText, env.sender);
+						}
+					} else if (parsed.type === "delete") {
+						// Message delete — never displayed as a new message; callback only when targetMessageId is valid.
+						shouldDisplayMessage = false;
+						if (
+							typeof parsed.targetMessageId === "string" &&
+							parsed.targetMessageId.length > 0 &&
+							parsed.targetMessageId.length <= 36
+						) {
+							onDeleteRef.current?.(groupId, parsed.targetMessageId);
 						}
 					} else if (parsed.type === "text" && typeof parsed.text === "string") {
 						// Structured text message — may include a reply context.
