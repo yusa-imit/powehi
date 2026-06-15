@@ -89,9 +89,13 @@ export type ReactionEmoji = (typeof ALLOWED_REACTION_EMOJIS)[number];
  * @param onReaction      Optional callback invoked when a reaction envelope is received.
  *                        Receives groupId, targetMessageId, emoji (from ALLOWED_REACTION_EMOJIS),
  *                        and the sender device ID. Not forwarded to onMessage.
- * @param onReadReceipt   Optional callback invoked when a read_receipt envelope is received.
- *                        Receives groupId, messageIds (server UUID array, max 100), readAt (unix ms),
- *                        and senderDeviceId. Not forwarded to onMessage.
+ * @param onReadReceipt      Optional callback invoked when a read_receipt envelope is received.
+ *                           Receives groupId, messageIds (server UUID array, max 100), readAt (unix ms),
+ *                           and senderDeviceId. Not forwarded to onMessage.
+ * @param onDeliveryReceipt  Optional callback invoked when a delivery_receipt envelope is received.
+ *                           Receives groupId, messageIds (server UUID array, max 100), and senderDeviceId.
+ *                           Fired when the peer's device received and decrypted the message.
+ *                           Not forwarded to onMessage.
  */
 export function useMessages(
 	identityId: string | undefined,
@@ -106,6 +110,7 @@ export function useMessages(
 		readAt: number,
 		senderDeviceId: string,
 	) => void,
+	onDeliveryReceipt?: (groupId: string, messageIds: string[], senderDeviceId: string) => void,
 ): void {
 	const { sessionToken } = useAuthStore();
 	const cryptoWorker = useCryptoWorker();
@@ -135,6 +140,11 @@ export function useMessages(
 	const onReadReceiptRef = useRef(onReadReceipt);
 	useEffect(() => {
 		onReadReceiptRef.current = onReadReceipt;
+	});
+
+	const onDeliveryReceiptRef = useRef(onDeliveryReceipt);
+	useEffect(() => {
+		onDeliveryReceiptRef.current = onDeliveryReceipt;
 	});
 
 	// Track the latest created_at we've seen to avoid re-delivering on restart.
@@ -235,6 +245,18 @@ export function useMessages(
 							parsed.readAt as number,
 							env.sender,
 						);
+					} else if (
+						parsed.type === "delivery_receipt" &&
+						Array.isArray(parsed.messageIds) &&
+						parsed.messageIds.length > 0 &&
+						parsed.messageIds.length <= 100 &&
+						(parsed.messageIds as unknown[]).every(
+							(id) => typeof id === "string" && id.length > 0 && id.length <= 36,
+						)
+					) {
+						// Delivery receipt — mark target messages as delivered; never displayed as a message.
+						shouldDisplayMessage = false;
+						onDeliveryReceiptRef.current?.(groupId, parsed.messageIds as string[], env.sender);
 					} else if (parsed.type === "pq_init" && Array.isArray(parsed.ct)) {
 						// §5.3 Phase B: PQ invite confirmation — decap ML-KEM ciphertext + derive binding.
 						shouldDisplayMessage = false;

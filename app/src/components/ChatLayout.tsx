@@ -40,6 +40,9 @@ interface ChatMessage {
 	continued?: boolean;
 	last?: boolean;
 	time?: string;
+	/** Peer's device received and decrypted this message (delivery_receipt received). */
+	delivered?: boolean;
+	/** Peer has read this message (read_receipt received). Supersedes delivered. */
 	read?: boolean;
 	/** Unix ms — set when sent with a disappearing TTL. Client-side mock only. */
 	expiresAt?: number;
@@ -837,15 +840,20 @@ function MessageBubble({
 								}}
 							>
 								{msg.time}
-								{isMe && (
-									<span data-testid="read-indicator" aria-label={msg.read ? "Read" : "Sent"}>
-										<Icon
-											name="doublecheck"
-											size={12}
-											color={msg.read ? "#A8C8FF" : "currentColor"}
-										/>
-									</span>
-								)}
+								{isMe &&
+									(msg.read ? (
+										<span data-testid="read-indicator" aria-label="Read">
+											<Icon name="doublecheck" size={12} color="#A8C8FF" />
+										</span>
+									) : msg.delivered ? (
+										<span data-testid="read-indicator" aria-label="Delivered">
+											<Icon name="doublecheck" size={12} color="currentColor" />
+										</span>
+									) : msg.id ? (
+										<span data-testid="read-indicator" aria-label="Sent">
+											<Icon name="check" size={12} color="currentColor" />
+										</span>
+									) : null)}
 							</span>
 						)}
 						{msg.expiresAt && (
@@ -1705,9 +1713,10 @@ export function ChatLayout() {
 	// Throttle ref for outgoing typing indicator signals (leading-edge, 3 s window).
 	const typingThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-	// Ref holds the latest sendReadReceipt closure so handleIncoming (stable useCallback)
-	// can call it without taking a dep on active/sessionToken/cryptoWorker.
+	// Refs hold the latest send*Receipt closures so handleIncoming (stable useCallback)
+	// can call them without taking a dep on active/sessionToken/cryptoWorker.
 	const sendReadReceiptRef = useRef<(ids: string[]) => void>(() => {});
+	const sendDeliveryReceiptRef = useRef<(ids: string[]) => void>(() => {});
 
 	// Reset in-conversation search when switching chats.
 	// biome-ignore lint/correctness/useExhaustiveDependencies: activeId is the trigger; setMsgSearch is stable
@@ -1801,6 +1810,8 @@ export function ChatLayout() {
 			);
 			// Encrypt and persist to IndexedDB — fails closed if encryptedDb unavailable.
 			persistIncoming(msg);
+			// Notify sender that we received and decrypted the message (best-effort).
+			sendDeliveryReceiptRef.current([msg.id]);
 			// Notify sender that we read the message (best-effort, fire-and-forget).
 			sendReadReceiptRef.current([msg.id]);
 		},
@@ -1938,6 +1949,24 @@ export function ChatLayout() {
 	);
 
 	/**
+	 * Mark messages as delivered when a peer's delivery_receipt arrives.
+	 * Sets `delivered: true` on all messages whose `id` is in `messageIds`.
+	 * Read state is not affected — a subsequent read_receipt sets `read: true`.
+	 */
+	const handleIncomingDeliveryReceipt = useCallback((gId: string, messageIds: string[]) => {
+		const idSet = new Set(messageIds);
+		setChats((cs) =>
+			cs.map((c) => {
+				if (c.mlsGroupId !== gId) return c;
+				const msgs = c.messages.map((m) =>
+					m.id && idSet.has(m.id) ? { ...m, delivered: true } : m,
+				);
+				return { ...c, messages: msgs };
+			}),
+		);
+	}, []);
+
+	/**
 	 * Send a read_receipt to the active MLS group for the given envelope IDs.
 	 * Fire-and-forget — a failed receipt is non-fatal (the UI shows "sent" vs "read" state).
 	 * Not a useCallback: re-created each render so it always closes over current state.
@@ -1956,9 +1985,29 @@ export function ChatLayout() {
 			.finally(() => plaintext.fill(0));
 	};
 
-	// Keep the ref fresh every render so handleIncoming always invokes the latest closure.
+	/**
+	 * Send a delivery_receipt to the active MLS group for the given envelope IDs.
+	 * Fire-and-forget — acknowledges to the sender that their message was received and decrypted.
+	 * Not a useCallback: re-created each render so it always closes over current state.
+	 * Exposed via sendDeliveryReceiptRef so stable callbacks (handleIncoming) can call it.
+	 */
+	const sendDeliveryReceipt = (messageIds: string[]) => {
+		if (!sessionToken || !active?.mlsGroupId || !active?.mlsIdentityId || !cryptoWorker) return;
+		const { mlsGroupId, mlsIdentityId } = active;
+		const plaintext = new TextEncoder().encode(
+			JSON.stringify({ type: "delivery_receipt", messageIds }),
+		);
+		cryptoWorker
+			.mlsEncrypt(mlsIdentityId, mlsGroupId, plaintext)
+			.then(({ ciphertext }) => sendMessageApi(sessionToken, mlsGroupId, ciphertext, undefined))
+			.catch(() => {})
+			.finally(() => plaintext.fill(0));
+	};
+
+	// Keep the refs fresh every render so handleIncoming always invokes the latest closures.
 	useEffect(() => {
 		sendReadReceiptRef.current = sendReadReceipt;
+		sendDeliveryReceiptRef.current = sendDeliveryReceipt;
 	});
 
 	/**
@@ -1992,6 +2041,7 @@ export function ChatLayout() {
 		handleIncomingTyping,
 		handleIncomingReaction,
 		handleIncomingReadReceipt,
+		handleIncomingDeliveryReceipt,
 	);
 
 	/** Select a chat and clear its unread badge atomically. */

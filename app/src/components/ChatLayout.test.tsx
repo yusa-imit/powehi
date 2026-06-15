@@ -654,4 +654,139 @@ describe("ChatLayout", () => {
 			useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null });
 		});
 	});
+
+	describe("delivery receipts", () => {
+		it("incoming delivery_receipt is NOT added as a message bubble", async () => {
+			let capturedOnDeliveryReceipt:
+				| ((groupId: string, messageIds: string[], senderDeviceId: string) => void)
+				| undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(_id, _gid, _onMsg, _onPq, _onTyping, _onReaction, _onReadReceipt, onDeliveryReceipt) => {
+					capturedOnDeliveryReceipt = onDeliveryReceipt;
+				},
+			);
+			render(<ChatLayout />);
+
+			await act(async () => {
+				capturedOnDeliveryReceipt?.(
+					"11111111-1111-1111-1111-111111111111",
+					["ddddddd-0001"],
+					"peer-device-z",
+				);
+			});
+
+			expect(screen.queryByText(/delivery_receipt/i)).not.toBeInTheDocument();
+		});
+
+		it("handleIncomingDeliveryReceipt shows Delivered indicator on matching message", async () => {
+			let capturedOnDeliveryReceipt:
+				| ((groupId: string, messageIds: string[], senderDeviceId: string) => void)
+				| undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(_id, _gid, _onMsg, _onPq, _onTyping, _onReaction, _onReadReceipt, onDeliveryReceipt) => {
+					capturedOnDeliveryReceipt = onDeliveryReceipt;
+				},
+			);
+			useAuthStore.setState({ phase: "app", deviceId: "my-device-d1", sessionToken: "tok-d1" });
+
+			const sendSpy = vi
+				.spyOn(MessagesApiModule, "sendMessage")
+				.mockResolvedValue("env-delivery-test-1");
+
+			render(<ChatLayout />);
+
+			const textarea = screen.getByPlaceholderText(/encrypted/i);
+			fireEvent.change(textarea, { target: { value: "delivered test" } });
+			fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+
+			await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+			await act(async () => {});
+
+			const beforeDelivered = screen
+				.queryAllByTestId("read-indicator")
+				.filter((el) => el.getAttribute("aria-label") === "Delivered").length;
+
+			await act(async () => {
+				capturedOnDeliveryReceipt?.(
+					"11111111-1111-1111-1111-111111111111",
+					["env-delivery-test-1"],
+					"peer-device-d1",
+				);
+			});
+
+			const afterDelivered = screen
+				.queryAllByTestId("read-indicator")
+				.filter((el) => el.getAttribute("aria-label") === "Delivered").length;
+			expect(afterDelivered).toBeGreaterThan(beforeDelivered);
+
+			sendSpy.mockRestore();
+			useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null });
+		});
+
+		it("delivered message transitions to Read after subsequent read_receipt", async () => {
+			let capturedOnReadReceipt:
+				| ((groupId: string, messageIds: string[], readAt: number, senderDeviceId: string) => void)
+				| undefined;
+			let capturedOnDeliveryReceipt:
+				| ((groupId: string, messageIds: string[], senderDeviceId: string) => void)
+				| undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(_id, _gid, _onMsg, _onPq, _onTyping, _onReaction, onReadReceipt, onDeliveryReceipt) => {
+					capturedOnReadReceipt = onReadReceipt;
+					capturedOnDeliveryReceipt = onDeliveryReceipt;
+				},
+			);
+			useAuthStore.setState({ phase: "app", deviceId: "my-device-d2", sessionToken: "tok-d2" });
+
+			const sendSpy = vi
+				.spyOn(MessagesApiModule, "sendMessage")
+				.mockResolvedValue("env-delivery-test-2");
+
+			render(<ChatLayout />);
+
+			const textarea = screen.getByPlaceholderText(/encrypted/i);
+			fireEvent.change(textarea, { target: { value: "read transition test" } });
+			fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+
+			await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+			await act(async () => {});
+
+			// Apply delivery receipt first.
+			await act(async () => {
+				capturedOnDeliveryReceipt?.(
+					"11111111-1111-1111-1111-111111111111",
+					["env-delivery-test-2"],
+					"peer-device-d2",
+				);
+			});
+
+			const deliveredCount = screen
+				.queryAllByTestId("read-indicator")
+				.filter((el) => el.getAttribute("aria-label") === "Delivered").length;
+			expect(deliveredCount).toBeGreaterThan(0);
+
+			// Apply read receipt — should supersede delivered state.
+			await act(async () => {
+				capturedOnReadReceipt?.(
+					"11111111-1111-1111-1111-111111111111",
+					["env-delivery-test-2"],
+					Date.now(),
+					"peer-device-d2",
+				);
+			});
+
+			const readCount = screen
+				.queryAllByTestId("read-indicator")
+				.filter((el) => el.getAttribute("aria-label") === "Read").length;
+			const stillDelivered = screen
+				.queryAllByTestId("read-indicator")
+				.filter((el) => el.getAttribute("aria-label") === "Delivered").length;
+
+			expect(readCount).toBeGreaterThan(0);
+			expect(stillDelivered).toBe(deliveredCount - 1);
+
+			sendSpy.mockRestore();
+			useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null });
+		});
+	});
 });

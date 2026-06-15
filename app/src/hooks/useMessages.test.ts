@@ -728,3 +728,187 @@ describe("useMessages — read_receipt handling", () => {
 		expect(onReadReceipt).not.toHaveBeenCalled();
 	});
 });
+
+describe("useMessages — delivery_receipt handling", () => {
+	const MSG_ID_A = "dddddddd-dddd-dddd-dddd-000000000001";
+	const MSG_ID_B = "dddddddd-dddd-dddd-dddd-000000000002";
+
+	function makeDeliveryReceiptEnvelope(overrides: Partial<Envelope> = {}): Envelope {
+		return {
+			id: ENV_ID,
+			group_id: GROUP_ID,
+			sender: SENDER_ID,
+			recipient: null,
+			message_type: "Application",
+			ciphertext: [10, 11, 12],
+			epoch: null,
+			created_at: "2026-06-15T11:00:00Z",
+			expires_at: null,
+			...overrides,
+		};
+	}
+
+	afterEach(() => {
+		mockWorker.mlsDecrypt.mockResolvedValue({
+			plaintext: new TextEncoder().encode(DECRYPTED_TEXT),
+		});
+	});
+
+	it("invokes onDeliveryReceipt with groupId, messageIds, and senderDeviceId", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "delivery_receipt", messageIds: [MSG_ID_A, MSG_ID_B] }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeDeliveryReceiptEnvelope()]);
+		const onDeliveryReceipt = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onDeliveryReceipt,
+			),
+		);
+
+		await waitFor(() => {
+			expect(onDeliveryReceipt).toHaveBeenCalledWith(GROUP_ID, [MSG_ID_A, MSG_ID_B], SENDER_ID);
+		});
+	});
+
+	it("does NOT forward delivery_receipt envelope to onMessage", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "delivery_receipt", messageIds: [MSG_ID_A] }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeDeliveryReceiptEnvelope()]);
+		const onMessage = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				onMessage,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				vi.fn(),
+			),
+		);
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onMessage).not.toHaveBeenCalled();
+	});
+
+	it("acks the delivery_receipt envelope after processing", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "delivery_receipt", messageIds: [MSG_ID_A] }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeDeliveryReceiptEnvelope()]);
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				vi.fn(),
+			),
+		);
+
+		await waitFor(() => {
+			expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID);
+		});
+	});
+
+	it("does NOT call onDeliveryReceipt when messageIds array is empty", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "delivery_receipt", messageIds: [] }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeDeliveryReceiptEnvelope()]);
+		const onDeliveryReceipt = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onDeliveryReceipt,
+			),
+		);
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onDeliveryReceipt).not.toHaveBeenCalled();
+	});
+
+	it("does NOT call onDeliveryReceipt when messageIds exceeds 100-item cap", async () => {
+		const tooMany = Array.from({ length: 101 }, (_, i) => `id-${String(i).padStart(3, "0")}`);
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "delivery_receipt", messageIds: tooMany }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeDeliveryReceiptEnvelope()]);
+		const onDeliveryReceipt = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onDeliveryReceipt,
+			),
+		);
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onDeliveryReceipt).not.toHaveBeenCalled();
+	});
+
+	it("does NOT call onDeliveryReceipt when messageIds contains non-string entries", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "delivery_receipt", messageIds: [42, null, MSG_ID_A] }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeDeliveryReceiptEnvelope()]);
+		const onDeliveryReceipt = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onDeliveryReceipt,
+			),
+		);
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onDeliveryReceipt).not.toHaveBeenCalled();
+	});
+});
