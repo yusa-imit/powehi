@@ -72,14 +72,7 @@ export interface IncomingMessage {
  * Allowed emoji for reactions. Validated server-side before calling onReaction.
  * Kept small and explicit to prevent free-form data smuggling via the emoji field.
  */
-export const ALLOWED_REACTION_EMOJIS = [
-	"👍",
-	"❤️",
-	"😂",
-	"😮",
-	"😢",
-	"😡",
-] as const;
+export const ALLOWED_REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "😡"] as const;
 export type ReactionEmoji = (typeof ALLOWED_REACTION_EMOJIS)[number];
 
 /**
@@ -110,23 +103,14 @@ export function useMessages(
 	onMessage: (msg: IncomingMessage) => void,
 	onPqBinding?: (groupId: string, bindingHex: string) => void,
 	onTyping?: (groupId: string) => void,
-	onReaction?: (
-		groupId: string,
-		targetId: string,
-		emoji: string,
-		senderId: string,
-	) => void,
+	onReaction?: (groupId: string, targetId: string, emoji: string, senderId: string) => void,
 	onReadReceipt?: (
 		groupId: string,
 		messageIds: string[],
 		readAt: number,
 		senderDeviceId: string,
 	) => void,
-	onDeliveryReceipt?: (
-		groupId: string,
-		messageIds: string[],
-		senderDeviceId: string,
-	) => void,
+	onDeliveryReceipt?: (groupId: string, messageIds: string[], senderDeviceId: string) => void,
 ): void {
 	const { sessionToken } = useAuthStore();
 	const cryptoWorker = useCryptoWorker();
@@ -184,11 +168,7 @@ export function useMessages(
 
 			try {
 				const ciphertext = new Uint8Array(env.ciphertext);
-				const { plaintext } = await cryptoWorker.mlsDecrypt(
-					identityId,
-					groupId,
-					ciphertext,
-				);
+				const { plaintext } = await cryptoWorker.mlsDecrypt(identityId, groupId, ciphertext);
 				const decoded = new TextDecoder().decode(plaintext);
 				// Base64-encode the wire ciphertext for Dexie persistence (safe loop, no spread).
 				const ciphertextB64 = uint8ToBase64(env.ciphertext);
@@ -217,10 +197,8 @@ export function useMessages(
 								Array.isArray((t as Record<string, unknown>).ct) &&
 								Array.isArray((t as Record<string, unknown>).key) &&
 								Array.isArray((t as Record<string, unknown>).iv) &&
-								((t as Record<string, unknown>).ct as number[]).length <=
-									16_384 &&
-								((t as Record<string, unknown>).key as number[]).length ===
-									32 &&
+								((t as Record<string, unknown>).ct as number[]).length <= 16_384 &&
+								((t as Record<string, unknown>).key as number[]).length === 32 &&
 								((t as Record<string, unknown>).iv as number[]).length === 12
 							) {
 								return t as ThumbnailPayload;
@@ -244,17 +222,10 @@ export function useMessages(
 						if (
 							typeof parsed.emoji === "string" &&
 							typeof parsed.targetMessageId === "string" &&
-							(ALLOWED_REACTION_EMOJIS as readonly string[]).includes(
-								parsed.emoji,
-							) &&
+							(ALLOWED_REACTION_EMOJIS as readonly string[]).includes(parsed.emoji) &&
 							parsed.targetMessageId.length > 0
 						) {
-							onReactionRef.current?.(
-								groupId,
-								parsed.targetMessageId,
-								parsed.emoji,
-								env.sender,
-							);
+							onReactionRef.current?.(groupId, parsed.targetMessageId, parsed.emoji, env.sender);
 						}
 					} else if (parsed.type === "read_receipt") {
 						// Read receipt — never displayed as a message; callback only when params are valid.
@@ -264,8 +235,7 @@ export function useMessages(
 							parsed.messageIds.length > 0 &&
 							parsed.messageIds.length <= 100 &&
 							(parsed.messageIds as unknown[]).every(
-								(id) =>
-									typeof id === "string" && id.length > 0 && id.length <= 36,
+								(id) => typeof id === "string" && id.length > 0 && id.length <= 36,
 							) &&
 							typeof parsed.readAt === "number" &&
 							Number.isFinite(parsed.readAt)
@@ -285,15 +255,10 @@ export function useMessages(
 							parsed.messageIds.length > 0 &&
 							parsed.messageIds.length <= 100 &&
 							(parsed.messageIds as unknown[]).every(
-								(id) =>
-									typeof id === "string" && id.length > 0 && id.length <= 36,
+								(id) => typeof id === "string" && id.length > 0 && id.length <= 36,
 							)
 						) {
-							onDeliveryReceiptRef.current?.(
-								groupId,
-								parsed.messageIds as string[],
-								env.sender,
-							);
+							onDeliveryReceiptRef.current?.(groupId, parsed.messageIds as string[], env.sender);
 						}
 					} else if (parsed.type === "pq_init" && Array.isArray(parsed.ct)) {
 						// §5.3 Phase B: PQ invite confirmation — decap ML-KEM ciphertext + derive binding.
@@ -302,8 +267,7 @@ export function useMessages(
 						if (pqHandle && cryptoWorker) {
 							try {
 								const ct = new Uint8Array(parsed.ct as number[]);
-								const { sharedSecretHandle } =
-									await cryptoWorker.mlKem768DecapV2(pqHandle, ct);
+								const { sharedSecretHandle } = await cryptoWorker.mlKem768DecapV2(pqHandle, ct);
 								const { bindingHex } = await cryptoWorker.mlsPqDeriveBinding(
 									sharedSecretHandle,
 									groupId,
@@ -322,9 +286,7 @@ export function useMessages(
 
 				if (shouldDisplayMessage) {
 					// Disappearing messages: parse server-set expires_at into unix ms.
-					const expiresAt = env.expires_at
-						? new Date(env.expires_at).getTime()
-						: undefined;
+					const expiresAt = env.expires_at ? new Date(env.expires_at).getTime() : undefined;
 					onMessageRef.current({
 						id: env.id,
 						senderId: env.sender,

@@ -1,22 +1,10 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import {
-	type MockInstance,
-	afterEach,
-	beforeEach,
-	describe,
-	expect,
-	it,
-	vi,
-} from "vitest";
+import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as MessagesModule from "../api/messages";
 import type { Envelope } from "../api/messages";
 import { useAuthStore } from "../store/auth";
 import * as CryptoWorkerHook from "./useCryptoWorker";
-import {
-	ALLOWED_REACTION_EMOJIS,
-	type IncomingMessage,
-	useMessages,
-} from "./useMessages";
+import { ALLOWED_REACTION_EMOJIS, type IncomingMessage, useMessages } from "./useMessages";
 
 const PQ_HANDLE = "pq-decap-handle-test";
 
@@ -41,15 +29,11 @@ let ackSpy: MockInstance<typeof MessagesModule.ackMessage>;
 
 beforeEach(() => {
 	// Spy on the exported functions — works with Vitest's ESM proxy.
-	pollSpy = vi
-		.spyOn(MessagesModule, "pollMessages")
-		.mockResolvedValue([] as Envelope[]);
+	pollSpy = vi.spyOn(MessagesModule, "pollMessages").mockResolvedValue([] as Envelope[]);
 	ackSpy = vi.spyOn(MessagesModule, "ackMessage").mockResolvedValue(undefined);
 
 	vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
-		mockWorker as unknown as ReturnType<
-			typeof CryptoWorkerHook.useCryptoWorker
-		>,
+		mockWorker as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
 	);
 	useAuthStore.setState({
 		phase: "app",
@@ -96,9 +80,7 @@ describe("useMessages", () => {
 		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
 
 		const received: IncomingMessage[] = [];
-		renderHook(() =>
-			useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)),
-		);
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
 
 		await waitFor(() => {
 			expect(received).toHaveLength(1);
@@ -146,9 +128,7 @@ describe("useMessages", () => {
 	});
 
 	it("skips messages for other groups without decrypting", async () => {
-		pollSpy.mockResolvedValueOnce([
-			makeEnvelope({ group_id: "different-group-id" }),
-		]);
+		pollSpy.mockResolvedValueOnce([makeEnvelope({ group_id: "different-group-id" })]);
 		const onMessage = vi.fn();
 
 		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, onMessage));
@@ -204,9 +184,7 @@ describe("useMessages", () => {
 		pollSpy.mockResolvedValueOnce([makeEnvelope({ expires_at: EXPIRES_ISO })]);
 
 		const received: IncomingMessage[] = [];
-		renderHook(() =>
-			useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)),
-		);
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
 
 		await waitFor(() => {
 			expect(received).toHaveLength(1);
@@ -218,9 +196,7 @@ describe("useMessages", () => {
 		pollSpy.mockResolvedValueOnce([makeEnvelope({ expires_at: null })]);
 
 		const received: IncomingMessage[] = [];
-		renderHook(() =>
-			useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)),
-		);
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
 
 		await waitFor(() => {
 			expect(received).toHaveLength(1);
@@ -231,9 +207,7 @@ describe("useMessages", () => {
 	it("stops polling after unmount", async () => {
 		vi.useFakeTimers();
 		try {
-			const { unmount } = renderHook(() =>
-				useMessages(IDENTITY_ID, GROUP_ID, vi.fn()),
-			);
+			const { unmount } = renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn()));
 
 			await act(async () => {
 				vi.advanceTimersByTime(0);
@@ -249,9 +223,7 @@ describe("useMessages", () => {
 			await Promise.resolve();
 
 			// After unmount the poll count must not increase by more than 1 in-flight call.
-			expect(pollSpy.mock.calls.length).toBeLessThanOrEqual(
-				countBeforeUnmount + 1,
-			);
+			expect(pollSpy.mock.calls.length).toBeLessThanOrEqual(countBeforeUnmount + 1);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -276,9 +248,7 @@ describe("useMessages — pq_init handling (§5.3 Phase B)", () => {
 	beforeEach(() => {
 		useAuthStore.setState({ pqDecapKeyHandle: PQ_HANDLE });
 		mockWorker.mlsDecrypt.mockResolvedValue({
-			plaintext: new TextEncoder().encode(
-				JSON.stringify({ type: "pq_init", ct: [1, 2, 3, 4] }),
-			),
+			plaintext: new TextEncoder().encode(JSON.stringify({ type: "pq_init", ct: [1, 2, 3, 4] })),
 		});
 	});
 
@@ -326,10 +296,7 @@ describe("useMessages — pq_init handling (§5.3 Phase B)", () => {
 		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), vi.fn()));
 
 		await waitFor(() => {
-			expect(mockWorker.mlKem768DecapV2).toHaveBeenCalledWith(
-				PQ_HANDLE,
-				expect.any(Uint8Array),
-			);
+			expect(mockWorker.mlKem768DecapV2).toHaveBeenCalledWith(PQ_HANDLE, expect.any(Uint8Array));
 		});
 	});
 
@@ -339,9 +306,7 @@ describe("useMessages — pq_init handling (§5.3 Phase B)", () => {
 		const onMessage = vi.fn();
 		const onPqBinding = vi.fn();
 
-		renderHook(() =>
-			useMessages(IDENTITY_ID, GROUP_ID, onMessage, onPqBinding),
-		);
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, onMessage, onPqBinding));
 
 		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
 		expect(onMessage).not.toHaveBeenCalled();
@@ -388,9 +353,7 @@ describe("useMessages — §9.4.1 thumbnail parsing", () => {
 
 	beforeEach(() => {
 		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
-			mockWorker as unknown as ReturnType<
-				typeof CryptoWorkerHook.useCryptoWorker
-			>,
+			mockWorker as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
 		);
 		useAuthStore.setState({
 			phase: "app",
@@ -428,9 +391,7 @@ describe("useMessages — §9.4.1 thumbnail parsing", () => {
 		pollSpy.mockResolvedValueOnce([makeImageEnvelope(thumb)]);
 
 		const received: IncomingMessage[] = [];
-		renderHook(() =>
-			useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)),
-		);
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
 
 		await waitFor(() => expect(received).toHaveLength(1));
 		expect(received[0].media?.thumbnail).toEqual(thumb);
@@ -451,9 +412,7 @@ describe("useMessages — §9.4.1 thumbnail parsing", () => {
 		pollSpy.mockResolvedValueOnce([makeImageEnvelope()]);
 
 		const received: IncomingMessage[] = [];
-		renderHook(() =>
-			useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)),
-		);
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
 
 		await waitFor(() => expect(received).toHaveLength(1));
 		expect(received[0].media?.thumbnail).toBeUndefined();
@@ -475,9 +434,7 @@ describe("useMessages — §9.4.1 thumbnail parsing", () => {
 		pollSpy.mockResolvedValueOnce([makeImageEnvelope()]);
 
 		const received: IncomingMessage[] = [];
-		renderHook(() =>
-			useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)),
-		);
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
 
 		await waitFor(() => expect(received).toHaveLength(1));
 		expect(received[0].media?.thumbnail).toBeUndefined();
@@ -501,9 +458,7 @@ describe("useMessages — typing_indicator handling", () => {
 
 	beforeEach(() => {
 		mockWorker.mlsDecrypt.mockResolvedValue({
-			plaintext: new TextEncoder().encode(
-				JSON.stringify({ type: "typing_indicator" }),
-			),
+			plaintext: new TextEncoder().encode(JSON.stringify({ type: "typing_indicator" })),
 		});
 	});
 
@@ -517,9 +472,7 @@ describe("useMessages — typing_indicator handling", () => {
 		pollSpy.mockResolvedValueOnce([makeTypingEnvelope()]);
 		const onTyping = vi.fn();
 
-		renderHook(() =>
-			useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, onTyping),
-		);
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, onTyping));
 
 		await waitFor(() => {
 			expect(onTyping).toHaveBeenCalledWith(GROUP_ID);
@@ -530,9 +483,7 @@ describe("useMessages — typing_indicator handling", () => {
 		pollSpy.mockResolvedValueOnce([makeTypingEnvelope()]);
 		const onMessage = vi.fn();
 
-		renderHook(() =>
-			useMessages(IDENTITY_ID, GROUP_ID, onMessage, undefined, vi.fn()),
-		);
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, onMessage, undefined, vi.fn()));
 
 		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
 		expect(onMessage).not.toHaveBeenCalled();
@@ -541,9 +492,7 @@ describe("useMessages — typing_indicator handling", () => {
 	it("acks the typing_indicator envelope after processing", async () => {
 		pollSpy.mockResolvedValueOnce([makeTypingEnvelope()]);
 
-		renderHook(() =>
-			useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, vi.fn()),
-		);
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, vi.fn()));
 
 		await waitFor(() => {
 			expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID);
@@ -588,24 +537,10 @@ describe("useMessages — reaction handling", () => {
 		pollSpy.mockResolvedValueOnce([makeReactionEnvelope()]);
 		const onReaction = vi.fn();
 
-		renderHook(() =>
-			useMessages(
-				IDENTITY_ID,
-				GROUP_ID,
-				vi.fn(),
-				undefined,
-				undefined,
-				onReaction,
-			),
-		);
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, onReaction));
 
 		await waitFor(() => {
-			expect(onReaction).toHaveBeenCalledWith(
-				GROUP_ID,
-				TARGET_ID,
-				"👍",
-				SENDER_ID,
-			);
+			expect(onReaction).toHaveBeenCalledWith(GROUP_ID, TARGET_ID, "👍", SENDER_ID);
 		});
 	});
 
@@ -622,16 +557,7 @@ describe("useMessages — reaction handling", () => {
 		pollSpy.mockResolvedValueOnce([makeReactionEnvelope()]);
 		const onMessage = vi.fn();
 
-		renderHook(() =>
-			useMessages(
-				IDENTITY_ID,
-				GROUP_ID,
-				onMessage,
-				undefined,
-				undefined,
-				vi.fn(),
-			),
-		);
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, onMessage, undefined, undefined, vi.fn()));
 
 		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
 		expect(onMessage).not.toHaveBeenCalled();
@@ -649,16 +575,7 @@ describe("useMessages — reaction handling", () => {
 		});
 		pollSpy.mockResolvedValueOnce([makeReactionEnvelope()]);
 
-		renderHook(() =>
-			useMessages(
-				IDENTITY_ID,
-				GROUP_ID,
-				vi.fn(),
-				undefined,
-				undefined,
-				vi.fn(),
-			),
-		);
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, vi.fn()));
 
 		await waitFor(() => {
 			expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID);
@@ -678,16 +595,7 @@ describe("useMessages — reaction handling", () => {
 		pollSpy.mockResolvedValueOnce([makeReactionEnvelope()]);
 		const onReaction = vi.fn();
 
-		renderHook(() =>
-			useMessages(
-				IDENTITY_ID,
-				GROUP_ID,
-				vi.fn(),
-				undefined,
-				undefined,
-				onReaction,
-			),
-		);
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, onReaction));
 
 		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
 		expect(onReaction).not.toHaveBeenCalled();
@@ -702,16 +610,7 @@ describe("useMessages — reaction handling", () => {
 		pollSpy.mockResolvedValueOnce([makeReactionEnvelope()]);
 		const onReaction = vi.fn();
 
-		renderHook(() =>
-			useMessages(
-				IDENTITY_ID,
-				GROUP_ID,
-				vi.fn(),
-				undefined,
-				undefined,
-				onReaction,
-			),
-		);
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, onReaction));
 
 		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
 		expect(onReaction).not.toHaveBeenCalled();
@@ -738,16 +637,7 @@ describe("useMessages — reaction handling", () => {
 		pollSpy.mockResolvedValueOnce([makeReactionEnvelope()]);
 		const onMessage = vi.fn();
 
-		renderHook(() =>
-			useMessages(
-				IDENTITY_ID,
-				GROUP_ID,
-				onMessage,
-				undefined,
-				undefined,
-				vi.fn(),
-			),
-		);
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, onMessage, undefined, undefined, vi.fn()));
 
 		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
 		await act(async () => {});
@@ -760,9 +650,7 @@ describe("useMessages — read_receipt handling", () => {
 	const MSG_ID_B = "aaaaaaaa-aaaa-aaaa-aaaa-000000000002";
 	const READ_AT = 1_718_000_000_000;
 
-	function makeReadReceiptEnvelope(
-		overrides: Partial<Envelope> = {},
-	): Envelope {
+	function makeReadReceiptEnvelope(overrides: Partial<Envelope> = {}): Envelope {
 		return {
 			id: ENV_ID,
 			group_id: GROUP_ID,
@@ -797,15 +685,7 @@ describe("useMessages — read_receipt handling", () => {
 		const onReadReceipt = vi.fn();
 
 		renderHook(() =>
-			useMessages(
-				IDENTITY_ID,
-				GROUP_ID,
-				vi.fn(),
-				undefined,
-				undefined,
-				undefined,
-				onReadReceipt,
-			),
+			useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, undefined, onReadReceipt),
 		);
 
 		await waitFor(() => {
@@ -832,15 +712,7 @@ describe("useMessages — read_receipt handling", () => {
 		const onMessage = vi.fn();
 
 		renderHook(() =>
-			useMessages(
-				IDENTITY_ID,
-				GROUP_ID,
-				onMessage,
-				undefined,
-				undefined,
-				undefined,
-				vi.fn(),
-			),
+			useMessages(IDENTITY_ID, GROUP_ID, onMessage, undefined, undefined, undefined, vi.fn()),
 		);
 
 		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
@@ -860,15 +732,7 @@ describe("useMessages — read_receipt handling", () => {
 		pollSpy.mockResolvedValueOnce([makeReadReceiptEnvelope()]);
 
 		renderHook(() =>
-			useMessages(
-				IDENTITY_ID,
-				GROUP_ID,
-				vi.fn(),
-				undefined,
-				undefined,
-				undefined,
-				vi.fn(),
-			),
+			useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, undefined, vi.fn()),
 		);
 
 		await waitFor(() => {
@@ -890,15 +754,7 @@ describe("useMessages — read_receipt handling", () => {
 		const onReadReceipt = vi.fn();
 
 		renderHook(() =>
-			useMessages(
-				IDENTITY_ID,
-				GROUP_ID,
-				vi.fn(),
-				undefined,
-				undefined,
-				undefined,
-				onReadReceipt,
-			),
+			useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, undefined, onReadReceipt),
 		);
 
 		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
@@ -906,10 +762,7 @@ describe("useMessages — read_receipt handling", () => {
 	});
 
 	it("does NOT call onReadReceipt when messageIds exceeds 100-item cap", async () => {
-		const tooMany = Array.from(
-			{ length: 101 },
-			(_, i) => `id-${String(i).padStart(3, "0")}`,
-		);
+		const tooMany = Array.from({ length: 101 }, (_, i) => `id-${String(i).padStart(3, "0")}`);
 		mockWorker.mlsDecrypt.mockResolvedValueOnce({
 			plaintext: new TextEncoder().encode(
 				JSON.stringify({
@@ -923,15 +776,7 @@ describe("useMessages — read_receipt handling", () => {
 		const onReadReceipt = vi.fn();
 
 		renderHook(() =>
-			useMessages(
-				IDENTITY_ID,
-				GROUP_ID,
-				vi.fn(),
-				undefined,
-				undefined,
-				undefined,
-				onReadReceipt,
-			),
+			useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, undefined, onReadReceipt),
 		);
 
 		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
@@ -952,15 +797,7 @@ describe("useMessages — read_receipt handling", () => {
 		const onReadReceipt = vi.fn();
 
 		renderHook(() =>
-			useMessages(
-				IDENTITY_ID,
-				GROUP_ID,
-				vi.fn(),
-				undefined,
-				undefined,
-				undefined,
-				onReadReceipt,
-			),
+			useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, undefined, onReadReceipt),
 		);
 
 		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
@@ -981,15 +818,7 @@ describe("useMessages — read_receipt handling", () => {
 		const onMessage = vi.fn();
 
 		renderHook(() =>
-			useMessages(
-				IDENTITY_ID,
-				GROUP_ID,
-				onMessage,
-				undefined,
-				undefined,
-				undefined,
-				vi.fn(),
-			),
+			useMessages(IDENTITY_ID, GROUP_ID, onMessage, undefined, undefined, undefined, vi.fn()),
 		);
 
 		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
@@ -1002,9 +831,7 @@ describe("useMessages — delivery_receipt handling", () => {
 	const MSG_ID_A = "dddddddd-dddd-dddd-dddd-000000000001";
 	const MSG_ID_B = "dddddddd-dddd-dddd-dddd-000000000002";
 
-	function makeDeliveryReceiptEnvelope(
-		overrides: Partial<Envelope> = {},
-	): Envelope {
+	function makeDeliveryReceiptEnvelope(overrides: Partial<Envelope> = {}): Envelope {
 		return {
 			id: ENV_ID,
 			group_id: GROUP_ID,
@@ -1051,11 +878,7 @@ describe("useMessages — delivery_receipt handling", () => {
 		);
 
 		await waitFor(() => {
-			expect(onDeliveryReceipt).toHaveBeenCalledWith(
-				GROUP_ID,
-				[MSG_ID_A, MSG_ID_B],
-				SENDER_ID,
-			);
+			expect(onDeliveryReceipt).toHaveBeenCalledWith(GROUP_ID, [MSG_ID_A, MSG_ID_B], SENDER_ID);
 		});
 	});
 
@@ -1138,10 +961,7 @@ describe("useMessages — delivery_receipt handling", () => {
 	});
 
 	it("does NOT call onDeliveryReceipt when messageIds exceeds 100-item cap", async () => {
-		const tooMany = Array.from(
-			{ length: 101 },
-			(_, i) => `id-${String(i).padStart(3, "0")}`,
-		);
+		const tooMany = Array.from({ length: 101 }, (_, i) => `id-${String(i).padStart(3, "0")}`);
 		mockWorker.mlsDecrypt.mockResolvedValueOnce({
 			plaintext: new TextEncoder().encode(
 				JSON.stringify({ type: "delivery_receipt", messageIds: tooMany }),
