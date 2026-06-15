@@ -1240,4 +1240,137 @@ describe("ChatLayout", () => {
 			await act(async () => {});
 		});
 	});
+
+	describe("message pinning", () => {
+		it("pin button appears on hover for a message with a stable envelope id", async () => {
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(() => {});
+			useAuthStore.setState({
+				phase: "app",
+				deviceId: "my-device-pin-1",
+				sessionToken: "tok-pin-1",
+			});
+
+			const sendSpy = vi
+				.spyOn(MessagesApiModule, "sendMessage")
+				.mockResolvedValue("pin-test-env-1");
+			render(<ChatLayout />);
+
+			const textarea = screen.getByPlaceholderText(/encrypted/i);
+			fireEvent.change(textarea, { target: { value: "message to pin" } });
+			fireEvent.click(screen.getByRole("button", { name: /send message/i }));
+
+			await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+			await act(async () => {});
+
+			const bubbles = screen.getAllByTestId("message-bubble");
+			const lastBubble = bubbles[bubbles.length - 1];
+			fireEvent.mouseEnter(lastBubble);
+
+			expect(screen.getByTestId("pin-button")).toBeInTheDocument();
+		});
+
+		it("clicking pin button shows pinned banner with message text", async () => {
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(() => {});
+			useAuthStore.setState({
+				phase: "app",
+				deviceId: "my-device-pin-2",
+				sessionToken: "tok-pin-2",
+			});
+
+			const sendSpy = vi
+				.spyOn(MessagesApiModule, "sendMessage")
+				.mockResolvedValue("pin-test-env-2");
+			render(<ChatLayout />);
+
+			const textarea = screen.getByPlaceholderText(/encrypted/i);
+			fireEvent.change(textarea, { target: { value: "pinnable message" } });
+			fireEvent.click(screen.getByRole("button", { name: /send message/i }));
+
+			await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+			await act(async () => {});
+
+			const bubbles = screen.getAllByTestId("message-bubble");
+			const lastBubble = bubbles[bubbles.length - 1];
+			fireEvent.mouseEnter(lastBubble);
+			fireEvent.click(screen.getByTestId("pin-button"));
+
+			expect(screen.getByTestId("pinned-banner")).toBeInTheDocument();
+		});
+
+		it("incoming pin shows pinned banner with peer message text", async () => {
+			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+			let capturedOnPin:
+				| ((groupId: string, targetMessageId: string, action: "pin" | "unpin") => void)
+				| undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(
+					_id,
+					_gid,
+					onMsg,
+					_onPq,
+					_onTyping,
+					_onReaction,
+					_onRead,
+					_onDelivery,
+					_onEdit,
+					_onDelete,
+					onPin,
+				) => {
+					capturedOnMessage = onMsg;
+					capturedOnPin = onPin;
+				},
+			);
+			render(<ChatLayout />);
+
+			const PEER_MSG_ID = "pin-peer-uuid-1111-111111111111";
+			await act(async () => {
+				capturedOnMessage?.({
+					id: PEER_MSG_ID,
+					groupId: "11111111-1111-1111-1111-111111111111",
+					senderId: "peer-device-pin",
+					text: "peer pinned message",
+					ciphertextB64: "Zg==",
+					epochSeq: 1,
+				});
+			});
+
+			await act(async () => {
+				capturedOnPin?.("11111111-1111-1111-1111-111111111111", PEER_MSG_ID, "pin");
+			});
+
+			expect(screen.getByTestId("pinned-banner")).toBeInTheDocument();
+		});
+
+		it("unpin button on banner hides the pinned banner", async () => {
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(() => {});
+			useAuthStore.setState({
+				phase: "app",
+				deviceId: "my-device-pin-3",
+				sessionToken: "tok-pin-3",
+			});
+
+			const sendSpy = vi
+				.spyOn(MessagesApiModule, "sendMessage")
+				.mockResolvedValue("pin-test-env-3");
+			render(<ChatLayout />);
+
+			const textarea = screen.getByPlaceholderText(/encrypted/i);
+			fireEvent.change(textarea, { target: { value: "to be unpinned" } });
+			fireEvent.click(screen.getByRole("button", { name: /send message/i }));
+
+			await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+			await act(async () => {});
+
+			const bubbles = screen.getAllByTestId("message-bubble");
+			const lastBubble = bubbles[bubbles.length - 1];
+			fireEvent.mouseEnter(lastBubble);
+			fireEvent.click(screen.getByTestId("pin-button"));
+
+			expect(screen.getByTestId("pinned-banner")).toBeInTheDocument();
+
+			fireEvent.click(screen.getByTestId("unpin-button"));
+
+			expect(screen.queryByTestId("pinned-banner")).not.toBeInTheDocument();
+		});
+	});
 });

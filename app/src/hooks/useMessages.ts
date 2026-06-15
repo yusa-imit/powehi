@@ -113,6 +113,9 @@ export type ReactionEmoji = (typeof ALLOWED_REACTION_EMOJIS)[number];
  *                           and senderDeviceId. Not forwarded to onMessage.
  * @param onDelete           Optional callback invoked when a delete envelope is received.
  *                           Receives groupId and targetMessageId (≤36 chars). Not forwarded to onMessage.
+ * @param onPin              Optional callback invoked when a pin or unpin envelope is received.
+ *                           Receives groupId, targetMessageId (≤36 chars), and action ("pin"|"unpin").
+ *                           Not forwarded to onMessage.
  */
 export function useMessages(
 	identityId: string | undefined,
@@ -135,6 +138,7 @@ export function useMessages(
 		senderDeviceId: string,
 	) => void,
 	onDelete?: (groupId: string, targetMessageId: string) => void,
+	onPin?: (groupId: string, targetMessageId: string, action: "pin" | "unpin") => void,
 ): void {
 	const { sessionToken } = useAuthStore();
 	const cryptoWorker = useCryptoWorker();
@@ -179,6 +183,11 @@ export function useMessages(
 	const onDeleteRef = useRef(onDelete);
 	useEffect(() => {
 		onDeleteRef.current = onDelete;
+	});
+
+	const onPinRef = useRef(onPin);
+	useEffect(() => {
+		onPinRef.current = onPin;
 	});
 
 	// Track the latest created_at we've seen to avoid re-delivering on restart.
@@ -317,6 +326,16 @@ export function useMessages(
 							parsed.targetMessageId.length <= 36
 						) {
 							onDeleteRef.current?.(groupId, parsed.targetMessageId);
+						}
+					} else if (parsed.type === "pin" || parsed.type === "unpin") {
+						// Pin/unpin — never displayed as a message; callback only when targetMessageId is valid.
+						shouldDisplayMessage = false;
+						if (
+							typeof parsed.targetMessageId === "string" &&
+							parsed.targetMessageId.length > 0 &&
+							parsed.targetMessageId.length <= 36
+						) {
+							onPinRef.current?.(groupId, parsed.targetMessageId, parsed.type);
 						}
 					} else if (parsed.type === "text" && typeof parsed.text === "string") {
 						// Structured text message — may include a reply context.

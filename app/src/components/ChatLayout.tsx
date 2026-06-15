@@ -57,6 +57,8 @@ interface ChatMessage {
 	edited?: boolean;
 	/** True when the message has been deleted (unsent) by the sender. */
 	deleted?: boolean;
+	/** True when a group member has pinned this message. */
+	pinned?: boolean;
 }
 
 interface Chat {
@@ -81,6 +83,8 @@ interface Chat {
 	pqBindingHex?: string;
 	/** Index into messages[] of the first unread message. Cleared when the chat is selected. */
 	firstUnreadAt?: number;
+	/** Envelope UUID of the currently pinned message, if any. */
+	pinnedMessageId?: string;
 }
 
 // ── Disappearing messages helpers ──────────────────────────────────────────────
@@ -319,6 +323,78 @@ function HighlightedText({ text, highlight }: { text: string; highlight: string 
 	}
 	if (cursor < text.length) parts.push(text.slice(cursor));
 	return <>{parts}</>;
+}
+
+// ── PinnedBanner ─────────────────────────────────────────────────────────────
+
+function PinnedBanner({
+	pinnedMessageId,
+	messages,
+	onUnpin,
+}: {
+	pinnedMessageId: string;
+	messages: ChatMessage[];
+	onUnpin: () => void;
+}) {
+	const msg = messages.find((m) => m.id === pinnedMessageId);
+	const preview = msg?.deleted ? "This message was deleted" : (msg?.text ?? "Message");
+	return (
+		<div
+			data-testid="pinned-banner"
+			style={{
+				display: "flex",
+				alignItems: "center",
+				gap: 8,
+				padding: "6px 18px",
+				background: "rgba(255,138,61,0.06)",
+				borderBottom: "1px solid rgba(255,138,61,0.18)",
+				fontSize: 12,
+				color: "var(--fg-2)",
+				flex: "none",
+			}}
+		>
+			<Icon name="pin" size={13} color="#FF8A3D" />
+			<span
+				style={{
+					fontWeight: 600,
+					fontSize: 10,
+					letterSpacing: "0.1em",
+					color: "#FF8A3D",
+					flex: "none",
+				}}
+			>
+				PINNED
+			</span>
+			<span
+				style={{
+					flex: 1,
+					overflow: "hidden",
+					textOverflow: "ellipsis",
+					whiteSpace: "nowrap",
+					color: "var(--fg-2)",
+				}}
+			>
+				{preview}
+			</span>
+			<button
+				type="button"
+				onClick={onUnpin}
+				aria-label="Unpin message"
+				data-testid="unpin-button"
+				style={{
+					background: "none",
+					border: "none",
+					color: "var(--fg-3)",
+					cursor: "pointer",
+					padding: 2,
+					display: "flex",
+					alignItems: "center",
+				}}
+			>
+				<Icon name="x" size={13} />
+			</button>
+		</div>
+	);
 }
 
 // ── Logo ──────────────────────────────────────────────────────────────────────
@@ -808,6 +884,7 @@ function MessageBubble({
 	onReply,
 	onEdit,
 	onDelete,
+	onPin,
 }: {
 	msg: ChatMessage;
 	partner: string;
@@ -816,6 +893,7 @@ function MessageBubble({
 	onReply?: () => void;
 	onEdit?: () => void;
 	onDelete?: () => void;
+	onPin?: () => void;
 }) {
 	const isMe = msg.from === "me";
 	const [pickerOpen, setPickerOpen] = useState(false);
@@ -997,6 +1075,39 @@ function MessageBubble({
 								}}
 							>
 								<Icon name="trash" size={11} />
+							</button>
+						</div>
+					)}
+
+					{/* Pin button — appears on hover for messages with a stable ID, not deleted */}
+					{onPin && msg.id && hovered && !msg.deleted && (
+						<div
+							style={{
+								position: "absolute",
+								top: -10,
+								left: 0,
+							}}
+						>
+							<button
+								type="button"
+								onClick={onPin}
+								aria-label={msg.pinned ? "Unpin message" : "Pin message"}
+								data-testid="pin-button"
+								style={{
+									width: 22,
+									height: 22,
+									borderRadius: "50%",
+									border: "1px solid var(--border-faint)",
+									background: msg.pinned ? "rgba(255,138,61,0.18)" : "var(--bg-elevated)",
+									color: msg.pinned ? "#FF8A3D" : "var(--fg-3)",
+									cursor: "pointer",
+									display: "flex",
+									alignItems: "center",
+									justifyContent: "center",
+									padding: 0,
+								}}
+							>
+								<Icon name="pin" size={11} />
 							</button>
 						</div>
 					)}
@@ -1226,6 +1337,7 @@ function MessageList({
 	onReply,
 	onEdit,
 	onDelete,
+	onPin,
 	firstUnreadIndex,
 }: {
 	messages: ChatMessage[];
@@ -1235,6 +1347,7 @@ function MessageList({
 	onReply?: (msg: ChatMessage) => void;
 	onEdit?: (msg: ChatMessage) => void;
 	onDelete?: (msgId: string) => void;
+	onPin?: (msgId: string) => void;
 	firstUnreadIndex?: number;
 }) {
 	const ref = useRef<HTMLDivElement>(null);
@@ -1392,6 +1505,10 @@ function MessageList({
 						onDelete={(() => {
 							const msgId = g.msg.id;
 							return msgId && g.msg.from === "me" && onDelete ? () => onDelete(msgId) : undefined;
+						})()}
+						onPin={(() => {
+							const msgId = g.msg.id;
+							return msgId && onPin ? () => onPin(msgId) : undefined;
 						})()}
 					/>
 				),
@@ -2460,6 +2577,71 @@ export function ChatLayout() {
 	);
 
 	/**
+	 * Apply an incoming pin/unpin signal to the matching chat.
+	 * Sets or clears `pinnedMessageId` and marks the target message `pinned`.
+	 */
+	const handleIncomingPin = useCallback(
+		(gId: string, targetMessageId: string, action: "pin" | "unpin") => {
+			setChats((cs) =>
+				cs.map((c) => {
+					if (c.mlsGroupId !== gId) return c;
+					const msgs = c.messages.map((m) => {
+						if (m.id !== targetMessageId) return m;
+						return { ...m, pinned: action === "pin" };
+					});
+					return {
+						...c,
+						messages: msgs,
+						pinnedMessageId:
+							action === "pin"
+								? targetMessageId
+								: c.pinnedMessageId === targetMessageId
+									? undefined
+									: c.pinnedMessageId,
+					};
+				}),
+			);
+		},
+		[],
+	);
+
+	/**
+	 * Pin or unpin a message in the active MLS group.
+	 * Optimistically updates local state, then MLS-encrypts and sends to peer.
+	 * Fire-and-forget — optimistic state stays on failure.
+	 */
+	const sendPin = useCallback(
+		(targetMessageId: string) => {
+			if (!sessionToken || !active?.mlsGroupId || !active?.mlsIdentityId || !cryptoWorker) return;
+			const { mlsGroupId, mlsIdentityId } = active;
+			const currentlyPinned = active.pinnedMessageId === targetMessageId;
+			const action = currentlyPinned ? "unpin" : "pin";
+			// Optimistic local update.
+			setChats((cs) =>
+				cs.map((c) => {
+					if (c.id !== activeId) return c;
+					const msgs = c.messages.map((m) => {
+						if (m.id !== targetMessageId) return m;
+						return { ...m, pinned: !currentlyPinned };
+					});
+					return {
+						...c,
+						messages: msgs,
+						pinnedMessageId: action === "pin" ? targetMessageId : undefined,
+					};
+				}),
+			);
+			const plaintext = new TextEncoder().encode(JSON.stringify({ type: action, targetMessageId }));
+			cryptoWorker
+				.mlsEncrypt(mlsIdentityId, mlsGroupId, plaintext)
+				.then(({ ciphertext }) => sendMessageApi(sessionToken, mlsGroupId, ciphertext, undefined))
+				.catch(() => {})
+				.finally(() => plaintext.fill(0));
+		},
+		[active, activeId, cryptoWorker, sessionToken],
+	);
+
+	/**
 	 * Send a read_receipt to the active MLS group for the given envelope IDs.
 	 * Fire-and-forget — a failed receipt is non-fatal (the UI shows "sent" vs "read" state).
 	 * Not a useCallback: re-created each render so it always closes over current state.
@@ -2537,6 +2719,7 @@ export function ChatLayout() {
 		handleIncomingDeliveryReceipt,
 		handleIncomingEdit,
 		handleIncomingDelete,
+		handleIncomingPin,
 	);
 
 	/** Select a chat and clear its unread badge.
@@ -2728,6 +2911,13 @@ export function ChatLayout() {
 						msgSearch={msgSearch}
 						onMsgSearch={setMsgSearch}
 					/>
+					{active.pinnedMessageId && (
+						<PinnedBanner
+							pinnedMessageId={active.pinnedMessageId}
+							messages={active.messages}
+							onUnpin={() => sendPin(active.pinnedMessageId ?? "")}
+						/>
+					)}
 					<MessageList
 						messages={active.messages}
 						partner={active.name}
@@ -2736,6 +2926,7 @@ export function ChatLayout() {
 						onReply={setReplyingTo}
 						onEdit={setEditingMessage}
 						onDelete={sendDelete}
+						onPin={sendPin}
 						firstUnreadIndex={active.firstUnreadAt}
 					/>
 					<Composer

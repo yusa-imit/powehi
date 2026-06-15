@@ -16,7 +16,7 @@ import type { ThumbnailPayload } from "./useMessages";
 import { useThumbnail } from "./useThumbnail";
 
 const MOCK_BLOB_URL = "blob:http://localhost/mock-thumb-url";
-const MOCK_PIXELS = new Uint8Array(64 * 64 * 3);
+const MOCK_PIXELS = new Uint8Array(new ArrayBuffer(64 * 64 * 3));
 
 const makeThumbnail = (overrides: Partial<ThumbnailPayload> = {}): ThumbnailPayload => ({
 	ct: Array.from<number>({ length: 100 }).fill(1),
@@ -151,9 +151,9 @@ describe("useThumbnail (prd.md §9.4.1)", () => {
 
 	it("does not call setObjectUrl after unmount (cancelled flag)", async () => {
 		// Delay decrypt so unmount happens before resolution.
-		let resolveDecrypt!: (v: { pixels: Uint8Array }) => void;
+		let resolveDecrypt!: (v: { pixels: Uint8Array<ArrayBuffer> }) => void;
 		mediaThumbnailDecryptFn.mockReturnValueOnce(
-			new Promise<{ pixels: Uint8Array }>((resolve) => {
+			new Promise<{ pixels: Uint8Array<ArrayBuffer> }>((resolve) => {
 				resolveDecrypt = resolve;
 			}),
 		);

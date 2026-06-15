@@ -142,7 +142,7 @@ const mockWorker = {
 	}),
 	mediaThumbnailDrop: async (_handle: string) => true,
 	mediaThumbnailDecrypt: async (_ct: Uint8Array, _key: Uint8Array, _iv: Uint8Array) => ({
-		pixels: new Uint8Array(64 * 64 * 3), // mock 64x64 RGB pixels
+		pixels: new Uint8Array(new ArrayBuffer(64 * 64 * 3)), // mock 64x64 RGB pixels
 	}),
 	mediaMessageCreateWithThumbnail: async (
 		_identityId: string,

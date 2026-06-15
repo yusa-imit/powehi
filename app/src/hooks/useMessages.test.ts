@@ -1530,3 +1530,151 @@ describe("useMessages — delete handling", () => {
 		});
 	});
 });
+
+describe("useMessages — pin handling", () => {
+	const TARGET_MSG_ID = "eeeeeeee-eeee-eeee-eeee-000000000001";
+
+	function makePinEnvelope(): Envelope {
+		return {
+			id: ENV_ID,
+			group_id: GROUP_ID,
+			sender: SENDER_ID,
+			recipient: null,
+			message_type: "Application",
+			ciphertext: [40, 41, 42],
+			epoch: null,
+			created_at: "2026-06-16T12:00:00Z",
+			expires_at: null,
+		};
+	}
+
+	afterEach(() => {
+		mockWorker.mlsDecrypt.mockResolvedValue({
+			plaintext: new TextEncoder().encode(DECRYPTED_TEXT),
+		});
+	});
+
+	it("invokes onPin with groupId, targetMessageId, and 'pin' action", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "pin", targetMessageId: TARGET_MSG_ID }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makePinEnvelope()]);
+		const onPin = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onPin,
+			),
+		);
+
+		await waitFor(() => {
+			expect(onPin).toHaveBeenCalledWith(GROUP_ID, TARGET_MSG_ID, "pin");
+		});
+	});
+
+	it("invokes onPin with groupId, targetMessageId, and 'unpin' action", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "unpin", targetMessageId: TARGET_MSG_ID }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makePinEnvelope()]);
+		const onPin = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onPin,
+			),
+		);
+
+		await waitFor(() => {
+			expect(onPin).toHaveBeenCalledWith(GROUP_ID, TARGET_MSG_ID, "unpin");
+		});
+	});
+
+	it("does NOT forward pin envelope to onMessage", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "pin", targetMessageId: TARGET_MSG_ID }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makePinEnvelope()]);
+		const onMessage = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				onMessage,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				vi.fn(),
+			),
+		);
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onMessage).not.toHaveBeenCalled();
+		await act(async () => {});
+		await act(async () => {
+			await new Promise<void>((r) => setTimeout(r, 0));
+		});
+	});
+
+	it("does NOT call onPin when targetMessageId is missing", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(JSON.stringify({ type: "pin" })),
+		});
+		pollSpy.mockResolvedValueOnce([makePinEnvelope()]);
+		const onPin = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onPin,
+			),
+		);
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onPin).not.toHaveBeenCalled();
+		await act(async () => {});
+		await act(async () => {
+			await new Promise<void>((r) => setTimeout(r, 0));
+		});
+	});
+});
