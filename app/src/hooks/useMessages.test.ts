@@ -1055,7 +1055,10 @@ describe("useMessages — replyTo handling", () => {
 				JSON.stringify({
 					type: "text",
 					text: "That is a great idea",
-					replyTo: { messageId: "orig-uuid-1234", excerpt: "Original message text" },
+					replyTo: {
+						messageId: "orig-uuid-1234",
+						excerpt: "Original message text",
+					},
 				}),
 			),
 		});
@@ -1168,7 +1171,11 @@ describe("useMessages — edit handling", () => {
 	it("invokes onEdit with groupId, targetMessageId, newText, and senderDeviceId", async () => {
 		mockWorker.mlsDecrypt.mockResolvedValueOnce({
 			plaintext: new TextEncoder().encode(
-				JSON.stringify({ type: "edit", targetMessageId: TARGET_MSG_ID, newText: "updated text" }),
+				JSON.stringify({
+					type: "edit",
+					targetMessageId: TARGET_MSG_ID,
+					newText: "updated text",
+				}),
 			),
 		});
 		pollSpy.mockResolvedValueOnce([makeEditEnvelope()]);
@@ -1196,7 +1203,11 @@ describe("useMessages — edit handling", () => {
 	it("does NOT forward edit envelope to onMessage", async () => {
 		mockWorker.mlsDecrypt.mockResolvedValueOnce({
 			plaintext: new TextEncoder().encode(
-				JSON.stringify({ type: "edit", targetMessageId: TARGET_MSG_ID, newText: "updated text" }),
+				JSON.stringify({
+					type: "edit",
+					targetMessageId: TARGET_MSG_ID,
+					newText: "updated text",
+				}),
 			),
 		});
 		pollSpy.mockResolvedValueOnce([makeEditEnvelope()]);
@@ -1224,7 +1235,11 @@ describe("useMessages — edit handling", () => {
 	it("does NOT call onEdit when targetMessageId is empty string", async () => {
 		mockWorker.mlsDecrypt.mockResolvedValueOnce({
 			plaintext: new TextEncoder().encode(
-				JSON.stringify({ type: "edit", targetMessageId: "", newText: "updated text" }),
+				JSON.stringify({
+					type: "edit",
+					targetMessageId: "",
+					newText: "updated text",
+				}),
 			),
 		});
 		pollSpy.mockResolvedValueOnce([makeEditEnvelope()]);
@@ -1251,7 +1266,11 @@ describe("useMessages — edit handling", () => {
 	it("does NOT call onEdit when targetMessageId exceeds 36 chars", async () => {
 		mockWorker.mlsDecrypt.mockResolvedValueOnce({
 			plaintext: new TextEncoder().encode(
-				JSON.stringify({ type: "edit", targetMessageId: "x".repeat(37), newText: "updated text" }),
+				JSON.stringify({
+					type: "edit",
+					targetMessageId: "x".repeat(37),
+					newText: "updated text",
+				}),
 			),
 		});
 		pollSpy.mockResolvedValueOnce([makeEditEnvelope()]);
@@ -1278,7 +1297,11 @@ describe("useMessages — edit handling", () => {
 	it("does NOT call onEdit when newText is empty string", async () => {
 		mockWorker.mlsDecrypt.mockResolvedValueOnce({
 			plaintext: new TextEncoder().encode(
-				JSON.stringify({ type: "edit", targetMessageId: TARGET_MSG_ID, newText: "" }),
+				JSON.stringify({
+					type: "edit",
+					targetMessageId: TARGET_MSG_ID,
+					newText: "",
+				}),
 			),
 		});
 		pollSpy.mockResolvedValueOnce([makeEditEnvelope()]);
@@ -1467,7 +1490,12 @@ describe("useMessages — delete handling", () => {
 
 		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
 		expect(onDelete).not.toHaveBeenCalled();
+		// Two-tick drain: first flush microtasks, then wait one event-loop tick so the
+		// setInterval-based next poll fires and settles before test cleanup runs.
 		await act(async () => {});
+		await act(async () => {
+			await new Promise<void>((r) => setTimeout(r, 0));
+		});
 	});
 
 	it("does NOT call onDelete when targetMessageId is missing", async () => {
@@ -1494,6 +1522,11 @@ describe("useMessages — delete handling", () => {
 
 		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
 		expect(onDelete).not.toHaveBeenCalled();
+		// Two-tick drain: first flush microtasks, then wait one event-loop tick so the
+		// setInterval-based next poll fires and settles before test cleanup runs.
 		await act(async () => {});
+		await act(async () => {
+			await new Promise<void>((r) => setTimeout(r, 0));
+		});
 	});
 });
