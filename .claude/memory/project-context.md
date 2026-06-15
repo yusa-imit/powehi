@@ -17,6 +17,29 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-16, cycle 160 — STABILIZATION: useThumbnail + useRegionDetect tests; delete act() drain fix)
+- **Cycle 160 (commit d66c192):** STABILIZATION — CI GREEN, cargo audit clean (1 allowed: instant/openmls). No open bug issues.
+  - **Test gap CLOSED — `useThumbnail.ts` (12 new tests):** Security-relevant hook had no test coverage. New `useThumbnail.test.ts`:
+    - `thumbnail.key (number[])` zeroed after successful decryption (invariant verified)
+    - Object URL revoked on unmount (memory leak prevention)
+    - Boundary validation fail-closed: key≠32 → no decrypt, iv≠12 → no decrypt, ct=0 → no decrypt, ct>16384 → no decrypt
+    - `ct === 16384` boundary accepted
+    - Decryption failure graceful (objectUrl stays null, no throw)
+    - cancelled flag prevents stale objectUrl after unmount
+    - cryptoWorker unavailable → no-op
+  - **Test gap CLOSED — `useRegionDetect.ts` (6 new tests):** Simple hook had no test coverage. New `useRegionDetect.test.ts`:
+    - Returns null before fetch resolves; returns regionId after success
+    - Calls store fetch exactly once on mount
+    - Network error and non-ok response → null (no throw)
+    - Pre-set store regionId returned immediately
+  - **act() drain improvement — `useMessages.test.ts`:** Last two delete "not called" tests had act() warnings from in-flight setInterval ticks firing after waitFor. Added two-tick drain: microtask flush + `setTimeout(r, 0)` inside act() as second drain. Eliminates the specific pattern.
+  - **security-auditor:** GREEN sweep on cycles 157-159 (quote reply, edit, delete). 2 new non-blocking YELLOWs:
+    - YELLOW-N1: `handleIncomingEdit`/`handleIncomingDelete` no-op silently when target message id not yet backfilled (in-flight send); safe (fails closed)
+    - YELLOW-N2: edit/delete envelopes carry no ordering token (epoch-tied); last-writer-wins. Benign in 2-party MLS; flag for threat-model-checker when group chat (>2 members) lands.
+  - **462 frontend tests** (+18: 12 useThumbnail + 6 useRegionDetect; was 444); 539 Rust tests (unchanged); tsc clean; biome clean.
+  - **target/ hygiene:** 4GB, under 20GB threshold — no pruning needed. 0-byte rmeta stubs cleaned.
+  - **Next cycle:** Post-MVP items: PQ hybrid activation (ADR-0003 Phase A — waits for openmls stable MLS_128_MLKEM768), mobile app scaffold (Tauri 2.x), or more UX features.
+
 ## Current state (2026-06-16, cycle 159 — FEATURE: E2EE message deletion)
 - **Cycle 159 (commit f972729):** FEATURE — Post-MVP UX: E2EE message unsend/delete.
   - **`useMessages.ts`:** Added `onDelete?: (groupId: string, targetMessageId: string) => void` as 10th param. `type === "delete"` handler in `processEnvelope`: validates `targetMessageId` is non-empty string ≤ 36 chars; `shouldDisplayMessage = false`; calls `onDeleteRef.current?.(groupId, targetMessageId)`. Same ref pattern as all other control handlers.
