@@ -17,6 +17,25 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-16, cycle 161 — FEATURE: CI fix (TS Uint8Array<ArrayBuffer>) + E2EE message pinning)
+- **Cycle 161 (commit f1b0be0):** FEATURE — CI RED fix + E2EE message pinning via MLS.
+  - **CI RED FIXED — Bundle budget check TypeScript error:** `new Uint8Array(n)` inferred as `Uint8Array<ArrayBufferLike>` in TS 5.8.3 but `mediaThumbnailDecrypt` interface expects `Uint8Array<ArrayBuffer>`. Fix: changed mock and test to `new Uint8Array(new ArrayBuffer(n))` and typed as `Uint8Array<ArrayBuffer>` (same pattern as cycle 127). Root file: `useCryptoWorker.ts` mock and `useThumbnail.test.ts`.
+  - **E2EE message pinning:**
+    - `Icon.tsx`: added `pin` icon (Lucide thumbtack SVG path)
+    - `useMessages.ts`: added `onPin` as 11th param. `"pin"` and `"unpin"` handlers in `processEnvelope`: validates `targetMessageId` is non-empty string ≤ 36 chars; `shouldDisplayMessage = false`; calls `onPinRef.current?.(groupId, targetMessageId, action)`. Same ref pattern as all other control handlers.
+    - `ChatLayout.tsx`:
+      - `ChatMessage` gets `pinned?: boolean`; `Chat` gets `pinnedMessageId?: string`
+      - `PinnedBanner` component: shows above message list when `pinnedMessageId` is set; displays pin icon + "PINNED" + message preview; X button to unpin
+      - `MessageBubble`: pin button on hover for messages with stable id and not deleted; highlighted (orange) when `msg.pinned`; position `top: -10, left: 0`
+      - `MessageList`: accepts `onPin?: (msgId: string) => void` prop; wires to each `MessageBubble` via IIFE
+      - `handleIncomingPin(gId, targetMessageId, action)`: pure `setChats` reducer; sets/clears `pinnedMessageId` and `msg.pinned` flag; no network call from receive path
+      - `sendPin(targetMessageId)`: toggles pin/unpin based on whether `active.pinnedMessageId === targetMessageId`; MLS-encrypts `{type:"pin"|"unpin", targetMessageId}`; `plaintext.fill(0)` in finally; optimistic update
+      - `useMessages` call: 11th arg `handleIncomingPin`
+  - **Security invariants:** Server only sees MLS ciphertext — `targetMessageId` never in plaintext. `shouldDisplayMessage = false` (no render from pin/unpin). No network calls from receive path. JSX text child in banner (no XSS). `plaintext.fill(0)` in finally. targetMessageId validated [1,36] before callback.
+  - **security-auditor:** GREEN. YELLOW-1: no `from` guard on `handleIncomingPin` (benign — pin only sets a pointer/flag, doesn't rewrite content; 2-party MLS authenticates peer). YELLOW-2: banner falls back to `"Message"` when target not in local state (graceful). YELLOW-3: send-side no explicit ID length check (ID is server-issued UUID; receiver fails closed).
+  - **470 frontend tests** (+8: 4 useMessages pin suite, 4 ChatLayout pin suite; was 462); 539 Rust tests (unchanged); tsc clean; biome clean.
+  - **Next cycle:** Post-MVP items: PQ hybrid activation (ADR-0003 Phase A — waits for openmls stable MLS_128_MLKEM768), mobile app scaffold (Tauri 2.x), or more UX features.
+
 ## Current state (2026-06-16, cycle 160 — STABILIZATION: useThumbnail + useRegionDetect tests; delete act() drain fix)
 - **Cycle 160 (commit d66c192):** STABILIZATION — CI GREEN, cargo audit clean (1 allowed: instant/openmls). No open bug issues.
   - **Test gap CLOSED — `useThumbnail.ts` (12 new tests):** Security-relevant hook had no test coverage. New `useThumbnail.test.ts`:
