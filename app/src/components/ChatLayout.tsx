@@ -53,6 +53,8 @@ interface ChatMessage {
 	reactions?: Record<string, string[]>;
 	/** Quote-reply context: the message this is a reply to. */
 	replyTo?: ReplyContext;
+	/** True when the message has been edited after sending. */
+	edited?: boolean;
 }
 
 interface Chat {
@@ -802,12 +804,14 @@ function MessageBubble({
 	highlight,
 	onReact,
 	onReply,
+	onEdit,
 }: {
 	msg: ChatMessage;
 	partner: string;
 	highlight?: string;
 	onReact?: (emoji: string) => void;
 	onReply?: () => void;
+	onEdit?: () => void;
 }) {
 	const isMe = msg.from === "me";
 	const [pickerOpen, setPickerOpen] = useState(false);
@@ -916,6 +920,21 @@ function MessageBubble({
 									) : null)}
 							</span>
 						)}
+						{msg.edited && (
+							<span
+								data-testid="edited-badge"
+								style={{
+									display: "inline-block",
+									marginLeft: 6,
+									fontSize: 10,
+									opacity: 0.6,
+									fontStyle: "italic",
+									verticalAlign: "2px",
+								}}
+							>
+								edited
+							</span>
+						)}
 						{msg.expiresAt && (
 							<div
 								style={{
@@ -933,6 +952,39 @@ function MessageBubble({
 							</div>
 						)}
 					</div>
+
+					{/* Edit button — appears on hover for own messages only */}
+					{onEdit && isMe && hovered && (
+						<div
+							style={{
+								position: "absolute",
+								top: -10,
+								right: 0,
+							}}
+						>
+							<button
+								type="button"
+								onClick={onEdit}
+								aria-label="Edit message"
+								data-testid="edit-button"
+								style={{
+									width: 22,
+									height: 22,
+									borderRadius: "50%",
+									border: "1px solid var(--border-faint)",
+									background: "var(--bg-elevated)",
+									color: "var(--fg-3)",
+									cursor: "pointer",
+									display: "flex",
+									alignItems: "center",
+									justifyContent: "center",
+									padding: 0,
+								}}
+							>
+								<Icon name="pencil" size={11} />
+							</button>
+						</div>
+					)}
 
 					{/* Reply button — appears on hover, aligned opposite to reaction trigger */}
 					{onReply && hovered && (
@@ -1124,6 +1176,7 @@ function MessageList({
 	searchQuery,
 	onReact,
 	onReply,
+	onEdit,
 	firstUnreadIndex,
 }: {
 	messages: ChatMessage[];
@@ -1131,6 +1184,7 @@ function MessageList({
 	searchQuery?: string;
 	onReact?: (msgId: string, emoji: string) => void;
 	onReply?: (msg: ChatMessage) => void;
+	onEdit?: (msg: ChatMessage) => void;
 	firstUnreadIndex?: number;
 }) {
 	const ref = useRef<HTMLDivElement>(null);
@@ -1284,6 +1338,7 @@ function MessageList({
 								: undefined
 						}
 						onReply={onReply ? () => onReply(g.msg) : undefined}
+						onEdit={g.msg.from === "me" && onEdit ? () => onEdit(g.msg) : undefined}
 					/>
 				),
 			)}
@@ -1300,6 +1355,9 @@ function Composer({
 	onTyping,
 	replyTo,
 	onCancelReply,
+	editingMessage,
+	onEdit,
+	onCancelEdit,
 }: {
 	onSend: (text: string) => void;
 	partner: string;
@@ -1313,13 +1371,34 @@ function Composer({
 	replyTo?: { text: string; from: "me" | "them" } | null;
 	/** Called when the user dismisses the reply preview. */
 	onCancelReply?: () => void;
+	/** When set, the composer is in edit mode — pre-filled with this message's text. */
+	editingMessage?: ChatMessage | null;
+	/** Called with the new text when the user confirms an edit. */
+	onEdit?: (newText: string) => void;
+	/** Called when the user cancels an edit. */
+	onCancelEdit?: () => void;
 }) {
 	const [text, setText] = useState("");
-	const send = () => {
-		if (text.trim()) {
-			onSend(text.trim());
+
+	// Pre-fill textarea when entering edit mode; clear when exiting.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: editingMessage.id is the semantic trigger
+	useEffect(() => {
+		if (editingMessage) {
+			setText(editingMessage.text);
+		} else {
 			setText("");
 		}
+	}, [editingMessage?.id]);
+
+	const send = () => {
+		const trimmed = text.trim();
+		if (!trimmed) return;
+		if (editingMessage && onEdit) {
+			onEdit(trimmed);
+		} else {
+			onSend(trimmed);
+		}
+		setText("");
 	};
 	const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
 		if (e.key === "Enter" && !e.shiftKey) {
@@ -1336,6 +1415,54 @@ function Composer({
 				background: "var(--bg-void)",
 			}}
 		>
+			{/* Edit mode bar — shown when editing a sent message */}
+			{editingMessage && (
+				<div
+					data-testid="edit-preview"
+					style={{
+						display: "flex",
+						alignItems: "center",
+						gap: 8,
+						padding: "6px 12px 6px 14px",
+						marginBottom: 4,
+						background: "var(--bg-surface)",
+						border: "1px solid var(--border-soft)",
+						borderRadius: "10px 10px 0 0",
+						borderBottom: "none",
+						fontSize: 12,
+						color: "var(--fg-3)",
+					}}
+				>
+					<Icon name="pencil" size={13} color="var(--fg-3)" />
+					<span
+						style={{
+							flex: 1,
+							overflow: "hidden",
+							textOverflow: "ellipsis",
+							whiteSpace: "nowrap",
+						}}
+					>
+						Editing: <span style={{ color: "var(--fg-2)" }}>{editingMessage.text}</span>
+					</span>
+					<button
+						type="button"
+						onClick={onCancelEdit}
+						aria-label="Cancel edit"
+						data-testid="cancel-edit"
+						style={{
+							background: "none",
+							border: "none",
+							color: "var(--fg-3)",
+							cursor: "pointer",
+							padding: 2,
+							display: "flex",
+							alignItems: "center",
+						}}
+					>
+						<Icon name="x" size={14} />
+					</button>
+				</div>
+			)}
 			{/* Reply preview bar — shown when replying to a message */}
 			{replyTo && (
 				<div
@@ -1389,7 +1516,7 @@ function Composer({
 				style={{
 					background: "var(--bg-surface)",
 					border: "1px solid var(--border-soft)",
-					borderRadius: replyTo ? "0 0 16px 16px" : 16,
+					borderRadius: replyTo || editingMessage ? "0 0 16px 16px" : 16,
 					display: "flex",
 					alignItems: "flex-end",
 					gap: 4,
@@ -1891,6 +2018,7 @@ export function ChatLayout() {
 	const [disappearingTtl, setDisappearingTtl] = useState<TtlOption>(undefined);
 	const [msgSearch, setMsgSearch] = useState("");
 	const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
+	const [editingMessage, setEditingMessage] = useState<ChatMessage | null>(null);
 
 	// Stable ref so handleIncoming (useCallback) can read current activeId without
 	// re-creating on every chat switch — avoids restarting the polling hook.
@@ -2174,6 +2302,60 @@ export function ChatLayout() {
 	}, []);
 
 	/**
+	 * Apply an incoming edit to the target message in the matching chat.
+	 * Only applies to messages from the peer (`from === "them"`) — prevents
+	 * a malicious edit envelope from rewriting our own sent messages.
+	 */
+	const handleIncomingEdit = useCallback(
+		(gId: string, targetMessageId: string, newText: string) => {
+			setChats((cs) =>
+				cs.map((c) => {
+					if (c.mlsGroupId !== gId) return c;
+					const msgs = c.messages.map((m) => {
+						if (m.id !== targetMessageId || m.from !== "them") return m;
+						return { ...m, text: newText, edited: true };
+					});
+					return { ...c, messages: msgs };
+				}),
+			);
+		},
+		[],
+	);
+
+	/**
+	 * Edit a previously sent "me" message: optimistically update local state,
+	 * then MLS-encrypt `{type:"edit", targetMessageId, newText}` and send to peer.
+	 * Fire-and-forget — optimistic update stays on failure.
+	 */
+	const sendEdit = useCallback(
+		(targetMessageId: string, newText: string) => {
+			if (!sessionToken || !active?.mlsGroupId || !active?.mlsIdentityId || !cryptoWorker) return;
+			const { mlsGroupId, mlsIdentityId } = active;
+			// Optimistic local update.
+			setChats((cs) =>
+				cs.map((c) => {
+					if (c.id !== activeId) return c;
+					const msgs = c.messages.map((m) => {
+						if (m.id !== targetMessageId || m.from !== "me") return m;
+						return { ...m, text: newText, edited: true };
+					});
+					return { ...c, messages: msgs };
+				}),
+			);
+			setEditingMessage(null);
+			const plaintext = new TextEncoder().encode(
+				JSON.stringify({ type: "edit", targetMessageId, newText }),
+			);
+			cryptoWorker
+				.mlsEncrypt(mlsIdentityId, mlsGroupId, plaintext)
+				.then(({ ciphertext }) => sendMessageApi(sessionToken, mlsGroupId, ciphertext, undefined))
+				.catch(() => {})
+				.finally(() => plaintext.fill(0));
+		},
+		[active, activeId, cryptoWorker, sessionToken],
+	);
+
+	/**
 	 * Send a read_receipt to the active MLS group for the given envelope IDs.
 	 * Fire-and-forget — a failed receipt is non-fatal (the UI shows "sent" vs "read" state).
 	 * Not a useCallback: re-created each render so it always closes over current state.
@@ -2249,6 +2431,7 @@ export function ChatLayout() {
 		handleIncomingReaction,
 		handleIncomingReadReceipt,
 		handleIncomingDeliveryReceipt,
+		handleIncomingEdit,
 	);
 
 	/** Select a chat and clear its unread badge.
@@ -2257,6 +2440,7 @@ export function ChatLayout() {
 	const handleSelectChat = useCallback((id: string) => {
 		setActiveId(id);
 		setReplyingTo(null);
+		setEditingMessage(null);
 		setChats((cs) =>
 			cs.map((c) => {
 				if (c.id !== id) return c;
@@ -2445,6 +2629,7 @@ export function ChatLayout() {
 						searchQuery={msgSearch}
 						onReact={sendReaction}
 						onReply={setReplyingTo}
+						onEdit={setEditingMessage}
 						firstUnreadIndex={active.firstUnreadAt}
 					/>
 					<Composer
@@ -2456,6 +2641,11 @@ export function ChatLayout() {
 						onTyping={sendTypingIndicator}
 						replyTo={replyingTo ? { text: replyingTo.text, from: replyingTo.from } : null}
 						onCancelReply={() => setReplyingTo(null)}
+						editingMessage={editingMessage}
+						onEdit={(newText) => {
+							if (editingMessage?.id) sendEdit(editingMessage.id, newText);
+						}}
+						onCancelEdit={() => setEditingMessage(null)}
 					/>
 				</main>
 			)}

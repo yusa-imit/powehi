@@ -108,6 +108,9 @@ export type ReactionEmoji = (typeof ALLOWED_REACTION_EMOJIS)[number];
  *                           Receives groupId, messageIds (server UUID array, max 100), and senderDeviceId.
  *                           Fired when the peer's device received and decrypted the message.
  *                           Not forwarded to onMessage.
+ * @param onEdit             Optional callback invoked when an edit envelope is received.
+ *                           Receives groupId, targetMessageId (≤36 chars), newText (≤10000 chars),
+ *                           and senderDeviceId. Not forwarded to onMessage.
  */
 export function useMessages(
 	identityId: string | undefined,
@@ -123,6 +126,12 @@ export function useMessages(
 		senderDeviceId: string,
 	) => void,
 	onDeliveryReceipt?: (groupId: string, messageIds: string[], senderDeviceId: string) => void,
+	onEdit?: (
+		groupId: string,
+		targetMessageId: string,
+		newText: string,
+		senderDeviceId: string,
+	) => void,
 ): void {
 	const { sessionToken } = useAuthStore();
 	const cryptoWorker = useCryptoWorker();
@@ -157,6 +166,11 @@ export function useMessages(
 	const onDeliveryReceiptRef = useRef(onDeliveryReceipt);
 	useEffect(() => {
 		onDeliveryReceiptRef.current = onDeliveryReceipt;
+	});
+
+	const onEditRef = useRef(onEdit);
+	useEffect(() => {
+		onEditRef.current = onEdit;
 	});
 
 	// Track the latest created_at we've seen to avoid re-delivering on restart.
@@ -272,6 +286,19 @@ export function useMessages(
 							)
 						) {
 							onDeliveryReceiptRef.current?.(groupId, parsed.messageIds as string[], env.sender);
+						}
+					} else if (parsed.type === "edit") {
+						// Message edit — never displayed as a new message; callback only when params are valid.
+						shouldDisplayMessage = false;
+						if (
+							typeof parsed.targetMessageId === "string" &&
+							parsed.targetMessageId.length > 0 &&
+							parsed.targetMessageId.length <= 36 &&
+							typeof parsed.newText === "string" &&
+							parsed.newText.length > 0 &&
+							parsed.newText.length <= 10_000
+						) {
+							onEditRef.current?.(groupId, parsed.targetMessageId, parsed.newText, env.sender);
 						}
 					} else if (parsed.type === "text" && typeof parsed.text === "string") {
 						// Structured text message — may include a reply context.

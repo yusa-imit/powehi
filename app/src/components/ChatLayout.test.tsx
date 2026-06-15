@@ -966,4 +966,139 @@ describe("ChatLayout", () => {
 			expect(screen.queryByTestId("reply-preview")).not.toBeInTheDocument();
 		});
 	});
+
+	describe("message editing", () => {
+		it("edit button appears on hover for own ('me') messages but not for peer messages", async () => {
+			// Send a "me" message so it's in the list
+			render(<ChatLayout />);
+			const textarea = screen.getByPlaceholderText(/encrypted/i);
+			fireEvent.change(textarea, { target: { value: "My own message" } });
+			fireEvent.click(screen.getByRole("button", { name: /send message/i }));
+
+			// Find the "me" message bubble (last one appended) and hover it
+			const bubbles = screen.getAllByTestId("message-bubble");
+			const lastBubble = bubbles[bubbles.length - 1];
+			fireEvent.mouseEnter(lastBubble);
+			expect(screen.getByTestId("edit-button")).toBeInTheDocument();
+
+			// Peer messages should not show edit button
+			fireEvent.mouseLeave(lastBubble);
+			// Hover the first bubble (a seed "them" message)
+			fireEvent.mouseEnter(bubbles[0]);
+			expect(screen.queryByTestId("edit-button")).not.toBeInTheDocument();
+		});
+
+		it("clicking edit button on own message shows edit preview in composer", () => {
+			render(<ChatLayout />);
+			const textarea = screen.getByPlaceholderText(/encrypted/i);
+			fireEvent.change(textarea, { target: { value: "Editable message" } });
+			fireEvent.click(screen.getByRole("button", { name: /send message/i }));
+
+			const bubbles = screen.getAllByTestId("message-bubble");
+			const lastBubble = bubbles[bubbles.length - 1];
+			fireEvent.mouseEnter(lastBubble);
+			fireEvent.click(screen.getByTestId("edit-button"));
+
+			expect(screen.getByTestId("edit-preview")).toBeInTheDocument();
+		});
+
+		it("cancel-edit button clears the edit preview", () => {
+			render(<ChatLayout />);
+			const textarea = screen.getByPlaceholderText(/encrypted/i);
+			fireEvent.change(textarea, { target: { value: "To be edited" } });
+			fireEvent.click(screen.getByRole("button", { name: /send message/i }));
+
+			const bubbles = screen.getAllByTestId("message-bubble");
+			fireEvent.mouseEnter(bubbles[bubbles.length - 1]);
+			fireEvent.click(screen.getByTestId("edit-button"));
+			expect(screen.getByTestId("edit-preview")).toBeInTheDocument();
+			fireEvent.click(screen.getByTestId("cancel-edit"));
+			expect(screen.queryByTestId("edit-preview")).not.toBeInTheDocument();
+		});
+
+		it("incoming edit updates matching peer message text and shows edited badge", async () => {
+			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+			let capturedOnEdit:
+				| ((
+						groupId: string,
+						targetMessageId: string,
+						newText: string,
+						senderDeviceId: string,
+				  ) => void)
+				| undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(_id, _gid, onMsg, _onPq, _onTyping, _onReaction, _onRead, _onDelivery, onEdit) => {
+					capturedOnMessage = onMsg;
+					capturedOnEdit = onEdit;
+				},
+			);
+			render(<ChatLayout />);
+
+			const MSG_ID = "edit-target-uuid-1111-111111111111";
+			await act(async () => {
+				capturedOnMessage?.({
+					id: MSG_ID,
+					groupId: "11111111-1111-1111-1111-111111111111",
+					senderId: "peer-device-1",
+					text: "original peer text",
+					ciphertextB64: "Zg==",
+					epochSeq: 1,
+				});
+			});
+
+			// Message appears in the list (also in sidebar preview — use getAllByText)
+			expect(screen.getAllByText("original peer text").length).toBeGreaterThan(0);
+
+			await act(async () => {
+				capturedOnEdit?.(
+					"11111111-1111-1111-1111-111111111111",
+					MSG_ID,
+					"updated peer text",
+					"peer-device-1",
+				);
+			});
+
+			// Updated text must appear; edited badge must be present
+			expect(screen.getAllByText("updated peer text").length).toBeGreaterThan(0);
+			expect(screen.getByTestId("edited-badge")).toBeInTheDocument();
+		});
+
+		it("incoming edit does NOT rewrite 'me' messages (own message protection)", async () => {
+			let capturedOnEdit:
+				| ((
+						groupId: string,
+						targetMessageId: string,
+						newText: string,
+						senderDeviceId: string,
+				  ) => void)
+				| undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(_id, _gid, _onMsg, _onPq, _onTyping, _onReaction, _onRead, _onDelivery, onEdit) => {
+					capturedOnEdit = onEdit;
+				},
+			);
+			render(<ChatLayout />);
+
+			// Send an own message (optimistic update applies regardless of session state)
+			const textarea = screen.getByPlaceholderText(/encrypted/i);
+			fireEvent.change(textarea, { target: { value: "my protected message" } });
+			fireEvent.click(screen.getByRole("button", { name: /send message/i }));
+			// Message appears in bubble and sidebar — use getAllByText
+			expect(screen.getAllByText("my protected message").length).toBeGreaterThan(0);
+
+			// A peer sends an edit targeting a nonexistent ID — should be a no-op
+			await act(async () => {
+				capturedOnEdit?.(
+					"11111111-1111-1111-1111-111111111111",
+					"fake-id-that-does-not-exist",
+					"hacked content",
+					"peer-device-1",
+				);
+			});
+
+			// Own message must remain; hacked content must not appear anywhere
+			expect(screen.getAllByText("my protected message").length).toBeGreaterThan(0);
+			expect(screen.queryByText("hacked content")).not.toBeInTheDocument();
+		});
+	});
 });

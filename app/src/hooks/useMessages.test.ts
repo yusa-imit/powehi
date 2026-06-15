@@ -1141,3 +1141,195 @@ describe("useMessages — replyTo handling", () => {
 		expect(received[0].replyTo).toBeUndefined();
 	});
 });
+
+describe("useMessages — edit handling", () => {
+	const TARGET_MSG_ID = "eeeeeeee-eeee-eeee-eeee-000000000001";
+
+	function makeEditEnvelope(): Envelope {
+		return {
+			id: ENV_ID,
+			group_id: GROUP_ID,
+			sender: SENDER_ID,
+			recipient: null,
+			message_type: "Application",
+			ciphertext: [20, 21, 22],
+			epoch: null,
+			created_at: "2026-06-15T12:00:00Z",
+			expires_at: null,
+		};
+	}
+
+	afterEach(() => {
+		mockWorker.mlsDecrypt.mockResolvedValue({
+			plaintext: new TextEncoder().encode(DECRYPTED_TEXT),
+		});
+	});
+
+	it("invokes onEdit with groupId, targetMessageId, newText, and senderDeviceId", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "edit", targetMessageId: TARGET_MSG_ID, newText: "updated text" }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeEditEnvelope()]);
+		const onEdit = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onEdit,
+			),
+		);
+
+		await waitFor(() => {
+			expect(onEdit).toHaveBeenCalledWith(GROUP_ID, TARGET_MSG_ID, "updated text", SENDER_ID);
+		});
+	});
+
+	it("does NOT forward edit envelope to onMessage", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "edit", targetMessageId: TARGET_MSG_ID, newText: "updated text" }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeEditEnvelope()]);
+		const onMessage = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				onMessage,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				vi.fn(),
+			),
+		);
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		await act(async () => {});
+		expect(onMessage).not.toHaveBeenCalled();
+	});
+
+	it("does NOT call onEdit when targetMessageId is empty string", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "edit", targetMessageId: "", newText: "updated text" }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeEditEnvelope()]);
+		const onEdit = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onEdit,
+			),
+		);
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onEdit).not.toHaveBeenCalled();
+	});
+
+	it("does NOT call onEdit when targetMessageId exceeds 36 chars", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "edit", targetMessageId: "x".repeat(37), newText: "updated text" }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeEditEnvelope()]);
+		const onEdit = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onEdit,
+			),
+		);
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onEdit).not.toHaveBeenCalled();
+	});
+
+	it("does NOT call onEdit when newText is empty string", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "edit", targetMessageId: TARGET_MSG_ID, newText: "" }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeEditEnvelope()]);
+		const onEdit = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onEdit,
+			),
+		);
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onEdit).not.toHaveBeenCalled();
+	});
+
+	it("does NOT call onEdit when newText exceeds 10000 chars", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({
+					type: "edit",
+					targetMessageId: TARGET_MSG_ID,
+					newText: "x".repeat(10_001),
+				}),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeEditEnvelope()]);
+		const onEdit = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onEdit,
+			),
+		);
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onEdit).not.toHaveBeenCalled();
+	});
+});
