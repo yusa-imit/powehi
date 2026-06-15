@@ -17,6 +17,27 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-15, cycle 157 — FEATURE: E2EE quote reply)
+- **Cycle 157 (commit 7256012):** FEATURE — Post-MVP UX: end-to-end encrypted quote reply.
+  - **`ReplyContext` type (new, exported from `useMessages.ts`):** `{ messageId: string; excerpt: string }`. Embedded in `IncomingMessage.replyTo`.
+  - **`useMessages.ts`:** New `type === "text"` JSON branch in `processEnvelope` — parses structured `{ type, text, replyTo }` messages. Validates: `messageId` is string, length > 0 and ≤ 36 chars; `excerpt` is string, length > 0; excerpt capped at 100 chars on receive. Backward compat: legacy plain-text messages still work (non-JSON throws → text = decoded).
+  - **`ChatLayout.tsx`:**
+    - `ChatMessage` interface gains `replyTo?: ReplyContext`
+    - `replyingTo: ChatMessage | null` state; cleared on chat switch, after send
+    - `MessageBubble`: hover-revealed "Reply" button (`data-testid="reply-button"`, `onMouseEnter/Leave` on outer div with `data-testid="message-bubble"`); quoted block above message text when `msg.replyTo` present (`data-testid="reply-quote"`, blue border-left, excerpt as JSX text child — no XSS)
+    - `MessageList`: `onReply?: (msg: ChatMessage) => void` prop threaded to each `MessageBubble`
+    - `Composer`: `replyTo` + `onCancelReply` props; reply preview bar above composer (`data-testid="reply-preview"`, `data-testid="cancel-reply"`) when replying; composer border-radius adapts to preview bar presence
+    - `sendMessage`: when `replyingTo.id` is set, encodes payload as `JSON.stringify({ type: "text", text, replyTo: { messageId, excerpt: text.slice(0,100) } })` → MLS-encrypts → server sees only ciphertext; plain text when no reply context (backward compat)
+    - `handleIncoming`: passes `msg.replyTo` from `IncomingMessage` into `ChatMessage`
+  - **`Icon.tsx`:** Added `reply` icon (corner-up-left SVG path)
+  - **Security invariants:** Server only receives MLS ciphertext — `replyTo` fields never sent in plaintext. Excerpt capped at 100 chars both on send and receive (defense-in-depth). No XSS (JSX text children, not innerHTML). No plaintext logging. `replyContext` only set when `replyingTo.id` is defined (no undefined messageId). `replyTo.excerpt` is display-only (no re-fetch, no re-decrypt).
+  - **security-auditor:** GREEN. YELLOW-1 (advisory): quote excerpt is unauthenticated relative to `messageId` (inherent in client-side quote previews). YELLOW-2 (informational): `replyTo` not persisted to Dexie — reduces at-rest data (non-issue).
+  - **424 frontend tests** (+9: 5 in useMessages replyTo suite, 4 in ChatLayout quote reply suite; was 415); tsc clean; biome clean.
+  - **Deferred advisory YELLOWs:**
+    - Quote unauthenticated attribution (inherent, non-blocking)
+    - `replyTo` context lost on page reload (not persisted to Dexie, functional note)
+  - **Next cycle:** Post-MVP items: PQ hybrid activation (ADR-0003 Phase A — waits for openmls stable MLS_128_MLKEM768), mobile app scaffold (Tauri 2.x), or message editing.
+
 ## Current state (2026-06-15, cycle 156 — FEATURE: "New Messages" divider + CI biome fix)
 - **Cycle 156 (commit 55fba6d):** FEATURE + CI fix
   - **CI RED fixed (commit eee81b9):** Biome lint failure on `useMessages.ts` and `useMessages.test.ts` — `ALLOWED_REACTION_EMOJIS` array and `onReaction`/`onReadReceipt`/`onDeliveryReceipt` function params were written in multi-line form but biome collapses to single-line when under print-width. Same recurring pattern as cycle 152. Fix: ran biome format --write on both files.
