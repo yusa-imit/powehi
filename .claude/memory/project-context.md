@@ -17,6 +17,16 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-15, cycle 155 — STABILIZATION: suppress invalid control messages from chat UI)
+- **Cycle 155 (commit 0d5d6f6):** STABILIZATION — CI GREEN, cargo audit clean (1 allowed: instant/openmls). No open bug issues. 539 Rust tests; 411 frontend tests.
+  - **Root bug fixed — `useMessages.ts` control message fallthrough:** When `reaction`/`read_receipt`/`delivery_receipt` matched the type discriminator but failed param validation, `shouldDisplayMessage` stayed `true` and the raw decrypted JSON blob was passed to `onMessage`, appearing in the chat bubble. Fix: set `shouldDisplayMessage = false` immediately on type match, gate the callback with the inner validation block (same pattern as `typing_indicator`). All three control types restructured.
+  - **+3 new invariant tests:** `does NOT forward invalid reaction (bad emoji) to onMessage`, `does NOT forward invalid read_receipt (empty messageIds) to onMessage`, `does NOT forward invalid delivery_receipt (non-string messageIds) to onMessage` — each uses `await act(async () => {})` drain after waitFor to eliminate act() warnings.
+  - **security-auditor:** GREEN. Fix reduces UI-injection surface (malformed control JSON no longer reaches render path). No plaintext logging, no XSS. Existing validation predicates unchanged (bounds/allowlist same as before).
+  - **Recurring pattern:** `await act(async () => {})` after `waitFor` drains Zustand subscription effects for the last test in a describe block — add to any new "not called" test that is the last in its block.
+  - **411 frontend tests** (+3; was 408); 539 Rust tests (unchanged); tsc clean; Biome clean.
+  - **Delivery receipts (cycle 154 — commit e85442c):** FEATURE — sent→delivered→read state machine with `delivery_receipt` MLS message type. 408 frontend tests (+9 delivery receipt tests vs cycle 153's 399).
+  - **Next cycle:** Post-MVP items: PQ hybrid activation (ADR-0003 Phase A — waits for openmls stable MLS_128_MLKEM768), mobile app scaffold (Tauri 2.x).
+
 ## Current state (2026-06-15, cycle 153 — FEATURE: E2EE read receipts via MLS read_receipt messages)
 - **Cycle 153 (commit 0fde7b5):** FEATURE — Post-MVP UX: end-to-end encrypted read receipts.
   - **`app/src/hooks/useMessages.ts`** (MODIFIED):
