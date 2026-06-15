@@ -789,4 +789,129 @@ describe("ChatLayout", () => {
 			useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null });
 		});
 	});
+
+	describe("new messages divider", () => {
+		it("divider does not appear in the active chat when a message arrives", async () => {
+			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(_identityId, _groupId, onMessage) => {
+					capturedOnMessage = onMessage;
+				},
+			);
+			render(<ChatLayout />);
+
+			// Maya is the active chat; message for Maya should NOT show the divider
+			await act(async () => {
+				capturedOnMessage?.({
+					id: "env-ndiv-1",
+					senderId: "device-a",
+					groupId: "11111111-1111-1111-1111-111111111111",
+					text: "no divider here",
+					ciphertextB64: "dGVzdA==",
+					epochSeq: 1,
+				});
+			});
+
+			expect(screen.queryByTestId("new-messages-divider")).not.toBeInTheDocument();
+		});
+
+		it("divider appears in a background chat when it receives its first unread message", async () => {
+			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(_identityId, _groupId, onMessage) => {
+					capturedOnMessage = onMessage;
+				},
+			);
+			render(<ChatLayout />);
+
+			// Switch to Jordan — Maya becomes background
+			fireEvent.click(screen.getAllByText("Jordan")[0]);
+
+			// Send a message for Maya (now background)
+			await act(async () => {
+				capturedOnMessage?.({
+					id: "env-ndiv-2",
+					senderId: "device-b",
+					groupId: "11111111-1111-1111-1111-111111111111",
+					text: "new for background maya",
+					ciphertextB64: "dGVzdA==",
+					epochSeq: 2,
+				});
+			});
+
+			// Switch back to Maya — divider should now be visible
+			fireEvent.click(screen.getAllByText("Maya Akana")[0]);
+
+			expect(screen.getByTestId("new-messages-divider")).toBeInTheDocument();
+		});
+
+		it("divider is removed after switching back to the chat", async () => {
+			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(_identityId, _groupId, onMessage) => {
+					capturedOnMessage = onMessage;
+				},
+			);
+			render(<ChatLayout />);
+
+			// Move to Jordan and send a message to Maya (background)
+			fireEvent.click(screen.getAllByText("Jordan")[0]);
+			await act(async () => {
+				capturedOnMessage?.({
+					id: "env-ndiv-3",
+					senderId: "device-c",
+					groupId: "11111111-1111-1111-1111-111111111111",
+					text: "clear me later",
+					ciphertextB64: "dGVzdA==",
+					epochSeq: 3,
+				});
+			});
+
+			// First switch back to Maya — divider visible
+			fireEvent.click(screen.getAllByText("Maya Akana")[0]);
+			expect(screen.getByTestId("new-messages-divider")).toBeInTheDocument();
+
+			// Switch away and back — divider should be gone now
+			fireEvent.click(screen.getAllByText("Jordan")[0]);
+			fireEvent.click(screen.getAllByText("Maya Akana")[0]);
+			expect(screen.queryByTestId("new-messages-divider")).not.toBeInTheDocument();
+		});
+
+		it("subsequent unread messages do not duplicate the divider", async () => {
+			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(_identityId, _groupId, onMessage) => {
+					capturedOnMessage = onMessage;
+				},
+			);
+			render(<ChatLayout />);
+
+			// Move to Jordan — Maya is background
+			fireEvent.click(screen.getAllByText("Jordan")[0]);
+			await act(async () => {
+				capturedOnMessage?.({
+					id: "env-ndiv-4a",
+					senderId: "device-d",
+					groupId: "11111111-1111-1111-1111-111111111111",
+					text: "first new msg",
+					ciphertextB64: "dGVzdA==",
+					epochSeq: 4,
+				});
+				capturedOnMessage?.({
+					id: "env-ndiv-4b",
+					senderId: "device-d",
+					groupId: "11111111-1111-1111-1111-111111111111",
+					text: "second new msg",
+					ciphertextB64: "dGVzdA==",
+					epochSeq: 5,
+				});
+			});
+
+			fireEvent.click(screen.getAllByText("Maya Akana")[0]);
+			// Only one divider — not one per new message
+			expect(screen.getAllByTestId("new-messages-divider")).toHaveLength(1);
+
+			await act(async () => {});
+		});
+	});
 });

@@ -72,6 +72,8 @@ interface Chat {
 	mlsIdentityId?: string;
 	/** 16-char PQ group binding hex (§5.3 Phase B). Set after pq_init exchange completes. */
 	pqBindingHex?: string;
+	/** Index into messages[] of the first unread message. Cleared when the chat is selected. */
+	firstUnreadAt?: number;
 }
 
 // ── Disappearing messages helpers ──────────────────────────────────────────────
@@ -107,7 +109,11 @@ const SEED_CHATS: Chat[] = [
 		mlsGroupId: "11111111-1111-1111-1111-111111111111",
 		mlsIdentityId: "22222222-2222-2222-2222-222222222222",
 		messages: [
-			{ day: "Yesterday", from: "them", text: "Hey — are you free tomorrow morning?" },
+			{
+				day: "Yesterday",
+				from: "them",
+				text: "Hey — are you free tomorrow morning?",
+			},
 			{
 				from: "me",
 				text: "Should be. What time?",
@@ -147,7 +153,13 @@ const SEED_CHATS: Chat[] = [
 		mlsGroupId: "33333333-3333-3333-3333-333333333333",
 		messages: [
 			{ day: "Today", from: "them", text: "split for last night" },
-			{ from: "them", text: "receipt.pdf", continued: true, last: true, time: "12:08" },
+			{
+				from: "them",
+				text: "receipt.pdf",
+				continued: true,
+				last: true,
+				time: "12:08",
+			},
 		],
 	},
 	{
@@ -161,7 +173,14 @@ const SEED_CHATS: Chat[] = [
 		unread: 0,
 		messages: [
 			{ day: "Yesterday", from: "them", text: "tomorrow 10am for the review?" },
-			{ from: "me", text: "see you tmrw", continued: true, last: true, time: "17:42", read: true },
+			{
+				from: "me",
+				text: "see you tmrw",
+				continued: true,
+				last: true,
+				time: "17:42",
+				read: true,
+			},
 		],
 	},
 	{
@@ -450,7 +469,14 @@ function ChatRow({
 						{chat.time}
 					</span>
 				</div>
-				<div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2 }}>
+				<div
+					style={{
+						display: "flex",
+						alignItems: "center",
+						gap: 6,
+						marginTop: 2,
+					}}
+				>
 					{chat.typing ? (
 						<span
 							style={{
@@ -743,7 +769,13 @@ function ConversationHeader({
 						<div style={{ fontSize: 11, color: "var(--fg-3)", marginTop: 1 }}>
 							{chat.online ? "online" : `last seen ${chat.lastSeen ?? "recently"}`}
 							{chat.typing && (
-								<span style={{ color: "#FF9E52", marginLeft: 8, fontStyle: "italic" }}>
+								<span
+									style={{
+										color: "#FF9E52",
+										marginLeft: 8,
+										fontStyle: "italic",
+									}}
+								>
 									· typing
 								</span>
 							)}
@@ -997,13 +1029,20 @@ function MessageBubble({
 // messages use their position relative to day label.
 type Group =
 	| { type: "day"; label: string; key: string }
-	| { type: "msg"; msg: ChatMessage; key: string };
+	| { type: "msg"; msg: ChatMessage; key: string }
+	| { type: "new-messages"; key: string };
 
-function buildGroups(messages: ChatMessage[]): Group[] {
+function buildGroups(messages: ChatMessage[], firstUnreadIndex?: number): Group[] {
 	const groups: Group[] = [];
 	let lastDay: string | undefined = undefined;
 	let dayMsgCount = 0;
-	for (const m of messages) {
+	let markerInserted = false;
+	for (let i = 0; i < messages.length; i++) {
+		const m = messages[i];
+		if (firstUnreadIndex !== undefined && i === firstUnreadIndex && !markerInserted) {
+			groups.push({ type: "new-messages", key: "new-messages-divider" });
+			markerInserted = true;
+		}
 		if (m.day && m.day !== lastDay) {
 			groups.push({ type: "day", label: m.day, key: `day-${m.day}` });
 			lastDay = m.day;
@@ -1023,11 +1062,13 @@ function MessageList({
 	partner,
 	searchQuery,
 	onReact,
+	firstUnreadIndex,
 }: {
 	messages: ChatMessage[];
 	partner: string;
 	searchQuery?: string;
 	onReact?: (msgId: string, emoji: string) => void;
+	firstUnreadIndex?: number;
 }) {
 	const ref = useRef<HTMLDivElement>(null);
 
@@ -1035,7 +1076,7 @@ function MessageList({
 		if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
 	});
 
-	const groups = buildGroups(messages);
+	const groups = buildGroups(messages, firstUnreadIndex);
 
 	const matchCount = searchQuery
 		? messages.filter((m) => !m.media && m.text.toLowerCase().includes(searchQuery.toLowerCase()))
@@ -1126,6 +1167,44 @@ function MessageList({
 						}}
 					>
 						{g.label}
+					</div>
+				) : g.type === "new-messages" ? (
+					<div
+						key={g.key}
+						data-testid="new-messages-divider"
+						style={{
+							display: "flex",
+							alignItems: "center",
+							gap: 10,
+							margin: "8px 0",
+						}}
+					>
+						<div
+							style={{
+								flex: 1,
+								height: 1,
+								background: "rgba(255,138,61,0.35)",
+							}}
+						/>
+						<span
+							style={{
+								fontSize: 10,
+								fontWeight: 600,
+								letterSpacing: "0.12em",
+								color: "#FF8A3D",
+								textTransform: "uppercase",
+								whiteSpace: "nowrap",
+							}}
+						>
+							New Messages
+						</span>
+						<div
+							style={{
+								flex: 1,
+								height: 1,
+								background: "rgba(255,138,61,0.35)",
+							}}
+						/>
 					</div>
 				) : (
 					<MessageBubble
@@ -1799,12 +1878,16 @@ export function ChatLayout() {
 					// activeIdRef.current reflects the current selection without making this
 					// callback re-create on every chat switch.
 					const isActive = c.id === activeIdRef.current;
+					// Track the index of the first unread message so MessageList can render
+					// the "New Messages" divider at the right position.
+					const firstUnreadAt = !isActive && c.unread === 0 ? msgs.length - 1 : c.firstUnreadAt;
 					return {
 						...c,
 						messages: msgs,
 						last: displayText,
 						time,
 						unread: isActive ? 0 : c.unread + 1,
+						firstUnreadAt: isActive ? undefined : firstUnreadAt,
 					};
 				}),
 			);
@@ -1893,7 +1976,10 @@ export function ChatLayout() {
 						const existing = m.reactions ?? {};
 						const senders = existing[emoji] ?? [];
 						if (senders.includes(senderId)) return m;
-						return { ...m, reactions: { ...existing, [emoji]: [...senders, senderId] } };
+						return {
+							...m,
+							reactions: { ...existing, [emoji]: [...senders, senderId] },
+						};
 					});
 					return { ...c, messages: msgs };
 				}),
@@ -2044,10 +2130,17 @@ export function ChatLayout() {
 		handleIncomingDeliveryReceipt,
 	);
 
-	/** Select a chat and clear its unread badge atomically. */
+	/** Select a chat and clear its unread badge.
+	 * First visit (unread > 0): clears badge, keeps divider visible.
+	 * Subsequent visit (unread === 0): clears divider too. */
 	const handleSelectChat = useCallback((id: string) => {
 		setActiveId(id);
-		setChats((cs) => cs.map((c) => (c.id === id ? { ...c, unread: 0 } : c)));
+		setChats((cs) =>
+			cs.map((c) => {
+				if (c.id !== id) return c;
+				return c.unread > 0 ? { ...c, unread: 0 } : { ...c, firstUnreadAt: undefined };
+			}),
+		);
 	}, []);
 
 	// Add a new chat entry when another device invites us (Welcome envelope received).
@@ -2217,6 +2310,7 @@ export function ChatLayout() {
 						partner={active.name}
 						searchQuery={msgSearch}
 						onReact={sendReaction}
+						firstUnreadIndex={active.firstUnreadAt}
 					/>
 					<Composer
 						onSend={sendMessage}
