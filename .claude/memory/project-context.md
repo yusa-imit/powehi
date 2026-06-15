@@ -17,6 +17,20 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-15, cycle 156 — FEATURE: "New Messages" divider + CI biome fix)
+- **Cycle 156 (commit 55fba6d):** FEATURE + CI fix
+  - **CI RED fixed (commit eee81b9):** Biome lint failure on `useMessages.ts` and `useMessages.test.ts` — `ALLOWED_REACTION_EMOJIS` array and `onReaction`/`onReadReceipt`/`onDeliveryReceipt` function params were written in multi-line form but biome collapses to single-line when under print-width. Same recurring pattern as cycle 152. Fix: ran biome format --write on both files.
+  - **"New Messages" divider (commit 55fba6d):** Post-MVP UX: horizontal orange separator at first-unread message position.
+    - **`Chat` interface**: added `firstUnreadAt?: number` (index into `messages[]` of first unread message — purely in-memory, never persisted, never sent to server).
+    - **`buildGroups(messages, firstUnreadIndex?)`**: when `firstUnreadIndex` matches current message index, inserts `{ type: "new-messages" }` group entry; max one per call.
+    - **`MessageList`**: new `firstUnreadIndex?: number` prop; renders static "New Messages" horizontal divider (orange accretion accent, letterSpaced caps) at the correct position. `data-testid="new-messages-divider"`.
+    - **`handleIncoming`**: on first unread message (`!isActive && c.unread === 0`), sets `firstUnreadAt = msgs.length - 1`. Subsequent unread messages don't change it. Active chats set `firstUnreadAt: undefined`.
+    - **`handleSelectChat`** (two-visit behaviour): first visit (unread > 0) clears badge only; second visit (unread === 0) clears `firstUnreadAt` removing the divider.
+  - **security-auditor:** GREEN — no RED or YELLOW. `firstUnreadAt` is a numeric index (no content), divider renders static string (no user data in JSX), never persisted to IndexedDB, never sent to server, no XSS risk.
+  - **415 frontend tests** (+4: divider absent for active chat, divider appears for background chat, divider removed on second visit, only one divider for multiple unread; was 411); tsc clean; biome clean.
+  - **Recurring pattern (CI):** Biome collapses multi-arg calls and array literals to single-line when they fit under print-width. Always run `biome format --write` before committing any file you've hand-written. The CI biome check (`pnpm --filter app exec biome check`) must be the final gate — don't rely on format-on-save alone.
+  - **Next cycle:** Post-MVP items: PQ hybrid activation (ADR-0003 Phase A — waits for openmls stable MLS_128_MLKEM768), mobile app scaffold (Tauri 2.x).
+
 ## Current state (2026-06-15, cycle 155 — STABILIZATION: suppress invalid control messages from chat UI)
 - **Cycle 155 (commit 0d5d6f6):** STABILIZATION — CI GREEN, cargo audit clean (1 allowed: instant/openmls). No open bug issues. 539 Rust tests; 411 frontend tests.
   - **Root bug fixed — `useMessages.ts` control message fallthrough:** When `reaction`/`read_receipt`/`delivery_receipt` matched the type discriminator but failed param validation, `shouldDisplayMessage` stayed `true` and the raw decrypted JSON blob was passed to `onMessage`, appearing in the chat bubble. Fix: set `shouldDisplayMessage = false` immediately on type match, gate the callback with the inner validation block (same pattern as `typing_indicator`). All three control types restructured.
