@@ -1047,3 +1047,97 @@ describe("useMessages — delivery_receipt handling", () => {
 		expect(onMessage).not.toHaveBeenCalled();
 	});
 });
+
+describe("useMessages — replyTo handling", () => {
+	it("parses replyTo from a structured text message", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({
+					type: "text",
+					text: "That is a great idea",
+					replyTo: { messageId: "orig-uuid-1234", excerpt: "Original message text" },
+				}),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
+
+		const received: IncomingMessage[] = [];
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
+
+		await waitFor(() => expect(received).toHaveLength(1));
+		expect(received[0].text).toBe("That is a great idea");
+		expect(received[0].replyTo).toEqual({
+			messageId: "orig-uuid-1234",
+			excerpt: "Original message text",
+		});
+	});
+
+	it("clamps excerpt to 100 chars", async () => {
+		const longExcerpt = "a".repeat(150);
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({
+					type: "text",
+					text: "Reply",
+					replyTo: { messageId: "mid-1", excerpt: longExcerpt },
+				}),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
+
+		const received: IncomingMessage[] = [];
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
+
+		await waitFor(() => expect(received).toHaveLength(1));
+		expect(received[0].replyTo?.excerpt).toBe("a".repeat(100));
+	});
+
+	it("ignores replyTo with messageId longer than 36 chars", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({
+					type: "text",
+					text: "Reply",
+					replyTo: { messageId: "x".repeat(37), excerpt: "some text" },
+				}),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
+
+		const received: IncomingMessage[] = [];
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
+
+		await waitFor(() => expect(received).toHaveLength(1));
+		expect(received[0].replyTo).toBeUndefined();
+	});
+
+	it("ignores replyTo with empty messageId", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({
+					type: "text",
+					text: "Reply",
+					replyTo: { messageId: "", excerpt: "some text" },
+				}),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
+
+		const received: IncomingMessage[] = [];
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
+
+		await waitFor(() => expect(received).toHaveLength(1));
+		expect(received[0].replyTo).toBeUndefined();
+	});
+
+	it("plain text (non-JSON) message has undefined replyTo", async () => {
+		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
+
+		const received: IncomingMessage[] = [];
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
+
+		await waitFor(() => expect(received).toHaveLength(1));
+		expect(received[0].text).toBe(DECRYPTED_TEXT);
+		expect(received[0].replyTo).toBeUndefined();
+	});
+});

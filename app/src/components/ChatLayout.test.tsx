@@ -914,4 +914,56 @@ describe("ChatLayout", () => {
 			await act(async () => {});
 		});
 	});
+
+	describe("quote reply", () => {
+		it("incoming message with replyTo renders a reply-quote block", async () => {
+			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(_identityId, _groupId, onMessage) => {
+					capturedOnMessage = onMessage;
+				},
+			);
+			render(<ChatLayout />);
+
+			await act(async () => {
+				capturedOnMessage?.({
+					id: "env-reply-1",
+					senderId: "device-x",
+					groupId: "11111111-1111-1111-1111-111111111111",
+					text: "That is a great idea",
+					ciphertextB64: "dGVzdA==",
+					epochSeq: 1,
+					replyTo: { messageId: "orig-uuid", excerpt: "Original message text" },
+				});
+			});
+
+			expect(screen.getByTestId("reply-quote")).toBeInTheDocument();
+			expect(screen.getByTestId("reply-quote").textContent).toBe("Original message text");
+		});
+
+		it("reply button appears on message bubble hover", () => {
+			render(<ChatLayout />);
+			const bubbles = screen.getAllByTestId("message-bubble");
+			fireEvent.mouseEnter(bubbles[0]);
+			expect(screen.getByTestId("reply-button")).toBeInTheDocument();
+		});
+
+		it("clicking reply button shows reply preview in composer", () => {
+			render(<ChatLayout />);
+			const bubbles = screen.getAllByTestId("message-bubble");
+			fireEvent.mouseEnter(bubbles[0]);
+			fireEvent.click(screen.getByTestId("reply-button"));
+			expect(screen.getByTestId("reply-preview")).toBeInTheDocument();
+		});
+
+		it("cancel-reply button clears the reply preview", () => {
+			render(<ChatLayout />);
+			const bubbles = screen.getAllByTestId("message-bubble");
+			fireEvent.mouseEnter(bubbles[0]);
+			fireEvent.click(screen.getByTestId("reply-button"));
+			expect(screen.getByTestId("reply-preview")).toBeInTheDocument();
+			fireEvent.click(screen.getByTestId("cancel-reply"));
+			expect(screen.queryByTestId("reply-preview")).not.toBeInTheDocument();
+		});
+	});
 });

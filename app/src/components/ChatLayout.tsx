@@ -17,6 +17,7 @@ import {
 	ALLOWED_REACTION_EMOJIS,
 	type IncomingMessage,
 	type MediaPayload,
+	type ReplyContext,
 	useMessages,
 } from "../hooks/useMessages";
 import { usePersistentMessages } from "../hooks/usePersistentMessages";
@@ -50,6 +51,8 @@ interface ChatMessage {
 	media?: MediaPayload;
 	/** Emoji reactions: emoji → array of sender device IDs (deduped). */
 	reactions?: Record<string, string[]>;
+	/** Quote-reply context: the message this is a reply to. */
+	replyTo?: ReplyContext;
 }
 
 interface Chat {
@@ -798,24 +801,30 @@ function MessageBubble({
 	partner,
 	highlight,
 	onReact,
+	onReply,
 }: {
 	msg: ChatMessage;
 	partner: string;
 	highlight?: string;
 	onReact?: (emoji: string) => void;
+	onReply?: () => void;
 }) {
 	const isMe = msg.from === "me";
 	const [pickerOpen, setPickerOpen] = useState(false);
+	const [hovered, setHovered] = useState(false);
 	const reactionEntries = msg.reactions ? Object.entries(msg.reactions) : [];
 
 	return (
 		<div
+			data-testid="message-bubble"
 			style={{
 				display: "flex",
 				flexDirection: "column",
 				alignItems: isMe ? "flex-end" : "flex-start",
 				marginTop: msg.continued ? 2 : 8,
 			}}
+			onMouseEnter={() => setHovered(true)}
+			onMouseLeave={() => setHovered(false)}
 		>
 			<div
 				style={{
@@ -853,6 +862,25 @@ function MessageBubble({
 									}),
 						}}
 					>
+						{msg.replyTo && (
+							<div
+								data-testid="reply-quote"
+								style={{
+									borderLeft: `2px solid ${isMe ? "rgba(42,17,0,0.4)" : "rgba(168,200,255,0.5)"}`,
+									paddingLeft: 8,
+									marginBottom: 6,
+									fontSize: 12,
+									lineHeight: 1.4,
+									color: isMe ? "rgba(42,17,0,0.65)" : "var(--fg-3)",
+									overflow: "hidden",
+									textOverflow: "ellipsis",
+									whiteSpace: "nowrap",
+									maxWidth: "100%",
+								}}
+							>
+								{msg.replyTo.excerpt}
+							</div>
+						)}
 						{msg.media ? (
 							<MediaImage media={msg.media} />
 						) : (
@@ -905,6 +933,39 @@ function MessageBubble({
 							</div>
 						)}
 					</div>
+
+					{/* Reply button — appears on hover, aligned opposite to reaction trigger */}
+					{onReply && hovered && (
+						<div
+							style={{
+								position: "absolute",
+								bottom: -10,
+								...(isMe ? { right: -28 } : { left: -28 }),
+							}}
+						>
+							<button
+								type="button"
+								onClick={onReply}
+								aria-label="Reply"
+								data-testid="reply-button"
+								style={{
+									width: 22,
+									height: 22,
+									borderRadius: "50%",
+									border: "1px solid var(--border-faint)",
+									background: "var(--bg-elevated)",
+									color: "var(--fg-3)",
+									cursor: "pointer",
+									display: "flex",
+									alignItems: "center",
+									justifyContent: "center",
+									padding: 0,
+								}}
+							>
+								<Icon name="reply" size={11} />
+							</button>
+						</div>
+					)}
 
 					{/* Reaction picker trigger — only shown when message has a stable ID */}
 					{onReact && msg.id && (
@@ -1062,12 +1123,14 @@ function MessageList({
 	partner,
 	searchQuery,
 	onReact,
+	onReply,
 	firstUnreadIndex,
 }: {
 	messages: ChatMessage[];
 	partner: string;
 	searchQuery?: string;
 	onReact?: (msgId: string, emoji: string) => void;
+	onReply?: (msg: ChatMessage) => void;
 	firstUnreadIndex?: number;
 }) {
 	const ref = useRef<HTMLDivElement>(null);
@@ -1220,6 +1283,7 @@ function MessageList({
 									}
 								: undefined
 						}
+						onReply={onReply ? () => onReply(g.msg) : undefined}
 					/>
 				),
 			)}
@@ -1234,6 +1298,8 @@ function Composer({
 	onToggleTtl,
 	onPhoto,
 	onTyping,
+	replyTo,
+	onCancelReply,
 }: {
 	onSend: (text: string) => void;
 	partner: string;
@@ -1243,6 +1309,10 @@ function Composer({
 	onPhoto?: () => void;
 	/** Called on each keystroke so ChatLayout can throttle-send typing_indicator messages. */
 	onTyping?: () => void;
+	/** When set, a reply preview bar is shown above the input. */
+	replyTo?: { text: string; from: "me" | "them" } | null;
+	/** Called when the user dismisses the reply preview. */
+	onCancelReply?: () => void;
 }) {
 	const [text, setText] = useState("");
 	const send = () => {
@@ -1266,11 +1336,60 @@ function Composer({
 				background: "var(--bg-void)",
 			}}
 		>
+			{/* Reply preview bar — shown when replying to a message */}
+			{replyTo && (
+				<div
+					data-testid="reply-preview"
+					style={{
+						display: "flex",
+						alignItems: "center",
+						gap: 8,
+						padding: "6px 12px 6px 14px",
+						marginBottom: 4,
+						background: "var(--bg-surface)",
+						border: "1px solid var(--border-soft)",
+						borderRadius: "10px 10px 0 0",
+						borderBottom: "none",
+						fontSize: 12,
+						color: "var(--fg-3)",
+					}}
+				>
+					<Icon name="reply" size={13} color="var(--fg-3)" />
+					<span
+						style={{
+							flex: 1,
+							overflow: "hidden",
+							textOverflow: "ellipsis",
+							whiteSpace: "nowrap",
+						}}
+					>
+						{replyTo.from === "me" ? "You" : partner.split(" ")[0]}:{" "}
+						<span style={{ color: "var(--fg-2)" }}>{replyTo.text}</span>
+					</span>
+					<button
+						type="button"
+						onClick={onCancelReply}
+						aria-label="Cancel reply"
+						data-testid="cancel-reply"
+						style={{
+							background: "none",
+							border: "none",
+							color: "var(--fg-3)",
+							cursor: "pointer",
+							padding: 2,
+							display: "flex",
+							alignItems: "center",
+						}}
+					>
+						<Icon name="x" size={14} />
+					</button>
+				</div>
+			)}
 			<div
 				style={{
 					background: "var(--bg-surface)",
 					border: "1px solid var(--border-soft)",
-					borderRadius: 16,
+					borderRadius: replyTo ? "0 0 16px 16px" : 16,
 					display: "flex",
 					alignItems: "flex-end",
 					gap: 4,
@@ -1771,6 +1890,7 @@ export function ChatLayout() {
 	const [inviteOpen, setInviteOpen] = useState(false);
 	const [disappearingTtl, setDisappearingTtl] = useState<TtlOption>(undefined);
 	const [msgSearch, setMsgSearch] = useState("");
+	const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
 
 	// Stable ref so handleIncoming (useCallback) can read current activeId without
 	// re-creating on every chat switch — avoids restarting the polling hook.
@@ -1873,6 +1993,7 @@ export function ChatLayout() {
 						continued: msgs.length > 0 && msgs[msgs.length - 1].from === "them",
 						media: msg.media,
 						expiresAt: msg.expiresAt,
+						replyTo: msg.replyTo,
 					});
 					// Increment unread only when the message arrives for a background chat.
 					// activeIdRef.current reflects the current selection without making this
@@ -2135,6 +2256,7 @@ export function ChatLayout() {
 	 * Subsequent visit (unread === 0): clears divider too. */
 	const handleSelectChat = useCallback((id: string) => {
 		setActiveId(id);
+		setReplyingTo(null);
 		setChats((cs) =>
 			cs.map((c) => {
 				if (c.id !== id) return c;
@@ -2195,6 +2317,13 @@ export function ChatLayout() {
 		const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
 		const expiresAt = disappearingTtl ? Date.now() + disappearingTtl * 1000 : undefined;
 
+		// Capture reply context before clearing state.
+		const currentReply = replyingTo;
+		const replyContext: ReplyContext | undefined = currentReply?.id
+			? { messageId: currentReply.id, excerpt: currentReply.text.slice(0, 100) }
+			: undefined;
+		setReplyingTo(null);
+
 		// Optimistic local update — always runs synchronously so UI is responsive.
 		setChats((cs) =>
 			cs.map((c) => {
@@ -2214,6 +2343,7 @@ export function ChatLayout() {
 					read: false,
 					continued: msgs.length > 0 && msgs[msgs.length - 1].from === "me",
 					expiresAt,
+					replyTo: replyContext,
 				});
 				return { ...c, messages: msgs, last: text, time };
 			}),
@@ -2221,8 +2351,12 @@ export function ChatLayout() {
 
 		// Real MLS encryption + REST API call when all context is available.
 		if (sessionToken && active?.mlsGroupId && active?.mlsIdentityId && cryptoWorker) {
+			// Encode as structured JSON when replying; plain text otherwise (backward compat).
+			const payload = replyContext
+				? JSON.stringify({ type: "text", text, replyTo: replyContext })
+				: text;
 			const encoder = new TextEncoder();
-			const plaintext = encoder.encode(text);
+			const plaintext = encoder.encode(payload);
 			try {
 				const { ciphertext } = await cryptoWorker.mlsEncrypt(
 					active.mlsIdentityId,
@@ -2310,6 +2444,7 @@ export function ChatLayout() {
 						partner={active.name}
 						searchQuery={msgSearch}
 						onReact={sendReaction}
+						onReply={setReplyingTo}
 						firstUnreadIndex={active.firstUnreadAt}
 					/>
 					<Composer
@@ -2319,6 +2454,8 @@ export function ChatLayout() {
 						onToggleTtl={handleToggleTtl}
 						onPhoto={() => fileInputRef.current?.click()}
 						onTyping={sendTypingIndicator}
+						replyTo={replyingTo ? { text: replyingTo.text, from: replyingTo.from } : null}
+						onCancelReply={() => setReplyingTo(null)}
 					/>
 				</main>
 			)}

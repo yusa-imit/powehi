@@ -49,6 +49,16 @@ export interface MediaPayload {
 	thumbnail?: ThumbnailPayload;
 }
 
+/**
+ * Reply context embedded in a structured text message.
+ * messageId references the envelope UUID of the quoted message.
+ * excerpt is up to 100 chars of the original text, capped before send.
+ */
+export interface ReplyContext {
+	messageId: string;
+	excerpt: string;
+}
+
 export interface IncomingMessage {
 	/** Raw envelope UUID — use for deduplication. */
 	id: string;
@@ -66,6 +76,8 @@ export interface IncomingMessage {
 	epochSeq: number;
 	/** Unix ms at which this message expires (disappearing messages). undefined = no TTL. */
 	expiresAt?: number;
+	/** Quote-reply context: the message this is a reply to, if any. */
+	replyTo?: ReplyContext;
 }
 
 /**
@@ -178,6 +190,7 @@ export function useMessages(
 				// Non-JSON or missing `type` field → treat as legacy plain text.
 				let text = decoded;
 				let media: MediaPayload | undefined;
+				let replyTo: ReplyContext | undefined;
 				let shouldDisplayMessage = true;
 				try {
 					const parsed = JSON.parse(decoded) as Record<string, unknown>;
@@ -260,6 +273,22 @@ export function useMessages(
 						) {
 							onDeliveryReceiptRef.current?.(groupId, parsed.messageIds as string[], env.sender);
 						}
+					} else if (parsed.type === "text" && typeof parsed.text === "string") {
+						// Structured text message — may include a reply context.
+						text = parsed.text;
+						const rt = parsed.replyTo;
+						if (rt !== null && typeof rt === "object") {
+							const r = rt as Record<string, unknown>;
+							if (
+								typeof r.messageId === "string" &&
+								r.messageId.length > 0 &&
+								r.messageId.length <= 36 &&
+								typeof r.excerpt === "string" &&
+								r.excerpt.length > 0
+							) {
+								replyTo = { messageId: r.messageId, excerpt: (r.excerpt as string).slice(0, 100) };
+							}
+						}
 					} else if (parsed.type === "pq_init" && Array.isArray(parsed.ct)) {
 						// §5.3 Phase B: PQ invite confirmation — decap ML-KEM ciphertext + derive binding.
 						shouldDisplayMessage = false;
@@ -296,6 +325,7 @@ export function useMessages(
 						ciphertextB64,
 						epochSeq,
 						expiresAt,
+						replyTo,
 					});
 				}
 				await ackMessage(sessionToken, env.id).catch(() => {});
