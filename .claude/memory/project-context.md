@@ -17,6 +17,31 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-16, cycle 159 — FEATURE: E2EE message deletion)
+- **Cycle 159 (commit f972729):** FEATURE — Post-MVP UX: E2EE message unsend/delete.
+  - **`useMessages.ts`:** Added `onDelete?: (groupId: string, targetMessageId: string) => void` as 10th param. `type === "delete"` handler in `processEnvelope`: validates `targetMessageId` is non-empty string ≤ 36 chars; `shouldDisplayMessage = false`; calls `onDeleteRef.current?.(groupId, targetMessageId)`. Same ref pattern as all other control handlers.
+  - **`ChatLayout.tsx`:**
+    - `ChatMessage` interface gains `deleted?: boolean`
+    - `MessageBubble`: when `msg.deleted`, renders `<span data-testid="deleted-placeholder">This message was deleted</span>` (italic, muted) instead of all content. Edit/reply/react controls hidden when `deleted`. Delete button (trash icon) on hover for own messages with stable `msg.id` and `!msg.deleted` — positioned at `top: -10, right: 26` (left of edit button).
+    - `MessageList`: `onDelete?: (msgId: string) => void` prop; threaded to each `MessageBubble` via IIFE closure to avoid non-null assertion.
+    - `handleIncomingDelete(gId, targetMessageId)`: marks matching peer messages (`m.from === "them"`) as `{ ...m, deleted: true }`. Own-message guard prevents peer from erasing our messages.
+    - `sendDelete(targetMessageId)`: optimistically marks own message deleted; MLS-encrypts `{type:"delete", targetMessageId}`; sends ciphertext; `plaintext.fill(0)` in `.finally()`. Fire-and-forget.
+    - `useMessages` call: 10th arg `handleIncomingDelete`.
+    - `<MessageList ... onDelete={sendDelete} />`
+  - **`Icon.tsx`:** Added `trash` SVG icon (static Lucide-style path literal).
+  - **Security invariants:** Server only receives MLS ciphertext — `targetMessageId` never sent in plaintext. `shouldDisplayMessage = false` before validation (malformed delete never rendered). Own-message guard (`m.from !== "them"`). Deleted placeholder is static JSX text (no XSS). No network calls from receive path (no SSRF). `plaintext.fill(0)` in finally. No plaintext logging.
+  - **security-auditor:** GREEN. YELLOW-1: sender-identity guard absent — any group member can delete any other's message; 2-party assumption (pre-existing pattern, same as edit). YELLOW-2: send-side `targetMessageId` not re-validated before encrypt (comes from stable `env.id`, advisory, pre-existing pattern).
+  - **444 frontend tests** (+9: 5 useMessages delete suite, 4 ChatLayout delete suite; was 435); tsc clean; biome clean.
+  - **Deferred advisory YELLOWs:**
+    - Delete sender-identity guard (2-party assumption, same as edit — non-blocking)
+    - Delete send-side id validation (advisory, pre-existing pattern)
+  - **Next cycle:** Post-MVP items: PQ hybrid activation (ADR-0003 Phase A — waits for openmls stable MLS_128_MLKEM768), mobile app scaffold (Tauri 2.x), or more UX features.
+
+## Current state (2026-06-15, cycle 158 — FEATURE: E2EE message editing)
+- **Cycle 158 (commit 0addbe0):** FEATURE — Post-MVP UX: end-to-end encrypted message editing.
+  - (Details in memory from prior cycle summary)
+  - **435 frontend tests** (+11 edit suite; was 424); tsc clean; biome clean.
+
 ## Current state (2026-06-15, cycle 157 — FEATURE: E2EE quote reply)
 - **Cycle 157 (commit 7256012):** FEATURE — Post-MVP UX: end-to-end encrypted quote reply.
   - **`ReplyContext` type (new, exported from `useMessages.ts`):** `{ messageId: string; excerpt: string }`. Embedded in `IncomingMessage.replyTo`.
