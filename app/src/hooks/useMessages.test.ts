@@ -1678,3 +1678,114 @@ describe("useMessages — pin handling", () => {
 		});
 	});
 });
+
+describe("useMessages — TTL in text messages (receiver-side disappearing)", () => {
+	it("sets expiresAt from ttl field in structured text message", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "text", text: "vanishing note", ttl: 300 }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
+
+		const received: IncomingMessage[] = [];
+		const before = Date.now();
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
+
+		await waitFor(() => expect(received).toHaveLength(1));
+		const after = Date.now();
+		expect(received[0].text).toBe("vanishing note");
+		expect(received[0].expiresAt).toBeGreaterThanOrEqual(before + 300_000);
+		expect(received[0].expiresAt).toBeLessThanOrEqual(after + 300_000);
+	});
+
+	it("ignores ttl = 0 (yields undefined expiresAt)", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "text", text: "zero ttl", ttl: 0 }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
+
+		const received: IncomingMessage[] = [];
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
+
+		await waitFor(() => expect(received).toHaveLength(1));
+		expect(received[0].expiresAt).toBeUndefined();
+	});
+
+	it("ignores ttl > 604800 (1 week max)", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "text", text: "forever", ttl: 604_801 }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
+
+		const received: IncomingMessage[] = [];
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
+
+		await waitFor(() => expect(received).toHaveLength(1));
+		expect(received[0].expiresAt).toBeUndefined();
+	});
+
+	it("ignores non-numeric ttl", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "text", text: "bad ttl", ttl: "300" }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
+
+		const received: IncomingMessage[] = [];
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
+
+		await waitFor(() => expect(received).toHaveLength(1));
+		expect(received[0].expiresAt).toBeUndefined();
+	});
+
+	it("payload ttl overrides server-provided expires_at", async () => {
+		const serverExpires = "2099-01-01T00:00:00.000Z";
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "text", text: "override", ttl: 3600 }),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeEnvelope({ expires_at: serverExpires })]);
+
+		const received: IncomingMessage[] = [];
+		const before = Date.now();
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
+
+		await waitFor(() => expect(received).toHaveLength(1));
+		const after = Date.now();
+		// expiresAt should be ≈ Date.now() + 1h, NOT the server's 2099 date.
+		expect(received[0].expiresAt).toBeGreaterThanOrEqual(before + 3_600_000);
+		expect(received[0].expiresAt).toBeLessThanOrEqual(after + 3_600_000);
+		expect(received[0].expiresAt).toBeLessThan(new Date("2099-01-01T00:00:00.000Z").getTime());
+	});
+
+	it("parses ttl alongside replyTo in the same message", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({
+					type: "text",
+					text: "combo",
+					ttl: 86400,
+					replyTo: { messageId: "msg-abc", excerpt: "quoted text" },
+				}),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
+
+		const received: IncomingMessage[] = [];
+		const before = Date.now();
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
+
+		await waitFor(() => expect(received).toHaveLength(1));
+		const after = Date.now();
+		expect(received[0].replyTo).toEqual({ messageId: "msg-abc", excerpt: "quoted text" });
+		expect(received[0].expiresAt).toBeGreaterThanOrEqual(before + 86_400_000);
+		expect(received[0].expiresAt).toBeLessThanOrEqual(after + 86_400_000);
+	});
+});

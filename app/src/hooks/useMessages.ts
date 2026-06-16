@@ -222,6 +222,7 @@ export function useMessages(
 				let text = decoded;
 				let media: MediaPayload | undefined;
 				let replyTo: ReplyContext | undefined;
+				let textTtl: number | undefined;
 				let shouldDisplayMessage = true;
 				try {
 					const parsed = JSON.parse(decoded) as Record<string, unknown>;
@@ -338,7 +339,7 @@ export function useMessages(
 							onPinRef.current?.(groupId, parsed.targetMessageId, parsed.type);
 						}
 					} else if (parsed.type === "text" && typeof parsed.text === "string") {
-						// Structured text message — may include a reply context.
+						// Structured text message — may include a reply context and/or TTL.
 						text = parsed.text;
 						const rt = parsed.replyTo;
 						if (rt !== null && typeof rt === "object") {
@@ -352,6 +353,16 @@ export function useMessages(
 							) {
 								replyTo = { messageId: r.messageId, excerpt: (r.excerpt as string).slice(0, 100) };
 							}
+						}
+						// Receiver-side disappearing timer: sender embeds TTL (seconds) so the
+						// receiver can set its own expiry without the server seeing the duration.
+						if (
+							typeof parsed.ttl === "number" &&
+							Number.isFinite(parsed.ttl) &&
+							parsed.ttl > 0 &&
+							parsed.ttl <= 604_800
+						) {
+							textTtl = parsed.ttl as number;
 						}
 					} else if (parsed.type === "pq_init" && Array.isArray(parsed.ct)) {
 						// §5.3 Phase B: PQ invite confirmation — decap ML-KEM ciphertext + derive binding.
@@ -378,8 +389,10 @@ export function useMessages(
 				}
 
 				if (shouldDisplayMessage) {
-					// Disappearing messages: parse server-set expires_at into unix ms.
-					const expiresAt = env.expires_at ? new Date(env.expires_at).getTime() : undefined;
+					// Receiver-side TTL from encrypted payload takes precedence over server-set expires_at.
+					// The server never sees plaintext TTL; the receiver derives its own expiry on decryption.
+					const serverExpiresAt = env.expires_at ? new Date(env.expires_at).getTime() : undefined;
+					const expiresAt = textTtl !== undefined ? Date.now() + textTtl * 1000 : serverExpiresAt;
 					onMessageRef.current({
 						id: env.id,
 						senderId: env.sender,

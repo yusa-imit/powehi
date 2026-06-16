@@ -100,6 +100,15 @@ function formatTtl(s: number | undefined): string {
 	return "1w";
 }
 
+function formatTimeLeft(expiresAt: number): string {
+	const s = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+	if (s <= 0) return "soon";
+	if (s < 3600) return `${Math.ceil(s / 60)}m`;
+	if (s < 86400) return `${Math.ceil(s / 3600)}h`;
+	if (s < 604800) return `${Math.ceil(s / 86400)}d`;
+	return "1w";
+}
+
 function nextTtl(current: number | undefined): TtlOption {
 	const idx = TTL_OPTIONS.indexOf(current as TtlOption);
 	return TTL_OPTIONS[(idx + 1) % TTL_OPTIONS.length];
@@ -1039,7 +1048,9 @@ function MessageBubble({
 										}}
 									>
 										<Icon name="timer" size={10} color="#FF9E52" />
-										<span>Disappearing</span>
+										<span data-testid="disappearing-badge">
+											Disappearing · {formatTimeLeft(msg.expiresAt)}
+										</span>
 									</div>
 								)}
 							</>
@@ -2823,10 +2834,17 @@ export function ChatLayout() {
 
 		// Real MLS encryption + REST API call when all context is available.
 		if (sessionToken && active?.mlsGroupId && active?.mlsIdentityId && cryptoWorker) {
-			// Encode as structured JSON when replying; plain text otherwise (backward compat).
-			const payload = replyContext
-				? JSON.stringify({ type: "text", text, replyTo: replyContext })
-				: text;
+			// Use structured JSON when replying or when a disappearing TTL is active so the
+			// receiver can derive its own expiry without the server seeing the duration.
+			const payload =
+				replyContext || disappearingTtl
+					? JSON.stringify({
+							type: "text",
+							text,
+							...(replyContext ? { replyTo: replyContext } : {}),
+							...(disappearingTtl ? { ttl: disappearingTtl } : {}),
+						})
+					: text;
 			const encoder = new TextEncoder();
 			const plaintext = encoder.encode(payload);
 			try {

@@ -135,8 +135,9 @@ describe("ChatLayout", () => {
 		fireEvent.click(screen.getByRole("button", { name: /send message/i }));
 		// The message was appended
 		expect(screen.getAllByText("secret message").length).toBeGreaterThan(0);
-		// The disappearing badge should appear ("Disappearing" text)
-		expect(screen.getByText("Disappearing")).toBeInTheDocument();
+		// The disappearing badge should appear with remaining time
+		expect(screen.getByTestId("disappearing-badge")).toBeInTheDocument();
+		expect(screen.getByTestId("disappearing-badge").textContent).toMatch(/Disappearing/);
 	});
 
 	it("persists verification to DB when user confirms safety number match", async () => {
