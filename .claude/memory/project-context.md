@@ -17,7 +17,12 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-16, cycle 164 — FEATURE: E2EE user presence heartbeat via MLS)
+## Current state (2026-06-16, cycle 165 — STABILIZATION: act() warnings fixed in polling hook tests)
+- **Cycle 165 (commit 1006d26):** STABILIZATION — CI green; no open bugs; security-auditor GREEN (YELLOW-1: ciphertext size limit confirmed covered by global 512KB DefaultBodyLimit — downgraded to INFO); cargo audit: 1 pre-existing warning (`instant` unmaintained via openmls — unchanged); clippy: clean.
+  - **act() warning fixes (useMessages.test.ts + useWelcomePoller.test.ts):** 8 warnings introduced or revealed by cycles 163-164 fixed by capturing `unmount` from `renderHook` and calling it inside `await act(async () => { unmount(); })`. This stops the poller setInterval from firing during RTL cleanup outside of act boundary. Remaining ~160 warnings are pre-existing (mostly usePersistentMessages, AcceptInviteModal, useMediaReceive — to be addressed in future STABILIZATION cycles).
+  - **490 frontend tests green**; Rust tests green (0 FAILED); target/ 4.1GB (under 20GB threshold — pruned 0-byte rmeta stubs only).
+
+## Previous state (2026-06-16, cycle 164 — FEATURE: E2EE user presence heartbeat via MLS)
 - **Cycle 164 (commit a02d082):** FEATURE — Post-MVP UX: real-time online/offline presence.
   - **`useMessages.ts`:** Added `onPresence?(groupId, status: "online"|"offline")` as 12th param; `presenceRef` pattern; `presence` handler: strict allowlist (`status === "online" || status === "offline"`), `shouldDisplayMessage = false`, never forwarded to `onMessage`.
   - **`ChatLayout.tsx`:**
