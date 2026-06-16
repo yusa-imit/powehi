@@ -17,6 +17,17 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-16, cycle 162 — FEATURE: receiver-side disappearing message TTL via MLS payload)
+- **Cycle 162 (commit 6ce32a2):** FEATURE — Receiver-side disappearing messages: TTL propagated inside MLS-encrypted payload.
+  - **Problem:** Disappearing messages were sender-only — receiver never got `expiresAt` because the server doesn't know the TTL (E2EE model). Receiver messages never auto-deleted.
+  - **`useMessages.ts`:** In `type === "text"` handler, parse `ttl` field (validated: `number`, `> 0`, `≤ 604_800`, `isFinite`). Payload TTL overrides server-set `expires_at` (server can't know duration). `textTtl` variable set before try block, used after: `expiresAt = textTtl !== undefined ? Date.now() + textTtl * 1000 : serverExpiresAt`.
+  - **`ChatLayout.tsx`/`sendMessage`:** When `disappearingTtl` is set, always use structured JSON (even without `replyContext`), including `ttl: disappearingTtl`. Both `replyTo` and `ttl` co-exist in same payload when both apply.
+  - **UI:** `formatTimeLeft(expiresAt)` helper computes human-readable remaining time. MessageBubble badge now shows `"Disappearing · 5m"` (or `"1h"`, `"1d"`, `"1w"`, `"soon"`) with `data-testid="disappearing-badge"`. Updated existing test to use testid + regex match.
+  - **Security invariants:** `ttl` is inside MLS ciphertext — server never sees duration. TTL validation rejects NaN/Infinity/negative/overflow. `formatTimeLeft` clamps with `Math.max(0,...)`. JSX text children (no XSS). No plaintext logging.
+  - **security-auditor:** GREEN. YELLOW-1: TTL is sender-advisory (inherent E2EE — sender controls TTL; no peer-enforced guarantee). YELLOW-2: 30s sweep lag means message can linger ≤30s past expiry (prd.md §9.4.3 acceptable).
+  - **476 frontend tests** (+6 TTL suite; was 470); 539 Rust tests (unchanged); tsc clean; biome clean.
+  - **Next cycle:** Post-MVP items: PQ hybrid activation (ADR-0003 Phase A — waits for openmls stable MLS_128_MLKEM768), mobile app scaffold (Tauri 2.x), or more UX features (message forwarding, user presence).
+
 ## Current state (2026-06-16, cycle 161 — FEATURE: CI fix (TS Uint8Array<ArrayBuffer>) + E2EE message pinning)
 - **Cycle 161 (commit f1b0be0):** FEATURE — CI RED fix + E2EE message pinning via MLS.
   - **CI RED FIXED — Bundle budget check TypeScript error:** `new Uint8Array(n)` inferred as `Uint8Array<ArrayBufferLike>` in TS 5.8.3 but `mediaThumbnailDecrypt` interface expects `Uint8Array<ArrayBuffer>`. Fix: changed mock and test to `new Uint8Array(new ArrayBuffer(n))` and typed as `Uint8Array<ArrayBuffer>` (same pattern as cycle 127). Root file: `useCryptoWorker.ts` mock and `useThumbnail.test.ts`.
