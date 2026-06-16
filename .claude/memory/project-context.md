@@ -17,6 +17,19 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-16, cycle 164 — FEATURE: E2EE user presence heartbeat via MLS)
+- **Cycle 164 (commit a02d082):** FEATURE — Post-MVP UX: real-time online/offline presence.
+  - **`useMessages.ts`:** Added `onPresence?(groupId, status: "online"|"offline")` as 12th param; `presenceRef` pattern; `presence` handler: strict allowlist (`status === "online" || status === "offline"`), `shouldDisplayMessage = false`, never forwarded to `onMessage`.
+  - **`ChatLayout.tsx`:**
+    - `presenceTimersRef` (Map, same pattern as `typingTimersRef`): 90s auto-offline timeout; cleared on unmount.
+    - `handleIncomingPresence(gId, status)`: "online" → marks chat online + resets 90s timer; "offline" → marks chat offline + records HH:MM `lastSeen`; refs-only (no SSRF, no XSS).
+    - Heartbeat `useEffect`: sends `{type:"presence", status:"online"}` MLS-ciphertext immediately + every 30s; sends "offline" on cleanup; biome-ignore for exhaustive-deps (active?.mlsGroupId is stable intent key).
+    - `useMessages` call: 12th arg `handleIncomingPresence`.
+  - **Security invariants:** Status inside MLS ciphertext — server never sees it. Strict allowlist blocks injection. No plaintext logging. `plaintext.fill(0)` in `.finally()`. `lastSeen` generated locally (`new Date()`), not from payload. Timer cleanup prevents leaks.
+  - **security-auditor:** GREEN. YELLOW-1: 30s cadence is minor traffic-analysis signal (pre-existing with typing/read-receipt). YELLOW-2: any group member can spoof peer presence (1:1 assumption; deferred to group-chat feature).
+  - **490 frontend tests** (+9: 5 useMessages presence suite, 4 ChatLayout presence suite; was 481); 539 Rust tests (unchanged); tsc clean; biome clean.
+  - **Next cycle:** Post-MVP items: PQ hybrid activation (ADR-0003 Phase A — waits for openmls stable MLS_128_MLKEM768), mobile app scaffold (Tauri 2.x), or more UX features (message search in sidebar, group chat scaffold, emoji picker).
+
 ## Current state (2026-06-16, cycle 163 — FEATURE: E2EE message forwarding via MLS chat-picker)
 - **Cycle 163 (commit 5bf00c8):** FEATURE — Post-MVP UX: E2EE message forwarding.
   - **`Icon.tsx`:** Added `forward` icon (Lucide corner-up-right SVG path).
