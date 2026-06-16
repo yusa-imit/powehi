@@ -45,6 +45,7 @@ const ICON_PATHS: Record<string, string> = {
 	trash:
 		'<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/>',
 	pin: '<line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17H19v-1.76a4 4 0 0 0-1.17-2.83L16 10.8V5h1a2 2 0 0 0 0-4H7a2 2 0 0 0 0 4h1v5.2l-1.83 2.41A4 4 0 0 0 5 15.24z"/>',
+	forward: '<polyline points="15 14 20 9 15 4"/><path d="M4 20v-7a4 4 0 0 1 4-4h12"/>',
 };
 
 export type IconName = keyof typeof ICON_PATHS;

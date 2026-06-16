@@ -894,6 +894,7 @@ function MessageBubble({
 	onEdit,
 	onDelete,
 	onPin,
+	onForward,
 }: {
 	msg: ChatMessage;
 	partner: string;
@@ -903,6 +904,7 @@ function MessageBubble({
 	onEdit?: () => void;
 	onDelete?: () => void;
 	onPin?: () => void;
+	onForward?: () => void;
 }) {
 	const isMe = msg.from === "me";
 	const [pickerOpen, setPickerOpen] = useState(false);
@@ -1119,6 +1121,39 @@ function MessageBubble({
 								}}
 							>
 								<Icon name="pin" size={11} />
+							</button>
+						</div>
+					)}
+
+					{/* Forward button — appears on hover for non-deleted messages with a stable ID */}
+					{onForward && msg.id && hovered && !msg.deleted && (
+						<div
+							style={{
+								position: "absolute",
+								top: -10,
+								left: 26,
+							}}
+						>
+							<button
+								type="button"
+								onClick={onForward}
+								aria-label="Forward message"
+								data-testid="forward-button"
+								style={{
+									width: 22,
+									height: 22,
+									borderRadius: "50%",
+									border: "1px solid var(--border-faint)",
+									background: "var(--bg-elevated)",
+									color: "var(--fg-3)",
+									cursor: "pointer",
+									display: "flex",
+									alignItems: "center",
+									justifyContent: "center",
+									padding: 0,
+								}}
+							>
+								<Icon name="forward" size={11} />
 							</button>
 						</div>
 					)}
@@ -1349,6 +1384,7 @@ function MessageList({
 	onEdit,
 	onDelete,
 	onPin,
+	onForward,
 	firstUnreadIndex,
 }: {
 	messages: ChatMessage[];
@@ -1359,6 +1395,7 @@ function MessageList({
 	onEdit?: (msg: ChatMessage) => void;
 	onDelete?: (msgId: string) => void;
 	onPin?: (msgId: string) => void;
+	onForward?: (msg: ChatMessage) => void;
 	firstUnreadIndex?: number;
 }) {
 	const ref = useRef<HTMLDivElement>(null);
@@ -1521,6 +1558,7 @@ function MessageList({
 							const msgId = g.msg.id;
 							return msgId && onPin ? () => onPin(msgId) : undefined;
 						})()}
+						onForward={onForward && !g.msg.deleted ? () => onForward(g.msg) : undefined}
 					/>
 				),
 			)}
@@ -2201,6 +2239,7 @@ export function ChatLayout() {
 	const [msgSearch, setMsgSearch] = useState("");
 	const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
 	const [editingMessage, setEditingMessage] = useState<ChatMessage | null>(null);
+	const [forwardMsg, setForwardMsg] = useState<{ id: string; text: string } | null>(null);
 
 	// Stable ref so handleIncoming (useCallback) can read current activeId without
 	// re-creating on every chat switch — avoids restarting the polling hook.
@@ -2697,6 +2736,43 @@ export function ChatLayout() {
 	});
 
 	/**
+	 * Forward `forwardMsg.text` to the target chat as a new MLS-encrypted message.
+	 * Optimistically appends to the target chat's message list, then sends via API.
+	 * Fire-and-forget — failure leaves the optimistic bubble in place (same as sendMessage).
+	 */
+	const sendForward = (targetId: string) => {
+		if (!forwardMsg || !sessionToken || !cryptoWorker) return;
+		const targetChat = chats.find((c) => c.id === targetId);
+		if (!targetChat?.mlsGroupId || !targetChat?.mlsIdentityId) return;
+		const { mlsGroupId, mlsIdentityId } = targetChat;
+		const text = forwardMsg.text;
+		const now = new Date();
+		const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+		setForwardMsg(null);
+		// Optimistic update on the target chat.
+		setChats((cs) =>
+			cs.map((c) => {
+				if (c.id !== targetId) return c;
+				const msgs = [...c.messages];
+				for (let i = msgs.length - 1; i >= 0; i--) {
+					if (msgs[i].from === "me" && msgs[i].last) {
+						msgs[i] = { ...msgs[i], last: false, continued: true };
+						break;
+					}
+				}
+				msgs.push({ from: "me", text, last: true, time, continued: false });
+				return { ...c, messages: msgs, last: text, time };
+			}),
+		);
+		const plaintext = new TextEncoder().encode(text);
+		cryptoWorker
+			.mlsEncrypt(mlsIdentityId, mlsGroupId, plaintext)
+			.then(({ ciphertext }) => sendMessageApi(sessionToken, mlsGroupId, ciphertext, undefined))
+			.catch(() => {})
+			.finally(() => plaintext.fill(0));
+	};
+
+	/**
 	 * Send a typing_indicator signal to the active MLS group.
 	 * Leading-edge throttled to once per 3 s (matches the receiver's display window).
 	 * Fire-and-forget — failure is silently ignored (non-fatal UX signal).
@@ -2945,6 +3021,9 @@ export function ChatLayout() {
 						onEdit={setEditingMessage}
 						onDelete={sendDelete}
 						onPin={sendPin}
+						onForward={(msg) => {
+							if (msg.id && !msg.deleted) setForwardMsg({ id: msg.id, text: msg.text });
+						}}
 						firstUnreadIndex={active.firstUnreadAt}
 					/>
 					<Composer
@@ -2984,6 +3063,153 @@ export function ChatLayout() {
 			)}
 
 			<InviteModal open={inviteOpen} onClose={() => setInviteOpen(false)} />
+
+			{forwardMsg && (
+				<div
+					data-testid="forward-modal-backdrop"
+					style={{
+						position: "fixed",
+						inset: 0,
+						background: "rgba(4,4,8,0.72)",
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "center",
+						zIndex: 100,
+					}}
+					onClick={() => setForwardMsg(null)}
+					onKeyDown={(e) => {
+						if (e.key === "Escape") setForwardMsg(null);
+					}}
+				>
+					<div
+						data-testid="forward-modal"
+						style={{
+							background: "var(--bg-elevated)",
+							border: "1px solid var(--border-faint)",
+							borderRadius: 16,
+							padding: "20px 0 8px",
+							width: 320,
+							maxHeight: 440,
+							display: "flex",
+							flexDirection: "column",
+							boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
+						}}
+						onClick={(e) => e.stopPropagation()}
+						onKeyDown={(e) => e.stopPropagation()}
+					>
+						<div
+							style={{
+								display: "flex",
+								alignItems: "center",
+								justifyContent: "space-between",
+								padding: "0 20px 14px",
+								borderBottom: "1px solid var(--border-faint)",
+							}}
+						>
+							<span
+								style={{
+									fontSize: 11,
+									fontWeight: 600,
+									letterSpacing: "0.12em",
+									color: "var(--fg-3)",
+									textTransform: "uppercase",
+								}}
+							>
+								Forward to
+							</span>
+							<button
+								type="button"
+								aria-label="Cancel forward"
+								data-testid="forward-modal-close"
+								onClick={() => setForwardMsg(null)}
+								style={{
+									background: "none",
+									border: "none",
+									color: "var(--fg-3)",
+									cursor: "pointer",
+									padding: 4,
+									display: "flex",
+									alignItems: "center",
+									justifyContent: "center",
+								}}
+							>
+								<Icon name="x" size={14} />
+							</button>
+						</div>
+						<div style={{ overflowY: "auto", padding: "8px 0" }}>
+							{chats
+								.filter((c) => c.id !== activeId && c.mlsGroupId && c.mlsIdentityId)
+								.map((c) => (
+									<button
+										key={c.id}
+										type="button"
+										data-testid={`forward-target-${c.id}`}
+										onClick={() => sendForward(c.id)}
+										style={{
+											width: "100%",
+											display: "flex",
+											alignItems: "center",
+											gap: 12,
+											padding: "10px 20px",
+											background: "none",
+											border: "none",
+											color: "var(--fg-1)",
+											cursor: "pointer",
+											textAlign: "left",
+										}}
+									>
+										<div
+											style={{
+												width: 36,
+												height: 36,
+												borderRadius: "50%",
+												background: "var(--bg-void)",
+												display: "flex",
+												alignItems: "center",
+												justifyContent: "center",
+												fontSize: 14,
+												fontWeight: 600,
+												color: "#A8C8FF",
+												flexShrink: 0,
+											}}
+										>
+											{c.name[0]}
+										</div>
+										<div>
+											<div style={{ fontSize: 13, fontWeight: 500 }}>{c.name}</div>
+											<div
+												style={{
+													fontSize: 11,
+													color: "var(--fg-3)",
+													marginTop: 1,
+												}}
+											>
+												{c.last
+													? c.last.length > 30
+														? `${c.last.slice(0, 30)}…`
+														: c.last
+													: "No messages yet"}
+											</div>
+										</div>
+									</button>
+								))}
+							{chats.filter((c) => c.id !== activeId && c.mlsGroupId && c.mlsIdentityId).length ===
+								0 && (
+								<div
+									style={{
+										padding: "20px",
+										textAlign: "center",
+										fontSize: 13,
+										color: "var(--fg-4)",
+									}}
+								>
+									No other conversations
+								</div>
+							)}
+						</div>
+					</div>
+				</div>
+			)}
 		</div>
 	);
 }
