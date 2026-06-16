@@ -53,17 +53,20 @@ function makeEnvelope(overrides: Partial<Envelope> = {}): Envelope {
 
 describe("useWelcomePoller", () => {
 	it("polls immediately on mount", async () => {
-		renderHook(() => useWelcomePoller(IDENTITY_ID, vi.fn()));
+		const { unmount } = renderHook(() => useWelcomePoller(IDENTITY_ID, vi.fn()));
 
 		await waitFor(() => {
 			expect(pollSpy).toHaveBeenCalledWith(TOKEN, undefined);
+		});
+		await act(async () => {
+			unmount();
 		});
 	});
 
 	it("calls mlsJoinGroup and acks envelope on Welcome", async () => {
 		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
 
-		renderHook(() => useWelcomePoller(IDENTITY_ID, vi.fn()));
+		const { unmount } = renderHook(() => useWelcomePoller(IDENTITY_ID, vi.fn()));
 
 		await waitFor(() => {
 			expect(mockWorker.mlsJoinGroup).toHaveBeenCalledWith(IDENTITY_ID, expect.any(Uint8Array));
@@ -71,13 +74,16 @@ describe("useWelcomePoller", () => {
 		await waitFor(() => {
 			expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID);
 		});
+		await act(async () => {
+			unmount();
+		});
 	});
 
 	it("fires onNewGroup with correct groupId and senderDeviceId", async () => {
 		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
 
 		const received: NewGroupEvent[] = [];
-		renderHook(() => useWelcomePoller(IDENTITY_ID, (e) => received.push(e)));
+		const { unmount } = renderHook(() => useWelcomePoller(IDENTITY_ID, (e) => received.push(e)));
 
 		await waitFor(() => {
 			expect(received).toHaveLength(1);
@@ -85,13 +91,16 @@ describe("useWelcomePoller", () => {
 
 		expect(received[0].groupId).toBe(JOINED_GROUP_ID);
 		expect(received[0].senderDeviceId).toBe(SENDER_ID);
+		await act(async () => {
+			unmount();
+		});
 	});
 
 	it("does not fire onNewGroup for Application envelopes", async () => {
 		pollSpy.mockResolvedValueOnce([makeEnvelope({ message_type: "Application" })]);
 		const onNewGroup = vi.fn();
 
-		renderHook(() => useWelcomePoller(IDENTITY_ID, onNewGroup));
+		const { unmount } = renderHook(() => useWelcomePoller(IDENTITY_ID, onNewGroup));
 
 		await waitFor(() => {
 			expect(pollSpy).toHaveBeenCalled();
@@ -99,6 +108,9 @@ describe("useWelcomePoller", () => {
 		await new Promise<void>((r) => setTimeout(r, 10));
 		expect(onNewGroup).not.toHaveBeenCalled();
 		expect(mockWorker.mlsJoinGroup).not.toHaveBeenCalled();
+		await act(async () => {
+			unmount();
+		});
 	});
 
 	it("does not ack Application envelopes (leaves them for useMessages)", async () => {

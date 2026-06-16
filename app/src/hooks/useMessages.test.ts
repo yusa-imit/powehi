@@ -69,10 +69,13 @@ function makeEnvelope(overrides: Partial<Envelope> = {}): Envelope {
 
 describe("useMessages", () => {
 	it("polls immediately on mount", async () => {
-		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn()));
+		const { unmount } = renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn()));
 
 		await waitFor(() => {
 			expect(pollSpy).toHaveBeenCalledWith(TOKEN, undefined);
+		});
+		await act(async () => {
+			unmount();
 		});
 	});
 
@@ -80,7 +83,7 @@ describe("useMessages", () => {
 		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
 
 		const received: IncomingMessage[] = [];
-		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
+		const { unmount } = renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
 
 		await waitFor(() => {
 			expect(received).toHaveLength(1);
@@ -89,15 +92,21 @@ describe("useMessages", () => {
 		expect(received[0].text).toBe(DECRYPTED_TEXT);
 		expect(received[0].senderId).toBe(SENDER_ID);
 		expect(received[0].id).toBe(ENV_ID);
+		await act(async () => {
+			unmount();
+		});
 	});
 
 	it("acks Application message after successful decrypt", async () => {
 		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
 
-		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn()));
+		const { unmount } = renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn()));
 
 		await waitFor(() => {
 			expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID);
+		});
+		await act(async () => {
+			unmount();
 		});
 	});
 
@@ -1818,7 +1827,7 @@ describe("useMessages — presence handling", () => {
 		pollSpy.mockResolvedValueOnce([makePresenceEnvelope()]);
 		const onPresence = vi.fn();
 
-		renderHook(() =>
+		const { unmount } = renderHook(() =>
 			useMessages(
 				IDENTITY_ID,
 				GROUP_ID,
@@ -1838,6 +1847,9 @@ describe("useMessages — presence handling", () => {
 		await waitFor(() => {
 			expect(onPresence).toHaveBeenCalledWith(GROUP_ID, "online");
 		});
+		await act(async () => {
+			unmount();
+		});
 	});
 
 	it("invokes onPresence with groupId and 'offline' status", async () => {
@@ -1847,7 +1859,7 @@ describe("useMessages — presence handling", () => {
 		pollSpy.mockResolvedValueOnce([makePresenceEnvelope()]);
 		const onPresence = vi.fn();
 
-		renderHook(() =>
+		const { unmount } = renderHook(() =>
 			useMessages(
 				IDENTITY_ID,
 				GROUP_ID,
@@ -1867,6 +1879,9 @@ describe("useMessages — presence handling", () => {
 		await waitFor(() => {
 			expect(onPresence).toHaveBeenCalledWith(GROUP_ID, "offline");
 		});
+		await act(async () => {
+			unmount();
+		});
 	});
 
 	it("does NOT forward presence envelope to onMessage", async () => {
@@ -1876,7 +1891,7 @@ describe("useMessages — presence handling", () => {
 		pollSpy.mockResolvedValueOnce([makePresenceEnvelope()]);
 		const onMessage = vi.fn();
 
-		renderHook(() =>
+		const { unmount } = renderHook(() =>
 			useMessages(
 				IDENTITY_ID,
 				GROUP_ID,
@@ -1895,9 +1910,8 @@ describe("useMessages — presence handling", () => {
 
 		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
 		expect(onMessage).not.toHaveBeenCalled();
-		await act(async () => {});
 		await act(async () => {
-			await new Promise<void>((r) => setTimeout(r, 0));
+			unmount();
 		});
 	});
 
@@ -1908,7 +1922,7 @@ describe("useMessages — presence handling", () => {
 		pollSpy.mockResolvedValueOnce([makePresenceEnvelope()]);
 		const onPresence = vi.fn();
 
-		renderHook(() =>
+		const { unmount } = renderHook(() =>
 			useMessages(
 				IDENTITY_ID,
 				GROUP_ID,
@@ -1927,9 +1941,8 @@ describe("useMessages — presence handling", () => {
 
 		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
 		expect(onPresence).not.toHaveBeenCalled();
-		await act(async () => {});
 		await act(async () => {
-			await new Promise<void>((r) => setTimeout(r, 0));
+			unmount();
 		});
 	});
 
@@ -1940,7 +1953,7 @@ describe("useMessages — presence handling", () => {
 		pollSpy.mockResolvedValueOnce([makePresenceEnvelope()]);
 		const onPresence = vi.fn();
 
-		renderHook(() =>
+		const { unmount } = renderHook(() =>
 			useMessages(
 				IDENTITY_ID,
 				GROUP_ID,
@@ -1959,9 +1972,8 @@ describe("useMessages — presence handling", () => {
 
 		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
 		expect(onPresence).not.toHaveBeenCalled();
-		await act(async () => {});
 		await act(async () => {
-			await new Promise<void>((r) => setTimeout(r, 0));
+			unmount();
 		});
 	});
 });
