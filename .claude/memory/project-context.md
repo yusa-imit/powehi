@@ -17,6 +17,21 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-06-16, cycle 163 — FEATURE: E2EE message forwarding via MLS chat-picker)
+- **Cycle 163 (commit 5bf00c8):** FEATURE — Post-MVP UX: E2EE message forwarding.
+  - **`Icon.tsx`:** Added `forward` icon (Lucide corner-up-right SVG path).
+  - **`ChatLayout.tsx`:**
+    - `MessageBubble`: `onForward?: () => void` prop; forward button at `top: -10, left: 26` (right of pin) visible on hover for non-deleted messages with stable envelope ID; uses `forward` icon.
+    - `MessageList`: `onForward?: (msg: ChatMessage) => void` prop; wired to each `MessageBubble` via guard `!g.msg.deleted`.
+    - `forwardMsg: { id: string; text: string } | null` state; set in `onForward` handler.
+    - `sendForward(targetId: string)`: finds target chat by id (requires `mlsGroupId` + `mlsIdentityId`); optimistic update appends `{ from: "me", text }` to target chat; MLS-encrypts text to target group; `sendMessageApi`; `plaintext.fill(0)` in `.finally()`.
+    - `ForwardChatPicker` modal: fixed overlay with backdrop; lists chats filtered by `c.id !== activeId && c.mlsGroupId && c.mlsIdentityId`; shows name + 30-char preview of last message; "No other conversations" when empty; X button + backdrop click + Escape key all close.
+    - `onForward` wired in MessageList render; `ForwardChatPicker` rendered when `forwardMsg !== null`.
+  - **Security invariants:** Text only leaves as MLS ciphertext — server sees nothing. No XSS: all content via JSX text children. `plaintext.fill(0)` in `.finally()`. Forward button gated on `!msg.deleted`. Target chat gated on `mlsGroupId+mlsIdentityId`. No new server-visible metadata.
+  - **security-auditor:** GREEN. YELLOW-1: no `MAX_MESSAGE_BYTES` cap on forward path (pre-existing gap, same as all other send paths; not introduced by this change).
+  - **481 frontend tests** (+5 forwarding suite; was 476); 539 Rust tests (unchanged); tsc clean; biome clean.
+  - **Next cycle:** Post-MVP items: PQ hybrid activation (ADR-0003 Phase A — waits for openmls stable MLS_128_MLKEM768), mobile app scaffold (Tauri 2.x), or more UX features (user presence, message search in sidebar, group chat scaffold).
+
 ## Current state (2026-06-16, cycle 162 — FEATURE: receiver-side disappearing message TTL via MLS payload)
 - **Cycle 162 (commit 6ce32a2):** FEATURE — Receiver-side disappearing messages: TTL propagated inside MLS-encrypted payload.
   - **Problem:** Disappearing messages were sender-only — receiver never got `expiresAt` because the server doesn't know the TTL (E2EE model). Receiver messages never auto-deleted.
