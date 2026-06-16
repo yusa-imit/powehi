@@ -1523,4 +1523,146 @@ describe("ChatLayout", () => {
 			expect(screen.getByText(/no other conversations/i)).toBeInTheDocument();
 		});
 	});
+
+	describe("user presence", () => {
+		it("incoming 'online' presence marks the peer chat as online", async () => {
+			let capturedOnPresence: ((groupId: string, status: "online" | "offline") => void) | undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(
+					_id,
+					_gid,
+					_onMsg,
+					_onPq,
+					_onTyping,
+					_onReaction,
+					_onRead,
+					_onDelivery,
+					_onEdit,
+					_onDelete,
+					_onPin,
+					onPresence,
+				) => {
+					capturedOnPresence = onPresence;
+				},
+			);
+
+			render(<ChatLayout />);
+
+			await act(async () => {
+				capturedOnPresence?.("11111111-1111-1111-1111-111111111111", "online");
+			});
+
+			expect(screen.getByText("online")).toBeInTheDocument();
+		});
+
+		it("incoming 'offline' presence marks the peer chat as offline with lastSeen time", async () => {
+			let capturedOnPresence: ((groupId: string, status: "online" | "offline") => void) | undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(
+					_id,
+					_gid,
+					_onMsg,
+					_onPq,
+					_onTyping,
+					_onReaction,
+					_onRead,
+					_onDelivery,
+					_onEdit,
+					_onDelete,
+					_onPin,
+					onPresence,
+				) => {
+					capturedOnPresence = onPresence;
+				},
+			);
+
+			render(<ChatLayout />);
+
+			// First mark online, then offline.
+			await act(async () => {
+				capturedOnPresence?.("11111111-1111-1111-1111-111111111111", "online");
+			});
+			await act(async () => {
+				capturedOnPresence?.("11111111-1111-1111-1111-111111111111", "offline");
+			});
+
+			// Should now show "last seen HH:MM" in the header.
+			const header = screen.getByText(/last seen/i);
+			expect(header).toBeInTheDocument();
+		});
+
+		it("presence 'online' from unknown group does not add new 'online' elements", async () => {
+			let capturedOnPresence: ((groupId: string, status: "online" | "offline") => void) | undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(
+					_id,
+					_gid,
+					_onMsg,
+					_onPq,
+					_onTyping,
+					_onReaction,
+					_onRead,
+					_onDelivery,
+					_onEdit,
+					_onDelete,
+					_onPin,
+					onPresence,
+				) => {
+					capturedOnPresence = onPresence;
+				},
+			);
+
+			render(<ChatLayout />);
+
+			// Count "online" elements before sending presence.
+			const countBefore = screen.queryAllByText("online").length;
+
+			// Unknown groupId — should not match any chat; no change to online count.
+			await act(async () => {
+				capturedOnPresence?.("00000000-0000-0000-0000-000000000000", "online");
+			});
+
+			expect(screen.queryAllByText("online").length).toBe(countBefore);
+		});
+
+		it("online status automatically reverts to offline after 90 s (timer fires)", async () => {
+			vi.useFakeTimers();
+			let capturedOnPresence: ((groupId: string, status: "online" | "offline") => void) | undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(
+					_id,
+					_gid,
+					_onMsg,
+					_onPq,
+					_onTyping,
+					_onReaction,
+					_onRead,
+					_onDelivery,
+					_onEdit,
+					_onDelete,
+					_onPin,
+					onPresence,
+				) => {
+					capturedOnPresence = onPresence;
+				},
+			);
+
+			render(<ChatLayout />);
+
+			await act(async () => {
+				capturedOnPresence?.("11111111-1111-1111-1111-111111111111", "online");
+			});
+			expect(screen.getByText("online")).toBeInTheDocument();
+
+			// Advance 90 s — the auto-offline timer should fire.
+			await act(async () => {
+				vi.advanceTimersByTime(90_000);
+			});
+
+			expect(screen.queryByText("online")).not.toBeInTheDocument();
+			expect(screen.getByText(/last seen/i)).toBeInTheDocument();
+
+			vi.useRealTimers();
+		});
+	});
 });

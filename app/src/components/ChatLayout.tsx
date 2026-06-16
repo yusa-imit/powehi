@@ -2258,6 +2258,16 @@ export function ChatLayout() {
 		};
 	}, []);
 
+	// Tracks presence timeout timers, keyed by mlsGroupId.
+	// If no "online" heartbeat arrives within 90 s, peer is marked offline.
+	const presenceTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+	useEffect(() => {
+		const timers = presenceTimersRef.current;
+		return () => {
+			for (const handle of timers.values()) clearTimeout(handle);
+		};
+	}, []);
+
 	// Throttle ref for outgoing typing indicator signals (leading-edge, 3 s window).
 	const typingThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -2656,6 +2666,37 @@ export function ChatLayout() {
 	);
 
 	/**
+	 * Handle an incoming presence heartbeat from a peer.
+	 * "online" resets the 90s offline timeout; "offline" marks them offline immediately.
+	 * lastSeen is recorded when transitioning from online→offline.
+	 */
+	const handleIncomingPresence = useCallback((gId: string, status: "online" | "offline") => {
+		const existing = presenceTimersRef.current.get(gId);
+		if (existing) clearTimeout(existing);
+
+		if (status === "offline") {
+			presenceTimersRef.current.delete(gId);
+			const now = new Date();
+			const lastSeen = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+			setChats((cs) =>
+				cs.map((c) => (c.mlsGroupId === gId ? { ...c, online: false, lastSeen } : c)),
+			);
+		} else {
+			// "online": mark online and schedule auto-offline after 90 s.
+			setChats((cs) => cs.map((c) => (c.mlsGroupId === gId ? { ...c, online: true } : c)));
+			const handle = setTimeout(() => {
+				presenceTimersRef.current.delete(gId);
+				const now = new Date();
+				const lastSeen = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+				setChats((cs) =>
+					cs.map((c) => (c.mlsGroupId === gId ? { ...c, online: false, lastSeen } : c)),
+				);
+			}, 90_000);
+			presenceTimersRef.current.set(gId, handle);
+		}
+	}, []);
+
+	/**
 	 * Pin or unpin a message in the active MLS group.
 	 * Optimistically updates local state, then MLS-encrypts and sends to peer.
 	 * Fire-and-forget — optimistic state stays on failure.
@@ -2794,6 +2835,32 @@ export function ChatLayout() {
 			.finally(() => plaintext.fill(0));
 	};
 
+	// Send presence heartbeat to the active MLS group every 30 s.
+	// Sends "offline" on cleanup (chat switch or unmount) so the peer knows immediately.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: active?.mlsGroupId + mlsIdentityId are the semantic triggers; full active object changes on every message
+	useEffect(() => {
+		if (!sessionToken || !cryptoWorker || !active?.mlsGroupId || !active?.mlsIdentityId) return;
+		const { mlsGroupId, mlsIdentityId } = active;
+
+		const sendPresence = (status: "online" | "offline") => {
+			const plaintext = new TextEncoder().encode(JSON.stringify({ type: "presence", status }));
+			cryptoWorker
+				.mlsEncrypt(mlsIdentityId, mlsGroupId, plaintext)
+				.then(({ ciphertext }) => sendMessageApi(sessionToken, mlsGroupId, ciphertext, undefined))
+				.catch(() => {})
+				.finally(() => plaintext.fill(0));
+		};
+
+		// Announce online immediately, then refresh every 30 s.
+		sendPresence("online");
+		const handle = setInterval(() => sendPresence("online"), 30_000);
+
+		return () => {
+			clearInterval(handle);
+			sendPresence("offline");
+		};
+	}, [sessionToken, cryptoWorker, active?.mlsGroupId, active?.mlsIdentityId]);
+
 	// Poll for incoming messages whenever there's an active MLS group + session.
 	useMessages(
 		active?.mlsIdentityId,
@@ -2807,6 +2874,7 @@ export function ChatLayout() {
 		handleIncomingEdit,
 		handleIncomingDelete,
 		handleIncomingPin,
+		handleIncomingPresence,
 	);
 
 	/** Select a chat and clear its unread badge.

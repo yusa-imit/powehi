@@ -116,6 +116,9 @@ export type ReactionEmoji = (typeof ALLOWED_REACTION_EMOJIS)[number];
  * @param onPin              Optional callback invoked when a pin or unpin envelope is received.
  *                           Receives groupId, targetMessageId (≤36 chars), and action ("pin"|"unpin").
  *                           Not forwarded to onMessage.
+ * @param onPresence         Optional callback invoked when a presence envelope is received.
+ *                           Receives groupId and status ("online"|"offline"). Not forwarded to onMessage.
+ *                           Heartbeat interval: sender emits every 30 s; receiver times out after 90 s.
  */
 export function useMessages(
 	identityId: string | undefined,
@@ -139,6 +142,7 @@ export function useMessages(
 	) => void,
 	onDelete?: (groupId: string, targetMessageId: string) => void,
 	onPin?: (groupId: string, targetMessageId: string, action: "pin" | "unpin") => void,
+	onPresence?: (groupId: string, status: "online" | "offline") => void,
 ): void {
 	const { sessionToken } = useAuthStore();
 	const cryptoWorker = useCryptoWorker();
@@ -188,6 +192,11 @@ export function useMessages(
 	const onPinRef = useRef(onPin);
 	useEffect(() => {
 		onPinRef.current = onPin;
+	});
+
+	const onPresenceRef = useRef(onPresence);
+	useEffect(() => {
+		onPresenceRef.current = onPresence;
 	});
 
 	// Track the latest created_at we've seen to avoid re-delivering on restart.
@@ -337,6 +346,12 @@ export function useMessages(
 							parsed.targetMessageId.length <= 36
 						) {
 							onPinRef.current?.(groupId, parsed.targetMessageId, parsed.type);
+						}
+					} else if (parsed.type === "presence") {
+						// Presence heartbeat — never displayed as a message; strict allowlist on status.
+						shouldDisplayMessage = false;
+						if (parsed.status === "online" || parsed.status === "offline") {
+							onPresenceRef.current?.(groupId, parsed.status);
 						}
 					} else if (parsed.type === "text" && typeof parsed.text === "string") {
 						// Structured text message — may include a reply context and/or TTL.

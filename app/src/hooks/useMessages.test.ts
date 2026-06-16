@@ -1789,3 +1789,179 @@ describe("useMessages — TTL in text messages (receiver-side disappearing)", ()
 		expect(received[0].expiresAt).toBeLessThanOrEqual(after + 86_400_000);
 	});
 });
+
+describe("useMessages — presence handling", () => {
+	function makePresenceEnvelope(): Envelope {
+		return {
+			id: ENV_ID,
+			group_id: GROUP_ID,
+			sender: SENDER_ID,
+			recipient: null,
+			message_type: "Application",
+			ciphertext: [50, 51, 52],
+			epoch: null,
+			created_at: "2026-06-16T12:00:00Z",
+			expires_at: null,
+		};
+	}
+
+	afterEach(() => {
+		mockWorker.mlsDecrypt.mockResolvedValue({
+			plaintext: new TextEncoder().encode(DECRYPTED_TEXT),
+		});
+	});
+
+	it("invokes onPresence with groupId and 'online' status", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(JSON.stringify({ type: "presence", status: "online" })),
+		});
+		pollSpy.mockResolvedValueOnce([makePresenceEnvelope()]);
+		const onPresence = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onPresence,
+			),
+		);
+
+		await waitFor(() => {
+			expect(onPresence).toHaveBeenCalledWith(GROUP_ID, "online");
+		});
+	});
+
+	it("invokes onPresence with groupId and 'offline' status", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(JSON.stringify({ type: "presence", status: "offline" })),
+		});
+		pollSpy.mockResolvedValueOnce([makePresenceEnvelope()]);
+		const onPresence = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onPresence,
+			),
+		);
+
+		await waitFor(() => {
+			expect(onPresence).toHaveBeenCalledWith(GROUP_ID, "offline");
+		});
+	});
+
+	it("does NOT forward presence envelope to onMessage", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(JSON.stringify({ type: "presence", status: "online" })),
+		});
+		pollSpy.mockResolvedValueOnce([makePresenceEnvelope()]);
+		const onMessage = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				onMessage,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				vi.fn(),
+			),
+		);
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onMessage).not.toHaveBeenCalled();
+		await act(async () => {});
+		await act(async () => {
+			await new Promise<void>((r) => setTimeout(r, 0));
+		});
+	});
+
+	it("does NOT call onPresence when status is invalid", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(JSON.stringify({ type: "presence", status: "away" })),
+		});
+		pollSpy.mockResolvedValueOnce([makePresenceEnvelope()]);
+		const onPresence = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onPresence,
+			),
+		);
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onPresence).not.toHaveBeenCalled();
+		await act(async () => {});
+		await act(async () => {
+			await new Promise<void>((r) => setTimeout(r, 0));
+		});
+	});
+
+	it("does NOT call onPresence when status field is missing", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(JSON.stringify({ type: "presence" })),
+		});
+		pollSpy.mockResolvedValueOnce([makePresenceEnvelope()]);
+		const onPresence = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onPresence,
+			),
+		);
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
+		expect(onPresence).not.toHaveBeenCalled();
+		await act(async () => {});
+		await act(async () => {
+			await new Promise<void>((r) => setTimeout(r, 0));
+		});
+	});
+});
