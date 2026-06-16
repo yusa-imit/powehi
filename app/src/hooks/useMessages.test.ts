@@ -83,7 +83,9 @@ describe("useMessages", () => {
 		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
 
 		const received: IncomingMessage[] = [];
-		const { unmount } = renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
+		const { unmount } = renderHook(() =>
+			useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)),
+		);
 
 		await waitFor(() => {
 			expect(received).toHaveLength(1);
