@@ -17,7 +17,21 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-16, cycle 165 — STABILIZATION: act() warnings fixed in polling hook tests)
+## Current state (2026-06-20, cycle 167 — FEATURE: local starred/bookmarked messages with panel UI)
+- **Cycle 167 (commit 07633df):** FEATURE — Post-MVP UX: client-side message starring/bookmarking.
+  - **`ChatMessage.starred?: boolean`:** Toggle flag in in-memory chat state. No MLS message sent, no server contact, no Dexie write — purely local. Server never learns which messages a user considers important.
+  - **`MessageBubble`:** Star button (`data-testid="star-button"`) on hover for any non-deleted message. aria-label toggles "Star message" / "Unstar message". Orange (`#FF8A3D`) highlight when starred. Position `top:-10, left:52` (right of forward button).
+  - **`handleStarMessage(chatId, msgId, msgText)`:** `setChats` reducer: ID-based match, text-based fallback for optimistic messages without stable ID. Pure immutable spread (`{ ...m, starred: !m.starred }`).
+  - **`StarredPanel`:** Absolute overlay in sidebar header area. Lists `chats.flatMap(c => c.messages.filter(m => m.starred))` across all chats. JSX text children only (XSS-safe). `data-testid="starred-panel"` / `"starred-item"`. Close button + backdrop navigation (clicks item → `onSelect(chatId)` + panel close). Empty state: "No starred messages yet." + hint text.
+  - **`IconBtn icon="star"`** in sidebar header opens `StarredPanel` (`label="Starred messages"`). Panel state managed locally in `Sidebar` via `useState(false)`.
+  - **`Icon.tsx`:** Added `star` SVG path (Lucide filled polygon).
+  - **Dead code removed:** `onStarred` prop was added but never wired (Sidebar manages panel internally). Removed from Sidebar type and ChatLayout call site.
+  - **Security invariants:** Local-only; no server exposure. JSX text children (no innerHTML). `starred` flag is not logged. No PII or ciphertext reaches the panel render.
+  - **security-auditor:** GREEN. YELLOW (advisory): text-based fallback match may toggle two identical-text optimistic messages in same chat simultaneously (benign cosmetic; self-corrects once stable ID lands).
+  - **499 frontend tests** (+9: 8 ChatLayout starred suite; was 490); Rust tests unchanged (539); biome clean; tsc clean.
+  - **Next cycle:** Post-MVP items: PQ hybrid activation (ADR-0003 Phase A — waits for openmls stable MLS_128_MLKEM768), mobile app scaffold (Tauri 2.x), or more UX features (emoji reactions, message search in sidebar, group chat scaffold).
+
+## Previous state (2026-06-16, cycle 165 — STABILIZATION: act() warnings fixed in polling hook tests)
 - **Cycle 165 (commit 1006d26):** STABILIZATION — CI green; no open bugs; security-auditor GREEN (YELLOW-1: ciphertext size limit confirmed covered by global 512KB DefaultBodyLimit — downgraded to INFO); cargo audit: 1 pre-existing warning (`instant` unmaintained via openmls — unchanged); clippy: clean.
   - **act() warning fixes (useMessages.test.ts + useWelcomePoller.test.ts):** 8 warnings introduced or revealed by cycles 163-164 fixed by capturing `unmount` from `renderHook` and calling it inside `await act(async () => { unmount(); })`. This stops the poller setInterval from firing during RTL cleanup outside of act boundary. Remaining ~160 warnings are pre-existing (mostly usePersistentMessages, AcceptInviteModal, useMediaReceive — to be addressed in future STABILIZATION cycles).
   - **490 frontend tests green**; Rust tests green (0 FAILED); target/ 4.1GB (under 20GB threshold — pruned 0-byte rmeta stubs only).
