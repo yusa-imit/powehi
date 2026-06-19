@@ -1665,4 +1665,134 @@ describe("ChatLayout", () => {
 			vi.useRealTimers();
 		});
 	});
+
+	// ── Starred messages ──────────────────────────────────────────────────────────
+
+	describe("starred messages", () => {
+		it("star button appears on hover for any non-deleted message", () => {
+			render(<ChatLayout />);
+			const bubbles = screen.getAllByTestId("message-bubble");
+			fireEvent.mouseEnter(bubbles[0]);
+			expect(screen.getByTestId("star-button")).toBeInTheDocument();
+		});
+
+		it("star button aria-label is 'Star message' when not yet starred", () => {
+			render(<ChatLayout />);
+			const bubbles = screen.getAllByTestId("message-bubble");
+			fireEvent.mouseEnter(bubbles[0]);
+			expect(screen.getByTestId("star-button")).toHaveAttribute("aria-label", "Star message");
+		});
+
+		it("clicking star button marks message as starred — aria-label becomes 'Unstar message'", () => {
+			render(<ChatLayout />);
+			const bubbles = screen.getAllByTestId("message-bubble");
+			fireEvent.mouseEnter(bubbles[0]);
+			fireEvent.click(screen.getByTestId("star-button"));
+			// After starring, the button aria-label toggles (message is re-rendered with starred:true)
+			expect(screen.getByTestId("star-button")).toHaveAttribute("aria-label", "Unstar message");
+		});
+
+		it("clicking star button again unstars the message — aria-label reverts to 'Star message'", () => {
+			render(<ChatLayout />);
+			const bubbles = screen.getAllByTestId("message-bubble");
+			fireEvent.mouseEnter(bubbles[0]);
+			fireEvent.click(screen.getByTestId("star-button"));
+			fireEvent.click(screen.getByTestId("star-button"));
+			expect(screen.getByTestId("star-button")).toHaveAttribute("aria-label", "Star message");
+		});
+
+		it("starred panel opens and shows empty state when no messages are starred", () => {
+			render(<ChatLayout />);
+			fireEvent.click(screen.getByRole("button", { name: /starred messages/i }));
+			expect(screen.getByTestId("starred-panel")).toBeInTheDocument();
+			expect(screen.getByText(/no starred messages yet/i)).toBeInTheDocument();
+		});
+
+		it("starred panel lists a message after it is starred", () => {
+			render(<ChatLayout />);
+			// Star the first seed message
+			const bubbles = screen.getAllByTestId("message-bubble");
+			fireEvent.mouseEnter(bubbles[0]);
+			fireEvent.click(screen.getByTestId("star-button"));
+			// Open the panel
+			fireEvent.click(screen.getByRole("button", { name: /starred messages/i }));
+			expect(screen.getByTestId("starred-panel")).toBeInTheDocument();
+			expect(screen.getAllByTestId("starred-item").length).toBeGreaterThan(0);
+		});
+
+		it("starred panel close button dismisses the panel", () => {
+			render(<ChatLayout />);
+			fireEvent.click(screen.getByRole("button", { name: /starred messages/i }));
+			expect(screen.getByTestId("starred-panel")).toBeInTheDocument();
+			fireEvent.click(screen.getByRole("button", { name: /close starred/i }));
+			expect(screen.queryByTestId("starred-panel")).not.toBeInTheDocument();
+		});
+
+		it("clicking a starred item in the panel navigates to that chat and closes the panel", () => {
+			render(<ChatLayout />);
+			// Switch to Jordan so the star lands on a non-active chat
+			fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+			// Star a Jordan message
+			const bubbles = screen.getAllByTestId("message-bubble");
+			fireEvent.mouseEnter(bubbles[0]);
+			fireEvent.click(screen.getByTestId("star-button"));
+			// Switch back to Maya (default active chat)
+			fireEvent.click(screen.getAllByRole("button", { name: /maya akana/i })[0]);
+			// Open starred panel and click the Jordan starred item
+			fireEvent.click(screen.getByRole("button", { name: /starred messages/i }));
+			const item = screen.getByTestId("starred-item");
+			fireEvent.click(item);
+			// Panel should be closed after navigation
+			expect(screen.queryByTestId("starred-panel")).not.toBeInTheDocument();
+		});
+
+		it("star button does not appear on a deleted message", async () => {
+			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+			let capturedOnDelete: ((groupId: string, targetMessageId: string) => void) | undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(
+					_id,
+					_gid,
+					onMsg,
+					_onPq,
+					_onTyping,
+					_onReaction,
+					_onRead,
+					_onDelivery,
+					_onEdit,
+					onDelete,
+				) => {
+					capturedOnMessage = onMsg;
+					capturedOnDelete = onDelete;
+				},
+			);
+			render(<ChatLayout />);
+
+			const PEER_MSG_ID = "star-delete-uuid-1111-111111111111";
+			await act(async () => {
+				capturedOnMessage?.({
+					id: PEER_MSG_ID,
+					groupId: "11111111-1111-1111-1111-111111111111",
+					senderId: "peer-device-star",
+					text: "peer message for star-delete test",
+					ciphertextB64: "Zg==",
+					epochSeq: 1,
+				});
+			});
+
+			// Delete the peer message
+			await act(async () => {
+				capturedOnDelete?.("11111111-1111-1111-1111-111111111111", PEER_MSG_ID);
+			});
+
+			// The deleted-placeholder should be visible
+			expect(screen.getByTestId("deleted-placeholder")).toBeInTheDocument();
+
+			// Hover the deleted bubble — star-button must NOT appear
+			const bubbles = screen.getAllByTestId("message-bubble");
+			const deletedBubble = bubbles[bubbles.length - 1];
+			fireEvent.mouseEnter(deletedBubble);
+			expect(screen.queryByTestId("star-button")).not.toBeInTheDocument();
+		});
+	});
 });

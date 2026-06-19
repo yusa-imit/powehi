@@ -59,6 +59,8 @@ interface ChatMessage {
 	deleted?: boolean;
 	/** True when a group member has pinned this message. */
 	pinned?: boolean;
+	/** True when the local user has starred this message (local-only, not synced). */
+	starred?: boolean;
 }
 
 interface Chat {
@@ -494,6 +496,122 @@ function IconBtn({
 	);
 }
 
+// ── StarredPanel ──────────────────────────────────────────────────────────────
+
+function StarredPanel({
+	chats,
+	onClose,
+	onJumpTo,
+}: {
+	chats: Chat[];
+	onClose: () => void;
+	onJumpTo: (chatId: string) => void;
+}) {
+	const starred = chats.flatMap((c) =>
+		c.messages.filter((m) => m.starred).map((m) => ({ chatId: c.id, chatName: c.name, msg: m })),
+	);
+
+	return (
+		<div
+			data-testid="starred-panel"
+			style={{
+				position: "absolute",
+				inset: 0,
+				background: "var(--bg-surface)",
+				zIndex: 20,
+				display: "flex",
+				flexDirection: "column",
+			}}
+		>
+			<div
+				style={{
+					padding: "14px 18px",
+					borderBottom: "1px solid var(--border-soft)",
+					display: "flex",
+					alignItems: "center",
+					gap: 10,
+				}}
+			>
+				<Icon name="star" size={16} color="#FF8A3D" />
+				<span
+					style={{
+						fontFamily: "var(--font-sans)",
+						fontWeight: 600,
+						fontSize: 14,
+						color: "var(--fg-1)",
+						flex: 1,
+					}}
+				>
+					Starred Messages
+				</span>
+				<IconBtn icon="x" onClick={onClose} label="Close starred" size={28} />
+			</div>
+
+			<div style={{ flex: 1, overflowY: "auto", padding: "8px 0" }}>
+				{starred.length === 0 ? (
+					<div
+						style={{
+							padding: 32,
+							textAlign: "center",
+							color: "var(--fg-3)",
+							fontSize: 13,
+						}}
+					>
+						No starred messages yet.
+						<br />
+						<span style={{ opacity: 0.6, fontSize: 12 }}>
+							Hover a message and click ★ to star it.
+						</span>
+					</div>
+				) : (
+					starred.map(({ chatId, chatName, msg }, i) => (
+						<button
+							key={`${chatId}-${msg.id ?? i}`}
+							type="button"
+							data-testid="starred-item"
+							onClick={() => onJumpTo(chatId)}
+							style={{
+								display: "block",
+								width: "100%",
+								textAlign: "left",
+								background: "none",
+								border: "none",
+								borderBottom: "1px solid var(--border-faint)",
+								padding: "10px 18px",
+								cursor: "pointer",
+							}}
+						>
+							<div
+								style={{
+									fontSize: 11,
+									color: "#FF8A3D",
+									fontFamily: "var(--font-mono)",
+									letterSpacing: "0.06em",
+									marginBottom: 4,
+								}}
+							>
+								{chatName}
+							</div>
+							<div
+								style={{
+									fontSize: 13,
+									color: "var(--fg-2)",
+									lineHeight: 1.4,
+									overflow: "hidden",
+									textOverflow: "ellipsis",
+									whiteSpace: "nowrap",
+								}}
+							>
+								{msg.media ? "Image attachment" : msg.text}
+							</div>
+						</button>
+					))
+				)}
+			</div>
+		</div>
+	);
+}
+
 // ── Sidebar ───────────────────────────────────────────────────────────────────
 
 function ChatRow({
@@ -632,6 +750,7 @@ function Sidebar({
 	searchQuery: string;
 	onSearch: (q: string) => void;
 }) {
+	const [starredOpen, setStarredOpen] = useState(false);
 	const regionId = useRegionDetect();
 	const filtered = chats.filter(
 		(c) =>
@@ -650,8 +769,19 @@ function Sidebar({
 				display: "flex",
 				flexDirection: "column",
 				height: "100%",
+				position: "relative",
 			}}
 		>
+			{starredOpen && (
+				<StarredPanel
+					chats={chats}
+					onClose={() => setStarredOpen(false)}
+					onJumpTo={(id) => {
+						onSelect(id);
+						setStarredOpen(false);
+					}}
+				/>
+			)}
 			<div
 				style={{
 					padding: "18px 18px 14px",
@@ -663,6 +793,7 @@ function Sidebar({
 				<Logo size={28} />
 				<div style={{ display: "flex", gap: 2 }}>
 					<IconBtn icon="plus" onClick={onNewChat} label="New chat" />
+					<IconBtn icon="star" onClick={() => setStarredOpen(true)} label="Starred messages" />
 					<IconBtn icon="settings" onClick={onSettings} label="Settings" />
 				</div>
 			</div>
@@ -895,6 +1026,7 @@ function MessageBubble({
 	onDelete,
 	onPin,
 	onForward,
+	onStar,
 }: {
 	msg: ChatMessage;
 	partner: string;
@@ -905,6 +1037,7 @@ function MessageBubble({
 	onDelete?: () => void;
 	onPin?: () => void;
 	onForward?: () => void;
+	onStar?: () => void;
 }) {
 	const isMe = msg.from === "me";
 	const [pickerOpen, setPickerOpen] = useState(false);
@@ -1158,6 +1291,39 @@ function MessageBubble({
 						</div>
 					)}
 
+					{/* Star button — appears on hover for non-deleted messages (optimistic msgs included) */}
+					{onStar && hovered && !msg.deleted && (
+						<div
+							style={{
+								position: "absolute",
+								top: -10,
+								left: 52,
+							}}
+						>
+							<button
+								type="button"
+								onClick={onStar}
+								aria-label={msg.starred ? "Unstar message" : "Star message"}
+								data-testid="star-button"
+								style={{
+									width: 22,
+									height: 22,
+									borderRadius: "50%",
+									border: "1px solid var(--border-faint)",
+									background: msg.starred ? "rgba(255,138,61,0.18)" : "var(--bg-elevated)",
+									color: msg.starred ? "#FF8A3D" : "var(--fg-3)",
+									cursor: "pointer",
+									display: "flex",
+									alignItems: "center",
+									justifyContent: "center",
+									padding: 0,
+								}}
+							>
+								<Icon name="star" size={11} />
+							</button>
+						</div>
+					)}
+
 					{/* Edit button — appears on hover for own messages only, when not deleted */}
 					{onEdit && isMe && hovered && !msg.deleted && (
 						<div
@@ -1385,6 +1551,7 @@ function MessageList({
 	onDelete,
 	onPin,
 	onForward,
+	onStar,
 	firstUnreadIndex,
 }: {
 	messages: ChatMessage[];
@@ -1396,6 +1563,7 @@ function MessageList({
 	onDelete?: (msgId: string) => void;
 	onPin?: (msgId: string) => void;
 	onForward?: (msg: ChatMessage) => void;
+	onStar?: (msgId: string | undefined, msgText: string) => void;
 	firstUnreadIndex?: number;
 }) {
 	const ref = useRef<HTMLDivElement>(null);
@@ -1559,6 +1727,7 @@ function MessageList({
 							return msgId && onPin ? () => onPin(msgId) : undefined;
 						})()}
 						onForward={onForward && !g.msg.deleted ? () => onForward(g.msg) : undefined}
+						onStar={onStar ? () => onStar(g.msg.id, g.msg.text) : undefined}
 					/>
 				),
 			)}
@@ -2733,6 +2902,27 @@ export function ChatLayout() {
 	);
 
 	/**
+	 * Toggle the star/bookmark flag on a message. Local-only — no MLS message sent,
+	 * no server contact. Falls back to text match for optimistic messages without a stable ID.
+	 */
+	const handleStarMessage = useCallback(
+		(chatId: string, msgId: string | undefined, msgText: string) => {
+			setChats((prev) =>
+				prev.map((c) => {
+					if (c.id !== chatId) return c;
+					const msgs = c.messages.map((m) => {
+						const matches = msgId ? m.id === msgId : m.text === msgText;
+						if (!matches) return m;
+						return { ...m, starred: !m.starred };
+					});
+					return { ...c, messages: msgs };
+				}),
+			);
+		},
+		[],
+	);
+
+	/**
 	 * Send a read_receipt to the active MLS group for the given envelope IDs.
 	 * Fire-and-forget — a failed receipt is non-fatal (the UI shows "sent" vs "read" state).
 	 * Not a useCallback: re-created each render so it always closes over current state.
@@ -3092,6 +3282,7 @@ export function ChatLayout() {
 						onForward={(msg) => {
 							if (msg.id && !msg.deleted) setForwardMsg({ id: msg.id, text: msg.text });
 						}}
+						onStar={(msgId, msgText) => handleStarMessage(activeId, msgId, msgText)}
 						firstUnreadIndex={active.firstUnreadAt}
 					/>
 					<Composer
