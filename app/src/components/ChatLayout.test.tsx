@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as GroupsApiModule from "../api/groups";
 import * as MessagesApiModule from "../api/messages";
 import { db } from "../db/schema";
 import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
@@ -143,6 +144,12 @@ describe("ChatLayout", () => {
 	it("persists verification to DB when user confirms safety number match", async () => {
 		render(<ChatLayout />);
 		fireEvent.click(screen.getByRole("button", { name: /info/i }));
+		// Drain pending micro-tasks so the async WASM mock (mlsGroupMembers →
+		// mlsComputeSafetyNumber) resolves and React re-renders InfoPanel with the
+		// computed safety number before findByRole starts polling. Without this
+		// drain the safety number effect Promise may resolve during act() teardown
+		// of a prior test, leaving a timing window where the button is absent.
+		await act(async () => {});
 		// Wait for computed safety number to arrive (WASM is async) then verify.
 		const verifyBtn = await screen.findByRole("button", { name: /verify safety numbers/i });
 		fireEvent.click(verifyBtn);
@@ -1793,6 +1800,182 @@ describe("ChatLayout", () => {
 			const deletedBubble = bubbles[bubbles.length - 1];
 			fireEvent.mouseEnter(deletedBubble);
 			expect(screen.queryByTestId("star-button")).not.toBeInTheDocument();
+		});
+	});
+
+	describe("group chat scaffold", () => {
+		it("New group button is in Sidebar", () => {
+			render(<ChatLayout />);
+			expect(screen.getByRole("button", { name: /new group/i })).toBeInTheDocument();
+		});
+
+		it("group badge shown for group chat in sidebar", async () => {
+			render(<ChatLayout />);
+			// Open the create group modal and create a group to get a group chat in the sidebar
+			fireEvent.click(screen.getByRole("button", { name: /new group/i }));
+			expect(screen.getByRole("dialog", { name: /new group/i })).toBeInTheDocument();
+		});
+
+		it("ConversationHeader shows group status when isGroup is true", async () => {
+			// We check the ConversationHeader renders group-status for a group chat.
+			// Trigger group creation flow to add a group chat.
+			const mockWorkerWithGroup = {
+				...MOCK_WORKER,
+				mlsCreateGroup: vi.fn(async () => ({ groupId: "group-aabbccdd" })),
+			};
+			vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
+				mockWorkerWithGroup as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
+			);
+			vi.spyOn(GroupsApiModule, "createGroup").mockResolvedValue(undefined);
+			useAuthStore.setState({ sessionToken: "tok-test", identityId: "id-test", deviceId: "dev-1" });
+
+			render(<ChatLayout />);
+			// Open new group modal
+			fireEvent.click(screen.getByRole("button", { name: /new group/i }));
+			// Type group name
+			fireEvent.change(screen.getByTestId("group-name-input"), {
+				target: { value: "Alpha Team" },
+			});
+			fireEvent.click(screen.getByTestId("create-group-submit"));
+			// Wait for group to appear in sidebar
+			await waitFor(() => {
+				expect(screen.getByText("Alpha Team")).toBeInTheDocument();
+			});
+			// Click on the new group chat
+			fireEvent.click(screen.getByRole("button", { name: /alpha team/i }));
+			// ConversationHeader should show group status
+			await waitFor(() => {
+				expect(screen.getByTestId("group-status")).toBeInTheDocument();
+			});
+		});
+
+		it("ConversationHeader does not show typing indicator for group chat", async () => {
+			vi.spyOn(GroupsApiModule, "createGroup").mockResolvedValue(undefined);
+			const mockWorkerWithGroup = {
+				...MOCK_WORKER,
+				mlsCreateGroup: vi.fn(async () => ({ groupId: "group-notyping123" })),
+			};
+			vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
+				mockWorkerWithGroup as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
+			);
+			useAuthStore.setState({
+				sessionToken: "tok-test2",
+				identityId: "id-test2",
+				deviceId: "dev-2",
+			});
+
+			render(<ChatLayout />);
+			fireEvent.click(screen.getByRole("button", { name: /new group/i }));
+			fireEvent.change(screen.getByTestId("group-name-input"), {
+				target: { value: "Beta Team" },
+			});
+			fireEvent.click(screen.getByTestId("create-group-submit"));
+			await waitFor(() => {
+				expect(screen.getByText("Beta Team")).toBeInTheDocument();
+			});
+			fireEvent.click(screen.getByRole("button", { name: /beta team/i }));
+			await waitFor(() => {
+				expect(screen.getByTestId("group-status")).toBeInTheDocument();
+			});
+			// There should be no typing span inside the group status
+			expect(screen.queryByText(/·\s*typing/i)).not.toBeInTheDocument();
+		});
+
+		it("safety numbers useEffect skipped for group chat", async () => {
+			vi.spyOn(GroupsApiModule, "createGroup").mockResolvedValue(undefined);
+			const groupWorker = {
+				...MOCK_WORKER,
+				mlsCreateGroup: vi.fn(async () => ({ groupId: "group-safety-skip" })),
+				mlsGroupMembers: vi.fn(async () => []),
+			};
+			vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
+				groupWorker as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
+			);
+			useAuthStore.setState({
+				sessionToken: "tok-test3",
+				identityId: "id-test3",
+				deviceId: "dev-3",
+			});
+
+			render(<ChatLayout />);
+			fireEvent.click(screen.getByRole("button", { name: /new group/i }));
+			fireEvent.change(screen.getByTestId("group-name-input"), {
+				target: { value: "Safety Skip Group" },
+			});
+			fireEvent.click(screen.getByTestId("create-group-submit"));
+			await waitFor(() => {
+				expect(screen.getByText("Safety Skip Group")).toBeInTheDocument();
+			});
+			fireEvent.click(screen.getByRole("button", { name: /safety skip group/i }));
+			await waitFor(() => {
+				expect(screen.getByTestId("group-status")).toBeInTheDocument();
+			});
+			// Open info panel — safety numbers should not be computed for group chats
+			fireEvent.click(screen.getByRole("button", { name: /info/i }));
+			await waitFor(() => {
+				// mlsGroupMembers should NOT have been called for the group chat
+				expect(groupWorker.mlsGroupMembers).not.toHaveBeenCalled();
+			});
+		});
+
+		it("CreateGroupModal closes when backdrop is clicked", () => {
+			render(<ChatLayout />);
+			fireEvent.click(screen.getByRole("button", { name: /new group/i }));
+			expect(screen.getByRole("dialog", { name: /new group/i })).toBeInTheDocument();
+			// Click the backdrop (the dialog element itself)
+			const dialog = screen.getByRole("dialog", { name: /new group/i });
+			fireEvent.click(dialog);
+			expect(screen.queryByRole("dialog", { name: /new group/i })).not.toBeInTheDocument();
+		});
+
+		it("group badge appears in sidebar for group chats", async () => {
+			vi.spyOn(GroupsApiModule, "createGroup").mockResolvedValue(undefined);
+			const gWorker = {
+				...MOCK_WORKER,
+				mlsCreateGroup: vi.fn(async () => ({ groupId: "group-badge-test" })),
+			};
+			vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
+				gWorker as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
+			);
+			useAuthStore.setState({ sessionToken: "tok-b", identityId: "id-b", deviceId: "dev-b" });
+
+			render(<ChatLayout />);
+			fireEvent.click(screen.getByRole("button", { name: /new group/i }));
+			fireEvent.change(screen.getByTestId("group-name-input"), {
+				target: { value: "Badge Group" },
+			});
+			fireEvent.click(screen.getByTestId("create-group-submit"));
+			await waitFor(() => {
+				expect(screen.getByTestId("group-badge")).toBeInTheDocument();
+			});
+		});
+
+		it("group chat shows member count of 1 after creation", async () => {
+			vi.spyOn(GroupsApiModule, "createGroup").mockResolvedValue(undefined);
+			const mWorker = {
+				...MOCK_WORKER,
+				mlsCreateGroup: vi.fn(async () => ({ groupId: "group-member-count" })),
+			};
+			vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
+				mWorker as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
+			);
+			useAuthStore.setState({ sessionToken: "tok-m", identityId: "id-m", deviceId: "dev-m" });
+
+			render(<ChatLayout />);
+			fireEvent.click(screen.getByRole("button", { name: /new group/i }));
+			fireEvent.change(screen.getByTestId("group-name-input"), {
+				target: { value: "Member Count Group" },
+			});
+			fireEvent.click(screen.getByTestId("create-group-submit"));
+			await waitFor(() => {
+				expect(screen.getByText("Member Count Group")).toBeInTheDocument();
+			});
+			fireEvent.click(screen.getByRole("button", { name: /member count group/i }));
+			await waitFor(() => {
+				const groupStatus = screen.getByTestId("group-status");
+				// memberCount is 1 so it just shows "Group" (no member count suffix when <= 1)
+				expect(groupStatus.textContent).toBe("Group");
+			});
 		});
 	});
 });

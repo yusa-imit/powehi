@@ -25,6 +25,7 @@ import { useRegionDetect } from "../hooks/useRegionDetect";
 import { type NewGroupEvent, useWelcomePoller } from "../hooks/useWelcomePoller";
 import { useAuthStore } from "../store/auth";
 import { uint8ToBase64 } from "../utils/base64";
+import { CreateGroupModal } from "./CreateGroupModal";
 import { Icon } from "./Icon";
 import { InviteModal } from "./InviteModal";
 import { MediaImage } from "./MediaImage";
@@ -87,6 +88,10 @@ interface Chat {
 	firstUnreadAt?: number;
 	/** Envelope UUID of the currently pinned message, if any. */
 	pinnedMessageId?: string;
+	/** True for group chats with 3+ members (set by creator). */
+	isGroup?: boolean;
+	/** Number of members in the group. Starts at 1 (creator only). */
+	memberCount?: number;
 }
 
 // ── Disappearing messages helpers ──────────────────────────────────────────────
@@ -668,6 +673,24 @@ function ChatRow({
 					>
 						{chat.name}
 					</span>
+					{chat.isGroup && (
+						<span
+							data-testid="group-badge"
+							style={{
+								fontSize: 9,
+								fontWeight: 600,
+								letterSpacing: "0.06em",
+								color: "#FF8A3D",
+								background: "rgba(255,138,61,0.12)",
+								border: "1px solid rgba(255,138,61,0.25)",
+								borderRadius: 4,
+								padding: "1px 5px",
+								flex: "none",
+							}}
+						>
+							GROUP
+						</span>
+					)}
 					<span
 						style={{
 							fontSize: 11,
@@ -738,6 +761,7 @@ function Sidebar({
 	activeId,
 	onSelect,
 	onNewChat,
+	onNewGroup,
 	onSettings,
 	searchQuery,
 	onSearch,
@@ -746,6 +770,7 @@ function Sidebar({
 	activeId: string;
 	onSelect: (id: string) => void;
 	onNewChat: () => void;
+	onNewGroup: () => void;
 	onSettings: () => void;
 	searchQuery: string;
 	onSearch: (q: string) => void;
@@ -792,6 +817,7 @@ function Sidebar({
 			>
 				<Logo size={28} />
 				<div style={{ display: "flex", gap: 2 }}>
+					<IconBtn icon="users" onClick={onNewGroup} label="New group" />
 					<IconBtn icon="plus" onClick={onNewChat} label="New chat" />
 					<IconBtn icon="star" onClick={() => setStarredOpen(true)} label="Starred messages" />
 					<IconBtn icon="settings" onClick={onSettings} label="Settings" />
@@ -990,17 +1016,26 @@ function ConversationHeader({
 							)}
 						</div>
 						<div style={{ fontSize: 11, color: "var(--fg-3)", marginTop: 1 }}>
-							{chat.online ? "online" : `last seen ${chat.lastSeen ?? "recently"}`}
-							{chat.typing && (
-								<span
-									style={{
-										color: "#FF9E52",
-										marginLeft: 8,
-										fontStyle: "italic",
-									}}
-								>
-									· typing
+							{chat.isGroup ? (
+								<span data-testid="group-status">
+									Group
+									{chat.memberCount && chat.memberCount > 1 ? ` · ${chat.memberCount} members` : ""}
 								</span>
+							) : (
+								<>
+									{chat.online ? "online" : `last seen ${chat.lastSeen ?? "recently"}`}
+									{chat.typing && (
+										<span
+											style={{
+												color: "#FF9E52",
+												marginLeft: 8,
+												fontStyle: "italic",
+											}}
+										>
+											· typing
+										</span>
+									)}
+								</>
 							)}
 						</div>
 					</div>
@@ -2067,7 +2102,7 @@ function InfoPanel({
 		// Reset immediately so a stale value from a previous chat never triggers a
 		// false MITM alarm during the async WASM call for the new chat (Y2).
 		setComputedSafetyNumber(null);
-		if (!worker || !chat.mlsGroupId || !chat.mlsIdentityId) {
+		if (!worker || !chat.mlsGroupId || !chat.mlsIdentityId || chat.isGroup) {
 			return;
 		}
 		let cancelled = false;
@@ -2099,7 +2134,7 @@ function InfoPanel({
 		return () => {
 			cancelled = true;
 		};
-	}, [cryptoWorker, chat.mlsGroupId, chat.mlsIdentityId]);
+	}, [cryptoWorker, chat.mlsGroupId, chat.mlsIdentityId, chat.isGroup]);
 
 	// Load stored verification state; re-runs when computedSafetyNumber arrives so
 	// MITM detection works even when WASM loads after the DB read completes.
@@ -2404,6 +2439,7 @@ export function ChatLayout() {
 	const [search, setSearch] = useState("");
 	const [infoOpen, setInfoOpen] = useState(false);
 	const [inviteOpen, setInviteOpen] = useState(false);
+	const [createGroupOpen, setCreateGroupOpen] = useState(false);
 	const [disappearingTtl, setDisappearingTtl] = useState<TtlOption>(undefined);
 	const [msgSearch, setMsgSearch] = useState("");
 	const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
@@ -3109,6 +3145,34 @@ export function ChatLayout() {
 		},
 		[identityId],
 	);
+	const handleGroupCreated = useCallback(
+		(groupId: string, groupName: string) => {
+			setCreateGroupOpen(false);
+			setChats((prev) => {
+				if (prev.some((c) => c.mlsGroupId === groupId)) return prev;
+				const now = new Date();
+				const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+				return [
+					{
+						id: groupId,
+						name: groupName,
+						handle: groupId.slice(0, 8),
+						online: false,
+						last: "",
+						time,
+						unread: 0,
+						messages: [],
+						mlsGroupId: groupId,
+						mlsIdentityId: identityId ?? undefined,
+						isGroup: true,
+						memberCount: 1,
+					},
+					...prev,
+				];
+			});
+		},
+		[identityId],
+	);
 	// Global Welcome poller — processes invitations from other devices.
 	useWelcomePoller(identityId, handleNewGroup);
 
@@ -3239,6 +3303,7 @@ export function ChatLayout() {
 				activeId={activeId}
 				onSelect={handleSelectChat}
 				onNewChat={() => setInviteOpen(true)}
+				onNewGroup={() => setCreateGroupOpen(true)}
 				onSettings={() => undefined}
 				searchQuery={search}
 				onSearch={setSearch}
@@ -3322,6 +3387,12 @@ export function ChatLayout() {
 			)}
 
 			<InviteModal open={inviteOpen} onClose={() => setInviteOpen(false)} />
+
+			<CreateGroupModal
+				open={createGroupOpen}
+				onClose={() => setCreateGroupOpen(false)}
+				onGroupCreated={handleGroupCreated}
+			/>
 
 			{forwardMsg && (
 				<div
