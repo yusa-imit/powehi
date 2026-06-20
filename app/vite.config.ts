@@ -127,5 +127,22 @@ export default defineConfig({
 		setupFiles: ["./src/test-setup.ts"],
 		include: ["src/**/*.{test,spec}.{ts,tsx}"],
 		exclude: ["e2e/**", "node_modules/**"],
+		// Large test files (e.g. ChatLayout with 100+ renders) accumulate V8 heap
+		// within one worker. Forks pool allows per-process --max-old-space-size;
+		// threads pool (the default) ignores execArgv so the OOM is unavoidable there.
+		//
+		// On a 16GB host the forks pool defaults to one fork per core (~10), and
+		// `--max-old-space-size=8192` lets EACH fork grow to 8GB — up to ~80GB of
+		// permitted heap, which sends the machine deep into swap (observed >20GB
+		// resident during autonomous-dev cycles). Cap the fork count and halve the
+		// per-fork heap so the aggregate ceiling is maxForks * heap = 2 * 4GB = 8GB.
+		pool: "forks",
+		poolOptions: {
+			forks: {
+				minForks: 1,
+				maxForks: 2,
+				execArgv: ["--max-old-space-size=4096"],
+			},
+		},
 	},
 });
