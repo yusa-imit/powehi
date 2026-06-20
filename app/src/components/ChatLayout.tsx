@@ -93,6 +93,8 @@ interface Chat {
 	isGroup?: boolean;
 	/** Number of members in the group. Starts at 1 (creator only). */
 	memberCount?: number;
+	/** When true, incoming messages do not increment the unread badge. Local-only, never sent to server. */
+	muted?: boolean;
 }
 
 // ── Disappearing messages helpers ──────────────────────────────────────────────
@@ -702,6 +704,16 @@ function ChatRow({
 					>
 						{chat.time}
 					</span>
+					{chat.muted && (
+						<span
+							data-testid="muted-icon"
+							title="Muted"
+							aria-hidden="true"
+							style={{ display: "flex", alignItems: "center" }}
+						>
+							<Icon name="bell-off" size={11} color="var(--fg-3)" />
+						</span>
+					)}
 				</div>
 				<div
 					style={{
@@ -2084,7 +2096,38 @@ function InfoSection({
 	);
 }
 
-function InfoRow({ label, trailing }: { label: string; trailing: string }) {
+function InfoRow({
+	label,
+	trailing,
+	onClick,
+}: {
+	label: string;
+	trailing: string;
+	onClick?: () => void;
+}) {
+	if (onClick) {
+		return (
+			<button
+				type="button"
+				onClick={onClick}
+				style={{
+					display: "flex",
+					justifyContent: "space-between",
+					padding: "10px 18px",
+					fontSize: 13,
+					width: "100%",
+					background: "transparent",
+					border: "none",
+					cursor: "pointer",
+					color: "inherit",
+					fontFamily: "inherit",
+				}}
+			>
+				<span style={{ color: "var(--fg-1)" }}>{label}</span>
+				<span style={{ color: "var(--fg-3)" }}>{trailing}</span>
+			</button>
+		);
+	}
 	return (
 		<div
 			style={{
@@ -2104,10 +2147,14 @@ function InfoPanel({
 	chat,
 	onClose,
 	disappearingTtl,
+	muted,
+	onToggleMute,
 }: {
 	chat: Chat;
 	onClose: () => void;
 	disappearingTtl: TtlOption;
+	muted: boolean;
+	onToggleMute: () => void;
 }) {
 	const [safetyVerified, setSafetyVerified] = useState(false);
 	const [verifiedAt, setVerifiedAt] = useState<number | undefined>(undefined);
@@ -2412,7 +2459,7 @@ function InfoPanel({
 			</div>
 
 			<InfoSection title="Notifications">
-				<InfoRow label="Mute" trailing="Off" />
+				<InfoRow label="Mute" trailing={muted ? "On" : "Off"} onClick={onToggleMute} />
 				<InfoRow label="Pin to top" trailing="On" />
 			</InfoSection>
 			<InfoSection title="Disappearing messages">
@@ -2604,13 +2651,15 @@ export function ChatLayout() {
 					const isActive = c.id === activeIdRef.current;
 					// Track the index of the first unread message so MessageList can render
 					// the "New Messages" divider at the right position.
-					const firstUnreadAt = !isActive && c.unread === 0 ? msgs.length - 1 : c.firstUnreadAt;
+					// Muted chats skip the divider too — no unread tracking for muted chats.
+					const firstUnreadAt =
+						!isActive && !c.muted && c.unread === 0 ? msgs.length - 1 : c.firstUnreadAt;
 					return {
 						...c,
 						messages: msgs,
 						last: displayText,
 						time,
-						unread: isActive ? 0 : c.unread + 1,
+						unread: isActive ? 0 : c.muted ? c.unread : c.unread + 1,
 						firstUnreadAt: isActive ? undefined : firstUnreadAt,
 					};
 				}),
@@ -2996,6 +3045,11 @@ export function ChatLayout() {
 		},
 		[],
 	);
+
+	/** Toggle the muted flag on a chat. Local-only — no MLS message sent, no server contact. */
+	const handleToggleMute = useCallback((chatId: string) => {
+		setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, muted: !c.muted } : c)));
+	}, []);
 
 	/**
 	 * Send a read_receipt to the active MLS group for the given envelope IDs.
@@ -3435,6 +3489,8 @@ export function ChatLayout() {
 					chat={active}
 					onClose={() => setInfoOpen(false)}
 					disappearingTtl={disappearingTtl}
+					muted={active.muted ?? false}
+					onToggleMute={() => handleToggleMute(active.id)}
 				/>
 			)}
 
