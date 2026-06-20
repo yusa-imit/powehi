@@ -45,6 +45,20 @@ describe("createGroup", () => {
 	});
 });
 
+// ── createGroup ── validation ─────────────────────────────────────────────────
+
+describe("createGroup — validation", () => {
+	it("rejects non-UUID groupId without making a network call", async () => {
+		await expect(createGroup(TOKEN, "not-a-uuid")).rejects.toThrow("invalid_group_id");
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("rejects path-traversal groupId", async () => {
+		await expect(createGroup(TOKEN, "../admin")).rejects.toThrow("invalid_group_id");
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+});
+
 // ── addMember ─────────────────────────────────────────────────────────────────
 
 describe("addMember", () => {
@@ -65,6 +79,16 @@ describe("addMember", () => {
 			new Response(JSON.stringify({ code: "unauthorized" }), { status: 403 }),
 		);
 		await expect(addMember(TOKEN, GROUP_ID, DEVICE_ID, 1)).rejects.toThrow("unauthorized");
+	});
+
+	it("rejects non-UUID groupId without fetch", async () => {
+		await expect(addMember(TOKEN, "bad-id", DEVICE_ID, 0)).rejects.toThrow("invalid_group_id");
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("rejects non-UUID deviceId without fetch", async () => {
+		await expect(addMember(TOKEN, GROUP_ID, "maya", 0)).rejects.toThrow("invalid_device_id");
+		expect(fetchMock).not.toHaveBeenCalled();
 	});
 });
 
@@ -87,5 +111,19 @@ describe("removeMember", () => {
 			new Response(JSON.stringify({ code: "not_found" }), { status: 404 }),
 		);
 		await expect(removeMember(TOKEN, GROUP_ID, DEVICE_ID)).rejects.toThrow("not_found");
+	});
+
+	it("rejects non-UUID groupId without fetch", async () => {
+		await expect(removeMember(TOKEN, "g/members/x/admin", DEVICE_ID)).rejects.toThrow(
+			"invalid_group_id",
+		);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("rejects non-UUID deviceId without fetch", async () => {
+		await expect(removeMember(TOKEN, GROUP_ID, "jordan?role=admin")).rejects.toThrow(
+			"invalid_device_id",
+		);
+		expect(fetchMock).not.toHaveBeenCalled();
 	});
 });

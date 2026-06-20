@@ -7,6 +7,15 @@
 
 const API_BASE = "/v1";
 
+// Strict opaque ID format: lowercase hex UUID (no path traversal, no injection)
+const OPAQUE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function assertOpaqueId(id: string, name: string): void {
+	if (!OPAQUE_ID_RE.test(id)) {
+		throw new Error(`invalid_${name}`);
+	}
+}
+
 function authHeaders(token: string): HeadersInit {
 	return {
 		"Content-Type": "application/json",
@@ -23,6 +32,7 @@ async function throwOnError(resp: Response): Promise<void> {
 
 /** POST /v1/groups — register a new MLS group. Creator becomes first member. */
 export async function createGroup(token: string, groupId: string): Promise<void> {
+	assertOpaqueId(groupId, "group_id");
 	const resp = await fetch(`${API_BASE}/groups`, {
 		method: "POST",
 		headers: authHeaders(token),
@@ -42,11 +52,16 @@ export async function addMember(
 	deviceId: string,
 	epoch: number,
 ): Promise<void> {
-	const resp = await fetch(`${API_BASE}/groups/${groupId}/members/${deviceId}`, {
-		method: "POST",
-		headers: authHeaders(token),
-		body: JSON.stringify({ epoch }),
-	});
+	assertOpaqueId(groupId, "group_id");
+	assertOpaqueId(deviceId, "device_id");
+	const resp = await fetch(
+		`${API_BASE}/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(deviceId)}`,
+		{
+			method: "POST",
+			headers: authHeaders(token),
+			body: JSON.stringify({ epoch }),
+		},
+	);
 	await throwOnError(resp);
 }
 
@@ -59,9 +74,14 @@ export async function removeMember(
 	groupId: string,
 	deviceId: string,
 ): Promise<void> {
-	const resp = await fetch(`${API_BASE}/groups/${groupId}/members/${deviceId}`, {
-		method: "DELETE",
-		headers: { Authorization: `Bearer ${token}` },
-	});
+	assertOpaqueId(groupId, "group_id");
+	assertOpaqueId(deviceId, "device_id");
+	const resp = await fetch(
+		`${API_BASE}/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(deviceId)}`,
+		{
+			method: "DELETE",
+			headers: { Authorization: `Bearer ${token}` },
+		},
+	);
 	await throwOnError(resp);
 }
