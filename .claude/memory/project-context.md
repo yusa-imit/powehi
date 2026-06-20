@@ -17,7 +17,17 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-21, cycle 176 — FEATURE: per-chat mute / unread badge suppression)
+## Current state (2026-06-21, cycle 177 — FEATURE: global message search in sidebar)
+- **Cycle 177 (commit 8a1ab04):** FEATURE — Global message search in sidebar.
+  - **`msgResults` in `Sidebar`:** When `searchQuery` is non-empty, scans all `chats[].messages[]` for text matching the query. Excludes deleted, media-only, `[image]` messages. Capped at 3 per chat, 10 total. Renders a "Messages" section below the filtered chat list with chat-name label + 80-char snippet highlighted via `HighlightedText`.
+  - **`handleJumpToMessage(chatId)`:** Switches to the target chat, seeds `msgSearch` (in-conversation highlight) with the sidebar query, then clears sidebar search. Local-only — no server calls, no MLS messages.
+  - **`Sidebar` props:** Added `onJumpToMessage?: (chatId: string) => void`.
+  - **Security invariants:** Local-only; no server exposure. JSX text children only (no innerHTML). No plaintext logging. No new server-visible metadata. `HighlightedText` uses `.indexOf()` + string slices only.
+  - **security-auditor:** GREEN. No findings.
+  - **555 frontend tests** (+9: ChatLayoutSearch suite — empty state, results for matching text, chat name label, snippet content, click switches chat, click clears sidebar search, no results when no match, incoming messages searchable, deleted messages excluded); tsc clean; biome clean.
+  - **Next cycle:** Mobile app scaffold (Tauri 2.x), notification settings (per-chat sound/vibration), or PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768).
+
+## Previous state (2026-06-21, cycle 176 — FEATURE: per-chat mute / unread badge suppression)
 - **Cycle 176 (commit fc7c976):** FEATURE — Per-chat mute.
   - **`Chat.muted?: boolean`:** Local-only flag on Chat object. Never sent to any server, never included in MLS payload, never logged. No persistence (lost on page reload — intentional, same pattern as draft).
   - **`handleIncoming`:** When `c.muted`, skip unread counter increment and skip `firstUnreadAt` divider tracking. Messages still received, stored, and delivery/read receipts still sent — mute is purely a badge-suppression feature.
