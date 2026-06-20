@@ -1,8 +1,8 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { db } from "../db/schema";
 import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
 import { useAuthStore } from "../store/auth";
-import { db } from "../db/schema";
 import { ChatLayout } from "./ChatLayout";
 
 const MOCK_WORKER = {
@@ -26,7 +26,11 @@ describe("ChatLayout — draft message saving", () => {
 		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
 			MOCK_WORKER as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
 		);
-		useAuthStore.setState({ sessionToken: "tok-draft", identityId: "id-draft", deviceId: "dev-draft" });
+		useAuthStore.setState({
+			sessionToken: "tok-draft",
+			identityId: "id-draft",
+			deviceId: "dev-draft",
+		});
 	});
 
 	afterEach(() => {

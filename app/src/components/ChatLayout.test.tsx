@@ -1382,7 +1382,6 @@ describe("ChatLayout", () => {
 		});
 	});
 
-
 	describe("user presence", () => {
 		it("incoming 'online' presence marks the peer chat as online", async () => {
 			let capturedOnPresence: ((groupId: string, status: "online" | "offline") => void) | undefined;
@@ -1830,5 +1829,4 @@ describe("ChatLayout", () => {
 			});
 		});
 	});
-
 });

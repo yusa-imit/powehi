@@ -1,9 +1,9 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { db } from "../db/schema";
 import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
 import * as UseMessagesModule from "../hooks/useMessages";
 import type { IncomingMessage } from "../hooks/useMessages";
-import { db } from "../db/schema";
 import { ChatLayout } from "./ChatLayout";
 
 const MOCK_WORKER = {
