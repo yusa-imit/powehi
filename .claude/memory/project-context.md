@@ -17,7 +17,18 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-20, cycle 167 — FEATURE: local starred/bookmarked messages with panel UI)
+## Current state (2026-06-20, cycle 174 — FEATURE: group chat add-member modal + per-chat draft persistence)
+- **Cycle 174 (commit d74b1a2):** FEATURE — Group UX + draft messages.
+  - **`AddMemberModal`:** Contact picker opened via "Add member" header button (group chats only). Calls `POST /v1/groups/:groupId/members/:deviceId`. Displays MLS E2EE welcome notice ("Their identity is never sent in plaintext"). Shows loading/error states. Increments local `memberCount` on success. Server never sees plaintext names or message content.
+  - **`Icon.tsx`:** Added `user-plus` SVG path.
+  - **Per-chat draft persistence:** `drafts: Record<string,string>` in React state (no Dexie, no localStorage, no server). `handleDraftChange(id, draft)` tracks per-chat draft text. `Composer` receives `chatId`, `initialDraft`, `onDraftChange`. Draft restored when switching back to a chat; cleared on send; lost on page reload (intentional).
+  - **Test suite split:** forwarding tests → `ChatLayoutForwarding.test.tsx`; draft tests → `ChatLayoutDraft.test.tsx`; add-member → `AddMemberModal.test.tsx` + `ChatLayoutAddMember.test.tsx`.
+  - **Security invariants:** JSX text children only (no XSS). Draft text stays in memory only. `addMember` call: groupId and contactId are app-controlled slugs/UUIDs; error handler shows only generic category string (no plaintext-logging). No new server-visible plaintext.
+  - **security-auditor:** GREEN. YELLOW-1: URL path interpolation in `groups.ts` not `encodeURIComponent`-wrapped (pre-production advisory, values are app-controlled). YELLOW-2: `contact.id` is chat slug not device UUID — must pass opaque deviceId before real backend.
+  - **534 frontend tests** (+25 new: 11 AddMemberModal + 4 add-member ChatLayout + 5 draft + 5 forwarding); Rust tests unchanged; tsc clean; biome clean.
+  - **Next cycle:** Emoji reactions (MLS E2EE reaction payload), message search in sidebar, or mobile app scaffold (Tauri 2.x). PQ hybrid (ADR-0003 Phase A) still waiting for openmls stable MLS_128_MLKEM768.
+
+## Previous state (2026-06-20, cycle 167 — FEATURE: local starred/bookmarked messages with panel UI)
 - **Cycle 167 (commit 07633df):** FEATURE — Post-MVP UX: client-side message starring/bookmarking.
   - **`ChatMessage.starred?: boolean`:** Toggle flag in in-memory chat state. No MLS message sent, no server contact, no Dexie write — purely local. Server never learns which messages a user considers important.
   - **`MessageBubble`:** Star button (`data-testid="star-button"`) on hover for any non-deleted message. aria-label toggles "Star message" / "Unstar message". Orange (`#FF8A3D`) highlight when starred. Position `top:-10, left:52` (right of forward button).
