@@ -17,7 +17,20 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-20, cycle 174 — FEATURE: group chat add-member modal + per-chat draft persistence)
+## Current state (2026-06-21, cycle 176 — FEATURE: per-chat mute / unread badge suppression)
+- **Cycle 176 (commit fc7c976):** FEATURE — Per-chat mute.
+  - **`Chat.muted?: boolean`:** Local-only flag on Chat object. Never sent to any server, never included in MLS payload, never logged. No persistence (lost on page reload — intentional, same pattern as draft).
+  - **`handleIncoming`:** When `c.muted`, skip unread counter increment and skip `firstUnreadAt` divider tracking. Messages still received, stored, and delivery/read receipts still sent — mute is purely a badge-suppression feature.
+  - **`ChatRow`:** Bell-off icon (`bell-off` icon added to `Icon.tsx`) shown when `chat.muted`. `aria-hidden="true"` (no contribution to button accessible name); `title="Muted"` for mouse users.
+  - **`InfoRow`:** Added optional `onClick` prop — renders as `<button type="button">` for interactive rows, stays `<div>` for static rows. Accessible pattern.
+  - **`InfoPanel`:** `muted: boolean` and `onToggleMute: () => void` props. "Mute" row in Notifications section is now an interactive toggle showing "On"/"Off". Wired to `handleToggleMute`.
+  - **`handleToggleMute(chatId)`:** `useCallback` with pure `setChats` immutable update. No API call, no MLS message, no side-effects.
+  - **Security invariants:** `muted` is purely in-memory. No server exposure. JSX text children only. `handleToggleMute` passes only local chatId. No PII or plaintext reaches any log.
+  - **security-auditor:** GREEN. YELLOW-1 (advisory): aria-hidden on muted icon means screen readers don't announce muted status from sidebar; title tooltip available for mouse users (non-blocking UX note).
+  - **546 frontend tests** (+6: ChatLayoutMute — toggle On/Off, bell-off icon, unread suppressed when muted, unread increments when unmuted, unmute restores, chat-specific mute); tsc clean; biome clean.
+  - **Next cycle:** Mobile app scaffold (Tauri 2.x), notification settings (per-chat sound/vibration mute), or PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768).
+
+## Previous state (2026-06-20, cycle 174 — FEATURE: group chat add-member modal + per-chat draft persistence)
 - **Cycle 174 (commit d74b1a2):** FEATURE — Group UX + draft messages.
   - **`AddMemberModal`:** Contact picker opened via "Add member" header button (group chats only). Calls `POST /v1/groups/:groupId/members/:deviceId`. Displays MLS E2EE welcome notice ("Their identity is never sent in plaintext"). Shows loading/error states. Increments local `memberCount` on success. Server never sees plaintext names or message content.
   - **`Icon.tsx`:** Added `user-plus` SVG path.
