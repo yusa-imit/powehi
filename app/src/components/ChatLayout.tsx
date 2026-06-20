@@ -778,6 +778,7 @@ function Sidebar({
 	onSettings,
 	searchQuery,
 	onSearch,
+	onJumpToMessage,
 }: {
 	chats: Chat[];
 	activeId: string;
@@ -787,6 +788,7 @@ function Sidebar({
 	onSettings: () => void;
 	searchQuery: string;
 	onSearch: (q: string) => void;
+	onJumpToMessage?: (chatId: string) => void;
 }) {
 	const [starredOpen, setStarredOpen] = useState(false);
 	const regionId = useRegionDetect();
@@ -796,6 +798,26 @@ function Sidebar({
 			c.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
 			c.last.toLowerCase().includes(searchQuery.toLowerCase()),
 	);
+
+	// Message-body search: scan all messages for the query (local only — no server contact).
+	// Excludes deleted messages, image placeholders, and media-only entries.
+	// Capped at 3 results per chat and 10 total to keep the UI manageable.
+	const msgResults = searchQuery
+		? chats
+				.flatMap((c) =>
+					c.messages
+						.filter(
+							(m) =>
+								!m.media &&
+								!m.deleted &&
+								m.text !== "[image]" &&
+								m.text.toLowerCase().includes(searchQuery.toLowerCase()),
+						)
+						.slice(0, 3)
+						.map((m) => ({ chatId: c.id, chatName: c.name, text: m.text })),
+				)
+				.slice(0, 10)
+		: [];
 
 	return (
 		<aside
@@ -895,7 +917,7 @@ function Sidebar({
 				{filtered.map((c) => (
 					<ChatRow key={c.id} chat={c} active={c.id === activeId} onClick={() => onSelect(c.id)} />
 				))}
-				{filtered.length === 0 && (
+				{filtered.length === 0 && msgResults.length === 0 && searchQuery && (
 					<div
 						style={{
 							padding: 24,
@@ -905,6 +927,73 @@ function Sidebar({
 						}}
 					>
 						No chats match &ldquo;{searchQuery}&rdquo;.
+					</div>
+				)}
+
+				{/* Message-body search results — only shown when search is active */}
+				{msgResults.length > 0 && (
+					<div style={{ marginTop: filtered.length > 0 ? 12 : 0 }}>
+						<div
+							data-testid="msg-search-section-header"
+							style={{
+								fontSize: 10,
+								fontWeight: 600,
+								letterSpacing: "0.14em",
+								textTransform: "uppercase",
+								color: "var(--fg-4)",
+								padding: "8px 12px 4px",
+							}}
+						>
+							Messages
+						</div>
+						{msgResults.map(({ chatId, chatName, text }) => (
+							<button
+								key={`msgresult-${chatId}-${text.slice(0, 20)}`}
+								type="button"
+								data-testid="msg-search-result"
+								onClick={() => onJumpToMessage?.(chatId)}
+								style={{
+									display: "block",
+									width: "100%",
+									textAlign: "left",
+									background: "none",
+									border: "none",
+									borderRadius: 10,
+									padding: "8px 12px",
+									cursor: "pointer",
+									color: "inherit",
+									fontFamily: "inherit",
+								}}
+							>
+								<div
+									style={{
+										fontSize: 11,
+										fontWeight: 600,
+										color: "#FF8A3D",
+										marginBottom: 2,
+										overflow: "hidden",
+										textOverflow: "ellipsis",
+										whiteSpace: "nowrap",
+									}}
+								>
+									{chatName}
+								</div>
+								<div
+									style={{
+										fontSize: 12,
+										color: "var(--fg-3)",
+										overflow: "hidden",
+										textOverflow: "ellipsis",
+										whiteSpace: "nowrap",
+									}}
+								>
+									<HighlightedText
+										text={text.length > 80 ? `${text.slice(0, 80)}…` : text}
+										highlight={searchQuery}
+									/>
+								</div>
+							</button>
+						))}
 					</div>
 				)}
 			</div>
@@ -3211,6 +3300,20 @@ export function ChatLayout() {
 		);
 	}, []);
 
+	/**
+	 * Jump to a chat from a sidebar message-search result.
+	 * Switches to the target chat, seeds in-conversation search with the sidebar query
+	 * so matching messages are highlighted immediately, then clears the sidebar search.
+	 */
+	const handleJumpToMessage = useCallback(
+		(chatId: string) => {
+			handleSelectChat(chatId);
+			setMsgSearch(search);
+			setSearch("");
+		},
+		[handleSelectChat, search],
+	);
+
 	// Add a new chat entry when another device invites us (Welcome envelope received).
 	const handleNewGroup = useCallback(
 		(event: NewGroupEvent) => {
@@ -3409,6 +3512,7 @@ export function ChatLayout() {
 				onSettings={() => undefined}
 				searchQuery={search}
 				onSearch={setSearch}
+				onJumpToMessage={handleJumpToMessage}
 			/>
 
 			{active && (
