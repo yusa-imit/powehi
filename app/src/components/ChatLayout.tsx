@@ -25,6 +25,7 @@ import { useRegionDetect } from "../hooks/useRegionDetect";
 import { type NewGroupEvent, useWelcomePoller } from "../hooks/useWelcomePoller";
 import { useAuthStore } from "../store/auth";
 import { uint8ToBase64 } from "../utils/base64";
+import { AddMemberModal } from "./AddMemberModal";
 import { CreateGroupModal } from "./CreateGroupModal";
 import { Icon } from "./Icon";
 import { InviteModal } from "./InviteModal";
@@ -930,6 +931,7 @@ function ConversationHeader({
 	pqBindingHex,
 	msgSearch,
 	onMsgSearch,
+	onAddMember,
 }: {
 	chat: Chat;
 	onCall: () => void;
@@ -939,6 +941,7 @@ function ConversationHeader({
 	pqBindingHex?: string;
 	msgSearch: string;
 	onMsgSearch: (q: string) => void;
+	onAddMember?: () => void;
 }) {
 	const [searchOpen, setSearchOpen] = useState(false);
 
@@ -1041,6 +1044,9 @@ function ConversationHeader({
 					</div>
 					<div style={{ display: "flex", gap: 2 }}>
 						<IconBtn icon="search" onClick={handleOpenSearch} label="Search in conversation" />
+						{chat.isGroup && onAddMember && (
+							<IconBtn icon="user-plus" onClick={onAddMember} label="Add member" />
+						)}
 						<IconBtn icon="phone" onClick={onCall} label="Voice call" />
 						<IconBtn icon="video" onClick={onVideo} label="Video call" />
 						<IconBtn icon="more-horizontal" onClick={onInfo} active={infoOpen} label="Info" />
@@ -1782,6 +1788,9 @@ function Composer({
 	editingMessage,
 	onEdit,
 	onCancelEdit,
+	chatId,
+	initialDraft,
+	onDraftChange,
 }: {
 	onSend: (text: string) => void;
 	partner: string;
@@ -1801,16 +1810,32 @@ function Composer({
 	onEdit?: (newText: string) => void;
 	/** Called when the user cancels an edit. */
 	onCancelEdit?: () => void;
+	chatId: string;
+	initialDraft: string;
+	onDraftChange: (chatId: string, draft: string) => void;
 }) {
-	const [text, setText] = useState("");
+	const [text, setText] = useState(initialDraft);
+	const prevChatIdRef = useRef(chatId);
 
-	// Pre-fill textarea when entering edit mode; clear when exiting.
-	// biome-ignore lint/correctness/useExhaustiveDependencies: editingMessage.id is the semantic trigger
+	// Restore saved draft when the active chat changes.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: chatId is the trigger; initialDraft is the new chat's draft
+	useEffect(() => {
+		if (prevChatIdRef.current !== chatId) {
+			prevChatIdRef.current = chatId;
+			if (!editingMessage) {
+				setText(initialDraft);
+			}
+		}
+	}, [chatId]);
+
+	// Pre-fill textarea when entering edit mode; restore draft when exiting.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: editingMessage.id is the semantic trigger; initialDraft read at fire time
 	useEffect(() => {
 		if (editingMessage) {
 			setText(editingMessage.text);
 		} else {
-			setText("");
+			// Restore the saved draft when exiting edit mode (cancelled or completed).
+			setText(initialDraft);
 		}
 	}, [editingMessage?.id]);
 
@@ -1823,6 +1848,7 @@ function Composer({
 			onSend(trimmed);
 		}
 		setText("");
+		onDraftChange(chatId, "");
 	};
 	const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
 		if (e.key === "Enter" && !e.shiftKey) {
@@ -1977,8 +2003,10 @@ function Composer({
 				<textarea
 					value={text}
 					onChange={(e) => {
-						setText(e.target.value);
+						const next = e.target.value;
+						setText(next);
 						onTyping?.();
+						onDraftChange(chatId, next);
 					}}
 					onKeyDown={handleKeyDown}
 					placeholder={`Message ${partner.split(" ")[0]} — encrypted`}
@@ -2439,7 +2467,18 @@ export function ChatLayout() {
 	const [search, setSearch] = useState("");
 	const [infoOpen, setInfoOpen] = useState(false);
 	const [inviteOpen, setInviteOpen] = useState(false);
+	const [drafts, setDrafts] = useState<Record<string, string>>({});
+	const handleDraftChange = useCallback((id: string, draft: string) => {
+		setDrafts((prev) => {
+			if (!draft) {
+				const { [id]: _, ...rest } = prev;
+				return rest;
+			}
+			return prev[id] === draft ? prev : { ...prev, [id]: draft };
+		});
+	}, []);
 	const [createGroupOpen, setCreateGroupOpen] = useState(false);
+	const [addMemberOpen, setAddMemberOpen] = useState(false);
 	const [disappearingTtl, setDisappearingTtl] = useState<TtlOption>(undefined);
 	const [msgSearch, setMsgSearch] = useState("");
 	const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
@@ -3173,6 +3212,15 @@ export function ChatLayout() {
 		},
 		[identityId],
 	);
+	const handleMemberAdded = useCallback(
+		(_contactId: string, _contactName: string) => {
+			setChats((prev) =>
+				prev.map((c) => (c.id === activeId ? { ...c, memberCount: (c.memberCount ?? 1) + 1 } : c)),
+			);
+		},
+		[activeId],
+	);
+
 	// Global Welcome poller — processes invitations from other devices.
 	useWelcomePoller(identityId, handleNewGroup);
 
@@ -3327,6 +3375,7 @@ export function ChatLayout() {
 						pqBindingHex={active.pqBindingHex}
 						msgSearch={msgSearch}
 						onMsgSearch={setMsgSearch}
+						onAddMember={active.isGroup ? () => setAddMemberOpen(true) : undefined}
 					/>
 					{active.pinnedMessageId && (
 						<PinnedBanner
@@ -3364,6 +3413,9 @@ export function ChatLayout() {
 							if (editingMessage?.id) sendEdit(editingMessage.id, newText);
 						}}
 						onCancelEdit={() => setEditingMessage(null)}
+						chatId={activeId}
+						initialDraft={drafts[activeId] ?? ""}
+						onDraftChange={handleDraftChange}
 					/>
 				</main>
 			)}
@@ -3393,6 +3445,19 @@ export function ChatLayout() {
 				onClose={() => setCreateGroupOpen(false)}
 				onGroupCreated={handleGroupCreated}
 			/>
+
+			{active?.isGroup && (
+				<AddMemberModal
+					open={addMemberOpen}
+					onClose={() => setAddMemberOpen(false)}
+					groupId={active.mlsGroupId ?? active.id}
+					groupName={active.name}
+					contacts={chats
+						.filter((c) => !c.isGroup && c.id !== active.id)
+						.map((c) => ({ id: c.id, name: c.name }))}
+					onMemberAdded={handleMemberAdded}
+				/>
+			)}
 
 			{forwardMsg && (
 				<div
