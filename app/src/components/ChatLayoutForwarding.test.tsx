@@ -68,6 +68,7 @@ describe("ChatLayout — message forwarding", () => {
 				_onPq,
 				_onTyping,
 				_onReaction,
+				_onReactionRemove,
 				_onRead,
 				_onDelivery,
 				_onEdit,

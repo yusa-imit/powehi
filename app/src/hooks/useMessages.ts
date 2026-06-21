@@ -101,6 +101,10 @@ export type ReactionEmoji = (typeof ALLOWED_REACTION_EMOJIS)[number];
  * @param onReaction      Optional callback invoked when a reaction envelope is received.
  *                        Receives groupId, targetMessageId, emoji (from ALLOWED_REACTION_EMOJIS),
  *                        and the sender device ID. Not forwarded to onMessage.
+ * @param onReactionRemove Optional callback invoked when a reaction_remove envelope is received.
+ *                         Same signature as onReaction. Peers must only remove their own reactions;
+ *                         enforcement is best-effort (validated by emoji allowlist + non-empty id).
+ *                         Not forwarded to onMessage.
  * @param onReadReceipt      Optional callback invoked when a read_receipt envelope is received.
  *                           Receives groupId, messageIds (server UUID array, max 100), readAt (unix ms),
  *                           and senderDeviceId. Not forwarded to onMessage.
@@ -127,6 +131,7 @@ export function useMessages(
 	onPqBinding?: (groupId: string, bindingHex: string) => void,
 	onTyping?: (groupId: string) => void,
 	onReaction?: (groupId: string, targetId: string, emoji: string, senderId: string) => void,
+	onReactionRemove?: (groupId: string, targetId: string, emoji: string, senderId: string) => void,
 	onReadReceipt?: (
 		groupId: string,
 		messageIds: string[],
@@ -167,6 +172,11 @@ export function useMessages(
 	const onReactionRef = useRef(onReaction);
 	useEffect(() => {
 		onReactionRef.current = onReaction;
+	});
+
+	const onReactionRemoveRef = useRef(onReactionRemove);
+	useEffect(() => {
+		onReactionRemoveRef.current = onReactionRemove;
 	});
 
 	const onReadReceiptRef = useRef(onReadReceipt);
@@ -280,6 +290,22 @@ export function useMessages(
 							parsed.targetMessageId.length > 0
 						) {
 							onReactionRef.current?.(groupId, parsed.targetMessageId, parsed.emoji, env.sender);
+						}
+					} else if (parsed.type === "reaction_remove") {
+						// Reaction removal — remove sender's emoji from the target message.
+						shouldDisplayMessage = false;
+						if (
+							typeof parsed.emoji === "string" &&
+							typeof parsed.targetMessageId === "string" &&
+							(ALLOWED_REACTION_EMOJIS as readonly string[]).includes(parsed.emoji) &&
+							parsed.targetMessageId.length > 0
+						) {
+							onReactionRemoveRef.current?.(
+								groupId,
+								parsed.targetMessageId,
+								parsed.emoji,
+								env.sender,
+							);
 						}
 					} else if (parsed.type === "read_receipt") {
 						// Read receipt — never displayed as a message; callback only when params are valid.

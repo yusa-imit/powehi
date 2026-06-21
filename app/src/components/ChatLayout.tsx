@@ -1166,6 +1166,7 @@ function MessageBubble({
 	msg,
 	partner,
 	highlight,
+	myDeviceId,
 	onReact,
 	onReply,
 	onEdit,
@@ -1177,6 +1178,7 @@ function MessageBubble({
 	msg: ChatMessage;
 	partner: string;
 	highlight?: string;
+	myDeviceId?: string;
 	onReact?: (emoji: string) => void;
 	onReply?: () => void;
 	onEdit?: () => void;
@@ -1626,29 +1628,35 @@ function MessageBubble({
 						paddingLeft: isMe ? 0 : 36,
 					}}
 				>
-					{reactionEntries.map(([emoji, senders]) => (
-						<button
-							key={emoji}
-							type="button"
-							onClick={() => onReact?.(emoji)}
-							data-testid={`reaction-chip-${emoji}`}
-							style={{
-								background: "rgba(255,255,255,0.06)",
-								border: "1px solid rgba(255,255,255,0.12)",
-								borderRadius: 12,
-								padding: "2px 8px",
-								fontSize: 12,
-								cursor: "pointer",
-								display: "inline-flex",
-								alignItems: "center",
-								gap: 4,
-								color: "var(--fg-2)",
-							}}
-						>
-							{emoji}
-							<span style={{ fontSize: 10, opacity: 0.75 }}>{senders.length}</span>
-						</button>
-					))}
+					{reactionEntries.map(([emoji, senders]) => {
+						const isMine = myDeviceId ? senders.includes(myDeviceId) : false;
+						return (
+							<button
+								key={emoji}
+								type="button"
+								onClick={() => onReact?.(emoji)}
+								data-testid={`reaction-chip-${emoji}`}
+								aria-pressed={isMine}
+								style={{
+									background: isMine ? "rgba(255,138,61,0.18)" : "rgba(255,255,255,0.06)",
+									border: isMine
+										? "1px solid rgba(255,138,61,0.5)"
+										: "1px solid rgba(255,255,255,0.12)",
+									borderRadius: 12,
+									padding: "2px 8px",
+									fontSize: 12,
+									cursor: "pointer",
+									display: "inline-flex",
+									alignItems: "center",
+									gap: 4,
+									color: isMine ? "#FF8A3D" : "var(--fg-2)",
+								}}
+							>
+								{emoji}
+								<span style={{ fontSize: 10, opacity: 0.75 }}>{senders.length}</span>
+							</button>
+						);
+					})}
 				</div>
 			)}
 		</div>
@@ -1691,6 +1699,7 @@ function MessageList({
 	messages,
 	partner,
 	searchQuery,
+	myDeviceId,
 	onReact,
 	onReply,
 	onEdit,
@@ -1703,6 +1712,7 @@ function MessageList({
 	messages: ChatMessage[];
 	partner: string;
 	searchQuery?: string;
+	myDeviceId?: string;
 	onReact?: (msgId: string, emoji: string) => void;
 	onReply?: (msg: ChatMessage) => void;
 	onEdit?: (msg: ChatMessage) => void;
@@ -1854,6 +1864,7 @@ function MessageList({
 						msg={g.msg}
 						partner={partner}
 						highlight={searchQuery}
+						myDeviceId={myDeviceId}
 						onReact={
 							g.msg.id && onReact
 								? (emoji) => {
@@ -2878,8 +2889,38 @@ export function ChatLayout() {
 	);
 
 	/**
-	 * Send an emoji reaction to the active MLS group targeting a specific message.
-	 * Optimistically applies the reaction locally before the server echo arrives.
+	 * Remove a sender's emoji from the target message in the matching chat.
+	 * Mirror of handleIncomingReaction — used for optimistic remove and peer reaction_remove.
+	 */
+	const handleRemoveReaction = useCallback(
+		(gId: string, targetId: string, emoji: string, senderId: string) => {
+			setChats((cs) =>
+				cs.map((c) => {
+					if (c.mlsGroupId !== gId) return c;
+					const msgs = c.messages.map((m) => {
+						if (m.id !== targetId) return m;
+						const existing = m.reactions ?? {};
+						const senders = existing[emoji] ?? [];
+						if (!senders.includes(senderId)) return m;
+						const newSenders = senders.filter((s) => s !== senderId);
+						if (newSenders.length === 0) {
+							const { [emoji]: _removed, ...rest } = existing;
+							return { ...m, reactions: rest };
+						}
+						return { ...m, reactions: { ...existing, [emoji]: newSenders } };
+					});
+					return { ...c, messages: msgs };
+				}),
+			);
+		},
+		[],
+	);
+
+	/**
+	 * Send an emoji reaction (or remove it if already reacted) to the active MLS group.
+	 * Toggle semantics: if myDeviceId is already in the senders list, sends reaction_remove
+	 * and removes locally. Otherwise adds the reaction and sends reaction.
+	 * Optimistically applies the change locally before the server echo arrives.
 	 * Fire-and-forget — failure leaves the optimistic update in place (best-effort UX).
 	 */
 	const sendReaction = useCallback(
@@ -2888,19 +2929,33 @@ export function ChatLayout() {
 			if (!sessionToken || !active?.mlsGroupId || !active?.mlsIdentityId || !cryptoWorker) return;
 			const { mlsGroupId, mlsIdentityId } = active;
 			const myDeviceId = useAuthStore.getState().deviceId;
-			if (myDeviceId) {
-				handleIncomingReaction(mlsGroupId, targetId, emoji, myDeviceId);
+			const targetChat = chats.find((c) => c.mlsGroupId === mlsGroupId);
+			const targetMsg = targetChat?.messages.find((m) => m.id === targetId);
+			const alreadyReacted =
+				myDeviceId && (targetMsg?.reactions?.[emoji] ?? []).includes(myDeviceId);
+			if (alreadyReacted) {
+				if (myDeviceId) handleRemoveReaction(mlsGroupId, targetId, emoji, myDeviceId);
+				const plaintext = new TextEncoder().encode(
+					JSON.stringify({ type: "reaction_remove", emoji, targetMessageId: targetId }),
+				);
+				cryptoWorker
+					.mlsEncrypt(mlsIdentityId, mlsGroupId, plaintext)
+					.then(({ ciphertext }) => sendMessageApi(sessionToken, mlsGroupId, ciphertext, undefined))
+					.catch(() => {})
+					.finally(() => plaintext.fill(0));
+			} else {
+				if (myDeviceId) handleIncomingReaction(mlsGroupId, targetId, emoji, myDeviceId);
+				const plaintext = new TextEncoder().encode(
+					JSON.stringify({ type: "reaction", emoji, targetMessageId: targetId }),
+				);
+				cryptoWorker
+					.mlsEncrypt(mlsIdentityId, mlsGroupId, plaintext)
+					.then(({ ciphertext }) => sendMessageApi(sessionToken, mlsGroupId, ciphertext, undefined))
+					.catch(() => {})
+					.finally(() => plaintext.fill(0));
 			}
-			const plaintext = new TextEncoder().encode(
-				JSON.stringify({ type: "reaction", emoji, targetMessageId: targetId }),
-			);
-			cryptoWorker
-				.mlsEncrypt(mlsIdentityId, mlsGroupId, plaintext)
-				.then(({ ciphertext }) => sendMessageApi(sessionToken, mlsGroupId, ciphertext, undefined))
-				.catch(() => {})
-				.finally(() => plaintext.fill(0));
 		},
-		[active, cryptoWorker, handleIncomingReaction, sessionToken],
+		[active, chats, cryptoWorker, handleIncomingReaction, handleRemoveReaction, sessionToken],
 	);
 
 	/**
@@ -3316,6 +3371,7 @@ export function ChatLayout() {
 		handlePqBinding,
 		handleIncomingTyping,
 		handleIncomingReaction,
+		handleRemoveReaction,
 		handleIncomingReadReceipt,
 		handleIncomingDeliveryReceipt,
 		handleIncomingEdit,
@@ -3585,6 +3641,7 @@ export function ChatLayout() {
 						messages={active.messages}
 						partner={active.name}
 						searchQuery={msgSearch}
+						myDeviceId={useAuthStore.getState().deviceId ?? undefined}
 						onReact={sendReaction}
 						onReply={setReplyingTo}
 						onEdit={setEditingMessage}

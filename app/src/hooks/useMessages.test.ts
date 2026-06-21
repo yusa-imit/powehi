@@ -696,7 +696,16 @@ describe("useMessages — read_receipt handling", () => {
 		const onReadReceipt = vi.fn();
 
 		renderHook(() =>
-			useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, undefined, onReadReceipt),
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onReadReceipt,
+			),
 		);
 
 		await waitFor(() => {
@@ -723,7 +732,16 @@ describe("useMessages — read_receipt handling", () => {
 		const onMessage = vi.fn();
 
 		renderHook(() =>
-			useMessages(IDENTITY_ID, GROUP_ID, onMessage, undefined, undefined, undefined, vi.fn()),
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				onMessage,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				vi.fn(),
+			),
 		);
 
 		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
@@ -743,7 +761,16 @@ describe("useMessages — read_receipt handling", () => {
 		pollSpy.mockResolvedValueOnce([makeReadReceiptEnvelope()]);
 
 		renderHook(() =>
-			useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, undefined, vi.fn()),
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				vi.fn(),
+			),
 		);
 
 		await waitFor(() => {
@@ -765,7 +792,16 @@ describe("useMessages — read_receipt handling", () => {
 		const onReadReceipt = vi.fn();
 
 		renderHook(() =>
-			useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, undefined, onReadReceipt),
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onReadReceipt,
+			),
 		);
 
 		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
@@ -787,7 +823,16 @@ describe("useMessages — read_receipt handling", () => {
 		const onReadReceipt = vi.fn();
 
 		renderHook(() =>
-			useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, undefined, onReadReceipt),
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onReadReceipt,
+			),
 		);
 
 		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
@@ -808,7 +853,16 @@ describe("useMessages — read_receipt handling", () => {
 		const onReadReceipt = vi.fn();
 
 		renderHook(() =>
-			useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, undefined, onReadReceipt),
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onReadReceipt,
+			),
 		);
 
 		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
@@ -829,7 +883,16 @@ describe("useMessages — read_receipt handling", () => {
 		const onMessage = vi.fn();
 
 		renderHook(() =>
-			useMessages(IDENTITY_ID, GROUP_ID, onMessage, undefined, undefined, undefined, vi.fn()),
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				onMessage,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				vi.fn(),
+			),
 		);
 
 		await waitFor(() => expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID));
@@ -880,6 +943,7 @@ describe("useMessages — delivery_receipt handling", () => {
 				IDENTITY_ID,
 				GROUP_ID,
 				vi.fn(),
+				undefined,
 				undefined,
 				undefined,
 				undefined,
@@ -963,6 +1027,7 @@ describe("useMessages — delivery_receipt handling", () => {
 				undefined,
 				undefined,
 				undefined,
+				undefined,
 				onDeliveryReceipt,
 			),
 		);
@@ -986,6 +1051,7 @@ describe("useMessages — delivery_receipt handling", () => {
 				IDENTITY_ID,
 				GROUP_ID,
 				vi.fn(),
+				undefined,
 				undefined,
 				undefined,
 				undefined,
@@ -1015,6 +1081,7 @@ describe("useMessages — delivery_receipt handling", () => {
 				IDENTITY_ID,
 				GROUP_ID,
 				vi.fn(),
+				undefined,
 				undefined,
 				undefined,
 				undefined,
@@ -1202,6 +1269,7 @@ describe("useMessages — edit handling", () => {
 				undefined,
 				undefined,
 				undefined,
+				undefined,
 				onEdit,
 			),
 		);
@@ -1266,6 +1334,7 @@ describe("useMessages — edit handling", () => {
 				undefined,
 				undefined,
 				undefined,
+				undefined,
 				onEdit,
 			),
 		);
@@ -1292,6 +1361,7 @@ describe("useMessages — edit handling", () => {
 				IDENTITY_ID,
 				GROUP_ID,
 				vi.fn(),
+				undefined,
 				undefined,
 				undefined,
 				undefined,
@@ -1328,6 +1398,7 @@ describe("useMessages — edit handling", () => {
 				undefined,
 				undefined,
 				undefined,
+				undefined,
 				onEdit,
 			),
 		);
@@ -1354,6 +1425,7 @@ describe("useMessages — edit handling", () => {
 				IDENTITY_ID,
 				GROUP_ID,
 				vi.fn(),
+				undefined,
 				undefined,
 				undefined,
 				undefined,
@@ -1405,6 +1477,7 @@ describe("useMessages — delete handling", () => {
 				IDENTITY_ID,
 				GROUP_ID,
 				vi.fn(),
+				undefined,
 				undefined,
 				undefined,
 				undefined,
@@ -1466,6 +1539,7 @@ describe("useMessages — delete handling", () => {
 				undefined,
 				undefined,
 				undefined,
+				undefined,
 				onDelete,
 			),
 		);
@@ -1489,6 +1563,7 @@ describe("useMessages — delete handling", () => {
 				IDENTITY_ID,
 				GROUP_ID,
 				vi.fn(),
+				undefined,
 				undefined,
 				undefined,
 				undefined,
@@ -1521,6 +1596,7 @@ describe("useMessages — delete handling", () => {
 				IDENTITY_ID,
 				GROUP_ID,
 				vi.fn(),
+				undefined,
 				undefined,
 				undefined,
 				undefined,
@@ -1586,6 +1662,7 @@ describe("useMessages — pin handling", () => {
 				undefined,
 				undefined,
 				undefined,
+				undefined,
 				onPin,
 			),
 		);
@@ -1609,6 +1686,7 @@ describe("useMessages — pin handling", () => {
 				IDENTITY_ID,
 				GROUP_ID,
 				vi.fn(),
+				undefined,
 				undefined,
 				undefined,
 				undefined,
@@ -1670,6 +1748,7 @@ describe("useMessages — pin handling", () => {
 				IDENTITY_ID,
 				GROUP_ID,
 				vi.fn(),
+				undefined,
 				undefined,
 				undefined,
 				undefined,
@@ -1842,6 +1921,7 @@ describe("useMessages — presence handling", () => {
 				undefined,
 				undefined,
 				undefined,
+				undefined,
 				onPresence,
 			),
 		);
@@ -1866,6 +1946,7 @@ describe("useMessages — presence handling", () => {
 				IDENTITY_ID,
 				GROUP_ID,
 				vi.fn(),
+				undefined,
 				undefined,
 				undefined,
 				undefined,
@@ -1937,6 +2018,7 @@ describe("useMessages — presence handling", () => {
 				undefined,
 				undefined,
 				undefined,
+				undefined,
 				onPresence,
 			),
 		);
@@ -1960,6 +2042,7 @@ describe("useMessages — presence handling", () => {
 				IDENTITY_ID,
 				GROUP_ID,
 				vi.fn(),
+				undefined,
 				undefined,
 				undefined,
 				undefined,

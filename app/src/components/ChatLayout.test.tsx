@@ -581,7 +581,7 @@ describe("ChatLayout", () => {
 				| ((groupId: string, messageIds: string[], readAt: number, senderDeviceId: string) => void)
 				| undefined;
 			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
-				(_id, _gid, _onMsg, _onPq, _onTyping, _onReaction, onReadReceipt) => {
+				(_id, _gid, _onMsg, _onPq, _onTyping, _onReaction, _onReactionRemove, onReadReceipt) => {
 					capturedOnReadReceipt = onReadReceipt;
 				},
 			);
@@ -616,7 +616,7 @@ describe("ChatLayout", () => {
 				| ((groupId: string, messageIds: string[], readAt: number, senderDeviceId: string) => void)
 				| undefined;
 			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
-				(_id, _gid, _onMsg, _onPq, _onTyping, _onReaction, onReadReceipt) => {
+				(_id, _gid, _onMsg, _onPq, _onTyping, _onReaction, _onReactionRemove, onReadReceipt) => {
 					capturedOnReadReceipt = onReadReceipt;
 				},
 			);
@@ -669,7 +669,17 @@ describe("ChatLayout", () => {
 				| ((groupId: string, messageIds: string[], senderDeviceId: string) => void)
 				| undefined;
 			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
-				(_id, _gid, _onMsg, _onPq, _onTyping, _onReaction, _onReadReceipt, onDeliveryReceipt) => {
+				(
+					_id,
+					_gid,
+					_onMsg,
+					_onPq,
+					_onTyping,
+					_onReaction,
+					_onReactionRemove,
+					_onReadReceipt,
+					onDeliveryReceipt,
+				) => {
 					capturedOnDeliveryReceipt = onDeliveryReceipt;
 				},
 			);
@@ -691,7 +701,17 @@ describe("ChatLayout", () => {
 				| ((groupId: string, messageIds: string[], senderDeviceId: string) => void)
 				| undefined;
 			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
-				(_id, _gid, _onMsg, _onPq, _onTyping, _onReaction, _onReadReceipt, onDeliveryReceipt) => {
+				(
+					_id,
+					_gid,
+					_onMsg,
+					_onPq,
+					_onTyping,
+					_onReaction,
+					_onReactionRemove,
+					_onReadReceipt,
+					onDeliveryReceipt,
+				) => {
 					capturedOnDeliveryReceipt = onDeliveryReceipt;
 				},
 			);
@@ -739,7 +759,17 @@ describe("ChatLayout", () => {
 				| ((groupId: string, messageIds: string[], senderDeviceId: string) => void)
 				| undefined;
 			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
-				(_id, _gid, _onMsg, _onPq, _onTyping, _onReaction, onReadReceipt, onDeliveryReceipt) => {
+				(
+					_id,
+					_gid,
+					_onMsg,
+					_onPq,
+					_onTyping,
+					_onReaction,
+					_onReactionRemove,
+					onReadReceipt,
+					onDeliveryReceipt,
+				) => {
 					capturedOnReadReceipt = onReadReceipt;
 					capturedOnDeliveryReceipt = onDeliveryReceipt;
 				},
@@ -1035,7 +1065,18 @@ describe("ChatLayout", () => {
 				  ) => void)
 				| undefined;
 			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
-				(_id, _gid, onMsg, _onPq, _onTyping, _onReaction, _onRead, _onDelivery, onEdit) => {
+				(
+					_id,
+					_gid,
+					onMsg,
+					_onPq,
+					_onTyping,
+					_onReaction,
+					_onReactionRemove,
+					_onRead,
+					_onDelivery,
+					onEdit,
+				) => {
 					capturedOnMessage = onMsg;
 					capturedOnEdit = onEdit;
 				},
@@ -1081,7 +1122,18 @@ describe("ChatLayout", () => {
 				  ) => void)
 				| undefined;
 			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
-				(_id, _gid, _onMsg, _onPq, _onTyping, _onReaction, _onRead, _onDelivery, onEdit) => {
+				(
+					_id,
+					_gid,
+					_onMsg,
+					_onPq,
+					_onTyping,
+					_onReaction,
+					_onReactionRemove,
+					_onRead,
+					_onDelivery,
+					onEdit,
+				) => {
 					capturedOnEdit = onEdit;
 				},
 			);
@@ -1180,6 +1232,7 @@ describe("ChatLayout", () => {
 					_onPq,
 					_onTyping,
 					_onReaction,
+					_onReactionRemove,
 					_onRead,
 					_onDelivery,
 					_onEdit,
@@ -1223,6 +1276,7 @@ describe("ChatLayout", () => {
 					_onPq,
 					_onTyping,
 					_onReaction,
+					_onReactionRemove,
 					_onRead,
 					_onDelivery,
 					_onEdit,
@@ -1318,6 +1372,7 @@ describe("ChatLayout", () => {
 					_onPq,
 					_onTyping,
 					_onReaction,
+					_onReactionRemove,
 					_onRead,
 					_onDelivery,
 					_onEdit,
@@ -1393,6 +1448,7 @@ describe("ChatLayout", () => {
 					_onPq,
 					_onTyping,
 					_onReaction,
+					_onReactionRemove,
 					_onRead,
 					_onDelivery,
 					_onEdit,
@@ -1423,6 +1479,7 @@ describe("ChatLayout", () => {
 					_onPq,
 					_onTyping,
 					_onReaction,
+					_onReactionRemove,
 					_onRead,
 					_onDelivery,
 					_onEdit,
@@ -1459,6 +1516,7 @@ describe("ChatLayout", () => {
 					_onPq,
 					_onTyping,
 					_onReaction,
+					_onReactionRemove,
 					_onRead,
 					_onDelivery,
 					_onEdit,
@@ -1494,6 +1552,7 @@ describe("ChatLayout", () => {
 					_onPq,
 					_onTyping,
 					_onReaction,
+					_onReactionRemove,
 					_onRead,
 					_onDelivery,
 					_onEdit,
@@ -1615,6 +1674,7 @@ describe("ChatLayout", () => {
 					_onPq,
 					_onTyping,
 					_onReaction,
+					_onReactionRemove,
 					_onRead,
 					_onDelivery,
 					_onEdit,
