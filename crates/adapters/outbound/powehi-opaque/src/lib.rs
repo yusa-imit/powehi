@@ -33,9 +33,9 @@ use opaque_ke::{
     CredentialFinalization, CredentialRequest, RegistrationRequest, RegistrationUpload,
     ServerLogin, ServerLoginStartParameters, ServerRegistration, ServerSetup,
 };
-use rand::rngs::OsRng;
 use powehi_domain::error::DomainError;
 use powehi_port_outbound::opaque::OpaqueServerPort;
+use rand::rngs::OsRng;
 
 /// OPAQUE ciphersuite — must match the client (powehi-crypto-wasm/src/opaque.rs).
 pub struct DefaultCipherSuite;
