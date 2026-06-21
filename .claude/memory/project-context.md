@@ -17,7 +17,15 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-21, cycle 179 — STABILIZATION: CI biome fix + powehi-opaque isolated-build fix)
+## Current state (2026-06-21, cycle 180 — STABILIZATION: CI rustfmt import-order fix in powehi-opaque)
+- **Cycle 180 (commit 93ff431):** STABILIZATION — CI red fix; no new features.
+  - **CI RED FIX (rustfmt import order):** `cargo fmt --all --check` was failing on `powehi-opaque/src/lib.rs` line 36: `use rand::rngs::OsRng` appeared before `use powehi_domain::*` and `use powehi_port_outbound::*`. rustfmt requires alphabetical order within the same use-group (`p` < `r`). Reordered to `powehi_domain` → `powehi_port_outbound` → `rand`. No logic change.
+  - **cargo audit:** 2 allowed warnings — `instant` unmaintained (pre-existing via openmls) + `bitcoin_hashes 0.14.100` yanked (via bip39 in powehi-crypto-wasm; pre-existing). No vulnerabilities.
+  - **target/:** 4.4GB (under 20GB threshold); 0-byte rmeta stubs pruned.
+  - **security-auditor:** GREEN. Pure use-statement reorder; no behavioral change.
+  - **Next cycle:** FEATURE — mobile app scaffold (Tauri 2.x), per-chat vibration toggle, or PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768).
+
+## Previous state (2026-06-21, cycle 179 — STABILIZATION: CI biome fix + powehi-opaque isolated-build fix)
 - **Cycle 179 (commits 21e3816, cf9d2c8):** STABILIZATION — Two CI/build fixes; no new features.
   - **CI RED FIX (biome format):** `ChatLayout.tsx` `handleToggleSound` `setChats` call was multi-line; biome formatter wanted a one-liner. `pnpm --filter app exec biome check --write` applied the fix. 560 frontend tests still pass; biome clean.
   - **powehi-opaque isolated-build fix:** `cargo test -p powehi-opaque` was failing with E0432 (unresolved `opaque_ke::rand::rngs::OsRng`). Root cause: the `rand/getrandom` feature was only available via workspace-wide unification from `powehi-crypto-wasm`'s `getrandom = "0.2"` dep — isolated crate builds didn't have it. Fix: added `rand = { version = "0.8", features = ["getrandom"] }` to workspace `[workspace.dependencies]` and `rand = { workspace = true }` to `powehi-opaque/Cargo.toml`; updated imports to use `rand::rngs::OsRng` directly. All 8 OPAQUE tests now pass in isolation. Full workspace still 547 tests, all green.
