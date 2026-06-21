@@ -74,6 +74,11 @@ jobs:
 
       - uses: taiki-e/install-action@nextest
 
+      - name: Pre-pull Postgres image
+        # Pre-pull avoids transient "bytes remaining on stream" errors during
+        # the testcontainers layer download inside the test process.
+        run: docker pull postgres:16-alpine
+
       - name: cargo nextest run (testcontainers integration)
         # Runs only the pg_security_it binary (testcontainers-based) which starts
         # its own ephemeral Postgres — does NOT run push_subscription_repo_it

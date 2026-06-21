@@ -33,7 +33,7 @@ use powehi_postgres::{
     PgServerConfigRepository, PgUserRepository,
 };
 use sqlx::PgPool;
-use testcontainers::runners::AsyncRunner;
+use testcontainers::{runners::AsyncRunner, ImageExt};
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 
@@ -41,8 +41,12 @@ use uuid::Uuid;
 
 /// Start a throwaway Postgres container, run all migrations, return the pool.
 /// Caller must keep the returned container alive for the duration of the test.
+///
+/// Uses postgres:16-alpine explicitly — the testcontainers-modules default
+/// (11-alpine) is EOL since 2023-11 and its Docker Hub layers are unstable.
 async fn setup() -> (testcontainers::ContainerAsync<Postgres>, PgPool) {
     let container = Postgres::default()
+        .with_tag("16-alpine")
         .start()
         .await
         .expect("Postgres container started");
