@@ -17,7 +17,14 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-21, cycle 178 — FEATURE: per-chat notification sound toggle + CI fix)
+## Current state (2026-06-21, cycle 179 — STABILIZATION: CI biome fix + powehi-opaque isolated-build fix)
+- **Cycle 179 (commits 21e3816, cf9d2c8):** STABILIZATION — Two CI/build fixes; no new features.
+  - **CI RED FIX (biome format):** `ChatLayout.tsx` `handleToggleSound` `setChats` call was multi-line; biome formatter wanted a one-liner. `pnpm --filter app exec biome check --write` applied the fix. 560 frontend tests still pass; biome clean.
+  - **powehi-opaque isolated-build fix:** `cargo test -p powehi-opaque` was failing with E0432 (unresolved `opaque_ke::rand::rngs::OsRng`). Root cause: the `rand/getrandom` feature was only available via workspace-wide unification from `powehi-crypto-wasm`'s `getrandom = "0.2"` dep — isolated crate builds didn't have it. Fix: added `rand = { version = "0.8", features = ["getrandom"] }` to workspace `[workspace.dependencies]` and `rand = { workspace = true }` to `powehi-opaque/Cargo.toml`; updated imports to use `rand::rngs::OsRng` directly. All 8 OPAQUE tests now pass in isolation. Full workspace still 547 tests, all green.
+  - **security-auditor:** GREEN. OsRng still backed by OS CSPRNG; no behavioral change; all OPAQUE invariants (synthetic KE2, 300s TTL, server-bound identity) verified unchanged.
+  - **Next cycle:** FEATURE — mobile app scaffold (Tauri 2.x), per-chat vibration toggle, or PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768).
+
+## Previous state (2026-06-21, cycle 178 — FEATURE: per-chat notification sound toggle + CI fix)
 - **Cycle 178 (commit 0ec56ca):** FEATURE — Per-chat notification sound toggle; CI fix.
   - **CI RED FIX:** `ChatLayoutSearch.test.tsx:147` had a dead `realUseMessages` import causing TS6133 that broke the bundle budget CI check. Removed the unused destructured import.
   - **`Chat.sound?: boolean`:** Local-only flag on Chat object. Never sent to any server, never included in MLS payload, never logged. No persistence (lost on page reload — intentional, same pattern as `muted`).
