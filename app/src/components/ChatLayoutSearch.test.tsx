@@ -144,7 +144,6 @@ describe("ChatLayout — sidebar message search", () => {
 		});
 		// Simulate incoming delete for that message
 		const deletePayload = JSON.stringify({ type: "delete", targetMessageId: "env-del-001" });
-		const { useMessages: realUseMessages } = await import("../hooks/useMessages");
 		// We can't easily trigger the delete handler in unit tests — instead just verify
 		// that after a manual state scenario the delete filter works.
 		// This test verifies the UI does not show search-result items with deleted content.

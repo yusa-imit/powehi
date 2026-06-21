@@ -95,6 +95,8 @@ interface Chat {
 	memberCount?: number;
 	/** When true, incoming messages do not increment the unread badge. Local-only, never sent to server. */
 	muted?: boolean;
+	/** When false, incoming messages do not trigger notification sounds. Local-only, never sent to server. */
+	sound?: boolean;
 }
 
 // ── Disappearing messages helpers ──────────────────────────────────────────────
@@ -2238,12 +2240,16 @@ function InfoPanel({
 	disappearingTtl,
 	muted,
 	onToggleMute,
+	sound,
+	onToggleSound,
 }: {
 	chat: Chat;
 	onClose: () => void;
 	disappearingTtl: TtlOption;
 	muted: boolean;
 	onToggleMute: () => void;
+	sound: boolean;
+	onToggleSound: () => void;
 }) {
 	const [safetyVerified, setSafetyVerified] = useState(false);
 	const [verifiedAt, setVerifiedAt] = useState<number | undefined>(undefined);
@@ -2549,6 +2555,7 @@ function InfoPanel({
 
 			<InfoSection title="Notifications">
 				<InfoRow label="Mute" trailing={muted ? "On" : "Off"} onClick={onToggleMute} />
+				<InfoRow label="Sound" trailing={sound ? "On" : "Off"} onClick={onToggleSound} />
 				<InfoRow label="Pin to top" trailing="On" />
 			</InfoSection>
 			<InfoSection title="Disappearing messages">
@@ -3140,6 +3147,13 @@ export function ChatLayout() {
 		setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, muted: !c.muted } : c)));
 	}, []);
 
+	/** Toggle the sound flag on a chat. Local-only — no MLS message sent, no server contact. */
+	const handleToggleSound = useCallback((chatId: string) => {
+		setChats((cs) =>
+			cs.map((c) => (c.id === chatId ? { ...c, sound: !(c.sound ?? true) } : c)),
+		);
+	}, []);
+
 	/**
 	 * Send a read_receipt to the active MLS group for the given envelope IDs.
 	 * Fire-and-forget — a failed receipt is non-fatal (the UI shows "sent" vs "read" state).
@@ -3595,6 +3609,8 @@ export function ChatLayout() {
 					disappearingTtl={disappearingTtl}
 					muted={active.muted ?? false}
 					onToggleMute={() => handleToggleMute(active.id)}
+					sound={active.sound ?? true}
+					onToggleSound={() => handleToggleSound(active.id)}
 				/>
 			)}
 
