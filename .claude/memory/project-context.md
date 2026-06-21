@@ -17,7 +17,20 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-21, cycle 181 — FEATURE: per-chat vibration toggle)
+## Current state (2026-06-21, cycle 182 — FEATURE: Tauri 2.x mobile app scaffold)
+- **Cycle 182 (commit 6744d2e):** FEATURE — Tauri 2.x native shell scaffold.
+  - **`app/src-tauri/`:** Standalone Cargo workspace (separate from server `crates/`). Not added to root workspace — avoids WebKit system dep requirement in server CI. Has its own `Cargo.lock`.
+  - **`Cargo.toml`:** `tauri = "2"`, `tauri-build = "2"`, `serde`, `serde_json`. `crate-type = ["staticlib", "cdylib", "rlib"]` for mobile compilation. Release profile: `lto=true`, `panic=abort`, `strip=true`.
+  - **`src/lib.rs`:** `#[cfg_attr(mobile, tauri::mobile_entry_point)]` macro enables iOS/Android JNI/ObjC harness. Desktop calls `run()` from `main.rs`.
+  - **`tauri.conf.json`:** Mobile-safe CSP (`'wasm-unsafe-eval'` for WASM, `blob:` for Comlink worker, `ipc: http://ipc.localhost` for Tauri IPC, `frame-ancestors 'none'`, `form-action 'self'`). Window: 430×932 (iPhone 14 Pro size), minWidth 375, minHeight 667.
+  - **`capabilities/default.json`:** `core:default` only — no fs/shell/http/clipboard plugins; scoped to `windows: ["main"]`.
+  - **`app/package.json`:** Added `@tauri-apps/api ^2` dep, `@tauri-apps/cli ^2` devDep, scripts: `tauri:dev`, `tauri:build`, `tauri:android:dev`, `tauri:android:build`, `tauri:ios:dev`, `tauri:ios:build`.
+  - **Security invariants:** No crypto crosses IPC boundary — WASM worker + MLS remain in WebView. No custom IPC commands. Tauri Rust backend is pure shell. No plaintext content exposed to native layer.
+  - **security-auditor:** GREEN. YELLOW-1: frame-ancestors/form-action missing (fixed in same commit). YELLOW-2: style-src unsafe-inline (pre-existing from Vite/Tailwind, non-blocking).
+  - **Rust tests (workspace):** 547 passed, 0 failed; fmt clean; biome clean; 566 frontend tests unchanged.
+  - **Next cycle:** PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768), Tauri mobile deep-link / push notification integration, or additional UX polish.
+
+## Previous state (2026-06-21, cycle 181 — FEATURE: per-chat vibration toggle)
 - **Cycle 181 (commit aeb72b4):** FEATURE — Per-chat vibration toggle.
   - **`Chat.vibrate?: boolean`:** Local-only flag. Default true (vibrate on new messages). Never sent to server, never included in MLS payload, never logged.
   - **`chatsRef`:** React useRef that mirrors `chats` state so `handleIncoming` (stable `useCallback`) can read per-chat vibrate/muted flags without taking a `chats` dep (which would restart the polling hook on every message). Same pattern as `activeIdRef`.
