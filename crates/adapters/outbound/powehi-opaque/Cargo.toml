@@ -10,4 +10,5 @@ powehi-domain = { workspace = true }
 powehi-port-outbound = { workspace = true }
 opaque-ke = { workspace = true, features = ["argon2"] }
 argon2 = { workspace = true }
+rand = { workspace = true }
 tracing = { workspace = true }

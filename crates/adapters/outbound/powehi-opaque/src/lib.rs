@@ -29,11 +29,11 @@ use std::time::{Duration, Instant};
 
 use argon2::Argon2;
 use opaque_ke::ciphersuite::CipherSuite;
-use opaque_ke::rand::rngs::OsRng;
 use opaque_ke::{
     CredentialFinalization, CredentialRequest, RegistrationRequest, RegistrationUpload,
     ServerLogin, ServerLoginStartParameters, ServerRegistration, ServerSetup,
 };
+use rand::rngs::OsRng;
 use powehi_domain::error::DomainError;
 use powehi_port_outbound::opaque::OpaqueServerPort;
 
@@ -173,7 +173,6 @@ impl OpaqueServerPort for OpaqueServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opaque_ke::rand::rngs::OsRng;
     use opaque_ke::{
         ClientLogin, ClientLoginFinishParameters, ClientRegistration,
         ClientRegistrationFinishParameters,
