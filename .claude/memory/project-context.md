@@ -17,7 +17,19 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-21, cycle 180 — STABILIZATION: CI rustfmt import-order fix in powehi-opaque)
+## Current state (2026-06-21, cycle 181 — FEATURE: per-chat vibration toggle)
+- **Cycle 181 (commit aeb72b4):** FEATURE — Per-chat vibration toggle.
+  - **`Chat.vibrate?: boolean`:** Local-only flag. Default true (vibrate on new messages). Never sent to server, never included in MLS payload, never logged.
+  - **`chatsRef`:** React useRef that mirrors `chats` state so `handleIncoming` (stable `useCallback`) can read per-chat vibrate/muted flags without taking a `chats` dep (which would restart the polling hook on every message). Same pattern as `activeIdRef`.
+  - **`handleIncoming`:** After persisting, calls `navigator.vibrate?.([100])` when the incoming chat is not muted and `vibrate !== false`. Optional-chained for desktop/unsupported browsers.
+  - **`handleToggleVibrate`:** Pure `setChats` immutable toggle. `!(c.vibrate ?? true)` so first tap goes On→Off. `useCallback([])`.
+  - **`InfoPanel`:** Added `vibrate: boolean` and `onToggleVibrate: () => void` props. "Vibrate" InfoRow in Notifications section (below Sound row).
+  - **Security invariants:** `vibrate` is purely in-memory. No server exposure. Boolean rendered as literal "On"/"Off" (no XSS). No PII or plaintext in any log path.
+  - **security-auditor:** GREEN. No findings.
+  - **566 frontend tests** (+6: ChatLayoutVibrate suite — default On, toggle Off, toggle back On, chat-specificity Jordan≠Maya, vibrate/sound independence, navigator.vibrate guard); tsc clean; biome clean.
+  - **Next cycle:** Mobile app scaffold (Tauri 2.x), PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768), or additional UX polish.
+
+## Previous state (2026-06-21, cycle 180 — STABILIZATION: CI rustfmt import-order fix in powehi-opaque)
 - **Cycle 180 (commit 93ff431):** STABILIZATION — CI red fix; no new features.
   - **CI RED FIX (rustfmt import order):** `cargo fmt --all --check` was failing on `powehi-opaque/src/lib.rs` line 36: `use rand::rngs::OsRng` appeared before `use powehi_domain::*` and `use powehi_port_outbound::*`. rustfmt requires alphabetical order within the same use-group (`p` < `r`). Reordered to `powehi_domain` → `powehi_port_outbound` → `rand`. No logic change.
   - **cargo audit:** 2 allowed warnings — `instant` unmaintained (pre-existing via openmls) + `bitcoin_hashes 0.14.100` yanked (via bip39 in powehi-crypto-wasm; pre-existing). No vulnerabilities.
