@@ -17,7 +17,19 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-21, cycle 182 — FEATURE: Tauri 2.x mobile app scaffold)
+## Current state (2026-06-22, cycle 183 — FEATURE: emoji reaction toggle-off + own-reaction highlight)
+- **Cycle 183 (commits b571854, 22652e3):** FEATURE — Reaction toggle-off + CI lockfile fix.
+  - **CI fix (b571854):** `pnpm-lock.yaml` was out of sync after cycle 182 added `@tauri-apps/api ^2` + `@tauri-apps/cli ^2` without regenerating it. `pnpm install` updated the lockfile; 566 tests still pass.
+  - **`useMessages.ts`:** New `onReactionRemove?` parameter at position 7 (between `onReaction` and `onReadReceipt`). New `reaction_remove` envelope type handled with same `ALLOWED_REACTION_EMOJIS` allowlist + `targetMessageId.length > 0` guard as `reaction`. `shouldDisplayMessage = false`; callback receives `(groupId, targetMessageId, emoji, env.sender)`.
+  - **`handleRemoveReaction` (ChatLayout):** Immutable `setChats` reducer — removes `senderId` from `existing[emoji]` array; deletes the emoji key entirely when the senders list becomes empty. Mirror of `handleIncomingReaction`.
+  - **`sendReaction` toggle semantics:** Reads current `chats` state to check if `myDeviceId` is already in `msg.reactions[emoji]`. If yes → sends `reaction_remove` MLS message + optimistic local remove. If no → existing add path. `plaintext.fill(0)` in `.finally()` on both paths.
+  - **`MessageBubble` + `MessageList`:** Added `myDeviceId?: string` prop threaded from `useAuthStore.getState().deviceId`. Own-reaction chips render with orange accent (`rgba(255,138,61,0.18)` bg, `rgba(255,138,61,0.5)` border, `#FF8A3D` text) and `aria-pressed="true"`. Peer chips: `aria-pressed="false"`.
+  - **Security invariants:** `myDeviceId` is local-only — not logged, not in any MLS payload. `env.sender` (MLS-authenticated device ID) prevents spoofing. Emoji + targetMessageId only in MLS ciphertext. All DOM rendering via JSX text children (no XSS vector). `plaintext.fill(0)` wipes both add and remove paths.
+  - **security-auditor:** GREEN. YELLOW-1 (advisory, pre-existing): `targetMessageId` has no `<= 36` upper-length guard in reaction/reaction_remove (unlike edit/delete/pin) — purely internal consistency nit, no injection sink.
+  - **Tests (572 total, +6):** `ChatLayoutReactions.test.tsx` — reaction_remove empties chip, reduces count, no-op for non-sender, own aria-pressed=true, peer aria-pressed=false, wrong-groupId no-op. All existing mocks updated for the new param shift.
+  - **Next cycle:** Tauri mobile deep-link / push notification integration, PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768), or more UX polish.
+
+## Previous state (2026-06-21, cycle 182 — FEATURE: Tauri 2.x mobile app scaffold)
 - **Cycle 182 (commit 6744d2e):** FEATURE — Tauri 2.x native shell scaffold.
   - **`app/src-tauri/`:** Standalone Cargo workspace (separate from server `crates/`). Not added to root workspace — avoids WebKit system dep requirement in server CI. Has its own `Cargo.lock`.
   - **`Cargo.toml`:** `tauri = "2"`, `tauri-build = "2"`, `serde`, `serde_json`. `crate-type = ["staticlib", "cdylib", "rlib"]` for mobile compilation. Release profile: `lto=true`, `panic=abort`, `strip=true`.
