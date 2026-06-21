@@ -17,7 +17,25 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-22, cycle 183 — FEATURE: emoji reaction toggle-off + own-reaction highlight)
+## Current state (2026-06-22, cycle 184 — FEATURE: Tauri deep-link invite handler + CI biome/tsc fixes)
+- **Cycle 184 (commits dca1418, a0c4ac7):** FEATURE — Tauri deep-link invite routing + two CI fixes.
+  - **CI fixes (dca1418):** Two biome-format issues in Tauri JSON files (`capabilities/default.json` + `tauri.conf.json` had 2-space indent vs biome's tabs) + unused `fireEvent` import in `ChatLayoutReactions.test.tsx` caused `tsc -b` TS6133 (`noUnusedLocals`). Fixed all three; 572 tests green, tsc clean, biome clean.
+  - **`useDeepLink.ts` (new hook):**
+    - `parseDeepLink(url)`: strict regex extracts 32-char lowercase hex code from `powehi://invite/<code>` (desktop) or `https://powehi.app/i/<code>` (iOS/Android universal link). Returns null for everything else — no injection surface.
+    - `useDeepLink(onInviteCode)`: mounts a `@tauri-apps/plugin-deep-link` listener. Calls `getCurrent()` on mount to handle the launch-via-deep-link case; registers `onOpenUrl()` for subsequent links. Ref pattern ensures callback updates don't restart the listener. No-op outside Tauri (`__TAURI_INTERNALS__` guard + `.catch()`).
+  - **`App.tsx`:** `useDeepLink(useCallback((code) => { if (phase === "app") setInviteCode(code); }, [phase]))` — gates on `phase === "app"` so unauthenticated launches cannot trigger the `AcceptInviteModal` redeem flow.
+  - **Tauri config updates:**
+    - `app/src-tauri/Cargo.toml`: `tauri-plugin-deep-link = "2"` added.
+    - `app/src-tauri/src/lib.rs`: `.plugin(tauri_plugin_deep_link::init())` registered.
+    - `app/src-tauri/tauri.conf.json`: `plugins.deep-link` config — desktop scheme `powehi`, mobile host `powehi.app` with pathPrefix `/i/`.
+    - `app/src-tauri/capabilities/default.json`: `"deep-link:default"` added (only exposes `getCurrent`/`onOpenUrl` — no scheme register/unregister).
+  - **`@tauri-apps/plugin-deep-link` npm package** added; `pnpm-lock.yaml` updated.
+  - **Security invariants:** Invite code flows to `POST /v1/invites/redeem` body only (never URL path, never logged, never raw HTML). Regex is strictly anchored to 32-hex. `phase="app"` guard prevents pre-auth redeem. Server-side validation is the real authority.
+  - **security-auditor:** GREEN. No findings.
+  - **Tests (589 total, +17):** `useDeepLink.test.ts` — 14 unit tests for `parseDeepLink` (valid desktop, valid mobile, wrong scheme, wrong host, wrong length, uppercase, non-hex, query-string trailing); `App.test.tsx` — 3 integration tests (modal opens, ignored pre-auth, closes on X). tsc clean; biome clean.
+  - **Next cycle:** Tauri push notification integration (foreground/background), PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768), or more UX polish.
+
+## Previous state (2026-06-22, cycle 183 — FEATURE: emoji reaction toggle-off + own-reaction highlight)
 - **Cycle 183 (commits b571854, 22652e3):** FEATURE — Reaction toggle-off + CI lockfile fix.
   - **CI fix (b571854):** `pnpm-lock.yaml` was out of sync after cycle 182 added `@tauri-apps/api ^2` + `@tauri-apps/cli ^2` without regenerating it. `pnpm install` updated the lockfile; 566 tests still pass.
   - **`useMessages.ts`:** New `onReactionRemove?` parameter at position 7 (between `onReaction` and `onReadReceipt`). New `reaction_remove` envelope type handled with same `ALLOWED_REACTION_EMOJIS` allowlist + `targetMessageId.length > 0` guard as `reaction`. `shouldDisplayMessage = false`; callback receives `(groupId, targetMessageId, emoji, env.sender)`.
