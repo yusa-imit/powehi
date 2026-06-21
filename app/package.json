@@ -12,9 +12,16 @@
 		"test:watch": "vitest",
 		"e2e": "playwright test",
 		"check": "biome check src",
-		"budget": "node scripts/check-bundle-budget.mjs"
+		"budget": "node scripts/check-bundle-budget.mjs",
+		"tauri:dev": "tauri dev",
+		"tauri:build": "tauri build",
+		"tauri:android:dev": "tauri android dev",
+		"tauri:android:build": "tauri android build",
+		"tauri:ios:dev": "tauri ios dev",
+		"tauri:ios:build": "tauri ios build"
 	},
 	"dependencies": {
+		"@tauri-apps/api": "^2",
 		"comlink": "^4.4.2",
 		"dexie": "^4.4.2",
 		"qrcode": "^1.5.4",
@@ -39,6 +46,7 @@
 		"tailwindcss": "^4.1.7",
 		"typescript": "^5.8.3",
 		"vite": "^6.3.5",
-		"vitest": "^3.2.0"
+		"vitest": "^3.2.0",
+		"@tauri-apps/cli": "^2"
 	}
 }

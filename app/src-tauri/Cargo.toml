@@ -1,0 +1,30 @@
+[package]
+name = "powehi-mobile"
+version = "0.1.0"
+edition = "2021"
+description = "Powehi E2EE messenger — Tauri 2.x native shell (desktop + mobile)"
+license = "AGPL-3.0-only"
+
+[lib]
+name = "powehi_mobile_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
+
+# Standalone workspace — NOT part of the server crates/ workspace.
+# Tauri requires system WebKit deps (libwebkit2gtk) that are not available
+# in the server CI environment; builds are done locally or in a dedicated CI job.
+[workspace]
