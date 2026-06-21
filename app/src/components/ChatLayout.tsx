@@ -3149,9 +3149,7 @@ export function ChatLayout() {
 
 	/** Toggle the sound flag on a chat. Local-only — no MLS message sent, no server contact. */
 	const handleToggleSound = useCallback((chatId: string) => {
-		setChats((cs) =>
-			cs.map((c) => (c.id === chatId ? { ...c, sound: !(c.sound ?? true) } : c)),
-		);
+		setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, sound: !(c.sound ?? true) } : c)));
 	}, []);
 
 	/**
