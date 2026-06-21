@@ -22,6 +22,7 @@
 	},
 	"dependencies": {
 		"@tauri-apps/api": "^2",
+		"@tauri-apps/plugin-deep-link": "^2.4.9",
 		"comlink": "^4.4.2",
 		"dexie": "^4.4.2",
 		"qrcode": "^1.5.4",
@@ -33,6 +34,7 @@
 		"@biomejs/biome": "^1.9.4",
 		"@playwright/test": "^1.60.0",
 		"@tailwindcss/vite": "^4.1.7",
+		"@tauri-apps/cli": "^2",
 		"@testing-library/jest-dom": "^6.6.3",
 		"@testing-library/react": "^16.3.0",
 		"@testing-library/user-event": "^14.5.2",
@@ -46,7 +48,6 @@
 		"tailwindcss": "^4.1.7",
 		"typescript": "^5.8.3",
 		"vite": "^6.3.5",
-		"vitest": "^3.2.0",
-		"@tauri-apps/cli": "^2"
+		"vitest": "^3.2.0"
 	}
 }

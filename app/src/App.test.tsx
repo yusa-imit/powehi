@@ -1,6 +1,7 @@
 import { act, render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
+import * as UseDeepLinkModule from "./hooks/useDeepLink";
 import { useAuthStore } from "./store/auth";
 
 // Reset Zustand store to login phase between tests.
@@ -8,6 +9,10 @@ beforeEach(() => {
 	useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null, identityId: null });
 	// Clear URL hash so tests don't bleed invite codes into each other.
 	history.replaceState(null, "", "/");
+});
+
+afterEach(() => {
+	vi.restoreAllMocks();
 });
 
 describe("App — login phase", () => {
@@ -85,6 +90,70 @@ describe("App — invite hash detection", () => {
 
 		await act(async () => {
 			render(<App />);
+		});
+
+		expect(screen.queryByRole("dialog", { name: /accept contact invite/i })).toBeNull();
+	});
+});
+
+describe("App — Tauri deep-link invite", () => {
+	it("opens AcceptInviteModal when authenticated and deep-link delivers an invite code", async () => {
+		let capturedCallback: ((code: string) => void) | undefined;
+		vi.spyOn(UseDeepLinkModule, "useDeepLink").mockImplementation((cb) => {
+			capturedCallback = cb;
+		});
+
+		useAuthStore.setState({ phase: "app", deviceId: "dev-1", identityId: "id-1" });
+
+		await act(async () => {
+			render(<App />);
+		});
+
+		await act(async () => {
+			capturedCallback?.("a".repeat(32));
+		});
+
+		expect(screen.getByRole("dialog", { name: /accept contact invite/i })).toBeInTheDocument();
+	});
+
+	it("ignores deep-link invite code when not authenticated (phase=login)", async () => {
+		let capturedCallback: ((code: string) => void) | undefined;
+		vi.spyOn(UseDeepLinkModule, "useDeepLink").mockImplementation((cb) => {
+			capturedCallback = cb;
+		});
+
+		// phase stays "login"
+		render(<App />);
+
+		act(() => {
+			capturedCallback?.("b".repeat(32));
+		});
+
+		expect(screen.queryByRole("dialog", { name: /accept contact invite/i })).toBeNull();
+	});
+
+	it("clears the modal when onClose is called after deep-link invite", async () => {
+		let capturedCallback: ((code: string) => void) | undefined;
+		vi.spyOn(UseDeepLinkModule, "useDeepLink").mockImplementation((cb) => {
+			capturedCallback = cb;
+		});
+
+		useAuthStore.setState({ phase: "app", deviceId: "dev-1", identityId: "id-1" });
+
+		await act(async () => {
+			render(<App />);
+		});
+		await act(async () => {
+			capturedCallback?.("c".repeat(32));
+		});
+
+		const dialog = screen.getByRole("dialog", { name: /accept contact invite/i });
+		expect(dialog).toBeInTheDocument();
+
+		// Close via the X button
+		const closeBtn = dialog.querySelector("button[aria-label]");
+		await act(async () => {
+			closeBtn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 		});
 
 		expect(screen.queryByRole("dialog", { name: /accept contact invite/i })).toBeNull();

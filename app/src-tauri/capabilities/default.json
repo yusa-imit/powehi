@@ -3,5 +3,5 @@
 	"identifier": "default",
 	"description": "Core capability for the main Powehi window",
 	"windows": ["main"],
-	"permissions": ["core:default"]
+	"permissions": ["core:default", "deep-link:default"]
 }
