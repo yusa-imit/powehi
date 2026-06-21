@@ -17,7 +17,16 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-22, cycle 184 — FEATURE: Tauri deep-link invite handler + CI biome/tsc fixes)
+## Current state (2026-06-22, cycle 185 — STABILIZATION: CI red fix — testcontainers postgres:11-alpine → 16-alpine)
+- **Cycle 185 (commit ab84e61):** STABILIZATION — CI red fix; no new features.
+  - **CI RED FIX (testcontainers postgres image):** `Integration Tests (Docker)` job was failing with "bytes remaining on stream" when pulling `postgres:11-alpine`. Root cause: postgres:11 is EOL (2023-11) and its Docker Hub layer store is unstable.
+  - **Fix 1 (test):** `pg_security_it.rs` setup() — added `use testcontainers::ImageExt` + changed `Postgres::default().start()` to `Postgres::default().with_tag("16-alpine").start()`. Return type stays `ContainerAsync<Postgres>` because `ContainerRequest<I>::start()` returns `ContainerAsync<I>`.
+  - **Fix 2 (CI):** Added `docker pull postgres:16-alpine` step in `ci-rust.yml` before the nextest run, so layers are pre-cached and testcontainers doesn't race the Docker daemon during test execution.
+  - **cargo audit:** 2 allowed warnings unchanged (instant unmaintained via openmls, bitcoin_hashes yanked via bip39). No vulnerabilities.
+  - **547 workspace tests** pass; clippy clean; fmt clean. target/ 4.6GB (under 20GB threshold).
+  - **Next cycle:** FEATURE — Tauri push notification integration (foreground/background), PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768), or more UX polish.
+
+## Previous state (2026-06-22, cycle 184 — FEATURE: Tauri deep-link invite handler + CI biome/tsc fixes)
 - **Cycle 184 (commits dca1418, a0c4ac7):** FEATURE — Tauri deep-link invite routing + two CI fixes.
   - **CI fixes (dca1418):** Two biome-format issues in Tauri JSON files (`capabilities/default.json` + `tauri.conf.json` had 2-space indent vs biome's tabs) + unused `fireEvent` import in `ChatLayoutReactions.test.tsx` caused `tsc -b` TS6133 (`noUnusedLocals`). Fixed all three; 572 tests green, tsc clean, biome clean.
   - **`useDeepLink.ts` (new hook):**
