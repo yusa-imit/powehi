@@ -17,7 +17,18 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-21, cycle 177 — FEATURE: global message search in sidebar)
+## Current state (2026-06-21, cycle 178 — FEATURE: per-chat notification sound toggle + CI fix)
+- **Cycle 178 (commit 0ec56ca):** FEATURE — Per-chat notification sound toggle; CI fix.
+  - **CI RED FIX:** `ChatLayoutSearch.test.tsx:147` had a dead `realUseMessages` import causing TS6133 that broke the bundle budget CI check. Removed the unused destructured import.
+  - **`Chat.sound?: boolean`:** Local-only flag on Chat object. Never sent to any server, never included in MLS payload, never logged. No persistence (lost on page reload — intentional, same pattern as `muted`).
+  - **`handleToggleSound(chatId)`:** Pure `setChats` immutable toggle. `!(c.sound ?? true)` so first toggle goes On→Off. `useCallback([])`.
+  - **`InfoPanel`:** Added `sound: boolean` and `onToggleSound: () => void` props. "Sound" InfoRow in Notifications section shows "On"/"Off". Sits below "Mute" row, same interactive button pattern.
+  - **Security invariants:** `sound` is purely in-memory. No server exposure. Boolean rendered as literal "On"/"Off" (no XSS). `handleToggleSound` passes only local chatId. No PII or plaintext reaches any log.
+  - **security-auditor:** GREEN. No findings.
+  - **560 frontend tests** (+5: ChatLayoutSound suite — default On, toggle Off, toggle back On, chat-specificity Jordan≠Maya, sound/mute independence); tsc clean.
+  - **Next cycle:** Mobile app scaffold (Tauri 2.x), per-chat vibration toggle, or PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768).
+
+## Previous state (2026-06-21, cycle 177 — FEATURE: global message search in sidebar)
 - **Cycle 177 (commit 8a1ab04):** FEATURE — Global message search in sidebar.
   - **`msgResults` in `Sidebar`:** When `searchQuery` is non-empty, scans all `chats[].messages[]` for text matching the query. Excludes deleted, media-only, `[image]` messages. Capped at 3 per chat, 10 total. Renders a "Messages" section below the filtered chat list with chat-name label + 80-char snippet highlighted via `HighlightedText`.
   - **`handleJumpToMessage(chatId)`:** Switches to the target chat, seeds `msgSearch` (in-conversation highlight) with the sidebar query, then clears sidebar search. Local-only — no server calls, no MLS messages.
