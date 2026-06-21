@@ -97,6 +97,8 @@ interface Chat {
 	muted?: boolean;
 	/** When false, incoming messages do not trigger notification sounds. Local-only, never sent to server. */
 	sound?: boolean;
+	/** When false, incoming messages do not trigger device vibration. Local-only, never sent to server. */
+	vibrate?: boolean;
 }
 
 // ── Disappearing messages helpers ──────────────────────────────────────────────
@@ -2242,6 +2244,8 @@ function InfoPanel({
 	onToggleMute,
 	sound,
 	onToggleSound,
+	vibrate,
+	onToggleVibrate,
 }: {
 	chat: Chat;
 	onClose: () => void;
@@ -2250,6 +2254,8 @@ function InfoPanel({
 	onToggleMute: () => void;
 	sound: boolean;
 	onToggleSound: () => void;
+	vibrate: boolean;
+	onToggleVibrate: () => void;
 }) {
 	const [safetyVerified, setSafetyVerified] = useState(false);
 	const [verifiedAt, setVerifiedAt] = useState<number | undefined>(undefined);
@@ -2556,6 +2562,7 @@ function InfoPanel({
 			<InfoSection title="Notifications">
 				<InfoRow label="Mute" trailing={muted ? "On" : "Off"} onClick={onToggleMute} />
 				<InfoRow label="Sound" trailing={sound ? "On" : "Off"} onClick={onToggleSound} />
+				<InfoRow label="Vibrate" trailing={vibrate ? "On" : "Off"} onClick={onToggleVibrate} />
 				<InfoRow label="Pin to top" trailing="On" />
 			</InfoSection>
 			<InfoSection title="Disappearing messages">
@@ -2634,6 +2641,13 @@ export function ChatLayout() {
 	useEffect(() => {
 		activeIdRef.current = activeId;
 	}, [activeId]);
+
+	// Stable ref so handleIncoming can read per-chat vibrate/mute flags without
+	// taking a dependency on chats (which would restart the polling hook on every message).
+	const chatsRef = useRef(chats);
+	useEffect(() => {
+		chatsRef.current = chats;
+	}, [chats]);
 
 	// Tracks auto-clear timers for peer typing indicators, keyed by mlsGroupId.
 	// Stored in a ref so setChats callbacks can mutate it without triggering re-renders.
@@ -2762,6 +2776,12 @@ export function ChatLayout() {
 			);
 			// Encrypt and persist to IndexedDB — fails closed if encryptedDb unavailable.
 			persistIncoming(msg);
+			// Trigger device vibration for the matching chat unless vibration is disabled or chat is muted.
+			// navigator.vibrate is absent on desktop — guard before calling (§7.5 progressive enhancement).
+			const incomingChat = chatsRef.current.find((c) => c.mlsGroupId === msg.groupId);
+			if (incomingChat && !incomingChat.muted && (incomingChat.vibrate ?? true)) {
+				navigator.vibrate?.([100]);
+			}
 			// Notify sender that we received and decrypted the message (best-effort).
 			sendDeliveryReceiptRef.current([msg.id]);
 			// Notify sender that we read the message (best-effort, fire-and-forget).
@@ -3150,6 +3170,13 @@ export function ChatLayout() {
 	/** Toggle the sound flag on a chat. Local-only — no MLS message sent, no server contact. */
 	const handleToggleSound = useCallback((chatId: string) => {
 		setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, sound: !(c.sound ?? true) } : c)));
+	}, []);
+
+	/** Toggle the vibrate flag on a chat. Local-only — no MLS message sent, no server contact. */
+	const handleToggleVibrate = useCallback((chatId: string) => {
+		setChats((cs) =>
+			cs.map((c) => (c.id === chatId ? { ...c, vibrate: !(c.vibrate ?? true) } : c)),
+		);
 	}, []);
 
 	/**
@@ -3609,6 +3636,8 @@ export function ChatLayout() {
 					onToggleMute={() => handleToggleMute(active.id)}
 					sound={active.sound ?? true}
 					onToggleSound={() => handleToggleSound(active.id)}
+					vibrate={active.vibrate ?? true}
+					onToggleVibrate={() => handleToggleVibrate(active.id)}
 				/>
 			)}
 
