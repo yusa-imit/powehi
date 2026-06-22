@@ -58,6 +58,7 @@ export function Login() {
 		token: string;
 		identityId: string | undefined;
 		pqDecapKeyHandle: string | undefined;
+		myHandle: string;
 	} | null>(null);
 	const [errorMsg, setErrorMsg] = useState("");
 	const [mode, setMode] = useState<Mode>("sign-in");
@@ -197,6 +198,7 @@ export function Login() {
 					token,
 					identityId: identityId ?? undefined,
 					pqDecapKeyHandle: result.pqDecapKeyHandle,
+					myHandle: handle.trim(),
 				};
 				return; // login() called from onConfirmed, not here.
 			}
@@ -231,7 +233,7 @@ export function Login() {
 			}
 
 			// Advance to app phase (sign-in path) — DB key was derived inside the crypto worker.
-			login(device_id, token, identityId ?? undefined, pqDecapKeyHandle);
+			login(device_id, token, identityId ?? undefined, pqDecapKeyHandle, handle.trim());
 		} catch (err) {
 			setPhase("error");
 			const msg = err instanceof Error ? err.message : "unknown_error";
@@ -522,9 +524,10 @@ export function Login() {
 					onConfirmed={() => {
 						setRecoveryWords(null);
 						if (pendingLoginRef.current) {
-							const { device_id, token, identityId, pqDecapKeyHandle } = pendingLoginRef.current;
+							const { device_id, token, identityId, pqDecapKeyHandle, myHandle } =
+								pendingLoginRef.current;
 							pendingLoginRef.current = null;
-							login(device_id, token, identityId, pqDecapKeyHandle);
+							login(device_id, token, identityId, pqDecapKeyHandle, myHandle);
 						}
 					}}
 				/>

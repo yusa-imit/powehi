@@ -100,6 +100,8 @@ interface Chat {
 	sound?: boolean;
 	/** When false, incoming messages do not trigger device vibration. Local-only, never sent to server. */
 	vibrate?: boolean;
+	/** Count of @mention messages in this chat that the user hasn't yet read. Local-only, never sent to server. */
+	mentionCount?: number;
 }
 
 // ── Disappearing messages helpers ──────────────────────────────────────────────
@@ -249,12 +251,19 @@ const SEED_CHATS: Chat[] = [
 		isGroup: true,
 		memberCount: 4,
 		mlsGroupId: "44444444-4444-4444-4444-444444444444",
+		mentionCount: 2,
 		messages: [
 			{
 				day: "Today",
 				from: "them",
 				text: "I pushed the color palette revisions.",
 				time: "10:12",
+			},
+			{
+				from: "them",
+				text: "@you can you review the final mockup? @all feedback welcome",
+				continued: true,
+				time: "13:45",
 			},
 			{
 				from: "them",
@@ -779,6 +788,25 @@ function ChatRow({
 							{chat.last}
 						</span>
 					)}
+					{(chat.mentionCount ?? 0) > 0 && (
+						<span
+							data-testid="mention-badge"
+							title={`${chat.mentionCount} mention${(chat.mentionCount ?? 0) > 1 ? "s" : ""}`}
+							style={{
+								background: "rgba(168,200,255,0.15)",
+								color: "#A8C8FF",
+								border: "1px solid rgba(168,200,255,0.4)",
+								fontWeight: 700,
+								fontSize: 10,
+								borderRadius: 9999,
+								padding: "2px 6px",
+								flex: "none",
+								lineHeight: "14px",
+							}}
+						>
+							@{(chat.mentionCount ?? 0) > 9 ? "9+" : chat.mentionCount}
+						</span>
+					)}
 					{chat.unread > 0 && (
 						<span
 							data-testid="unread-badge"
@@ -827,6 +855,9 @@ function Sidebar({
 	const regionId = useRegionDetect();
 	const dmUnread = chats.filter((c) => !c.isGroup).reduce((s, c) => s + c.unread, 0);
 	const groupUnread = chats.filter((c) => !!c.isGroup).reduce((s, c) => s + c.unread, 0);
+	const groupMentions = chats
+		.filter((c) => !!c.isGroup)
+		.reduce((s, c) => s + (c.mentionCount ?? 0), 0);
 	const filtered = chats.filter((c) => {
 		const matchesTab =
 			chatFilter === "all" ||
@@ -982,6 +1013,23 @@ function Sidebar({
 									}}
 								>
 									{badge > 9 ? "9+" : badge}
+								</span>
+							)}
+							{tab === "groups" && groupMentions > 0 && (
+								<span
+									data-testid="filter-tab-groups-mention-badge"
+									style={{
+										background: "rgba(168,200,255,0.15)",
+										color: "#A8C8FF",
+										border: "1px solid rgba(168,200,255,0.4)",
+										fontWeight: 700,
+										fontSize: 9,
+										borderRadius: 9999,
+										padding: "1px 5px",
+										lineHeight: "14px",
+									}}
+								>
+									@{groupMentions > 9 ? "9+" : groupMentions}
 								</span>
 							)}
 						</button>
@@ -2872,6 +2920,16 @@ export function ChatLayout() {
 					// Muted chats skip the divider too — no unread tracking for muted chats.
 					const firstUnreadAt =
 						!isActive && !c.muted && c.unread === 0 ? msgs.length - 1 : c.firstUnreadAt;
+					// @mention detection for group chats: increment when text contains @all,
+					// @everyone, or @<myHandle> (case-insensitive). Cleared when chat is opened.
+					const rawLower = msg.text.toLowerCase();
+					const mh = useAuthStore.getState().myHandle?.toLowerCase();
+					const isMention =
+						!isActive &&
+						!!c.isGroup &&
+						(rawLower.includes("@all") ||
+							rawLower.includes("@everyone") ||
+							(!!mh && rawLower.includes(`@${mh}`)));
 					return {
 						...c,
 						messages: msgs,
@@ -2879,6 +2937,7 @@ export function ChatLayout() {
 						time,
 						unread: isActive ? 0 : c.muted ? c.unread : c.unread + 1,
 						firstUnreadAt: isActive ? undefined : firstUnreadAt,
+						mentionCount: isActive ? 0 : isMention ? (c.mentionCount ?? 0) + 1 : c.mentionCount,
 					};
 				}),
 			);
@@ -3484,7 +3543,7 @@ export function ChatLayout() {
 		handleIncomingPresence,
 	);
 
-	/** Select a chat and clear its unread badge.
+	/** Select a chat and clear its unread and mention badges.
 	 * First visit (unread > 0): clears badge, keeps divider visible.
 	 * Subsequent visit (unread === 0): clears divider too. */
 	const handleSelectChat = useCallback((id: string) => {
@@ -3494,7 +3553,8 @@ export function ChatLayout() {
 		setChats((cs) =>
 			cs.map((c) => {
 				if (c.id !== id) return c;
-				return c.unread > 0 ? { ...c, unread: 0 } : { ...c, firstUnreadAt: undefined };
+				const base = c.unread > 0 ? { ...c, unread: 0 } : { ...c, firstUnreadAt: undefined };
+				return { ...base, mentionCount: 0 };
 			}),
 		);
 	}, []);

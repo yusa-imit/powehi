@@ -10,11 +10,14 @@ interface AuthState {
 	identityId: string | null;
 	/** ML-KEM-768 decap key handle for the Welcome-side PQ binding (§5.3 Phase B). Cleared after use. */
 	pqDecapKeyHandle: string | null;
+	/** The user's own plaintext handle — used for @mention detection in group messages. Never sent to server. */
+	myHandle: string | null;
 	login: (
 		deviceId: string,
 		sessionToken?: string,
 		identityId?: string,
 		pqDecapKeyHandle?: string,
+		myHandle?: string,
 	) => void;
 	clearPqDecapKeyHandle: () => void;
 	logout: () => Promise<void>;
@@ -26,11 +29,13 @@ export const useAuthStore = create<AuthState>()((set) => ({
 	sessionToken: null,
 	identityId: null,
 	pqDecapKeyHandle: null,
+	myHandle: null,
 	login: (
 		deviceId: string,
 		sessionToken?: string,
 		identityId?: string,
 		pqDecapKeyHandle?: string,
+		myHandle?: string,
 	) =>
 		set({
 			phase: "app",
@@ -38,6 +43,7 @@ export const useAuthStore = create<AuthState>()((set) => ({
 			sessionToken: sessionToken ?? null,
 			identityId: identityId ?? null,
 			pqDecapKeyHandle: pqDecapKeyHandle ?? null,
+			myHandle: myHandle ?? null,
 		}),
 	clearPqDecapKeyHandle: () => set({ pqDecapKeyHandle: null }),
 	logout: async () => {
@@ -54,6 +60,7 @@ export const useAuthStore = create<AuthState>()((set) => ({
 			sessionToken: null,
 			identityId: null,
 			pqDecapKeyHandle: null,
+			myHandle: null,
 		});
 	},
 }));
