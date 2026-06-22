@@ -17,7 +17,17 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-22, cycle 186 — FEATURE: Tauri native OS notification on background message arrival)
+## Current state (2026-06-22, cycle 187 — FEATURE: sidebar chat filter tabs — All / Chats / Groups with unread badges)
+- **Cycle 187 (commit d07e2ec):** FEATURE — Sidebar chat filter tabs.
+  - **`Sidebar` component:** Added `chatFilter` state (`"all" | "dms" | "groups"`, default `"all"`). Computed `dmUnread` = sum of unread in DM chats; `groupUnread` = sum of unread in group chats. Updated `filtered` predicate to compose tab filter (`matchesTab`) with search filter (`matchesSearch`). Updated `msgResults` to also scope by `chatFilter` (Groups tab only searches group chat messages, etc.).
+  - **Tab bar UI:** Three buttons (`filter-tab-{all,dms,groups}`) between the search bar and encryption banner. Active tab styled with orange accent. Conditional `<span data-testid="filter-tab-{tab}-badge">` shows per-tab aggregate unread count (capped at "9+") when > 0. All text is JSX literal — no XSS surface. `onClick` sets `chatFilter` to one of three const-array literals only.
+  - **SEED_CHATS:** Added "Design Team" group chat (`isGroup: true`, `memberCount: 4`, `mlsGroupId: "44444444-..."`, `unread: 0`, no `mlsIdentityId`). No mlsIdentityId means it cannot trigger any server-bound envelope path; purely for display/demo.
+  - **Security invariants:** Filtering is local state only — no server contact. Design Team lacks mlsIdentityId → all authenticated send/encrypt paths are guarded and unreachable from this seed. No new server-visible metadata. No plaintext logging. JSX text children only.
+  - **security-auditor:** GREEN. No findings.
+  - **609 frontend tests** (+11: `ChatLayoutFilter.test.tsx` — tabs rendered, DM isolation, group isolation, All-tab restore, Chats-tab DM badge, Groups-tab no-badge when 0, Groups-tab badge after incoming message, Chats-tab badge live increment, search scoping for groups tab, search scoping for chats tab); tsc clean; biome clean.
+  - **Next cycle:** More UX polish — maybe per-chat mention counts in group chats, or message reactions counter in group view, or PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768).
+
+## Previous state (2026-06-22, cycle 186 — FEATURE: Tauri native OS notification on background message arrival)
 - **Cycle 186 (commit df2a785):** FEATURE — Tauri native push notification integration.
   - **`useTauriNotification.ts` (new hook):**
     - On mount: dynamic-imports `@tauri-apps/plugin-notification`, checks `isPermissionGranted()`, falls back to `requestPermission()`. Stores the `sendNotification` fn in a ref; null until granted.
