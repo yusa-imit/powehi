@@ -22,6 +22,7 @@ import {
 } from "../hooks/useMessages";
 import { usePersistentMessages } from "../hooks/usePersistentMessages";
 import { useRegionDetect } from "../hooks/useRegionDetect";
+import { useTauriNotification } from "../hooks/useTauriNotification";
 import { type NewGroupEvent, useWelcomePoller } from "../hooks/useWelcomePoller";
 import { useAuthStore } from "../store/auth";
 import { uint8ToBase64 } from "../utils/base64";
@@ -2683,10 +2684,11 @@ export function ChatLayout() {
 	// Throttle ref for outgoing typing indicator signals (leading-edge, 3 s window).
 	const typingThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-	// Refs hold the latest send*Receipt closures so handleIncoming (stable useCallback)
-	// can call them without taking a dep on active/sessionToken/cryptoWorker.
+	// Refs hold the latest send*Receipt and notification closures so handleIncoming
+	// (stable useCallback) can call them without taking extra deps.
 	const sendReadReceiptRef = useRef<(ids: string[]) => void>(() => {});
 	const sendDeliveryReceiptRef = useRef<(ids: string[]) => void>(() => {});
+	const showTauriNotificationRef = useRef<() => void>(() => {});
 
 	// Reset in-conversation search when switching chats.
 	// biome-ignore lint/correctness/useExhaustiveDependencies: activeId is the trigger; setMsgSearch is stable
@@ -2700,6 +2702,7 @@ export function ChatLayout() {
 	const { persistIncoming, persistOutgoing, purgeExpired } = usePersistentMessages(
 		active?.mlsGroupId,
 	);
+	const showTauriNotification = useTauriNotification();
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	const { sendMedia } = useMediaSend({
 		identityId: active?.mlsIdentityId,
@@ -2792,6 +2795,12 @@ export function ChatLayout() {
 			const incomingChat = chatsRef.current.find((c) => c.mlsGroupId === msg.groupId);
 			if (incomingChat && !incomingChat.muted && (incomingChat.vibrate ?? true)) {
 				navigator.vibrate?.([100]);
+			}
+			// Show a native OS notification when the app window is in the background.
+			// The hook internally guards on !document.hasFocus() and Tauri availability.
+			// Title/body are fixed ("Powehi" / "New message") — no content or sender exposed.
+			if (incomingChat && !incomingChat.muted) {
+				showTauriNotificationRef.current();
 			}
 			// Notify sender that we received and decrypted the message (best-effort).
 			sendDeliveryReceiptRef.current([msg.id]);
@@ -3276,6 +3285,7 @@ export function ChatLayout() {
 	useEffect(() => {
 		sendReadReceiptRef.current = sendReadReceipt;
 		sendDeliveryReceiptRef.current = sendDeliveryReceipt;
+		showTauriNotificationRef.current = showTauriNotification;
 	});
 
 	/**
