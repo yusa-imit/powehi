@@ -17,7 +17,22 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-22, cycle 187 — FEATURE: sidebar chat filter tabs — All / Chats / Groups with unread badges)
+## Current state (2026-06-22, cycle 188 — FEATURE: @mention count badge in group chat sidebar rows)
+- **Cycle 188 (commit 3af9922):** FEATURE — @mention count badge in group chat sidebar rows.
+  - **`Chat` interface:** Added `mentionCount?: number` — local-only, never sent to server.
+  - **`ChatRow`:** Renders photon-blue `@N` badge (`data-testid="mention-badge"`) when `mentionCount > 0`. Positioned before the orange unread badge. Title tooltip shows "N mention(s)". Caps at "9+".
+  - **`handleIncoming`:** Detects `@all`, `@everyone`, or `@<myHandle>` (case-insensitive substring match) in incoming group message text. Increments `mentionCount` for background group chats. Active chats reset to 0. Uses `useAuthStore.getState().myHandle` (direct getState access — no new deps on the useCallback).
+  - **`handleSelectChat`:** Clears `mentionCount: 0` alongside unread/firstUnreadAt when a chat is opened.
+  - **Groups filter tab:** Adds aggregate `groupMentions` counter. Shows `@N` mention badge (`data-testid="filter-tab-groups-mention-badge"`) in photon blue alongside orange unread badge.
+  - **`auth.ts`:** `myHandle: string | null` added to `AuthState`; `login()` accepts optional 5th param `myHandle?: string`; cleared to null on logout.
+  - **`Login.tsx`:** Both sign-in and registration paths pass `handle.trim()` to `login()`. `pendingLoginRef` type updated to include `myHandle`.
+  - **SEED_CHATS:** Design Team gets `mentionCount: 2` + new seed message `"@you can you review the final mockup? @all feedback welcome"`.
+  - **Security invariants:** `mentionCount` is local-only — no server contact, no new API calls. `myHandle` is in-memory Zustand only (cleared on logout), never logged. Mention detection is `String.includes()` — no regex from user input, no XSS surface. security-auditor GREEN. Advisory: substring handle matching may produce false positives for short handles (e.g. `al` ⊂ `all`); cosmetic UX only, not a security issue.
+  - **security-auditor:** GREEN.
+  - **619 frontend tests** (+10: `ChatLayoutMentions.test.tsx` — seed badge shown, photon-blue color, Groups tab aggregate badge, cleared on chat select, @all triggers increment, @myHandle triggers increment, no-mention message no increment, caps at 9+, DM chats no badge, Groups tab badge clears on select); tsc clean; biome clean.
+  - **Next cycle:** More UX polish — message reactions counter in group view (total reaction sum on messages), or PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768).
+
+## Previous state (2026-06-22, cycle 187 — FEATURE: sidebar chat filter tabs — All / Chats / Groups with unread badges)
 - **Cycle 187 (commit d07e2ec):** FEATURE — Sidebar chat filter tabs.
   - **`Sidebar` component:** Added `chatFilter` state (`"all" | "dms" | "groups"`, default `"all"`). Computed `dmUnread` = sum of unread in DM chats; `groupUnread` = sum of unread in group chats. Updated `filtered` predicate to compose tab filter (`matchesTab`) with search filter (`matchesSearch`). Updated `msgResults` to also scope by `chatFilter` (Groups tab only searches group chat messages, etc.).
   - **Tab bar UI:** Three buttons (`filter-tab-{all,dms,groups}`) between the search bar and encryption banner. Active tab styled with orange accent. Conditional `<span data-testid="filter-tab-{tab}-badge">` shows per-tab aggregate unread count (capped at "9+") when > 0. All text is JSX literal — no XSS surface. `onClick` sets `chatFilter` to one of three const-array literals only.
