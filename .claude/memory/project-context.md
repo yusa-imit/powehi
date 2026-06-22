@@ -17,7 +17,28 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-22, cycle 185 — STABILIZATION: CI red fix — testcontainers postgres:11-alpine → 16-alpine)
+## Current state (2026-06-22, cycle 186 — FEATURE: Tauri native OS notification on background message arrival)
+- **Cycle 186 (commit df2a785):** FEATURE — Tauri native push notification integration.
+  - **`useTauriNotification.ts` (new hook):**
+    - On mount: dynamic-imports `@tauri-apps/plugin-notification`, checks `isPermissionGranted()`, falls back to `requestPermission()`. Stores the `sendNotification` fn in a ref; null until granted.
+    - Exported callback: calls `senderRef.current({ title: "Powehi", body: "New message" })` only when `!document.hasFocus()`. Title and body are hard-coded constants — no sender identity, no plaintext content, no metadata ever reaches the OS notification layer (prd.md §3 threat model).
+    - Guard: entire hook is a no-op outside Tauri (`window.__TAURI_INTERNALS__` check + dynamic import only fires inside that branch).
+    - Cleanup: `active` flag prevents async race after unmount; `senderRef` cleared on teardown.
+  - **`ChatLayout.tsx`:**
+    - Added `useTauriNotification` import and hook call (`showTauriNotification = useTauriNotification()`).
+    - Added `showTauriNotificationRef` alongside `sendReadReceiptRef` / `sendDeliveryReceiptRef`; kept fresh every render in the existing ref-update `useEffect`.
+    - In `handleIncoming`: calls `showTauriNotificationRef.current()` when `incomingChat && !incomingChat.muted`. The `!document.hasFocus()` guard is inside the hook — no foreground spam.
+  - **Tauri Rust:**
+    - `app/src-tauri/Cargo.toml`: `tauri-plugin-notification = "2"` added.
+    - `app/src-tauri/src/lib.rs`: `.plugin(tauri_plugin_notification::init())` registered.
+    - `app/src-tauri/capabilities/default.json`: `"notification:default"` added.
+  - **npm:** `@tauri-apps/plugin-notification = "^2"` added to `app/package.json`; `pnpm-lock.yaml` updated.
+  - **Security invariants:** Title/body are string literals (no injection surface). `incomingChat.muted` gate prevents notifications on silenced chats. `document.hasFocus()` suppresses foreground. No auth material, ciphertext, or PII touches the notification path.
+  - **security-auditor:** GREEN. YELLOW-1 (advisory): no debounce — one OS notification per message; OS provides implicit backpressure. YELLOW-2: `hasFocus()` over-suppresses when a *different* chat is active (safe fail, privacy-correct).
+  - **598 frontend tests** pass (+9: `useTauriNotification.test.ts` — outside Tauri no-op, permission-denied silent, focus suppression, content-free invariant, stable callback, skip `requestPermission` when already granted). tsc clean; biome clean.
+  - **Next cycle:** More UX polish (message search in sidebar, group chat badge counts), or PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768).
+
+## Previous state (2026-06-22, cycle 185 — STABILIZATION: CI red fix — testcontainers postgres:11-alpine → 16-alpine)
 - **Cycle 185 (commit ab84e61):** STABILIZATION — CI red fix; no new features.
   - **CI RED FIX (testcontainers postgres image):** `Integration Tests (Docker)` job was failing with "bytes remaining on stream" when pulling `postgres:11-alpine`. Root cause: postgres:11 is EOL (2023-11) and its Docker Hub layer store is unstable.
   - **Fix 1 (test):** `pg_security_it.rs` setup() — added `use testcontainers::ImageExt` + changed `Postgres::default().start()` to `Postgres::default().with_tag("16-alpine").start()`. Return type stays `ContainerAsync<Postgres>` because `ContainerRequest<I>::start()` returns `ContainerAsync<I>`.
