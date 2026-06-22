@@ -238,6 +238,33 @@ const SEED_CHATS: Chat[] = [
 			},
 		],
 	},
+	{
+		id: "design-team",
+		name: "Design Team",
+		handle: "design-team",
+		online: false,
+		last: "Noa: Final mockup is up",
+		time: "13:55",
+		unread: 0,
+		isGroup: true,
+		memberCount: 4,
+		mlsGroupId: "44444444-4444-4444-4444-444444444444",
+		messages: [
+			{
+				day: "Today",
+				from: "them",
+				text: "I pushed the color palette revisions.",
+				time: "10:12",
+			},
+			{
+				from: "them",
+				text: "Final mockup is up",
+				continued: true,
+				last: true,
+				time: "13:55",
+			},
+		],
+	},
 ];
 
 // ── Avatar ────────────────────────────────────────────────────────────────────
@@ -796,19 +823,33 @@ function Sidebar({
 	onJumpToMessage?: (chatId: string) => void;
 }) {
 	const [starredOpen, setStarredOpen] = useState(false);
+	const [chatFilter, setChatFilter] = useState<"all" | "dms" | "groups">("all");
 	const regionId = useRegionDetect();
-	const filtered = chats.filter(
-		(c) =>
+	const dmUnread = chats.filter((c) => !c.isGroup).reduce((s, c) => s + c.unread, 0);
+	const groupUnread = chats.filter((c) => !!c.isGroup).reduce((s, c) => s + c.unread, 0);
+	const filtered = chats.filter((c) => {
+		const matchesTab =
+			chatFilter === "all" ||
+			(chatFilter === "dms" && !c.isGroup) ||
+			(chatFilter === "groups" && !!c.isGroup);
+		const matchesSearch =
 			!searchQuery ||
 			c.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-			c.last.toLowerCase().includes(searchQuery.toLowerCase()),
-	);
+			c.last.toLowerCase().includes(searchQuery.toLowerCase());
+		return matchesTab && matchesSearch;
+	});
 
 	// Message-body search: scan all messages for the query (local only — no server contact).
 	// Excludes deleted messages, image placeholders, and media-only entries.
 	// Capped at 3 results per chat and 10 total to keep the UI manageable.
 	const msgResults = searchQuery
 		? chats
+				.filter(
+					(c) =>
+						chatFilter === "all" ||
+						(chatFilter === "dms" && !c.isGroup) ||
+						(chatFilter === "groups" && !!c.isGroup),
+				)
 				.flatMap((c) =>
 					c.messages
 						.filter(
@@ -893,6 +934,59 @@ function Sidebar({
 						}}
 					/>
 				</div>
+			</div>
+
+			{/* Chat filter tabs */}
+			<div style={{ display: "flex", gap: 4, padding: "0 14px 10px" }}>
+				{(["all", "dms", "groups"] as const).map((tab) => {
+					const label = tab === "all" ? "All" : tab === "dms" ? "Chats" : "Groups";
+					const badge = tab === "dms" ? dmUnread : tab === "groups" ? groupUnread : 0;
+					const isActive = chatFilter === tab;
+					return (
+						<button
+							key={tab}
+							type="button"
+							data-testid={`filter-tab-${tab}`}
+							onClick={() => setChatFilter(tab)}
+							style={{
+								flex: 1,
+								background: isActive ? "rgba(255,138,61,0.12)" : "transparent",
+								border: isActive
+									? "1px solid rgba(255,138,61,0.3)"
+									: "1px solid var(--border-faint)",
+								borderRadius: 8,
+								padding: "6px 0",
+								cursor: "pointer",
+								color: isActive ? "#FF8A3D" : "var(--fg-3)",
+								fontFamily: "var(--font-sans)",
+								fontSize: 12,
+								fontWeight: isActive ? 600 : 400,
+								display: "flex",
+								alignItems: "center",
+								justifyContent: "center",
+								gap: 5,
+							}}
+						>
+							{label}
+							{badge > 0 && (
+								<span
+									data-testid={`filter-tab-${tab}-badge`}
+									style={{
+										background: "#FF8A3D",
+										color: "#2A0A00",
+										fontWeight: 700,
+										fontSize: 9,
+										borderRadius: 9999,
+										padding: "1px 5px",
+										lineHeight: "14px",
+									}}
+								>
+									{badge > 9 ? "9+" : badge}
+								</span>
+							)}
+						</button>
+					);
+				})}
 			</div>
 
 			{/* Encryption banner — photon blue lock, always */}
