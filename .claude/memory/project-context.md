@@ -17,7 +17,23 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-25, cycle 189 — FEATURE: group message reactions total summary + sidebar reaction preview)
+## Current state (2026-06-25, cycle 191 — FEATURE: message search result count + jump-to specific message)
+- **Cycle 191 (commit 5b03ce0):** FEATURE — Message search result count in sidebar header + jump-to-message scroll + flash highlight.
+  - **Sidebar `msgResults`:** Each result now carries `messageId: m.id` (the server envelope UUID, optional). Result count shown in section header as `"Messages (N)"` (N ≤ 10, purely `msgResults.length`). Result `key` uses messageId when available (prevents duplicate-key collisions when two messages share identical text).
+  - **`onJumpToMessage` signature:** Extended to `(chatId: string, messageId?: string) => void`. When messageId is present, stored in `jumpToMessageId` state in ChatLayout.
+  - **`handleJumpToMessage`:** Chains `handleSelectChat(chatId)`, `setMsgSearch(search)`, `setSearch("")`, and conditionally `setJumpToMessageId(messageId)`.
+  - **`jumpToMessageId` / `handleJumpComplete`:** New ChatLayout state. `handleJumpComplete = useCallback(() => setJumpToMessageId(null), [])` — cleared from MessageList after 1400ms.
+  - **`MessageList`:** New props `jumpToMessageId?: string` + `onJumpComplete?: () => void`.
+    - **Scroll-to-bottom** `useLayoutEffect` (no-deps) gated on `!jumpToMessageId` — resumes after jump is cleared.
+    - **Jump `useEffect`**: finds `[data-msg-id="${jumpToMessageId}"]`, calls `scrollIntoView({ block:"center", behavior:"smooth" })`, sets `flashingId`, clears after 1400ms + calls `onJumpComplete`. If element not found (no server ID), still calls `onJumpComplete` immediately.
+    - **`flashingId` state**: drives `data-jump-flash="true"` on the wrapper div.
+  - **Message wrappers:** Each MessageBubble wrapped in `<div data-msg-id={g.msg.id} data-jump-flash={...}>` — opaque UUID only, no content/PII in DOM.
+  - **`index.css`:** `@keyframes powehi-jump-flash` (accretion orange, 0%→60%→100% fade 1.4s) + `[data-jump-flash="true"]` rule.
+  - **Security invariants:** `data-msg-id` holds envelope UUID only — no content, ciphertext, PII. `querySelector` cannot XSS. CSS attribute selector targets literal `"true"` — no injection surface. Zero new server calls. security-auditor GREEN (one non-blocking YELLOW: scroll-to-bottom self-clears via `onJumpComplete` on both found/not-found paths — verified correct).
+  - **639 frontend tests** (+10: `ChatLayoutJumpToMessage.test.tsx` — header count "Messages (1)", count increments for 2 matches, `data-msg-id` attr present, `data-jump-flash` set on click, `scrollIntoView` called with `{block:"center",behavior:"smooth"}`, flash clears after 1400ms, no-ID chat switch works, section absent when empty, cap at 10, unique keys for same-text messages); tsc clean; biome clean.
+  - **Next cycle:** More UX polish — pinned message jump/preview, typing indicator animation polish, or PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768).
+
+## Previous state (2026-06-25, cycle 189 — FEATURE: group message reactions total summary + sidebar reaction preview)
 - **Cycle 189 (commit b9c5944):** FEATURE — Group message reactions total summary + sidebar preview.
   - **`lastMsgReactionSummary(chat)`:** Pure helper. Reads `chat.messages[last].reactions` (local state only). For group chats with reactions on the last message, returns a compact string like `"🎉3 🔥2"`. null for DMs or no reactions. Never contacts server, never logs.
   - **`ChatRow` sidebar:** Renders `data-testid="last-msg-reaction-summary"` pill after `chat.last` text when `reactionSummary` is non-null and not typing. Emoji+count format (e.g. "🎉3 🔥2"). Single-sender emoji shown without count (e.g. "👀").
@@ -28,7 +44,6 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
   - **Security invariants:** Pure local rendering. JSX text children only (no dangerouslySetInnerHTML). Emoji keys gated by upstream `ALLOWED_REACTION_EMOJIS` allowlist in `useMessages.ts`. Sender UUIDs never rendered — only `.length` count. No new network calls. No plaintext logging.
   - **security-auditor:** GREEN. Minor UX note (non-blocking): `lastMsgReactionSummary` reads literal-last array entry; if a deleted tombstone is last, it may show stale reactions.
   - **629 frontend tests** (+10: `ChatLayoutGroupReactions.test.tsx` — sidebar shows summary for Design Team, no summary for DM, emoji+count format correct, group msg ≥2 reactions shows summary, DM msg no summary, single reaction no summary, count accuracy, plural text correct, seed reaction chips visible, seed 4-reaction summary shown); tsc clean; biome clean.
-  - **Next cycle:** More UX polish — message search result count/jump-to in sidebar, or PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768).
 
 ## Previous state (2026-06-22, cycle 188 — FEATURE: @mention count badge in group chat sidebar rows)
 - **Cycle 188 (commit 3af9922):** FEATURE — @mention count badge in group chat sidebar rows.
