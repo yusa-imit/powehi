@@ -81,3 +81,21 @@ body {
 	-webkit-font-smoothing: antialiased;
 	-moz-osx-font-smoothing: grayscale;
 }
+
+/* Jump-to-message flash — applied via data-jump-flash="true" */
+@keyframes powehi-jump-flash {
+	0% {
+		background-color: rgba(255, 138, 61, 0.22);
+	}
+	60% {
+		background-color: rgba(255, 138, 61, 0.08);
+	}
+	100% {
+		background-color: transparent;
+	}
+}
+
+[data-jump-flash="true"] {
+	animation: powehi-jump-flash 1.4s ease-out forwards;
+	border-radius: 8px;
+}

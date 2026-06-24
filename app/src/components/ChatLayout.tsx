@@ -878,7 +878,7 @@ function Sidebar({
 	onSettings: () => void;
 	searchQuery: string;
 	onSearch: (q: string) => void;
-	onJumpToMessage?: (chatId: string) => void;
+	onJumpToMessage?: (chatId: string, messageId?: string) => void;
 }) {
 	const [starredOpen, setStarredOpen] = useState(false);
 	const [chatFilter, setChatFilter] = useState<"all" | "dms" | "groups">("all");
@@ -921,7 +921,7 @@ function Sidebar({
 								m.text.toLowerCase().includes(searchQuery.toLowerCase()),
 						)
 						.slice(0, 3)
-						.map((m) => ({ chatId: c.id, chatName: c.name, text: m.text })),
+						.map((m) => ({ chatId: c.id, chatName: c.name, text: m.text, messageId: m.id })),
 				)
 				.slice(0, 10)
 		: [];
@@ -1121,14 +1121,14 @@ function Sidebar({
 								padding: "8px 12px 4px",
 							}}
 						>
-							Messages
+							Messages ({msgResults.length})
 						</div>
-						{msgResults.map(({ chatId, chatName, text }) => (
+						{msgResults.map(({ chatId, chatName, text, messageId }) => (
 							<button
-								key={`msgresult-${chatId}-${text.slice(0, 20)}`}
+								key={`msgresult-${chatId}-${messageId ?? text.slice(0, 20)}`}
 								type="button"
 								data-testid="msg-search-result"
-								onClick={() => onJumpToMessage?.(chatId)}
+								onClick={() => onJumpToMessage?.(chatId, messageId)}
 								style={{
 									display: "block",
 									width: "100%",
@@ -1899,6 +1899,8 @@ function MessageList({
 	onForward,
 	onStar,
 	firstUnreadIndex,
+	jumpToMessageId,
+	onJumpComplete,
 }: {
 	messages: ChatMessage[];
 	partner: string;
@@ -1913,12 +1915,35 @@ function MessageList({
 	onForward?: (msg: ChatMessage) => void;
 	onStar?: (msgId: string | undefined, msgText: string) => void;
 	firstUnreadIndex?: number;
+	jumpToMessageId?: string;
+	onJumpComplete?: () => void;
 }) {
 	const ref = useRef<HTMLDivElement>(null);
+	const [flashingId, setFlashingId] = useState<string | null>(null);
 
+	// Scroll to bottom on every render — gated off when a jump is active.
 	useLayoutEffect(() => {
-		if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+		if (ref.current && !jumpToMessageId) {
+			ref.current.scrollTop = ref.current.scrollHeight;
+		}
 	});
+
+	// Scroll to the jumped-to message and apply the flash highlight.
+	useEffect(() => {
+		if (!jumpToMessageId || !ref.current) return;
+		const el = ref.current.querySelector(`[data-msg-id="${jumpToMessageId}"]`);
+		if (el) {
+			el.scrollIntoView({ block: "center", behavior: "smooth" });
+			setFlashingId(jumpToMessageId);
+			const timer = setTimeout(() => {
+				setFlashingId(null);
+				onJumpComplete?.();
+			}, 1400);
+			return () => clearTimeout(timer);
+		}
+		// Message not found in DOM (no server-assigned ID) — still clear jump state.
+		onJumpComplete?.();
+	}, [jumpToMessageId, onJumpComplete]);
 
 	const groups = buildGroups(messages, firstUnreadIndex);
 
@@ -2051,34 +2076,39 @@ function MessageList({
 						/>
 					</div>
 				) : (
-					<MessageBubble
+					<div
 						key={g.key}
-						msg={g.msg}
-						partner={partner}
-						highlight={searchQuery}
-						myDeviceId={myDeviceId}
-						isGroup={isGroup}
-						onReact={
-							g.msg.id && onReact
-								? (emoji) => {
-										const id = g.msg.id;
-										if (id) onReact(id, emoji);
-									}
-								: undefined
-						}
-						onReply={onReply ? () => onReply(g.msg) : undefined}
-						onEdit={g.msg.from === "me" && onEdit ? () => onEdit(g.msg) : undefined}
-						onDelete={(() => {
-							const msgId = g.msg.id;
-							return msgId && g.msg.from === "me" && onDelete ? () => onDelete(msgId) : undefined;
-						})()}
-						onPin={(() => {
-							const msgId = g.msg.id;
-							return msgId && onPin ? () => onPin(msgId) : undefined;
-						})()}
-						onForward={onForward && !g.msg.deleted ? () => onForward(g.msg) : undefined}
-						onStar={onStar ? () => onStar(g.msg.id, g.msg.text) : undefined}
-					/>
+						data-msg-id={g.msg.id ?? undefined}
+						data-jump-flash={flashingId != null && flashingId === g.msg.id ? "true" : undefined}
+					>
+						<MessageBubble
+							msg={g.msg}
+							partner={partner}
+							highlight={searchQuery}
+							myDeviceId={myDeviceId}
+							isGroup={isGroup}
+							onReact={
+								g.msg.id && onReact
+									? (emoji) => {
+											const id = g.msg.id;
+											if (id) onReact(id, emoji);
+										}
+									: undefined
+							}
+							onReply={onReply ? () => onReply(g.msg) : undefined}
+							onEdit={g.msg.from === "me" && onEdit ? () => onEdit(g.msg) : undefined}
+							onDelete={(() => {
+								const msgId = g.msg.id;
+								return msgId && g.msg.from === "me" && onDelete ? () => onDelete(msgId) : undefined;
+							})()}
+							onPin={(() => {
+								const msgId = g.msg.id;
+								return msgId && onPin ? () => onPin(msgId) : undefined;
+							})()}
+							onForward={onForward && !g.msg.deleted ? () => onForward(g.msg) : undefined}
+							onStar={onStar ? () => onStar(g.msg.id, g.msg.text) : undefined}
+						/>
+					</div>
 				),
 			)}
 		</div>
@@ -2838,6 +2868,8 @@ export function ChatLayout() {
 	const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
 	const [editingMessage, setEditingMessage] = useState<ChatMessage | null>(null);
 	const [forwardMsg, setForwardMsg] = useState<{ id: string; text: string } | null>(null);
+	const [jumpToMessageId, setJumpToMessageId] = useState<string | null>(null);
+	const handleJumpComplete = useCallback(() => setJumpToMessageId(null), []);
 
 	// Stable ref so handleIncoming (useCallback) can read current activeId without
 	// re-creating on every chat switch — avoids restarting the polling hook.
@@ -3615,10 +3647,11 @@ export function ChatLayout() {
 	 * so matching messages are highlighted immediately, then clears the sidebar search.
 	 */
 	const handleJumpToMessage = useCallback(
-		(chatId: string) => {
+		(chatId: string, messageId?: string) => {
 			handleSelectChat(chatId);
 			setMsgSearch(search);
 			setSearch("");
+			if (messageId) setJumpToMessageId(messageId);
 		},
 		[handleSelectChat, search],
 	);
@@ -3867,6 +3900,8 @@ export function ChatLayout() {
 						}}
 						onStar={(msgId, msgText) => handleStarMessage(activeId, msgId, msgText)}
 						firstUnreadIndex={active.firstUnreadAt}
+						jumpToMessageId={jumpToMessageId ?? undefined}
+						onJumpComplete={handleJumpComplete}
 					/>
 					<Composer
 						onSend={sendMessage}
