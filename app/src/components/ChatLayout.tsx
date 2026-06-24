@@ -258,12 +258,14 @@ const SEED_CHATS: Chat[] = [
 				from: "them",
 				text: "I pushed the color palette revisions.",
 				time: "10:12",
+				reactions: { "👍": ["dev-a", "dev-b", "dev-c"], "❤️": ["dev-d"] },
 			},
 			{
 				from: "them",
 				text: "@you can you review the final mockup? @all feedback welcome",
 				continued: true,
 				time: "13:45",
+				reactions: { "👀": ["dev-a", "dev-b"] },
 			},
 			{
 				from: "them",
@@ -271,6 +273,7 @@ const SEED_CHATS: Chat[] = [
 				continued: true,
 				last: true,
 				time: "13:55",
+				reactions: { "🎉": ["dev-a", "dev-b", "dev-c"], "🔥": ["dev-d", "dev-e"] },
 			},
 		],
 	},
@@ -663,6 +666,18 @@ function StarredPanel({
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
 
+function lastMsgReactionSummary(chat: Chat): string | null {
+	if (!chat.isGroup) return null;
+	const msgs = chat.messages;
+	const lastMsg = msgs[msgs.length - 1];
+	if (!lastMsg?.reactions) return null;
+	const entries = Object.entries(lastMsg.reactions).filter(([, s]) => s.length > 0);
+	if (entries.length === 0) return null;
+	return entries
+		.map(([emoji, senders]) => `${emoji}${senders.length > 1 ? senders.length : ""}`)
+		.join(" ");
+}
+
 function ChatRow({
 	chat,
 	active,
@@ -673,6 +688,7 @@ function ChatRow({
 	onClick: () => void;
 }) {
 	const [hover, setHover] = useState(false);
+	const reactionSummary = lastMsgReactionSummary(chat);
 	return (
 		<button
 			type="button"
@@ -786,6 +802,20 @@ function ChatRow({
 							}}
 						>
 							{chat.last}
+						</span>
+					)}
+					{reactionSummary && !chat.typing && (
+						<span
+							data-testid="last-msg-reaction-summary"
+							title="Reactions on last message"
+							style={{
+								fontSize: 11,
+								color: "var(--fg-3)",
+								flex: "none",
+								letterSpacing: "0.02em",
+							}}
+						>
+							{reactionSummary}
 						</span>
 					)}
 					{(chat.mentionCount ?? 0) > 0 && (
@@ -1310,6 +1340,7 @@ function MessageBubble({
 	partner,
 	highlight,
 	myDeviceId,
+	isGroup,
 	onReact,
 	onReply,
 	onEdit,
@@ -1322,6 +1353,7 @@ function MessageBubble({
 	partner: string;
 	highlight?: string;
 	myDeviceId?: string;
+	isGroup?: boolean;
 	onReact?: (emoji: string) => void;
 	onReply?: () => void;
 	onEdit?: () => void;
@@ -1334,6 +1366,7 @@ function MessageBubble({
 	const [pickerOpen, setPickerOpen] = useState(false);
 	const [hovered, setHovered] = useState(false);
 	const reactionEntries = msg.reactions ? Object.entries(msg.reactions) : [];
+	const totalReactionCount = reactionEntries.reduce((sum, [, senders]) => sum + senders.length, 0);
 
 	return (
 		<div
@@ -1802,6 +1835,20 @@ function MessageBubble({
 					})}
 				</div>
 			)}
+			{isGroup && totalReactionCount >= 2 && (
+				<span
+					data-testid="reaction-total-summary"
+					style={{
+						fontSize: 11,
+						color: "var(--fg-4)",
+						paddingLeft: isMe ? 0 : 36,
+						marginTop: reactionEntries.length > 0 ? 2 : 4,
+						letterSpacing: "0.01em",
+					}}
+				>
+					{`· ${totalReactionCount} reaction${totalReactionCount === 1 ? "" : "s"}`}
+				</span>
+			)}
 		</div>
 	);
 }
@@ -1843,6 +1890,7 @@ function MessageList({
 	partner,
 	searchQuery,
 	myDeviceId,
+	isGroup,
 	onReact,
 	onReply,
 	onEdit,
@@ -1856,6 +1904,7 @@ function MessageList({
 	partner: string;
 	searchQuery?: string;
 	myDeviceId?: string;
+	isGroup?: boolean;
 	onReact?: (msgId: string, emoji: string) => void;
 	onReply?: (msg: ChatMessage) => void;
 	onEdit?: (msg: ChatMessage) => void;
@@ -2008,6 +2057,7 @@ function MessageList({
 						partner={partner}
 						highlight={searchQuery}
 						myDeviceId={myDeviceId}
+						isGroup={isGroup}
 						onReact={
 							g.msg.id && onReact
 								? (emoji) => {
@@ -3806,6 +3856,7 @@ export function ChatLayout() {
 						partner={active.name}
 						searchQuery={msgSearch}
 						myDeviceId={useAuthStore.getState().deviceId ?? undefined}
+						isGroup={active.isGroup}
 						onReact={sendReaction}
 						onReply={setReplyingTo}
 						onEdit={setEditingMessage}
