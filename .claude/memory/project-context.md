@@ -17,7 +17,20 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-22, cycle 188 — FEATURE: @mention count badge in group chat sidebar rows)
+## Current state (2026-06-25, cycle 189 — FEATURE: group message reactions total summary + sidebar reaction preview)
+- **Cycle 189 (commit b9c5944):** FEATURE — Group message reactions total summary + sidebar preview.
+  - **`lastMsgReactionSummary(chat)`:** Pure helper. Reads `chat.messages[last].reactions` (local state only). For group chats with reactions on the last message, returns a compact string like `"🎉3 🔥2"`. null for DMs or no reactions. Never contacts server, never logs.
+  - **`ChatRow` sidebar:** Renders `data-testid="last-msg-reaction-summary"` pill after `chat.last` text when `reactionSummary` is non-null and not typing. Emoji+count format (e.g. "🎉3 🔥2"). Single-sender emoji shown without count (e.g. "👀").
+  - **`MessageBubble`:** Added `isGroup?: boolean` prop. Computes `totalReactionCount = Σ senders.length across all emoji entries`. When `isGroup && totalReactionCount >= 2`, renders `data-testid="reaction-total-summary"` span showing "· N reactions" in muted `var(--fg-4)`. Threshold 2 avoids noise for solo reactions.
+  - **`MessageList`:** Passes `isGroup` down to each `MessageBubble`.
+  - **Main `<MessageList>` call:** `isGroup={active.isGroup}` wired in.
+  - **Design Team seed:** First message gets `{ "👍": ["dev-a","dev-b","dev-c"], "❤️": ["dev-d"] }` (total 4 → shows "· 4 reactions"); second gets `{ "👀": ["dev-a","dev-b"] }` (total 2 → shows "· 2 reactions"); last message gets `{ "🎉": ["dev-a","dev-b","dev-c"], "🔥": ["dev-d","dev-e"] }` (sidebar shows "🎉3 🔥2").
+  - **Security invariants:** Pure local rendering. JSX text children only (no dangerouslySetInnerHTML). Emoji keys gated by upstream `ALLOWED_REACTION_EMOJIS` allowlist in `useMessages.ts`. Sender UUIDs never rendered — only `.length` count. No new network calls. No plaintext logging.
+  - **security-auditor:** GREEN. Minor UX note (non-blocking): `lastMsgReactionSummary` reads literal-last array entry; if a deleted tombstone is last, it may show stale reactions.
+  - **629 frontend tests** (+10: `ChatLayoutGroupReactions.test.tsx` — sidebar shows summary for Design Team, no summary for DM, emoji+count format correct, group msg ≥2 reactions shows summary, DM msg no summary, single reaction no summary, count accuracy, plural text correct, seed reaction chips visible, seed 4-reaction summary shown); tsc clean; biome clean.
+  - **Next cycle:** More UX polish — message search result count/jump-to in sidebar, or PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768).
+
+## Previous state (2026-06-22, cycle 188 — FEATURE: @mention count badge in group chat sidebar rows)
 - **Cycle 188 (commit 3af9922):** FEATURE — @mention count badge in group chat sidebar rows.
   - **`Chat` interface:** Added `mentionCount?: number` — local-only, never sent to server.
   - **`ChatRow`:** Renders photon-blue `@N` badge (`data-testid="mention-badge"`) when `mentionCount > 0`. Positioned before the orange unread badge. Title tooltip shows "N mention(s)". Caps at "9+".
