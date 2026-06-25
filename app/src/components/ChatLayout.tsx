@@ -2892,11 +2892,13 @@ interface CallOverlayProps {
 	durationSec: number;
 	muted: boolean;
 	cameraOff: boolean;
+	screensharing: boolean;
 	onHangUp: () => void;
 	onAccept: () => void;
 	onDecline: () => void;
 	onMuteToggle: () => void;
 	onCameraToggle: () => void;
+	onScreenshareToggle: () => void;
 }
 
 function CallOverlay({
@@ -2906,11 +2908,13 @@ function CallOverlay({
 	durationSec,
 	muted,
 	cameraOff,
+	screensharing,
 	onHangUp,
 	onAccept,
 	onDecline,
 	onMuteToggle,
 	onCameraToggle,
+	onScreenshareToggle,
 }: CallOverlayProps) {
 	const callLabel = type === "video" ? "Video call" : "Voice call";
 
@@ -3071,6 +3075,15 @@ function CallOverlay({
 						)}
 						<button
 							type="button"
+							aria-label={screensharing ? "Stop sharing screen" : "Share screen"}
+							data-testid="call-btn-screenshare"
+							style={ctrlBtn(screensharing)}
+							onClick={onScreenshareToggle}
+						>
+							<Icon name={screensharing ? "monitor-off" : "monitor"} size={20} />
+						</button>
+						<button
+							type="button"
 							aria-label="End call"
 							data-testid="call-btn-end"
 							style={hangUpBtn}
@@ -3154,6 +3167,7 @@ export function ChatLayout() {
 	const [callDurationSec, setCallDurationSec] = useState(0);
 	const [callMuted, setCallMuted] = useState(false);
 	const [callCameraOff, setCallCameraOff] = useState(false);
+	const [callScreensharing, setCallScreensharing] = useState(false);
 	const [callChatId, setCallChatId] = useState<string | null>(null);
 
 	const handleVoiceCall = useCallback(() => {
@@ -3162,6 +3176,7 @@ export function ChatLayout() {
 		setCallChatId(activeIdRef.current);
 		setCallMuted(false);
 		setCallCameraOff(false);
+		setCallScreensharing(false);
 		setCallDurationSec(0);
 	}, []);
 
@@ -3171,6 +3186,7 @@ export function ChatLayout() {
 		setCallChatId(activeIdRef.current);
 		setCallMuted(false);
 		setCallCameraOff(false);
+		setCallScreensharing(false);
 		setCallDurationSec(0);
 	}, []);
 
@@ -3180,6 +3196,11 @@ export function ChatLayout() {
 		setCallDurationSec(0);
 		setCallMuted(false);
 		setCallCameraOff(false);
+		setCallScreensharing(false);
+	}, []);
+
+	const handleScreenshareToggle = useCallback(() => {
+		setCallScreensharing((prev) => !prev);
 	}, []);
 
 	const handleAcceptCall = useCallback(() => {
@@ -4344,11 +4365,13 @@ export function ChatLayout() {
 					durationSec={callDurationSec}
 					muted={callMuted}
 					cameraOff={callCameraOff}
+					screensharing={callScreensharing}
 					onHangUp={handleHangUp}
 					onAccept={handleAcceptCall}
 					onDecline={handleDeclineCall}
 					onMuteToggle={() => setCallMuted((m) => !m)}
 					onCameraToggle={() => setCallCameraOff((o) => !o)}
+					onScreenshareToggle={handleScreenshareToggle}
 				/>
 			)}
 
