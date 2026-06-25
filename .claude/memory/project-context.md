@@ -17,7 +17,19 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-25, cycle 196 — FEATURE: voice/video call overlay stub)
+## Current state (2026-06-26, cycle 197 — FEATURE: screenshare placeholder in active call)
+- **Cycle 197 (commit 0fa2a2d):** FEATURE — Screenshare toggle button in active call overlay.
+  - **`Icon.tsx`:** Added `monitor` and `monitor-off` Lucide-style SVG paths (Lucide monitor + monitor-off originals).
+  - **`CallOverlay` props:** Added `screensharing: boolean` + `onScreenshareToggle: () => void`.
+  - **Screenshare button:** Rendered in the active-state controls row (between camera and end-call). `aria-label` flips between `"Share screen"` / `"Stop sharing screen"`. Styled via existing `ctrlBtn(active)` helper (orange accent when active). Icon: `monitor` / `monitor-off`.
+  - **`ChatLayout` state:** `callScreensharing` boolean (useState false). `handleScreenshareToggle = useCallback(() => setCallScreensharing(prev => !prev), [])`.
+  - **Resets:** `setCallScreensharing(false)` in `handleVoiceCall`, `handleVideoCall`, `handleHangUp` — no stale state across calls.
+  - **Stub guarantee:** No `getDisplayMedia` / `getUserMedia` / `RTCPeerConnection` calls anywhere.
+  - **security-auditor:** GREEN — no media-capture APIs, no server calls, no user input to DOM, no PII.
+  - **694 frontend tests pass** (+10: `ChatLayoutCallOverlayScreenshare.test.tsx` — button present in voice, button present in video, initial "Share screen" label, toggle to "Stop sharing screen", double-toggle back, not shown outgoing, not shown incoming, state clears on hang-up + new call, screenshare/mute independent, no getDisplayMedia/getUserMedia called); tsc clean; biome clean.
+  - **Next cycle:** Message forwarding to external apps (share sheet), or PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768 ciphersuite).
+
+## Previous state (2026-06-25, cycle 196 — FEATURE: voice/video call overlay stub)
 - **Cycle 196 (commit 942b469):** FEATURE — Voice/video call UI stub (no WebRTC, no getUserMedia).
   - **`CallOverlay` component:** Three states — `outgoing` (Calling..., cancel button), `incoming` (accept/decline buttons), `active` (live duration timer, mute/camera-off/end-call controls).
   - **Icons:** `mic-off`, `video-off`, `phone-off` added to Icon.tsx (Lucide-style inline SVG).
