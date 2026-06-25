@@ -17,7 +17,19 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-25, cycle 192 — FEATURE: pinned banner click-to-jump with scroll + flash highlight)
+## Current state (2026-06-25, cycle 193 — FEATURE: animated typing indicator — three-dot bounce animation)
+- **Cycle 193 (commit b5fbcf1):** FEATURE — Animated typing indicator (TypingDots component).
+  - **`TypingDots` component:** New inline component in `ChatLayout.tsx`. Renders three `<span class="powehi-typing-dot">` elements in an `inline-flex` row with `gap: 3`. Container carries `data-testid="typing-dots"` and `aria-label="typing"`. Default color: accretion orange `#FF9E52`.
+  - **CSS (`index.css`):** `@keyframes powehi-typing-dot` — dots bounce 4px up (0%→30%→60%→100%) with `opacity: 0.35→1→0.35` cycle. 1.2s infinite. Dots 2 and 3 staggered by 0.2s and 0.4s respectively via `animation-delay`.
+  - **Sidebar (`ChatRow`):** Replaced `<span style="fontStyle: italic">typing...</span>` with `<TypingDots />`. Old text node gone from DOM.
+  - **Header (`ConversationHeader`):** Replaced `<span style="fontStyle: italic">· typing</span>` with `<span style="marginLeft: 8">· <TypingDots /></span>`. The middot glyph is kept as a visual separator.
+  - **Test migrations:** Updated `ChatLayout.test.tsx` 3 typing tests: `getByText("typing...")` → `getAllByTestId("typing-dots")`; `/·\s*typing/i` regex → testid; auto-clear test verifies count drops rather than text disappears.
+  - **New test file `ChatLayoutTypingDots.test.tsx`** (+10 tests): dots in sidebar (seed data Sam), aria-label="typing" on all instances, exactly 3 `.powehi-typing-dot` spans, no static "typing..." text, header dots appear on incoming signal, count increases when header activates, background chat signal doesn't affect header, auto-clear drops count to baseline, no "typing..." or "· typing" text at any time, `#FF9E52` inline color on container.
+  - **Security invariants:** TypingDots is a pure render component — no eval, no innerHTML, no network calls. No content/PII reaches the DOM. `aria-label` is a hardcoded string literal.
+  - **659 frontend tests** (+10); tsc clean; biome clean.
+  - **Next cycle:** Read receipt delivery UI, or PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768 ciphersuite), or voice/video call UI stub.
+
+## Previous state (2026-06-25, cycle 192 — FEATURE: pinned banner click-to-jump with scroll + flash highlight)
 - **Cycle 192 (commit 4641b3c):** FEATURE — Pinned banner click-to-jump.
   - **`PinnedBanner` component:** Added `onJumpToPin?: () => void` prop. The content area (pin icon + "PINNED" label + preview text) is now wrapped in a `<button type="button" onClick={onJumpToPin} data-testid="pinned-banner-jump" aria-label="Jump to pinned message">`. Cursor `pointer` when `onJumpToPin` defined, `default` otherwise. Unpin X button stays as a separate right-side button.
   - **Call site:** `onJumpToPin={() => setJumpToMessageId(active.pinnedMessageId ?? null)}` — sets existing `jumpToMessageId: string | null` React state. No new state, no network calls, no MLS ops, no Dexie writes.
