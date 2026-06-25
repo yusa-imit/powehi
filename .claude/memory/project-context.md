@@ -17,7 +17,19 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-25, cycle 193 — FEATURE: animated typing indicator — three-dot bounce animation)
+## Current state (2026-06-25, cycle 194 — FEATURE: deferred read receipts + Sending indicator)
+- **Cycle 194 (commit 31fd409):** FEATURE — Deferred read receipt dispatch + "Sending" state icon.
+  - **Problem fixed:** `sendReadReceipt` was called immediately on message receipt, even when the app was minimized or in a background chat. Read receipts now only fire when `incomingChat.id === activeIdRef.current && document.hasFocus()`.
+  - **`pendingReadReceipts` ref:** `Map<mlsGroupId, string[]>` buffers envelope IDs for background/unfocused messages.
+  - **Flush on chat selection (`handleSelectChat`):** Sends buffered receipts for the opened chat using its own `mlsGroupId`/`mlsIdentityId`.
+  - **Flush on window focus:** New `useEffect` listens for `window.focus` → flushes active chat buffer.
+  - **Security fix (RED from security-auditor):** `sendReadReceipt` now takes explicit `(mlsGroupId, mlsIdentityId, messageIds)` params instead of reading from `active`, preventing cross-conversation metadata leakage (buffered receipts from chat B encrypted into chat A's MLS stream).
+  - **"Sending" state:** Changed `null` branch in read indicator to `<Icon name="timer" opacity=0.45 aria-label="Sending">` — completes Sending→Sent(✓)→Delivered(✓✓grey)→Read(✓✓blue) progression.
+  - **security-auditor:** GREEN after fix (RED finding resolved). Buffer stores only envelope UUIDs, no plaintext/PII. No new XSS surface.
+  - **670 frontend tests** (+11: `ChatLayoutReadReceipts.test.tsx` — Read indicator on seed, incoming "them" no indicator, Sending timer on optimistic, delivery_receipt→Delivered, read_receipt→Read, immediate dispatch on active+focused, deferred on unfocused, window focus flush, batch receipt, Sent single-check, delivery doesn't advance to Read); tsc clean; biome clean.
+  - **Next cycle:** Voice/video call UI stub, or PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768 ciphersuite).
+
+## Previous state (2026-06-25, cycle 193 — FEATURE: animated typing indicator — three-dot bounce animation)
 - **Cycle 193 (commit b5fbcf1):** FEATURE — Animated typing indicator (TypingDots component).
   - **`TypingDots` component:** New inline component in `ChatLayout.tsx`. Renders three `<span class="powehi-typing-dot">` elements in an `inline-flex` row with `gap: 3`. Container carries `data-testid="typing-dots"` and `aria-label="typing"`. Default color: accretion orange `#FF9E52`.
   - **CSS (`index.css`):** `@keyframes powehi-typing-dot` — dots bounce 4px up (0%→30%→60%→100%) with `opacity: 0.35→1→0.35` cycle. 1.2s infinite. Dots 2 and 3 staggered by 0.2s and 0.4s respectively via `animation-delay`.
