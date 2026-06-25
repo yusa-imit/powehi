@@ -17,7 +17,17 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-25, cycle 191 — FEATURE: message search result count + jump-to specific message)
+## Current state (2026-06-25, cycle 192 — FEATURE: pinned banner click-to-jump with scroll + flash highlight)
+- **Cycle 192 (commit 4641b3c):** FEATURE — Pinned banner click-to-jump.
+  - **`PinnedBanner` component:** Added `onJumpToPin?: () => void` prop. The content area (pin icon + "PINNED" label + preview text) is now wrapped in a `<button type="button" onClick={onJumpToPin} data-testid="pinned-banner-jump" aria-label="Jump to pinned message">`. Cursor `pointer` when `onJumpToPin` defined, `default` otherwise. Unpin X button stays as a separate right-side button.
+  - **Call site:** `onJumpToPin={() => setJumpToMessageId(active.pinnedMessageId ?? null)}` — sets existing `jumpToMessageId: string | null` React state. No new state, no network calls, no MLS ops, no Dexie writes.
+  - **Reuses jump infrastructure from cycle 191:** `MessageList` jump `useEffect` finds `[data-msg-id="${jumpToMessageId}"]`, calls `scrollIntoView({ block:"center", behavior:"smooth" })`, sets `flashingId` (drives `@keyframes powehi-jump-flash` orange flash 1.4s), clears via `onJumpComplete`. If element not found: `onJumpComplete` immediately (no crash).
+  - **Security invariants:** `onJumpToPin` is a React state setter — no eval, no innerHTML. `active.pinnedMessageId` is a UUID validated by `handleIncomingPin` to ≤36 chars (hex+hyphens — cannot break CSS selector). Zero new server calls. No plaintext/PII/ciphertext in any log path. `data-msg-id` holds envelope UUID only.
+  - **security-auditor:** GREEN. INFO (non-blocking, pre-existing): `CSS.escape()` at querySelector sink would harden the UUID→selector path against format changes; not a present vulnerability (UUID format excludes `"]/`).
+  - **649 frontend tests** (+10: `ChatLayoutPinnedJump.test.tsx` — banner renders on incoming pin, jump button aria-label correct, scrollIntoView called on click, data-jump-flash set on target, flash clears after 1400ms, preview shows message text, unpin signal removes banner, absent when no pin, no crash when element not in DOM, chat isolation for non-active chat's pin); tsc clean; biome clean.
+  - **Next cycle:** More UX polish — typing indicator animation polish, read receipt delivery UI, or PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768).
+
+## Previous state (2026-06-25, cycle 191 — FEATURE: message search result count + jump-to specific message)
 - **Cycle 191 (commit 5b03ce0):** FEATURE — Message search result count in sidebar header + jump-to-message scroll + flash highlight.
   - **Sidebar `msgResults`:** Each result now carries `messageId: m.id` (the server envelope UUID, optional). Result count shown in section header as `"Messages (N)"` (N ≤ 10, purely `msgResults.length`). Result `key` uses messageId when available (prevents duplicate-key collisions when two messages share identical text).
   - **`onJumpToMessage` signature:** Extended to `(chatId: string, messageId?: string) => void`. When messageId is present, stored in `jumpToMessageId` state in ChatLayout.
