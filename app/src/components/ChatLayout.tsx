@@ -2874,6 +2874,252 @@ function InfoPanel({
 	);
 }
 
+// ── Call overlay ──────────────────────────────────────────────────────────────
+
+type CallState = "idle" | "outgoing" | "active" | "incoming";
+type CallType = "voice" | "video";
+
+function formatCallDuration(s: number): string {
+	const mins = Math.floor(s / 60);
+	const secs = s % 60;
+	return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+}
+
+interface CallOverlayProps {
+	state: Exclude<CallState, "idle">;
+	type: CallType;
+	chatName: string;
+	durationSec: number;
+	muted: boolean;
+	cameraOff: boolean;
+	onHangUp: () => void;
+	onAccept: () => void;
+	onDecline: () => void;
+	onMuteToggle: () => void;
+	onCameraToggle: () => void;
+}
+
+function CallOverlay({
+	state,
+	type,
+	chatName,
+	durationSec,
+	muted,
+	cameraOff,
+	onHangUp,
+	onAccept,
+	onDecline,
+	onMuteToggle,
+	onCameraToggle,
+}: CallOverlayProps) {
+	const callLabel = type === "video" ? "Video call" : "Voice call";
+
+	const overlayStyle: CSSProperties = {
+		position: "fixed",
+		inset: 0,
+		background: "rgba(4,4,8,0.88)",
+		display: "flex",
+		alignItems: "center",
+		justifyContent: "center",
+		zIndex: 200,
+	};
+
+	const cardStyle: CSSProperties = {
+		background: "var(--bg-elevated)",
+		border: "1px solid var(--border-soft)",
+		borderRadius: 20,
+		padding: "32px 28px 24px",
+		width: 320,
+		display: "flex",
+		flexDirection: "column",
+		alignItems: "center",
+		gap: 0,
+		boxShadow: "0 16px 64px rgba(0,0,0,0.6)",
+	};
+
+	const avatarStyle: CSSProperties = {
+		width: 72,
+		height: 72,
+		borderRadius: "50%",
+		background: "var(--bg-void)",
+		display: "flex",
+		alignItems: "center",
+		justifyContent: "center",
+		fontSize: 28,
+		fontWeight: 700,
+		color: state === "incoming" ? "#A8C8FF" : "#FF9E52",
+		border: `2px solid ${state === "incoming" ? "#A8C8FF" : "#FF9E52"}`,
+		marginBottom: 16,
+	};
+
+	const ctrlBtn = (active = false): CSSProperties => ({
+		width: 52,
+		height: 52,
+		borderRadius: "50%",
+		border: `1px solid ${active ? "#FF9E52" : "var(--border-soft)"}`,
+		background: active ? "rgba(255,158,82,0.12)" : "var(--bg-void)",
+		color: active ? "#FF9E52" : "var(--fg-2)",
+		cursor: "pointer",
+		display: "flex",
+		alignItems: "center",
+		justifyContent: "center",
+	});
+
+	const hangUpBtn: CSSProperties = {
+		width: 56,
+		height: 56,
+		borderRadius: "50%",
+		background: "#C0392B",
+		border: "none",
+		color: "#fff",
+		cursor: "pointer",
+		display: "flex",
+		alignItems: "center",
+		justifyContent: "center",
+	};
+
+	const acceptBtn: CSSProperties = {
+		width: 56,
+		height: 56,
+		borderRadius: "50%",
+		background: "#27AE60",
+		border: "none",
+		color: "#fff",
+		cursor: "pointer",
+		display: "flex",
+		alignItems: "center",
+		justifyContent: "center",
+	};
+
+	return (
+		<div data-testid="call-overlay" style={overlayStyle}>
+			<dialog
+				open
+				aria-label={callLabel}
+				style={cardStyle}
+				onClick={(e) => e.stopPropagation()}
+				onKeyDown={(e) => e.stopPropagation()}
+			>
+				<div style={avatarStyle} aria-hidden="true">
+					{chatName[0]}
+				</div>
+				<div
+					style={{
+						fontSize: 16,
+						fontWeight: 600,
+						color: "var(--fg-1)",
+						marginBottom: 4,
+					}}
+					data-testid="call-peer-name"
+				>
+					{chatName}
+				</div>
+
+				{state === "outgoing" && (
+					<div
+						style={{ fontSize: 13, color: "var(--fg-3)", marginBottom: 28 }}
+						data-testid="call-status-outgoing"
+					>
+						{callLabel} · Calling...
+					</div>
+				)}
+
+				{state === "incoming" && (
+					<div
+						style={{ fontSize: 13, color: "var(--fg-3)", marginBottom: 28 }}
+						data-testid="call-status-incoming"
+					>
+						Incoming {callLabel.toLowerCase()}
+					</div>
+				)}
+
+				{state === "active" && (
+					<div
+						style={{
+							fontSize: 13,
+							color: "#4ADE80",
+							fontVariantNumeric: "tabular-nums",
+							marginBottom: 24,
+						}}
+						data-testid="call-duration"
+					>
+						{formatCallDuration(durationSec)}
+					</div>
+				)}
+
+				{state === "active" && (
+					<div style={{ display: "flex", gap: 16, alignItems: "center", marginTop: 4 }}>
+						<button
+							type="button"
+							aria-label={muted ? "Unmute" : "Mute"}
+							data-testid="call-btn-mute"
+							style={ctrlBtn(muted)}
+							onClick={onMuteToggle}
+						>
+							<Icon name={muted ? "mic-off" : "mic"} size={20} />
+						</button>
+						{type === "video" && (
+							<button
+								type="button"
+								aria-label={cameraOff ? "Camera on" : "Camera off"}
+								data-testid="call-btn-camera"
+								style={ctrlBtn(cameraOff)}
+								onClick={onCameraToggle}
+							>
+								<Icon name={cameraOff ? "video-off" : "video"} size={20} />
+							</button>
+						)}
+						<button
+							type="button"
+							aria-label="End call"
+							data-testid="call-btn-end"
+							style={hangUpBtn}
+							onClick={onHangUp}
+						>
+							<Icon name="phone-off" size={22} />
+						</button>
+					</div>
+				)}
+
+				{state === "outgoing" && (
+					<button
+						type="button"
+						aria-label="Cancel call"
+						data-testid="call-btn-end"
+						style={hangUpBtn}
+						onClick={onHangUp}
+					>
+						<Icon name="phone-off" size={22} />
+					</button>
+				)}
+
+				{state === "incoming" && (
+					<div style={{ display: "flex", gap: 20, marginTop: 4 }}>
+						<button
+							type="button"
+							aria-label="Decline call"
+							data-testid="call-btn-decline"
+							style={hangUpBtn}
+							onClick={onDecline}
+						>
+							<Icon name="phone-off" size={22} />
+						</button>
+						<button
+							type="button"
+							aria-label="Accept call"
+							data-testid="call-btn-accept"
+							style={acceptBtn}
+							onClick={onAccept}
+						>
+							<Icon name="phone" size={22} />
+						</button>
+					</div>
+				)}
+			</dialog>
+		</div>
+	);
+}
+
 // ── ChatLayout (root export) ──────────────────────────────────────────────────
 
 export function ChatLayout() {
@@ -2901,6 +3147,70 @@ export function ChatLayout() {
 	const [forwardMsg, setForwardMsg] = useState<{ id: string; text: string } | null>(null);
 	const [jumpToMessageId, setJumpToMessageId] = useState<string | null>(null);
 	const handleJumpComplete = useCallback(() => setJumpToMessageId(null), []);
+
+	// ── Call state ────────────────────────────────────────────────────────────
+	const [callState, setCallState] = useState<CallState>("idle");
+	const [callType, setCallType] = useState<CallType>("voice");
+	const [callDurationSec, setCallDurationSec] = useState(0);
+	const [callMuted, setCallMuted] = useState(false);
+	const [callCameraOff, setCallCameraOff] = useState(false);
+	const [callChatId, setCallChatId] = useState<string | null>(null);
+
+	const handleVoiceCall = useCallback(() => {
+		setCallType("voice");
+		setCallState("outgoing");
+		setCallChatId(activeIdRef.current);
+		setCallMuted(false);
+		setCallCameraOff(false);
+		setCallDurationSec(0);
+	}, []);
+
+	const handleVideoCall = useCallback(() => {
+		setCallType("video");
+		setCallState("outgoing");
+		setCallChatId(activeIdRef.current);
+		setCallMuted(false);
+		setCallCameraOff(false);
+		setCallDurationSec(0);
+	}, []);
+
+	const handleHangUp = useCallback(() => {
+		setCallState("idle");
+		setCallChatId(null);
+		setCallDurationSec(0);
+		setCallMuted(false);
+		setCallCameraOff(false);
+	}, []);
+
+	const handleAcceptCall = useCallback(() => {
+		setCallState("active");
+		setCallDurationSec(0);
+	}, []);
+
+	const handleDeclineCall = useCallback(() => {
+		setCallState("idle");
+		setCallChatId(null);
+		setCallDurationSec(0);
+	}, []);
+
+	// Simulate peer answering: outgoing → active after 2.5 s.
+	useEffect(() => {
+		if (callState !== "outgoing") return;
+		const t = setTimeout(() => setCallState("active"), 2500);
+		return () => clearTimeout(t);
+	}, [callState]);
+
+	// Duration timer — ticks every second while a call is active.
+	useEffect(() => {
+		if (callState !== "active") {
+			setCallDurationSec(0);
+			return;
+		}
+		const t = setInterval(() => setCallDurationSec((s) => s + 1), 1000);
+		return () => clearInterval(t);
+	}, [callState]);
+
+	const callChat = chats.find((c) => c.id === callChatId) ?? null;
 
 	// Stable ref so handleIncoming (useCallback) can read current activeId without
 	// re-creating on every chat switch — avoids restarting the polling hook.
@@ -3942,8 +4252,8 @@ export function ChatLayout() {
 				>
 					<ConversationHeader
 						chat={active}
-						onCall={() => undefined}
-						onVideo={() => undefined}
+						onCall={handleVoiceCall}
+						onVideo={handleVideoCall}
 						onInfo={() => setInfoOpen((v) => !v)}
 						infoOpen={infoOpen}
 						pqBindingHex={active.pqBindingHex}
@@ -4024,6 +4334,37 @@ export function ChatLayout() {
 			)}
 
 			<InviteModal open={inviteOpen} onClose={() => setInviteOpen(false)} />
+
+			{/* Voice / video call overlay — pure UI stub (no WebRTC) */}
+			{callState !== "idle" && callChat && (
+				<CallOverlay
+					state={callState}
+					type={callType}
+					chatName={callChat.name}
+					durationSec={callDurationSec}
+					muted={callMuted}
+					cameraOff={callCameraOff}
+					onHangUp={handleHangUp}
+					onAccept={handleAcceptCall}
+					onDecline={handleDeclineCall}
+					onMuteToggle={() => setCallMuted((m) => !m)}
+					onCameraToggle={() => setCallCameraOff((o) => !o)}
+				/>
+			)}
+
+			{/* Hidden dev button — lets tests trigger an incoming call without WebRTC signalling. */}
+			<button
+				type="button"
+				data-testid="dev-simulate-incoming-call"
+				style={{ display: "none" }}
+				onClick={() => {
+					setCallType("voice");
+					setCallState("incoming");
+					setCallChatId(activeIdRef.current);
+				}}
+			>
+				simulate
+			</button>
 
 			<CreateGroupModal
 				open={createGroupOpen}
