@@ -394,10 +394,12 @@ function PinnedBanner({
 	pinnedMessageId,
 	messages,
 	onUnpin,
+	onJumpToPin,
 }: {
 	pinnedMessageId: string;
 	messages: ChatMessage[];
 	onUnpin: () => void;
+	onJumpToPin?: () => void;
 }) {
 	const msg = messages.find((m) => m.id === pinnedMessageId);
 	const preview = msg?.deleted ? "This message was deleted" : (msg?.text ?? "Message");
@@ -408,7 +410,7 @@ function PinnedBanner({
 				display: "flex",
 				alignItems: "center",
 				gap: 8,
-				padding: "6px 18px",
+				paddingRight: 18,
 				background: "rgba(255,138,61,0.06)",
 				borderBottom: "1px solid rgba(255,138,61,0.18)",
 				fontSize: 12,
@@ -416,29 +418,48 @@ function PinnedBanner({
 				flex: "none",
 			}}
 		>
-			<Icon name="pin" size={13} color="#FF8A3D" />
-			<span
+			<button
+				type="button"
+				onClick={onJumpToPin}
+				data-testid="pinned-banner-jump"
+				aria-label="Jump to pinned message"
 				style={{
-					fontWeight: 600,
-					fontSize: 10,
-					letterSpacing: "0.1em",
-					color: "#FF8A3D",
-					flex: "none",
-				}}
-			>
-				PINNED
-			</span>
-			<span
-				style={{
+					display: "flex",
+					alignItems: "center",
+					gap: 8,
 					flex: 1,
-					overflow: "hidden",
-					textOverflow: "ellipsis",
-					whiteSpace: "nowrap",
-					color: "var(--fg-2)",
+					background: "none",
+					border: "none",
+					padding: "6px 0 6px 18px",
+					cursor: onJumpToPin ? "pointer" : "default",
+					minWidth: 0,
+					textAlign: "left",
 				}}
 			>
-				{preview}
-			</span>
+				<Icon name="pin" size={13} color="#FF8A3D" />
+				<span
+					style={{
+						fontWeight: 600,
+						fontSize: 10,
+						letterSpacing: "0.1em",
+						color: "#FF8A3D",
+						flex: "none",
+					}}
+				>
+					PINNED
+				</span>
+				<span
+					style={{
+						flex: 1,
+						overflow: "hidden",
+						textOverflow: "ellipsis",
+						whiteSpace: "nowrap",
+						color: "var(--fg-2)",
+					}}
+				>
+					{preview}
+				</span>
+			</button>
 			<button
 				type="button"
 				onClick={onUnpin}
@@ -452,6 +473,7 @@ function PinnedBanner({
 					padding: 2,
 					display: "flex",
 					alignItems: "center",
+					flex: "none",
 				}}
 			>
 				<Icon name="x" size={13} />
@@ -3882,6 +3904,7 @@ export function ChatLayout() {
 							pinnedMessageId={active.pinnedMessageId}
 							messages={active.messages}
 							onUnpin={() => sendPin(active.pinnedMessageId ?? "")}
+							onJumpToPin={() => setJumpToMessageId(active.pinnedMessageId ?? null)}
 						/>
 					)}
 					<MessageList
