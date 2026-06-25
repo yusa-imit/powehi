@@ -17,7 +17,15 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-25, cycle 194 — FEATURE: deferred read receipts + Sending indicator)
+## Current state (2026-06-25, cycle 195 — STABILIZATION: fix CI Frontend test uncaught exceptions)
+- **Cycle 195 (commit 347c88a):** STABILIZATION — Fixed CI Frontend failure (11 uncaught exceptions in `ChatLayoutReadReceipts.test.tsx`).
+  - **Root cause:** `afterEach` called `vi.restoreAllMocks()` (restoring real `useMessages` that calls hooks) then `useAuthStore.setState()` which triggered a re-render of the still-mounted `ChatLayout`. Real `useMessages` calls `useAuthStore()` (2 hooks) but mock had 0 hooks → `areHookInputsEqual(undefined, deps)` → TypeError in React reconciler.
+  - **Fix:** Import `cleanup` from `@testing-library/react` and call it as the FIRST statement of `afterEach`, before `vi.restoreAllMocks()`. This unmounts the component before mocks are restored, preventing the stale re-render.
+  - **security-auditor:** GREEN. `cleanup()` is teardown-only; no assertions modified; cross-conversation leakage tests still intact; strengthens test isolation.
+  - **670 frontend tests pass, 0 uncaught exceptions, tsc clean.**
+  - **Next cycle:** Voice/video call UI stub, or PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768 ciphersuite).
+
+## Previous state (2026-06-25, cycle 194 — FEATURE: deferred read receipts + Sending indicator)
 - **Cycle 194 (commit 31fd409):** FEATURE — Deferred read receipt dispatch + "Sending" state icon.
   - **Problem fixed:** `sendReadReceipt` was called immediately on message receipt, even when the app was minimized or in a background chat. Read receipts now only fire when `incomingChat.id === activeIdRef.current && document.hasFocus()`.
   - **`pendingReadReceipts` ref:** `Map<mlsGroupId, string[]>` buffers envelope IDs for background/unfocused messages.
