@@ -351,13 +351,14 @@ describe("ChatLayout", () => {
 
 	// ── Typing indicator ─────────────────────────────────────────────────────────
 
-	it("seed chat Sam shows 'typing...' in sidebar", () => {
+	it("seed chat Sam shows animated typing dots in sidebar", () => {
 		render(<ChatLayout />);
-		// Sam has typing: true in SEED_CHATS; sidebar should show italicised "typing..."
-		expect(screen.getByText("typing...")).toBeInTheDocument();
+		// Sam has typing: true in SEED_CHATS; sidebar should show the TypingDots component
+		const dots = screen.getAllByTestId("typing-dots");
+		expect(dots.length).toBeGreaterThanOrEqual(1);
 	});
 
-	it("incoming typing signal shows '· typing' in the conversation header for the active chat", async () => {
+	it("incoming typing signal shows animated typing dots in the conversation header for the active chat", async () => {
 		let capturedOnTyping: ((groupId: string) => void) | undefined;
 		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
 			(_identityId, _groupId, _onMessage, _onPqBinding, onTyping) => {
@@ -372,8 +373,9 @@ describe("ChatLayout", () => {
 			capturedOnTyping?.("11111111-1111-1111-1111-111111111111");
 		});
 
-		// The ConversationHeader should now show "· typing"
-		expect(screen.getByText(/·\s*typing/i)).toBeInTheDocument();
+		// The ConversationHeader should now show the TypingDots component
+		const dots = screen.getAllByTestId("typing-dots");
+		expect(dots.length).toBeGreaterThanOrEqual(1);
 	});
 
 	it("typing indicator auto-clears after 3 seconds", async () => {
@@ -387,17 +389,21 @@ describe("ChatLayout", () => {
 			);
 			render(<ChatLayout />);
 
-			// Trigger typing signal
+			// Trigger typing signal for Maya's group (active chat)
 			await act(async () => {
 				capturedOnTyping?.("11111111-1111-1111-1111-111111111111");
 			});
-			expect(screen.getByText(/·\s*typing/i)).toBeInTheDocument();
+			// Both Sam's sidebar dots + Maya's header dots are present → 2 instances
+			const before = screen.getAllByTestId("typing-dots").length;
+			expect(before).toBeGreaterThanOrEqual(2);
 
 			// Advance timers past the 3 s auto-clear
 			await act(async () => {
 				vi.advanceTimersByTime(3_100);
 			});
-			expect(screen.queryByText(/·\s*typing/i)).not.toBeInTheDocument();
+			// After clear only Sam's sidebar dots remain → count dropped by 1
+			const after = screen.getAllByTestId("typing-dots").length;
+			expect(after).toBeLessThan(before);
 		} finally {
 			vi.useRealTimers();
 		}

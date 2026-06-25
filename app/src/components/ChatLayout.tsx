@@ -700,6 +700,20 @@ function lastMsgReactionSummary(chat: Chat): string | null {
 		.join(" ");
 }
 
+function TypingDots({ color = "#FF9E52" }: { color?: string }) {
+	return (
+		<span
+			data-testid="typing-dots"
+			aria-label="typing"
+			style={{ display: "inline-flex", alignItems: "center", gap: 3, color }}
+		>
+			<span className="powehi-typing-dot" />
+			<span className="powehi-typing-dot" />
+			<span className="powehi-typing-dot" />
+		</span>
+	);
+}
+
 function ChatRow({
 	chat,
 	active,
@@ -803,15 +817,7 @@ function ChatRow({
 					}}
 				>
 					{chat.typing ? (
-						<span
-							style={{
-								fontSize: 13,
-								color: "#FF9E52",
-								fontStyle: "italic",
-							}}
-						>
-							typing...
-						</span>
+						<TypingDots />
 					) : (
 						<span
 							style={{
@@ -1328,14 +1334,8 @@ function ConversationHeader({
 								<>
 									{chat.online ? "online" : `last seen ${chat.lastSeen ?? "recently"}`}
 									{chat.typing && (
-										<span
-											style={{
-												color: "#FF9E52",
-												marginLeft: 8,
-												fontStyle: "italic",
-											}}
-										>
-											· typing
+										<span style={{ marginLeft: 8 }}>
+											· <TypingDots />
 										</span>
 									)}
 								</>
