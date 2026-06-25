@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as MessagesApiModule from "../api/messages";
 import { db } from "../db/schema";
@@ -67,6 +67,7 @@ describe("ChatLayout — read receipt delivery UI", () => {
 	});
 
 	afterEach(() => {
+		cleanup();
 		vi.restoreAllMocks();
 		vi.useRealTimers();
 		captureIncoming = null;
