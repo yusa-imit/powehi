@@ -1498,7 +1498,16 @@ function MessageBubble({
 												<span data-testid="read-indicator" aria-label="Sent">
 													<Icon name="check" size={12} color="currentColor" />
 												</span>
-											) : null)}
+											) : (
+												<span data-testid="read-indicator" aria-label="Sending">
+													<Icon
+														name="timer"
+														size={12}
+														color="currentColor"
+														style={{ opacity: 0.45 }}
+													/>
+												</span>
+											))}
 									</span>
 								)}
 								{msg.edited && (
@@ -2932,9 +2941,13 @@ export function ChatLayout() {
 
 	// Refs hold the latest send*Receipt and notification closures so handleIncoming
 	// (stable useCallback) can call them without taking extra deps.
-	const sendReadReceiptRef = useRef<(ids: string[]) => void>(() => {});
+	const sendReadReceiptRef = useRef<
+		(mlsGroupId: string, mlsIdentityId: string, ids: string[]) => void
+	>(() => {});
 	const sendDeliveryReceiptRef = useRef<(ids: string[]) => void>(() => {});
 	const showTauriNotificationRef = useRef<() => void>(() => {});
+	// mlsGroupId → envelope IDs awaiting read receipt (deferred until chat is visible + focused).
+	const pendingReadReceipts = useRef<Map<string, string[]>>(new Map());
 
 	// Reset in-conversation search when switching chats.
 	// biome-ignore lint/correctness/useExhaustiveDependencies: activeId is the trigger; setMsgSearch is stable
@@ -3061,8 +3074,20 @@ export function ChatLayout() {
 			}
 			// Notify sender that we received and decrypted the message (best-effort).
 			sendDeliveryReceiptRef.current([msg.id]);
-			// Notify sender that we read the message (best-effort, fire-and-forget).
-			sendReadReceiptRef.current([msg.id]);
+			// Read receipt: only dispatch immediately when this chat is active and the window is
+			// focused — the user has actually seen the message. Otherwise buffer it; flushed when
+			// the user opens the chat or the window regains focus.
+			// Always pass the incoming message's own group IDs so the receipt is encrypted to the
+			// correct MLS group regardless of which chat is currently active.
+			if (incomingChat?.id === activeIdRef.current && document.hasFocus()) {
+				const gId = incomingChat?.mlsGroupId;
+				const iId = incomingChat?.mlsIdentityId;
+				if (gId && iId) sendReadReceiptRef.current(gId, iId, [msg.id]);
+			} else {
+				const queue = pendingReadReceipts.current.get(msg.groupId) ?? [];
+				queue.push(msg.id);
+				pendingReadReceipts.current.set(msg.groupId, queue);
+			}
 		},
 		[persistIncoming],
 	);
@@ -3501,14 +3526,15 @@ export function ChatLayout() {
 	}, []);
 
 	/**
-	 * Send a read_receipt to the active MLS group for the given envelope IDs.
+	 * Send a read_receipt to the specified MLS group for the given envelope IDs.
+	 * Takes explicit mlsGroupId/mlsIdentityId so buffered receipts from background chats
+	 * are always encrypted to the correct group, not to whatever `active` happens to be.
 	 * Fire-and-forget — a failed receipt is non-fatal (the UI shows "sent" vs "read" state).
-	 * Not a useCallback: re-created each render so it always closes over current state.
+	 * Not a useCallback: re-created each render so it always closes over current session state.
 	 * Exposed via sendReadReceiptRef so stable callbacks (handleIncoming) can call it.
 	 */
-	const sendReadReceipt = (messageIds: string[]) => {
-		if (!sessionToken || !active?.mlsGroupId || !active?.mlsIdentityId || !cryptoWorker) return;
-		const { mlsGroupId, mlsIdentityId } = active;
+	const sendReadReceipt = (mlsGroupId: string, mlsIdentityId: string, messageIds: string[]) => {
+		if (!sessionToken || !mlsGroupId || !mlsIdentityId || !cryptoWorker) return;
 		const plaintext = new TextEncoder().encode(
 			JSON.stringify({ type: "read_receipt", messageIds, readAt: Date.now() }),
 		);
@@ -3544,6 +3570,21 @@ export function ChatLayout() {
 		sendDeliveryReceiptRef.current = sendDeliveryReceipt;
 		showTauriNotificationRef.current = showTauriNotification;
 	});
+
+	// When the window regains focus, flush pending read receipts for the active chat.
+	useEffect(() => {
+		const handleWindowFocus = () => {
+			const activeChat = chatsRef.current.find((c) => c.id === activeIdRef.current);
+			if (!activeChat?.mlsGroupId || !activeChat?.mlsIdentityId) return;
+			const pending = pendingReadReceipts.current.get(activeChat.mlsGroupId);
+			if (pending?.length) {
+				sendReadReceiptRef.current(activeChat.mlsGroupId, activeChat.mlsIdentityId, pending);
+				pendingReadReceipts.current.delete(activeChat.mlsGroupId);
+			}
+		};
+		window.addEventListener("focus", handleWindowFocus);
+		return () => window.removeEventListener("focus", handleWindowFocus);
+	}, []);
 
 	/**
 	 * Forward `forwardMsg.text` to the target chat as a new MLS-encrypted message.
@@ -3661,6 +3702,17 @@ export function ChatLayout() {
 				return { ...base, mentionCount: 0 };
 			}),
 		);
+		// Flush buffered read receipts for this chat when the user opens it.
+		// Use the chat's own mlsGroupId/mlsIdentityId — never `active` — to avoid
+		// encrypting receipts into the wrong MLS group (security-auditor finding #1).
+		const chat = chatsRef.current.find((c) => c.id === id);
+		if (chat?.mlsGroupId && chat?.mlsIdentityId) {
+			const pending = pendingReadReceipts.current.get(chat.mlsGroupId);
+			if (pending?.length) {
+				sendReadReceiptRef.current(chat.mlsGroupId, chat.mlsIdentityId, pending);
+				pendingReadReceipts.current.delete(chat.mlsGroupId);
+			}
+		}
 	}, []);
 
 	/**
