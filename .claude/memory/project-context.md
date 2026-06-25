@@ -17,7 +17,18 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-26, cycle 197 — FEATURE: screenshare placeholder in active call)
+## Current state (2026-06-26, cycle 198 — FEATURE: Web Share API — share message to native OS share sheet)
+- **Cycle 198 (commit c47cd47):** FEATURE — Web Share API share button on MessageBubble.
+  - **`Icon.tsx`:** Added `share-2` Lucide SVG path (share-2: three circles connected by lines).
+  - **`MessageBubble` props:** Added `onShare?: () => void`. Share button rendered at `top:-10, left:78` (after star at left:52). Condition: `onShare && hovered && !msg.deleted && msg.text && msg.text !== "[image]"` — skips media-only placeholder messages.
+  - **`MessageList` props:** Added `onShare?: (msg: ChatMessage) => void`. Wired: `onShare={onShare && !g.msg.deleted ? () => onShare(g.msg) : undefined}`.
+  - **`handleShareMessage`:** `useCallback` — guards: `!msg.text || msg.text === "[image]"` returns early; `!navigator.share` returns early (unsupported platforms no-op). Calls `navigator.share({ text: msg.text }).catch(() => {})`. **No title, no url** — minimises metadata exposure (chat name / group ID never sent to OS share sheet). On Tauri mobile, this surfaces the native share sheet via WebView Web Share API.
+  - **Security invariants:** Purely client-side. No MLS message sent, no server contact, no new server-visible metadata. `navigator.share` receives only `{ text: msg.text }` — no chat name, group ID, sender identity, or timestamps. XSS-safe (navigator.share is a structured API, not a DOM/HTML sink). `.catch(() => {})` silently swallows AbortError (user cancels) without logging any content. User gesture required (button click only — no timer/effect autorun; browser enforces transient activation).
+  - **security-auditor:** GREEN. YELLOW-1 (non-blocking advisory): `Permissions-Policy` header does not explicitly list `web-share=(self)` — default allows it; optional hardening.
+  - **704 frontend tests pass** (+10: `ChatLayoutShare.test.tsx` — share button appears on hover, absent for deleted, absent for [image], click calls navigator.share, share called with {text} only (no title/url), button for own messages, AbortError handled silently, aria-label "Share message", share not called for empty text, correct text for last of 2 messages); tsc clean; biome clean.
+  - **Next cycle:** PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768 ciphersuite), or more UX polish.
+
+## Previous state (2026-06-26, cycle 197 — FEATURE: screenshare placeholder in active call)
 - **Cycle 197 (commit 0fa2a2d):** FEATURE — Screenshare toggle button in active call overlay.
   - **`Icon.tsx`:** Added `monitor` and `monitor-off` Lucide-style SVG paths (Lucide monitor + monitor-off originals).
   - **`CallOverlay` props:** Added `screensharing: boolean` + `onScreenshareToggle: () => void`.
