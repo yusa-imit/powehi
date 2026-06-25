@@ -1370,6 +1370,7 @@ function MessageBubble({
 	onPin,
 	onForward,
 	onStar,
+	onShare,
 }: {
 	msg: ChatMessage;
 	partner: string;
@@ -1383,6 +1384,7 @@ function MessageBubble({
 	onPin?: () => void;
 	onForward?: () => void;
 	onStar?: () => void;
+	onShare?: () => void;
 }) {
 	const isMe = msg.from === "me";
 	const [pickerOpen, setPickerOpen] = useState(false);
@@ -1679,6 +1681,39 @@ function MessageBubble({
 						</div>
 					)}
 
+					{/* Share button — Web Share API; appears on hover for non-deleted text messages */}
+					{onShare && hovered && !msg.deleted && msg.text && msg.text !== "[image]" && (
+						<div
+							style={{
+								position: "absolute",
+								top: -10,
+								left: 78,
+							}}
+						>
+							<button
+								type="button"
+								onClick={onShare}
+								aria-label="Share message"
+								data-testid="share-button"
+								style={{
+									width: 22,
+									height: 22,
+									borderRadius: "50%",
+									border: "1px solid var(--border-faint)",
+									background: "var(--bg-elevated)",
+									color: "var(--fg-3)",
+									cursor: "pointer",
+									display: "flex",
+									alignItems: "center",
+									justifyContent: "center",
+									padding: 0,
+								}}
+							>
+								<Icon name="share-2" size={11} />
+							</button>
+						</div>
+					)}
+
 					{/* Edit button — appears on hover for own messages only, when not deleted */}
 					{onEdit && isMe && hovered && !msg.deleted && (
 						<div
@@ -1929,6 +1964,7 @@ function MessageList({
 	onPin,
 	onForward,
 	onStar,
+	onShare,
 	firstUnreadIndex,
 	jumpToMessageId,
 	onJumpComplete,
@@ -1945,6 +1981,7 @@ function MessageList({
 	onPin?: (msgId: string) => void;
 	onForward?: (msg: ChatMessage) => void;
 	onStar?: (msgId: string | undefined, msgText: string) => void;
+	onShare?: (msg: ChatMessage) => void;
 	firstUnreadIndex?: number;
 	jumpToMessageId?: string;
 	onJumpComplete?: () => void;
@@ -2138,6 +2175,7 @@ function MessageList({
 							})()}
 							onForward={onForward && !g.msg.deleted ? () => onForward(g.msg) : undefined}
 							onStar={onStar ? () => onStar(g.msg.id, g.msg.text) : undefined}
+							onShare={onShare && !g.msg.deleted ? () => onShare(g.msg) : undefined}
 						/>
 					</div>
 				),
@@ -3839,6 +3877,14 @@ export function ChatLayout() {
 		[],
 	);
 
+	/** Share a message via the Web Share API / Tauri native share sheet.
+	 * Purely client-side — no MLS message sent, no server contact. */
+	const handleShareMessage = useCallback((msg: ChatMessage) => {
+		if (!msg.text || msg.text === "[image]") return;
+		if (typeof navigator === "undefined" || !navigator.share) return;
+		navigator.share({ text: msg.text }).catch(() => {});
+	}, []);
+
 	/** Toggle the muted flag on a chat. Local-only — no MLS message sent, no server contact. */
 	const handleToggleMute = useCallback((chatId: string) => {
 		setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, muted: !c.muted } : c)));
@@ -4305,6 +4351,7 @@ export function ChatLayout() {
 							if (msg.id && !msg.deleted) setForwardMsg({ id: msg.id, text: msg.text });
 						}}
 						onStar={(msgId, msgText) => handleStarMessage(activeId, msgId, msgText)}
+						onShare={handleShareMessage}
 						firstUnreadIndex={active.firstUnreadAt}
 						jumpToMessageId={jumpToMessageId ?? undefined}
 						onJumpComplete={handleJumpComplete}

@@ -63,6 +63,8 @@ const ICON_PATHS: Record<string, string> = {
 		'<rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>',
 	"monitor-off":
 		'<path d="M17 17H4a2 2 0 0 1-2-2V5c0-.53.19-1 .5-1.37"/><path d="M22 15a2 2 0 0 1-2 2"/><rect x="8" y="21" width="8" height="2" rx="1"/><line x1="12" y1="17" x2="12" y2="21"/><line x1="1" y1="1" x2="23" y2="23"/><path d="M6 3h16a2 2 0 0 1 2 2v11"/>',
+	"share-2":
+		'<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>',
 };
 
 export type IconName = keyof typeof ICON_PATHS;
