@@ -17,7 +17,19 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-25, cycle 195 — STABILIZATION: fix CI Frontend test uncaught exceptions)
+## Current state (2026-06-25, cycle 196 — FEATURE: voice/video call overlay stub)
+- **Cycle 196 (commit 942b469):** FEATURE — Voice/video call UI stub (no WebRTC, no getUserMedia).
+  - **`CallOverlay` component:** Three states — `outgoing` (Calling..., cancel button), `incoming` (accept/decline buttons), `active` (live duration timer, mute/camera-off/end-call controls).
+  - **Icons:** `mic-off`, `video-off`, `phone-off` added to Icon.tsx (Lucide-style inline SVG).
+  - **Call state in ChatLayout:** `callState` / `callType` / `callDurationSec` / `callMuted` / `callCameraOff` / `callChatId`. Two useEffects: outgoing→active auto-connect (2.5 s setTimeout), active duration tick (setInterval 1 s). Both clean up on unmount.
+  - **Semantic:** Outer `<div>` = backdrop, inner `<dialog open>` = card — fixes biome `useSemanticElements` lint.
+  - **Dev button:** hidden `data-testid="dev-simulate-incoming-call"` (display:none) lets tests trigger incoming call state without WebRTC signalling.
+  - **Wire-up:** Previously no-op `onCall={() => undefined}` / `onVideo={() => undefined}` in ConversationHeader now call `handleVoiceCall` / `handleVideoCall`.
+  - **security-auditor:** GREEN — no network calls, no getUserMedia, no PII exposure, no XSS surface.
+  - **684 frontend tests pass** (+14: `ChatLayoutCallOverlay.test.tsx`); tsc clean; biome clean.
+  - **Next cycle:** Message forwarding to external apps (share sheet), or screenshare placeholder in active call, or PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768 ciphersuite).
+
+## Previous state (2026-06-25, cycle 195 — STABILIZATION: fix CI Frontend test uncaught exceptions)
 - **Cycle 195 (commit 347c88a):** STABILIZATION — Fixed CI Frontend failure (11 uncaught exceptions in `ChatLayoutReadReceipts.test.tsx`).
   - **Root cause:** `afterEach` called `vi.restoreAllMocks()` (restoring real `useMessages` that calls hooks) then `useAuthStore.setState()` which triggered a re-render of the still-mounted `ChatLayout`. Real `useMessages` calls `useAuthStore()` (2 hooks) but mock had 0 hooks → `areHookInputsEqual(undefined, deps)` → TypeError in React reconciler.
   - **Fix:** Import `cleanup` from `@testing-library/react` and call it as the FIRST statement of `afterEach`, before `vi.restoreAllMocks()`. This unmounts the component before mocks are restored, preventing the stale re-render.
