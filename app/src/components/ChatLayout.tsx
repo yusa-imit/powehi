@@ -1496,7 +1496,7 @@ function MessageBubble({
 												<span data-testid="read-indicator" aria-label="Delivered">
 													<Icon name="doublecheck" size={12} color="currentColor" />
 												</span>
-											) : msg.id ? (
+											) : msg.id && !msg.id.startsWith("opt_") ? (
 												<span data-testid="read-indicator" aria-label="Sent">
 													<Icon name="check" size={12} color="currentColor" />
 												</span>
@@ -2196,6 +2196,7 @@ function Composer({
 	editingMessage,
 	onEdit,
 	onCancelEdit,
+	onEditLast,
 	chatId,
 	initialDraft,
 	onDraftChange,
@@ -2218,6 +2219,8 @@ function Composer({
 	onEdit?: (newText: string) => void;
 	/** Called when the user cancels an edit. */
 	onCancelEdit?: () => void;
+	/** Called when the user presses ↑ in an empty composer to edit the last own message. */
+	onEditLast?: () => void;
 	chatId: string;
 	initialDraft: string;
 	onDraftChange: (chatId: string, draft: string) => void;
@@ -2262,6 +2265,17 @@ function Composer({
 		if (e.key === "Enter" && !e.shiftKey) {
 			e.preventDefault();
 			send();
+		} else if (e.key === "ArrowUp" && text === "" && !editingMessage) {
+			e.preventDefault();
+			onEditLast?.();
+		} else if (e.key === "Escape") {
+			if (editingMessage) {
+				e.preventDefault();
+				onCancelEdit?.();
+			} else if (replyTo) {
+				e.preventDefault();
+				onCancelReply?.();
+			}
 		}
 	};
 
@@ -3586,6 +3600,7 @@ export function ChatLayout() {
 	const sendReaction = useCallback(
 		(targetId: string, emoji: string) => {
 			if (!(ALLOWED_REACTION_EMOJIS as readonly string[]).includes(emoji)) return;
+			if (targetId.startsWith("opt_")) return;
 			if (!sessionToken || !active?.mlsGroupId || !active?.mlsIdentityId || !cryptoWorker) return;
 			const { mlsGroupId, mlsIdentityId } = active;
 			const myDeviceId = useAuthStore.getState().deviceId;
@@ -3686,7 +3701,8 @@ export function ChatLayout() {
 		(targetMessageId: string, newText: string) => {
 			if (!sessionToken || !active?.mlsGroupId || !active?.mlsIdentityId || !cryptoWorker) return;
 			const { mlsGroupId, mlsIdentityId } = active;
-			// Optimistic local update.
+			// Optimistic local update — always applied regardless of whether the envelope has a
+			// server-assigned ID yet. opt_* IDs denote messages awaiting backfill.
 			setChats((cs) =>
 				cs.map((c) => {
 					if (c.id !== activeId) return c;
@@ -3698,6 +3714,8 @@ export function ChatLayout() {
 				}),
 			);
 			setEditingMessage(null);
+			// Skip network send for optimistic messages that haven't received a server ID yet.
+			if (targetMessageId.startsWith("opt_")) return;
 			const plaintext = new TextEncoder().encode(
 				JSON.stringify({ type: "edit", targetMessageId, newText }),
 			);
@@ -3748,6 +3766,8 @@ export function ChatLayout() {
 					return { ...c, messages: msgs };
 				}),
 			);
+			// opt_* ids are pending server acknowledgement — skip network send.
+			if (targetMessageId.startsWith("opt_")) return;
 			const plaintext = new TextEncoder().encode(
 				JSON.stringify({ type: "delete", targetMessageId }),
 			);
@@ -3827,6 +3847,7 @@ export function ChatLayout() {
 	 */
 	const sendPin = useCallback(
 		(targetMessageId: string) => {
+			if (targetMessageId.startsWith("opt_")) return;
 			if (!sessionToken || !active?.mlsGroupId || !active?.mlsIdentityId || !cryptoWorker) return;
 			const { mlsGroupId, mlsIdentityId } = active;
 			const currentlyPinned = active.pinnedMessageId === targetMessageId;
@@ -4204,6 +4225,9 @@ export function ChatLayout() {
 		setReplyingTo(null);
 
 		// Optimistic local update — always runs synchronously so UI is responsive.
+		// Assign a temp local ID (opt_ prefix) so ↑-to-edit can target this message before
+		// the server-assigned envelope ID is backfilled.
+		const optId = `opt_${crypto.randomUUID()}`;
 		setChats((cs) =>
 			cs.map((c) => {
 				if (c.id !== activeId) return c;
@@ -4215,6 +4239,7 @@ export function ChatLayout() {
 					}
 				}
 				msgs.push({
+					id: optId,
 					from: "me",
 					text,
 					last: true,
@@ -4263,7 +4288,7 @@ export function ChatLayout() {
 						if (c.id !== chatId) return c;
 						const msgs = [...c.messages];
 						for (let i = msgs.length - 1; i >= 0; i--) {
-							if (msgs[i].from === "me" && !msgs[i].id) {
+							if (msgs[i].from === "me" && msgs[i].id?.startsWith("opt_")) {
 								msgs[i] = { ...msgs[i], id: envelopeId };
 								break;
 							}
@@ -4370,6 +4395,12 @@ export function ChatLayout() {
 							if (editingMessage?.id) sendEdit(editingMessage.id, newText);
 						}}
 						onCancelEdit={() => setEditingMessage(null)}
+						onEditLast={() => {
+							const last = [...(active?.messages ?? [])]
+								.reverse()
+								.find((m) => m.from === "me" && !m.deleted);
+							if (last) setEditingMessage(last);
+						}}
 						chatId={activeId}
 						initialDraft={drafts[activeId] ?? ""}
 						onDraftChange={handleDraftChange}
