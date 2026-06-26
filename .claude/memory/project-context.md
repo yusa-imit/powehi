@@ -17,7 +17,18 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-26, cycle 198 — FEATURE: Web Share API — share message to native OS share sheet)
+## Current state (2026-06-27, cycle 199 — FEATURE: keyboard shortcuts ↑ to edit last message, Escape to cancel)
+- **Cycle 199 (commit f134167):** FEATURE — Composer keyboard shortcuts.
+  - **↑ arrow (empty composer, not in edit mode):** Calls `onEditLast` → finds the last own non-deleted message (reversed scan of `active.messages`) and enters edit mode via `setEditingMessage`. Works whether message has a server id or a temp `opt_` id.
+  - **Escape (in edit mode):** Calls `onCancelEdit?.()` → `setEditingMessage(null)`.
+  - **Escape (in reply mode):** Calls `onCancelReply?.()` → `setReplyingTo(null)`.
+  - **Optimistic message local IDs:** Optimistic "me" messages now assigned `id: \`opt_\${crypto.randomUUID()}\`` at send time. Backfill logic updated to `msgs[i].id?.startsWith("opt_")` instead of `!msgs[i].id`. `Sending` indicator updated to `msg.id?.startsWith("opt_")`.
+  - **`opt_` network guard (YELLOW advisory fix):** Added `if (targetId.startsWith("opt_")) return` to `sendReaction`, `sendDelete`, and `sendPin` — ensures unacknowledged messages (no real server envelope id yet) can never be referenced cross-MLS-boundary as edit/delete/pin/reaction targets. Structural invariant, not just UI-gating.
+  - **Security invariants:** Purely client-side keyboard events; no new server calls, no new server-visible metadata, no MLS ops. `onEditLast` only touches `m.from === "me"` messages — peers cannot influence target. `crypto.randomUUID()` output is hex+hyphens, never in a DOM/HTML sink. security-auditor: GREEN (YELLOW advisory applied).
+  - **715 frontend tests pass** (+11: `ChatLayoutKeyboardShortcuts.test.tsx` — ↑ activates edit mode, ↑ fills composer with last own text, ↑ no-op when draft present, ↑ no-op in Jordan chat (no own messages), ↑ no-op when already editing, ↑ skips deleted own messages, Escape cancels edit, Escape cancels reply, Escape no-op when idle, edit confirmed via ↑ shows edited badge, ↑ selects last of two own messages); tsc clean; biome clean.
+  - **Next cycle:** PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768 ciphersuite), or more UX polish.
+
+## Previous state (2026-06-26, cycle 198 — FEATURE: Web Share API — share message to native OS share sheet)
 - **Cycle 198 (commit c47cd47):** FEATURE — Web Share API share button on MessageBubble.
   - **`Icon.tsx`:** Added `share-2` Lucide SVG path (share-2: three circles connected by lines).
   - **`MessageBubble` props:** Added `onShare?: () => void`. Share button rendered at `top:-10, left:78` (after star at left:52). Condition: `onShare && hovered && !msg.deleted && msg.text && msg.text !== "[image]"` — skips media-only placeholder messages.
