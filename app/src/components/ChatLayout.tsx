@@ -66,6 +66,13 @@ interface ChatMessage {
 	starred?: boolean;
 }
 
+interface ChatMember {
+	id: string;
+	name: string;
+	handle: string;
+	role?: "admin" | "member";
+}
+
 interface Chat {
 	id: string;
 	name: string;
@@ -94,6 +101,8 @@ interface Chat {
 	isGroup?: boolean;
 	/** Number of members in the group. Starts at 1 (creator only). */
 	memberCount?: number;
+	/** Local member roster for group chats — never sent to server, never in MLS payload. */
+	members?: ChatMember[];
 	/** When true, incoming messages do not increment the unread badge. Local-only, never sent to server. */
 	muted?: boolean;
 	/** When false, incoming messages do not trigger notification sounds. Local-only, never sent to server. */
@@ -254,6 +263,12 @@ const SEED_CHATS: Chat[] = [
 		unread: 0,
 		isGroup: true,
 		memberCount: 4,
+		members: [
+			{ id: "dev-a", name: "Finn", handle: "finn", role: "admin" },
+			{ id: "dev-b", name: "Maya", handle: "maya", role: "member" },
+			{ id: "dev-c", name: "Jordan", handle: "jordan", role: "member" },
+			{ id: "dev-d", name: "Noa", handle: "noa", role: "member" },
+		],
 		mlsGroupId: "44444444-4444-4444-4444-444444444444",
 		mentionCount: 2,
 		messages: [
@@ -2595,6 +2610,7 @@ function InfoPanel({
 	onToggleArchive,
 	pinnedTop,
 	onTogglePinTop,
+	myHandle,
 }: {
 	chat: Chat;
 	onClose: () => void;
@@ -2609,6 +2625,7 @@ function InfoPanel({
 	onToggleArchive: () => void;
 	pinnedTop: boolean;
 	onTogglePinTop: () => void;
+	myHandle?: string;
 }) {
 	const [safetyVerified, setSafetyVerified] = useState(false);
 	const [verifiedAt, setVerifiedAt] = useState<number | undefined>(undefined);
@@ -2838,79 +2855,161 @@ function InfoPanel({
 				</div>
 			</div>
 
-			{/* Safety Numbers — photon blue encryption verification card */}
-			<div style={{ padding: "0 14px 16px" }}>
-				<div
-					style={{
-						background: "rgba(168,200,255,0.05)",
-						border: "1px solid rgba(168,200,255,0.22)",
-						borderRadius: 14,
-						padding: 16,
-					}}
-				>
+			{chat.isGroup ? (
+				/* Group member list */
+				<InfoSection title={`Members (${chat.members?.length ?? chat.memberCount ?? 0})`}>
 					<div
+						data-testid="group-member-list"
 						style={{
 							display: "flex",
-							alignItems: "center",
-							gap: 8,
-							marginBottom: 12,
+							flexDirection: "column",
+							gap: 0,
+							padding: "0 18px 8px",
 						}}
 					>
-						<Icon name="lock" size={14} color="#A8C8FF" />
-						<span
-							style={{
-								fontSize: 11,
-								fontWeight: 600,
-								letterSpacing: "0.1em",
-								textTransform: "uppercase",
-								color: "#A8C8FF",
-							}}
-						>
-							Safety Numbers
-						</span>
+						{(chat.members ?? []).map((member) => {
+							const isMe =
+								myHandle != null && member.handle.toLowerCase() === myHandle.toLowerCase();
+							return (
+								<div
+									key={member.id}
+									data-testid="group-member-row"
+									style={{
+										display: "flex",
+										alignItems: "center",
+										gap: 10,
+										padding: "7px 0",
+										borderBottom: "1px solid var(--border-faint)",
+									}}
+								>
+									<Avatar name={member.name} size={30} />
+									<div style={{ flex: 1, minWidth: 0 }}>
+										<div
+											style={{
+												fontSize: 13,
+												fontWeight: 500,
+												color: "var(--fg-1)",
+												display: "flex",
+												alignItems: "center",
+												gap: 6,
+											}}
+										>
+											{member.name}
+											{isMe && (
+												<span
+													data-testid="member-you-badge"
+													style={{
+														fontSize: 10,
+														fontWeight: 600,
+														color: "#FF9E52",
+														background: "rgba(255,158,82,0.12)",
+														borderRadius: 4,
+														padding: "1px 5px",
+													}}
+												>
+													You
+												</span>
+											)}
+											{member.role === "admin" && (
+												<span
+													data-testid="member-admin-badge"
+													style={{
+														fontSize: 10,
+														fontWeight: 600,
+														color: "#A8C8FF",
+														background: "rgba(168,200,255,0.1)",
+														borderRadius: 4,
+														padding: "1px 5px",
+													}}
+												>
+													Admin
+												</span>
+											)}
+										</div>
+										<div style={{ fontSize: 11, color: "var(--fg-4)", marginTop: 1 }}>
+											@{member.handle}
+										</div>
+									</div>
+								</div>
+							);
+						})}
 					</div>
-					{mitmAlert && (
+				</InfoSection>
+			) : (
+				/* Safety Numbers — photon blue encryption verification card */
+				<div style={{ padding: "0 14px 16px" }}>
+					<div
+						style={{
+							background: "rgba(168,200,255,0.05)",
+							border: "1px solid rgba(168,200,255,0.22)",
+							borderRadius: 14,
+							padding: 16,
+						}}
+					>
 						<div
 							style={{
 								display: "flex",
 								alignItems: "center",
 								gap: 8,
-								background: "rgba(255,100,100,0.08)",
-								border: "1px solid rgba(255,100,100,0.3)",
-								borderRadius: 9,
-								padding: "8px 10px",
-								marginBottom: 10,
+								marginBottom: 12,
 							}}
 						>
-							<Icon name="alert" size={14} color="#FF9999" />
-							<span style={{ fontSize: 12, color: "#FF9999" }}>
-								Safety number changed — verify again to confirm identity
+							<Icon name="lock" size={14} color="#A8C8FF" />
+							<span
+								style={{
+									fontSize: 11,
+									fontWeight: 600,
+									letterSpacing: "0.1em",
+									textTransform: "uppercase",
+									color: "#A8C8FF",
+								}}
+							>
+								Safety Numbers
 							</span>
 						</div>
-					)}
-					{computedSafetyNumber !== null ? (
-						<SafetyNumbers
-							safetyNumber={computedSafetyNumber}
-							peerName={chat.name}
-							verified={safetyVerified}
-							verifiedAt={verifiedAt}
-							onVerify={handleVerify}
-							onReset={handleReset}
-						/>
-					) : (
-						<div
-							style={{
-								padding: "12px 0 4px",
-								fontSize: 12,
-								color: "var(--fg-3)",
-								textAlign: "center",
-							}}
-						>
-							Safety number not available
-						</div>
-					)}
+						{mitmAlert && (
+							<div
+								style={{
+									display: "flex",
+									alignItems: "center",
+									gap: 8,
+									background: "rgba(255,100,100,0.08)",
+									border: "1px solid rgba(255,100,100,0.3)",
+									borderRadius: 9,
+									padding: "8px 10px",
+									marginBottom: 10,
+								}}
+							>
+								<Icon name="alert" size={14} color="#FF9999" />
+								<span style={{ fontSize: 12, color: "#FF9999" }}>
+									Safety number changed — verify again to confirm identity
+								</span>
+							</div>
+						)}
+						{computedSafetyNumber !== null ? (
+							<SafetyNumbers
+								safetyNumber={computedSafetyNumber}
+								peerName={chat.name}
+								verified={safetyVerified}
+								verifiedAt={verifiedAt}
+								onVerify={handleVerify}
+								onReset={handleReset}
+							/>
+						) : (
+							<div
+								style={{
+									padding: "12px 0 4px",
+									fontSize: 12,
+									color: "var(--fg-3)",
+									textAlign: "center",
+								}}
+							>
+								Safety number not available
+							</div>
+						)}
+					</div>
 				</div>
-			</div>
+			)}
 
 			<InfoSection title="Notifications">
 				<InfoRow label="Mute" trailing={muted ? "On" : "Off"} onClick={onToggleMute} />
@@ -4502,6 +4601,7 @@ export function ChatLayout() {
 					onToggleArchive={() => handleToggleArchive(active.id)}
 					pinnedTop={active.pinnedTop ?? false}
 					onTogglePinTop={() => handleTogglePinTop(active.id)}
+					myHandle={useAuthStore.getState().myHandle ?? undefined}
 				/>
 			)}
 
