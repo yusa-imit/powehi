@@ -5,19 +5,23 @@
  * current regionId from the store. No PII, no auth — purely informational.
  */
 
-import { act, renderHook } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useRegionStore } from "../store/region";
 import { useRegionDetect } from "./useRegionDetect";
 
 describe("useRegionDetect (prd.md §7.6)", () => {
-	beforeEach(() => {
-		useRegionStore.setState({ regionId: null, detectedAt: null });
+	beforeEach(async () => {
+		await act(async () => {
+			useRegionStore.setState({ regionId: null, detectedAt: null });
+		});
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		vi.restoreAllMocks();
-		useRegionStore.setState({ regionId: null, detectedAt: null });
+		await act(async () => {
+			useRegionStore.setState({ regionId: null, detectedAt: null });
+		});
 	});
 
 	it("returns null before fetch resolves", () => {
@@ -31,8 +35,7 @@ describe("useRegionDetect (prd.md §7.6)", () => {
 			new Response(JSON.stringify({ region_id: "eu-de-1" }), { status: 200 }),
 		);
 		const { result } = renderHook(() => useRegionDetect());
-		await act(async () => {});
-		expect(result.current).toBe("eu-de-1");
+		await waitFor(() => expect(result.current).toBe("eu-de-1"));
 	});
 
 	it("calls store fetch exactly once on mount", async () => {
@@ -67,5 +70,7 @@ describe("useRegionDetect (prd.md §7.6)", () => {
 		const { result } = renderHook(() => useRegionDetect());
 		// Already set in store — should be returned immediately.
 		expect(result.current).toBe("ap-kr-1");
+		// Flush the async fetch that still runs on mount (503 → no state change).
+		await act(async () => {});
 	});
 });
