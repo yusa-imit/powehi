@@ -104,6 +104,8 @@ interface Chat {
 	mentionCount?: number;
 	/** True when the chat is archived (local-only, not synced). */
 	archived?: boolean;
+	/** True when the chat is pinned to the top of the sidebar (local-only, not synced). */
+	pinnedTop?: boolean;
 }
 
 // ── Disappearing messages helpers ──────────────────────────────────────────────
@@ -771,6 +773,11 @@ function ChatRow({
 					>
 						{chat.name}
 					</span>
+					{chat.pinnedTop && (
+						<span data-testid="pin-top-indicator" style={{ lineHeight: 0 }}>
+							<Icon name="pin" size={10} color="#A8C8FF" />
+						</span>
+					)}
 					{chat.isGroup && (
 						<span
 							data-testid="group-badge"
@@ -1133,9 +1140,16 @@ function Sidebar({
 
 			{/* Chat list */}
 			<div style={{ flex: 1, overflowY: "auto", padding: "6px 8px 12px" }}>
-				{filtered.map((c) => (
-					<ChatRow key={c.id} chat={c} active={c.id === activeId} onClick={() => onSelect(c.id)} />
-				))}
+				{[...filtered]
+					.sort((a, b) => (b.pinnedTop ? 1 : 0) - (a.pinnedTop ? 1 : 0))
+					.map((c) => (
+						<ChatRow
+							key={c.id}
+							chat={c}
+							active={c.id === activeId}
+							onClick={() => onSelect(c.id)}
+						/>
+					))}
 				{filtered.length === 0 && msgResults.length === 0 && searchQuery && (
 					<div
 						style={{
@@ -2579,6 +2593,8 @@ function InfoPanel({
 	onToggleVibrate,
 	archived,
 	onToggleArchive,
+	pinnedTop,
+	onTogglePinTop,
 }: {
 	chat: Chat;
 	onClose: () => void;
@@ -2591,6 +2607,8 @@ function InfoPanel({
 	onToggleVibrate: () => void;
 	archived: boolean;
 	onToggleArchive: () => void;
+	pinnedTop: boolean;
+	onTogglePinTop: () => void;
 }) {
 	const [safetyVerified, setSafetyVerified] = useState(false);
 	const [verifiedAt, setVerifiedAt] = useState<number | undefined>(undefined);
@@ -2898,7 +2916,7 @@ function InfoPanel({
 				<InfoRow label="Mute" trailing={muted ? "On" : "Off"} onClick={onToggleMute} />
 				<InfoRow label="Sound" trailing={sound ? "On" : "Off"} onClick={onToggleSound} />
 				<InfoRow label="Vibrate" trailing={vibrate ? "On" : "Off"} onClick={onToggleVibrate} />
-				<InfoRow label="Pin to top" trailing="On" />
+				<InfoRow label="Pin to top" trailing={pinnedTop ? "On" : "Off"} onClick={onTogglePinTop} />
 			</InfoSection>
 			<InfoSection title="Disappearing messages">
 				<InfoRow label="Auto-delete after" trailing={formatTtl(disappearingTtl)} />
@@ -3969,6 +3987,11 @@ export function ChatLayout() {
 		// When un-archiving while on the archived tab, switch to "all" tab — done via Sidebar state.
 	}, []);
 
+	/** Toggle the pinnedTop flag on a chat. Local-only — no MLS message sent, no server contact. */
+	const handleTogglePinTop = useCallback((chatId: string) => {
+		setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, pinnedTop: !c.pinnedTop } : c)));
+	}, []);
+
 	/**
 	 * Send a read_receipt to the specified MLS group for the given envelope IDs.
 	 * Takes explicit mlsGroupId/mlsIdentityId so buffered receipts from background chats
@@ -4477,6 +4500,8 @@ export function ChatLayout() {
 					onToggleVibrate={() => handleToggleVibrate(active.id)}
 					archived={active.archived ?? false}
 					onToggleArchive={() => handleToggleArchive(active.id)}
+					pinnedTop={active.pinnedTop ?? false}
+					onTogglePinTop={() => handleTogglePinTop(active.id)}
 				/>
 			)}
 
