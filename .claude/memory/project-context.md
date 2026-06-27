@@ -17,7 +17,15 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-27, cycle 204 — FEATURE: jump-to-bottom FAB — scroll-up detection + unread badge)
+## Current state (2026-06-28, cycle 205 — STABILIZATION: eliminate act() warnings in useRegionDetect tests)
+- **Cycle 205 (commit e2f34df):** STABILIZATION — Fixed act() warnings in `useRegionDetect.test.ts`.
+  - **CI:** Green (success). **cargo audit:** 2 allowed warnings (instant unmaintained via openmls; bitcoin_hashes yanked via bip39 — both transitive deps, upstream-controlled). **cargo clippy:** Clean. **773 frontend tests + all Rust tests pass.**
+  - **Root cause:** `beforeEach`/`afterEach` Zustand `setState` calls were outside `act()` (Zustand's useSyncExternalStore subscriber flush not attributed). The "returns regionId after fetch resolves" test used a one-tick `act` flush that raced the two-await store chain (`fetch()` → `res.json()` → `set()`).
+  - **Fix:** Wrapped `beforeEach`/`afterEach` store resets in `await act(async () => {...})`. Changed async assertion to `await waitFor(() => expect(result.current).toBe("eu-de-1"))` which polls within act. Added `await act(async () => {})` after "reflects store regionId already set before mount" to flush the background fetch.
+  - **Target dir:** 6.5 GB (well under 20 GB cap). Pruned 0-byte `.rmeta` stubs.
+  - **Next cycle:** PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768 ciphersuite), or more UX polish.
+
+## Previous state (2026-06-27, cycle 204 — FEATURE: jump-to-bottom FAB — scroll-up detection + unread badge)
 - **Cycle 204 (commit 971ac29):** FEATURE — Jump-to-bottom FAB in message list.
   - **Scroll-up detection:** `MessageList` tracks `isAtBottomRef` (ref) + `isAtBottom` (state) via an `onScroll` handler on `data-testid="message-list-scroll"`. Threshold: `scrollTop + clientHeight >= scrollHeight - 80`.
   - **FAB:** `data-testid="jump-to-bottom-btn"`, `aria-label="Jump to bottom"`, `type="button"`. Positioned absolute bottom-right (bottom:16, right:20, 40×40 circle). Visible only when `!isAtBottom`. Clicking calls `handleJumpToBottom` → sets `scrollTop = scrollHeight`, resets `isAtBottom=true` + `newMsgCount=0`.
