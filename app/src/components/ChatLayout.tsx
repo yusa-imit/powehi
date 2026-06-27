@@ -1496,6 +1496,7 @@ function MessageBubble({
 	onForward,
 	onStar,
 	onShare,
+	onCopy,
 }: {
 	msg: ChatMessage;
 	partner: string;
@@ -1510,10 +1511,12 @@ function MessageBubble({
 	onForward?: () => void;
 	onStar?: () => void;
 	onShare?: () => void;
+	onCopy?: () => void;
 }) {
 	const isMe = msg.from === "me";
 	const [pickerOpen, setPickerOpen] = useState(false);
 	const [hovered, setHovered] = useState(false);
+	const [copied, setCopied] = useState(false);
 	const reactionEntries = msg.reactions ? Object.entries(msg.reactions) : [];
 	const totalReactionCount = reactionEntries.reduce((sum, [, senders]) => sum + senders.length, 0);
 
@@ -1839,6 +1842,43 @@ function MessageBubble({
 						</div>
 					)}
 
+					{/* Copy button — clipboard; appears on hover for non-deleted text messages */}
+					{onCopy && hovered && !msg.deleted && msg.text && msg.text !== "[image]" && (
+						<div
+							style={{
+								position: "absolute",
+								top: -10,
+								left: 104,
+							}}
+						>
+							<button
+								type="button"
+								onClick={() => {
+									onCopy();
+									setCopied(true);
+									setTimeout(() => setCopied(false), 1500);
+								}}
+								aria-label="Copy message"
+								data-testid="copy-button"
+								style={{
+									width: 22,
+									height: 22,
+									borderRadius: "50%",
+									border: "1px solid var(--border-faint)",
+									background: copied ? "rgba(255,138,61,0.18)" : "var(--bg-elevated)",
+									color: copied ? "#FF8A3D" : "var(--fg-3)",
+									cursor: "pointer",
+									display: "flex",
+									alignItems: "center",
+									justifyContent: "center",
+									padding: 0,
+								}}
+							>
+								<Icon name={copied ? "check" : "copy"} size={11} />
+							</button>
+						</div>
+					)}
+
 					{/* Edit button — appears on hover for own messages only, when not deleted */}
 					{onEdit && isMe && hovered && !msg.deleted && (
 						<div
@@ -2091,6 +2131,7 @@ function MessageList({
 	onForward,
 	onStar,
 	onShare,
+	onCopy,
 	firstUnreadIndex,
 	jumpToMessageId,
 	onJumpComplete,
@@ -2109,6 +2150,7 @@ function MessageList({
 	onForward?: (msg: ChatMessage) => void;
 	onStar?: (msgId: string | undefined, msgText: string) => void;
 	onShare?: (msg: ChatMessage) => void;
+	onCopy?: (msg: ChatMessage) => void;
 	firstUnreadIndex?: number;
 	jumpToMessageId?: string;
 	onJumpComplete?: () => void;
@@ -2358,6 +2400,11 @@ function MessageList({
 								onForward={onForward && !g.msg.deleted ? () => onForward(g.msg) : undefined}
 								onStar={onStar ? () => onStar(g.msg.id, g.msg.text) : undefined}
 								onShare={onShare && !g.msg.deleted ? () => onShare(g.msg) : undefined}
+								onCopy={
+									onCopy && !g.msg.deleted && g.msg.text && g.msg.text !== "[image]"
+										? () => onCopy(g.msg)
+										: undefined
+								}
 							/>
 						</div>
 					),
@@ -4251,6 +4298,11 @@ export function ChatLayout() {
 		navigator.share({ text: msg.text }).catch(() => {});
 	}, []);
 
+	const handleCopyMessage = useCallback((msg: ChatMessage) => {
+		if (!msg.text || msg.text === "[image]") return;
+		navigator.clipboard.writeText(msg.text).catch(() => {});
+	}, []);
+
 	/** Toggle the muted flag on a chat. Local-only — no MLS message sent, no server contact. */
 	const handleToggleMute = useCallback((chatId: string) => {
 		setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, muted: !c.muted } : c)));
@@ -4735,6 +4787,7 @@ export function ChatLayout() {
 						}}
 						onStar={(msgId, msgText) => handleStarMessage(activeId, msgId, msgText)}
 						onShare={handleShareMessage}
+						onCopy={handleCopyMessage}
 						firstUnreadIndex={active.firstUnreadAt}
 						jumpToMessageId={jumpToMessageId ?? undefined}
 						onJumpComplete={handleJumpComplete}
