@@ -1,6 +1,7 @@
 import {
 	type CSSProperties,
 	type KeyboardEvent,
+	type ReactNode,
 	useCallback,
 	useEffect,
 	useLayoutEffect,
@@ -181,6 +182,11 @@ const SEED_CHATS: Chat[] = [
 				time: "14:30",
 			},
 			{ from: "me", text: "Works for me." },
+			{
+				from: "them",
+				text: "Great! Here's the menu: https://example.com/menu",
+				continued: true,
+			},
 			{
 				from: "me",
 				text: "Bringing the notebook.",
@@ -376,15 +382,58 @@ function Avatar({
 	);
 }
 
+// ── parseMessageLinks ─────────────────────────────────────────────────────────
+// Splits a message string into text/URL segments. Only https:// and http://
+// URLs are linkified; javascript:, data:, and anything else stays as text.
+// Trailing punctuation (.,;:!?)] that typically isn't part of a URL is stripped
+// from the matched URL and emitted as a trailing text segment.
+
+type MsgSegment = { type: "text" | "url"; value: string };
+
+function parseMessageLinks(text: string): MsgSegment[] {
+	const URL_RE = /https?:\/\/[^\s<>"']+/gi;
+	const segs: MsgSegment[] = [];
+	let last = 0;
+	let m = URL_RE.exec(text);
+	while (m !== null) {
+		const fullMatch = m[0];
+		const cleaned = fullMatch.replace(/[.,;:!?)\]]+$/, "");
+		let valid = false;
+		try {
+			const u = new URL(cleaned);
+			valid = u.protocol === "https:" || u.protocol === "http:";
+		} catch {
+			/* not a valid URL */
+		}
+		if (m.index > last) {
+			segs.push({ type: "text", value: text.slice(last, m.index) });
+		}
+		if (valid) {
+			segs.push({ type: "url", value: cleaned });
+			if (cleaned.length < fullMatch.length) {
+				segs.push({ type: "text", value: fullMatch.slice(cleaned.length) });
+			}
+		} else {
+			segs.push({ type: "text", value: fullMatch });
+		}
+		last = m.index + fullMatch.length;
+		m = URL_RE.exec(text);
+	}
+	if (last < text.length) {
+		segs.push({ type: "text", value: text.slice(last) });
+	}
+	return segs.length > 0 ? segs : [{ type: "text", value: text }];
+}
+
 // ── HighlightedText ───────────────────────────────────────────────────────────
 
-function HighlightedText({ text, highlight }: { text: string; highlight: string }) {
-	if (!highlight) return <>{text}</>;
+function applyHighlight(text: string, highlight: string): ReactNode {
 	const lc = text.toLowerCase();
 	const hlLc = highlight.toLowerCase();
-	const parts: React.ReactNode[] = [];
+	const parts: ReactNode[] = [];
 	let cursor = 0;
 	let idx = lc.indexOf(hlLc, cursor);
+	if (idx === -1) return text;
 	while (idx !== -1) {
 		if (idx > cursor) parts.push(text.slice(cursor, idx));
 		parts.push(
@@ -405,6 +454,39 @@ function HighlightedText({ text, highlight }: { text: string; highlight: string 
 	}
 	if (cursor < text.length) parts.push(text.slice(cursor));
 	return <>{parts}</>;
+}
+
+function HighlightedText({ text, highlight }: { text: string; highlight: string }) {
+	const segs = parseMessageLinks(text);
+	const noLinks = segs.length === 1 && segs[0].type === "text";
+	if (noLinks && !highlight) return <>{text}</>;
+	return (
+		<>
+			{segs.map((seg, i) => {
+				const k = `${seg.type}-${i}`;
+				if (seg.type === "url") {
+					return (
+						<a
+							key={k}
+							href={seg.value}
+							target="_blank"
+							rel="noopener noreferrer"
+							data-testid="message-link"
+							style={{
+								color: "#A8C8FF",
+								textDecoration: "underline",
+								wordBreak: "break-all",
+							}}
+						>
+							{seg.value}
+						</a>
+					);
+				}
+				if (!highlight) return <span key={k}>{seg.value}</span>;
+				return <span key={k}>{applyHighlight(seg.value, highlight)}</span>;
+			})}
+		</>
+	);
 }
 
 // ── PinnedBanner ─────────────────────────────────────────────────────────────
