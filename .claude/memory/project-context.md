@@ -17,7 +17,19 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-27, cycle 203 — FEATURE: group member list — Members section in InfoPanel for group chats)
+## Current state (2026-06-27, cycle 204 — FEATURE: jump-to-bottom FAB — scroll-up detection + unread badge)
+- **Cycle 204 (commit 971ac29):** FEATURE — Jump-to-bottom FAB in message list.
+  - **Scroll-up detection:** `MessageList` tracks `isAtBottomRef` (ref) + `isAtBottom` (state) via an `onScroll` handler on `data-testid="message-list-scroll"`. Threshold: `scrollTop + clientHeight >= scrollHeight - 80`.
+  - **FAB:** `data-testid="jump-to-bottom-btn"`, `aria-label="Jump to bottom"`, `type="button"`. Positioned absolute bottom-right (bottom:16, right:20, 40×40 circle). Visible only when `!isAtBottom`. Clicking calls `handleJumpToBottom` → sets `scrollTop = scrollHeight`, resets `isAtBottom=true` + `newMsgCount=0`.
+  - **Unread badge:** `data-testid="jump-to-bottom-badge"`. Counts incoming messages that arrive while scrolled up (capped: `Math.min(c + added, 99)`). Shown as integer or `"99+"` when `>= 99`. Cleared when user scrolls to bottom or clicks FAB.
+  - **Auto-scroll gate:** `useLayoutEffect` scroll-to-bottom now gated on `isAtBottomRef.current` (was ungated). Prevents scroll-to-bottom hijacking when user is reading old messages.
+  - **Chat-switch reset:** `useEffect` on `chatId` dep resets all scroll state so every new chat starts at bottom. `chatId` prop added to `MessageList`.
+  - **`chevron-down` icon:** Added to `Icon.tsx` (`<polyline points="6 9 12 15 18 9"/>`).
+  - **security-auditor: GREEN** — purely client-side; no server calls, no MLS ops; badge shows integer count only (never message content); no XSS (JSX text children only); no logging of scroll state/chatId/count.
+  - **773 frontend tests pass** (+11: `ChatLayoutJumpToBottom.test.tsx` — FAB absent at bottom, FAB appears on scroll-up, aria-label correct, FAB click hides it, FAB click sets scrollTop, badge absent with no new msgs, badge count=1 on first msg, badge increments on 2 msgs, badge clears on scroll-to-bottom, FAB hides on scroll-to-bottom, badge never shown when at bottom); tsc clean; biome clean.
+  - **Next cycle:** PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768 ciphersuite), or more UX polish.
+
+## Previous state (2026-06-27, cycle 203 — FEATURE: group member list — Members section in InfoPanel for group chats)
 - **Cycle 203 (commit 7a59bec):** FEATURE — Group member list in InfoPanel.
   - **`ChatMember` interface:** `{ id: string; name: string; handle: string; role?: "admin" | "member" }` — local-only type, never sent to server, never in MLS payload.
   - **`Chat.members?: ChatMember[]`:** New optional field on Chat. Never appears in any sendMessage/sendReaction/MLS encrypt path. Render-only.
