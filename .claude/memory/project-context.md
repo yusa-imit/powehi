@@ -17,7 +17,18 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-28, cycle 206 — FEATURE: URL linkification in message text)
+## Current state (2026-06-28, cycle 207 — FEATURE: copy message to clipboard)
+- **Cycle 207 (commit f273cc4):** FEATURE — Copy message to clipboard button in message hover toolbar.
+  - **Copy button:** Appears on hover for non-deleted text messages (excluding `[image]` placeholders and empty text). Positioned at `left:104` in the hover toolbar (after Share at left:78). `data-testid="copy-button"`, `aria-label="Copy message"`.
+  - **`handleCopyMessage`:** `navigator.clipboard.writeText(msg.text).catch(() => {})` — structured API, not a DOM sink. Failure silently ignored. No server calls, no MLS ops, no PII logging.
+  - **Copied feedback:** `copied` boolean state in `MessageBubble`. On click: calls `onCopy()` + `setCopied(true)` + `setTimeout(() => setCopied(false), 1500)`. Button shows `<Icon name={copied ? "check" : "copy"} />` in orange when copied, normal when idle.
+  - **Security guards (triple-gated):** Deleted/`[image]`/empty text skipped at button render, `MessageList` wiring, and `handleCopyMessage` handler.
+  - **Timer test fix:** `vi.useRealTimers()` added to `afterEach` before any async teardown — prevents fake timers from hanging `db.verifiedContacts.clear()` when a test fails before `vi.useRealTimers()` in the test body.
+  - **security-auditor: GREEN** — `navigator.clipboard.writeText` is a structured API (not DOM sink); no logging of copied content; no server call; no MLS op; triple-gated guards.
+  - **796 frontend tests pass (+11: `ChatLayoutCopy.test.tsx` — button on hover, absent for deleted, absent for [image], calls writeText with correct text, button on own messages, aria-label correct, copied state present after click, clipboard failure no crash, correct text with multiple messages, copied state resets after 1500ms, absent for empty text)**; tsc clean; biome clean.
+  - **Next cycle:** PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768 ciphersuite), or more UX polish.
+
+## Previous state (2026-06-28, cycle 206 — FEATURE: URL linkification in message text)
 - **Cycle 206 (commit 9f69cfd):** FEATURE — Clickable link detection in message text.
   - **`parseMessageLinks(text)`:** Splits message text into `{type: "text" | "url", value}` segments. Only `https:` and `http:` URLs are linkified — `javascript:`, `data:`, `vbscript:` etc. remain plain text. Validated via `new URL()` + protocol allowlist. Trailing punctuation (`,.:;!?)]`) stripped from matched URLs.
   - **`applyHighlight(text, highlight)`:** Extracted from `HighlightedText` (was inline), now reused per-segment.
