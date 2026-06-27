@@ -1,8 +1,8 @@
 import { render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as UseMediaReceiveModule from "../hooks/useMediaReceive";
-import * as UseThumbnailModule from "../hooks/useThumbnail";
 import type { MediaPayload } from "../hooks/useMessages";
+import * as UseThumbnailModule from "../hooks/useThumbnail";
 import { MediaImage } from "./MediaImage";
 
 const OBJECT_URL = "blob:mock-full-url";
