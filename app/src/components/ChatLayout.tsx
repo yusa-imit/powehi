@@ -1995,6 +1995,7 @@ function buildGroups(messages: ChatMessage[], firstUnreadIndex?: number): Group[
 }
 
 function MessageList({
+	chatId,
 	messages,
 	partner,
 	searchQuery,
@@ -2012,6 +2013,7 @@ function MessageList({
 	jumpToMessageId,
 	onJumpComplete,
 }: {
+	chatId: string;
 	messages: ChatMessage[];
 	partner: string;
 	searchQuery?: string;
@@ -2031,10 +2033,14 @@ function MessageList({
 }) {
 	const ref = useRef<HTMLDivElement>(null);
 	const [flashingId, setFlashingId] = useState<string | null>(null);
+	const isAtBottomRef = useRef(true);
+	const [isAtBottom, setIsAtBottom] = useState(true);
+	const [newMsgCount, setNewMsgCount] = useState(0);
+	const prevMsgCountRef = useRef(messages.length);
 
-	// Scroll to bottom on every render — gated off when a jump is active.
+	// Scroll to bottom on every render — gated off when a jump is active or the user has scrolled up.
 	useLayoutEffect(() => {
-		if (ref.current && !jumpToMessageId) {
+		if (ref.current && !jumpToMessageId && isAtBottomRef.current) {
 			ref.current.scrollTop = ref.current.scrollHeight;
 		}
 	});
@@ -2056,6 +2062,44 @@ function MessageList({
 		onJumpComplete?.();
 	}, [jumpToMessageId, onJumpComplete]);
 
+	// Reset scroll-to-bottom state when the active chat changes so the new chat
+	// always starts at the bottom. Must be declared before the messages.length
+	// effect so prevMsgCountRef is updated first on a chat switch.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: messages.length read as snapshot at chat-switch time; intentional reset on chatId only
+	useEffect(() => {
+		isAtBottomRef.current = true;
+		setIsAtBottom(true);
+		setNewMsgCount(0);
+		prevMsgCountRef.current = messages.length;
+	}, [chatId]);
+
+	// Count new messages that arrive while the user is scrolled up.
+	useEffect(() => {
+		const added = messages.length - prevMsgCountRef.current;
+		prevMsgCountRef.current = messages.length;
+		if (added > 0 && !isAtBottomRef.current) {
+			setNewMsgCount((c) => Math.min(c + added, 99));
+		}
+	}, [messages.length]);
+
+	const handleScroll = useCallback(() => {
+		const el = ref.current;
+		if (!el) return;
+		const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 80;
+		isAtBottomRef.current = atBottom;
+		setIsAtBottom(atBottom);
+		if (atBottom) setNewMsgCount(0);
+	}, []);
+
+	const handleJumpToBottom = useCallback(() => {
+		if (ref.current) {
+			ref.current.scrollTop = ref.current.scrollHeight;
+		}
+		isAtBottomRef.current = true;
+		setIsAtBottom(true);
+		setNewMsgCount(0);
+	}, []);
+
 	const groups = buildGroups(messages, firstUnreadIndex);
 
 	const matchCount = searchQuery
@@ -2065,163 +2109,226 @@ function MessageList({
 
 	return (
 		<div
-			ref={ref}
 			style={{
+				position: "relative",
 				flex: 1,
-				overflowY: "auto",
-				padding: "24px 36px 16px",
+				overflow: "hidden",
 				display: "flex",
 				flexDirection: "column",
-				gap: 4,
-				background:
-					"radial-gradient(ellipse 100% 60% at 50% 110%, rgba(255,138,61,0.07), transparent 60%), var(--bg-void)",
 			}}
 		>
-			{/* Search results count — shown when in-conversation search is active */}
-			{searchQuery && (
+			<div
+				ref={ref}
+				data-testid="message-list-scroll"
+				onScroll={handleScroll}
+				style={{
+					flex: 1,
+					overflowY: "auto",
+					padding: "24px 36px 16px",
+					display: "flex",
+					flexDirection: "column",
+					gap: 4,
+					background:
+						"radial-gradient(ellipse 100% 60% at 50% 110%, rgba(255,138,61,0.07), transparent 60%), var(--bg-void)",
+				}}
+			>
+				{/* Search results count — shown when in-conversation search is active */}
+				{searchQuery && (
+					<div
+						style={{
+							alignSelf: "center",
+							padding: "5px 14px",
+							marginBottom: 8,
+							background: "rgba(255,138,61,0.08)",
+							border: "1px solid rgba(255,138,61,0.22)",
+							borderRadius: 20,
+							fontSize: 11,
+							color: "var(--fg-2)",
+							letterSpacing: "0.03em",
+						}}
+						aria-live="polite"
+					>
+						{matchCount === 0
+							? "No matches"
+							: `${matchCount} ${matchCount === 1 ? "match" : "matches"}`}
+					</div>
+				)}
+
+				{/* E2EE notice */}
 				<div
 					style={{
 						alignSelf: "center",
-						padding: "5px 14px",
-						marginBottom: 8,
-						background: "rgba(255,138,61,0.08)",
-						border: "1px solid rgba(255,138,61,0.22)",
-						borderRadius: 20,
-						fontSize: 11,
-						color: "var(--fg-2)",
-						letterSpacing: "0.03em",
-					}}
-					aria-live="polite"
-				>
-					{matchCount === 0
-						? "No matches"
-						: `${matchCount} ${matchCount === 1 ? "match" : "matches"}`}
-				</div>
-			)}
-
-			{/* E2EE notice */}
-			<div
-				style={{
-					alignSelf: "center",
-					maxWidth: 480,
-					textAlign: "center",
-					padding: "14px 20px",
-					margin: "8px 0 24px",
-					background: "rgba(168,200,255,0.05)",
-					border: "1px solid rgba(168,200,255,0.18)",
-					borderRadius: 12,
-				}}
-			>
-				<div
-					style={{
-						display: "inline-flex",
-						alignItems: "center",
-						gap: 6,
-						fontSize: 11,
-						fontWeight: 500,
-						letterSpacing: "0.12em",
-						color: "#C8DCFF",
-						textTransform: "uppercase",
-						marginBottom: 6,
+						maxWidth: 480,
+						textAlign: "center",
+						padding: "14px 20px",
+						margin: "8px 0 24px",
+						background: "rgba(168,200,255,0.05)",
+						border: "1px solid rgba(168,200,255,0.18)",
+						borderRadius: 12,
 					}}
 				>
-					<Icon name="lock" size={11} color="#A8C8FF" /> End-to-end encrypted
-				</div>
-				<div style={{ fontSize: 12, color: "var(--fg-3)", lineHeight: 1.5 }}>
-					Only you and {partner.split(" ")[0]} can read these messages. Not even Powehi.
-				</div>
-			</div>
-
-			{groups.map((g) =>
-				g.type === "day" ? (
 					<div
-						key={g.key}
 						style={{
-							alignSelf: "center",
-							margin: "12px 0 6px",
-							fontSize: 10,
-							fontWeight: 500,
-							letterSpacing: "0.14em",
-							color: "var(--fg-4)",
-							textTransform: "uppercase",
-						}}
-					>
-						{g.label}
-					</div>
-				) : g.type === "new-messages" ? (
-					<div
-						key={g.key}
-						data-testid="new-messages-divider"
-						style={{
-							display: "flex",
+							display: "inline-flex",
 							alignItems: "center",
-							gap: 10,
-							margin: "8px 0",
+							gap: 6,
+							fontSize: 11,
+							fontWeight: 500,
+							letterSpacing: "0.12em",
+							color: "#C8DCFF",
+							textTransform: "uppercase",
+							marginBottom: 6,
 						}}
 					>
+						<Icon name="lock" size={11} color="#A8C8FF" /> End-to-end encrypted
+					</div>
+					<div style={{ fontSize: 12, color: "var(--fg-3)", lineHeight: 1.5 }}>
+						Only you and {partner.split(" ")[0]} can read these messages. Not even Powehi.
+					</div>
+				</div>
+
+				{groups.map((g) =>
+					g.type === "day" ? (
 						<div
+							key={g.key}
 							style={{
-								flex: 1,
-								height: 1,
-								background: "rgba(255,138,61,0.35)",
-							}}
-						/>
-						<span
-							style={{
+								alignSelf: "center",
+								margin: "12px 0 6px",
 								fontSize: 10,
-								fontWeight: 600,
-								letterSpacing: "0.12em",
-								color: "#FF8A3D",
+								fontWeight: 500,
+								letterSpacing: "0.14em",
+								color: "var(--fg-4)",
 								textTransform: "uppercase",
-								whiteSpace: "nowrap",
 							}}
 						>
-							New Messages
-						</span>
+							{g.label}
+						</div>
+					) : g.type === "new-messages" ? (
 						<div
+							key={g.key}
+							data-testid="new-messages-divider"
 							style={{
-								flex: 1,
-								height: 1,
-								background: "rgba(255,138,61,0.35)",
+								display: "flex",
+								alignItems: "center",
+								gap: 10,
+								margin: "8px 0",
 							}}
-						/>
-					</div>
-				) : (
-					<div
-						key={g.key}
-						data-msg-id={g.msg.id ?? undefined}
-						data-jump-flash={flashingId != null && flashingId === g.msg.id ? "true" : undefined}
-					>
-						<MessageBubble
-							msg={g.msg}
-							partner={partner}
-							highlight={searchQuery}
-							myDeviceId={myDeviceId}
-							isGroup={isGroup}
-							onReact={
-								g.msg.id && onReact
-									? (emoji) => {
-											const id = g.msg.id;
-											if (id) onReact(id, emoji);
-										}
-									: undefined
-							}
-							onReply={onReply ? () => onReply(g.msg) : undefined}
-							onEdit={g.msg.from === "me" && onEdit ? () => onEdit(g.msg) : undefined}
-							onDelete={(() => {
-								const msgId = g.msg.id;
-								return msgId && g.msg.from === "me" && onDelete ? () => onDelete(msgId) : undefined;
-							})()}
-							onPin={(() => {
-								const msgId = g.msg.id;
-								return msgId && onPin ? () => onPin(msgId) : undefined;
-							})()}
-							onForward={onForward && !g.msg.deleted ? () => onForward(g.msg) : undefined}
-							onStar={onStar ? () => onStar(g.msg.id, g.msg.text) : undefined}
-							onShare={onShare && !g.msg.deleted ? () => onShare(g.msg) : undefined}
-						/>
-					</div>
-				),
+						>
+							<div
+								style={{
+									flex: 1,
+									height: 1,
+									background: "rgba(255,138,61,0.35)",
+								}}
+							/>
+							<span
+								style={{
+									fontSize: 10,
+									fontWeight: 600,
+									letterSpacing: "0.12em",
+									color: "#FF8A3D",
+									textTransform: "uppercase",
+									whiteSpace: "nowrap",
+								}}
+							>
+								New Messages
+							</span>
+							<div
+								style={{
+									flex: 1,
+									height: 1,
+									background: "rgba(255,138,61,0.35)",
+								}}
+							/>
+						</div>
+					) : (
+						<div
+							key={g.key}
+							data-msg-id={g.msg.id ?? undefined}
+							data-jump-flash={flashingId != null && flashingId === g.msg.id ? "true" : undefined}
+						>
+							<MessageBubble
+								msg={g.msg}
+								partner={partner}
+								highlight={searchQuery}
+								myDeviceId={myDeviceId}
+								isGroup={isGroup}
+								onReact={
+									g.msg.id && onReact
+										? (emoji) => {
+												const id = g.msg.id;
+												if (id) onReact(id, emoji);
+											}
+										: undefined
+								}
+								onReply={onReply ? () => onReply(g.msg) : undefined}
+								onEdit={g.msg.from === "me" && onEdit ? () => onEdit(g.msg) : undefined}
+								onDelete={(() => {
+									const msgId = g.msg.id;
+									return msgId && g.msg.from === "me" && onDelete
+										? () => onDelete(msgId)
+										: undefined;
+								})()}
+								onPin={(() => {
+									const msgId = g.msg.id;
+									return msgId && onPin ? () => onPin(msgId) : undefined;
+								})()}
+								onForward={onForward && !g.msg.deleted ? () => onForward(g.msg) : undefined}
+								onStar={onStar ? () => onStar(g.msg.id, g.msg.text) : undefined}
+								onShare={onShare && !g.msg.deleted ? () => onShare(g.msg) : undefined}
+							/>
+						</div>
+					),
+				)}
+			</div>
+			{!isAtBottom && (
+				<button
+					type="button"
+					data-testid="jump-to-bottom-btn"
+					aria-label="Jump to bottom"
+					onClick={handleJumpToBottom}
+					style={{
+						position: "absolute",
+						bottom: 16,
+						right: 20,
+						width: 40,
+						height: 40,
+						borderRadius: "50%",
+						background: "rgba(255,138,61,0.15)",
+						border: "1px solid rgba(255,138,61,0.4)",
+						color: "#FF8A3D",
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "center",
+						cursor: "pointer",
+						zIndex: 10,
+					}}
+				>
+					<Icon name="chevron-down" size={18} color="#FF8A3D" />
+					{newMsgCount > 0 && (
+						<span
+							data-testid="jump-to-bottom-badge"
+							style={{
+								position: "absolute",
+								top: -6,
+								right: -6,
+								minWidth: 18,
+								height: 18,
+								borderRadius: 9,
+								background: "#FF8A3D",
+								color: "#040408",
+								fontSize: 10,
+								fontWeight: 700,
+								display: "flex",
+								alignItems: "center",
+								justifyContent: "center",
+								padding: "0 4px",
+							}}
+						>
+							{newMsgCount >= 99 ? "99+" : newMsgCount}
+						</span>
+					)}
+				</button>
 			)}
 		</div>
 	);
@@ -4530,6 +4637,7 @@ export function ChatLayout() {
 						/>
 					)}
 					<MessageList
+						chatId={activeId}
 						messages={active.messages}
 						partner={active.name}
 						searchQuery={msgSearch}
