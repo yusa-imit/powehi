@@ -102,6 +102,8 @@ interface Chat {
 	vibrate?: boolean;
 	/** Count of @mention messages in this chat that the user hasn't yet read. Local-only, never sent to server. */
 	mentionCount?: number;
+	/** True when the chat is archived (local-only, not synced). */
+	archived?: boolean;
 }
 
 // ── Disappearing messages helpers ──────────────────────────────────────────────
@@ -909,7 +911,7 @@ function Sidebar({
 	onJumpToMessage?: (chatId: string, messageId?: string) => void;
 }) {
 	const [starredOpen, setStarredOpen] = useState(false);
-	const [chatFilter, setChatFilter] = useState<"all" | "dms" | "groups">("all");
+	const [chatFilter, setChatFilter] = useState<"all" | "dms" | "groups" | "archived">("all");
 	const regionId = useRegionDetect();
 	const dmUnread = chats.filter((c) => !c.isGroup).reduce((s, c) => s + c.unread, 0);
 	const groupUnread = chats.filter((c) => !!c.isGroup).reduce((s, c) => s + c.unread, 0);
@@ -918,9 +920,12 @@ function Sidebar({
 		.reduce((s, c) => s + (c.mentionCount ?? 0), 0);
 	const filtered = chats.filter((c) => {
 		const matchesTab =
-			chatFilter === "all" ||
-			(chatFilter === "dms" && !c.isGroup) ||
-			(chatFilter === "groups" && !!c.isGroup);
+			chatFilter === "archived"
+				? !!c.archived
+				: !c.archived &&
+					(chatFilter === "all" ||
+						(chatFilter === "dms" && !c.isGroup) ||
+						(chatFilter === "groups" && !!c.isGroup));
 		const matchesSearch =
 			!searchQuery ||
 			c.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -933,11 +938,13 @@ function Sidebar({
 	// Capped at 3 results per chat and 10 total to keep the UI manageable.
 	const msgResults = searchQuery
 		? chats
-				.filter(
-					(c) =>
-						chatFilter === "all" ||
-						(chatFilter === "dms" && !c.isGroup) ||
-						(chatFilter === "groups" && !!c.isGroup),
+				.filter((c) =>
+					chatFilter === "archived"
+						? !!c.archived
+						: !c.archived &&
+							(chatFilter === "all" ||
+								(chatFilter === "dms" && !c.isGroup) ||
+								(chatFilter === "groups" && !!c.isGroup)),
 				)
 				.flatMap((c) =>
 					c.messages
@@ -1027,8 +1034,15 @@ function Sidebar({
 
 			{/* Chat filter tabs */}
 			<div style={{ display: "flex", gap: 4, padding: "0 14px 10px" }}>
-				{(["all", "dms", "groups"] as const).map((tab) => {
-					const label = tab === "all" ? "All" : tab === "dms" ? "Chats" : "Groups";
+				{(["all", "dms", "groups", "archived"] as const).map((tab) => {
+					const label =
+						tab === "all"
+							? "All"
+							: tab === "dms"
+								? "Chats"
+								: tab === "groups"
+									? "Groups"
+									: "Archived";
 					const badge = tab === "dms" ? dmUnread : tab === "groups" ? groupUnread : 0;
 					const isActive = chatFilter === tab;
 					return (
@@ -2563,6 +2577,8 @@ function InfoPanel({
 	onToggleSound,
 	vibrate,
 	onToggleVibrate,
+	archived,
+	onToggleArchive,
 }: {
 	chat: Chat;
 	onClose: () => void;
@@ -2573,6 +2589,8 @@ function InfoPanel({
 	onToggleSound: () => void;
 	vibrate: boolean;
 	onToggleVibrate: () => void;
+	archived: boolean;
+	onToggleArchive: () => void;
 }) {
 	const [safetyVerified, setSafetyVerified] = useState(false);
 	const [verifiedAt, setVerifiedAt] = useState<number | undefined>(undefined);
@@ -2915,6 +2933,26 @@ function InfoPanel({
 					gap: 4,
 				}}
 			>
+				<button
+					type="button"
+					data-testid="archive-button"
+					onClick={onToggleArchive}
+					style={{
+						background: "var(--bg-elevated)",
+						border: "1px solid var(--border-soft)",
+						borderRadius: 10,
+						padding: "10px 0",
+						cursor: "pointer",
+						color: "var(--fg-2)",
+						fontFamily: "var(--font-sans)",
+						fontSize: 13,
+						fontWeight: 500,
+						width: "100%",
+						textAlign: "center",
+					}}
+				>
+					{archived ? "Unarchive Chat" : "Archive Chat"}
+				</button>
 				<button type="button" style={destructiveButton}>
 					Clear messages
 				</button>
@@ -3438,6 +3476,7 @@ export function ChatLayout() {
 						unread: isActive ? 0 : c.muted ? c.unread : c.unread + 1,
 						firstUnreadAt: isActive ? undefined : firstUnreadAt,
 						mentionCount: isActive ? 0 : isMention ? (c.mentionCount ?? 0) + 1 : c.mentionCount,
+						archived: c.archived ? false : c.archived,
 					};
 				}),
 			);
@@ -3921,6 +3960,13 @@ export function ChatLayout() {
 		setChats((cs) =>
 			cs.map((c) => (c.id === chatId ? { ...c, vibrate: !(c.vibrate ?? true) } : c)),
 		);
+	}, []);
+
+	/** Toggle the archived flag on a chat. Local-only — no MLS message sent, no server contact. */
+	const handleToggleArchive = useCallback((chatId: string) => {
+		setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, archived: !c.archived } : c)));
+		// When archiving the active chat, stay in the chat but it's now archived.
+		// When un-archiving while on the archived tab, switch to "all" tab — done via Sidebar state.
 	}, []);
 
 	/**
@@ -4429,6 +4475,8 @@ export function ChatLayout() {
 					onToggleSound={() => handleToggleSound(active.id)}
 					vibrate={active.vibrate ?? true}
 					onToggleVibrate={() => handleToggleVibrate(active.id)}
+					archived={active.archived ?? false}
+					onToggleArchive={() => handleToggleArchive(active.id)}
 				/>
 			)}
 
