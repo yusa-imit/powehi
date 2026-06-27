@@ -17,7 +17,15 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-27, cycle 199 — FEATURE: keyboard shortcuts ↑ to edit last message, Escape to cancel)
+## Current state (2026-06-27, cycle 200 — STABILIZATION: close test coverage gaps — MediaImage + useCryptoWorker)
+- **Cycle 200 (commit 18e065c):** STABILIZATION — Closed test coverage gaps.
+  - **`MediaImage.test.tsx`** (+9 tests): loading placeholder (no thumbnail), blurred thumbnail placeholder while loading, full image when loaded, "Image unavailable" on error, "Image unavailable" when objectUrl is null after load, thumbnail prop passed to useThumbnail only while loading, undefined passed when not loading, correct `alt` text for full image, correct `alt` for thumbnail img.
+  - **`useCryptoWorker.test.ts`** (+5 tests): singleton identity (`useCryptoWorker === getCryptoWorkerProxy` same reference), repeated-call stability, never-throws contract in JSDOM environment.
+  - **CI green (730 frontend tests pass, was 715):** All Rust tests (316 total) and clippy also green.
+  - **Target dir:** 6.4GB (well under 20GB threshold — no prune needed).
+  - **Next cycle:** PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768 ciphersuite), or more UX polish.
+
+## Previous state (2026-06-27, cycle 199 — FEATURE: keyboard shortcuts ↑ to edit last message, Escape to cancel)
 - **Cycle 199 (commit f134167):** FEATURE — Composer keyboard shortcuts.
   - **↑ arrow (empty composer, not in edit mode):** Calls `onEditLast` → finds the last own non-deleted message (reversed scan of `active.messages`) and enters edit mode via `setEditingMessage`. Works whether message has a server id or a temp `opt_` id.
   - **Escape (in edit mode):** Calls `onCancelEdit?.()` → `setEditingMessage(null)`.
