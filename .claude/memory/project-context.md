@@ -17,7 +17,19 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-27, cycle 201 — FEATURE: chat archive — archive/unarchive + Archived filter tab)
+## Current state (2026-06-27, cycle 202 — FEATURE: pin chat to top — pinnedTop floats chats in sidebar)
+- **Cycle 202 (commits 8027713, df8fd47):** FEATURE — Pin chat to top + CI fix.
+  - **CI fix (8027713):** `ChatLayoutArchive.test.tsx` — removed unused `MAYA_GROUP_ID` and `DESIGN_TEAM_GROUP_ID` constants that caused TS6133 (`noUnusedLocals`) and broke the bundle-budget CI build step.
+  - **`Chat.pinnedTop?: boolean`:** Local-only flag. Never sent to server, never in MLS payload, never in IndexedDB (Chat object not persisted — only messages are). Same pattern as `muted`/`sound`/`vibrate`/`archived`.
+  - **`handleTogglePinTop`:** Pure `setChats` immutable toggle. No API call, no MLS message, no server contact.
+  - **Sidebar sort:** `[...filtered].sort((a, b) => (b.pinnedTop ? 1 : 0) - (a.pinnedTop ? 1 : 0))` — stable (ES2019+), local-only. Pinned chats float above unpinned in All, DMs, Groups, Archived tabs.
+  - **ChatRow pin indicator:** `<span data-testid="pin-top-indicator"><Icon name="pin" size={10} color="#A8C8FF" /></span>` — JSX only, no innerHTML, no XSS surface. Photon-blue decorative (not the lock glyph, so brand rule intact).
+  - **InfoPanel "Pin to top" InfoRow:** Wired `trailing={pinnedTop ? "On" : "Off"}` + `onClick={onTogglePinTop}`. Archived chats continue to be excluded from non-archived tabs even when also pinned (archived wins).
+  - **security-auditor: GREEN** — pinnedTop absent from all 11 MLS plaintext shapes and the send API body; no console.* calls; no XSS surface.
+  - **750 frontend tests pass** (+10: `ChatLayoutPinTop.test.tsx` — InfoPanel Off by default, toggle On, double-toggle Off, sidebar pin indicator, no indicator without pinning, appears-first in sidebar, chat-specific independence, multiple pins, archive+pin stays archived, mute independence); tsc clean; biome clean.
+  - **Next cycle:** PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768 ciphersuite), or more UX polish.
+
+## Previous state (2026-06-27, cycle 201 — FEATURE: chat archive — archive/unarchive + Archived filter tab)
 - **Cycle 201 (commits 179d428, be82d4a):** FEATURE — Chat archive + biome CI fix.
   - **Biome CI fix (179d428):** `MediaImage.test.tsx` import order — `import type { MediaPayload }` must come before `import * as UseThumbnailModule` (biome organizeImports rule). Frontend CI was red since cycle 200.
   - **`Chat.archived?: boolean`:** Local-only flag (never sent to server or included in MLS payload). Structurally isolated from all API/send paths by the API layer's explicit field allowlist.
