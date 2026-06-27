@@ -17,7 +17,17 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-28, cycle 205 — STABILIZATION: eliminate act() warnings in useRegionDetect tests)
+## Current state (2026-06-28, cycle 206 — FEATURE: URL linkification in message text)
+- **Cycle 206 (commit 9f69cfd):** FEATURE — Clickable link detection in message text.
+  - **`parseMessageLinks(text)`:** Splits message text into `{type: "text" | "url", value}` segments. Only `https:` and `http:` URLs are linkified — `javascript:`, `data:`, `vbscript:` etc. remain plain text. Validated via `new URL()` + protocol allowlist. Trailing punctuation (`,.:;!?)]`) stripped from matched URLs.
+  - **`applyHighlight(text, highlight)`:** Extracted from `HighlightedText` (was inline), now reused per-segment.
+  - **`HighlightedText` updated:** URL segments render as `<a target="_blank" rel="noopener noreferrer">` in photon-blue (`#A8C8FF`). Text segments continue to get `<mark>` highlights for search. Keys composite `${type}-${i}` (biome `noArrayIndexKey` compliant).
+  - **Seed message:** Maya's chat gained `"Great! Here's the menu: https://example.com/menu"` from peer.
+  - **security-auditor: GREEN** — JSX attr escaping prevents XSS; no `dangerouslySetInnerHTML`; protocol allowlist blocks `javascript:`/`data:` injection; `rel="noopener noreferrer"` prevents opener hijacking; no plaintext logging.
+  - **785 frontend tests pass (+12: `ChatLayoutLinks.test.tsx` — seed link renders, https linkified, target=_blank, rel=noopener noreferrer, http linkified, plain text not linkified, javascript: blocked, data: blocked, URL at start, URL at end, multiple URLs, trailing period stripped)**; tsc clean; biome clean.
+  - **Next cycle:** PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768 ciphersuite), or more UX polish.
+
+## Previous state (2026-06-28, cycle 205 — STABILIZATION: eliminate act() warnings in useRegionDetect tests)
 - **Cycle 205 (commit e2f34df):** STABILIZATION — Fixed act() warnings in `useRegionDetect.test.ts`.
   - **CI:** Green (success). **cargo audit:** 2 allowed warnings (instant unmaintained via openmls; bitcoin_hashes yanked via bip39 — both transitive deps, upstream-controlled). **cargo clippy:** Clean. **773 frontend tests + all Rust tests pass.**
   - **Root cause:** `beforeEach`/`afterEach` Zustand `setState` calls were outside `act()` (Zustand's useSyncExternalStore subscriber flush not attributed). The "returns regionId after fetch resolves" test used a one-tick `act` flush that raced the two-await store chain (`fetch()` → `res.json()` → `set()`).
