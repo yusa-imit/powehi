@@ -17,7 +17,18 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-27, cycle 202 — FEATURE: pin chat to top — pinnedTop floats chats in sidebar)
+## Current state (2026-06-27, cycle 203 — FEATURE: group member list — Members section in InfoPanel for group chats)
+- **Cycle 203 (commit 7a59bec):** FEATURE — Group member list in InfoPanel.
+  - **`ChatMember` interface:** `{ id: string; name: string; handle: string; role?: "admin" | "member" }` — local-only type, never sent to server, never in MLS payload.
+  - **`Chat.members?: ChatMember[]`:** New optional field on Chat. Never appears in any sendMessage/sendReaction/MLS encrypt path. Render-only.
+  - **Design Team seed:** 4 members — `{ id:"dev-a", name:"Finn", handle:"finn", role:"admin" }`, `{ id:"dev-b", name:"Maya", handle:"maya" }`, `{ id:"dev-c", name:"Jordan", handle:"jordan" }`, `{ id:"dev-d", name:"Noa", handle:"noa" }`. Design Team still has no `mlsIdentityId`, so all authenticated API paths remain unreachable.
+  - **InfoPanel conditional rendering:** `chat.isGroup` → shows "Members (N)" `InfoSection` with `data-testid="group-member-list"`. Each row has `data-testid="group-member-row"`: Avatar, name, `@handle`. Badges: "You" (orange) when `myHandle.toLowerCase() === member.handle.toLowerCase()`; "Admin" (photon-blue) when `member.role === "admin"`. DMs → unchanged Safety Numbers section.
+  - **`myHandle` prop:** `useAuthStore.getState().myHandle ?? undefined` passed to InfoPanel at call site. Used only for badge comparison — never logged, never in MLS plaintext.
+  - **security-auditor: GREEN** — JSX text children only (no XSS); member.name/handle never in MLS payload or API; myHandle not logged; timing-safe badge comparison (no network round-trip); design-team guard (no mlsIdentityId) blocks all send paths.
+  - **762 frontend tests pass** (+12: `ChatLayoutGroupMemberList.test.tsx` — member list renders for group, absent for DM, count in section title, 4 member rows, names displayed, @handles displayed, admin badge appears once, non-admin has no admin badge, You badge when myHandle matches, You badge absent when not in list, Safety Numbers absent for group, Safety Numbers present for DM); tsc clean; biome clean.
+  - **Next cycle:** PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768 ciphersuite), or more UX polish.
+
+## Previous state (2026-06-27, cycle 202 — FEATURE: pin chat to top — pinnedTop floats chats in sidebar)
 - **Cycle 202 (commits 8027713, df8fd47):** FEATURE — Pin chat to top + CI fix.
   - **CI fix (8027713):** `ChatLayoutArchive.test.tsx` — removed unused `MAYA_GROUP_ID` and `DESIGN_TEAM_GROUP_ID` constants that caused TS6133 (`noUnusedLocals`) and broke the bundle-budget CI build step.
   - **`Chat.pinnedTop?: boolean`:** Local-only flag. Never sent to server, never in MLS payload, never in IndexedDB (Chat object not persisted — only messages are). Same pattern as `muted`/`sound`/`vibrate`/`archived`.
