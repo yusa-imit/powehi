@@ -21,10 +21,8 @@ const MOCK_WORKER = {
 	decryptDbField: vi.fn(async (v: string) => v),
 };
 
-// mlsGroupIds from SEED_CHATS
-const MAYA_GROUP_ID = "11111111-1111-1111-1111-111111111111";
+// mlsGroupId from SEED_CHATS (Jordan's group, used for auto-unarchive test)
 const JORDAN_GROUP_ID = "33333333-3333-3333-3333-333333333333";
-const DESIGN_TEAM_GROUP_ID = "44444444-4444-4444-4444-444444444444";
 
 describe("ChatLayout — chat archive", () => {
 	beforeEach(async () => {
