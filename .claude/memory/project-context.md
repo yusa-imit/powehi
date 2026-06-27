@@ -17,7 +17,19 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-27, cycle 200 — STABILIZATION: close test coverage gaps — MediaImage + useCryptoWorker)
+## Current state (2026-06-27, cycle 201 — FEATURE: chat archive — archive/unarchive + Archived filter tab)
+- **Cycle 201 (commits 179d428, be82d4a):** FEATURE — Chat archive + biome CI fix.
+  - **Biome CI fix (179d428):** `MediaImage.test.tsx` import order — `import type { MediaPayload }` must come before `import * as UseThumbnailModule` (biome organizeImports rule). Frontend CI was red since cycle 200.
+  - **`Chat.archived?: boolean`:** Local-only flag (never sent to server or included in MLS payload). Structurally isolated from all API/send paths by the API layer's explicit field allowlist.
+  - **Sidebar "Archived" filter tab:** `chatFilter` type extended to `"all" | "dms" | "groups" | "archived"`. The "all"/"dms"/"groups" tabs exclude archived chats (`!c.archived` guard). The "archived" tab shows only `c.archived === true` chats. `msgResults` scoped by the same logic.
+  - **`handleToggleArchive`:** Pure `setChats` immutable toggle. No API call, no MLS message, no server contact.
+  - **Auto-unarchive on incoming message:** In `handleIncoming` setChats reducer, `archived: c.archived ? false : c.archived` — a new message promotes an archived chat back to the main list.
+  - **InfoPanel "Archive Chat" / "Unarchive Chat" button:** `data-testid="archive-button"`. `archived` and `onToggleArchive` props wired at call site.
+  - **security-auditor: GREEN** — `archived` field verified absent from all 8 send paths (sendMessage, sendReaction, sendEdit, sendDelete, sendPin, read/delivery receipts, forward, typing, presence). No new server-visible metadata. No XSS (JSX literal text children). InfoPanel button verified safe.
+  - **740 frontend tests pass** (+10: `ChatLayoutArchive.test.tsx` — tab renders, only archived chats in Archived tab, All tab excludes archived, InfoPanel button toggles text, unarchive via InfoPanel, auto-unarchive on incoming, no badge for archived tab, archive hides from All tab, DMs tab excludes archived, Groups tab excludes archived); tsc clean; biome clean.
+  - **Next cycle:** PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768 ciphersuite), or more UX polish.
+
+## Previous state (2026-06-27, cycle 200 — STABILIZATION: close test coverage gaps — MediaImage + useCryptoWorker)
 - **Cycle 200 (commit 18e065c):** STABILIZATION — Closed test coverage gaps.
   - **`MediaImage.test.tsx`** (+9 tests): loading placeholder (no thumbnail), blurred thumbnail placeholder while loading, full image when loaded, "Image unavailable" on error, "Image unavailable" when objectUrl is null after load, thumbnail prop passed to useThumbnail only while loading, undefined passed when not loading, correct `alt` text for full image, correct `alt` for thumbnail img.
   - **`useCryptoWorker.test.ts`** (+5 tests): singleton identity (`useCryptoWorker === getCryptoWorkerProxy` same reference), repeated-call stability, never-throws contract in JSDOM environment.
