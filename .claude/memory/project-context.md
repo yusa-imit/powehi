@@ -17,7 +17,16 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-28, cycle 209 — FEATURE: scheduled send in message composer)
+## Current state (2026-06-28, cycle 210 — STABILIZATION: CI fix — unused import unblocks bundle budget)
+- **Cycle 210 (commit bf2ed02):** STABILIZATION — Fixed Frontend CI bundle budget failure.
+  - **Root cause:** `ChatLayoutScheduleSend.test.tsx` imported `waitFor` from `@testing-library/react` but never used it. `tsc -b` with `noUnusedLocals` emitted TS6133, aborting before `vite build` could run. The bundle-budget CI job then failed (no dist/).
+  - **Fix:** Removed `waitFor` from the import on line 1 (kept `act`, `fireEvent`, `render`, `screen`).
+  - **Verified locally:** `pnpm --filter app build` clean, `pnpm --filter app budget` passes (JS ≤140.5KB gz, WASM ≤553.7KB gz, both under limits), `820 frontend tests pass`, biome clean.
+  - **cargo audit:** 2 allowed warnings (instant unmaintained via openmls; bitcoin_hashes yanked via bip39 — both transitive deps, upstream-controlled). No new vulnerabilities.
+  - **Target dir:** 6.4 GB (under 20 GB cap). 0-byte .rmeta stubs pruned.
+  - **Next cycle:** PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768 ciphersuite), or more UX polish.
+
+## Previous state (2026-06-28, cycle 209 — FEATURE: scheduled send in message composer)
 - **Cycle 209 (commit a1f911a):** FEATURE — Scheduled Send: queue a message to fire at a future time.
   - **`SchedulePickerPopup`:** Floating popover with `<input type="datetime-local">`, Cancel + Schedule buttons. `minDt` is `now+60s`. `handleSubmit` validates `ms > Date.now()` before calling `onSchedule(ms)`. `data-testid="schedule-picker"`.
   - **`Composer` changes:** Added `onScheduleSend?: (text, at) => void` prop; `schedulePickerOpen` + `schedulePickerRef` state; click-outside useEffect mirrors the emoji picker pattern; "Send later" timer button (`data-testid="send-later-btn"`) appears alongside the send button when text is non-empty.
