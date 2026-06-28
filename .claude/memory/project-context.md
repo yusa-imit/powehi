@@ -2511,3 +2511,6 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - Use skills: add-rust-crate, add-mls-test, new-api-endpoint, verify-reproducible-build,
   threat-model-update, infra-test.
 - Review is part of writing: implement → run the relevant review agent → fix → commit.
+
+## Cycle log (recent)
+- Cycle 215 STABILIZATION: Added 4 security-invariant tests (KeyPackage single-use, cross-device isolation, expired-envelope suppression, TTL complement). security-auditor GREEN. 83/83 application tests. commit 6cbde19.
