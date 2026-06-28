@@ -104,4 +104,97 @@ describe("ChatLayout — draft message saving", () => {
 		render(<ChatLayout />);
 		expect(screen.getByPlaceholderText(/encrypted/i)).toHaveValue("");
 	});
+
+	// ── Draft sidebar indicator tests ──────────────────────────────────────────
+
+	it("draft-preview appears in sidebar after switching away from a chat with text", async () => {
+		render(<ChatLayout />);
+		const textarea = screen.getByPlaceholderText(/encrypted/i);
+		fireEvent.change(textarea, { target: { value: "hello world" } });
+
+		fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+
+		await waitFor(() => {
+			expect(screen.getByTestId("draft-preview")).toBeInTheDocument();
+		});
+	});
+
+	it("draft-preview shows 'Draft:' label and the draft text", async () => {
+		render(<ChatLayout />);
+		const textarea = screen.getByPlaceholderText(/encrypted/i);
+		fireEvent.change(textarea, { target: { value: "my draft message" } });
+
+		fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+
+		await waitFor(() => {
+			const preview = screen.getByTestId("draft-preview");
+			expect(preview).toHaveTextContent("Draft:");
+			expect(preview).toHaveTextContent("my draft message");
+		});
+	});
+
+	it("draft-preview absent for the active chat even with text in composer", async () => {
+		render(<ChatLayout />);
+		const textarea = screen.getByPlaceholderText(/encrypted/i);
+		fireEvent.change(textarea, { target: { value: "typing now" } });
+
+		expect(screen.queryByTestId("draft-preview")).not.toBeInTheDocument();
+	});
+
+	it("draft-preview absent when no text was typed before switching", async () => {
+		render(<ChatLayout />);
+		fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+
+		await waitFor(() => {
+			expect(screen.queryByTestId("draft-preview")).not.toBeInTheDocument();
+		});
+	});
+
+	it("draft-preview disappears after the draft is sent", async () => {
+		render(<ChatLayout />);
+		const textarea = screen.getByPlaceholderText(/encrypted/i);
+		fireEvent.change(textarea, { target: { value: "soon to be sent" } });
+
+		fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+
+		fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+
+		await waitFor(() => {
+			expect(screen.queryByTestId("draft-preview")).not.toBeInTheDocument();
+		});
+	});
+
+	it("each inactive chat shows its own independent draft-preview", async () => {
+		render(<ChatLayout />);
+		const textarea = screen.getByPlaceholderText(/encrypted/i);
+		fireEvent.change(textarea, { target: { value: "maya draft" } });
+
+		fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+		await waitFor(() => {
+			expect(screen.getByTestId("draft-preview")).toBeInTheDocument();
+		});
+
+		fireEvent.change(screen.getByPlaceholderText(/encrypted/i), {
+			target: { value: "jordan draft" },
+		});
+
+		fireEvent.click(screen.getAllByRole("button", { name: /maya akana/i })[0]);
+		await waitFor(() => {
+			const previews = screen.getAllByTestId("draft-preview");
+			expect(previews).toHaveLength(1);
+			expect(previews[0]).toHaveTextContent("jordan draft");
+		});
+	});
+
+	it("draft-preview replaces chat.last text (not shown alongside it)", async () => {
+		render(<ChatLayout />);
+		const textarea = screen.getByPlaceholderText(/encrypted/i);
+		fireEvent.change(textarea, { target: { value: "drafty" } });
+
+		fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+
+		await waitFor(() => {
+			expect(screen.getByTestId("draft-preview")).toBeInTheDocument();
+		});
+	});
 });

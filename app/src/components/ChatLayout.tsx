@@ -820,10 +820,12 @@ function TypingDots({ color = "#FF9E52" }: { color?: string }) {
 function ChatRow({
 	chat,
 	active,
+	draft,
 	onClick,
 }: {
 	chat: Chat;
 	active: boolean;
+	draft?: string;
 	onClick: () => void;
 }) {
 	const [hover, setHover] = useState(false);
@@ -926,6 +928,20 @@ function ChatRow({
 				>
 					{chat.typing ? (
 						<TypingDots />
+					) : !active && draft ? (
+						<span
+							data-testid="draft-preview"
+							style={{
+								fontSize: 13,
+								overflow: "hidden",
+								textOverflow: "ellipsis",
+								whiteSpace: "nowrap",
+								flex: 1,
+							}}
+						>
+							<span style={{ color: "#FF9E52", fontWeight: 600 }}>Draft: </span>
+							<span style={{ color: "var(--fg-3)" }}>{draft}</span>
+						</span>
 					) : (
 						<span
 							style={{
@@ -998,6 +1014,7 @@ function ChatRow({
 function Sidebar({
 	chats,
 	activeId,
+	drafts,
 	onSelect,
 	onNewChat,
 	onNewGroup,
@@ -1008,6 +1025,7 @@ function Sidebar({
 }: {
 	chats: Chat[];
 	activeId: string;
+	drafts: Record<string, string>;
 	onSelect: (id: string) => void;
 	onNewChat: () => void;
 	onNewGroup: () => void;
@@ -1246,6 +1264,7 @@ function Sidebar({
 							key={c.id}
 							chat={c}
 							active={c.id === activeId}
+							draft={drafts[c.id]}
 							onClick={() => onSelect(c.id)}
 						/>
 					))}
@@ -5146,6 +5165,7 @@ export function ChatLayout() {
 			<Sidebar
 				chats={chats}
 				activeId={activeId}
+				drafts={drafts}
 				onSelect={handleSelectChat}
 				onNewChat={() => setInviteOpen(true)}
 				onNewGroup={() => setCreateGroupOpen(true)}
