@@ -1505,12 +1505,25 @@ function ConversationHeader({
 	);
 }
 
+function getReactionHandles(
+	senders: string[],
+	members: ChatMember[] | undefined,
+	myDeviceId: string | undefined,
+): string[] {
+	return senders.map((id) => {
+		if (myDeviceId && id === myDeviceId) return "You";
+		const member = members?.find((m) => m.id === id);
+		return member ? member.handle : id.slice(0, 8);
+	});
+}
+
 function MessageBubble({
 	msg,
 	partner,
 	highlight,
 	myDeviceId,
 	isGroup,
+	members,
 	onReact,
 	onReply,
 	onEdit,
@@ -1528,6 +1541,7 @@ function MessageBubble({
 	highlight?: string;
 	myDeviceId?: string;
 	isGroup?: boolean;
+	members?: ChatMember[];
 	onReact?: (emoji: string) => void;
 	onReply?: () => void;
 	onEdit?: () => void;
@@ -1546,6 +1560,7 @@ function MessageBubble({
 	const [pickerOpen, setPickerOpen] = useState(false);
 	const [hovered, setHovered] = useState(false);
 	const [copied, setCopied] = useState(false);
+	const [hoveredReaction, setHoveredReaction] = useState<string | null>(null);
 	const reactionEntries = msg.reactions ? Object.entries(msg.reactions) : [];
 	const totalReactionCount = reactionEntries.reduce((sum, [, senders]) => sum + senders.length, 0);
 
@@ -2110,31 +2125,64 @@ function MessageBubble({
 				>
 					{reactionEntries.map(([emoji, senders]) => {
 						const isMine = myDeviceId ? senders.includes(myDeviceId) : false;
+						const isChipHovered = hoveredReaction === emoji;
+						const tooltipHandles = getReactionHandles(senders, members, myDeviceId);
 						return (
-							<button
+							<div
 								key={emoji}
-								type="button"
-								onClick={() => onReact?.(emoji)}
-								data-testid={`reaction-chip-${emoji}`}
-								aria-pressed={isMine}
-								style={{
-									background: isMine ? "rgba(255,138,61,0.18)" : "rgba(255,255,255,0.06)",
-									border: isMine
-										? "1px solid rgba(255,138,61,0.5)"
-										: "1px solid rgba(255,255,255,0.12)",
-									borderRadius: 12,
-									padding: "2px 8px",
-									fontSize: 12,
-									cursor: "pointer",
-									display: "inline-flex",
-									alignItems: "center",
-									gap: 4,
-									color: isMine ? "#FF8A3D" : "var(--fg-2)",
-								}}
+								data-testid={`reaction-chip-wrapper-${emoji}`}
+								style={{ position: "relative", display: "inline-flex" }}
+								onMouseEnter={() => setHoveredReaction(emoji)}
+								onMouseLeave={() => setHoveredReaction(null)}
 							>
-								{emoji}
-								<span style={{ fontSize: 10, opacity: 0.75 }}>{senders.length}</span>
-							</button>
+								{isChipHovered && tooltipHandles.length > 0 && (
+									<div
+										data-testid={`reaction-tooltip-${emoji}`}
+										style={{
+											position: "absolute",
+											bottom: "calc(100% + 6px)",
+											left: "50%",
+											transform: "translateX(-50%)",
+											background: "rgba(14,14,22,0.96)",
+											border: "1px solid var(--border-faint)",
+											borderRadius: 8,
+											padding: "4px 10px",
+											fontSize: 11,
+											color: "var(--fg-1)",
+											whiteSpace: "nowrap",
+											pointerEvents: "none",
+											zIndex: 20,
+											boxShadow: "0 2px 8px rgba(0,0,0,0.45)",
+											lineHeight: 1.6,
+										}}
+									>
+										{emoji} {tooltipHandles.join(", ")}
+									</div>
+								)}
+								<button
+									type="button"
+									onClick={() => onReact?.(emoji)}
+									data-testid={`reaction-chip-${emoji}`}
+									aria-pressed={isMine}
+									style={{
+										background: isMine ? "rgba(255,138,61,0.18)" : "rgba(255,255,255,0.06)",
+										border: isMine
+											? "1px solid rgba(255,138,61,0.5)"
+											: "1px solid rgba(255,255,255,0.12)",
+										borderRadius: 12,
+										padding: "2px 8px",
+										fontSize: 12,
+										cursor: "pointer",
+										display: "inline-flex",
+										alignItems: "center",
+										gap: 4,
+										color: isMine ? "#FF8A3D" : "var(--fg-2)",
+									}}
+								>
+									{emoji}
+									<span style={{ fontSize: 10, opacity: 0.75 }}>{senders.length}</span>
+								</button>
+							</div>
 						);
 					})}
 				</div>
@@ -2196,6 +2244,7 @@ function MessageList({
 	searchQuery,
 	myDeviceId,
 	isGroup,
+	members,
 	onReact,
 	onReply,
 	onEdit,
@@ -2217,6 +2266,7 @@ function MessageList({
 	searchQuery?: string;
 	myDeviceId?: string;
 	isGroup?: boolean;
+	members?: ChatMember[];
 	onReact?: (msgId: string, emoji: string) => void;
 	onReply?: (msg: ChatMessage) => void;
 	onEdit?: (msg: ChatMessage) => void;
@@ -2454,6 +2504,7 @@ function MessageList({
 								highlight={searchQuery}
 								myDeviceId={myDeviceId}
 								isGroup={isGroup}
+								members={members}
 								onReact={
 									g.msg.id && onReact
 										? (emoji) => {
@@ -5531,6 +5582,7 @@ export function ChatLayout() {
 						searchQuery={msgSearch}
 						myDeviceId={useAuthStore.getState().deviceId ?? undefined}
 						isGroup={active.isGroup}
+						members={active.members}
 						onReact={sendReaction}
 						onReply={setReplyingTo}
 						onEdit={setEditingMessage}
