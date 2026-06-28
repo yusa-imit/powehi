@@ -17,7 +17,17 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-28, cycle 212 — FEATURE: group poll creation in chat composer)
+## Current state (2026-06-29, cycle 213 — FEATURE: reaction detail tooltip)
+- **Cycle 213 (commit 6e12181):** FEATURE — Reaction detail tooltip: hover any reaction chip to see who reacted.
+  - **`getReactionHandles(senders, members, myDeviceId)`:** Pure function mapping device IDs to display handles. Shows "You" for `myDeviceId`, looks up `handle` from group `members`, falls back to 8-char ID truncation.
+  - **`MessageBubble` changes:** Added `members?: ChatMember[]` prop; `hoveredReaction: string | null` state; each reaction chip row is wrapped in `<div data-testid="reaction-chip-wrapper-{emoji}">` with `onMouseEnter`/`onMouseLeave` handlers. Tooltip `data-testid="reaction-tooltip-{emoji}"` is absolutely positioned above the chip, `pointerEvents: none`, `zIndex: 20`. Only shown when `hoveredReaction === emoji`.
+  - **`MessageList`:** Added `members?: ChatMember[]` prop, threaded through to `MessageBubble`.
+  - **`ChatLayout`:** Passes `active.members` to `MessageList`.
+  - **Security:** Handles resolved from local group roster only — never sent to server. No new server-visible metadata. Tooltip has `pointerEvents: none` so it can't intercept clicks.
+  - **846 frontend tests pass** (+4: `ChatLayoutReactionDetail.test.tsx` — shows handles on hover, hides on leave, shows ❤️ tooltip with correct handle, chip tooltips are independent); biome clean; bundle budget OK.
+  - **Next cycle:** More UX polish or PQ hybrid Phase A.
+
+## Previous state (2026-06-28, cycle 212 — FEATURE: group poll creation in chat composer)
 - **Cycle 212 (commit a7a3a71):** FEATURE — Group poll feature in chat composer.
   - **`PollView`:** Renders poll question + clickable option bars (proportional fill) + vote count. Voter toggle: clicking an option adds/removes "me" sentinel from the voters array.
   - **`PollCreatorPopup`:** Floating popup with question input + 2-4 option inputs + Add option / Cancel / Create buttons. Validates non-empty question + 2+ non-empty options before submitting.
