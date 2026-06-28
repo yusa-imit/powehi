@@ -65,6 +65,8 @@ interface ChatMessage {
 	pinned?: boolean;
 	/** True when the local user has starred this message (local-only, not synced). */
 	starred?: boolean;
+	/** Unix ms — when set the message is queued locally and fires at this time. Client-side only. */
+	scheduledFor?: number;
 }
 
 interface ChatMember {
@@ -1497,6 +1499,7 @@ function MessageBubble({
 	onStar,
 	onShare,
 	onCopy,
+	onCancelScheduled,
 }: {
 	msg: ChatMessage;
 	partner: string;
@@ -1512,6 +1515,8 @@ function MessageBubble({
 	onStar?: () => void;
 	onShare?: () => void;
 	onCopy?: () => void;
+	/** Called when the user cancels a pending scheduled message. */
+	onCancelScheduled?: () => void;
 }) {
 	const isMe = msg.from === "me";
 	const [pickerOpen, setPickerOpen] = useState(false);
@@ -1671,6 +1676,48 @@ function MessageBubble({
 										<span data-testid="disappearing-badge">
 											Disappearing · {formatTimeLeft(msg.expiresAt)}
 										</span>
+									</div>
+								)}
+								{msg.scheduledFor && (
+									<div
+										style={{
+											display: "flex",
+											alignItems: "center",
+											gap: 4,
+											marginTop: 4,
+											fontSize: 10,
+											color: "#A8C8FF",
+											opacity: 0.9,
+										}}
+									>
+										<Icon name="timer" size={10} color="#A8C8FF" />
+										<span data-testid="scheduled-badge">
+											Scheduled ·{" "}
+											{new Date(msg.scheduledFor).toLocaleTimeString([], {
+												hour: "2-digit",
+												minute: "2-digit",
+											})}
+										</span>
+										{onCancelScheduled && (
+											<button
+												type="button"
+												onClick={onCancelScheduled}
+												data-testid="cancel-scheduled-btn"
+												aria-label="Cancel scheduled message"
+												style={{
+													background: "none",
+													border: "none",
+													color: "#A8C8FF",
+													cursor: "pointer",
+													padding: 0,
+													fontSize: 10,
+													textDecoration: "underline",
+													lineHeight: 1,
+												}}
+											>
+												Cancel
+											</button>
+										)}
 									</div>
 								)}
 							</>
@@ -2132,6 +2179,7 @@ function MessageList({
 	onStar,
 	onShare,
 	onCopy,
+	onCancelScheduled,
 	firstUnreadIndex,
 	jumpToMessageId,
 	onJumpComplete,
@@ -2151,6 +2199,7 @@ function MessageList({
 	onStar?: (msgId: string | undefined, msgText: string) => void;
 	onShare?: (msg: ChatMessage) => void;
 	onCopy?: (msg: ChatMessage) => void;
+	onCancelScheduled?: (msgId: string) => void;
 	firstUnreadIndex?: number;
 	jumpToMessageId?: string;
 	onJumpComplete?: () => void;
@@ -2405,6 +2454,12 @@ function MessageList({
 										? () => onCopy(g.msg)
 										: undefined
 								}
+								onCancelScheduled={(() => {
+									const msgId = g.msg.id;
+									return msgId && g.msg.scheduledFor && onCancelScheduled
+										? () => onCancelScheduled(msgId)
+										: undefined;
+								})()}
 							/>
 						</div>
 					),
@@ -2565,6 +2620,108 @@ function EmojiPickerPopup({ onSelect }: { onSelect: (emoji: string) => void }) {
 	);
 }
 
+// ── SchedulePickerPopup ───────────────────────────────────────────────────────
+
+function SchedulePickerPopup({
+	onSchedule,
+	onClose,
+}: {
+	onSchedule: (at: number) => void;
+	onClose: () => void;
+}) {
+	const minDt = (() => {
+		const d = new Date(Date.now() + 60_000);
+		const pad = (n: number) => String(n).padStart(2, "0");
+		return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+	})();
+	const [value, setValue] = useState(minDt);
+
+	const handleSubmit = () => {
+		const ms = new Date(value).getTime();
+		if (!Number.isFinite(ms) || ms <= Date.now()) return;
+		onSchedule(ms);
+	};
+
+	return (
+		<div
+			data-testid="schedule-picker"
+			style={{
+				position: "absolute",
+				bottom: "calc(100% + 8px)",
+				right: 0,
+				background: "var(--bg-surface)",
+				border: "1px solid var(--border-soft)",
+				borderRadius: 12,
+				padding: "14px 16px",
+				boxShadow: "0 8px 32px rgba(0,0,0,0.45)",
+				zIndex: 100,
+				minWidth: 240,
+				display: "flex",
+				flexDirection: "column",
+				gap: 10,
+			}}
+		>
+			<div style={{ fontSize: 12, fontWeight: 600, color: "var(--fg-2)", letterSpacing: "0.04em" }}>
+				Send later
+			</div>
+			<input
+				type="datetime-local"
+				value={value}
+				min={minDt}
+				onChange={(e) => setValue(e.target.value)}
+				data-testid="schedule-datetime-input"
+				style={{
+					background: "var(--bg-void)",
+					border: "1px solid var(--border-soft)",
+					borderRadius: 8,
+					color: "var(--fg-1)",
+					fontFamily: "var(--font-mono)",
+					fontSize: 12,
+					padding: "6px 8px",
+					outline: "none",
+					width: "100%",
+					boxSizing: "border-box",
+				}}
+			/>
+			<div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+				<button
+					type="button"
+					onClick={onClose}
+					data-testid="schedule-cancel"
+					style={{
+						background: "transparent",
+						border: "1px solid var(--border-soft)",
+						borderRadius: 8,
+						color: "var(--fg-3)",
+						cursor: "pointer",
+						fontSize: 12,
+						padding: "5px 12px",
+					}}
+				>
+					Cancel
+				</button>
+				<button
+					type="button"
+					onClick={handleSubmit}
+					data-testid="schedule-confirm"
+					style={{
+						background: "linear-gradient(180deg,#FF9E52,#FF7A2B)",
+						border: "none",
+						borderRadius: 8,
+						color: "#2A0A00",
+						cursor: "pointer",
+						fontSize: 12,
+						fontWeight: 600,
+						padding: "5px 12px",
+					}}
+				>
+					Schedule
+				</button>
+			</div>
+		</div>
+	);
+}
+
 function Composer({
 	onSend,
 	partner,
@@ -2581,6 +2738,7 @@ function Composer({
 	chatId,
 	initialDraft,
 	onDraftChange,
+	onScheduleSend,
 }: {
 	onSend: (text: string) => void;
 	partner: string;
@@ -2605,12 +2763,16 @@ function Composer({
 	chatId: string;
 	initialDraft: string;
 	onDraftChange: (chatId: string, draft: string) => void;
+	/** Called with the message text and Unix-ms target time when user schedules a send. */
+	onScheduleSend?: (text: string, at: number) => void;
 }) {
 	const [text, setText] = useState(initialDraft);
 	const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
+	const [schedulePickerOpen, setSchedulePickerOpen] = useState(false);
 	const prevChatIdRef = useRef(chatId);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const emojiPickerRef = useRef<HTMLDivElement>(null);
+	const schedulePickerRef = useRef<HTMLDivElement>(null);
 
 	// Restore saved draft when the active chat changes.
 	// biome-ignore lint/correctness/useExhaustiveDependencies: chatId is the trigger; initialDraft is the new chat's draft
@@ -2645,6 +2807,18 @@ function Composer({
 		document.addEventListener("mousedown", handler);
 		return () => document.removeEventListener("mousedown", handler);
 	}, [emojiPickerOpen]);
+
+	// Close schedule picker on click outside.
+	useEffect(() => {
+		if (!schedulePickerOpen) return;
+		const handler = (ev: MouseEvent) => {
+			if (schedulePickerRef.current && !schedulePickerRef.current.contains(ev.target as Node)) {
+				setSchedulePickerOpen(false);
+			}
+		};
+		document.addEventListener("mousedown", handler);
+		return () => document.removeEventListener("mousedown", handler);
+	}, [schedulePickerOpen]);
 
 	const handleInsertEmoji = useCallback(
 		(emoji: string) => {
@@ -2871,27 +3045,68 @@ function Composer({
 					{emojiPickerOpen && <EmojiPickerPopup onSelect={handleInsertEmoji} />}
 				</div>
 				{text.trim() ? (
-					<button
-						type="button"
-						onClick={send}
-						aria-label="Send message"
-						style={{
-							width: 36,
-							height: 36,
-							borderRadius: "50%",
-							border: "none",
-							background: "linear-gradient(180deg, #FF9E52, #FF7A2B)",
-							color: "#2A0A00",
-							display: "flex",
-							alignItems: "center",
-							justifyContent: "center",
-							cursor: "pointer",
-							boxShadow: "0 0 0 1px rgba(255,138,61,0.35), 0 0 14px rgba(255,138,61,0.3)",
-							transition: "transform 120ms",
-						}}
-					>
-						<Icon name="arrow-right" size={16} />
-					</button>
+					<div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+						{/* Send later button — only visible when text is present and onScheduleSend is wired */}
+						{onScheduleSend && (
+							<div ref={schedulePickerRef} style={{ position: "relative" }}>
+								<button
+									type="button"
+									onClick={() => setSchedulePickerOpen((o) => !o)}
+									aria-label="Send later"
+									data-testid="send-later-btn"
+									style={{
+										width: 32,
+										height: 32,
+										borderRadius: "50%",
+										border: "1px solid var(--border-soft)",
+										background: schedulePickerOpen ? "var(--bg-surface)" : "transparent",
+										color: "var(--fg-3)",
+										display: "flex",
+										alignItems: "center",
+										justifyContent: "center",
+										cursor: "pointer",
+										transition: "all 120ms",
+									}}
+								>
+									<Icon name="timer" size={14} />
+								</button>
+								{schedulePickerOpen && (
+									<SchedulePickerPopup
+										onSchedule={(at) => {
+											const trimmed = text.trim();
+											if (!trimmed) return;
+											onScheduleSend(trimmed, at);
+											setText("");
+											onDraftChange(chatId, "");
+											setSchedulePickerOpen(false);
+										}}
+										onClose={() => setSchedulePickerOpen(false)}
+									/>
+								)}
+							</div>
+						)}
+						<button
+							type="button"
+							onClick={send}
+							aria-label="Send message"
+							style={{
+								width: 36,
+								height: 36,
+								borderRadius: "50%",
+								border: "none",
+								background: "linear-gradient(180deg, #FF9E52, #FF7A2B)",
+								color: "#2A0A00",
+								display: "flex",
+								alignItems: "center",
+								justifyContent: "center",
+								cursor: "pointer",
+								boxShadow: "0 0 0 1px rgba(255,138,61,0.35), 0 0 14px rgba(255,138,61,0.3)",
+								transition: "transform 120ms",
+							}}
+						>
+							<Icon name="arrow-right" size={16} />
+						</button>
+					</div>
 				) : (
 					<IconBtn icon="mic" label="Voice" size={36} />
 				)}
@@ -4764,6 +4979,61 @@ export function ChatLayout() {
 		return () => clearInterval(handle);
 	}, [purgeExpired]);
 
+	// Sweep scheduled messages: when scheduledFor <= now, fire them as regular sends.
+	useEffect(() => {
+		const fireScheduled = () => {
+			const now = Date.now();
+			setChats((cs) =>
+				cs.map((c) => ({
+					...c,
+					messages: c.messages.map((m) =>
+						m.scheduledFor && m.scheduledFor <= now ? { ...m, scheduledFor: undefined } : m,
+					),
+				})),
+			);
+		};
+		const handle = setInterval(fireScheduled, 10_000);
+		return () => clearInterval(handle);
+	}, []);
+
+	const sendScheduled = (text: string, at: number) => {
+		const now = new Date();
+		const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+		const optId = `sched_${crypto.randomUUID()}`;
+		setChats((cs) =>
+			cs.map((c) => {
+				if (c.id !== activeId) return c;
+				const msgs = [...c.messages];
+				for (let i = msgs.length - 1; i >= 0; i--) {
+					if (msgs[i].from === "me" && msgs[i].last && !msgs[i].scheduledFor) {
+						msgs[i] = { ...msgs[i], last: false, continued: true };
+						break;
+					}
+				}
+				msgs.push({
+					id: optId,
+					from: "me",
+					text,
+					last: true,
+					time,
+					read: false,
+					continued: msgs.length > 0 && msgs[msgs.length - 1].from === "me",
+					scheduledFor: at,
+				});
+				return { ...c, messages: msgs };
+			}),
+		);
+	};
+
+	const cancelScheduled = (msgId: string) => {
+		setChats((cs) =>
+			cs.map((c) => ({
+				...c,
+				messages: c.messages.filter((m) => m.id !== msgId),
+			})),
+		);
+	};
+
 	const sendMessage = async (text: string) => {
 		const now = new Date();
 		const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
@@ -4931,6 +5201,7 @@ export function ChatLayout() {
 						onStar={(msgId, msgText) => handleStarMessage(activeId, msgId, msgText)}
 						onShare={handleShareMessage}
 						onCopy={handleCopyMessage}
+						onCancelScheduled={cancelScheduled}
 						firstUnreadIndex={active.firstUnreadAt}
 						jumpToMessageId={jumpToMessageId ?? undefined}
 						onJumpComplete={handleJumpComplete}
@@ -4958,6 +5229,7 @@ export function ChatLayout() {
 						chatId={activeId}
 						initialDraft={drafts[activeId] ?? ""}
 						onDraftChange={handleDraftChange}
+						onScheduleSend={sendScheduled}
 					/>
 				</main>
 			)}
