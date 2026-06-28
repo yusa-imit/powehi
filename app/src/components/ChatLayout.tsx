@@ -67,6 +67,8 @@ interface ChatMessage {
 	starred?: boolean;
 	/** Unix ms — when set the message is queued locally and fires at this time. Client-side only. */
 	scheduledFor?: number;
+	/** Group poll — options with voter lists. Local-only, not synced to server. */
+	poll?: { question: string; options: { text: string; voters: string[] }[] };
 }
 
 interface ChatMember {
@@ -1519,6 +1521,7 @@ function MessageBubble({
 	onShare,
 	onCopy,
 	onCancelScheduled,
+	onVote,
 }: {
 	msg: ChatMessage;
 	partner: string;
@@ -1536,6 +1539,8 @@ function MessageBubble({
 	onCopy?: () => void;
 	/** Called when the user cancels a pending scheduled message. */
 	onCancelScheduled?: () => void;
+	/** Called when the user votes on a poll option. */
+	onVote?: (optionIdx: number) => void;
 }) {
 	const isMe = msg.from === "me";
 	const [pickerOpen, setPickerOpen] = useState(false);
@@ -1620,7 +1625,9 @@ function MessageBubble({
 										{msg.replyTo.excerpt}
 									</div>
 								)}
-								{msg.media ? (
+								{msg.poll ? (
+									<PollView poll={msg.poll} isMe={isMe} onVote={onVote} />
+								) : msg.media ? (
 									<MediaImage media={msg.media} />
 								) : (
 									<HighlightedText text={msg.text} highlight={highlight ?? ""} />
@@ -2199,6 +2206,7 @@ function MessageList({
 	onShare,
 	onCopy,
 	onCancelScheduled,
+	onVote,
 	firstUnreadIndex,
 	jumpToMessageId,
 	onJumpComplete,
@@ -2219,6 +2227,7 @@ function MessageList({
 	onShare?: (msg: ChatMessage) => void;
 	onCopy?: (msg: ChatMessage) => void;
 	onCancelScheduled?: (msgId: string) => void;
+	onVote?: (msgId: string | undefined, optionIdx: number) => void;
 	firstUnreadIndex?: number;
 	jumpToMessageId?: string;
 	onJumpComplete?: () => void;
@@ -2479,6 +2488,7 @@ function MessageList({
 										? () => onCancelScheduled(msgId)
 										: undefined;
 								})()}
+								onVote={onVote ? (optIdx) => onVote(g.msg.id, optIdx) : undefined}
 							/>
 						</div>
 					),
@@ -2639,6 +2649,236 @@ function EmojiPickerPopup({ onSelect }: { onSelect: (emoji: string) => void }) {
 	);
 }
 
+// ── PollView ──────────────────────────────────────────────────────────────────
+
+function PollView({
+	poll,
+	isMe,
+	onVote,
+}: {
+	poll: NonNullable<ChatMessage["poll"]>;
+	isMe: boolean;
+	onVote?: (optionIdx: number) => void;
+}) {
+	const totalVotes = poll.options.reduce((s, o) => s + o.voters.length, 0);
+	return (
+		<div data-testid="poll-view" style={{ minWidth: 200 }}>
+			<div
+				data-testid="poll-question"
+				style={{ fontWeight: 600, fontSize: 14, marginBottom: 10, lineHeight: 1.3 }}
+			>
+				{poll.question}
+			</div>
+			{poll.options.map((opt, idx) => {
+				const voted = opt.voters.includes("me");
+				const pct = totalVotes > 0 ? Math.round((opt.voters.length / totalVotes) * 100) : 0;
+				const barColor = isMe ? "rgba(42,17,0,0.25)" : "rgba(168,200,255,0.25)";
+				const barFill = voted ? (isMe ? "rgba(42,17,0,0.5)" : "rgba(168,200,255,0.55)") : barColor;
+				return (
+					<button
+						// biome-ignore lint/suspicious/noArrayIndexKey: stable option index
+						key={idx}
+						type="button"
+						data-testid={`poll-option-${idx}`}
+						onClick={() => onVote?.(idx)}
+						style={{
+							position: "relative",
+							display: "flex",
+							justifyContent: "space-between",
+							alignItems: "center",
+							width: "100%",
+							marginBottom: 6,
+							padding: "7px 10px",
+							borderRadius: 8,
+							border: voted
+								? `1px solid ${isMe ? "rgba(42,17,0,0.4)" : "rgba(168,200,255,0.5)"}`
+								: "1px solid transparent",
+							background: "transparent",
+							cursor: "pointer",
+							fontFamily: "var(--font-sans)",
+							fontSize: 13,
+							color: "inherit",
+							overflow: "hidden",
+							textAlign: "left",
+						}}
+					>
+						{/* Fill bar */}
+						<div
+							data-testid={`poll-bar-${idx}`}
+							style={{
+								position: "absolute",
+								inset: 0,
+								width: `${pct}%`,
+								background: barFill,
+								borderRadius: 8,
+								transition: "width 300ms ease",
+								zIndex: 0,
+							}}
+						/>
+						<span style={{ position: "relative", zIndex: 1 }}>{opt.text}</span>
+						<span
+							data-testid={`poll-pct-${idx}`}
+							style={{ position: "relative", zIndex: 1, opacity: 0.7, fontSize: 11 }}
+						>
+							{totalVotes > 0 ? `${pct}%` : ""}
+						</span>
+					</button>
+				);
+			})}
+			<div data-testid="poll-total-votes" style={{ fontSize: 10, opacity: 0.55, marginTop: 4 }}>
+				{totalVotes} {totalVotes === 1 ? "vote" : "votes"}
+			</div>
+		</div>
+	);
+}
+
+// ── PollCreatorPopup ──────────────────────────────────────────────────────────
+
+function PollCreatorPopup({
+	onCreate,
+	onClose,
+}: {
+	onCreate: (question: string, options: string[]) => void;
+	onClose: () => void;
+}) {
+	const [question, setQuestion] = useState("");
+	const [options, setOptions] = useState(["", ""]);
+
+	const handleSubmit = () => {
+		const q = question.trim();
+		const opts = options.map((o) => o.trim()).filter(Boolean);
+		if (!q || opts.length < 2) return;
+		onCreate(q, opts);
+	};
+
+	const updateOption = (idx: number, val: string) =>
+		setOptions((prev) => prev.map((o, i) => (i === idx ? val : o)));
+
+	const addOption = () => {
+		if (options.length >= 4) return;
+		setOptions((prev) => [...prev, ""]);
+	};
+
+	return (
+		<div
+			data-testid="poll-creator"
+			style={{
+				position: "absolute",
+				bottom: "calc(100% + 8px)",
+				left: 0,
+				background: "var(--bg-surface)",
+				border: "1px solid var(--border-soft)",
+				borderRadius: 12,
+				padding: "14px 16px",
+				boxShadow: "0 8px 32px rgba(0,0,0,0.45)",
+				zIndex: 100,
+				minWidth: 260,
+				display: "flex",
+				flexDirection: "column",
+				gap: 8,
+			}}
+		>
+			<div style={{ fontSize: 12, fontWeight: 600, color: "var(--fg-2)", letterSpacing: "0.04em" }}>
+				Create poll
+			</div>
+			<input
+				data-testid="poll-question-input"
+				value={question}
+				onChange={(e) => setQuestion(e.target.value)}
+				placeholder="Ask a question…"
+				style={{
+					background: "var(--bg-void)",
+					border: "1px solid var(--border-soft)",
+					borderRadius: 8,
+					color: "var(--fg-1)",
+					fontFamily: "var(--font-sans)",
+					fontSize: 13,
+					padding: "6px 10px",
+					outline: "none",
+					width: "100%",
+					boxSizing: "border-box",
+				}}
+			/>
+			{options.map((opt, idx) => (
+				<input
+					// biome-ignore lint/suspicious/noArrayIndexKey: stable fixed-size array of poll options
+					key={idx}
+					data-testid={`poll-option-input-${idx}`}
+					value={opt}
+					onChange={(e) => updateOption(idx, e.target.value)}
+					placeholder={`Option ${idx + 1}`}
+					style={{
+						background: "var(--bg-void)",
+						border: "1px solid var(--border-soft)",
+						borderRadius: 8,
+						color: "var(--fg-1)",
+						fontFamily: "var(--font-sans)",
+						fontSize: 13,
+						padding: "6px 10px",
+						outline: "none",
+						width: "100%",
+						boxSizing: "border-box",
+					}}
+				/>
+			))}
+			{options.length < 4 && (
+				<button
+					type="button"
+					onClick={addOption}
+					data-testid="poll-add-option"
+					style={{
+						background: "transparent",
+						border: "1px dashed var(--border-soft)",
+						borderRadius: 8,
+						color: "var(--fg-3)",
+						cursor: "pointer",
+						fontSize: 12,
+						padding: "5px 10px",
+						textAlign: "left",
+					}}
+				>
+					+ Add option
+				</button>
+			)}
+			<div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 2 }}>
+				<button
+					type="button"
+					onClick={onClose}
+					data-testid="poll-cancel"
+					style={{
+						background: "transparent",
+						border: "1px solid var(--border-soft)",
+						borderRadius: 8,
+						color: "var(--fg-3)",
+						cursor: "pointer",
+						fontSize: 12,
+						padding: "5px 12px",
+					}}
+				>
+					Cancel
+				</button>
+				<button
+					type="button"
+					onClick={handleSubmit}
+					data-testid="poll-create"
+					style={{
+						background: "linear-gradient(180deg,#FF9E52,#FF7A2B)",
+						border: "none",
+						borderRadius: 8,
+						color: "#2A0A00",
+						cursor: "pointer",
+						fontSize: 12,
+						fontWeight: 600,
+						padding: "5px 12px",
+					}}
+				>
+					Create
+				</button>
+			</div>
+		</div>
+	);
+}
+
 // ── SchedulePickerPopup ───────────────────────────────────────────────────────
 
 function SchedulePickerPopup({
@@ -2758,6 +2998,8 @@ function Composer({
 	initialDraft,
 	onDraftChange,
 	onScheduleSend,
+	onCreatePoll,
+	isGroupChat,
 }: {
 	onSend: (text: string) => void;
 	partner: string;
@@ -2784,10 +3026,16 @@ function Composer({
 	onDraftChange: (chatId: string, draft: string) => void;
 	/** Called with the message text and Unix-ms target time when user schedules a send. */
 	onScheduleSend?: (text: string, at: number) => void;
+	/** Called with poll question + options when user creates a poll (group chats only). */
+	onCreatePoll?: (question: string, options: string[]) => void;
+	/** True when composing in a group chat — enables poll button. */
+	isGroupChat?: boolean;
 }) {
 	const [text, setText] = useState(initialDraft);
 	const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
 	const [schedulePickerOpen, setSchedulePickerOpen] = useState(false);
+	const [pollCreatorOpen, setPollCreatorOpen] = useState(false);
+	const pollCreatorRef = useRef<HTMLDivElement>(null);
 	const prevChatIdRef = useRef(chatId);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const emojiPickerRef = useRef<HTMLDivElement>(null);
@@ -2838,6 +3086,18 @@ function Composer({
 		document.addEventListener("mousedown", handler);
 		return () => document.removeEventListener("mousedown", handler);
 	}, [schedulePickerOpen]);
+
+	// Close poll creator on click outside.
+	useEffect(() => {
+		if (!pollCreatorOpen) return;
+		const handler = (ev: MouseEvent) => {
+			if (pollCreatorRef.current && !pollCreatorRef.current.contains(ev.target as Node)) {
+				setPollCreatorOpen(false);
+			}
+		};
+		document.addEventListener("mousedown", handler);
+		return () => document.removeEventListener("mousedown", handler);
+	}, [pollCreatorOpen]);
 
 	const handleInsertEmoji = useCallback(
 		(emoji: string) => {
@@ -3003,6 +3263,25 @@ function Composer({
 			>
 				<IconBtn icon="attach" label="Attach" size={32} />
 				<IconBtn icon="image" label="Photo" size={32} onClick={onPhoto} />
+				{isGroupChat && (
+					<div ref={pollCreatorRef} style={{ position: "relative" }}>
+						<IconBtn
+							icon="bar-chart"
+							label="Create poll"
+							size={32}
+							onClick={() => setPollCreatorOpen((o) => !o)}
+						/>
+						{pollCreatorOpen && (
+							<PollCreatorPopup
+								onCreate={(q, opts) => {
+									onCreatePoll?.(q, opts);
+									setPollCreatorOpen(false);
+								}}
+								onClose={() => setPollCreatorOpen(false)}
+							/>
+						)}
+					</div>
+				)}
 				<button
 					type="button"
 					onClick={onToggleTtl}
@@ -5053,6 +5332,48 @@ export function ChatLayout() {
 		);
 	};
 
+	const handleCreatePoll = (question: string, options: string[]) => {
+		if (!activeId) return;
+		const now = new Date();
+		const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+		const pollId = `poll_${now.getTime()}`;
+		const newMsg: ChatMessage = {
+			id: pollId,
+			from: "me",
+			text: "",
+			time,
+			last: true,
+			poll: { question, options: options.map((text) => ({ text, voters: [] })) },
+		};
+		setChats((cs) =>
+			cs.map((c) => (c.id === activeId ? { ...c, messages: [...c.messages, newMsg] } : c)),
+		);
+	};
+
+	const handleVotePoll = (msgId: string | undefined, optionIdx: number) => {
+		if (!activeId || !msgId) return;
+		setChats((cs) =>
+			cs.map((c) => {
+				if (c.id !== activeId) return c;
+				return {
+					...c,
+					messages: c.messages.map((m) => {
+						if (m.id !== msgId || !m.poll) return m;
+						const opts = m.poll.options.map((opt, i) => {
+							if (i !== optionIdx) return opt;
+							const already = opt.voters.includes("me");
+							return {
+								...opt,
+								voters: already ? opt.voters.filter((v) => v !== "me") : [...opt.voters, "me"],
+							};
+						});
+						return { ...m, poll: { ...m.poll, options: opts } };
+					}),
+				};
+			}),
+		);
+	};
+
 	const sendMessage = async (text: string) => {
 		const now = new Date();
 		const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
@@ -5222,6 +5543,7 @@ export function ChatLayout() {
 						onShare={handleShareMessage}
 						onCopy={handleCopyMessage}
 						onCancelScheduled={cancelScheduled}
+						onVote={handleVotePoll}
 						firstUnreadIndex={active.firstUnreadAt}
 						jumpToMessageId={jumpToMessageId ?? undefined}
 						onJumpComplete={handleJumpComplete}
@@ -5250,6 +5572,8 @@ export function ChatLayout() {
 						initialDraft={drafts[activeId] ?? ""}
 						onDraftChange={handleDraftChange}
 						onScheduleSend={sendScheduled}
+						onCreatePoll={active.isGroup ? handleCreatePoll : undefined}
+						isGroupChat={active.isGroup}
 					/>
 				</main>
 			)}
