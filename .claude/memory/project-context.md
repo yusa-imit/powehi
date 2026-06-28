@@ -17,7 +17,18 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-29, cycle 213 — FEATURE: reaction detail tooltip)
+## Current state (2026-06-29, cycle 214 — FEATURE: image lightbox)
+- **Cycle 214 (commit cdba978):** FEATURE — Image lightbox: clicking a media image opens a full-screen overlay.
+  - **`Lightbox` component:** Full-screen overlay (rgba 0.94 void bg, z-index 60). Close button, backdrop click, and Escape/ArrowLeft/ArrowRight keyboard handlers via useEffect. Prev/next navigation arrow buttons visible only when adjacent images exist. Counter shows "N / total" when there are multiple images. Image rendered via `MediaImage` with `imgStyle` override (max 90vw/85vh instead of inline 320px).
+  - **`MediaImage` changes:** Added optional `imgStyle?: CSSProperties` prop merged into `<img>` style (thumbnail and full image). Enables lightbox to render the image at larger dimensions without duplication.
+  - **`MessageBubble` changes:** Added `onOpenLightbox?: () => void` prop; wraps `<MediaImage>` in a `<button data-testid="media-open-lightbox">` when the prop is provided.
+  - **`MessageList` changes:** Added `onOpenLightbox?: (msg: ChatMessage) => void` prop, threaded through to `MessageBubble` for each media message.
+  - **`ChatLayout`:** Added `lightboxMsgIdx` state, `mediaMessages` memo, and `handleOpen/Close/Prev/Next` callbacks. Renders `<Lightbox>` above all panels when idx is non-null.
+  - **Security:** Lightbox renders only already-decrypted object URLs from `useMediaReceive`; no new server requests, no new server-visible metadata. Pure display layer.
+  - **853 frontend tests pass** (+7: `ChatLayoutLightbox.test.tsx` — open on click, close button, Escape key, backdrop click, counter + prev/next buttons, ArrowRight nav, ArrowLeft nav); tsc clean; biome clean; bundle budget OK (JS 142.6KB gz / WASM 553.7KB gz).
+  - **Next cycle:** More UX polish or PQ hybrid Phase A.
+
+## Previous state (2026-06-29, cycle 213 — FEATURE: reaction detail tooltip)
 - **Cycle 213 (commit 6e12181):** FEATURE — Reaction detail tooltip: hover any reaction chip to see who reacted.
   - **`getReactionHandles(senders, members, myDeviceId)`:** Pure function mapping device IDs to display handles. Shows "You" for `myDeviceId`, looks up `handle` from group `members`, falls back to 8-char ID truncation.
   - **`MessageBubble` changes:** Added `members?: ChatMember[]` prop; `hoveredReaction: string | null` state; each reaction chip row is wrapped in `<div data-testid="reaction-chip-wrapper-{emoji}">` with `onMouseEnter`/`onMouseLeave` handlers. Tooltip `data-testid="reaction-tooltip-{emoji}"` is absolutely positioned above the chip, `pointerEvents: none`, `zIndex: 20`. Only shown when `hoveredReaction === emoji`.
