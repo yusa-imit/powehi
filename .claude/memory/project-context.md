@@ -17,7 +17,17 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-28, cycle 207 — FEATURE: copy message to clipboard)
+## Current state (2026-06-28, cycle 208 — FEATURE: emoji picker in message composer)
+- **Cycle 208 (commit 5688a2f):** FEATURE — Emoji picker popup in message composer.
+  - **`EmojiPickerPopup`:** Floating `<div data-testid="emoji-picker">` above the smile button. 3 categories: Smileys (16 emojis), Gestures (10), Symbols (10). Each emoji is a `<button data-testid="emoji-btn" aria-label={emoji}>` — JSX text children only, no innerHTML.
+  - **`handleInsertEmoji`:** Pure string concat `text.slice(0, start) + emoji + text.slice(end)` → `setText`. Respects `selectionStart`/`selectionEnd` cursor position via `textareaRef`. Calls `requestAnimationFrame` to restore focus + caret after insert. Closes picker on select.
+  - **Click-outside:** `document.addEventListener("mousedown", handler)` gated on `emojiPickerOpen`, with ref guard and cleanup.
+  - **Smile button toggle:** `onClick={() => setEmojiPickerOpen(o => !o)}` — toggles open/close.
+  - **security-auditor: GREEN** — JSX text children only (no XSS); no server calls; no MLS ops; no logging of inserted emoji or composed text; `mousedown` listener cleaned up on effect teardown; no new server-visible metadata.
+  - **807 frontend tests pass (+11: `ChatLayoutEmojiPicker.test.tsx` — picker hidden by default, opens on smile click, closes on second click, shows all 3 categories, emoji inserts into input, closes picker on emoji click, multiple emojis insert sequentially, closes on outside click, aria-labels are emojis, position absolute style, preserves existing draft text)**; tsc clean; biome clean.
+  - **Next cycle:** PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768 ciphersuite), or more UX polish.
+
+## Previous state (2026-06-28, cycle 207 — FEATURE: copy message to clipboard)
 - **Cycle 207 (commit f273cc4):** FEATURE — Copy message to clipboard button in message hover toolbar.
   - **Copy button:** Appears on hover for non-deleted text messages (excluding `[image]` placeholders and empty text). Positioned at `left:104` in the hover toolbar (after Share at left:78). `data-testid="copy-button"`, `aria-label="Copy message"`.
   - **`handleCopyMessage`:** `navigator.clipboard.writeText(msg.text).catch(() => {})` — structured API, not a DOM sink. Failure silently ignored. No server calls, no MLS ops, no PII logging.
