@@ -17,7 +17,16 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-28, cycle 210 — STABILIZATION: CI fix — unused import unblocks bundle budget)
+## Current state (2026-06-28, cycle 211 — FEATURE: draft-preview indicator in sidebar)
+- **Cycle 211 (commit 09b112e):** FEATURE — Draft indicator in sidebar: inactive chat rows show "Draft: [preview]" when there is unsent text.
+  - **`ChatRow`:** New `draft?: string` prop. When `!active && draft`, renders `<span data-testid="draft-preview">` with orange "Draft: " label + the draft text instead of `chat.last`. Condition guards active chat (no indicator while composing in the current chat).
+  - **`Sidebar`:** New `drafts: Record<string, string>` prop. Passes `draft={drafts[c.id]}` to each `ChatRow`.
+  - **`ChatLayout`:** Threads existing in-memory `drafts` state (already present since cycle N) into `Sidebar`. No new state added.
+  - **Security:** JSX text children only (no XSS surface). Draft text is in-memory React state — never logged, never server-bound, never in MLS payload. security-auditor: GREEN.
+  - **827 frontend tests pass** (+7: `ChatLayoutDraft.test.tsx` — draft-preview appears after switching, shows "Draft:" label + text, absent for active chat, absent with no text, disappears after send, independent per-chat, replaces chat.last); tsc clean; biome clean; bundle budget OK (JS 140.6KB gz / WASM 553.7KB gz).
+  - **Next cycle:** PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768 ciphersuite), or more UX polish.
+
+## Previous state (2026-06-28, cycle 210 — STABILIZATION: CI fix — unused import unblocks bundle budget)
 - **Cycle 210 (commit bf2ed02):** STABILIZATION — Fixed Frontend CI bundle budget failure.
   - **Root cause:** `ChatLayoutScheduleSend.test.tsx` imported `waitFor` from `@testing-library/react` but never used it. `tsc -b` with `noUnusedLocals` emitted TS6133, aborting before `vite build` could run. The bundle-budget CI job then failed (no dist/).
   - **Fix:** Removed `waitFor` from the import on line 1 (kept `act`, `fireEvent`, `render`, `screen`).
