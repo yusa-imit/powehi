@@ -2463,6 +2463,108 @@ function MessageList({
 	);
 }
 
+// ── EmojiPickerPopup ─────────────────────────────────────────────────────────
+
+const EMOJI_CATEGORIES = [
+	{
+		label: "Smileys",
+		emojis: [
+			"😊",
+			"😂",
+			"🥰",
+			"😍",
+			"😭",
+			"😅",
+			"🤣",
+			"😎",
+			"🙄",
+			"😤",
+			"🥺",
+			"😬",
+			"😴",
+			"🤔",
+			"😏",
+			"🤩",
+		],
+	},
+	{
+		label: "Gestures",
+		emojis: ["👍", "👎", "👏", "🙌", "👋", "🤝", "🤞", "💪", "✌️", "🫶"],
+	},
+	{
+		label: "Symbols",
+		emojis: ["❤️", "💔", "🔥", "✨", "💯", "🎉", "💡", "🌟", "💫", "🎊"],
+	},
+] as const;
+
+function EmojiPickerPopup({ onSelect }: { onSelect: (emoji: string) => void }) {
+	return (
+		<div
+			data-testid="emoji-picker"
+			style={{
+				position: "absolute",
+				bottom: "calc(100% + 8px)",
+				right: 0,
+				background: "var(--bg-surface)",
+				border: "1px solid var(--border-soft)",
+				borderRadius: 12,
+				padding: "10px 12px 12px",
+				width: 284,
+				boxShadow: "0 8px 32px rgba(0,0,0,0.45)",
+				zIndex: 100,
+			}}
+		>
+			{EMOJI_CATEGORIES.map((cat) => (
+				<div key={cat.label} style={{ marginBottom: 8 }}>
+					<div
+						style={{
+							fontSize: 10,
+							color: "var(--fg-3)",
+							fontFamily: "var(--font-mono)",
+							letterSpacing: "0.06em",
+							marginBottom: 6,
+						}}
+					>
+						{cat.label.toUpperCase()}
+					</div>
+					<div style={{ display: "flex", flexWrap: "wrap", gap: 2 }}>
+						{cat.emojis.map((emoji) => (
+							<button
+								key={emoji}
+								type="button"
+								onClick={() => onSelect(emoji)}
+								aria-label={emoji}
+								data-testid="emoji-btn"
+								style={{
+									fontSize: 20,
+									width: 36,
+									height: 36,
+									display: "flex",
+									alignItems: "center",
+									justifyContent: "center",
+									background: "transparent",
+									border: "none",
+									borderRadius: 6,
+									cursor: "pointer",
+									transition: "background 100ms",
+								}}
+								onMouseEnter={(ev) => {
+									(ev.currentTarget as HTMLButtonElement).style.background = "var(--bg-elevated)";
+								}}
+								onMouseLeave={(ev) => {
+									(ev.currentTarget as HTMLButtonElement).style.background = "transparent";
+								}}
+							>
+								{emoji}
+							</button>
+						))}
+					</div>
+				</div>
+			))}
+		</div>
+	);
+}
+
 function Composer({
 	onSend,
 	partner,
@@ -2505,7 +2607,10 @@ function Composer({
 	onDraftChange: (chatId: string, draft: string) => void;
 }) {
 	const [text, setText] = useState(initialDraft);
+	const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
 	const prevChatIdRef = useRef(chatId);
+	const textareaRef = useRef<HTMLTextAreaElement>(null);
+	const emojiPickerRef = useRef<HTMLDivElement>(null);
 
 	// Restore saved draft when the active chat changes.
 	// biome-ignore lint/correctness/useExhaustiveDependencies: chatId is the trigger; initialDraft is the new chat's draft
@@ -2528,6 +2633,35 @@ function Composer({
 			setText(initialDraft);
 		}
 	}, [editingMessage?.id]);
+
+	// Close emoji picker on click outside.
+	useEffect(() => {
+		if (!emojiPickerOpen) return;
+		const handler = (ev: MouseEvent) => {
+			if (emojiPickerRef.current && !emojiPickerRef.current.contains(ev.target as Node)) {
+				setEmojiPickerOpen(false);
+			}
+		};
+		document.addEventListener("mousedown", handler);
+		return () => document.removeEventListener("mousedown", handler);
+	}, [emojiPickerOpen]);
+
+	const handleInsertEmoji = useCallback(
+		(emoji: string) => {
+			const el = textareaRef.current;
+			const start = el?.selectionStart ?? text.length;
+			const end = el?.selectionEnd ?? text.length;
+			const next = text.slice(0, start) + emoji + text.slice(end);
+			setText(next);
+			onDraftChange(chatId, next);
+			setEmojiPickerOpen(false);
+			requestAnimationFrame(() => {
+				el?.focus();
+				el?.setSelectionRange(start + emoji.length, start + emoji.length);
+			});
+		},
+		[text, chatId, onDraftChange],
+	);
 
 	const send = () => {
 		const trimmed = text.trim();
@@ -2702,6 +2836,7 @@ function Composer({
 					{ttl && <span>{formatTtl(ttl)}</span>}
 				</button>
 				<textarea
+					ref={textareaRef}
 					value={text}
 					onChange={(e) => {
 						const next = e.target.value;
@@ -2726,7 +2861,15 @@ function Composer({
 						lineHeight: 1.4,
 					}}
 				/>
-				<IconBtn icon="smile" label="Emoji" size={32} />
+				<div ref={emojiPickerRef} style={{ position: "relative" }}>
+					<IconBtn
+						icon="smile"
+						label="Emoji"
+						size={32}
+						onClick={() => setEmojiPickerOpen((o) => !o)}
+					/>
+					{emojiPickerOpen && <EmojiPickerPopup onSelect={handleInsertEmoji} />}
+				</div>
 				{text.trim() ? (
 					<button
 						type="button"
