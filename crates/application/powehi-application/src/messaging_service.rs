@@ -1181,4 +1181,65 @@ mod tests {
             "fan-out must be capped at MAX_FAN_OUT_RECIPIENTS to prevent DoS amplification"
         );
     }
+
+    #[tokio::test]
+    async fn poll_envelopes_does_not_return_expired_envelope() {
+        // Disappearing-message security invariant: an envelope whose expires_at
+        // is in the past must never be returned by poll_envelopes, even when
+        // it is still physically present in the store (prd.md §5.4).
+        use chrono::Duration as CDuration;
+        let group_id = GroupId::new();
+        let member = DeviceId::new();
+        let env_repo =
+            FakeEnvelopeRepo::with_memberships(vec![(group_id.clone(), member.clone())]);
+
+        // Directly insert an envelope with expires_at 1 second in the past.
+        let mut env = Envelope::new(
+            group_id.clone(),
+            member.clone(),
+            None,
+            MessageType::Application,
+            b"ct".to_vec(),
+        );
+        env.expires_at = Some(Utc::now() - CDuration::seconds(1));
+        env_repo.store.lock().unwrap().insert(env.id.clone(), env);
+
+        let group_repo = FakeGroupRepo::with_member_in(group_id, member.clone());
+        let svc = make_service(env_repo, group_repo);
+        let pending = svc.poll_envelopes(&member, None).await.unwrap();
+        assert!(
+            pending.is_empty(),
+            "expired envelope must not be returned to client"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_envelopes_returns_non_expired_envelope_with_ttl() {
+        // Complement: an envelope with a future expires_at IS returned while
+        // it has not yet expired (validates that TTL filtering is one-sided).
+        use chrono::Duration as CDuration;
+        let group_id = GroupId::new();
+        let member = DeviceId::new();
+        let env_repo =
+            FakeEnvelopeRepo::with_memberships(vec![(group_id.clone(), member.clone())]);
+
+        let mut env = Envelope::new(
+            group_id.clone(),
+            member.clone(),
+            None,
+            MessageType::Application,
+            b"ct".to_vec(),
+        );
+        env.expires_at = Some(Utc::now() + CDuration::hours(1));
+        env_repo.store.lock().unwrap().insert(env.id.clone(), env);
+
+        let group_repo = FakeGroupRepo::with_member_in(group_id, member.clone());
+        let svc = make_service(env_repo, group_repo);
+        let pending = svc.poll_envelopes(&member, None).await.unwrap();
+        assert_eq!(
+            pending.len(),
+            1,
+            "non-expired envelope must be returned while TTL has not elapsed"
+        );
+    }
 }

@@ -239,4 +239,42 @@ mod tests {
         svc.fetch_one(&device).await.unwrap();
         assert_eq!(svc.count(&device).await.unwrap(), 2);
     }
+
+    #[tokio::test]
+    async fn fetch_one_is_single_use() {
+        // MLS security invariant: each KeyPackage must be used exactly once.
+        // A second fetch after consumption must return NotFound — key reuse
+        // would break the forward-secrecy guarantees of MLS (prd.md §5.2).
+        let repo = FakeKpRepo::new();
+        let svc = KeyPackageService::new(repo);
+        let device = DeviceId::new();
+        svc.upload(&device, vec![Bytes::from_static(b"kp")])
+            .await
+            .unwrap();
+        svc.fetch_one(&device).await.unwrap();
+        let err = svc.fetch_one(&device).await.unwrap_err();
+        assert!(
+            matches!(err, DomainError::NotFound(_)),
+            "consumed KeyPackage must not be returned again: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_one_returns_not_found_for_different_device() {
+        // Security invariant: a KeyPackage uploaded by device A must never be
+        // returned when fetching for device B. This prevents KeyPackage
+        // cross-device delivery that would break MLS group formation.
+        let repo = FakeKpRepo::new();
+        let svc = KeyPackageService::new(repo);
+        let device_a = DeviceId::new();
+        let device_b = DeviceId::new();
+        svc.upload(&device_a, vec![Bytes::from_static(b"kp-a")])
+            .await
+            .unwrap();
+        let err = svc.fetch_one(&device_b).await.unwrap_err();
+        assert!(
+            matches!(err, DomainError::NotFound(_)),
+            "device_a's KeyPackage must not be returned for device_b: {err:?}"
+        );
+    }
 }
