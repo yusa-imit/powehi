@@ -17,7 +17,18 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-28, cycle 211 — FEATURE: draft-preview indicator in sidebar)
+## Current state (2026-06-28, cycle 212 — FEATURE: group poll creation in chat composer)
+- **Cycle 212 (commit a7a3a71):** FEATURE — Group poll feature in chat composer.
+  - **`PollView`:** Renders poll question + clickable option bars (proportional fill) + vote count. Voter toggle: clicking an option adds/removes "me" sentinel from the voters array.
+  - **`PollCreatorPopup`:** Floating popup with question input + 2-4 option inputs + Add option / Cancel / Create buttons. Validates non-empty question + 2+ non-empty options before submitting.
+  - **Composer changes:** `isGroupChat` prop gates the poll button (bar-chart icon). `onCreatePoll` prop wires the creator. Poll button only appears in group chats.
+  - **`handleCreatePoll`:** Adds poll message (local only, `id: poll_<ts>`, `text: ""`) to active chat state. No server call, no MLS op, no Dexie write.
+  - **`handleVotePoll`:** Toggles "me" in the voters array for the selected option. Pure local state mutation.
+  - **Security:** JSX text children only (no XSS); poll never enters MLS payload, never logged, never persisted; DM chats correctly excluded via `isGroupChat` gate. security-auditor: GREEN.
+  - **842 frontend tests pass** (+12: `ChatLayoutPoll.test.tsx`); tsc clean; biome clean; bundle budget OK (JS 141.7KB gz / WASM 553.7KB gz).
+  - **Next cycle:** PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768 ciphersuite), or more UX polish.
+
+## Previous state (2026-06-28, cycle 211 — FEATURE: draft-preview indicator in sidebar)
 - **Cycle 211 (commit 09b112e):** FEATURE — Draft indicator in sidebar: inactive chat rows show "Draft: [preview]" when there is unsent text.
   - **`ChatRow`:** New `draft?: string` prop. When `!active && draft`, renders `<span data-testid="draft-preview">` with orange "Draft: " label + the draft text instead of `chat.last`. Condition guards active chat (no indicator while composing in the current chat).
   - **`Sidebar`:** New `drafts: Record<string, string>` prop. Passes `draft={drafts[c.id]}` to each `ChatRow`.
