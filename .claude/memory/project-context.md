@@ -17,7 +17,19 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-28, cycle 208 — FEATURE: emoji picker in message composer)
+## Current state (2026-06-28, cycle 209 — FEATURE: scheduled send in message composer)
+- **Cycle 209 (commit a1f911a):** FEATURE — Scheduled Send: queue a message to fire at a future time.
+  - **`SchedulePickerPopup`:** Floating popover with `<input type="datetime-local">`, Cancel + Schedule buttons. `minDt` is `now+60s`. `handleSubmit` validates `ms > Date.now()` before calling `onSchedule(ms)`. `data-testid="schedule-picker"`.
+  - **`Composer` changes:** Added `onScheduleSend?: (text, at) => void` prop; `schedulePickerOpen` + `schedulePickerRef` state; click-outside useEffect mirrors the emoji picker pattern; "Send later" timer button (`data-testid="send-later-btn"`) appears alongside the send button when text is non-empty.
+  - **`ChatMessage.scheduledFor?: number`:** Client-side-only Unix ms field. When set, message is queued pending.
+  - **Message bubble:** Photon-blue `"Scheduled · HH:MM"` badge (`data-testid="scheduled-badge"`) with inline Cancel button (`data-testid="cancel-scheduled-btn"`). Cancel removes the message via `onCancelScheduled`.
+  - **`sendScheduled(text, at)`:** Adds message to active chat with `scheduledFor` set (uses `sched_` id prefix). `cancelScheduled(msgId)` filters it out.
+  - **Sweep `useEffect` (10s interval):** Clears `scheduledFor` on messages where `scheduledFor <= Date.now()`, making them look like regular sent messages.
+  - **CI fix (commit 844216f):** Biome format — collapsed `waitFor` callback in `ChatLayoutEmojiPicker.test.tsx` to single line.
+  - **422 frontend tests pass (+13: `ChatLayoutScheduleSend.test.tsx` — button hidden on empty, appears with text, opens picker on click, picker has datetime-local, cancel closes picker, schedule adds badge, picker closes after confirm, composer cleared, cancel removes message, badge shows time, timer sweep fires message, multiple queued independently)**; tsc clean; biome clean.
+  - **Next cycle:** PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768 ciphersuite), or more UX polish.
+
+## Previous state (2026-06-28, cycle 208 — FEATURE: emoji picker in message composer)
 - **Cycle 208 (commit 5688a2f):** FEATURE — Emoji picker popup in message composer.
   - **`EmojiPickerPopup`:** Floating `<div data-testid="emoji-picker">` above the smile button. 3 categories: Smileys (16 emojis), Gestures (10), Symbols (10). Each emoji is a `<button data-testid="emoji-btn" aria-label={emoji}>` — JSX text children only, no innerHTML.
   - **`handleInsertEmoji`:** Pure string concat `text.slice(0, start) + emoji + text.slice(end)` → `setText`. Respects `selectionStart`/`selectionEnd` cursor position via `textareaRef`. Calls `requestAnimationFrame` to restore focus + caret after insert. Closes picker on select.
