@@ -137,9 +137,7 @@ describe("ChatLayout — emoji picker", () => {
 		await act(async () => {
 			fireEvent.mouseDown(document.body);
 		});
-		await waitFor(() =>
-			expect(screen.queryByTestId("emoji-picker")).not.toBeInTheDocument(),
-		);
+		await waitFor(() => expect(screen.queryByTestId("emoji-picker")).not.toBeInTheDocument());
 	});
 
 	it("emoji buttons have accessible aria-label set to the emoji itself", async () => {
