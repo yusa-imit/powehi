@@ -1,3 +1,4 @@
+import type { CSSProperties } from "react";
 import { useMediaReceive } from "../hooks/useMediaReceive";
 import type { MediaPayload } from "../hooks/useMessages";
 import { useThumbnail } from "../hooks/useThumbnail";
@@ -11,7 +12,7 @@ import { useThumbnail } from "../hooks/useThumbnail";
  *
  * Object URLs are revoked on unmount to prevent memory leaks.
  */
-export function MediaImage({ media }: { media: MediaPayload }) {
+export function MediaImage({ media, imgStyle }: { media: MediaPayload; imgStyle?: CSSProperties }) {
 	const { objectUrl, loading, error } = useMediaReceive(media);
 	const { objectUrl: thumbUrl } = useThumbnail(loading ? media.thumbnail : undefined);
 
@@ -45,6 +46,7 @@ export function MediaImage({ media }: { media: MediaPayload }) {
 						display: "block",
 						filter: "blur(4px)",
 						transition: "filter 0.3s",
+						...imgStyle,
 					}}
 				/>
 			);
@@ -78,6 +80,7 @@ export function MediaImage({ media }: { media: MediaPayload }) {
 				maxHeight: 320,
 				borderRadius: 10,
 				display: "block",
+				...imgStyle,
 			}}
 		/>
 	);

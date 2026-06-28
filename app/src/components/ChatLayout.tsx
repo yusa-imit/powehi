@@ -1535,6 +1535,7 @@ function MessageBubble({
 	onCopy,
 	onCancelScheduled,
 	onVote,
+	onOpenLightbox,
 }: {
 	msg: ChatMessage;
 	partner: string;
@@ -1555,12 +1556,15 @@ function MessageBubble({
 	onCancelScheduled?: () => void;
 	/** Called when the user votes on a poll option. */
 	onVote?: (optionIdx: number) => void;
+	/** Called when the user clicks a media image to view it full-screen. */
+	onOpenLightbox?: () => void;
 }) {
 	const isMe = msg.from === "me";
 	const [pickerOpen, setPickerOpen] = useState(false);
 	const [hovered, setHovered] = useState(false);
 	const [copied, setCopied] = useState(false);
 	const [hoveredReaction, setHoveredReaction] = useState<string | null>(null);
+	const hasLightbox = !!onOpenLightbox && !!msg.media;
 	const reactionEntries = msg.reactions ? Object.entries(msg.reactions) : [];
 	const totalReactionCount = reactionEntries.reduce((sum, [, senders]) => sum + senders.length, 0);
 
@@ -1643,7 +1647,25 @@ function MessageBubble({
 								{msg.poll ? (
 									<PollView poll={msg.poll} isMe={isMe} onVote={onVote} />
 								) : msg.media ? (
-									<MediaImage media={msg.media} />
+									hasLightbox ? (
+										<button
+											type="button"
+											onClick={onOpenLightbox}
+											data-testid="media-open-lightbox"
+											aria-label="View image full screen"
+											style={{
+												background: "none",
+												border: "none",
+												padding: 0,
+												cursor: "pointer",
+												display: "block",
+											}}
+										>
+											<MediaImage media={msg.media} />
+										</button>
+									) : (
+										<MediaImage media={msg.media} />
+									)
 								) : (
 									<HighlightedText text={msg.text} highlight={highlight ?? ""} />
 								)}
@@ -2256,6 +2278,7 @@ function MessageList({
 	onCopy,
 	onCancelScheduled,
 	onVote,
+	onOpenLightbox,
 	firstUnreadIndex,
 	jumpToMessageId,
 	onJumpComplete,
@@ -2278,6 +2301,7 @@ function MessageList({
 	onCopy?: (msg: ChatMessage) => void;
 	onCancelScheduled?: (msgId: string) => void;
 	onVote?: (msgId: string | undefined, optionIdx: number) => void;
+	onOpenLightbox?: (msg: ChatMessage) => void;
 	firstUnreadIndex?: number;
 	jumpToMessageId?: string;
 	onJumpComplete?: () => void;
@@ -2540,6 +2564,9 @@ function MessageList({
 										: undefined;
 								})()}
 								onVote={onVote ? (optIdx) => onVote(g.msg.id, optIdx) : undefined}
+								onOpenLightbox={
+									onOpenLightbox && g.msg.media ? () => onOpenLightbox(g.msg) : undefined
+								}
 							/>
 						</div>
 					),
@@ -3464,6 +3491,177 @@ function Composer({
 	);
 }
 
+// ── Lightbox ──────────────────────────────────────────────────────────────────
+
+function Lightbox({
+	mediaMsgs,
+	idx,
+	onClose,
+	onPrev,
+	onNext,
+}: {
+	mediaMsgs: ChatMessage[];
+	idx: number;
+	onClose: () => void;
+	onPrev: () => void;
+	onNext: () => void;
+}) {
+	const current = mediaMsgs[idx];
+
+	useEffect(() => {
+		function onKey(e: globalThis.KeyboardEvent) {
+			if (e.key === "Escape") onClose();
+			else if (e.key === "ArrowLeft") onPrev();
+			else if (e.key === "ArrowRight") onNext();
+		}
+		window.addEventListener("keydown", onKey);
+		return () => window.removeEventListener("keydown", onKey);
+	}, [onClose, onPrev, onNext]);
+
+	if (!current?.media) return null;
+	const hasPrev = idx > 0;
+	const hasNext = idx < mediaMsgs.length - 1;
+
+	return (
+		<div
+			data-testid="lightbox"
+			aria-label="Image lightbox"
+			onClick={onClose}
+			onKeyDown={(e) => {
+				if (e.key === "Escape") onClose();
+				else if (e.key === "ArrowLeft") onPrev();
+				else if (e.key === "ArrowRight") onNext();
+			}}
+			style={{
+				position: "fixed",
+				inset: 0,
+				background: "rgba(4,4,8,0.94)",
+				zIndex: 60,
+				display: "flex",
+				alignItems: "center",
+				justifyContent: "center",
+			}}
+		>
+			<button
+				type="button"
+				aria-label="Close lightbox"
+				data-testid="lightbox-close"
+				onClick={(e) => {
+					e.stopPropagation();
+					onClose();
+				}}
+				style={{
+					position: "absolute",
+					top: 18,
+					right: 18,
+					width: 36,
+					height: 36,
+					borderRadius: "50%",
+					background: "rgba(255,255,255,0.1)",
+					border: "1px solid rgba(255,255,255,0.12)",
+					color: "var(--fg-1)",
+					cursor: "pointer",
+					display: "flex",
+					alignItems: "center",
+					justifyContent: "center",
+				}}
+			>
+				<Icon name="x" size={16} />
+			</button>
+
+			{mediaMsgs.length > 1 && (
+				<div
+					data-testid="lightbox-counter"
+					style={{
+						position: "absolute",
+						top: 24,
+						left: "50%",
+						transform: "translateX(-50%)",
+						fontSize: 12,
+						fontFamily: "var(--font-mono)",
+						color: "var(--fg-3)",
+						pointerEvents: "none",
+					}}
+				>
+					{idx + 1} / {mediaMsgs.length}
+				</div>
+			)}
+
+			{hasPrev && (
+				<button
+					type="button"
+					aria-label="Previous image"
+					data-testid="lightbox-prev"
+					onClick={(e) => {
+						e.stopPropagation();
+						onPrev();
+					}}
+					style={{
+						position: "absolute",
+						left: 18,
+						top: "50%",
+						transform: "translateY(-50%)",
+						width: 40,
+						height: 40,
+						borderRadius: "50%",
+						background: "rgba(255,255,255,0.1)",
+						border: "1px solid rgba(255,255,255,0.12)",
+						color: "var(--fg-1)",
+						cursor: "pointer",
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "center",
+					}}
+				>
+					<Icon name="arrow-left" size={18} />
+				</button>
+			)}
+
+			{hasNext && (
+				<button
+					type="button"
+					aria-label="Next image"
+					data-testid="lightbox-next"
+					onClick={(e) => {
+						e.stopPropagation();
+						onNext();
+					}}
+					style={{
+						position: "absolute",
+						right: 18,
+						top: "50%",
+						transform: "translateY(-50%)",
+						width: 40,
+						height: 40,
+						borderRadius: "50%",
+						background: "rgba(255,255,255,0.1)",
+						border: "1px solid rgba(255,255,255,0.12)",
+						color: "var(--fg-1)",
+						cursor: "pointer",
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "center",
+					}}
+				>
+					<Icon name="arrow-right" size={18} />
+				</button>
+			)}
+
+			<div
+				data-testid="lightbox-image-container"
+				onClick={(e) => e.stopPropagation()}
+				onKeyDown={(e) => e.stopPropagation()}
+				style={{ maxWidth: "90vw", maxHeight: "85vh", display: "flex", alignItems: "center" }}
+			>
+				<MediaImage
+					media={current.media}
+					imgStyle={{ maxWidth: "90vw", maxHeight: "85vh", borderRadius: 12 }}
+				/>
+			</div>
+		</div>
+	);
+}
+
 // ── InfoPanel ─────────────────────────────────────────────────────────────────
 
 function InfoSection({
@@ -4309,6 +4507,7 @@ export function ChatLayout() {
 	const [editingMessage, setEditingMessage] = useState<ChatMessage | null>(null);
 	const [forwardMsg, setForwardMsg] = useState<{ id: string; text: string } | null>(null);
 	const [jumpToMessageId, setJumpToMessageId] = useState<string | null>(null);
+	const [lightboxMsgIdx, setLightboxMsgIdx] = useState<number | null>(null);
 	const handleJumpComplete = useCallback(() => setJumpToMessageId(null), []);
 
 	// ── Call state ────────────────────────────────────────────────────────────
@@ -4436,6 +4635,26 @@ export function ChatLayout() {
 		setMsgSearch("");
 	}, [activeId]);
 	const active = chats.find((c) => c.id === activeId);
+	const mediaMessages = useMemo(
+		() => (active?.messages ?? []).filter((m) => !!m.media),
+		[active?.messages],
+	);
+	const handleOpenLightbox = useCallback(
+		(msg: ChatMessage) => {
+			const idx = mediaMessages.findIndex((m) => m === msg);
+			if (idx !== -1) setLightboxMsgIdx(idx);
+		},
+		[mediaMessages],
+	);
+	const handleLightboxClose = useCallback(() => setLightboxMsgIdx(null), []);
+	const handleLightboxPrev = useCallback(
+		() => setLightboxMsgIdx((i) => (i !== null && i > 0 ? i - 1 : i)),
+		[],
+	);
+	const handleLightboxNext = useCallback(
+		() => setLightboxMsgIdx((i) => (i !== null && i < mediaMessages.length - 1 ? i + 1 : i)),
+		[mediaMessages.length],
+	);
 
 	const { sessionToken, identityId } = useAuthStore();
 	const cryptoWorker = useCryptoWorker();
@@ -5596,6 +5815,7 @@ export function ChatLayout() {
 						onCopy={handleCopyMessage}
 						onCancelScheduled={cancelScheduled}
 						onVote={handleVotePoll}
+						onOpenLightbox={handleOpenLightbox}
 						firstUnreadIndex={active.firstUnreadAt}
 						jumpToMessageId={jumpToMessageId ?? undefined}
 						onJumpComplete={handleJumpComplete}
@@ -5660,6 +5880,16 @@ export function ChatLayout() {
 			)}
 
 			<InviteModal open={inviteOpen} onClose={() => setInviteOpen(false)} />
+
+			{lightboxMsgIdx !== null && (
+				<Lightbox
+					mediaMsgs={mediaMessages}
+					idx={lightboxMsgIdx}
+					onClose={handleLightboxClose}
+					onPrev={handleLightboxPrev}
+					onNext={handleLightboxNext}
+				/>
+			)}
 
 			{/* Voice / video call overlay — pure UI stub (no WebRTC) */}
 			{callState !== "idle" && callChat && (
