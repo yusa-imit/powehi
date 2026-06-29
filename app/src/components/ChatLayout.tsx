@@ -120,6 +120,8 @@ interface Chat {
 	archived?: boolean;
 	/** True when the chat is pinned to the top of the sidebar (local-only, not synced). */
 	pinnedTop?: boolean;
+	/** Group description / topic text (local-only, not synced). Group chats only. */
+	description?: string;
 }
 
 // ── Disappearing messages helpers ──────────────────────────────────────────────
@@ -280,6 +282,7 @@ const SEED_CHATS: Chat[] = [
 			{ id: "dev-d", name: "Noa", handle: "noa", role: "member" },
 		],
 		mlsGroupId: "44444444-4444-4444-4444-444444444444",
+		description: "Where design meets code — share mockups, get feedback, ship it.",
 		mentionCount: 2,
 		messages: [
 			{
@@ -3752,6 +3755,7 @@ function InfoPanel({
 	pinnedTop,
 	onTogglePinTop,
 	myHandle,
+	onUpdateDescription,
 }: {
 	chat: Chat;
 	onClose: () => void;
@@ -3767,7 +3771,10 @@ function InfoPanel({
 	pinnedTop: boolean;
 	onTogglePinTop: () => void;
 	myHandle?: string;
+	onUpdateDescription?: (desc: string) => void;
 }) {
+	const [descEditing, setDescEditing] = useState(false);
+	const [descDraft, setDescDraft] = useState("");
 	const [safetyVerified, setSafetyVerified] = useState(false);
 	const [verifiedAt, setVerifiedAt] = useState<number | undefined>(undefined);
 	const [mitmAlert, setMitmAlert] = useState(false);
@@ -3996,6 +4003,126 @@ function InfoPanel({
 				</div>
 			</div>
 
+			{chat.isGroup && (
+				/* Group description / topic */
+				<InfoSection title="About">
+					<div style={{ padding: "0 18px 12px" }}>
+						{descEditing ? (
+							<div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+								<textarea
+									data-testid="group-description-input"
+									rows={3}
+									maxLength={200}
+									value={descDraft}
+									onChange={(e) => setDescDraft(e.target.value)}
+									onKeyDown={(e) => {
+										if (e.key === "Enter" && !e.shiftKey) {
+											e.preventDefault();
+											const trimmed = descDraft.trim();
+											onUpdateDescription?.(trimmed);
+											setDescEditing(false);
+										} else if (e.key === "Escape") {
+											setDescEditing(false);
+										}
+									}}
+									style={{
+										width: "100%",
+										background: "var(--bg-elevated)",
+										color: "var(--fg-1)",
+										border: "1px solid var(--border-soft)",
+										borderRadius: 6,
+										padding: "6px 8px",
+										fontSize: 13,
+										fontFamily: "var(--font-sans)",
+										resize: "none",
+										outline: "none",
+										boxSizing: "border-box",
+									}}
+								/>
+								<div style={{ display: "flex", gap: 6 }}>
+									<button
+										type="button"
+										data-testid="group-description-save"
+										onClick={() => {
+											const trimmed = descDraft.trim();
+											onUpdateDescription?.(trimmed);
+											setDescEditing(false);
+										}}
+										style={{
+											padding: "4px 12px",
+											fontSize: 12,
+											fontFamily: "var(--font-sans)",
+											fontWeight: 600,
+											background: "#FF8A3D",
+											color: "#040408",
+											border: "none",
+											borderRadius: 5,
+											cursor: "pointer",
+										}}
+									>
+										Save
+									</button>
+									<button
+										type="button"
+										data-testid="group-description-cancel"
+										onClick={() => setDescEditing(false)}
+										style={{
+											padding: "4px 12px",
+											fontSize: 12,
+											fontFamily: "var(--font-sans)",
+											fontWeight: 500,
+											background: "var(--bg-elevated)",
+											color: "var(--fg-3)",
+											border: "1px solid var(--border-soft)",
+											borderRadius: 5,
+											cursor: "pointer",
+										}}
+									>
+										Cancel
+									</button>
+								</div>
+							</div>
+						) : (
+							<div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+								<span
+									data-testid="group-description-text"
+									style={{
+										flex: 1,
+										fontSize: 13,
+										color: chat.description ? "var(--fg-2)" : "var(--fg-4)",
+										lineHeight: 1.5,
+									}}
+								>
+									{chat.description || "No description set"}
+								</span>
+								{onUpdateDescription && (
+									<button
+										type="button"
+										data-testid="group-description-edit-btn"
+										aria-label="Edit group description"
+										onClick={() => {
+											setDescDraft(chat.description ?? "");
+											setDescEditing(true);
+										}}
+										style={{
+											flex: "none",
+											background: "transparent",
+											border: "none",
+											color: "var(--fg-3)",
+											cursor: "pointer",
+											padding: 2,
+											display: "flex",
+											alignItems: "center",
+										}}
+									>
+										<Icon name="edit-2" size={13} />
+									</button>
+								)}
+							</div>
+						)}
+					</div>
+				</InfoSection>
+			)}
 			{chat.isGroup ? (
 				/* Group member list */
 				<InfoSection title={`Members (${chat.members?.length ?? chat.memberCount ?? 0})`}>
@@ -5258,6 +5385,10 @@ export function ChatLayout() {
 		setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, pinnedTop: !c.pinnedTop } : c)));
 	}, []);
 
+	const handleUpdateGroupDescription = useCallback((chatId: string, desc: string) => {
+		setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, description: desc } : c)));
+	}, []);
+
 	/**
 	 * Send a read_receipt to the specified MLS group for the given envelope IDs.
 	 * Takes explicit mlsGroupId/mlsIdentityId so buffered receipts from background chats
@@ -5876,6 +6007,7 @@ export function ChatLayout() {
 					pinnedTop={active.pinnedTop ?? false}
 					onTogglePinTop={() => handleTogglePinTop(active.id)}
 					myHandle={useAuthStore.getState().myHandle ?? undefined}
+					onUpdateDescription={(desc) => handleUpdateGroupDescription(active.id, desc)}
 				/>
 			)}
 
