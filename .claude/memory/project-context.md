@@ -17,7 +17,18 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-29, cycle 216 — STABILIZATION: CI format fix + security audit)
+## Current state (2026-06-29, cycle 217 — FEATURE: group description in InfoPanel)
+- **Cycle 217 (commit 865909a):** FEATURE — Editable group description ("About" section) in group InfoPanel.
+  - **`Chat.description?: string`:** Local-only field. Never sent to server, never in MLS payload, never in any API request body. Comment documents this explicitly.
+  - **`handleUpdateGroupDescription(chatId, desc)`:** Pure `setChats` immutable map update. No API call, no MLS op, no server contact.
+  - **InfoPanel "About" section:** Rendered for group chats only (DMs unchanged). View mode: description text (or "No description set" placeholder in muted fg-4 color) + pencil edit button. Edit mode: controlled `<textarea>` (maxLength=200), Save/Cancel buttons, Enter (without Shift) saves and collapses, Escape cancels without saving.
+  - **`edit-2` icon:** Lucide-style `<path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>` added to Icon.tsx.
+  - **Design Team seed:** `description: "Where design meets code — share mockups, get feedback, ship it."` added.
+  - **Security:** JSX text children only (no dangerouslySetInnerHTML). Controlled textarea. No logging. No new server-visible metadata. `data-testid` values are string literals. security-auditor: GREEN. YELLOW-1 advisory: handler has no length guard (safe now since local-only — note for when/if promoted to synced field).
+  - **862 frontend tests pass** (+9: `ChatLayoutGroupDescription.test.tsx` — seed description shown, new group placeholder, edit button present, textarea opens, Save saves, Enter saves+collapses, Escape cancels, Cancel button cancels, absent for DM); tsc clean; biome clean; bundle budget OK (JS 143.1KB gz / WASM 553.7KB gz).
+  - **Next cycle:** PQ hybrid Phase A or more UX polish.
+
+## Previous state (2026-06-29, cycle 216 — STABILIZATION: CI format fix + security audit)
 - **Cycle 216 (commit a19ec02):** STABILIZATION — Fixed `Format check` CI failure (main was red).
   - **Root cause:** Two `let env_repo = \n    FakeEnvelopeRepo::with_memberships(...)` bindings added in cycle 215 were split across 2 lines even though they fit within 100 chars. `cargo fmt --check` in CI failed with exit code 1.
   - **Fix:** `cargo fmt --package powehi-application` collapsed both bindings to single lines (lines 1193, 1223 in `messaging_service.rs`).
