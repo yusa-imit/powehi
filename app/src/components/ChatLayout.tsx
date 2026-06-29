@@ -1030,6 +1030,7 @@ function Sidebar({
 	searchQuery,
 	onSearch,
 	onJumpToMessage,
+	onMarkAllRead,
 }: {
 	chats: Chat[];
 	activeId: string;
@@ -1041,6 +1042,7 @@ function Sidebar({
 	searchQuery: string;
 	onSearch: (q: string) => void;
 	onJumpToMessage?: (chatId: string, messageId?: string) => void;
+	onMarkAllRead?: () => void;
 }) {
 	const [starredOpen, setStarredOpen] = useState(false);
 	const [chatFilter, setChatFilter] = useState<"all" | "dms" | "groups" | "archived">("all");
@@ -1050,6 +1052,9 @@ function Sidebar({
 	const groupMentions = chats
 		.filter((c) => !!c.isGroup)
 		.reduce((s, c) => s + (c.mentionCount ?? 0), 0);
+	const totalUnread = chats.reduce((s, c) => s + c.unread, 0);
+	const totalMentions = chats.reduce((s, c) => s + (c.mentionCount ?? 0), 0);
+	const hasUnread = totalUnread > 0 || totalMentions > 0;
 	const filtered = chats.filter((c) => {
 		const matchesTab =
 			chatFilter === "archived"
@@ -1128,6 +1133,9 @@ function Sidebar({
 				<div style={{ display: "flex", gap: 2 }}>
 					<IconBtn icon="users" onClick={onNewGroup} label="New group" />
 					<IconBtn icon="plus" onClick={onNewChat} label="New chat" />
+					{hasUnread && onMarkAllRead && (
+						<IconBtn icon="check-square" onClick={onMarkAllRead} label="Mark all as read" />
+					)}
 					<IconBtn icon="star" onClick={() => setStarredOpen(true)} label="Starred messages" />
 					<IconBtn icon="settings" onClick={onSettings} label="Settings" />
 				</div>
@@ -5782,6 +5790,14 @@ export function ChatLayout() {
 		);
 	}, []);
 
+	/** Clear unread badge, mention badge, and unread divider for every chat in one operation.
+	 * Local-only — no server call, no MLS op, no logging. */
+	const handleMarkAllRead = useCallback(() => {
+		setChats((cs) =>
+			cs.map((c) => ({ ...c, unread: 0, firstUnreadAt: undefined, mentionCount: 0 })),
+		);
+	}, []);
+
 	/**
 	 * Send a read_receipt to the specified MLS group for the given envelope IDs.
 	 * Takes explicit mlsGroupId/mlsIdentityId so buffered receipts from background chats
@@ -6288,6 +6304,7 @@ export function ChatLayout() {
 				searchQuery={search}
 				onSearch={setSearch}
 				onJumpToMessage={handleJumpToMessage}
+				onMarkAllRead={handleMarkAllRead}
 			/>
 
 			{active && (
