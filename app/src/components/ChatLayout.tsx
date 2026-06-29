@@ -127,6 +127,25 @@ interface Chat {
 	nickname?: string;
 }
 
+// ── Day-label helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Returns a human-readable day label for `ts` (Unix ms): "Today", "Yesterday",
+ * or a locale-formatted string like "Mon, Jun 28". Pure — no side effects.
+ */
+export function getDayLabel(ts: number): string {
+	const d = new Date(ts);
+	const now = new Date();
+	const todayStr = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
+	const msgStr = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+	if (msgStr === todayStr) return "Today";
+	const yesterday = new Date(now);
+	yesterday.setDate(now.getDate() - 1);
+	const yStr = `${yesterday.getFullYear()}-${yesterday.getMonth()}-${yesterday.getDate()}`;
+	if (msgStr === yStr) return "Yesterday";
+	return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+}
+
 // ── Disappearing messages helpers ──────────────────────────────────────────────
 
 const TTL_OPTIONS = [undefined, 300, 3600, 86400, 604800] as const;
@@ -2557,6 +2576,7 @@ function MessageList({
 					g.type === "day" ? (
 						<div
 							key={g.key}
+							data-testid="date-separator"
 							style={{
 								alignSelf: "center",
 								margin: "12px 0 6px",
@@ -5312,12 +5332,22 @@ export function ChatLayout() {
 						}
 					}
 					const displayText = msg.media ? "Image attachment" : msg.text;
+					const dayLabel = getDayLabel(now.getTime());
+					// Find the last explicitly-set day label in the history (sparse field).
+					let prevDay: string | undefined;
+					for (let j = msgs.length - 1; j >= 0; j--) {
+						if (msgs[j].day) {
+							prevDay = msgs[j].day;
+							break;
+						}
+					}
 					msgs.push({
 						id: msg.id,
 						from: "them",
 						text: displayText,
 						last: true,
 						time,
+						day: dayLabel !== prevDay ? dayLabel : undefined,
 						continued: msgs.length > 0 && msgs[msgs.length - 1].from === "them",
 						media: msg.media,
 						expiresAt: msg.expiresAt,
@@ -6274,6 +6304,7 @@ export function ChatLayout() {
 		// Assign a temp local ID (opt_ prefix) so ↑-to-edit can target this message before
 		// the server-assigned envelope ID is backfilled.
 		const optId = `opt_${crypto.randomUUID()}`;
+		const sendDayLabel = getDayLabel(now.getTime());
 		setChats((cs) =>
 			cs.map((c) => {
 				if (c.id !== activeId) return c;
@@ -6284,12 +6315,21 @@ export function ChatLayout() {
 						break;
 					}
 				}
+				// Set day label only when the day has changed from the last separator.
+				let prevDay: string | undefined;
+				for (let j = msgs.length - 1; j >= 0; j--) {
+					if (msgs[j].day) {
+						prevDay = msgs[j].day;
+						break;
+					}
+				}
 				msgs.push({
 					id: optId,
 					from: "me",
 					text,
 					last: true,
 					time,
+					day: sendDayLabel !== prevDay ? sendDayLabel : undefined,
 					read: false,
 					continued: msgs.length > 0 && msgs[msgs.length - 1].from === "me",
 					expiresAt,
