@@ -197,6 +197,11 @@ const SEED_CHATS: Chat[] = [
 				continued: true,
 			},
 			{
+				from: "them",
+				text: "Also **bring your charger** — the `outlet` by the window is the *only one* that works.",
+				continued: true,
+			},
+			{
 				from: "me",
 				text: "Bringing the notebook.",
 				continued: true,
@@ -466,13 +471,82 @@ function applyHighlight(text: string, highlight: string): ReactNode {
 	return <>{parts}</>;
 }
 
+// ── parseFormatting ───────────────────────────────────────────────────────────
+// Splits a plain-text string into segments: bold (**text**), italic (*text*),
+// inline code (`text`), or plain text. Bold must be matched before italic so
+// that ** is consumed as a unit before the * alternative is tried.
+
+type FmtSegment = { type: "text" | "bold" | "italic" | "code"; value: string };
+
+function parseFormatting(text: string): FmtSegment[] {
+	const segs: FmtSegment[] = [];
+	const FMT_RE = /`([^`]+)`|\*\*([^*]+)\*\*|\*([^*]+)\*/g;
+	let last = 0;
+	let m: RegExpExecArray | null;
+	// biome-ignore lint/suspicious/noAssignInExpressions: idiomatic exec loop
+	while ((m = FMT_RE.exec(text)) !== null) {
+		if (m.index > last) segs.push({ type: "text", value: text.slice(last, m.index) });
+		if (m[1] !== undefined) segs.push({ type: "code", value: m[1] });
+		else if (m[2] !== undefined) segs.push({ type: "bold", value: m[2] });
+		else if (m[3] !== undefined) segs.push({ type: "italic", value: m[3] });
+		last = m.index + m[0].length;
+	}
+	if (last < text.length) segs.push({ type: "text", value: text.slice(last) });
+	return segs.length > 0 ? segs : [{ type: "text", value: text }];
+}
+
+// Renders an array of FmtSegment nodes applying optional search highlight.
+function renderFmtWithHighlight(fmtSegs: FmtSegment[], highlight: string, kp: string): ReactNode {
+	const inner = (v: string): ReactNode => (highlight ? applyHighlight(v, highlight) : v);
+	return fmtSegs.map((f, j) => {
+		const fk = `${kp}-${j}`;
+		switch (f.type) {
+			case "bold":
+				return (
+					<strong key={fk} data-testid="fmt-bold" style={{ fontWeight: 700 }}>
+						{inner(f.value)}
+					</strong>
+				);
+			case "italic":
+				return (
+					<em key={fk} data-testid="fmt-italic">
+						{inner(f.value)}
+					</em>
+				);
+			case "code":
+				return (
+					<code
+						key={fk}
+						data-testid="fmt-code"
+						style={{
+							fontFamily: "monospace",
+							background: "rgba(255,255,255,0.08)",
+							borderRadius: 3,
+							padding: "0 3px",
+							fontSize: "0.9em",
+						}}
+					>
+						{f.value}
+					</code>
+				);
+			default:
+				return <span key={fk}>{inner(f.value)}</span>;
+		}
+	});
+}
+
 function HighlightedText({ text, highlight }: { text: string; highlight: string }) {
-	const segs = parseMessageLinks(text);
-	const noLinks = segs.length === 1 && segs[0].type === "text";
-	if (noLinks && !highlight) return <>{text}</>;
+	const urlSegs = parseMessageLinks(text);
+	const isPlainText = urlSegs.length === 1 && urlSegs[0].type === "text";
+	if (isPlainText) {
+		const fmtSegs = parseFormatting(text);
+		const noFmt = fmtSegs.length === 1 && fmtSegs[0].type === "text";
+		if (noFmt && !highlight) return <>{text}</>;
+		return <>{renderFmtWithHighlight(fmtSegs, highlight, "root")}</>;
+	}
 	return (
 		<>
-			{segs.map((seg, i) => {
+			{urlSegs.map((seg, i) => {
 				const k = `${seg.type}-${i}`;
 				if (seg.type === "url") {
 					return (
@@ -492,8 +566,8 @@ function HighlightedText({ text, highlight }: { text: string; highlight: string 
 						</a>
 					);
 				}
-				if (!highlight) return <span key={k}>{seg.value}</span>;
-				return <span key={k}>{applyHighlight(seg.value, highlight)}</span>;
+				const fmtSegs = parseFormatting(seg.value);
+				return <span key={k}>{renderFmtWithHighlight(fmtSegs, highlight, k)}</span>;
 			})}
 		</>
 	);
