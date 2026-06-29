@@ -17,7 +17,17 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-30, cycle 221 — FEATURE: mark-all-read button)
+## Current state (2026-06-30, cycle 222 — FEATURE: inline text formatting)
+- **Cycle 222 (commit fc2ecfd):** FEATURE — Inline text formatting in chat message bubbles.
+  - **`parseFormatting(text)`:** New pure function. Regex `` /`([^`]+)`|\*\*([^*]+)\*\*|\*([^*]+)\*/g `` splits text into `FmtSegment[]` with types `text | bold | italic | code`. Bold (`**`) matched before italic (`*`) in alternation so `**` consumed as a unit. Linear-time (negated char classes, no ReDoS).
+  - **`renderFmtWithHighlight(fmtSegs, highlight, kp)`:** Renders segments to JSX: bold → `<strong data-testid="fmt-bold">`, italic → `<em data-testid="fmt-italic">`, code → `<code data-testid="fmt-code" style={{fontFamily:"monospace",...}>`. All JSX text children — no `dangerouslySetInnerHTML`. Search highlight (`applyHighlight`) applied inside bold/italic content; code content is literal.
+  - **`HighlightedText` updated:** Now chains `parseMessageLinks` → `parseFormatting` per text segment. URL links unaffected (href comes only from `parseMessageLinks`). Fast path preserved: pure text with no URLs, formatting, or highlight returns `<>{text}</>` directly.
+  - **Seed message added:** Maya's chat: `"Also **bring your charger** — the \`outlet\` by the window is the *only one* that works."` — demonstrates all three formatting types.
+  - **Security:** No `dangerouslySetInnerHTML` anywhere in file (grep confirmed). `<strong>`/`<em>`/`<code>` are non-sink semantic tags. Inline `style` has only hardcoded literal values. `href` in `<a>` tags comes from `parseMessageLinks` only (protocol-validated, unchanged). No server calls, no MLS ops, no PII logging, no new server-visible metadata. security-auditor: **GREEN** — no findings; React JSX escaping makes XSS impossible; no ReDoS exposure (linear-time negated char class quantifiers).
+  - **910 frontend tests pass (+12: `ChatLayoutFormatting.test.tsx` — seed bold renders `<strong>`, seed italic renders `<em>`, seed code renders `<code>`, incoming `**bold**` renders strong, incoming `*italic*` renders em, incoming `` `code` `` renders code, plain text no fmt elements, unmatched `*` stays as text, bold+URL same message, code has monospace style, mixed bold+italic, URL linkification still works)**; tsc clean; biome clean; bundle budget OK (JS 144.8KB gz / WASM 553.7KB gz).
+  - **Next cycle:** PQ hybrid Phase A or more UX polish.
+
+## Previous state (2026-06-30, cycle 221 — FEATURE: mark-all-read button)
 - **Cycle 221 (commit fb27f08):** FEATURE — "Mark all as read" button in sidebar header.
   - **`check-square` icon:** Added to `Icon.tsx` (static SVG path, Lucide-style). Local-only.
   - **`Sidebar` prop `onMarkAllRead?: () => void`:** Optional callback. Sidebar computes `totalUnread = chats.reduce(...)`, `totalMentions = chats.reduce(...)`, `hasUnread = totalUnread > 0 || totalMentions > 0`. Renders `<IconBtn icon="check-square" label="Mark all as read">` in header only when `hasUnread && onMarkAllRead`.
