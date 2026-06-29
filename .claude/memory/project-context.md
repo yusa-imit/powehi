@@ -17,7 +17,16 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-29, cycle 217 — FEATURE: group description in InfoPanel)
+## Current state (2026-06-29, cycle 218 — FEATURE: Cmd+K quick chat switcher)
+- **Cycle 218 (commit 15ab178):** FEATURE — Cmd+K quick chat switcher modal.
+  - **`QuickSwitcher` component:** Full-screen backdrop (rgba 0.72), centered 400px panel. Auto-focused search input filters chats by name or handle (case-insensitive). Items shown with avatar initial, name, and @handle. Arrow keys navigate highlighted item (`aria-selected`); Enter selects; Escape / second Ctrl+K / backdrop click closes.
+  - **State:** `quickSwitcherOpen`, `quickSwitcherQuery`, `quickSwitcherActive`, `quickSwitcherInputRef` — all local to `ChatLayout`.
+  - **Global keydown listener:** `(e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k"` (CapsLock-safe); `e.preventDefault()` suppresses browser address-bar focus; cleanup on unmount.
+  - **Security:** JSX text children only (no dangerouslySetInnerHTML). Query never logged, never sent to server. No API calls. No new server-visible metadata. security-auditor: PASS. Advisory fixed: CapsLock robustness via `.toLowerCase()`.
+  - **874 frontend tests pass** (+12: `ChatLayoutQuickSwitcher.test.tsx` — not visible on init, Ctrl+K opens, Meta+K opens, Escape closes, backdrop click closes, lists seed chats, typing filters, no-match empty state, click switches chat, ArrowDown highlights, Enter selects, second Ctrl+K closes); tsc clean; biome clean; bundle budget OK (JS 143.9KB gz / WASM 553.7KB gz).
+  - **Next cycle:** PQ hybrid Phase A or more UX polish.
+
+## Previous state (2026-06-29, cycle 217 — FEATURE: group description in InfoPanel)
 - **Cycle 217 (commit 865909a):** FEATURE — Editable group description ("About" section) in group InfoPanel.
   - **`Chat.description?: string`:** Local-only field. Never sent to server, never in MLS payload, never in any API request body. Comment documents this explicitly.
   - **`handleUpdateGroupDescription(chatId, desc)`:** Pure `setChats` immutable map update. No API call, no MLS op, no server contact.
