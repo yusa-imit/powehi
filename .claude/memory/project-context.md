@@ -17,7 +17,17 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-29, cycle 219 — FEATURE: chat nickname for DM contacts)
+## Current state (2026-06-29, cycle 220 — STABILIZATION: security-invariant input validation tests)
+- **Cycle 220 (commit f16c4a5):** STABILIZATION — Added 6 missing security-invariant input validation tests to `powehi-rest-api`.
+  - **`register_init_short/long_handle_hash_returns_400`:** SHA-256 constraint — `handle_hash` must be exactly 32 bytes; shorter/longer inputs must be rejected at the HTTP layer before the OPAQUE state machine runs (prevents brute-force handle enumeration via oracle).
+  - **`login_init_short/long_handle_hash_returns_400`:** Same constraint for login path.
+  - **`fetch/upload_key_packages_malformed_device_id_returns_400`:** `parse_device_id` with non-UUID path param returns InvalidInput; handler must reject before reaching use case.
+  - **CI:** Green (2 allowed warnings: instant unmaintained via openmls; bitcoin_hashes yanked via bip39 — both transitive). No new vulnerabilities.
+  - **Target dir:** 7.4 GB (under 20 GB threshold, no pruning). fmt clean; clippy clean.
+  - **powehi-rest-api: 139 tests pass (+6).**
+  - **Next cycle:** PQ hybrid Phase A or more UX polish.
+
+## Previous state (2026-06-29, cycle 219 — FEATURE: chat nickname for DM contacts)
 - **Cycle 219 (commit c779153):** FEATURE — Chat nickname: custom display name for DM contacts (local-only, never sent to server).
   - **`Chat.nickname?: string`:** New optional field on Chat. Local-only — absent from all MLS encrypt paths, API request bodies, and log statements.
   - **`handleUpdateNickname(chatId, nickname)`:** Pure `setChats` immutable update. Empty string → `undefined` (clears nickname). No API call, no MLS op, no server contact.
