@@ -1190,8 +1190,7 @@ mod tests {
         use chrono::Duration as CDuration;
         let group_id = GroupId::new();
         let member = DeviceId::new();
-        let env_repo =
-            FakeEnvelopeRepo::with_memberships(vec![(group_id.clone(), member.clone())]);
+        let env_repo = FakeEnvelopeRepo::with_memberships(vec![(group_id.clone(), member.clone())]);
 
         // Directly insert an envelope with expires_at 1 second in the past.
         let mut env = Envelope::new(
@@ -1220,8 +1219,7 @@ mod tests {
         use chrono::Duration as CDuration;
         let group_id = GroupId::new();
         let member = DeviceId::new();
-        let env_repo =
-            FakeEnvelopeRepo::with_memberships(vec![(group_id.clone(), member.clone())]);
+        let env_repo = FakeEnvelopeRepo::with_memberships(vec![(group_id.clone(), member.clone())]);
 
         let mut env = Envelope::new(
             group_id.clone(),
