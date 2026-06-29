@@ -17,7 +17,17 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-29, cycle 220 — STABILIZATION: security-invariant input validation tests)
+## Current state (2026-06-30, cycle 221 — FEATURE: mark-all-read button)
+- **Cycle 221 (commit fb27f08):** FEATURE — "Mark all as read" button in sidebar header.
+  - **`check-square` icon:** Added to `Icon.tsx` (static SVG path, Lucide-style). Local-only.
+  - **`Sidebar` prop `onMarkAllRead?: () => void`:** Optional callback. Sidebar computes `totalUnread = chats.reduce(...)`, `totalMentions = chats.reduce(...)`, `hasUnread = totalUnread > 0 || totalMentions > 0`. Renders `<IconBtn icon="check-square" label="Mark all as read">` in header only when `hasUnread && onMarkAllRead`.
+  - **`handleMarkAllRead`:** Pure `setChats` map — sets `unread:0, firstUnreadAt:undefined, mentionCount:0` for all chats in one operation. No API call, no MLS op, no server contact, no logging.
+  - **Button visibility:** Visible when any chat has unread messages or mention badges (Jordan seed data has `unread:2`; Design Team has `mentionCount:2`). Disappears after clicking. Reappears when new messages arrive.
+  - **Security:** Purely local React state. Fields are local-only (never in MLS plaintext or API request body). Button label is a string literal. No new server-visible metadata. security-auditor: GREEN — verified no server calls, no MLS, no XSS, no PII logging.
+  - **898 frontend tests pass (+11: `ChatLayoutMarkAllRead.test.tsx` — button visible on load, aria-label correct, clicking clears unread badges, button hides itself after click, mention badges cleared, button reappears after new incoming msg, active chat messages intact, Chats-tab unread cleared, Groups-tab mention cleared, no-op when no unread, chat select still works after mark-all-read)**; tsc clean; biome clean; bundle budget OK (JS 144.4KB gz / WASM 553.7KB gz).
+  - **Next cycle:** PQ hybrid Phase A or more UX polish.
+
+## Previous state (2026-06-29, cycle 220 — STABILIZATION: security-invariant input validation tests)
 - **Cycle 220 (commit f16c4a5):** STABILIZATION — Added 6 missing security-invariant input validation tests to `powehi-rest-api`.
   - **`register_init_short/long_handle_hash_returns_400`:** SHA-256 constraint — `handle_hash` must be exactly 32 bytes; shorter/longer inputs must be rejected at the HTTP layer before the OPAQUE state machine runs (prevents brute-force handle enumeration via oracle).
   - **`login_init_short/long_handle_hash_returns_400`:** Same constraint for login path.
