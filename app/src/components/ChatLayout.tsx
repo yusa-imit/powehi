@@ -2,6 +2,7 @@ import {
 	type CSSProperties,
 	type KeyboardEvent,
 	type ReactNode,
+	type RefObject,
 	useCallback,
 	useEffect,
 	useLayoutEffect,
@@ -3494,6 +3495,226 @@ function Composer({
 	);
 }
 
+// ── Quick Switcher ────────────────────────────────────────────────────────────
+
+function QuickSwitcher({
+	chats,
+	query,
+	activeIdx,
+	inputRef,
+	onQueryChange,
+	onActiveChange,
+	onSelect,
+	onClose,
+}: {
+	chats: Chat[];
+	query: string;
+	activeIdx: number;
+	inputRef: RefObject<HTMLInputElement | null>;
+	onQueryChange: (q: string) => void;
+	onActiveChange: (idx: number) => void;
+	onSelect: (id: string) => void;
+	onClose: () => void;
+}) {
+	const q = query.toLowerCase();
+	const filtered = chats.filter(
+		(c) => !q || c.name.toLowerCase().includes(q) || c.handle.toLowerCase().includes(q),
+	);
+	const clampedActive = Math.min(activeIdx, Math.max(0, filtered.length - 1));
+
+	useEffect(() => {
+		inputRef.current?.focus();
+	}, [inputRef]);
+
+	function handleKeyDown(e: React.KeyboardEvent) {
+		if (e.key === "Escape") {
+			onClose();
+		} else if (e.key === "ArrowDown") {
+			e.preventDefault();
+			onActiveChange(Math.min(clampedActive + 1, filtered.length - 1));
+		} else if (e.key === "ArrowUp") {
+			e.preventDefault();
+			onActiveChange(Math.max(clampedActive - 1, 0));
+		} else if (e.key === "Enter") {
+			const target = filtered[clampedActive];
+			if (target) onSelect(target.id);
+		}
+	}
+
+	return (
+		<div
+			data-testid="quick-switcher-backdrop"
+			style={{
+				position: "fixed",
+				inset: 0,
+				background: "rgba(4,4,8,0.72)",
+				display: "flex",
+				alignItems: "flex-start",
+				justifyContent: "center",
+				paddingTop: "15vh",
+				zIndex: 120,
+			}}
+			onClick={onClose}
+			onKeyDown={(e) => {
+				if (e.key === "Escape") onClose();
+			}}
+		>
+			<div
+				data-testid="quick-switcher"
+				style={{
+					background: "var(--bg-elevated)",
+					border: "1px solid var(--border-faint)",
+					borderRadius: 14,
+					width: 400,
+					maxHeight: 360,
+					display: "flex",
+					flexDirection: "column",
+					boxShadow: "0 12px 48px rgba(0,0,0,0.6)",
+					overflow: "hidden",
+				}}
+				onClick={(e) => e.stopPropagation()}
+				onKeyDown={handleKeyDown}
+			>
+				<div
+					style={{
+						display: "flex",
+						alignItems: "center",
+						gap: 10,
+						padding: "10px 14px",
+						borderBottom: "1px solid var(--border-faint)",
+					}}
+				>
+					<Icon name="search" size={14} color="var(--fg-3)" />
+					<input
+						ref={inputRef}
+						data-testid="quick-switcher-input"
+						type="text"
+						placeholder="Jump to conversation…"
+						value={query}
+						onChange={(e) => onQueryChange(e.target.value)}
+						style={{
+							flex: 1,
+							background: "none",
+							border: "none",
+							outline: "none",
+							color: "var(--fg-1)",
+							fontSize: 14,
+							fontFamily: "var(--font-sans)",
+						}}
+					/>
+					<span
+						style={{
+							fontSize: 11,
+							color: "var(--fg-4)",
+							fontFamily: "var(--font-mono)",
+							padding: "2px 5px",
+							border: "1px solid var(--border-faint)",
+							borderRadius: 4,
+						}}
+					>
+						Esc
+					</span>
+				</div>
+				<div style={{ overflowY: "auto" }}>
+					{filtered.length === 0 ? (
+						<div
+							style={{
+								padding: "20px",
+								textAlign: "center",
+								fontSize: 13,
+								color: "var(--fg-4)",
+							}}
+							data-testid="quick-switcher-empty"
+						>
+							No conversations found
+						</div>
+					) : (
+						filtered.map((c, i) => (
+							<button
+								key={c.id}
+								type="button"
+								data-testid={`quick-switcher-item-${c.id}`}
+								aria-selected={i === clampedActive}
+								onClick={() => onSelect(c.id)}
+								style={{
+									display: "flex",
+									alignItems: "center",
+									gap: 10,
+									width: "100%",
+									padding: "9px 14px",
+									background: i === clampedActive ? "var(--bg-surface)" : "none",
+									border: "none",
+									cursor: "pointer",
+									textAlign: "left",
+									color: "var(--fg-1)",
+								}}
+							>
+								<div
+									style={{
+										width: 32,
+										height: 32,
+										borderRadius: "50%",
+										background: "var(--bg-surface)",
+										display: "flex",
+										alignItems: "center",
+										justifyContent: "center",
+										fontSize: 12,
+										fontWeight: 600,
+										color: "var(--fg-2)",
+										flexShrink: 0,
+									}}
+								>
+									{c.name.charAt(0).toUpperCase()}
+								</div>
+								<div style={{ minWidth: 0 }}>
+									<div
+										style={{
+											fontWeight: 500,
+											fontSize: 13,
+											color: "var(--fg-1)",
+											overflow: "hidden",
+											textOverflow: "ellipsis",
+											whiteSpace: "nowrap",
+										}}
+									>
+										{c.name}
+									</div>
+									<div
+										style={{
+											fontSize: 11,
+											color: "var(--fg-3)",
+											overflow: "hidden",
+											textOverflow: "ellipsis",
+											whiteSpace: "nowrap",
+										}}
+									>
+										@{c.handle}
+									</div>
+								</div>
+							</button>
+						))
+					)}
+				</div>
+				{filtered.length > 0 && (
+					<div
+						style={{
+							borderTop: "1px solid var(--border-faint)",
+							padding: "6px 14px",
+							display: "flex",
+							gap: 12,
+							fontSize: 11,
+							color: "var(--fg-4)",
+						}}
+					>
+						<span>↑↓ navigate</span>
+						<span>↵ open</span>
+					</div>
+				)}
+			</div>
+		</div>
+	);
+}
+
 // ── Lightbox ──────────────────────────────────────────────────────────────────
 
 function Lightbox({
@@ -4637,6 +4858,12 @@ export function ChatLayout() {
 	const [lightboxMsgIdx, setLightboxMsgIdx] = useState<number | null>(null);
 	const handleJumpComplete = useCallback(() => setJumpToMessageId(null), []);
 
+	// ── Quick switcher (Cmd+K / Ctrl+K) ──────────────────────────────────────
+	const [quickSwitcherOpen, setQuickSwitcherOpen] = useState(false);
+	const [quickSwitcherQuery, setQuickSwitcherQuery] = useState("");
+	const [quickSwitcherActive, setQuickSwitcherActive] = useState(0);
+	const quickSwitcherInputRef = useRef<HTMLInputElement>(null);
+
 	// ── Call state ────────────────────────────────────────────────────────────
 	const [callState, setCallState] = useState<CallState>("idle");
 	const [callType, setCallType] = useState<CallType>("voice");
@@ -4761,6 +4988,24 @@ export function ChatLayout() {
 	useEffect(() => {
 		setMsgSearch("");
 	}, [activeId]);
+
+	// Global Cmd+K / Ctrl+K opens the quick switcher.
+	useEffect(() => {
+		function onKey(e: globalThis.KeyboardEvent) {
+			if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+				e.preventDefault();
+				setQuickSwitcherOpen((v) => {
+					if (!v) {
+						setQuickSwitcherQuery("");
+						setQuickSwitcherActive(0);
+					}
+					return !v;
+				});
+			}
+		}
+		window.addEventListener("keydown", onKey);
+		return () => window.removeEventListener("keydown", onKey);
+	}, []);
 	const active = chats.find((c) => c.id === activeId);
 	const mediaMessages = useMemo(
 		() => (active?.messages ?? []).filter((m) => !!m.media),
@@ -6220,6 +6465,26 @@ export function ChatLayout() {
 						</div>
 					</div>
 				</div>
+			)}
+
+			{/* ── Quick switcher (Cmd+K / Ctrl+K) ─────────────────────────────── */}
+			{quickSwitcherOpen && (
+				<QuickSwitcher
+					chats={chats}
+					query={quickSwitcherQuery}
+					activeIdx={quickSwitcherActive}
+					inputRef={quickSwitcherInputRef}
+					onQueryChange={(q) => {
+						setQuickSwitcherQuery(q);
+						setQuickSwitcherActive(0);
+					}}
+					onActiveChange={setQuickSwitcherActive}
+					onSelect={(id) => {
+						setActiveId(id);
+						setQuickSwitcherOpen(false);
+					}}
+					onClose={() => setQuickSwitcherOpen(false)}
+				/>
 			)}
 		</div>
 	);
