@@ -17,7 +17,17 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-30, cycle 222 — FEATURE: inline text formatting)
+## Current state (2026-06-30, cycle 223 — FEATURE: date separator auto-labels for runtime messages)
+- **Cycle 223 (commit fdee407):** FEATURE — Date separators now auto-computed for runtime messages.
+  - **`getDayLabel(ts: number): string`** (exported pure helper): returns "Today", "Yesterday", or locale-formatted date (e.g. "Mon, Jun 28"). Uses `new Date(ts)` vs today/yesterday comparison by year+month+date — no I/O, no DOM sink.
+  - **`handleIncoming` updated:** Backwards scan finds last explicitly-set `day` field in chat history. New incoming message gets `day: getDayLabel(now.getTime())` only when the day has changed from `prevDay`. Enables date separators to appear automatically at midnight boundaries for real messages.
+  - **`sendMessage` optimistic update:** Same auto-day logic applied so outgoing messages also trigger date separators when day rolls over.
+  - **`data-testid="date-separator"`** added to the day-divider `<div>` in MessageList for testability.
+  - **Security:** `day` is absent from all MLS plaintext paths (explicit payload construction from `text`/`replyTo`/`ttl`). JSX text children only (no dangerouslySetInnerHTML). No PII logging. No new server-visible metadata. security-auditor: **GREEN**.
+  - **920 frontend tests pass (+10: `ChatLayoutDateSeparator.test.tsx` — getDayLabel today, getDayLabel yesterday, getDayLabel older, getDayLabel deterministic, seed shows Today separator, seed shows Yesterday separator, no duplicate day labels, same-day incoming no extra separator, separator non-empty, Yesterday before Today ordering)**; tsc clean; biome clean; bundle budget OK (JS 145.0KB gz / WASM 553.7KB gz).
+  - **Next cycle:** PQ hybrid Phase A or more UX polish.
+
+## Previous state (2026-06-30, cycle 222 — FEATURE: inline text formatting)
 - **Cycle 222 (commit fc2ecfd):** FEATURE — Inline text formatting in chat message bubbles.
   - **`parseFormatting(text)`:** New pure function. Regex `` /`([^`]+)`|\*\*([^*]+)\*\*|\*([^*]+)\*/g `` splits text into `FmtSegment[]` with types `text | bold | italic | code`. Bold (`**`) matched before italic (`*`) in alternation so `**` consumed as a unit. Linear-time (negated char classes, no ReDoS).
   - **`renderFmtWithHighlight(fmtSegs, highlight, kp)`:** Renders segments to JSX: bold → `<strong data-testid="fmt-bold">`, italic → `<em data-testid="fmt-italic">`, code → `<code data-testid="fmt-code" style={{fontFamily:"monospace",...}>`. All JSX text children — no `dangerouslySetInnerHTML`. Search highlight (`applyHighlight`) applied inside bold/italic content; code content is literal.
