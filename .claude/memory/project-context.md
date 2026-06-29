@@ -17,7 +17,21 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-29, cycle 214 — FEATURE: image lightbox)
+## Current state (2026-06-29, cycle 216 — STABILIZATION: CI format fix + security audit)
+- **Cycle 216 (commit a19ec02):** STABILIZATION — Fixed `Format check` CI failure (main was red).
+  - **Root cause:** Two `let env_repo = \n    FakeEnvelopeRepo::with_memberships(...)` bindings added in cycle 215 were split across 2 lines even though they fit within 100 chars. `cargo fmt --check` in CI failed with exit code 1.
+  - **Fix:** `cargo fmt --package powehi-application` collapsed both bindings to single lines (lines 1193, 1223 in `messaging_service.rs`).
+  - **Verification:** `cargo fmt --check` clean, all 83 application tests pass, full workspace build clean.
+  - **Security audit:** `security-auditor` on `messaging_service.rs` + `envelope_repo.rs` → PASS. No critical/high/medium findings. TTL filter consistent in both SQL branches (`expires_at IS NULL OR expires_at > NOW()`). Auth checks correct. No plaintext logging. Integration test `find_pending_excludes_expired_envelopes` in `pg_security_it.rs` is authoritative TTL gate.
+  - **`cargo audit`:** 2 allowed warnings (instant unmaintained via openmls; bitcoin_hashes yanked via bip39 — both transitive, upstream-controlled). No vulnerabilities.
+  - **Target dir:** 7.2 GB (under 20 GB threshold). No pruning needed.
+  - **Next cycle:** PQ hybrid Phase A or more UX polish.
+
+## Previous state (2026-06-29, cycle 215 — STABILIZATION: MLS security-invariant tests)
+- **Cycle 215 (commit 6cbde19):** STABILIZATION — MLS KeyPackage single-use and disappearing-message expiry invariants.
+  - **Next cycle:** More UX polish or PQ hybrid Phase A.
+
+## Previous state (2026-06-29, cycle 214 — FEATURE: image lightbox)
 - **Cycle 214 (commit cdba978):** FEATURE — Image lightbox: clicking a media image opens a full-screen overlay.
   - **`Lightbox` component:** Full-screen overlay (rgba 0.94 void bg, z-index 60). Close button, backdrop click, and Escape/ArrowLeft/ArrowRight keyboard handlers via useEffect. Prev/next navigation arrow buttons visible only when adjacent images exist. Counter shows "N / total" when there are multiple images. Image rendered via `MediaImage` with `imgStyle` override (max 90vw/85vh instead of inline 320px).
   - **`MediaImage` changes:** Added optional `imgStyle?: CSSProperties` prop merged into `<img>` style (thumbnail and full image). Enables lightbox to render the image at larger dimensions without duplication.
