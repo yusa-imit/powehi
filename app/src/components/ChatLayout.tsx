@@ -123,6 +123,8 @@ interface Chat {
 	pinnedTop?: boolean;
 	/** Group description / topic text (local-only, not synced). Group chats only. */
 	description?: string;
+	/** Custom display name set by the local user for this DM contact (local-only, never sent to server). */
+	nickname?: string;
 }
 
 // ── Disappearing messages helpers ──────────────────────────────────────────────
@@ -858,7 +860,7 @@ function ChatRow({
 				fontFamily: "inherit",
 			}}
 		>
-			<Avatar name={chat.name} size={42} online={chat.online} />
+			<Avatar name={chat.nickname ?? chat.name} size={42} online={chat.online} />
 			<div style={{ flex: 1, minWidth: 0 }}>
 				<div
 					style={{
@@ -878,7 +880,7 @@ function ChatRow({
 							whiteSpace: "nowrap",
 						}}
 					>
-						{chat.name}
+						{chat.nickname ?? chat.name}
 					</span>
 					{chat.pinnedTop && (
 						<span data-testid="pin-top-indicator" style={{ lineHeight: 0 }}>
@@ -1451,11 +1453,14 @@ function ConversationHeader({
 				</>
 			) : (
 				<>
-					<Avatar name={chat.name} size={38} online={chat.online} />
+					<Avatar name={chat.nickname ?? chat.name} size={38} online={chat.online} />
 					<div style={{ flex: 1, minWidth: 0 }}>
 						<div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-							<span style={{ fontSize: 15, fontWeight: 500, color: "var(--fg-1)" }}>
-								{chat.name}
+							<span
+								data-testid="conversation-header-name"
+								style={{ fontSize: 15, fontWeight: 500, color: "var(--fg-1)" }}
+							>
+								{chat.nickname ?? chat.name}
 							</span>
 							<Icon name="lock" size={11} color="#A8C8FF" />
 							{pqBindingHex && (
@@ -3518,7 +3523,11 @@ function QuickSwitcher({
 }) {
 	const q = query.toLowerCase();
 	const filtered = chats.filter(
-		(c) => !q || c.name.toLowerCase().includes(q) || c.handle.toLowerCase().includes(q),
+		(c) =>
+			!q ||
+			(c.nickname ?? c.name).toLowerCase().includes(q) ||
+			c.name.toLowerCase().includes(q) ||
+			c.handle.toLowerCase().includes(q),
 	);
 	const clampedActive = Math.min(activeIdx, Math.max(0, filtered.length - 1));
 
@@ -3664,7 +3673,7 @@ function QuickSwitcher({
 										flexShrink: 0,
 									}}
 								>
-									{c.name.charAt(0).toUpperCase()}
+									{(c.nickname ?? c.name).charAt(0).toUpperCase()}
 								</div>
 								<div style={{ minWidth: 0 }}>
 									<div
@@ -3677,7 +3686,7 @@ function QuickSwitcher({
 											whiteSpace: "nowrap",
 										}}
 									>
-										{c.name}
+										{c.nickname ?? c.name}
 									</div>
 									<div
 										style={{
@@ -3688,7 +3697,7 @@ function QuickSwitcher({
 											whiteSpace: "nowrap",
 										}}
 									>
-										@{c.handle}
+										{c.nickname ? c.name : `@${c.handle}`}
 									</div>
 								</div>
 							</button>
@@ -3977,6 +3986,7 @@ function InfoPanel({
 	onTogglePinTop,
 	myHandle,
 	onUpdateDescription,
+	onUpdateNickname,
 }: {
 	chat: Chat;
 	onClose: () => void;
@@ -3993,9 +4003,12 @@ function InfoPanel({
 	onTogglePinTop: () => void;
 	myHandle?: string;
 	onUpdateDescription?: (desc: string) => void;
+	onUpdateNickname?: (nickname: string) => void;
 }) {
 	const [descEditing, setDescEditing] = useState(false);
 	const [descDraft, setDescDraft] = useState("");
+	const [nicknameEditing, setNicknameEditing] = useState(false);
+	const [nicknameDraft, setNicknameDraft] = useState("");
 	const [safetyVerified, setSafetyVerified] = useState(false);
 	const [verifiedAt, setVerifiedAt] = useState<number | undefined>(undefined);
 	const [mitmAlert, setMitmAlert] = useState(false);
@@ -4159,8 +4172,9 @@ function InfoPanel({
 
 			{/* User info */}
 			<div style={{ padding: "24px 18px 20px", textAlign: "center" }}>
-				<Avatar name={chat.name} size={80} />
+				<Avatar name={chat.nickname ?? chat.name} size={80} />
 				<div
+					data-testid="info-panel-display-name"
 					style={{
 						fontSize: 18,
 						fontWeight: 500,
@@ -4168,9 +4182,18 @@ function InfoPanel({
 						marginTop: 14,
 					}}
 				>
-					{chat.name}
+					{chat.nickname ?? chat.name}
 				</div>
-				<div style={{ fontSize: 13, color: "var(--fg-3)", marginTop: 4 }}>@{chat.handle}</div>
+				<div style={{ fontSize: 13, color: "var(--fg-3)", marginTop: 4 }}>
+					{chat.nickname ? (
+						<>
+							<span data-testid="info-panel-real-name">{chat.name}</span>
+							{" · "}@{chat.handle}
+						</>
+					) : (
+						<>@{chat.handle}</>
+					)}
+				</div>
 				<div
 					style={{
 						display: "flex",
@@ -4223,6 +4246,124 @@ function InfoPanel({
 					</button>
 				</div>
 			</div>
+
+			{!chat.isGroup && onUpdateNickname && (
+				/* Nickname — DM only, local-only, never sent to server */
+				<InfoSection title="Nickname">
+					<div style={{ padding: "0 18px 12px" }}>
+						{nicknameEditing ? (
+							<div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+								<input
+									data-testid="nickname-input"
+									type="text"
+									maxLength={50}
+									value={nicknameDraft}
+									onChange={(e) => setNicknameDraft(e.target.value)}
+									onKeyDown={(e) => {
+										if (e.key === "Enter") {
+											e.preventDefault();
+											onUpdateNickname(nicknameDraft.trim());
+											setNicknameEditing(false);
+										} else if (e.key === "Escape") {
+											setNicknameEditing(false);
+										}
+									}}
+									placeholder={`Nickname for ${chat.name}`}
+									style={{
+										background: "var(--bg-void)",
+										border: "1px solid var(--border-soft)",
+										borderRadius: 8,
+										padding: "7px 10px",
+										color: "var(--fg-1)",
+										fontSize: 13,
+										fontFamily: "var(--font-sans)",
+										outline: "none",
+										width: "100%",
+										boxSizing: "border-box",
+									}}
+									// biome-ignore lint/a11y/noAutofocus: edit mode opened by explicit user action
+									autoFocus
+								/>
+								<div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+									<button
+										type="button"
+										data-testid="nickname-cancel"
+										onClick={() => setNicknameEditing(false)}
+										style={{
+											fontSize: 12,
+											padding: "4px 10px",
+											borderRadius: 6,
+											border: "1px solid var(--border-soft)",
+											background: "none",
+											color: "var(--fg-3)",
+											cursor: "pointer",
+											fontFamily: "var(--font-sans)",
+										}}
+									>
+										Cancel
+									</button>
+									<button
+										type="button"
+										data-testid="nickname-save"
+										onClick={() => {
+											onUpdateNickname(nicknameDraft.trim());
+											setNicknameEditing(false);
+										}}
+										style={{
+											fontSize: 12,
+											padding: "4px 10px",
+											borderRadius: 6,
+											border: "none",
+											background: "#FF8A3D",
+											color: "#2A1100",
+											cursor: "pointer",
+											fontFamily: "var(--font-sans)",
+											fontWeight: 600,
+										}}
+									>
+										Save
+									</button>
+								</div>
+							</div>
+						) : (
+							<div
+								style={{
+									display: "flex",
+									alignItems: "center",
+									justifyContent: "space-between",
+									gap: 8,
+								}}
+							>
+								<span
+									data-testid="nickname-display"
+									style={{ fontSize: 13, color: chat.nickname ? "var(--fg-1)" : "var(--fg-4)" }}
+								>
+									{chat.nickname || "No nickname set"}
+								</span>
+								<button
+									type="button"
+									data-testid="nickname-edit-btn"
+									onClick={() => {
+										setNicknameDraft(chat.nickname ?? "");
+										setNicknameEditing(true);
+									}}
+									style={{
+										background: "none",
+										border: "none",
+										cursor: "pointer",
+										padding: 4,
+										color: "var(--fg-3)",
+										lineHeight: 0,
+									}}
+									aria-label="Edit nickname"
+								>
+									<Icon name="edit-2" size={13} />
+								</button>
+							</div>
+						)}
+					</div>
+				</InfoSection>
+			)}
 
 			{chat.isGroup && (
 				/* Group description / topic */
@@ -5634,6 +5775,13 @@ export function ChatLayout() {
 		setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, description: desc } : c)));
 	}, []);
 
+	/** Set (or clear) a custom display nickname for a DM contact. Local-only — never sent to server. */
+	const handleUpdateNickname = useCallback((chatId: string, nickname: string) => {
+		setChats((cs) =>
+			cs.map((c) => (c.id === chatId ? { ...c, nickname: nickname || undefined } : c)),
+		);
+	}, []);
+
 	/**
 	 * Send a read_receipt to the specified MLS group for the given envelope IDs.
 	 * Takes explicit mlsGroupId/mlsIdentityId so buffered receipts from background chats
@@ -6253,6 +6401,7 @@ export function ChatLayout() {
 					onTogglePinTop={() => handleTogglePinTop(active.id)}
 					myHandle={useAuthStore.getState().myHandle ?? undefined}
 					onUpdateDescription={(desc) => handleUpdateGroupDescription(active.id, desc)}
+					onUpdateNickname={(nickname) => handleUpdateNickname(active.id, nickname)}
 				/>
 			)}
 
