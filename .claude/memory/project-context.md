@@ -17,7 +17,18 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-29, cycle 218 — FEATURE: Cmd+K quick chat switcher)
+## Current state (2026-06-29, cycle 219 — FEATURE: chat nickname for DM contacts)
+- **Cycle 219 (commit c779153):** FEATURE — Chat nickname: custom display name for DM contacts (local-only, never sent to server).
+  - **`Chat.nickname?: string`:** New optional field on Chat. Local-only — absent from all MLS encrypt paths, API request bodies, and log statements.
+  - **`handleUpdateNickname(chatId, nickname)`:** Pure `setChats` immutable update. Empty string → `undefined` (clears nickname). No API call, no MLS op, no server contact.
+  - **`InfoPanel` Nickname section (DM only):** Appears between user info block and Safety Numbers section. View mode: shows nickname text or "No nickname set" placeholder + pencil edit button. Edit mode: controlled `<input type="text" maxLength=50>` with Save/Cancel/Enter/Escape. `autoFocus` on open (biome-ignore comment, explicit user action).
+  - **Display propagation:** `chat.nickname ?? chat.name` shown in `ChatRow` (sidebar), `ConversationHeader` (data-testid="conversation-header-name"), `InfoPanel` user info block. When nickname set, original name shown as subtitle in InfoPanel.
+  - **`QuickSwitcher` updated:** Filter includes `(c.nickname ?? c.name)` in addition to `c.name` and `c.handle`. Display shows `c.nickname ?? c.name`; subtitle shows `c.name` (real name) when nickname set, else `@handle`.
+  - **Security:** JSX text children only (no dangerouslySetInnerHTML). `nickname` never in MLS payload, never logged, never in any API call. Controlled input (maxLength=50). No new server-visible metadata. security-auditor: GREEN (pending confirmation).
+  - **887 frontend tests pass** (+13: `ChatLayoutNickname.test.tsx` — DM shows nickname section, group does NOT, no-nickname placeholder, edit opens input, maxLength 50, Save saves+hides input, Enter saves, Cancel discards, Escape discards, nickname in ConversationHeader, clearing restores real name, searchable in QuickSwitcher, QuickSwitcher displays nickname); tsc clean; biome clean; bundle budget OK (JS 144.3KB gz / WASM 553.7KB gz).
+  - **Next cycle:** PQ hybrid Phase A or more UX polish.
+
+## Previous state (2026-06-29, cycle 218 — FEATURE: Cmd+K quick chat switcher)
 - **Cycle 218 (commit 15ab178):** FEATURE — Cmd+K quick chat switcher modal.
   - **`QuickSwitcher` component:** Full-screen backdrop (rgba 0.72), centered 400px panel. Auto-focused search input filters chats by name or handle (case-insensitive). Items shown with avatar initial, name, and @handle. Arrow keys navigate highlighted item (`aria-selected`); Enter selects; Escape / second Ctrl+K / backdrop click closes.
   - **State:** `quickSwitcherOpen`, `quickSwitcherQuery`, `quickSwitcherActive`, `quickSwitcherInputRef` — all local to `ChatLayout`.
