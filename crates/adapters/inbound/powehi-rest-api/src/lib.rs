@@ -2711,4 +2711,118 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
+
+    // ── handle_hash length validation tests ──────────────────────────────────
+    //
+    // SHA-256 output is always exactly 32 bytes. Any other length means the
+    // client sent something other than a hash, which must be rejected at the
+    // HTTP layer before the OPAQUE state machine ever runs.
+
+    fn register_init_body(handle_hash: Vec<u8>) -> String {
+        serde_json::json!({
+            "opaque_request": vec![0u8; 8],
+            "handle_hash": handle_hash,
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn register_init_short_handle_hash_returns_400() {
+        let resp = test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/register/init")
+                    .header("content-type", "application/json")
+                    .body(Body::from(register_init_body(vec![0xABu8; 31])))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn register_init_long_handle_hash_returns_400() {
+        let resp = test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/register/init")
+                    .header("content-type", "application/json")
+                    .body(Body::from(register_init_body(vec![0xCDu8; 33])))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn login_init_short_handle_hash_returns_400() {
+        let resp = test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/login/init")
+                    .header("content-type", "application/json")
+                    .body(Body::from(login_init_body(vec![0xABu8; 31])))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn login_init_long_handle_hash_returns_400() {
+        let resp = test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/login/init")
+                    .header("content-type", "application/json")
+                    .body(Body::from(login_init_body(vec![0xCDu8; 33])))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ── key-package path-param validation tests ───────────────────────────────
+
+    #[tokio::test]
+    async fn fetch_key_package_malformed_device_id_returns_400() {
+        let resp = key_package_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/key-packages/not-a-uuid")
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn upload_key_packages_malformed_device_id_returns_400() {
+        let body = serde_json::json!({ "packages": [[1u8, 2]] });
+        let resp = key_package_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/key-packages/not-a-uuid")
+                    .header("authorization", bearer())
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
 }
