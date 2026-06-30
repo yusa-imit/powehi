@@ -583,4 +583,112 @@ mod tests {
             "notification with invalid group_id must be dropped"
         );
     }
+
+    // --- EpochAdvanced notification filtering ---
+
+    #[test]
+    fn epoch_advanced_for_member_group_is_forwarded() {
+        let device = DeviceId::new();
+        let group = GroupId::new();
+        let mut groups = make_groups(std::slice::from_ref(&group));
+
+        let notif = WsNotification::EpochAdvanced {
+            group_id: group.to_string(),
+            new_epoch: 7,
+        };
+        assert!(
+            filter_notification(&mut groups, &notif, &device),
+            "member must receive EpochAdvanced for their group"
+        );
+    }
+
+    #[test]
+    fn epoch_advanced_for_non_member_group_is_suppressed() {
+        let device = DeviceId::new();
+        let other_group = GroupId::new();
+        let mut groups = make_groups(&[]); // device belongs to no groups
+
+        let notif = WsNotification::EpochAdvanced {
+            group_id: other_group.to_string(),
+            new_epoch: 3,
+        };
+        assert!(
+            !filter_notification(&mut groups, &notif, &device),
+            "non-member must not receive EpochAdvanced for a foreign group"
+        );
+    }
+
+    #[test]
+    fn epoch_advanced_with_invalid_group_id_is_filtered_out() {
+        let device = DeviceId::new();
+        let mut groups = make_groups(&[]);
+
+        let notif = WsNotification::EpochAdvanced {
+            group_id: "bad-uuid".into(),
+            new_epoch: 1,
+        };
+        assert!(
+            !filter_notification(&mut groups, &notif, &device),
+            "EpochAdvanced with unparseable group_id must be dropped"
+        );
+    }
+
+    // --- MemberRemoved edge cases ---
+
+    #[test]
+    fn member_removed_for_other_device_notifies_remaining_members() {
+        let device = DeviceId::new();
+        let other = DeviceId::new();
+        let group = GroupId::new();
+        let mut groups = make_groups(std::slice::from_ref(&group));
+
+        let notif = WsNotification::MemberRemoved {
+            group_id: group.to_string(),
+            device_id: other.to_string(),
+        };
+        assert!(
+            filter_notification(&mut groups, &notif, &device),
+            "remaining member must see MemberRemoved for another device"
+        );
+        // Device itself must still be in the group after the removal
+        assert!(
+            groups.contains(&group),
+            "device's own membership must not be affected by another device's removal"
+        );
+    }
+
+    #[test]
+    fn member_removed_for_other_device_not_in_group_is_suppressed() {
+        let device = DeviceId::new();
+        let other = DeviceId::new();
+        let group = GroupId::new();
+        let mut groups = make_groups(&[]); // device is not in this group
+
+        let notif = WsNotification::MemberRemoved {
+            group_id: group.to_string(),
+            device_id: other.to_string(),
+        };
+        assert!(
+            !filter_notification(&mut groups, &notif, &device),
+            "non-member must not receive MemberRemoved for a foreign group"
+        );
+    }
+
+    #[test]
+    fn member_removed_for_this_device_when_not_member_returns_false() {
+        // Security edge case: spurious MemberRemoved for this device in a group
+        // it never joined must return false (no phantom notification).
+        let device = DeviceId::new();
+        let group = GroupId::new();
+        let mut groups = make_groups(&[]); // device is NOT in this group
+
+        let notif = WsNotification::MemberRemoved {
+            group_id: group.to_string(),
+            device_id: device.to_string(),
+        };
+        assert!(
+            !filter_notification(&mut groups, &notif, &device),
+            "spurious MemberRemoved for a group this device never joined must not be forwarded"
+        );
+    }
 }

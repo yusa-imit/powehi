@@ -52,3 +52,67 @@ pub struct MediaBlob {
     /// MLS group this blob was shared to. When set, any group member may download.
     pub group_id: Option<GroupId>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_id_from_uuid_round_trips() {
+        let uuid = Uuid::new_v4();
+        let id = MediaId::from(uuid);
+        assert_eq!(id.as_uuid(), uuid);
+    }
+
+    #[test]
+    fn media_id_new_creates_valid_uuid() {
+        let id = MediaId::new();
+        // as_uuid() must return a valid v4 UUID — non-nil
+        assert_ne!(id.as_uuid(), Uuid::nil());
+    }
+
+    #[test]
+    fn media_id_two_news_are_distinct() {
+        let a = MediaId::new();
+        let b = MediaId::new();
+        assert_ne!(a.as_uuid(), b.as_uuid());
+    }
+
+    #[test]
+    fn media_id_display_matches_inner_uuid() {
+        let uuid = Uuid::new_v4();
+        let id = MediaId::from(uuid);
+        assert_eq!(id.to_string(), uuid.to_string());
+    }
+
+    #[test]
+    fn media_id_default_is_non_nil() {
+        let id = MediaId::default();
+        assert_ne!(id.as_uuid(), Uuid::nil());
+    }
+
+    #[test]
+    fn media_id_equality_on_same_uuid() {
+        let uuid = Uuid::new_v4();
+        let a = MediaId::from(uuid);
+        let b = MediaId::from(uuid);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn media_id_serializes_as_uuid_string() {
+        let uuid = Uuid::new_v4();
+        let id = MediaId::from(uuid);
+        let json = serde_json::to_string(&id).unwrap();
+        // Serde UUID serializes as "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+        assert_eq!(json, format!("\"{}\"", uuid));
+    }
+
+    #[test]
+    fn media_id_deserializes_from_uuid_string() {
+        let uuid = Uuid::new_v4();
+        let json = format!("\"{}\"", uuid);
+        let id: MediaId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id.as_uuid(), uuid);
+    }
+}
