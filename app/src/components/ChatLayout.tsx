@@ -4089,6 +4089,7 @@ function InfoPanel({
 	myHandle,
 	onUpdateDescription,
 	onUpdateNickname,
+	onClearMessages,
 }: {
 	chat: Chat;
 	onClose: () => void;
@@ -4106,11 +4107,13 @@ function InfoPanel({
 	myHandle?: string;
 	onUpdateDescription?: (desc: string) => void;
 	onUpdateNickname?: (nickname: string) => void;
+	onClearMessages?: () => void;
 }) {
 	const [descEditing, setDescEditing] = useState(false);
 	const [descDraft, setDescDraft] = useState("");
 	const [nicknameEditing, setNicknameEditing] = useState(false);
 	const [nicknameDraft, setNicknameDraft] = useState("");
+	const [clearConfirm, setClearConfirm] = useState(false);
 	const [safetyVerified, setSafetyVerified] = useState(false);
 	const [verifiedAt, setVerifiedAt] = useState<number | undefined>(undefined);
 	const [mitmAlert, setMitmAlert] = useState(false);
@@ -4802,9 +4805,83 @@ function InfoPanel({
 				>
 					{archived ? "Unarchive Chat" : "Archive Chat"}
 				</button>
-				<button type="button" style={destructiveButton}>
-					Clear messages
-				</button>
+				{clearConfirm ? (
+					<div
+						data-testid="clear-messages-confirm"
+						style={{
+							background: "var(--bg-elevated)",
+							border: "1px solid var(--border-soft)",
+							borderRadius: 10,
+							padding: "10px 14px",
+							display: "flex",
+							flexDirection: "column",
+							gap: 6,
+						}}
+					>
+						<span
+							style={{
+								color: "var(--fg-2)",
+								fontFamily: "var(--font-sans)",
+								fontSize: 13,
+								textAlign: "center",
+							}}
+						>
+							Clear all messages? This cannot be undone.
+						</span>
+						<div style={{ display: "flex", gap: 6 }}>
+							<button
+								type="button"
+								data-testid="clear-messages-cancel"
+								onClick={() => setClearConfirm(false)}
+								style={{
+									flex: 1,
+									background: "var(--bg-elevated)",
+									border: "1px solid var(--border-soft)",
+									borderRadius: 8,
+									padding: "7px 0",
+									cursor: "pointer",
+									color: "var(--fg-2)",
+									fontFamily: "var(--font-sans)",
+									fontSize: 13,
+									fontWeight: 500,
+								}}
+							>
+								Cancel
+							</button>
+							<button
+								type="button"
+								data-testid="clear-messages-confirm-btn"
+								onClick={() => {
+									onClearMessages?.();
+									setClearConfirm(false);
+								}}
+								style={{
+									flex: 1,
+									background: "rgba(205,48,63,0.14)",
+									border: "1px solid rgba(205,48,63,0.32)",
+									borderRadius: 8,
+									padding: "7px 0",
+									cursor: "pointer",
+									color: "#E05261",
+									fontFamily: "var(--font-sans)",
+									fontSize: 13,
+									fontWeight: 600,
+								}}
+							>
+								Clear
+							</button>
+						</div>
+					</div>
+				) : (
+					<button
+						type="button"
+						data-testid="clear-messages-button"
+						onClick={() => setClearConfirm(true)}
+						style={destructiveButton}
+					>
+						Clear messages
+					</button>
+				)}
 				<button type="button" style={destructiveButton}>
 					Block · Report
 				</button>
@@ -5894,6 +5971,27 @@ export function ChatLayout() {
 		);
 	}, []);
 
+	/** Erase all messages in a chat. Local-only — no MLS op, no server contact.
+	 * Resets unread count, mention count, pinned message, and last-message preview. */
+	const handleClearMessages = useCallback((chatId: string) => {
+		setChats((cs) =>
+			cs.map((c) =>
+				c.id !== chatId
+					? c
+					: {
+							...c,
+							messages: [],
+							unread: 0,
+							mentionCount: 0,
+							firstUnreadAt: undefined,
+							pinnedMessageId: undefined,
+							last: "",
+							time: "",
+						},
+			),
+		);
+	}, []);
+
 	/** Clear unread badge, mention badge, and unread divider for every chat in one operation.
 	 * Local-only — no server call, no MLS op, no logging. */
 	const handleMarkAllRead = useCallback(() => {
@@ -6533,6 +6631,7 @@ export function ChatLayout() {
 					myHandle={useAuthStore.getState().myHandle ?? undefined}
 					onUpdateDescription={(desc) => handleUpdateGroupDescription(active.id, desc)}
 					onUpdateNickname={(nickname) => handleUpdateNickname(active.id, nickname)}
+					onClearMessages={() => handleClearMessages(active.id)}
 				/>
 			)}
 
