@@ -2377,6 +2377,7 @@ function MessageList({
 	myDeviceId,
 	isGroup,
 	members,
+	isTyping,
 	onReact,
 	onReply,
 	onEdit,
@@ -2400,6 +2401,7 @@ function MessageList({
 	myDeviceId?: string;
 	isGroup?: boolean;
 	members?: ChatMember[];
+	isTyping?: boolean;
 	onReact?: (msgId: string, emoji: string) => void;
 	onReply?: (msg: ChatMessage) => void;
 	onEdit?: (msg: ChatMessage) => void;
@@ -2681,6 +2683,43 @@ function MessageList({
 							/>
 						</div>
 					),
+				)}
+				{isTyping && (
+					<div
+						data-testid="typing-bubble"
+						style={{ display: "flex", alignItems: "flex-end", gap: 8, paddingTop: 4 }}
+					>
+						<div
+							style={{
+								width: 30,
+								height: 30,
+								borderRadius: "50%",
+								background: "rgba(168,200,255,0.18)",
+								display: "flex",
+								alignItems: "center",
+								justifyContent: "center",
+								fontSize: 12,
+								fontWeight: 700,
+								color: "#A8C8FF",
+								flexShrink: 0,
+							}}
+						>
+							{partner[0]?.toUpperCase() ?? "?"}
+						</div>
+						<div
+							style={{
+								background: "rgba(255,255,255,0.06)",
+								border: "1px solid rgba(255,255,255,0.10)",
+								borderRadius: "4px 16px 16px 16px",
+								padding: "10px 16px",
+								minWidth: 60,
+								display: "flex",
+								alignItems: "center",
+							}}
+						>
+							<TypingDots />
+						</div>
+					</div>
 				)}
 			</div>
 			{!isAtBottom && (
@@ -6554,6 +6593,7 @@ export function ChatLayout() {
 						searchQuery={msgSearch}
 						myDeviceId={useAuthStore.getState().deviceId ?? undefined}
 						isGroup={active.isGroup}
+						isTyping={active.typing}
 						members={active.members}
 						onReact={sendReaction}
 						onReply={setReplyingTo}
