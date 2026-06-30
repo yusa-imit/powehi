@@ -17,7 +17,15 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-30, cycle 223 — FEATURE: date separator auto-labels for runtime messages)
+## Current state (2026-06-30, cycle 224 — FEATURE: starred messages test coverage)
+- **Cycle 224 (commit b7b9808):** FEATURE — Added 12 tests for the starred messages feature (`ChatLayoutStarred.test.tsx`).
+  - **Gap closed:** `StarredPanel` + `handleStarMessage` + `star-button` in `MessageBubble` were fully implemented in `ChatLayout.tsx` (local-only, no server contact, no MLS op) but had zero dedicated tests.
+  - **Tests:** star button on hover, aria-label "Star message" for unstarred, "Starred messages" button opens panel, empty state text, close button dismisses panel, starring adds to panel, starred item shows message text, starred item shows chat name, clicking item switches chat + closes panel, unstar removes from panel, star absent for deleted messages, starring incoming message with stable id.
+  - **Security:** Test file only — no implementation changes. Starred feature is local-only (never in MLS payload, never logged, never in API body). Confirmed by prior security-auditor pass.
+  - **932 frontend tests pass (+12: `ChatLayoutStarred.test.tsx`)**; tsc clean; biome clean; bundle budget OK (JS 145.0KB gz / WASM 553.7KB gz).
+  - **Next cycle:** PQ hybrid Phase A or more UX polish.
+
+## Previous state (2026-06-30, cycle 223 — FEATURE: date separator auto-labels for runtime messages)
 - **Cycle 223 (commit fdee407):** FEATURE — Date separators now auto-computed for runtime messages.
   - **`getDayLabel(ts: number): string`** (exported pure helper): returns "Today", "Yesterday", or locale-formatted date (e.g. "Mon, Jun 28"). Uses `new Date(ts)` vs today/yesterday comparison by year+month+date — no I/O, no DOM sink.
   - **`handleIncoming` updated:** Backwards scan finds last explicitly-set `day` field in chat history. New incoming message gets `day: getDayLabel(now.getTime())` only when the day has changed from `prevDay`. Enables date separators to appear automatically at midnight boundaries for real messages.
