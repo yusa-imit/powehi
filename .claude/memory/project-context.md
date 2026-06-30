@@ -17,7 +17,17 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-30, cycle 224 — FEATURE: starred messages test coverage)
+## Current state (2026-06-30, cycle 225 — STABILIZATION: EpochAdvanced + MemberRemoved edge-case tests + MediaId unit tests)
+- **Cycle 225 (commit 3e7ed3b):** STABILIZATION — Added 14 Rust unit tests closing coverage gaps.
+  - **CI:** Green on main (all 3 recent runs pass). No open issues.
+  - **ws-hub handler.rs (+6 tests):** `EpochAdvanced` notification filtering for member (true) / non-member (false) / invalid-group-id (false); `MemberRemoved` for another device (remaining member notified, non-member suppressed); phantom-removal security guard (MemberRemoved for this device when not in group → false).
+  - **powehi-domain media.rs (+8 tests):** `MediaId` From\<Uuid\> round-trip, two new() calls distinct, Display matches inner UUID, Default non-nil, equality by UUID, serde_json serialize/deserialize round-trip. Added `serde_json` as dev-dependency in `powehi-domain/Cargo.toml`.
+  - **Security sweep:** clippy clean (0 errors/warnings), biome clean (133 files), tsc clean, `cargo audit` 3 pre-existing allowed warnings (instant unmaintained via openmls, bitcoin_hashes yanked via bip39, one other transitive) — no new vulnerabilities.
+  - **Target dir:** 7.4 GB (under 20 GB threshold, no pruning needed).
+  - **Rust: 542+ tests pass (0 failed)**; frontend: 932 tests pass.
+  - **Next cycle:** PQ hybrid Phase A or more UX polish.
+
+## Previous state (2026-06-30, cycle 224 — FEATURE: starred messages test coverage)
 - **Cycle 224 (commit b7b9808):** FEATURE — Added 12 tests for the starred messages feature (`ChatLayoutStarred.test.tsx`).
   - **Gap closed:** `StarredPanel` + `handleStarMessage` + `star-button` in `MessageBubble` were fully implemented in `ChatLayout.tsx` (local-only, no server contact, no MLS op) but had zero dedicated tests.
   - **Tests:** star button on hover, aria-label "Star message" for unstarred, "Starred messages" button opens panel, empty state text, close button dismisses panel, starring adds to panel, starred item shows message text, starred item shows chat name, clicking item switches chat + closes panel, unstar removes from panel, star absent for deleted messages, starring incoming message with stable id.
