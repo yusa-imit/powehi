@@ -55,9 +55,7 @@ describe("ChatLayout — clear chat history", () => {
 		render(<ChatLayout />);
 		openInfoPanel(/jordan/i);
 		fireEvent.click(screen.getByTestId("clear-messages-button"));
-		await waitFor(() =>
-			expect(screen.getByTestId("clear-messages-confirm")).toBeInTheDocument(),
-		);
+		await waitFor(() => expect(screen.getByTestId("clear-messages-confirm")).toBeInTheDocument());
 		expect(screen.getByTestId("clear-messages-cancel")).toBeInTheDocument();
 		expect(screen.getByTestId("clear-messages-confirm-btn")).toBeInTheDocument();
 	});
@@ -66,21 +64,15 @@ describe("ChatLayout — clear chat history", () => {
 		render(<ChatLayout />);
 		openInfoPanel(/jordan/i);
 		fireEvent.click(screen.getByTestId("clear-messages-button"));
-		await waitFor(() =>
-			expect(screen.getByTestId("clear-messages-confirm")).toBeInTheDocument(),
-		);
-		expect(screen.getByTestId("clear-messages-confirm")).toHaveTextContent(
-			"Clear all messages?",
-		);
+		await waitFor(() => expect(screen.getByTestId("clear-messages-confirm")).toBeInTheDocument());
+		expect(screen.getByTestId("clear-messages-confirm")).toHaveTextContent("Clear all messages?");
 	});
 
 	it("Cancel button hides the confirmation prompt", async () => {
 		render(<ChatLayout />);
 		openInfoPanel(/jordan/i);
 		fireEvent.click(screen.getByTestId("clear-messages-button"));
-		await waitFor(() =>
-			expect(screen.getByTestId("clear-messages-confirm")).toBeInTheDocument(),
-		);
+		await waitFor(() => expect(screen.getByTestId("clear-messages-confirm")).toBeInTheDocument());
 		fireEvent.click(screen.getByTestId("clear-messages-cancel"));
 		await waitFor(() =>
 			expect(screen.queryByTestId("clear-messages-confirm")).not.toBeInTheDocument(),
@@ -97,9 +89,7 @@ describe("ChatLayout — clear chat history", () => {
 		// Open InfoPanel and start clearing
 		fireEvent.click(screen.getByRole("button", { name: /info/i }));
 		fireEvent.click(screen.getByTestId("clear-messages-button"));
-		await waitFor(() =>
-			expect(screen.getByTestId("clear-messages-confirm")).toBeInTheDocument(),
-		);
+		await waitFor(() => expect(screen.getByTestId("clear-messages-confirm")).toBeInTheDocument());
 		// Cancel — messages must remain
 		fireEvent.click(screen.getByTestId("clear-messages-cancel"));
 		await waitFor(() =>
@@ -116,13 +106,9 @@ describe("ChatLayout — clear chat history", () => {
 		// Open InfoPanel, clear messages
 		fireEvent.click(screen.getByRole("button", { name: /info/i }));
 		fireEvent.click(screen.getByTestId("clear-messages-button"));
-		await waitFor(() =>
-			expect(screen.getByTestId("clear-messages-confirm")).toBeInTheDocument(),
-		);
+		await waitFor(() => expect(screen.getByTestId("clear-messages-confirm")).toBeInTheDocument());
 		fireEvent.click(screen.getByTestId("clear-messages-confirm-btn"));
-		await waitFor(() =>
-			expect(screen.queryByText("split for last night")).not.toBeInTheDocument(),
-		);
+		await waitFor(() => expect(screen.queryByText("split for last night")).not.toBeInTheDocument());
 		expect(screen.queryByText("receipt.pdf")).not.toBeInTheDocument();
 	});
 
@@ -135,14 +121,10 @@ describe("ChatLayout — clear chat history", () => {
 		// Open InfoPanel and clear
 		openInfoPanel(/jordan/i);
 		fireEvent.click(screen.getByTestId("clear-messages-button"));
-		await waitFor(() =>
-			expect(screen.getByTestId("clear-messages-confirm")).toBeInTheDocument(),
-		);
+		await waitFor(() => expect(screen.getByTestId("clear-messages-confirm")).toBeInTheDocument());
 		fireEvent.click(screen.getByTestId("clear-messages-confirm-btn"));
 		// After clearing, unread should be 0 — badge gone
-		await waitFor(() =>
-			expect(screen.queryByText("2")).not.toBeInTheDocument(),
-		);
+		await waitFor(() => expect(screen.queryByText("2")).not.toBeInTheDocument());
 		expect(unreadBadge()).toBeNull();
 	});
 
@@ -150,9 +132,7 @@ describe("ChatLayout — clear chat history", () => {
 		render(<ChatLayout />);
 		openInfoPanel(/jordan/i);
 		fireEvent.click(screen.getByTestId("clear-messages-button"));
-		await waitFor(() =>
-			expect(screen.getByTestId("clear-messages-confirm")).toBeInTheDocument(),
-		);
+		await waitFor(() => expect(screen.getByTestId("clear-messages-confirm")).toBeInTheDocument());
 		fireEvent.click(screen.getByTestId("clear-messages-confirm-btn"));
 		await waitFor(() =>
 			expect(screen.queryByTestId("clear-messages-confirm")).not.toBeInTheDocument(),
@@ -168,15 +148,11 @@ describe("ChatLayout — clear chat history", () => {
 		fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
 		fireEvent.click(screen.getByRole("button", { name: /info/i }));
 		fireEvent.click(screen.getByTestId("clear-messages-button"));
-		await waitFor(() =>
-			expect(screen.getByTestId("clear-messages-confirm")).toBeInTheDocument(),
-		);
+		await waitFor(() => expect(screen.getByTestId("clear-messages-confirm")).toBeInTheDocument());
 		fireEvent.click(screen.getByTestId("clear-messages-confirm-btn"));
 		// Switch back to Maya — her messages must still be there
 		fireEvent.click(screen.getAllByRole("button", { name: /maya akana/i })[0]);
-		await waitFor(() =>
-			expect(screen.getByText("9am at the corner cafe?")).toBeInTheDocument(),
-		);
+		await waitFor(() => expect(screen.getByText("9am at the corner cafe?")).toBeInTheDocument());
 	});
 
 	it("Starred message from cleared chat is removed from starred panel", async () => {
@@ -184,9 +160,9 @@ describe("ChatLayout — clear chat history", () => {
 		// Star Jordan's message first
 		fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
 		// Hover to show star button (simulate via fireEvent.mouseEnter on the message)
-		const message = screen.getByText("split for last night").closest(
-			'[data-testid="message-bubble"]',
-		);
+		const message = screen
+			.getByText("split for last night")
+			.closest('[data-testid="message-bubble"]');
 		if (message) fireEvent.mouseEnter(message);
 		const starBtn = screen.queryByRole("button", { name: /star message/i });
 		if (starBtn) fireEvent.click(starBtn);
@@ -196,13 +172,9 @@ describe("ChatLayout — clear chat history", () => {
 		// Now clear Jordan's chat
 		fireEvent.click(screen.getByRole("button", { name: /info/i }));
 		fireEvent.click(screen.getByTestId("clear-messages-button"));
-		await waitFor(() =>
-			expect(screen.getByTestId("clear-messages-confirm")).toBeInTheDocument(),
-		);
+		await waitFor(() => expect(screen.getByTestId("clear-messages-confirm")).toBeInTheDocument());
 		fireEvent.click(screen.getByTestId("clear-messages-confirm-btn"));
 		// The starred message from Jordan should be gone
-		await waitFor(() =>
-			expect(screen.queryByTestId("starred-item")).not.toBeInTheDocument(),
-		);
+		await waitFor(() => expect(screen.queryByTestId("starred-item")).not.toBeInTheDocument());
 	});
 });
