@@ -17,7 +17,14 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-30, cycle 226 — FEATURE: clear chat history)
+## Current state (2026-06-30, cycle 227 — FEATURE: typing bubble in message list + biome CI fix)
+- **Cycle 227 (commits 19b3c5e + 60e21fd):**
+  - **CI fix (19b3c5e):** Frontend CI was red — Biome wanted multi-line `waitFor(() =>\n  expect(...),\n)` collapsed to single-line. Fixed `ChatLayoutClearMessages.test.tsx` with `biome format --write`.
+  - **Typing bubble (60e21fd):** `MessageList` now renders an animated `TypingDots` bubble at the bottom of the message area when `isTyping` is true. Bubble is styled as a peer incoming message: avatar initial (photon-blue ring), speech bubble with `border-radius: 4px 16px 16px 16px`, containing `<TypingDots />`. Added `isTyping?: boolean` prop to `MessageList`; passed `active.typing` from ChatLayout. No server calls, no logging, no new metadata — pure display layer. Existing `useLayoutEffect` scroll-to-bottom handles auto-scroll when bubble appears.
+  - **950 frontend tests pass (+7: `ChatLayoutTypingBubble.test.tsx` — bubble visible (Sam), testid present, contains typing-dots, shows avatar initial S, absent on non-typing chat, disappears on switch, sidebar dots present)**; tsc clean; biome clean.
+  - **Next cycle:** PQ hybrid Phase A or more UX polish (e.g. draft message persistence, message search, unread divider).
+
+## Previous state (2026-06-30, cycle 226 — FEATURE: clear chat history)
 - **Cycle 226 (commit dc124e4):** FEATURE — "Clear messages" button in InfoPanel now functional with inline confirm flow.
   - **`handleClearMessages(chatId)`:** Pure `setChats` — resets `messages[]`, `unread`, `mentionCount`, `pinnedMessageId`, `firstUnreadAt`, `last`, `time`. No MLS op, no server contact, no logging.
   - **InfoPanel `clearConfirm` state:** Click "Clear messages" → shows inline confirm panel ("Clear all messages? This cannot be undone.") with Cancel / Clear buttons. Confirming calls `onClearMessages?.()` and collapses back. No `window.confirm` (testable, better UX).
