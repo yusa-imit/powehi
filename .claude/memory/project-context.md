@@ -17,7 +17,15 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-30, cycle 225 — STABILIZATION: EpochAdvanced + MemberRemoved edge-case tests + MediaId unit tests)
+## Current state (2026-06-30, cycle 226 — FEATURE: clear chat history)
+- **Cycle 226 (commit dc124e4):** FEATURE — "Clear messages" button in InfoPanel now functional with inline confirm flow.
+  - **`handleClearMessages(chatId)`:** Pure `setChats` — resets `messages[]`, `unread`, `mentionCount`, `pinnedMessageId`, `firstUnreadAt`, `last`, `time`. No MLS op, no server contact, no logging.
+  - **InfoPanel `clearConfirm` state:** Click "Clear messages" → shows inline confirm panel ("Clear all messages? This cannot be undone.") with Cancel / Clear buttons. Confirming calls `onClearMessages?.()` and collapses back. No `window.confirm` (testable, better UX).
+  - **No new server-visible metadata.** JSX text children only (no dangerouslySetInnerHTML). Destructive-button style (red tint: rgba(205,48,63,0.14)). Starred messages derived from messages[] so they auto-clear.
+  - **943 frontend tests pass (+11: `ChatLayoutClearMessages.test.tsx` — button visible, correct text, shows confirm on click, confirm has warning text, Cancel hides prompt, Cancel keeps messages intact, Confirm removes all messages, unread badge cleared, confirm prompt closes after confirm, other chats unaffected, starred message from cleared chat removed from starred panel)**; tsc clean; biome clean; bundle budget OK.
+  - **Next cycle:** PQ hybrid Phase A or more UX polish.
+
+## Previous state (2026-06-30, cycle 225 — STABILIZATION: EpochAdvanced + MemberRemoved edge-case tests + MediaId unit tests)
 - **Cycle 225 (commit 3e7ed3b):** STABILIZATION — Added 14 Rust unit tests closing coverage gaps.
   - **CI:** Green on main (all 3 recent runs pass). No open issues.
   - **ws-hub handler.rs (+6 tests):** `EpochAdvanced` notification filtering for member (true) / non-member (false) / invalid-group-id (false); `MemberRemoved` for another device (remaining member notified, non-member suppressed); phantom-removal security guard (MemberRemoved for this device when not in group → false).
