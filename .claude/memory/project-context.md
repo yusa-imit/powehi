@@ -17,7 +17,18 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-06-30, cycle 227 — FEATURE: typing bubble in message list + biome CI fix)
+## Current state (2026-07-02, cycle 228 — FEATURE: media gallery in InfoPanel)
+- **Cycle 228 (commit 9dbe9f1):** FEATURE — InfoPanel's Media section now shows real image thumbnails.
+  - **`InfoPanel` new props:** `mediaMessages?: ChatMessage[]` and `onOpenLightbox?: (msg: ChatMessage) => void`. Wired from ChatLayout with existing `mediaMessages` memo and `handleOpenLightbox` callback.
+  - **Grid:** 3-col CSS grid, up to 6 `MediaImage` thumbnails (`object-fit: cover`, `aspect-ratio: 1/1`). Each wrapped in `<button data-testid="media-gallery-thumb">`. Clicking opens the existing Lightbox at the correct index.
+  - **Overflow:** When the chat has 7+ media messages, the 6th slot shows a `data-testid="media-gallery-overflow"` overlay with "+N" count (N = total − 5). Its aria-label reads "View all N images".
+  - **Empty state:** `data-testid="media-gallery-empty"` shows "No shared media" when no media in the chat.
+  - **Security:** Display-only — no server calls, no new metadata, JSX text children only (no dangerouslySetInnerHTML). Uses existing `useMediaReceive` decryption path. security-auditor: GREEN.
+  - **960 frontend tests pass (+10: `ChatLayoutMediaGallery.test.tsx` — empty state, grid appears on media, 1 thumbnail for 1 image, 6 thumbnails for 6 images, overflow indicator for 8 images, cap at 6 thumbs, click opens lightbox, aria-label "View image", overflow aria-label "View all N images", empty state gone once media arrives)**; tsc clean; biome clean; bundle budget OK (JS 145.5KB gz / WASM 553.7KB gz).
+  - **Note:** Unread divider (`new-messages-divider`) was already implemented (discovered during cycle) — `buildGroups` inserts it at `firstUnreadIndex`.
+  - **Next cycle:** PQ hybrid Phase A or more UX polish (e.g. draft message persistence, message search, presence indicators).
+
+## Previous state (2026-06-30, cycle 227 — FEATURE: typing bubble in message list + biome CI fix)
 - **Cycle 227 (commits 19b3c5e + 60e21fd):**
   - **CI fix (19b3c5e):** Frontend CI was red — Biome wanted multi-line `waitFor(() =>\n  expect(...),\n)` collapsed to single-line. Fixed `ChatLayoutClearMessages.test.tsx` with `biome format --write`.
   - **Typing bubble (60e21fd):** `MessageList` now renders an animated `TypingDots` bubble at the bottom of the message area when `isTyping` is true. Bubble is styled as a peer incoming message: avatar initial (photon-blue ring), speech bubble with `border-radius: 4px 16px 16px 16px`, containing `<TypingDots />`. Added `isTyping?: boolean` prop to `MessageList`; passed `active.typing` from ChatLayout. No server calls, no logging, no new metadata — pure display layer. Existing `useLayoutEffect` scroll-to-bottom handles auto-scroll when bubble appears.
