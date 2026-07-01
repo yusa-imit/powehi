@@ -4129,6 +4129,8 @@ function InfoPanel({
 	onUpdateDescription,
 	onUpdateNickname,
 	onClearMessages,
+	mediaMessages,
+	onOpenLightbox,
 }: {
 	chat: Chat;
 	onClose: () => void;
@@ -4147,6 +4149,8 @@ function InfoPanel({
 	onUpdateDescription?: (desc: string) => void;
 	onUpdateNickname?: (nickname: string) => void;
 	onClearMessages?: () => void;
+	mediaMessages?: ChatMessage[];
+	onOpenLightbox?: (msg: ChatMessage) => void;
 }) {
 	const [descEditing, setDescEditing] = useState(false);
 	const [descDraft, setDescDraft] = useState("");
@@ -4795,25 +4799,85 @@ function InfoPanel({
 				<InfoRow label="Auto-delete after" trailing={formatTtl(disappearingTtl)} />
 			</InfoSection>
 			<InfoSection title="Media">
-				<div
-					style={{
-						display: "grid",
-						gridTemplateColumns: "repeat(3, 1fr)",
-						gap: 6,
-						padding: "4px 18px 16px",
-					}}
-				>
-					{[0, 1, 2, 3, 4, 5].map((i) => (
-						<div
-							key={i}
-							style={{
-								aspectRatio: "1/1",
-								borderRadius: 8,
-								background: `linear-gradient(135deg, hsl(${i * 40 + 20}, 40%, 28%), hsl(${i * 40 + 220}, 35%, 10%))`,
-							}}
-						/>
-					))}
-				</div>
+				{!mediaMessages || mediaMessages.length === 0 ? (
+					<div
+						data-testid="media-gallery-empty"
+						style={{
+							padding: "12px 18px 16px",
+							fontSize: 12,
+							color: "var(--fg-4)",
+							textAlign: "center",
+						}}
+					>
+						No shared media
+					</div>
+				) : (
+					<div
+						data-testid="media-gallery"
+						style={{
+							display: "grid",
+							gridTemplateColumns: "repeat(3, 1fr)",
+							gap: 6,
+							padding: "4px 18px 16px",
+						}}
+					>
+						{mediaMessages.slice(0, 6).map((msg, i) => {
+							const isOverflow = i === 5 && mediaMessages.length > 6;
+							return (
+								<button
+									key={msg.id ?? i}
+									type="button"
+									data-testid="media-gallery-thumb"
+									aria-label={isOverflow ? `View all ${mediaMessages.length} images` : "View image"}
+									onClick={() => onOpenLightbox?.(msg)}
+									style={{
+										aspectRatio: "1/1",
+										borderRadius: 8,
+										overflow: "hidden",
+										padding: 0,
+										border: "none",
+										cursor: "pointer",
+										position: "relative",
+										background: "rgba(168,200,255,0.06)",
+									}}
+								>
+									{msg.media && (
+										<MediaImage
+											media={msg.media}
+											imgStyle={{
+												width: "100%",
+												height: "100%",
+												maxWidth: "100%",
+												maxHeight: "100%",
+												objectFit: "cover",
+												borderRadius: 0,
+											}}
+										/>
+									)}
+									{isOverflow && (
+										<div
+											data-testid="media-gallery-overflow"
+											style={{
+												position: "absolute",
+												inset: 0,
+												background: "rgba(4,4,8,0.7)",
+												display: "flex",
+												alignItems: "center",
+												justifyContent: "center",
+												fontSize: 16,
+												fontWeight: 700,
+												color: "var(--fg-1)",
+												borderRadius: 8,
+											}}
+										>
+											+{mediaMessages.length - 5}
+										</div>
+									)}
+								</button>
+							);
+						})}
+					</div>
+				)}
 			</InfoSection>
 
 			<div
@@ -6672,6 +6736,8 @@ export function ChatLayout() {
 					onUpdateDescription={(desc) => handleUpdateGroupDescription(active.id, desc)}
 					onUpdateNickname={(nickname) => handleUpdateNickname(active.id, nickname)}
 					onClearMessages={() => handleClearMessages(active.id)}
+					mediaMessages={mediaMessages}
+					onOpenLightbox={handleOpenLightbox}
 				/>
 			)}
 
