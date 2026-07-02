@@ -405,7 +405,7 @@ describe("listDevices", () => {
 		await listDevices(TOKEN);
 		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
 		expect(url).toBe("/v1/auth/devices");
-		expect((init.headers as Record<string, string>)["Authorization"]).toBe(`Bearer ${TOKEN}`);
+		expect((init.headers as Record<string, string>).Authorization).toBe(`Bearer ${TOKEN}`);
 		expect(init.method).toBeUndefined(); // default GET
 	});
 
@@ -430,7 +430,7 @@ describe("revokeDevice", () => {
 		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
 		expect(url).toBe(`/v1/auth/devices/${DEVICE_ID}`);
 		expect(init.method).toBe("DELETE");
-		expect((init.headers as Record<string, string>)["Authorization"]).toBe(`Bearer ${TOKEN}`);
+		expect((init.headers as Record<string, string>).Authorization).toBe(`Bearer ${TOKEN}`);
 	});
 
 	it("resolves without error on 204 No Content", async () => {

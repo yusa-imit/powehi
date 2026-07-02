@@ -117,9 +117,7 @@ export function LinkedDevicesPanel({ onClose }: LinkedDevicesPanelProps) {
 				>
 					<Icon name="chevron-left" size={16} />
 				</button>
-				<span style={{ fontWeight: 600, fontSize: 15, color: "var(--fg-1)" }}>
-					Linked Devices
-				</span>
+				<span style={{ fontWeight: 600, fontSize: 15, color: "var(--fg-1)" }}>Linked Devices</span>
 			</div>
 
 			{/* Body */}
@@ -127,7 +125,12 @@ export function LinkedDevicesPanel({ onClose }: LinkedDevicesPanelProps) {
 				{loading && (
 					<div
 						data-testid="linked-devices-loading"
-						style={{ padding: "32px 16px", textAlign: "center", color: "var(--fg-3)", fontSize: 13 }}
+						style={{
+							padding: "32px 16px",
+							textAlign: "center",
+							color: "var(--fg-3)",
+							fontSize: 13,
+						}}
 					>
 						Loading…
 					</div>
@@ -145,7 +148,12 @@ export function LinkedDevicesPanel({ onClose }: LinkedDevicesPanelProps) {
 				{!loading && !error && devices.length === 0 && (
 					<div
 						data-testid="linked-devices-empty"
-						style={{ padding: "32px 16px", textAlign: "center", color: "var(--fg-3)", fontSize: 13 }}
+						style={{
+							padding: "32px 16px",
+							textAlign: "center",
+							color: "var(--fg-3)",
+							fontSize: 13,
+						}}
 					>
 						No linked devices found.
 					</div>
@@ -172,11 +180,7 @@ export function LinkedDevicesPanel({ onClose }: LinkedDevicesPanelProps) {
 								}}
 							>
 								{/* Lock icon — photon blue per design system */}
-								<Icon
-									name="lock"
-									size={16}
-									color={isCurrent ? "var(--photon)" : "var(--fg-4)"}
-								/>
+								<Icon name="lock" size={16} color={isCurrent ? "var(--photon)" : "var(--fg-4)"} />
 
 								{/* Device info */}
 								<div style={{ flex: 1, minWidth: 0 }}>

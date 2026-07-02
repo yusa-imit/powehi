@@ -51,22 +51,16 @@ describe("LinkedDevicesPanel", () => {
 		vi.spyOn(AuthApi, "listDevices").mockResolvedValue(MOCK_DEVICES);
 		render(<LinkedDevicesPanel onClose={vi.fn()} />);
 		await waitFor(() => {
-			expect(
-				screen.getByTestId(`device-current-badge-${DEVICE_A}`),
-			).toBeInTheDocument();
+			expect(screen.getByTestId(`device-current-badge-${DEVICE_A}`)).toBeInTheDocument();
 		});
 		// Non-current device must NOT have the badge.
-		expect(
-			screen.queryByTestId(`device-current-badge-${DEVICE_B}`),
-		).not.toBeInTheDocument();
+		expect(screen.queryByTestId(`device-current-badge-${DEVICE_B}`)).not.toBeInTheDocument();
 	});
 
 	it("current device has no revoke button", async () => {
 		vi.spyOn(AuthApi, "listDevices").mockResolvedValue(MOCK_DEVICES);
 		render(<LinkedDevicesPanel onClose={vi.fn()} />);
-		await waitFor(() =>
-			expect(screen.getByTestId(`device-row-${DEVICE_A}`)).toBeInTheDocument(),
-		);
+		await waitFor(() => expect(screen.getByTestId(`device-row-${DEVICE_A}`)).toBeInTheDocument());
 		expect(screen.queryByTestId(`device-revoke-btn-${DEVICE_A}`)).not.toBeInTheDocument();
 	});
 
@@ -102,9 +96,7 @@ describe("LinkedDevicesPanel", () => {
 		await waitFor(() =>
 			expect(screen.getByTestId(`device-revoke-btn-${DEVICE_B}`)).toBeInTheDocument(),
 		);
-		expect(
-			screen.queryByTestId(`device-revoke-confirm-${DEVICE_B}`),
-		).not.toBeInTheDocument();
+		expect(screen.queryByTestId(`device-revoke-confirm-${DEVICE_B}`)).not.toBeInTheDocument();
 	});
 
 	it("calls revokeDevice API and removes device from list on confirm", async () => {
@@ -120,9 +112,7 @@ describe("LinkedDevicesPanel", () => {
 		});
 		expect(revokeSpy).toHaveBeenCalledWith(SESSION, DEVICE_B);
 		await waitFor(() => {
-			expect(
-				screen.queryByTestId(`device-row-${DEVICE_B}`),
-			).not.toBeInTheDocument();
+			expect(screen.queryByTestId(`device-row-${DEVICE_B}`)).not.toBeInTheDocument();
 		});
 		// Current device still present.
 		expect(screen.getByTestId(`device-row-${DEVICE_A}`)).toBeInTheDocument();
