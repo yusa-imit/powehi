@@ -3024,7 +3024,10 @@ mod tests {
             .unwrap();
         let body = String::from_utf8(bytes.to_vec()).unwrap();
         // Internal error detail must never leak into the HTTP response (no-plaintext-logging).
-        assert!(!body.contains("db unavailable"), "internal message must not appear in response");
+        assert!(
+            !body.contains("db unavailable"),
+            "internal message must not appear in response"
+        );
         assert_eq!(body, r#"{"code":"internal"}"#);
     }
 
@@ -3047,6 +3050,10 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(json, serde_json::json!([]), "empty device list must serialize as []");
+        assert_eq!(
+            json,
+            serde_json::json!([]),
+            "empty device list must serialize as []"
+        );
     }
 }
