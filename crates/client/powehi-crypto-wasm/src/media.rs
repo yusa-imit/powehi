@@ -147,6 +147,108 @@ pub fn decrypt_with_raw_key(
 mod tests {
     use super::*;
 
+    // ── Property-based tests (proptest) ─────────────────────────────────────
+    //
+    // These exercise AES-256-GCM security invariants against arbitrary inputs,
+    // complementing the fixed-input unit tests below (testing-conventions.md:
+    // "Property-based (proptest): crypto round-trips and serialization").
+
+    #[cfg(not(target_arch = "wasm32"))]
+    mod property {
+        use super::super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// For any plaintext up to 64 KB, encrypt→decrypt returns the original bytes.
+            #[test]
+            fn encrypt_decrypt_roundtrip(plaintext in proptest::collection::vec(any::<u8>(), 0..=65536)) {
+                let (ciphertext, key, iv, _hash) = encrypt(&plaintext).unwrap();
+                let recovered = decrypt(&key, &iv, &ciphertext).unwrap();
+                prop_assert_eq!(recovered, plaintext);
+            }
+
+            /// Wrong-length key always returns InvalidKeyLen before any AES-GCM attempt.
+            #[test]
+            fn wrong_key_len_always_rejected(
+                bad_len in (0usize..=64).prop_filter("not exactly 32", |l| *l != MEDIA_KEY_BYTES),
+                plaintext in proptest::collection::vec(any::<u8>(), 1..=256),
+            ) {
+                let (ciphertext, _key, iv, blob_hash) = encrypt(&plaintext).unwrap();
+                let bad_key = vec![0u8; bad_len];
+                let result = decrypt_with_raw_key(&bad_key, &iv, &ciphertext, &blob_hash);
+                prop_assert!(
+                    matches!(result, Err(MediaError::InvalidKeyLen)),
+                    "expected InvalidKeyLen for key len {bad_len}, got {result:?}"
+                );
+            }
+
+            /// Wrong-length IV always returns InvalidIvLen before any AES-GCM attempt.
+            #[test]
+            fn wrong_iv_len_always_rejected(
+                bad_len in (0usize..=24).prop_filter("not exactly 12", |l| *l != MEDIA_IV_BYTES),
+                plaintext in proptest::collection::vec(any::<u8>(), 1..=256),
+            ) {
+                let (ciphertext, key, _iv, blob_hash) = encrypt(&plaintext).unwrap();
+                let bad_iv = vec![0u8; bad_len];
+                let result = decrypt_with_raw_key(key.as_ref(), &bad_iv, &ciphertext, &blob_hash);
+                prop_assert!(
+                    matches!(result, Err(MediaError::InvalidIvLen)),
+                    "expected InvalidIvLen for iv len {bad_len}, got {result:?}"
+                );
+            }
+
+            /// Any single-byte flip in ciphertext or GCM tag causes decryption to fail.
+            /// Verifies GCM integrity protection for random plaintexts.
+            #[test]
+            fn tampered_ciphertext_never_decrypts(
+                plaintext in proptest::collection::vec(any::<u8>(), 1..=256),
+                flip_offset in any::<u8>(),
+            ) {
+                let (mut ciphertext, key, iv, _hash) = encrypt(&plaintext).unwrap();
+                // Flip a byte anywhere in ciphertext+tag using modular indexing so
+                // we never go out of bounds regardless of ciphertext length.
+                let idx = (flip_offset as usize) % ciphertext.len();
+                ciphertext[idx] ^= 0xff;
+                prop_assert!(
+                    decrypt(&key, &iv, &ciphertext).is_err(),
+                    "tampered ciphertext at byte {idx} must not decrypt"
+                );
+            }
+
+            /// Blob-hash mismatch is caught before AES-GCM decryption.
+            /// Any 1-bit deviation in the expected hash triggers BlobHashMismatch.
+            #[test]
+            fn blob_hash_mismatch_rejected_before_decrypt(
+                plaintext in proptest::collection::vec(any::<u8>(), 1..=256),
+                flip_offset in any::<u8>(),
+            ) {
+                let (ciphertext, key, iv, mut blob_hash) = encrypt(&plaintext).unwrap();
+                let idx = (flip_offset as usize) % BLOB_HASH_BYTES;
+                blob_hash[idx] ^= 0xff;
+                prop_assert!(
+                    matches!(
+                        decrypt_with_raw_key(key.as_ref(), &iv, &ciphertext, &blob_hash),
+                        Err(MediaError::BlobHashMismatch)
+                    ),
+                    "tampered blob_hash at byte {idx} must return BlobHashMismatch"
+                );
+            }
+
+            /// Two encryptions of the same plaintext always produce different ciphertexts
+            /// (fresh random key + IV per call → semantic security).
+            #[test]
+            fn semantic_security_different_ciphertexts(
+                plaintext in proptest::collection::vec(any::<u8>(), 1..=256),
+            ) {
+                let (ct1, _k1, _iv1, _h1) = encrypt(&plaintext).unwrap();
+                let (ct2, _k2, _iv2, _h2) = encrypt(&plaintext).unwrap();
+                prop_assert_ne!(ct1, ct2, "two encryptions of the same plaintext must differ");
+            }
+        }
+    }
+
+    // ── Deterministic unit tests ─────────────────────────────────────────────
+
     #[test]
     fn test_encrypt_decrypt_round_trip() {
         let plaintext = b"hello powehi media world";

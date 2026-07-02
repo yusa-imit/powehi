@@ -64,6 +64,9 @@ wasm-bindgen-test = "0.3"
 ml-kem = { workspace = true, features = ["deterministic"] }
 # Note: ed25519-dalek was previously a dev-dep for the kem_credential KAT; it is
 # now a runtime dep (above) for §8.5 recovery-phrase Ed25519 key derivation.
+# Property-based testing for crypto round-trips (testing-conventions.md).
+# Not compiled into the WASM binary — dev-only.
+proptest = { workspace = true }
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-O", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]

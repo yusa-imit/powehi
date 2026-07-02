@@ -124,6 +124,8 @@ aws-credential-types = "1"
 # integration testing
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
+# property-based testing (testing-conventions.md: crypto round-trips and serialization)
+proptest = "1"
 # workspace crates
 powehi-domain = { path = "crates/domain/powehi-domain" }
 powehi-port-inbound = { path = "crates/ports/powehi-port-inbound" }
