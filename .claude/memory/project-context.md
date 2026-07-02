@@ -17,7 +17,20 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-03, cycle 234 — FEATURE: time-window message grouping)
+## Current state (2026-07-03, cycle 235 — STABILIZATION: DomainEvent serde round-trip tests)
+- **Cycle 235 (commit 2184757):** STABILIZATION — Added 4 unit tests to `DomainEvent` in `powehi-domain`.
+  - **Mode:** STABILIZATION (counter 235 % 5 == 0). CI was green on main.
+  - **Test gap closed:** `crates/domain/powehi-domain/src/event.rs` — the `DomainEvent` enum had `#[derive(Serialize, Deserialize)]` but zero tests verifying serde round-trips. Events are published to Redis pub/sub, so wire-format integrity matters.
+  - **4 tests added:**
+    1. `occurred_at_returns_at_field_for_all_variants` — all 7 variants return the `at` field.
+    2. `serde_json_round_trips_all_variants` — all 7 variants survive JSON encode/decode with timestamp preserved.
+    3. `epoch_advanced_preserves_epoch_through_serde` — `Epoch(42)` round-trips correctly.
+    4. `member_removed_preserves_epoch_through_serde` — `Epoch(7)` round-trips correctly.
+  - **security-auditor:** GREEN — no PII/keys in fixtures, no prod code changed, no new server-visible metadata, no auth-bypass paths affected.
+  - **Rust: 578 tests pass** (was 574, +4); clippy clean; `cargo audit` 3 pre-existing allowed warnings, no new vulns. Target dir: 9.7 GB (< 20 GB, no pruning). 997 frontend tests pass.
+  - **Next cycle:** PQ hybrid Phase A or more UX polish (e.g. presence indicators, disappearing-messages countdown tick, message reactions total for group).
+
+## Previous state (2026-07-03, cycle 234 — FEATURE: time-window message grouping)
 - **Cycle 234 (commit 9dd6398):** FEATURE — Time-window message grouping (3-minute visual groups).
   - **Mode:** FEATURE (counter 234 % 5 ≠ 0). CI was green (last run: success on cycle 233).
   - **Feature:** Consecutive messages from the same sender within 3 minutes now form a visual group: avatar shown only at group head, subsequent bubbles use 2px top margin (vs 8px). Messages > 3 min apart break into a new group.
