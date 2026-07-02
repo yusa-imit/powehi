@@ -1649,6 +1649,7 @@ function MessageBubble({
 	onCancelScheduled,
 	onVote,
 	onOpenLightbox,
+	countdownTick,
 }: {
 	msg: ChatMessage;
 	partner: string;
@@ -1673,6 +1674,8 @@ function MessageBubble({
 	onVote?: (optionIdx: number) => void;
 	/** Called when the user clicks a media image to view it full-screen. */
 	onOpenLightbox?: () => void;
+	/** Incremented every second when there are expiring messages; drives countdown re-render. */
+	countdownTick?: number;
 }) {
 	const isMe = msg.from === "me";
 	const [pickerOpen, setPickerOpen] = useState(false);
@@ -1858,7 +1861,7 @@ function MessageBubble({
 										}}
 									>
 										<Icon name="timer" size={10} color="#FF9E52" />
-										<span data-testid="disappearing-badge">
+										<span data-testid="disappearing-badge" data-countdown-tick={countdownTick ?? 0}>
 											Disappearing · {formatTimeLeft(msg.expiresAt)}
 										</span>
 									</div>
@@ -2429,6 +2432,7 @@ function MessageList({
 	firstUnreadIndex,
 	jumpToMessageId,
 	onJumpComplete,
+	countdownTick,
 }: {
 	chatId: string;
 	messages: ChatMessage[];
@@ -2453,6 +2457,8 @@ function MessageList({
 	firstUnreadIndex?: number;
 	jumpToMessageId?: string;
 	onJumpComplete?: () => void;
+	/** Incremented every second when there are expiring messages; drives countdown re-render. */
+	countdownTick?: number;
 }) {
 	const ref = useRef<HTMLDivElement>(null);
 	const [flashingId, setFlashingId] = useState<string | null>(null);
@@ -2717,6 +2723,7 @@ function MessageList({
 								onOpenLightbox={
 									onOpenLightbox && g.msg.media ? () => onOpenLightbox(g.msg) : undefined
 								}
+								countdownTick={countdownTick}
 							/>
 						</div>
 					),
@@ -5477,6 +5484,18 @@ export function ChatLayout() {
 	}, [tabTotalUnread]);
 
 	const active = chats.find((c) => c.id === activeId);
+
+	// Countdown tick — forces a re-render every second when the active chat has any
+	// disappearing message so `formatTimeLeft` stays current without polling for each
+	// message individually.
+	const [countdownTick, setCountdownTick] = useState(0);
+	const hasExpiringMessages = (active?.messages ?? []).some((m) => !!m.expiresAt);
+	useEffect(() => {
+		if (!hasExpiringMessages) return;
+		const handle = setInterval(() => setCountdownTick((n) => n + 1), 1000);
+		return () => clearInterval(handle);
+	}, [hasExpiringMessages]);
+
 	const mediaMessages = useMemo(
 		() => (active?.messages ?? []).filter((m) => !!m.media),
 		[active?.messages],
@@ -6726,6 +6745,7 @@ export function ChatLayout() {
 						firstUnreadIndex={active.firstUnreadAt}
 						jumpToMessageId={jumpToMessageId ?? undefined}
 						onJumpComplete={handleJumpComplete}
+						countdownTick={countdownTick}
 					/>
 					<Composer
 						onSend={sendMessage}
