@@ -17,7 +17,17 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-02, cycle 232 — STABILIZATION: CI fix + list_devices error-path tests)
+## Current state (2026-07-02, cycle 233 — STABILIZATION: CI fix rustfmt formatting)
+- **Cycle 233 (commit 1d6886a):** STABILIZATION (forced — CI — Rust Format check was red).
+  - **Mode:** FEATURE counter 233, but switched to STABILIZATION because CI was red.
+  - **Root cause:** `cargo fmt --all --check` failed — two `assert!` / `assert_eq!` calls added in cycle 232 tests exceeded the line-length threshold (rustfmt requires multi-line form for long assert calls with messages).
+    - `lib.rs:3024`: `assert!(!body.contains("db unavailable"), "...")` → multi-line
+    - `lib.rs:3050`: `assert_eq!(json, serde_json::json!([]), "...")` → multi-line
+  - **Fix:** `cargo fmt --manifest-path crates/adapters/inbound/powehi-rest-api/Cargo.toml`; verified `cargo fmt --all --check` exits 0.
+  - **143 tests pass** (no regressions); push triggered new CI run.
+  - **Next cycle:** PQ hybrid Phase A or more UX polish (e.g. message grouping by time window, presence indicators, disappearing-messages countdown tick).
+
+## Previous state (2026-07-02, cycle 232 — STABILIZATION: CI fix + list_devices error-path tests)
 - **Cycle 232 (commits 03b561f + e883d96):** STABILIZATION (forced — CI — Frontend was red).
   - **Mode:** FEATURE counter 232, but switched to STABILIZATION because CI — Frontend was red.
   - **Root cause:** Biome lint/format errors introduced in cycle 231 (linked devices panel):
