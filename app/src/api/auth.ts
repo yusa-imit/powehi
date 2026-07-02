@@ -125,6 +125,38 @@ export async function loginFinish(
 	return resp.json() as Promise<string>;
 }
 
+// ── Device management ─────────────────────────────────────────────────────────
+
+export interface DeviceInfo {
+	device_id: string;
+	created_at: string;
+	last_seen_at: string | null;
+}
+
+/** GET /v1/auth/devices — list all devices linked to the authenticated account. */
+export async function listDevices(sessionToken: string): Promise<DeviceInfo[]> {
+	const resp = await fetch(`${API_BASE}/auth/devices`, {
+		headers: { Authorization: `Bearer ${sessionToken}` },
+	});
+	if (!resp.ok) {
+		const body = (await resp.json().catch(() => ({}))) as { code?: string };
+		throw new Error(body.code ?? `list_devices_failed:${resp.status}`);
+	}
+	return resp.json() as Promise<DeviceInfo[]>;
+}
+
+/** DELETE /v1/auth/devices/:id — revoke (delink) a device. Invalidates all its sessions. */
+export async function revokeDevice(sessionToken: string, deviceId: string): Promise<void> {
+	const resp = await fetch(`${API_BASE}/auth/devices/${encodeURIComponent(deviceId)}`, {
+		method: "DELETE",
+		headers: { Authorization: `Bearer ${sessionToken}` },
+	});
+	if (!resp.ok) {
+		const body = (await resp.json().catch(() => ({}))) as { code?: string };
+		throw new Error(body.code ?? `revoke_device_failed:${resp.status}`);
+	}
+}
+
 // ── Key packages ──────────────────────────────────────────────────────────────
 
 export async function uploadKeyPackage(

@@ -64,6 +64,10 @@ wasm-bindgen-test = "0.3"
 ml-kem = { workspace = true, features = ["deterministic"] }
 # Note: ed25519-dalek was previously a dev-dep for the kem_credential KAT; it is
 # now a runtime dep (above) for §8.5 recovery-phrase Ed25519 key derivation.
+
+# proptest (and its rusty-fork → wait-timeout dependency) only compiles on native
+# targets; exclude from wasm32 to avoid CI failures in `wasm-pack test --node`.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 # Property-based testing for crypto round-trips (testing-conventions.md).
 # Not compiled into the WASM binary — dev-only.
 proptest = { workspace = true }

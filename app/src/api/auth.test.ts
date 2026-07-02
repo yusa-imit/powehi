@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { hashHandle, loginFinish, loginInit, regFinish, regInit, uploadKeyPackage } from "./auth";
+import {
+	hashHandle,
+	listDevices,
+	loginFinish,
+	loginInit,
+	regFinish,
+	regInit,
+	revokeDevice,
+	uploadKeyPackage,
+} from "./auth";
 
 const fetchMock = vi.fn<typeof fetch>();
 beforeEach(() => {
@@ -381,5 +390,66 @@ describe("uploadKeyPackage", () => {
 		expect(warnSpy).toHaveBeenCalledOnce();
 		expect(warnSpy.mock.calls[0]).toHaveLength(2);
 		warnSpy.mockRestore();
+	});
+});
+
+// ── listDevices ───────────────────────────────────────────────────────────────
+
+describe("listDevices", () => {
+	const MOCK_LIST = [
+		{ device_id: DEVICE_ID, created_at: "2026-01-01T00:00:00Z", last_seen_at: null },
+	];
+
+	it("sends GET /v1/auth/devices with Bearer token", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp(MOCK_LIST));
+		await listDevices(TOKEN);
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe("/v1/auth/devices");
+		expect((init.headers as Record<string, string>)["Authorization"]).toBe(`Bearer ${TOKEN}`);
+		expect(init.method).toBeUndefined(); // default GET
+	});
+
+	it("returns parsed device list on success", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp(MOCK_LIST));
+		const result = await listDevices(TOKEN);
+		expect(result).toEqual(MOCK_LIST);
+	});
+
+	it("throws on non-2xx response", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp({ code: "unauthorized" }, 401));
+		await expect(listDevices(TOKEN)).rejects.toThrow("unauthorized");
+	});
+});
+
+// ── revokeDevice ──────────────────────────────────────────────────────────────
+
+describe("revokeDevice", () => {
+	it("sends DELETE /v1/auth/devices/:id with Bearer token", async () => {
+		fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+		await revokeDevice(TOKEN, DEVICE_ID);
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe(`/v1/auth/devices/${DEVICE_ID}`);
+		expect(init.method).toBe("DELETE");
+		expect((init.headers as Record<string, string>)["Authorization"]).toBe(`Bearer ${TOKEN}`);
+	});
+
+	it("resolves without error on 204 No Content", async () => {
+		fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+		await expect(revokeDevice(TOKEN, DEVICE_ID)).resolves.toBeUndefined();
+	});
+
+	it("throws on 404 (device not found)", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp({ code: "not_found" }, 404));
+		await expect(revokeDevice(TOKEN, DEVICE_ID)).rejects.toThrow("not_found");
+	});
+
+	it("encodes device ID in URL to prevent path injection", async () => {
+		// A device ID with special chars should be URL-encoded (won't happen with UUIDs,
+		// but encodeURIComponent is the correct defensive measure).
+		const weirdId = "abc/def";
+		fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+		await revokeDevice(TOKEN, weirdId);
+		const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe("/v1/auth/devices/abc%2Fdef");
 	});
 });

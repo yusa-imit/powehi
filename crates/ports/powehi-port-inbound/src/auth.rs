@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use powehi_domain::{device::DeviceId, error::DomainError, user::UserId};
 use serde::{Deserialize, Serialize};
 
@@ -72,6 +73,18 @@ pub struct DeviceRegistrationResponse {
     pub device_id: DeviceId,
 }
 
+/// A single device entry returned by `list_devices`.
+///
+/// `mls_credential` is intentionally omitted — callers don't need the raw
+/// credential bytes to render the device list, and excluding it shrinks the
+/// response and avoids sending extra crypto material over the wire.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceInfo {
+    pub device_id: DeviceId,
+    pub created_at: DateTime<Utc>,
+    pub last_seen_at: Option<DateTime<Utc>>,
+}
+
 #[async_trait]
 pub trait AuthUseCase: Send + Sync {
     async fn register_init(
@@ -94,4 +107,5 @@ pub trait AuthUseCase: Send + Sync {
         user_id: &UserId,
         device_id: &DeviceId,
     ) -> Result<(), DomainError>;
+    async fn list_devices(&self, user_id: &UserId) -> Result<Vec<DeviceInfo>, DomainError>;
 }

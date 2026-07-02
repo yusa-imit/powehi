@@ -14,8 +14,8 @@ use axum::{
 use metrics::counter;
 use powehi_domain::{device::DeviceId, error::DomainError};
 use powehi_port_inbound::auth::{
-    DeviceRegistrationRequest, DeviceRegistrationResponse, LoginFinishRequest, LoginInitRequest,
-    LoginInitResponse, RegistrationFinishRequest, RegistrationFinishResponse,
+    DeviceInfo, DeviceRegistrationRequest, DeviceRegistrationResponse, LoginFinishRequest,
+    LoginInitRequest, LoginInitResponse, RegistrationFinishRequest, RegistrationFinishResponse,
     RegistrationInitRequest, RegistrationInitResponse, SessionToken,
 };
 
@@ -146,4 +146,28 @@ pub async fn revoke_device_handler(
         })?;
     tracing::info!("auth.revoke_device");
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /v1/auth/devices` — list all devices linked to the authenticated user's account.
+///
+/// Returns device IDs, creation timestamps, and last-seen timestamps. MLS credential
+/// bytes are never returned (smaller response, no extra crypto material over the wire).
+/// The current device appears in the list; clients should highlight it.
+pub async fn list_devices_handler(
+    State(state): State<AppState>,
+    AuthenticatedDevice(current_device_id): AuthenticatedDevice,
+) -> Result<Json<Vec<DeviceInfo>>, ApiError> {
+    let device = state
+        .device_repo
+        .find_by_id(&current_device_id)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or_else(|| ApiError::from(DomainError::NotFound("device".into())))?;
+    let devices = state.auth.list_devices(&device.user_id).await?;
+    tracing::info!(
+        user_id = %device.user_id,
+        device_count = devices.len(),
+        "auth.list_devices"
+    );
+    Ok(Json(devices))
 }

@@ -162,6 +162,12 @@ mod tests {
         async fn revoke_device(&self, _: &UserId, _: &DeviceId) -> Result<(), DomainError> {
             unimplemented!()
         }
+        async fn list_devices(
+            &self,
+            _: &UserId,
+        ) -> Result<Vec<powehi_port_inbound::auth::DeviceInfo>, DomainError> {
+            unimplemented!()
+        }
     }
 
     #[async_trait]

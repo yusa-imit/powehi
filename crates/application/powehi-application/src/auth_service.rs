@@ -9,7 +9,7 @@ use powehi_domain::{
     user::{User, UserId},
 };
 use powehi_port_inbound::auth::{
-    AuthUseCase, DeviceRegistrationRequest, LoginFinishRequest, LoginInitRequest,
+    AuthUseCase, DeviceInfo, DeviceRegistrationRequest, LoginFinishRequest, LoginInitRequest,
     LoginInitResponse, RegistrationFinishRequest, RegistrationFinishResponse,
     RegistrationInitRequest, RegistrationInitResponse, SessionToken,
 };
@@ -279,6 +279,19 @@ impl AuthUseCase for AuthService {
         let device = Device::new(device_id.clone(), user_id.clone(), req.mls_credential);
         self.device_repo.save(&device).await?;
         Ok(device_id)
+    }
+
+    #[instrument(skip(self, user_id))]
+    async fn list_devices(&self, user_id: &UserId) -> Result<Vec<DeviceInfo>, DomainError> {
+        let devices = self.device_repo.find_by_user(user_id).await?;
+        Ok(devices
+            .into_iter()
+            .map(|d| DeviceInfo {
+                device_id: d.id,
+                created_at: d.created_at,
+                last_seen_at: d.last_seen_at,
+            })
+            .collect())
     }
 
     #[instrument(skip(self, user_id, device_id))]

@@ -136,7 +136,10 @@ fn router_inner(
     // auth state. Shared bucket is intentionally stricter: login + device ops
     // draw from the same per-IP allowance, preventing budget-doubling.
     let device_routes = Router::new()
-        .route("/v1/auth/devices", post(routes::auth::register_new_device))
+        .route(
+            "/v1/auth/devices",
+            get(routes::auth::list_devices_handler).post(routes::auth::register_new_device),
+        )
         .route(
             "/v1/auth/devices/:id",
             delete(routes::auth::revoke_device_handler),
@@ -416,6 +419,12 @@ mod tests {
             _user_id: &UserId,
             _device_id: &DeviceId,
         ) -> Result<(), DomainError> {
+            unimplemented!()
+        }
+        async fn list_devices(
+            &self,
+            _user_id: &UserId,
+        ) -> Result<Vec<powehi_port_inbound::auth::DeviceInfo>, DomainError> {
             unimplemented!()
         }
     }
@@ -1658,6 +1667,12 @@ mod tests {
         ) -> Result<(), DomainError> {
             unimplemented!()
         }
+        async fn list_devices(
+            &self,
+            _user_id: &UserId,
+        ) -> Result<Vec<powehi_port_inbound::auth::DeviceInfo>, DomainError> {
+            unimplemented!()
+        }
     }
 
     fn login_init_body(handle_hash: Vec<u8>) -> String {
@@ -2476,6 +2491,24 @@ mod tests {
         ) -> Result<(), DomainError> {
             Ok(())
         }
+        async fn list_devices(
+            &self,
+            _user_id: &UserId,
+        ) -> Result<Vec<powehi_port_inbound::auth::DeviceInfo>, DomainError> {
+            use powehi_port_inbound::auth::DeviceInfo;
+            Ok(vec![
+                DeviceInfo {
+                    device_id: DeviceId::new(),
+                    created_at: Utc::now(),
+                    last_seen_at: None,
+                },
+                DeviceInfo {
+                    device_id: DeviceId::new(),
+                    created_at: Utc::now(),
+                    last_seen_at: Some(Utc::now()),
+                },
+            ])
+        }
     }
 
     fn device_router() -> Router {
@@ -2570,6 +2603,58 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     }
 
+    #[tokio::test]
+    async fn list_devices_returns_device_list() {
+        let resp = device_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/auth/devices")
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let arr = json.as_array().expect("response must be a JSON array");
+        assert_eq!(arr.len(), 2, "MockAuthDeviceSuccess returns 2 devices");
+        for entry in arr {
+            assert!(
+                entry.get("device_id").and_then(|v| v.as_str()).is_some(),
+                "each device entry must include device_id"
+            );
+            assert!(
+                entry.get("created_at").is_some(),
+                "each device entry must include created_at"
+            );
+            // last_seen_at is present as a key (may be null)
+            assert!(
+                entry.get("last_seen_at").is_some(),
+                "each device entry must include last_seen_at key"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn list_devices_without_token_returns_401() {
+        let resp = test_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/auth/devices")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
     // Mocks for error-path device management tests.
     struct MockAuthDeviceRevokeNotFound;
     #[async_trait]
@@ -2601,6 +2686,12 @@ mod tests {
         }
         async fn revoke_device(&self, _: &UserId, _: &DeviceId) -> Result<(), DomainError> {
             Err(DomainError::NotFound("device".into()))
+        }
+        async fn list_devices(
+            &self,
+            _user_id: &UserId,
+        ) -> Result<Vec<powehi_port_inbound::auth::DeviceInfo>, DomainError> {
+            unimplemented!()
         }
     }
 
@@ -2634,6 +2725,12 @@ mod tests {
         }
         async fn revoke_device(&self, _: &UserId, _: &DeviceId) -> Result<(), DomainError> {
             Err(DomainError::Unauthorized)
+        }
+        async fn list_devices(
+            &self,
+            _user_id: &UserId,
+        ) -> Result<Vec<powehi_port_inbound::auth::DeviceInfo>, DomainError> {
+            unimplemented!()
         }
     }
 
