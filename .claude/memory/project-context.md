@@ -17,7 +17,15 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-02, cycle 228 — FEATURE: media gallery in InfoPanel)
+## Current state (2026-07-02, cycle 229 — FEATURE: browser tab title unread badge)
+- **Cycle 229 (commit d1cd843):** FEATURE — Browser tab title now shows unread count.
+  - **`tabTotalUnread`:** Computed in `ChatLayout` via `chats.reduce((s,c) => s + c.unread, 0)`.
+  - **`useEffect`:** Sets `document.title = "(N) Powehi"` when N > 0; resets to `"Powehi"` when 0 or on unmount.
+  - **Security:** Display-only side effect; no server calls, no new metadata, no logging. The count is an integer derived from local state only.
+  - **969 frontend tests pass (+9: `ChatLayoutTabTitle.test.tsx` — initial badge (2), numeric format match, background-chat increment, mark-all-read reset, chat-switch clear, active-chat no-increment, unmount restore, multi-chat accumulation, individual-clear revert)**; tsc clean; biome clean.
+  - **Next cycle:** PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768 ciphersuite), or more UX polish (e.g. message grouping by time window, presence indicators, disappearing-messages countdown tick).
+
+## Previous state (2026-07-02, cycle 228 — FEATURE: media gallery in InfoPanel)
 - **Cycle 228 (commit 9dbe9f1):** FEATURE — InfoPanel's Media section now shows real image thumbnails.
   - **`InfoPanel` new props:** `mediaMessages?: ChatMessage[]` and `onOpenLightbox?: (msg: ChatMessage) => void`. Wired from ChatLayout with existing `mediaMessages` memo and `handleOpenLightbox` callback.
   - **Grid:** 3-col CSS grid, up to 6 `MediaImage` thumbnails (`object-fit: cover`, `aspect-ratio: 1/1`). Each wrapped in `<button data-testid="media-gallery-thumb">`. Clicking opens the existing Lightbox at the correct index.
