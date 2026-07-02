@@ -131,10 +131,9 @@ mod tests {
     #[test]
     fn serde_json_round_trips_all_variants() {
         for event in sample_events() {
-            let json = serde_json::to_string(&event)
-                .expect("serialization must succeed");
-            let restored: DomainEvent = serde_json::from_str(&json)
-                .expect("deserialization must succeed");
+            let json = serde_json::to_string(&event).expect("serialization must succeed");
+            let restored: DomainEvent =
+                serde_json::from_str(&json).expect("deserialization must succeed");
             // Verify occurred_at survives the round-trip — timestamps are the
             // only invariant we can compare without PartialEq on the enum.
             assert_eq!(
