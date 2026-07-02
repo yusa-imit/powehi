@@ -17,7 +17,28 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-02, cycle 230 — STABILIZATION: proptest property-based crypto tests)
+## Current state (2026-07-02, cycle 232 — STABILIZATION: CI fix + list_devices error-path tests)
+- **Cycle 232 (commits 03b561f + e883d96):** STABILIZATION (forced — CI — Frontend was red).
+  - **Mode:** FEATURE counter 232, but switched to STABILIZATION because CI — Frontend was red.
+  - **Root cause:** Biome lint/format errors introduced in cycle 231 (linked devices panel):
+    - `auth.test.ts:408,433` — `useLiteralKeys`: `["Authorization"]` → `.Authorization`
+    - `LinkedDevicesPanel.test.tsx` — multi-line `waitFor/expect` calls collapsed to single-line
+    - `LinkedDevicesPanel.tsx` — formatter diff
+  - **Fix (03b561f):** `biome check --fix --unsafe` auto-corrected all 4 violations. 987 frontend tests pass.
+  - **CI — Frontend:** Green on `03b561f` (success), restoring green on main.
+  - **New tests (e883d96):** Closed 2 coverage gaps in `powehi-rest-api` for `GET /v1/auth/devices`:
+    1. `list_devices_service_error_returns_500` — asserts 500 status + no internal detail in body (no-plaintext-logging invariant).
+    2. `list_devices_empty_list_returns_200_with_empty_array` — asserts 200 OK with `[]` when no devices.
+  - **security-auditor:** GREEN (all 4 invariants verified — no-plaintext-logging, unimplemented! side-effect isolation, no real PII/keys, no auth bypass).
+  - **powehi-rest-api: 143 tests pass** (was 141, +2); clippy clean; `cargo audit` 3 pre-existing allowed warnings, no new vulns. Target dir: 9.5 GB (< 20 GB, no pruning). 987 frontend tests pass.
+  - **Next cycle:** PQ hybrid Phase A or more UX polish (e.g. message grouping by time window, presence indicators, disappearing-messages countdown tick).
+
+## Previous state (2026-07-02, cycle 231 — FEATURE: linked devices panel)
+- **Cycle 231 (commit 85a4a54):** FEATURE — Linked Devices panel + GET /v1/auth/devices backend endpoint.
+  - **Note:** This commit introduced biome lint errors that were fixed in cycle 232 (03b561f).
+  - **Next cycle:** Fixed in cycle 232.
+
+## Previous state (2026-07-02, cycle 230 — STABILIZATION: proptest property-based crypto tests)
 - **Cycle 230 (commit 135e537):** STABILIZATION — Added 6 proptest property-based tests for AES-256-GCM media encryption.
   - **Mode:** STABILIZATION (counter 230 % 5 == 0).
   - **CI:** Green on main (all recent runs pass). No open issues.
