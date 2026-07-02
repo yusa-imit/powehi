@@ -17,16 +17,31 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-03, cycle 235 — STABILIZATION: DomainEvent serde round-trip tests)
+## Current state (2026-07-03, cycle 236 — FEATURE: disappearing-message countdown tick + CI fix)
+- **Cycle 236 (commits 102980e + 7b64665):** FEATURE — Disappearing-message countdown tick + CI Format check fix.
+  - **Mode:** FEATURE (counter 236 % 5 ≠ 0). CI was red (rustfmt on `event.rs` serde test) → fixed first.
+  - **CI fix (102980e):** `cargo fmt --all` on `crates/domain/powehi-domain/src/event.rs` — the `.expect()` chains in `serde_json_round_trips_all_variants` were formatted differently locally vs CI. Rustfmt normalized them.
+  - **Feature (7b64665):** Disappearing-message countdown badge now updates every second.
+    - `countdownTick: number` state in `ChatLayout` — incremented by `setInterval(1000)` only when `hasExpiringMessages` (active chat has ≥1 message with `expiresAt`). Interval auto-clears when no expiring messages are present.
+    - Prop threaded: `ChatLayout` → `MessageList` → `MessageBubble` as `countdownTick?: number`.
+    - `data-countdown-tick={countdownTick ?? 0}` on `<span data-testid="disappearing-badge">` — observable in tests and ensures React compiler cannot elide re-renders.
+    - `formatTimeLeft(msg.expiresAt)` re-evaluated on every tick because `Date.now()` is called inline.
+  - **8 new tests** in `ChatLayoutCountdownTick.test.tsx` (fake timers via `vi.useFakeTimers`):
+    1. Badge renders when message has `expiresAt`.
+    2. Badge shows "Disappearing ·" prefix.
+    3. `data-countdown-tick` increments after 1 s.
+    4. `data-countdown-tick` increments 3 times after 3 s.
+    5. No badge without `expiresAt`.
+    6. '2m' label for 2-minute TTL.
+    7. 'soon' label for already-expired message.
+    8. Text updates from '2m' → '1m' after clock advances.
+  - **Frontend: 1005 tests pass** (was 997, +8); tsc clean; biome clean.
+  - **Note:** The "presence indicators" feature was already fully implemented in prior cycles; "disappearing countdown tick" was the missing piece.
+  - **Next cycle:** PQ hybrid Phase A or more UX polish (e.g. message reactions total for group, per-message reaction breakdown tooltip).
+
+## Previous state (2026-07-03, cycle 235 — STABILIZATION: DomainEvent serde round-trip tests)
 - **Cycle 235 (commit 2184757):** STABILIZATION — Added 4 unit tests to `DomainEvent` in `powehi-domain`.
   - **Mode:** STABILIZATION (counter 235 % 5 == 0). CI was green on main.
-  - **Test gap closed:** `crates/domain/powehi-domain/src/event.rs` — the `DomainEvent` enum had `#[derive(Serialize, Deserialize)]` but zero tests verifying serde round-trips. Events are published to Redis pub/sub, so wire-format integrity matters.
-  - **4 tests added:**
-    1. `occurred_at_returns_at_field_for_all_variants` — all 7 variants return the `at` field.
-    2. `serde_json_round_trips_all_variants` — all 7 variants survive JSON encode/decode with timestamp preserved.
-    3. `epoch_advanced_preserves_epoch_through_serde` — `Epoch(42)` round-trips correctly.
-    4. `member_removed_preserves_epoch_through_serde` — `Epoch(7)` round-trips correctly.
-  - **security-auditor:** GREEN — no PII/keys in fixtures, no prod code changed, no new server-visible metadata, no auth-bypass paths affected.
   - **Rust: 578 tests pass** (was 574, +4); clippy clean; `cargo audit` 3 pre-existing allowed warnings, no new vulns. Target dir: 9.7 GB (< 20 GB, no pruning). 997 frontend tests pass.
   - **Next cycle:** PQ hybrid Phase A or more UX polish (e.g. presence indicators, disappearing-messages countdown tick, message reactions total for group).
 
