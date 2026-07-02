@@ -17,7 +17,22 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-02, cycle 233 — STABILIZATION: CI fix rustfmt formatting)
+## Current state (2026-07-03, cycle 234 — FEATURE: time-window message grouping)
+- **Cycle 234 (commit 9dd6398):** FEATURE — Time-window message grouping (3-minute visual groups).
+  - **Mode:** FEATURE (counter 234 % 5 ≠ 0). CI was green (last run: success on cycle 233).
+  - **Feature:** Consecutive messages from the same sender within 3 minutes now form a visual group: avatar shown only at group head, subsequent bubbles use 2px top margin (vs 8px). Messages > 3 min apart break into a new group.
+  - **Implementation:**
+    - Added `ts?: number` (Unix ms) to `ChatMessage` interface.
+    - Set `ts: now.getTime()` in `handleIncoming`, `sendMessage` optimistic push, and media upload optimistic push.
+    - `buildGroups` computes `showAvatar` per `msg` group entry: uses 3-minute window when both messages have `ts`; falls back to `msg.continued` for legacy seed data (zero visual regression).
+    - `MessageBubble` receives `showAvatar` from `MessageList`; uses it for avatar render and `marginTop` (8 vs 2). `data-testid="msg-avatar"` added for testability.
+    - `TIME_GROUP_WINDOW_MS = 3 * 60 * 1000` constant.
+  - **Security:** `ts` is local-only (never in MLS payload, API body, or logs). Pure render logic — no server calls, no new server-visible metadata.
+  - **Tests:** 10 tests in `ChatLayoutTimeGrouping.test.tsx` — group head avatar, <3 min grouped, >3 min breaks group, boundary 2m59s grouped, seed fallback regression, different-sender independence, margin 2px for continuation, margin 8px for group start, 3-quick-msgs = 1 avatar, gap >3 min = new avatar.
+  - **997 frontend tests pass (+10)**; tsc clean; biome clean; budget OK (JS 145.7 KB gz, WASM 553.7 KB gz).
+  - **Next cycle:** PQ hybrid Phase A or more UX polish (e.g. presence indicators, disappearing-messages countdown tick, message reactions total for group).
+
+## Previous state (2026-07-02, cycle 233 — STABILIZATION: CI fix rustfmt formatting)
 - **Cycle 233 (commit 1d6886a):** STABILIZATION (forced — CI — Rust Format check was red).
   - **Mode:** FEATURE counter 233, but switched to STABILIZATION because CI was red.
   - **Root cause:** `cargo fmt --all --check` failed — two `assert!` / `assert_eq!` calls added in cycle 232 tests exceeded the line-length threshold (rustfmt requires multi-line form for long assert calls with messages).
