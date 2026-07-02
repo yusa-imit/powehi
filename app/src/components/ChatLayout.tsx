@@ -46,6 +46,8 @@ interface ChatMessage {
 	continued?: boolean;
 	last?: boolean;
 	time?: string;
+	/** Unix ms timestamp — set on new messages for time-window grouping. Absent on seed messages. */
+	ts?: number;
 	/** Peer's device received and decrypted this message (delivery_receipt received). */
 	delivered?: boolean;
 	/** Peer has read this message (read_receipt received). Supersedes delivered. */
@@ -1634,6 +1636,7 @@ function MessageBubble({
 	myDeviceId,
 	isGroup,
 	members,
+	showAvatar,
 	onReact,
 	onReply,
 	onEdit,
@@ -1653,6 +1656,8 @@ function MessageBubble({
 	myDeviceId?: string;
 	isGroup?: boolean;
 	members?: ChatMember[];
+	/** When false, suppress the sender avatar and collapse the top margin (same-group continuation). */
+	showAvatar?: boolean;
 	onReact?: (emoji: string) => void;
 	onReply?: () => void;
 	onEdit?: () => void;
@@ -1678,6 +1683,9 @@ function MessageBubble({
 	const reactionEntries = msg.reactions ? Object.entries(msg.reactions) : [];
 	const totalReactionCount = reactionEntries.reduce((sum, [, senders]) => sum + senders.length, 0);
 
+	// showAvatar defaults to !msg.continued for backward-compat with seed data that lacks ts.
+	const avatarVisible = showAvatar ?? !msg.continued;
+
 	return (
 		<div
 			data-testid="message-bubble"
@@ -1685,7 +1693,7 @@ function MessageBubble({
 				display: "flex",
 				flexDirection: "column",
 				alignItems: isMe ? "flex-end" : "flex-start",
-				marginTop: msg.continued ? 2 : 8,
+				marginTop: avatarVisible ? 8 : 2,
 			}}
 			onMouseEnter={() => setHovered(true)}
 			onMouseLeave={() => setHovered(false)}
@@ -1701,7 +1709,11 @@ function MessageBubble({
 			>
 				{!isMe && (
 					<div style={{ width: 28, flex: "none" }}>
-						{!msg.continued && <Avatar name={partner} size={28} />}
+						{avatarVisible && (
+							<div data-testid="msg-avatar">
+								<Avatar name={partner} size={28} />
+							</div>
+						)}
 					</div>
 				)}
 				<div style={{ position: "relative", maxWidth: "72%" }}>
@@ -2341,14 +2353,19 @@ function MessageBubble({
 // messages use their position relative to day label.
 type Group =
 	| { type: "day"; label: string; key: string }
-	| { type: "msg"; msg: ChatMessage; key: string }
+	| { type: "msg"; msg: ChatMessage; showAvatar: boolean; key: string }
 	| { type: "new-messages"; key: string };
+
+/** Messages from the same sender within this window form a visual group. */
+const TIME_GROUP_WINDOW_MS = 3 * 60 * 1000;
 
 function buildGroups(messages: ChatMessage[], firstUnreadIndex?: number): Group[] {
 	const groups: Group[] = [];
 	let lastDay: string | undefined = undefined;
 	let dayMsgCount = 0;
 	let markerInserted = false;
+	let lastFrom: string | undefined = undefined;
+	let lastTs: number | undefined = undefined;
 	for (let i = 0; i < messages.length; i++) {
 		const m = messages[i];
 		if (firstUnreadIndex !== undefined && i === firstUnreadIndex && !markerInserted) {
@@ -2359,12 +2376,31 @@ function buildGroups(messages: ChatMessage[], firstUnreadIndex?: number): Group[
 			groups.push({ type: "day", label: m.day, key: `day-${m.day}` });
 			lastDay = m.day;
 			dayMsgCount = 0;
+			// Day boundary always breaks any visual group.
+			lastFrom = undefined;
+			lastTs = undefined;
+		}
+		// Compute whether this message starts a new visual group:
+		// - Different sender from the previous message → always show avatar/name header.
+		// - Same sender with both timestamps present → show when gap ≥ 3 minutes.
+		// - Same sender but no timestamps (legacy seed data) → fall back to continued flag.
+		const consecutive = m.from === lastFrom;
+		let showAvatar: boolean;
+		if (!consecutive) {
+			showAvatar = true;
+		} else if (m.ts !== undefined && lastTs !== undefined) {
+			showAvatar = m.ts - lastTs >= TIME_GROUP_WINDOW_MS;
+		} else {
+			showAvatar = !m.continued;
 		}
 		groups.push({
 			type: "msg",
 			msg: m,
+			showAvatar,
 			key: `msg-${lastDay ?? "no-day"}-${dayMsgCount++}-${m.from}-${m.text.slice(0, 8)}`,
 		});
+		lastFrom = m.from;
+		lastTs = m.ts;
 	}
 	return groups;
 }
@@ -2642,6 +2678,7 @@ function MessageList({
 								myDeviceId={myDeviceId}
 								isGroup={isGroup}
 								members={members}
+								showAvatar={g.showAvatar}
 								onReact={
 									g.msg.id && onReact
 										? (emoji) => {
@@ -5537,6 +5574,7 @@ export function ChatLayout() {
 						text: displayText,
 						last: true,
 						time,
+						ts: now.getTime(),
 						day: dayLabel !== prevDay ? dayLabel : undefined,
 						continued: msgs.length > 0 && msgs[msgs.length - 1].from === "them",
 						media: msg.media,
@@ -5634,6 +5672,7 @@ export function ChatLayout() {
 						text: "Image attachment",
 						last: true,
 						time,
+						ts: now.getTime(),
 						read: false,
 						continued: msgs.length > 0 && msgs[msgs.length - 1].from === "me",
 					});
@@ -6540,6 +6579,7 @@ export function ChatLayout() {
 					text,
 					last: true,
 					time,
+					ts: now.getTime(),
 					day: sendDayLabel !== prevDay ? sendDayLabel : undefined,
 					read: false,
 					continued: msgs.length > 0 && msgs[msgs.length - 1].from === "me",
