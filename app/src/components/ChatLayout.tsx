@@ -5429,6 +5429,16 @@ export function ChatLayout() {
 		window.addEventListener("keydown", onKey);
 		return () => window.removeEventListener("keydown", onKey);
 	}, []);
+
+	// Update browser tab title to reflect total unread count across all chats.
+	const tabTotalUnread = chats.reduce((s, c) => s + c.unread, 0);
+	useEffect(() => {
+		document.title = tabTotalUnread > 0 ? `(${tabTotalUnread}) Powehi` : "Powehi";
+		return () => {
+			document.title = "Powehi";
+		};
+	}, [tabTotalUnread]);
+
 	const active = chats.find((c) => c.id === activeId);
 	const mediaMessages = useMemo(
 		() => (active?.messages ?? []).filter((m) => !!m.media),
