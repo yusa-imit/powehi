@@ -17,7 +17,23 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-02, cycle 229 — FEATURE: browser tab title unread badge)
+## Current state (2026-07-02, cycle 230 — STABILIZATION: proptest property-based crypto tests)
+- **Cycle 230 (commit 135e537):** STABILIZATION — Added 6 proptest property-based tests for AES-256-GCM media encryption.
+  - **Mode:** STABILIZATION (counter 230 % 5 == 0).
+  - **CI:** Green on main (all recent runs pass). No open issues.
+  - **proptest added to workspace:** `proptest = "1"` in workspace `[dev-dependencies]`; wired as `proptest = { workspace = true }` in `powehi-crypto-wasm` dev-deps.
+  - **6 invariants in `media.rs` `property` submodule (native-only, `cfg(not(target_arch = "wasm32"))`):**
+    1. `encrypt_decrypt_roundtrip` — any plaintext 0–64 KB round-trips through AES-256-GCM correctly.
+    2. `wrong_key_len_always_rejected` — any key length ≠ 32 always returns `InvalidKeyLen` before any decryption.
+    3. `wrong_iv_len_always_rejected` — any IV length ≠ 12 always returns `InvalidIvLen`.
+    4. `tampered_ciphertext_never_decrypts` — any single-byte flip in ciphertext/GCM tag causes decryption failure.
+    5. `blob_hash_mismatch_rejected_before_decrypt` — any bit flip in expected blob hash returns `BlobHashMismatch`.
+    6. `semantic_security_different_ciphertexts` — two encryptions of the same plaintext always differ (fresh random key+IV).
+  - **Security:** Tests verify security invariants (GCM integrity, pre-decryption hash check, semantic security). No crypto code changed; test-only diff. Satisfies testing-conventions.md "Property-based (proptest): crypto round-trips".
+  - **powehi-crypto-wasm: 120 tests pass** (was 114, +6 proptest); all workspace tests green; clippy clean; `cargo audit` 3 existing allowed warnings (instant/openmls, bitcoin_hashes/bip39, anyhow), no new vulns. Target dir: 8.9 GB (< 20 GB, no pruning needed). 969 frontend tests pass.
+  - **Next cycle:** PQ hybrid Phase A or more UX polish (e.g. message grouping by time window, presence indicators, disappearing-messages countdown tick).
+
+## Previous state (2026-07-02, cycle 229 — FEATURE: browser tab title unread badge)
 - **Cycle 229 (commit d1cd843):** FEATURE — Browser tab title now shows unread count.
   - **`tabTotalUnread`:** Computed in `ChatLayout` via `chats.reduce((s,c) => s + c.unread, 0)`.
   - **`useEffect`:** Sets `document.title = "(N) Powehi"` when N > 0; resets to `"Powehi"` when 0 or on unmount.
