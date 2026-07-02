@@ -2666,4 +2666,10 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - Review is part of writing: implement → run the relevant review agent → fix → commit.
 
 ## Cycle log (recent)
+- Cycle 231 FEATURE: Linked Devices panel + GET /v1/auth/devices endpoint (commit 85a4a54).
+  - Fixed CI-Frontend failure: proptest moved to [target.cfg(not(wasm32)).dev-dependencies] in powehi-crypto-wasm (wait-timeout doesn't compile on wasm32).
+  - Backend: DeviceInfo type (device_id, created_at, last_seen_at; no mls_credential), list_devices in AuthUseCase + AuthService, GET /v1/auth/devices handler (rate-limited, auth-gated), 2 new backend tests.
+  - Frontend: LinkedDevicesPanel component (current device badge, 2-step revoke confirm, error/empty/loading states), listDevices + revokeDevice API functions in auth.ts, 11 component tests + 6 API tests.
+  - security-auditor: GREEN (6 questions all clean; authorization scoped to authenticated user, no credential leakage, rate-limited, no plaintext logging, encodeURIComponent on DELETE URL).
+  - All tests: 987 frontend (81 files) + all backend tests passing.
 - Cycle 215 STABILIZATION: Added 4 security-invariant tests (KeyPackage single-use, cross-device isolation, expired-envelope suppression, TTL complement). security-auditor GREEN. 83/83 application tests. commit 6cbde19.
