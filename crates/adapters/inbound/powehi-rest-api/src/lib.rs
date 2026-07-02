@@ -2922,4 +2922,131 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
+
+    // ── list_devices error-path tests ─────────────────────────────────────────
+
+    struct MockAuthDeviceListInternalError;
+    #[async_trait]
+    impl AuthUseCase for MockAuthDeviceListInternalError {
+        async fn register_init(
+            &self,
+            _: RegistrationInitRequest,
+        ) -> Result<RegistrationInitResponse, DomainError> {
+            unimplemented!()
+        }
+        async fn register_finish(
+            &self,
+            _: RegistrationFinishRequest,
+        ) -> Result<RegistrationFinishResponse, DomainError> {
+            unimplemented!()
+        }
+        async fn login_init(&self, _: LoginInitRequest) -> Result<LoginInitResponse, DomainError> {
+            unimplemented!()
+        }
+        async fn login_finish(&self, _: LoginFinishRequest) -> Result<SessionToken, DomainError> {
+            unimplemented!()
+        }
+        async fn register_device(
+            &self,
+            _: &UserId,
+            _: DeviceRegistrationRequest,
+        ) -> Result<DeviceId, DomainError> {
+            unimplemented!()
+        }
+        async fn revoke_device(&self, _: &UserId, _: &DeviceId) -> Result<(), DomainError> {
+            unimplemented!()
+        }
+        async fn list_devices(
+            &self,
+            _user_id: &UserId,
+        ) -> Result<Vec<powehi_port_inbound::auth::DeviceInfo>, DomainError> {
+            Err(DomainError::Internal("db unavailable".into()))
+        }
+    }
+
+    struct MockAuthDeviceListEmpty;
+    #[async_trait]
+    impl AuthUseCase for MockAuthDeviceListEmpty {
+        async fn register_init(
+            &self,
+            _: RegistrationInitRequest,
+        ) -> Result<RegistrationInitResponse, DomainError> {
+            unimplemented!()
+        }
+        async fn register_finish(
+            &self,
+            _: RegistrationFinishRequest,
+        ) -> Result<RegistrationFinishResponse, DomainError> {
+            unimplemented!()
+        }
+        async fn login_init(&self, _: LoginInitRequest) -> Result<LoginInitResponse, DomainError> {
+            unimplemented!()
+        }
+        async fn login_finish(&self, _: LoginFinishRequest) -> Result<SessionToken, DomainError> {
+            unimplemented!()
+        }
+        async fn register_device(
+            &self,
+            _: &UserId,
+            _: DeviceRegistrationRequest,
+        ) -> Result<DeviceId, DomainError> {
+            unimplemented!()
+        }
+        async fn revoke_device(&self, _: &UserId, _: &DeviceId) -> Result<(), DomainError> {
+            unimplemented!()
+        }
+        async fn list_devices(
+            &self,
+            _user_id: &UserId,
+        ) -> Result<Vec<powehi_port_inbound::auth::DeviceInfo>, DomainError> {
+            Ok(vec![])
+        }
+    }
+
+    /// When the auth service returns Internal error, list_devices_handler must return 500.
+    /// Verify that the internal error detail is NOT present in the response body (no-plaintext-logging).
+    #[tokio::test]
+    async fn list_devices_service_error_returns_500() {
+        let resp = device_router_with_auth(Arc::new(MockAuthDeviceListInternalError))
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/auth/devices")
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        // Internal error detail must never leak into the HTTP response (no-plaintext-logging).
+        assert!(!body.contains("db unavailable"), "internal message must not appear in response");
+        assert_eq!(body, r#"{"code":"internal"}"#);
+    }
+
+    /// When the user has no linked devices the handler returns 200 OK with an empty JSON array.
+    #[tokio::test]
+    async fn list_devices_empty_list_returns_200_with_empty_array() {
+        let resp = device_router_with_auth(Arc::new(MockAuthDeviceListEmpty))
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/auth/devices")
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json, serde_json::json!([]), "empty device list must serialize as []");
+    }
 }
