@@ -892,6 +892,248 @@ function StarredPanel({
 	);
 }
 
+// ── Custom user status ────────────────────────────────────────────────────────
+
+type CustomStatus = { emoji: string; text: string } | null;
+
+const STATUS_PRESETS = [
+	{ emoji: "🎉", text: "Be right back" },
+	{ emoji: "🏠", text: "Working from home" },
+	{ emoji: "📵", text: "Do not disturb" },
+	{ emoji: "🎧", text: "In a meeting" },
+	{ emoji: "🌴", text: "On vacation" },
+] as const;
+
+function StatusEditor({
+	current,
+	onSave,
+	onClose,
+}: {
+	current: CustomStatus;
+	onSave: (status: CustomStatus) => void;
+	onClose: () => void;
+}) {
+	const [emoji, setEmoji] = useState(current?.emoji ?? "");
+	const [text, setText] = useState(current?.text ?? "");
+
+	const handleSave = () => {
+		const trimmedText = text.trim();
+		const trimmedEmoji = emoji.trim();
+		onSave(trimmedText || trimmedEmoji ? { emoji: trimmedEmoji, text: trimmedText } : null);
+		onClose();
+	};
+
+	const handleClear = () => {
+		onSave(null);
+		onClose();
+	};
+
+	return (
+		<dialog
+			open
+			data-testid="status-editor-overlay"
+			aria-label="Set your status"
+			onClick={(e) => {
+				if (e.target === e.currentTarget) onClose();
+			}}
+			onKeyDown={(e) => {
+				if (e.key === "Escape") onClose();
+			}}
+			style={{
+				position: "fixed",
+				inset: 0,
+				width: "100vw",
+				height: "100vh",
+				maxWidth: "100vw",
+				maxHeight: "100vh",
+				background: "rgba(4,4,8,0.72)",
+				display: "flex",
+				alignItems: "center",
+				justifyContent: "center",
+				zIndex: 1000,
+				border: "none",
+				padding: 0,
+				margin: 0,
+			}}
+		>
+			<div
+				data-testid="status-editor"
+				onClick={(e) => e.stopPropagation()}
+				onKeyDown={(e) => e.stopPropagation()}
+				style={{
+					background: "var(--bg-surface)",
+					border: "1px solid var(--border-soft)",
+					borderRadius: 16,
+					padding: "24px 28px 20px",
+					width: 360,
+					display: "flex",
+					flexDirection: "column",
+					gap: 16,
+				}}
+			>
+				<div style={{ fontSize: 15, fontWeight: 600, color: "var(--fg-1)" }}>Set a status</div>
+
+				{/* Emoji + text row */}
+				<div style={{ display: "flex", gap: 8 }}>
+					<input
+						data-testid="status-emoji-input"
+						value={emoji}
+						onChange={(e) => setEmoji(e.target.value)}
+						placeholder="😊"
+						maxLength={4}
+						style={{
+							width: 52,
+							textAlign: "center",
+							background: "var(--bg-input)",
+							border: "1px solid var(--border-faint)",
+							borderRadius: 8,
+							padding: "8px 4px",
+							fontSize: 20,
+							outline: "none",
+							color: "var(--fg-1)",
+							fontFamily: "var(--font-sans)",
+						}}
+					/>
+					<input
+						data-testid="status-text-input"
+						value={text}
+						onChange={(e) => setText(e.target.value)}
+						onKeyDown={(e) => {
+							if (e.key === "Enter") handleSave();
+							if (e.key === "Escape") onClose();
+						}}
+						placeholder="What's your status?"
+						maxLength={80}
+						style={{
+							flex: 1,
+							background: "var(--bg-input)",
+							border: "1px solid var(--border-faint)",
+							borderRadius: 8,
+							padding: "8px 12px",
+							fontSize: 13,
+							outline: "none",
+							color: "var(--fg-1)",
+							fontFamily: "var(--font-sans)",
+						}}
+					/>
+				</div>
+
+				{/* Quick presets */}
+				<div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+					<div
+						style={{
+							fontSize: 10,
+							fontWeight: 600,
+							letterSpacing: "0.14em",
+							textTransform: "uppercase",
+							color: "var(--fg-4)",
+						}}
+					>
+						Quick presets
+					</div>
+					<div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+						{STATUS_PRESETS.map((p) => (
+							<button
+								key={p.text}
+								type="button"
+								data-testid={`status-preset-${p.text.toLowerCase().replace(/\s+/g, "-")}`}
+								onClick={() => {
+									setEmoji(p.emoji);
+									setText(p.text);
+								}}
+								style={{
+									background: "var(--bg-input)",
+									border: "1px solid var(--border-faint)",
+									borderRadius: 20,
+									padding: "5px 10px",
+									fontSize: 12,
+									cursor: "pointer",
+									color: "var(--fg-2)",
+									fontFamily: "var(--font-sans)",
+									display: "flex",
+									alignItems: "center",
+									gap: 4,
+								}}
+							>
+								<span>{p.emoji}</span>
+								<span>{p.text}</span>
+							</button>
+						))}
+					</div>
+				</div>
+
+				{/* Action buttons */}
+				<div
+					style={{
+						display: "flex",
+						justifyContent: "space-between",
+						alignItems: "center",
+						marginTop: 4,
+					}}
+				>
+					{current ? (
+						<button
+							type="button"
+							data-testid="status-clear-btn"
+							onClick={handleClear}
+							style={{
+								background: "none",
+								border: "none",
+								cursor: "pointer",
+								fontSize: 12,
+								color: "var(--fg-3)",
+								fontFamily: "var(--font-sans)",
+								padding: "6px 0",
+							}}
+						>
+							Clear status
+						</button>
+					) : (
+						<span />
+					)}
+					<div style={{ display: "flex", gap: 8 }}>
+						<button
+							type="button"
+							data-testid="status-cancel-btn"
+							onClick={onClose}
+							style={{
+								background: "none",
+								border: "1px solid var(--border-soft)",
+								borderRadius: 8,
+								padding: "7px 16px",
+								fontSize: 13,
+								cursor: "pointer",
+								color: "var(--fg-2)",
+								fontFamily: "var(--font-sans)",
+							}}
+						>
+							Cancel
+						</button>
+						<button
+							type="button"
+							data-testid="status-save-btn"
+							onClick={handleSave}
+							style={{
+								background: "#FF8A3D",
+								border: "none",
+								borderRadius: 8,
+								padding: "7px 16px",
+								fontSize: 13,
+								fontWeight: 600,
+								cursor: "pointer",
+								color: "#fff",
+								fontFamily: "var(--font-sans)",
+							}}
+						>
+							Save
+						</button>
+					</div>
+				</div>
+			</div>
+		</dialog>
+	);
+}
+
 // ── Sidebar ───────────────────────────────────────────────────────────────────
 
 function lastMsgReactionSummary(chat: Chat): string | null {
@@ -1126,6 +1368,8 @@ function Sidebar({
 	onSearch,
 	onJumpToMessage,
 	onMarkAllRead,
+	customStatus,
+	onEditStatus,
 }: {
 	chats: Chat[];
 	activeId: string;
@@ -1138,6 +1382,8 @@ function Sidebar({
 	onSearch: (q: string) => void;
 	onJumpToMessage?: (chatId: string, messageId?: string) => void;
 	onMarkAllRead?: () => void;
+	customStatus: CustomStatus;
+	onEditStatus: () => void;
 }) {
 	const [starredOpen, setStarredOpen] = useState(false);
 	const [chatFilter, setChatFilter] = useState<"all" | "dms" | "groups" | "archived">("all");
@@ -1479,6 +1725,89 @@ function Sidebar({
 					<span>{regionId}</span>
 				</div>
 			)}
+
+			{/* User status bar */}
+			<div
+				data-testid="user-status-bar"
+				style={{
+					padding: "10px 14px",
+					borderTop: "1px solid var(--border-faint)",
+					display: "flex",
+					alignItems: "center",
+					gap: 10,
+				}}
+			>
+				<div
+					style={{
+						width: 32,
+						height: 32,
+						borderRadius: "50%",
+						background: "#A8C8FF",
+						color: "#040408",
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "center",
+						fontSize: 13,
+						fontWeight: 700,
+						flex: "none",
+					}}
+				>
+					Y
+				</div>
+				<div style={{ flex: 1, minWidth: 0 }}>
+					<div
+						style={{
+							fontSize: 13,
+							fontWeight: 600,
+							color: "var(--fg-1)",
+							lineHeight: 1.2,
+						}}
+					>
+						You
+					</div>
+					{customStatus ? (
+						<div
+							data-testid="user-status-text"
+							style={{
+								fontSize: 11,
+								color: "var(--fg-3)",
+								overflow: "hidden",
+								textOverflow: "ellipsis",
+								whiteSpace: "nowrap",
+								lineHeight: 1.3,
+							}}
+						>
+							{customStatus.emoji && <span style={{ marginRight: 3 }}>{customStatus.emoji}</span>}
+							{customStatus.text}
+						</div>
+					) : (
+						<div
+							data-testid="user-status-placeholder"
+							style={{ fontSize: 11, color: "var(--fg-4)", lineHeight: 1.3 }}
+						>
+							Set a status...
+						</div>
+					)}
+				</div>
+				<button
+					type="button"
+					data-testid="user-status-edit-btn"
+					onClick={onEditStatus}
+					aria-label="Edit status"
+					style={{
+						background: "none",
+						border: "none",
+						cursor: "pointer",
+						padding: 4,
+						borderRadius: 6,
+						color: "var(--fg-3)",
+						display: "flex",
+						alignItems: "center",
+					}}
+				>
+					<Icon name="edit-2" size={14} color="var(--fg-3)" />
+				</button>
+			</div>
 		</aside>
 	);
 }
@@ -4194,6 +4523,7 @@ function InfoPanel({
 	onClearMessages,
 	mediaMessages,
 	onOpenLightbox,
+	onOpenDm,
 }: {
 	chat: Chat;
 	onClose: () => void;
@@ -4214,8 +4544,10 @@ function InfoPanel({
 	onClearMessages?: () => void;
 	mediaMessages?: ChatMessage[];
 	onOpenLightbox?: (msg: ChatMessage) => void;
+	onOpenDm?: (handle: string) => void;
 }) {
 	const [descEditing, setDescEditing] = useState(false);
+	const [contactCard, setContactCard] = useState<ChatMember | null>(null);
 	const [descDraft, setDescDraft] = useState("");
 	const [nicknameEditing, setNicknameEditing] = useState(false);
 	const [nicknameDraft, setNicknameDraft] = useState("");
@@ -4355,6 +4687,7 @@ function InfoPanel({
 				flexDirection: "column",
 				height: "100%",
 				overflowY: "auto",
+				position: "relative",
 			}}
 		>
 			{/* Header */}
@@ -4697,85 +5030,246 @@ function InfoPanel({
 				</InfoSection>
 			)}
 			{chat.isGroup ? (
-				/* Group member list */
-				<InfoSection title={`Members (${chat.members?.length ?? chat.memberCount ?? 0})`}>
-					<div
-						data-testid="group-member-list"
-						style={{
-							display: "flex",
-							flexDirection: "column",
-							gap: 0,
-							padding: "0 18px 8px",
-						}}
-					>
-						{(chat.members ?? []).map((member) => {
-							const isMe =
-								myHandle != null && member.handle.toLowerCase() === myHandle.toLowerCase();
-							return (
+				<>
+					{/* Group member list */}
+					<InfoSection title={`Members (${chat.members?.length ?? chat.memberCount ?? 0})`}>
+						<div
+							data-testid="group-member-list"
+							style={{
+								display: "flex",
+								flexDirection: "column",
+								gap: 0,
+								padding: "0 18px 8px",
+							}}
+						>
+							{(chat.members ?? []).map((member) => {
+								const isMe =
+									myHandle != null && member.handle.toLowerCase() === myHandle.toLowerCase();
+								return (
+									<button
+										key={member.id}
+										type="button"
+										data-testid="group-member-row"
+										onClick={() => setContactCard(member)}
+										style={{
+											display: "flex",
+											alignItems: "center",
+											gap: 10,
+											padding: "7px 0",
+											borderBottom: "1px solid var(--border-faint)",
+											background: "none",
+											border: "none",
+											borderTop: "none",
+											textAlign: "left",
+											width: "100%",
+											cursor: "pointer",
+											borderRadius: 0,
+										}}
+									>
+										<Avatar name={member.name} size={30} />
+										<div style={{ flex: 1, minWidth: 0 }}>
+											<div
+												style={{
+													fontSize: 13,
+													fontWeight: 500,
+													color: "var(--fg-1)",
+													display: "flex",
+													alignItems: "center",
+													gap: 6,
+												}}
+											>
+												{member.name}
+												{isMe && (
+													<span
+														data-testid="member-you-badge"
+														style={{
+															fontSize: 10,
+															fontWeight: 600,
+															color: "#FF9E52",
+															background: "rgba(255,158,82,0.12)",
+															borderRadius: 4,
+															padding: "1px 5px",
+														}}
+													>
+														You
+													</span>
+												)}
+												{member.role === "admin" && (
+													<span
+														data-testid="member-admin-badge"
+														style={{
+															fontSize: 10,
+															fontWeight: 600,
+															color: "#A8C8FF",
+															background: "rgba(168,200,255,0.1)",
+															borderRadius: 4,
+															padding: "1px 5px",
+														}}
+													>
+														Admin
+													</span>
+												)}
+											</div>
+											<div style={{ fontSize: 11, color: "var(--fg-4)", marginTop: 1 }}>
+												@{member.handle}
+											</div>
+										</div>
+									</button>
+								);
+							})}
+						</div>
+					</InfoSection>
+					{/* Contact card overlay — appears when a member row is tapped */}
+					{contactCard !== null && (
+						<dialog
+							open
+							data-testid="contact-card-overlay"
+							aria-label={`Contact card for ${contactCard.name}`}
+							style={{
+								position: "absolute",
+								inset: 0,
+								width: "100%",
+								height: "100%",
+								maxWidth: "100%",
+								maxHeight: "100%",
+								background: "rgba(4,4,8,0.72)",
+								display: "flex",
+								alignItems: "center",
+								justifyContent: "center",
+								zIndex: 20,
+								border: "none",
+								padding: 0,
+								margin: 0,
+							}}
+							onClick={(e) => {
+								if (e.target === e.currentTarget) setContactCard(null);
+							}}
+							onKeyDown={(e) => {
+								if (e.key === "Escape") setContactCard(null);
+							}}
+						>
+							<div
+								data-testid="contact-card"
+								style={{
+									background: "var(--surface-2, #111118)",
+									border: "1px solid var(--border-faint)",
+									borderRadius: 16,
+									padding: 24,
+									width: 240,
+									display: "flex",
+									flexDirection: "column",
+									alignItems: "center",
+									gap: 10,
+								}}
+							>
+								<Avatar name={contactCard.name} size={60} />
 								<div
-									key={member.id}
-									data-testid="group-member-row"
 									style={{
+										fontSize: 16,
+										fontWeight: 600,
+										color: "var(--fg-1)",
 										display: "flex",
 										alignItems: "center",
-										gap: 10,
-										padding: "7px 0",
-										borderBottom: "1px solid var(--border-faint)",
+										gap: 6,
+										flexWrap: "wrap",
+										justifyContent: "center",
 									}}
 								>
-									<Avatar name={member.name} size={30} />
-									<div style={{ flex: 1, minWidth: 0 }}>
-										<div
+									{contactCard.name}
+									{myHandle != null &&
+										contactCard.handle.toLowerCase() === myHandle.toLowerCase() && (
+											<span
+												data-testid="contact-card-you-badge"
+												style={{
+													fontSize: 10,
+													fontWeight: 600,
+													color: "#FF9E52",
+													background: "rgba(255,158,82,0.12)",
+													borderRadius: 4,
+													padding: "1px 5px",
+												}}
+											>
+												You
+											</span>
+										)}
+									{contactCard.role === "admin" && (
+										<span
+											data-testid="contact-card-admin-badge"
 											style={{
-												fontSize: 13,
-												fontWeight: 500,
-												color: "var(--fg-1)",
-												display: "flex",
-												alignItems: "center",
-												gap: 6,
+												fontSize: 10,
+												fontWeight: 600,
+												color: "#A8C8FF",
+												background: "rgba(168,200,255,0.1)",
+												borderRadius: 4,
+												padding: "1px 5px",
 											}}
 										>
-											{member.name}
-											{isMe && (
-												<span
-													data-testid="member-you-badge"
-													style={{
-														fontSize: 10,
-														fontWeight: 600,
-														color: "#FF9E52",
-														background: "rgba(255,158,82,0.12)",
-														borderRadius: 4,
-														padding: "1px 5px",
-													}}
-												>
-													You
-												</span>
-											)}
-											{member.role === "admin" && (
-												<span
-													data-testid="member-admin-badge"
-													style={{
-														fontSize: 10,
-														fontWeight: 600,
-														color: "#A8C8FF",
-														background: "rgba(168,200,255,0.1)",
-														borderRadius: 4,
-														padding: "1px 5px",
-													}}
-												>
-													Admin
-												</span>
-											)}
-										</div>
-										<div style={{ fontSize: 11, color: "var(--fg-4)", marginTop: 1 }}>
-											@{member.handle}
-										</div>
-									</div>
+											Admin
+										</span>
+									)}
 								</div>
-							);
-						})}
-					</div>
-				</InfoSection>
+								<div
+									data-testid="contact-card-handle"
+									style={{ fontSize: 13, color: "var(--fg-4)" }}
+								>
+									@{contactCard.handle}
+								</div>
+								<div
+									style={{
+										display: "flex",
+										gap: 8,
+										marginTop: 6,
+										width: "100%",
+									}}
+								>
+									{!(
+										myHandle != null && contactCard.handle.toLowerCase() === myHandle.toLowerCase()
+									) && (
+										<button
+											type="button"
+											data-testid="contact-card-message-btn"
+											onClick={() => {
+												onOpenDm?.(contactCard.handle);
+												setContactCard(null);
+											}}
+											style={{
+												flex: 1,
+												padding: "8px 0",
+												background: "#FF8A3D",
+												color: "#040408",
+												border: "none",
+												borderRadius: 8,
+												fontWeight: 600,
+												fontSize: 13,
+												cursor: "pointer",
+											}}
+										>
+											Message
+										</button>
+									)}
+									<button
+										type="button"
+										data-testid="contact-card-close-btn"
+										onClick={() => setContactCard(null)}
+										style={{
+											flex: 1,
+											padding: "8px 0",
+											background: "rgba(242,237,227,0.07)",
+											color: "var(--fg-2)",
+											border: "1px solid var(--border-faint)",
+											borderRadius: 8,
+											fontWeight: 500,
+											fontSize: 13,
+											cursor: "pointer",
+										}}
+									>
+										Close
+									</button>
+								</div>
+							</div>
+						</dialog>
+					)}
+				</>
 			) : (
 				/* Safety Numbers — photon blue encryption verification card */
 				<div style={{ padding: "0 14px 16px" }}>
@@ -5343,6 +5837,10 @@ export function ChatLayout() {
 	const [jumpToMessageId, setJumpToMessageId] = useState<string | null>(null);
 	const [lightboxMsgIdx, setLightboxMsgIdx] = useState<number | null>(null);
 	const handleJumpComplete = useCallback(() => setJumpToMessageId(null), []);
+
+	// ── Custom user status ────────────────────────────────────────────────────
+	const [customStatus, setCustomStatus] = useState<CustomStatus>(null);
+	const [statusEditorOpen, setStatusEditorOpen] = useState(false);
 
 	// ── Quick switcher (Cmd+K / Ctrl+K) ──────────────────────────────────────
 	const [quickSwitcherOpen, setQuickSwitcherOpen] = useState(false);
@@ -6395,6 +6893,17 @@ export function ChatLayout() {
 		[handleSelectChat, search],
 	);
 
+	// Open a DM with a group member by handle (triggered from contact card).
+	// Switches to the existing DM if found; closes InfoPanel in both cases.
+	const handleOpenDmFromMember = useCallback(
+		(handle: string) => {
+			const dm = chatsRef.current.find((c) => !c.isGroup && c.handle === handle);
+			if (dm) handleSelectChat(dm.id);
+			setInfoOpen(false);
+		},
+		[handleSelectChat],
+	);
+
 	// Add a new chat entry when another device invites us (Welcome envelope received).
 	const handleNewGroup = useCallback(
 		(event: NewGroupEvent) => {
@@ -6708,6 +7217,8 @@ export function ChatLayout() {
 				onSearch={setSearch}
 				onJumpToMessage={handleJumpToMessage}
 				onMarkAllRead={handleMarkAllRead}
+				customStatus={customStatus}
+				onEditStatus={() => setStatusEditorOpen(true)}
 			/>
 
 			{active && (
@@ -6828,6 +7339,7 @@ export function ChatLayout() {
 					onClearMessages={() => handleClearMessages(active.id)}
 					mediaMessages={mediaMessages}
 					onOpenLightbox={handleOpenLightbox}
+					onOpenDm={handleOpenDmFromMember}
 				/>
 			)}
 
@@ -7059,6 +7571,15 @@ export function ChatLayout() {
 						setQuickSwitcherOpen(false);
 					}}
 					onClose={() => setQuickSwitcherOpen(false)}
+				/>
+			)}
+
+			{/* ── Custom user status editor ─────────────────────────────────────── */}
+			{statusEditorOpen && (
+				<StatusEditor
+					current={customStatus}
+					onSave={setCustomStatus}
+					onClose={() => setStatusEditorOpen(false)}
 				/>
 			)}
 		</div>
