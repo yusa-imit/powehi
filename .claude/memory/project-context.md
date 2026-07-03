@@ -17,7 +17,33 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-03, cycle 237 — FEATURE: click reply quote to jump to original message)
+## Current state (2026-07-04, cycle 239 — FEATURE: custom user status)
+- **Cycle 239 (commit f578537):** FEATURE — Custom user status in sidebar footer.
+  - **Mode:** FEATURE (counter 239 % 5 ≠ 0). CI was green on main (all recent runs success).
+  - **Feature:** Users can set a custom status (emoji + text) that appears at the bottom of the sidebar under "You".
+    - `StatusEditor` modal: emoji input (max 4 chars) + text input (max 80 chars), 5 quick-preset buttons, clear/cancel/save actions. Uses `<dialog open>` element (same pattern as `RecoveryPhraseModal`) for correct a11y.
+    - `user-status-bar` in Sidebar footer: photon-blue avatar ("Y"), "You" label, status text or "Set a status..." placeholder, edit button (`Icon name="edit-2"`).
+    - `customStatus: CustomStatus | null` + `statusEditorOpen: boolean` state in `ChatLayout`.
+    - Contact card overlay (`{contactCard !== null && ...}`) also converted to `<dialog open>`.
+  - **Bug fix (pre-existing):** The `{chat.isGroup ? (` ternary in InfoPanel had two sibling JSX nodes after InfoSection (the member list + contact card overlay) without a React fragment — biome parse error. Fixed by wrapping with `<>...</>`.
+  - **security-auditor:** GREEN — status is local-only (never sent to server, no MLS payload, no logging); rendered via JSX text children (no dangerouslySetInnerHTML).
+  - **12 new tests** in `ChatLayoutCustomStatus.test.tsx`:
+    1. Status bar always visible.
+    2. Default placeholder "Set a status..." when no status set.
+    3. Edit button opens status editor.
+    4. Editor has emoji + text inputs.
+    5. Clicking a preset populates both inputs.
+    6. Saving shows status in sidebar.
+    7. Saved emoji appears in status bar.
+    8. Cancel closes editor without saving.
+    9. Clear status removes status → returns to placeholder.
+    10. Saving empty inputs clears status.
+    11. Clicking backdrop closes editor without saving.
+    12. Clear button only visible when status exists.
+  - **Frontend: 1024 tests pass** (was 1012, +12); tsc clean; biome clean.
+  - **Next cycle:** Chat export (download conversation as JSON/text), or message search within active chat, or per-message reaction breakdown tooltip.
+
+## Previous state (2026-07-03, cycle 237 — FEATURE: click reply quote to jump to original message)
 - **Cycle 237 (commit 47eb4c4):** FEATURE — Reply-quote click jumps to original message.
   - **Mode:** FEATURE (counter 237 % 5 ≠ 0). CI was green on main (all recent runs success).
   - **Feature:** Clicking the reply-quote banner in a message bubble now scrolls to and flashes the original referenced message (same scroll+flash animation as the pinned-message jump).
