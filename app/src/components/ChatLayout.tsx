@@ -1649,6 +1649,7 @@ function MessageBubble({
 	onCancelScheduled,
 	onVote,
 	onOpenLightbox,
+	onJumpToReply,
 	countdownTick,
 }: {
 	msg: ChatMessage;
@@ -1674,6 +1675,8 @@ function MessageBubble({
 	onVote?: (optionIdx: number) => void;
 	/** Called when the user clicks a media image to view it full-screen. */
 	onOpenLightbox?: () => void;
+	/** Called when the user clicks the reply quote to scroll to the original message. */
+	onJumpToReply?: (messageId: string) => void;
 	/** Incremented every second when there are expiring messages; drives countdown re-render. */
 	countdownTick?: number;
 }) {
@@ -1751,9 +1754,21 @@ function MessageBubble({
 						) : (
 							<>
 								{msg.replyTo && (
-									<div
+									<button
+										type="button"
 										data-testid="reply-quote"
+										onClick={
+											onJumpToReply && msg.replyTo.messageId
+												? () => onJumpToReply(msg.replyTo?.messageId ?? "")
+												: undefined
+										}
 										style={{
+											display: "block",
+											background: "none",
+											border: "none",
+											padding: 0,
+											cursor: onJumpToReply ? "pointer" : "default",
+											textAlign: "left",
 											borderLeft: `2px solid ${isMe ? "rgba(42,17,0,0.4)" : "rgba(168,200,255,0.5)"}`,
 											paddingLeft: 8,
 											marginBottom: 6,
@@ -1767,7 +1782,7 @@ function MessageBubble({
 										}}
 									>
 										{msg.replyTo.excerpt}
-									</div>
+									</button>
 								)}
 								{msg.poll ? (
 									<PollView poll={msg.poll} isMe={isMe} onVote={onVote} />
@@ -2429,6 +2444,7 @@ function MessageList({
 	onCancelScheduled,
 	onVote,
 	onOpenLightbox,
+	onJumpToReply,
 	firstUnreadIndex,
 	jumpToMessageId,
 	onJumpComplete,
@@ -2454,6 +2470,8 @@ function MessageList({
 	onCancelScheduled?: (msgId: string) => void;
 	onVote?: (msgId: string | undefined, optionIdx: number) => void;
 	onOpenLightbox?: (msg: ChatMessage) => void;
+	/** Called when the user clicks a reply quote to scroll to the original message. */
+	onJumpToReply?: (messageId: string) => void;
 	firstUnreadIndex?: number;
 	jumpToMessageId?: string;
 	onJumpComplete?: () => void;
@@ -2477,7 +2495,7 @@ function MessageList({
 	// Scroll to the jumped-to message and apply the flash highlight.
 	useEffect(() => {
 		if (!jumpToMessageId || !ref.current) return;
-		const el = ref.current.querySelector(`[data-msg-id="${jumpToMessageId}"]`);
+		const el = ref.current.querySelector(`[data-msg-id="${CSS.escape(jumpToMessageId)}"]`);
 		if (el) {
 			el.scrollIntoView({ block: "center", behavior: "smooth" });
 			setFlashingId(jumpToMessageId);
@@ -2723,6 +2741,7 @@ function MessageList({
 								onOpenLightbox={
 									onOpenLightbox && g.msg.media ? () => onOpenLightbox(g.msg) : undefined
 								}
+								onJumpToReply={onJumpToReply}
 								countdownTick={countdownTick}
 							/>
 						</div>
@@ -6742,6 +6761,7 @@ export function ChatLayout() {
 						onCancelScheduled={cancelScheduled}
 						onVote={handleVotePoll}
 						onOpenLightbox={handleOpenLightbox}
+						onJumpToReply={(id) => setJumpToMessageId(id)}
 						firstUnreadIndex={active.firstUnreadAt}
 						jumpToMessageId={jumpToMessageId ?? undefined}
 						onJumpComplete={handleJumpComplete}
