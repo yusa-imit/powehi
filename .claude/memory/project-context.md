@@ -17,7 +17,27 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-03, cycle 236 — FEATURE: disappearing-message countdown tick + CI fix)
+## Current state (2026-07-03, cycle 237 — FEATURE: click reply quote to jump to original message)
+- **Cycle 237 (commit 47eb4c4):** FEATURE — Reply-quote click jumps to original message.
+  - **Mode:** FEATURE (counter 237 % 5 ≠ 0). CI was green on main (all recent runs success).
+  - **Feature:** Clicking the reply-quote banner in a message bubble now scrolls to and flashes the original referenced message (same scroll+flash animation as the pinned-message jump).
+    - Reply-quote `<div>` → `<button type="button">` for accessibility (keyboard focusable, `cursor: pointer`).
+    - `onJumpToReply?: (messageId: string) => void` prop added to `MessageBubble` and `MessageList`.
+    - Wired in `ChatLayout` as `onJumpToReply={(id) => setJumpToMessageId(id)}` — reuses existing `jumpToMessageId` + `handleJumpComplete` machinery.
+    - **Security fix (auditor YELLOW → GREEN):** `CSS.escape(jumpToMessageId)` applied at the querySelector call site to prevent CSS-selector injection from peer-supplied `messageId` values (peer-controlled string was interpolated raw into `[data-msg-id="${id}"]`).
+  - **7 tests** in `ChatLayoutJumpToReply.test.tsx`:
+    1. Button present when message has `replyTo`.
+    2. Shows excerpt text.
+    3. Clicking triggers scroll to original message.
+    4. `<button>` tag (accessibility).
+    5. No reply-quote for plain messages.
+    6. Multiple independent reply quotes.
+    7. Cross-message isolation (clicking one doesn't affect others).
+  - **`security-auditor` verdict:** YELLOW initially (CSS-selector injection via peer `messageId`); fixed with `CSS.escape()` → GREEN.
+  - **Frontend: 1012 tests pass** (was 1005, +7); tsc clean; biome clean.
+  - **Next cycle:** PQ hybrid Phase A or more UX polish (e.g. custom user status, chat export, contact card on group member tap).
+
+## Previous state (2026-07-03, cycle 236 — FEATURE: disappearing-message countdown tick + CI fix)
 - **Cycle 236 (commits 102980e + 7b64665):** FEATURE — Disappearing-message countdown tick + CI Format check fix.
   - **Mode:** FEATURE (counter 236 % 5 ≠ 0). CI was red (rustfmt on `event.rs` serde test) → fixed first.
   - **CI fix (102980e):** `cargo fmt --all` on `crates/domain/powehi-domain/src/event.rs` — the `.expect()` chains in `serde_json_round_trips_all_variants` were formatted differently locally vs CI. Rustfmt normalized them.
