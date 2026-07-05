@@ -4521,6 +4521,7 @@ function InfoPanel({
 	onUpdateDescription,
 	onUpdateNickname,
 	onClearMessages,
+	onExportChat,
 	mediaMessages,
 	onOpenLightbox,
 	onOpenDm,
@@ -4542,6 +4543,7 @@ function InfoPanel({
 	onUpdateDescription?: (desc: string) => void;
 	onUpdateNickname?: (nickname: string) => void;
 	onClearMessages?: () => void;
+	onExportChat?: (format: "json" | "text") => void;
 	mediaMessages?: ChatMessage[];
 	onOpenLightbox?: (msg: ChatMessage) => void;
 	onOpenDm?: (handle: string) => void;
@@ -4552,6 +4554,7 @@ function InfoPanel({
 	const [nicknameEditing, setNicknameEditing] = useState(false);
 	const [nicknameDraft, setNicknameDraft] = useState("");
 	const [clearConfirm, setClearConfirm] = useState(false);
+	const [exportConfirm, setExportConfirm] = useState(false);
 	const [safetyVerified, setSafetyVerified] = useState(false);
 	const [verifiedAt, setVerifiedAt] = useState<number | undefined>(undefined);
 	const [mitmAlert, setMitmAlert] = useState(false);
@@ -5465,6 +5468,117 @@ function InfoPanel({
 				>
 					{archived ? "Unarchive Chat" : "Archive Chat"}
 				</button>
+				{exportConfirm ? (
+					<div
+						data-testid="export-chat-confirm"
+						style={{
+							background: "var(--bg-elevated)",
+							border: "1px solid var(--border-soft)",
+							borderRadius: 10,
+							padding: "10px 14px",
+							display: "flex",
+							flexDirection: "column",
+							gap: 6,
+						}}
+					>
+						<span
+							style={{
+								color: "var(--fg-2)",
+								fontFamily: "var(--font-sans)",
+								fontSize: 13,
+								textAlign: "center",
+							}}
+						>
+							Save a local copy of this conversation.
+						</span>
+						<div style={{ display: "flex", gap: 6 }}>
+							<button
+								type="button"
+								data-testid="export-cancel"
+								onClick={() => setExportConfirm(false)}
+								style={{
+									flex: 1,
+									background: "var(--bg-elevated)",
+									border: "1px solid var(--border-soft)",
+									borderRadius: 8,
+									padding: "7px 0",
+									cursor: "pointer",
+									color: "var(--fg-2)",
+									fontFamily: "var(--font-sans)",
+									fontSize: 13,
+									fontWeight: 500,
+								}}
+							>
+								Cancel
+							</button>
+							<button
+								type="button"
+								data-testid="export-as-json"
+								onClick={() => {
+									onExportChat?.("json");
+									setExportConfirm(false);
+								}}
+								style={{
+									flex: 1,
+									background: "var(--bg-elevated)",
+									border: "1px solid var(--border-soft)",
+									borderRadius: 8,
+									padding: "7px 0",
+									cursor: "pointer",
+									color: "var(--fg-1)",
+									fontFamily: "var(--font-sans)",
+									fontSize: 13,
+									fontWeight: 500,
+								}}
+							>
+								JSON
+							</button>
+							<button
+								type="button"
+								data-testid="export-as-text"
+								onClick={() => {
+									onExportChat?.("text");
+									setExportConfirm(false);
+								}}
+								style={{
+									flex: 1,
+									background: "var(--bg-elevated)",
+									border: "1px solid var(--border-soft)",
+									borderRadius: 8,
+									padding: "7px 0",
+									cursor: "pointer",
+									color: "var(--fg-1)",
+									fontFamily: "var(--font-sans)",
+									fontSize: 13,
+									fontWeight: 500,
+								}}
+							>
+								Text
+							</button>
+						</div>
+					</div>
+				) : (
+					<button
+						type="button"
+						data-testid="export-chat-button"
+						onClick={() => setExportConfirm(true)}
+						style={{
+							background: "var(--bg-elevated)",
+							border: "1px solid var(--border-soft)",
+							borderRadius: 10,
+							padding: "10px 0",
+							cursor: "pointer",
+							color: "var(--fg-2)",
+							fontFamily: "var(--font-sans)",
+							fontSize: 13,
+							fontWeight: 500,
+							width: "100%",
+							textAlign: "center",
+						}}
+					>
+						Export Chat
+					</button>
+				)}
 				{clearConfirm ? (
 					<div
 						data-testid="clear-messages-confirm"
@@ -6680,6 +6794,65 @@ export function ChatLayout() {
 		);
 	}, []);
 
+	/** Export a chat's messages to a downloadable file (JSON or plain text).
+	 * Local-only — triggers a browser download, never sends data to the server.
+	 * Only message content fields are exported; crypto keys and envelope IDs are omitted. */
+	const handleExportChat = useCallback(
+		(chatId: string, format: "json" | "text") => {
+			const chat = chats.find((c) => c.id === chatId);
+			if (!chat) return;
+
+			// Sanitize the handle to safe filename characters (no path separators, control
+			// chars, or RTL-override codepoints that could spoof the download filename).
+			const safeHandle =
+				chat.handle
+					.replace(/[^A-Za-z0-9._-]/g, "_")
+					.slice(0, 64)
+					.replace(/^[._]+/, "") || "chat";
+
+			const myHandle = useAuthStore.getState().myHandle ?? "You";
+
+			if (format === "json") {
+				const payload = {
+					chat: { name: chat.name, handle: chat.handle, isGroup: chat.isGroup ?? false },
+					messages: chat.messages.map((m) => ({
+						from: m.from === "me" ? myHandle : chat.name,
+						text: m.deleted ? "(deleted)" : m.text,
+						time: m.time ?? null,
+						ts: m.ts ?? null,
+						edited: m.edited ?? false,
+					})),
+				};
+				const blob = new Blob([JSON.stringify(payload, null, 2)], {
+					type: "application/json",
+				});
+				const url = URL.createObjectURL(blob);
+				const a = document.createElement("a");
+				a.href = url;
+				a.download = `${safeHandle}-export.json`;
+				a.click();
+				URL.revokeObjectURL(url);
+			} else {
+				const lines = chat.messages
+					.filter((m) => !m.day)
+					.map((m) => {
+						const sender = m.from === "me" ? myHandle : chat.name;
+						const label = m.time ? `${sender} (${m.time})` : sender;
+						const body = m.deleted ? "(deleted)" : m.edited ? `${m.text} (edited)` : m.text;
+						return `${label}: ${body}`;
+					});
+				const blob = new Blob([lines.join("\n")], { type: "text/plain" });
+				const url = URL.createObjectURL(blob);
+				const a = document.createElement("a");
+				a.href = url;
+				a.download = `${safeHandle}-export.txt`;
+				a.click();
+				URL.revokeObjectURL(url);
+			}
+		},
+		[chats],
+	);
+
 	/** Clear unread badge, mention badge, and unread divider for every chat in one operation.
 	 * Local-only — no server call, no MLS op, no logging. */
 	const handleMarkAllRead = useCallback(() => {
@@ -7337,6 +7510,7 @@ export function ChatLayout() {
 					onUpdateDescription={(desc) => handleUpdateGroupDescription(active.id, desc)}
 					onUpdateNickname={(nickname) => handleUpdateNickname(active.id, nickname)}
 					onClearMessages={() => handleClearMessages(active.id)}
+					onExportChat={(fmt) => handleExportChat(active.id, fmt)}
 					mediaMessages={mediaMessages}
 					onOpenLightbox={handleOpenLightbox}
 					onOpenDm={handleOpenDmFromMember}
