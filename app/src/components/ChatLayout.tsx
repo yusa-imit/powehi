@@ -161,6 +161,18 @@ function formatTtl(s: number | undefined): string {
 	return "1w";
 }
 
+// ── Slow mode helpers ──────────────────────────────────────────────────────────
+
+const SLOW_MODE_OPTIONS = [0, 5, 30, 60, 300, 3600] as const;
+type SlowModeDelay = (typeof SLOW_MODE_OPTIONS)[number];
+
+function formatSlowMode(d: SlowModeDelay): string {
+	if (d === 0) return "Off";
+	if (d < 60) return `${d}s`;
+	if (d < 3600) return `${d / 60}m`;
+	return "1h";
+}
+
 function formatTimeLeft(expiresAt: number): string {
 	const s = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
 	if (s <= 0) return "soon";
@@ -3620,6 +3632,8 @@ function Composer({
 	onScheduleSend,
 	onCreatePoll,
 	isGroupChat,
+	slowModeCooldownSec = 0,
+	slowModeDelay: composerSlowModeDelay = 0,
 }: {
 	onSend: (text: string) => void;
 	partner: string;
@@ -3650,6 +3664,10 @@ function Composer({
 	onCreatePoll?: (question: string, options: string[]) => void;
 	/** True when composing in a group chat — enables poll button. */
 	isGroupChat?: boolean;
+	/** Seconds remaining in slow-mode cooldown (0 = no cooldown active). */
+	slowModeCooldownSec?: number;
+	/** Active slow-mode delay for this chat (seconds). 0 = disabled. */
+	slowModeDelay?: SlowModeDelay;
 }) {
 	const [text, setText] = useState(initialDraft);
 	const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
@@ -3737,6 +3755,7 @@ function Composer({
 	);
 
 	const send = () => {
+		if (slowModeCooldownSec > 0) return;
 		const trimmed = text.trim();
 		if (!trimmed) return;
 		if (editingMessage && onEdit) {
@@ -3773,6 +3792,28 @@ function Composer({
 				background: "var(--bg-void)",
 			}}
 		>
+			{/* Slow-mode banner — shown when slow mode is active for this group */}
+			{composerSlowModeDelay > 0 && (
+				<div
+					data-testid="slow-mode-banner"
+					style={{
+						display: "flex",
+						alignItems: "center",
+						gap: 6,
+						padding: "4px 14px",
+						marginBottom: 4,
+						background: "var(--bg-surface)",
+						border: "1px solid var(--border-soft)",
+						borderRadius: "8px 8px 0 0",
+						borderBottom: "none",
+						fontSize: 12,
+						color: "var(--fg-3)",
+					}}
+				>
+					<Icon name="clock" size={12} color="var(--fg-3)" />
+					<span>Slow mode: {formatSlowMode(composerSlowModeDelay)} between messages</span>
+				</div>
+			)}
 			{/* Edit mode bar — shown when editing a sent message */}
 			{editingMessage && (
 				<div
@@ -3929,6 +3970,7 @@ function Composer({
 				</button>
 				<textarea
 					ref={textareaRef}
+					data-testid="composer-textarea"
 					value={text}
 					onChange={(e) => {
 						const next = e.target.value;
@@ -3962,7 +4004,28 @@ function Composer({
 					/>
 					{emojiPickerOpen && <EmojiPickerPopup onSelect={handleInsertEmoji} />}
 				</div>
-				{text.trim() ? (
+				{slowModeCooldownSec > 0 ? (
+					<div
+						data-testid="slow-mode-countdown"
+						style={{
+							display: "flex",
+							alignItems: "center",
+							justifyContent: "center",
+							minWidth: 52,
+							height: 36,
+							borderRadius: 18,
+							background: "var(--bg-elevated)",
+							border: "1px solid var(--border-soft)",
+							fontSize: 12,
+							fontWeight: 600,
+							color: "var(--fg-3)",
+							letterSpacing: "0.02em",
+							padding: "0 10px",
+						}}
+					>
+						{slowModeCooldownSec}s
+					</div>
+				) : text.trim() ? (
 					<div style={{ display: "flex", alignItems: "center", gap: 4 }}>
 						{/* Send later button — only visible when text is present and onScheduleSend is wired */}
 						{onScheduleSend && (
@@ -4525,6 +4588,9 @@ function InfoPanel({
 	mediaMessages,
 	onOpenLightbox,
 	onOpenDm,
+	slowModeDelay: infoPanelSlowMode = 0,
+	onSetSlowMode,
+	isAdmin = false,
 }: {
 	chat: Chat;
 	onClose: () => void;
@@ -4547,6 +4613,9 @@ function InfoPanel({
 	mediaMessages?: ChatMessage[];
 	onOpenLightbox?: (msg: ChatMessage) => void;
 	onOpenDm?: (handle: string) => void;
+	slowModeDelay?: SlowModeDelay;
+	onSetSlowMode?: (d: SlowModeDelay) => void;
+	isAdmin?: boolean;
 }) {
 	const [descEditing, setDescEditing] = useState(false);
 	const [contactCard, setContactCard] = useState<ChatMember | null>(null);
@@ -5358,6 +5427,58 @@ function InfoPanel({
 			<InfoSection title="Disappearing messages">
 				<InfoRow label="Auto-delete after" trailing={formatTtl(disappearingTtl)} />
 			</InfoSection>
+			{chat.isGroup && (
+				<InfoSection title="Slow mode">
+					{isAdmin && onSetSlowMode ? (
+						<div
+							data-testid="slow-mode-admin-row"
+							style={{
+								display: "flex",
+								alignItems: "center",
+								justifyContent: "space-between",
+								padding: "10px 18px",
+							}}
+						>
+							<span style={{ fontSize: 14, color: "var(--fg-2)" }}>Send delay</span>
+							<select
+								data-testid="slow-mode-select"
+								value={infoPanelSlowMode}
+								onChange={(e) => onSetSlowMode(Number(e.target.value) as SlowModeDelay)}
+								style={{
+									background: "var(--bg-elevated)",
+									color: "var(--fg-1)",
+									border: "1px solid var(--border-soft)",
+									borderRadius: 6,
+									fontSize: 13,
+									padding: "4px 8px",
+									cursor: "pointer",
+									fontFamily: "var(--font-sans)",
+								}}
+							>
+								{SLOW_MODE_OPTIONS.map((opt) => (
+									<option key={opt} value={opt}>
+										{formatSlowMode(opt)}
+									</option>
+								))}
+							</select>
+						</div>
+					) : (
+						<div
+							data-testid="slow-mode-member-row"
+							style={{
+								display: "flex",
+								alignItems: "center",
+								justifyContent: "space-between",
+								padding: "10px 18px",
+								fontSize: 13,
+							}}
+						>
+							<span style={{ color: "var(--fg-1)" }}>Send delay</span>
+							<span style={{ color: "var(--fg-3)" }}>{formatSlowMode(infoPanelSlowMode)}</span>
+						</div>
+					)}
+				</InfoSection>
+			)}
 			<InfoSection title="Media">
 				{!mediaMessages || mediaMessages.length === 0 ? (
 					<div
@@ -6126,6 +6247,23 @@ export function ChatLayout() {
 		const handle = setInterval(() => setCountdownTick((n) => n + 1), 1000);
 		return () => clearInterval(handle);
 	}, [hasExpiringMessages]);
+
+	// ── Slow mode ─────────────────────────────────────────────────────────────
+	const [slowModeDelay, setSlowModeDelay] = useState<Record<string, SlowModeDelay>>({});
+	const [slowModeCooldownUntil, setSlowModeCooldownUntil] = useState<Record<string, number>>({});
+	const [slowModeTick, setSlowModeTick] = useState(0);
+	const hasCooldown = Object.values(slowModeCooldownUntil).some((v) => v > Date.now());
+	useEffect(() => {
+		if (!hasCooldown) return;
+		const handle = setInterval(() => setSlowModeTick((n) => n + 1), 1000);
+		return () => clearInterval(handle);
+	}, [hasCooldown]);
+	// Seconds remaining for the active chat's cooldown (re-evaluated on each tick).
+	// biome-ignore lint/correctness/useExhaustiveDependencies: slowModeTick is the timer signal
+	const activeCooldownSec = useMemo(() => {
+		const until = slowModeCooldownUntil[activeId] ?? 0;
+		return Math.max(0, Math.ceil((until - Date.now()) / 1000));
+	}, [slowModeCooldownUntil, activeId, slowModeTick]);
 
 	const mediaMessages = useMemo(
 		() => (active?.messages ?? []).filter((m) => !!m.media),
@@ -7270,6 +7408,15 @@ export function ChatLayout() {
 			: undefined;
 		setReplyingTo(null);
 
+		// Apply slow-mode cooldown for the sending chat before dispatching.
+		const activeSlowDelay = slowModeDelay[activeId] ?? 0;
+		if (activeSlowDelay > 0) {
+			setSlowModeCooldownUntil((prev) => ({
+				...prev,
+				[activeId]: Date.now() + activeSlowDelay * 1000,
+			}));
+		}
+
 		// Optimistic local update — always runs synchronously so UI is responsive.
 		// Assign a temp local ID (opt_ prefix) so ↑-to-edit can target this message before
 		// the server-assigned envelope ID is backfilled.
@@ -7477,6 +7624,8 @@ export function ChatLayout() {
 						onScheduleSend={sendScheduled}
 						onCreatePoll={active.isGroup ? handleCreatePoll : undefined}
 						isGroupChat={active.isGroup}
+						slowModeCooldownSec={activeCooldownSec}
+						slowModeDelay={active.isGroup ? (slowModeDelay[activeId] ?? 0) : 0}
 					/>
 				</main>
 			)}
@@ -7514,6 +7663,15 @@ export function ChatLayout() {
 					mediaMessages={mediaMessages}
 					onOpenLightbox={handleOpenLightbox}
 					onOpenDm={handleOpenDmFromMember}
+					slowModeDelay={slowModeDelay[active.id] ?? 0}
+					onSetSlowMode={(d) => setSlowModeDelay((prev) => ({ ...prev, [active.id]: d }))}
+					isAdmin={
+						active.members?.some(
+							(m) =>
+								m.role === "admin" &&
+								m.handle.toLowerCase() === (useAuthStore.getState().myHandle ?? "").toLowerCase(),
+						) ?? false
+					}
 				/>
 			)}
 
