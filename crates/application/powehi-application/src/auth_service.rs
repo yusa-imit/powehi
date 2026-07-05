@@ -1301,4 +1301,79 @@ mod tests {
             "set_members failure must propagate"
         );
     }
+
+    // ── list_devices ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_devices_empty_when_user_has_no_devices() {
+        let (svc, _, _, _) = make_svc();
+        let uid = UserId::new();
+        let devices = svc.list_devices(&uid).await.unwrap();
+        assert!(devices.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_devices_returns_all_registered_devices() {
+        let (svc, _, _, _) = make_svc();
+        let uid = UserId::new();
+        let id1 = svc
+            .register_device(&uid, DeviceRegistrationRequest { mls_credential: vec![1] })
+            .await
+            .unwrap();
+        let id2 = svc
+            .register_device(&uid, DeviceRegistrationRequest { mls_credential: vec![2] })
+            .await
+            .unwrap();
+
+        let mut devices = svc.list_devices(&uid).await.unwrap();
+        assert_eq!(devices.len(), 2);
+        devices.sort_by_key(|d| d.device_id.as_uuid());
+        let mut expected = vec![id1, id2];
+        expected.sort_by_key(|d| d.as_uuid());
+        assert_eq!(devices[0].device_id, expected[0]);
+        assert_eq!(devices[1].device_id, expected[1]);
+    }
+
+    #[tokio::test]
+    async fn list_devices_isolates_by_user() {
+        // Security invariant: user A's devices must never appear in user B's list.
+        let (svc, _, _, _) = make_svc();
+        let user_a = UserId::new();
+        let user_b = UserId::new();
+        svc.register_device(&user_a, DeviceRegistrationRequest { mls_credential: vec![] })
+            .await
+            .unwrap();
+        let device_b = svc
+            .register_device(&user_b, DeviceRegistrationRequest { mls_credential: vec![] })
+            .await
+            .unwrap();
+
+        let list_a = svc.list_devices(&user_a).await.unwrap();
+        let list_b = svc.list_devices(&user_b).await.unwrap();
+
+        assert_eq!(list_a.len(), 1);
+        assert_eq!(list_b.len(), 1);
+        assert_eq!(list_b[0].device_id, device_b);
+        // user_b's device must not appear in user_a's list.
+        assert!(
+            !list_a.iter().any(|d| d.device_id == device_b),
+            "user_b device must not appear in user_a list"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_devices_last_seen_at_is_none_at_registration() {
+        // Freshly registered devices have no last_seen_at.
+        let (svc, _, _, _) = make_svc();
+        let uid = UserId::new();
+        svc.register_device(&uid, DeviceRegistrationRequest { mls_credential: vec![] })
+            .await
+            .unwrap();
+        let devices = svc.list_devices(&uid).await.unwrap();
+        assert_eq!(devices.len(), 1);
+        assert!(
+            devices[0].last_seen_at.is_none(),
+            "newly registered device has no last_seen_at"
+        );
+    }
 }
