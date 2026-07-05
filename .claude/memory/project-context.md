@@ -17,7 +17,25 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-06, cycle 241 — FEATURE: chat export)
+## Current state (2026-07-06, cycle 242 — FEATURE: group slow mode)
+- **Cycle 242 (commits 78582d7 + e241c77):** FEATURE — Group slow mode + CI fix.
+  - **Mode:** FEATURE (counter 242 % 5 ≠ 0). CI was RED on main (Rust 1.96.1 fmt drift in auth_service.rs) — fixed first.
+  - **CI fix (78582d7):** `cargo fmt --all` on `crates/application/powehi-application/src/auth_service.rs` — DeviceRegistrationRequest struct literal formatting changed by Rust 1.96.1 stable update. 87 Rust tests still pass.
+  - **Feature (e241c77):** Group slow mode — admins can set a per-message send cooldown (Off / 5s / 30s / 1m / 5m / 1h) in the group InfoPanel.
+    - `SlowModeDelay = 0 | 5 | 30 | 60 | 300 | 3600` type + `formatSlowMode()` helper.
+    - `slowModeDelay: Record<string, SlowModeDelay>` + `slowModeCooldownUntil: Record<string, number>` + `slowModeTick` state in ChatLayout.
+    - `setInterval(1000)` tick only runs while `hasCooldown = Object.values(cooldownUntil).some(v => v > Date.now())`.
+    - `activeCooldownSec = useMemo(...[slowModeCooldownUntil, activeId, slowModeTick])` — recomputed on each tick.
+    - Composer: slow-mode-banner above input when delay > 0; countdown badge (`data-testid="slow-mode-countdown"`) replaces send button AND voice icon while cooldown > 0.
+    - InfoPanel group section: admin sees `<select data-testid="slow-mode-select">` for all SLOW_MODE_OPTIONS; non-admin sees read-only `data-testid="slow-mode-member-row"` with current delay label.
+    - `isAdmin` derived client-side from `myHandle` vs `member.role === "admin"` — fine since slow mode is local-only.
+    - `data-testid="composer-textarea"` added to the composer `<textarea>` for reliable test targeting.
+    - **security-auditor:** GREEN — local-only (no server call, no MLS path touched), no XSS (select coerced via `Number()`, `formatSlowMode` closed domain), no plaintext logging, timer leaks nothing.
+  - **11 tests** in `ChatLayoutSlowMode.test.tsx`: slow-mode section visible in group / absent in DM, admin has select / non-admin has read-only row, select default Off, admin sets 30s, banner appears when delay>0 / absent when Off, countdown shows after send, send button absent during cooldown, countdown decrements over time, selector default Off.
+  - **Frontend: 1046 tests pass** (was 1035, +11); tsc clean; biome clean.
+  - **Next cycle:** PQ hybrid Phase A (waiting for openmls stable MLS_128_MLKEM768), or more UX polish (message threading panel, per-group theme/background, keyboard shortcut help modal).
+
+## Previous state (2026-07-06, cycle 241 — FEATURE: chat export)
 - **Cycle 241 (commits ddd80b5 + d25bf84):** FEATURE — Chat export (download as JSON or text).
   - **Mode:** FEATURE (counter 241 % 5 ≠ 0). CI was green on main.
   - **Commit 1 (ddd80b5):** Committed pending `list_devices` tests in `powehi-application` (4 tests: empty list, returns all devices, user isolation security invariant, last_seen_at is None at registration). 87 application tests pass.
