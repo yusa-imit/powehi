@@ -1317,11 +1317,21 @@ mod tests {
         let (svc, _, _, _) = make_svc();
         let uid = UserId::new();
         let id1 = svc
-            .register_device(&uid, DeviceRegistrationRequest { mls_credential: vec![1] })
+            .register_device(
+                &uid,
+                DeviceRegistrationRequest {
+                    mls_credential: vec![1],
+                },
+            )
             .await
             .unwrap();
         let id2 = svc
-            .register_device(&uid, DeviceRegistrationRequest { mls_credential: vec![2] })
+            .register_device(
+                &uid,
+                DeviceRegistrationRequest {
+                    mls_credential: vec![2],
+                },
+            )
             .await
             .unwrap();
 
@@ -1340,11 +1350,21 @@ mod tests {
         let (svc, _, _, _) = make_svc();
         let user_a = UserId::new();
         let user_b = UserId::new();
-        svc.register_device(&user_a, DeviceRegistrationRequest { mls_credential: vec![] })
-            .await
-            .unwrap();
+        svc.register_device(
+            &user_a,
+            DeviceRegistrationRequest {
+                mls_credential: vec![],
+            },
+        )
+        .await
+        .unwrap();
         let device_b = svc
-            .register_device(&user_b, DeviceRegistrationRequest { mls_credential: vec![] })
+            .register_device(
+                &user_b,
+                DeviceRegistrationRequest {
+                    mls_credential: vec![],
+                },
+            )
             .await
             .unwrap();
 
@@ -1366,9 +1386,14 @@ mod tests {
         // Freshly registered devices have no last_seen_at.
         let (svc, _, _, _) = make_svc();
         let uid = UserId::new();
-        svc.register_device(&uid, DeviceRegistrationRequest { mls_credential: vec![] })
-            .await
-            .unwrap();
+        svc.register_device(
+            &uid,
+            DeviceRegistrationRequest {
+                mls_credential: vec![],
+            },
+        )
+        .await
+        .unwrap();
         let devices = svc.list_devices(&uid).await.unwrap();
         assert_eq!(devices.len(), 1);
         assert!(
