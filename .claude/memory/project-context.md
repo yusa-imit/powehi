@@ -17,7 +17,22 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-04, cycle 239 — FEATURE: custom user status)
+## Current state (2026-07-06, cycle 241 — FEATURE: chat export)
+- **Cycle 241 (commits ddd80b5 + d25bf84):** FEATURE — Chat export (download as JSON or text).
+  - **Mode:** FEATURE (counter 241 % 5 ≠ 0). CI was green on main.
+  - **Commit 1 (ddd80b5):** Committed pending `list_devices` tests in `powehi-application` (4 tests: empty list, returns all devices, user isolation security invariant, last_seen_at is None at registration). 87 application tests pass.
+  - **Feature (d25bf84):** "Export Chat" button in InfoPanel → confirm dialog (Cancel / JSON / Text) → local-only browser download.
+    - JSON payload: `{ chat: { name, handle, isGroup }, messages: [{ from, text, time, ts, edited }] }` — whitelist approach, mlsGroupId/mlsIdentityId/pqBindingHex/envelope IDs/media/reactions all omitted.
+    - Text format: `"Sender (time): body"` one line per message.
+    - Handle sanitized to `[A-Za-z0-9._-]` (max 64 chars, no leading dot) before `<a download>` interpolation — defense against RTL-override filename spoofing.
+    - `exportConfirm: boolean` state in InfoPanel; `onExportChat?: (format) => void` prop.
+    - `handleExportChat(chatId, format)` in ChatLayout using `URL.createObjectURL` + `<a>` trigger + `URL.revokeObjectURL`.
+  - **security-auditor verdict:** YELLOW → GREEN after handle sanitization fix. All zero-knowledge invariants pass: no server call, no crypto-state leak, no plaintext logging, no XSS.
+  - **11 tests** in `ChatLayoutExport.test.tsx`: button visible, correct label, confirm dialog shows 3 buttons, cancel restores button, JSON triggers download + closes, text triggers download + closes, JSON omits mlsGroupId/mlsIdentityId/pqBindingHex (security invariant), JSON contains name + messages array, text has line-per-message format, messages remain after export (non-destructive), coexists with clear-messages button.
+  - **Frontend: 1035 tests pass** (was 1024, +11); tsc clean; biome clean.
+  - **Next cycle:** Message search within active chat, or per-message reaction breakdown tooltip, or PQ hybrid Phase A.
+
+## Previous state (2026-07-04, cycle 239 — FEATURE: custom user status)
 - **Cycle 239 (commit f578537):** FEATURE — Custom user status in sidebar footer.
   - **Mode:** FEATURE (counter 239 % 5 ≠ 0). CI was green on main (all recent runs success).
   - **Feature:** Users can set a custom status (emoji + text) that appears at the bottom of the sidebar under "You".
