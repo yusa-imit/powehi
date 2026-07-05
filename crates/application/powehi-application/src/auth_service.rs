@@ -1338,7 +1338,7 @@ mod tests {
         let mut devices = svc.list_devices(&uid).await.unwrap();
         assert_eq!(devices.len(), 2);
         devices.sort_by_key(|d| d.device_id.as_uuid());
-        let mut expected = vec![id1, id2];
+        let mut expected = [id1, id2];
         expected.sort_by_key(|d| d.as_uuid());
         assert_eq!(devices[0].device_id, expected[0]);
         assert_eq!(devices[1].device_id, expected[1]);

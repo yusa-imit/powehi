@@ -3,7 +3,7 @@
  * Admins can set a per-message cooldown delay (Off / 5s / 30s / 1m / 5m / 1h).
  * While the cooldown is active, the send button is replaced with a countdown badge.
  */
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db/schema";
 import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
