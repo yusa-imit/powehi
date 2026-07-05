@@ -8,6 +8,7 @@ const ICON_PATHS: Record<string, string> = {
 	check: '<polyline points="20 6 9 17 4 12"/>',
 	"chevron-right": '<polyline points="9 18 15 12 9 6"/>',
 	"chevron-down": '<polyline points="6 9 12 15 18 9"/>',
+	"chevron-up": '<polyline points="18 15 12 9 6 15"/>',
 	phone:
 		'<path d="M22 16.92V20a2 2 0 0 1-2.18 2A19.86 19.86 0 0 1 2 4.18 2 2 0 0 1 4 2h3.09a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/>',
 	video:

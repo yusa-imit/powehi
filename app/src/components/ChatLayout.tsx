@@ -475,21 +475,26 @@ function parseMessageLinks(text: string): MsgSegment[] {
 
 // ── HighlightedText ───────────────────────────────────────────────────────────
 
-function applyHighlight(text: string, highlight: string): ReactNode {
+function applyHighlight(text: string, highlight: string, isCurrentMatch?: boolean): ReactNode {
 	const lc = text.toLowerCase();
 	const hlLc = highlight.toLowerCase();
 	const parts: ReactNode[] = [];
 	let cursor = 0;
 	let idx = lc.indexOf(hlLc, cursor);
 	if (idx === -1) return text;
+	// Only the first occurrence in this bubble gets the current-match testid.
+	let firstMark = true;
 	while (idx !== -1) {
 		if (idx > cursor) parts.push(text.slice(cursor, idx));
+		const isCurrent = isCurrentMatch && firstMark;
+		firstMark = false;
 		parts.push(
 			<mark
 				key={`${idx}-${cursor}`}
+				data-testid={isCurrent ? "search-current-match" : "search-highlight"}
 				style={{
-					background: "rgba(255,138,61,0.35)",
-					color: "inherit",
+					background: isCurrent ? "rgba(255,138,61,0.60)" : "rgba(255,138,61,0.35)",
+					color: "#F2EDE3",
 					borderRadius: 2,
 					padding: "0 1px",
 				}}
@@ -529,8 +534,14 @@ function parseFormatting(text: string): FmtSegment[] {
 }
 
 // Renders an array of FmtSegment nodes applying optional search highlight.
-function renderFmtWithHighlight(fmtSegs: FmtSegment[], highlight: string, kp: string): ReactNode {
-	const inner = (v: string): ReactNode => (highlight ? applyHighlight(v, highlight) : v);
+function renderFmtWithHighlight(
+	fmtSegs: FmtSegment[],
+	highlight: string,
+	kp: string,
+	isCurrentMatch?: boolean,
+): ReactNode {
+	const inner = (v: string): ReactNode =>
+		highlight ? applyHighlight(v, highlight, isCurrentMatch) : v;
 	return fmtSegs.map((f, j) => {
 		const fk = `${kp}-${j}`;
 		switch (f.type) {
@@ -568,14 +579,22 @@ function renderFmtWithHighlight(fmtSegs: FmtSegment[], highlight: string, kp: st
 	});
 }
 
-function HighlightedText({ text, highlight }: { text: string; highlight: string }) {
+function HighlightedText({
+	text,
+	highlight,
+	isCurrentMatch,
+}: {
+	text: string;
+	highlight: string;
+	isCurrentMatch?: boolean;
+}) {
 	const urlSegs = parseMessageLinks(text);
 	const isPlainText = urlSegs.length === 1 && urlSegs[0].type === "text";
 	if (isPlainText) {
 		const fmtSegs = parseFormatting(text);
 		const noFmt = fmtSegs.length === 1 && fmtSegs[0].type === "text";
 		if (noFmt && !highlight) return <>{text}</>;
-		return <>{renderFmtWithHighlight(fmtSegs, highlight, "root")}</>;
+		return <>{renderFmtWithHighlight(fmtSegs, highlight, "root", isCurrentMatch)}</>;
 	}
 	return (
 		<>
@@ -600,7 +619,7 @@ function HighlightedText({ text, highlight }: { text: string; highlight: string 
 					);
 				}
 				const fmtSegs = parseFormatting(seg.value);
-				return <span key={k}>{renderFmtWithHighlight(fmtSegs, highlight, k)}</span>;
+				return <span key={k}>{renderFmtWithHighlight(fmtSegs, highlight, k, isCurrentMatch)}</span>;
 			})}
 		</>
 	);
@@ -751,6 +770,7 @@ function IconBtn({
 	label,
 	style,
 	color,
+	"data-testid": dataTestId,
 }: {
 	icon: Parameters<typeof Icon>[0]["name"];
 	onClick?: () => void;
@@ -759,6 +779,7 @@ function IconBtn({
 	label: string;
 	style?: CSSProperties;
 	color?: string;
+	"data-testid"?: string;
 }) {
 	const [hover, setHover] = useState(false);
 	return (
@@ -766,6 +787,7 @@ function IconBtn({
 			type="button"
 			onClick={onClick}
 			aria-label={label}
+			data-testid={dataTestId}
 			onMouseEnter={() => setHover(true)}
 			onMouseLeave={() => setHover(false)}
 			style={{
@@ -1836,6 +1858,7 @@ function ConversationHeader({
 	msgSearch,
 	onMsgSearch,
 	onAddMember,
+	onChatSearchOpen,
 }: {
 	chat: Chat;
 	onCall: () => void;
@@ -1846,6 +1869,8 @@ function ConversationHeader({
 	msgSearch: string;
 	onMsgSearch: (q: string) => void;
 	onAddMember?: () => void;
+	/** Called when the user clicks the search icon to open the in-chat search bar. */
+	onChatSearchOpen?: () => void;
 }) {
 	const [searchOpen, setSearchOpen] = useState(false);
 
@@ -1974,6 +1999,8 @@ function MessageBubble({
 	msg,
 	partner,
 	highlight,
+	highlightQuery,
+	isCurrentMatch,
 	myDeviceId,
 	isGroup,
 	members,
@@ -1996,6 +2023,10 @@ function MessageBubble({
 	msg: ChatMessage;
 	partner: string;
 	highlight?: string;
+	/** Query string from the in-chat search bar — produces search-highlight marks. */
+	highlightQuery?: string;
+	/** True when this bubble is the current navigated match in the in-chat search. */
+	isCurrentMatch?: boolean;
 	myDeviceId?: string;
 	isGroup?: boolean;
 	members?: ChatMember[];
@@ -2148,7 +2179,11 @@ function MessageBubble({
 										<MediaImage media={msg.media} />
 									)
 								) : (
-									<HighlightedText text={msg.text} highlight={highlight ?? ""} />
+									<HighlightedText
+										text={msg.text}
+										highlight={highlightQuery ?? highlight ?? ""}
+										isCurrentMatch={isCurrentMatch}
+									/>
 								)}
 								{msg.last && msg.time && (
 									<span
@@ -2769,6 +2804,9 @@ function MessageList({
 	messages,
 	partner,
 	searchQuery,
+	searchMatchIds,
+	searchMatchIndex,
+	searchMatchQuery,
 	myDeviceId,
 	isGroup,
 	members,
@@ -2795,6 +2833,12 @@ function MessageList({
 	messages: ChatMessage[];
 	partner: string;
 	searchQuery?: string;
+	/** Message IDs matching the in-chat search bar query (from ChatLayout). */
+	searchMatchIds?: string[];
+	/** 0-based index of the currently navigated match. */
+	searchMatchIndex?: number;
+	/** The raw query string for the in-chat search bar — used to highlight matched text. */
+	searchMatchQuery?: string;
 	myDeviceId?: string;
 	isGroup?: boolean;
 	members?: ChatMember[];
@@ -3040,6 +3084,18 @@ function MessageList({
 								msg={g.msg}
 								partner={partner}
 								highlight={searchQuery}
+								highlightQuery={
+									searchMatchIds && searchMatchIds.length > 0 && g.msg.id
+										? searchMatchIds.includes(g.msg.id)
+											? (searchMatchQuery ?? searchQuery ?? "")
+											: undefined
+										: undefined
+								}
+								isCurrentMatch={
+									searchMatchIds && searchMatchIds.length > 0 && searchMatchIndex !== undefined
+										? searchMatchIds[searchMatchIndex] === g.msg.id
+										: false
+								}
 								myDeviceId={myDeviceId}
 								isGroup={isGroup}
 								members={members}
@@ -6066,6 +6122,13 @@ export function ChatLayout() {
 	const [addMemberOpen, setAddMemberOpen] = useState(false);
 	const [disappearingTtl, setDisappearingTtl] = useState<TtlOption>(undefined);
 	const [msgSearch, setMsgSearch] = useState("");
+
+	// ── In-chat message search bar (above composer) ───────────────────────────
+	const [chatSearchOpen, setChatSearchOpen] = useState(false);
+	const [chatSearchQuery, setChatSearchQuery] = useState("");
+	const [chatSearchIndex, setChatSearchIndex] = useState(0);
+	const chatSearchInputRef = useRef<HTMLInputElement>(null);
+
 	const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
 	const [editingMessage, setEditingMessage] = useState<ChatMessage | null>(null);
 	const [forwardMsg, setForwardMsg] = useState<{ id: string; text: string } | null>(null);
@@ -6208,6 +6271,47 @@ export function ChatLayout() {
 		setMsgSearch("");
 	}, [activeId]);
 
+	// Close and clear the in-chat search bar when switching chats.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: activeId is the trigger; setters are stable
+	useEffect(() => {
+		setChatSearchOpen(false);
+		setChatSearchQuery("");
+		setChatSearchIndex(0);
+	}, [activeId]);
+
+	// Auto-focus the search input when the bar opens.
+	useEffect(() => {
+		if (chatSearchOpen) {
+			chatSearchInputRef.current?.focus();
+		}
+	}, [chatSearchOpen]);
+
+	// `active` and `chatSearchMatchIds` must be defined before the scroll useEffect
+	// that depends on them — hoisted here to avoid the TDZ.
+	const active = chats.find((c) => c.id === activeId);
+
+	// Compute which message IDs match the in-chat search bar query.
+	// Local-only — never sent to server, never logged (no-plaintext-logging invariant).
+	const chatSearchMatchIds = useMemo<string[]>(() => {
+		if (!chatSearchQuery || !active?.messages) return [];
+		const q = chatSearchQuery.toLowerCase();
+		return active.messages
+			.filter((m) => !m.media && !m.deleted && m.text && m.text.toLowerCase().includes(q))
+			.map((m) => m.id)
+			.filter((id): id is string => id !== undefined);
+	}, [active?.messages, chatSearchQuery]);
+
+	// Scroll to the current match when chatSearchIndex changes.
+	useEffect(() => {
+		if (chatSearchMatchIds.length === 0) return;
+		const currentId = chatSearchMatchIds[chatSearchIndex];
+		if (!currentId) return;
+		const el = document.querySelector(`[data-msg-id="${CSS.escape(currentId)}"]`);
+		if (el) {
+			el.scrollIntoView({ behavior: "smooth", block: "center" });
+		}
+	}, [chatSearchIndex, chatSearchMatchIds]);
+
 	// Global Cmd+K / Ctrl+K opens the quick switcher.
 	useEffect(() => {
 		function onKey(e: globalThis.KeyboardEvent) {
@@ -6226,6 +6330,22 @@ export function ChatLayout() {
 		return () => window.removeEventListener("keydown", onKey);
 	}, []);
 
+	// Global Ctrl+F / Cmd+F opens the in-chat search bar; Escape closes it.
+	useEffect(() => {
+		function onKey(e: globalThis.KeyboardEvent) {
+			if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
+				e.preventDefault();
+				setChatSearchOpen(true);
+			} else if (e.key === "Escape" && chatSearchOpen) {
+				setChatSearchOpen(false);
+				setChatSearchQuery("");
+				setChatSearchIndex(0);
+			}
+		}
+		window.addEventListener("keydown", onKey);
+		return () => window.removeEventListener("keydown", onKey);
+	}, [chatSearchOpen]);
+
 	// Update browser tab title to reflect total unread count across all chats.
 	const tabTotalUnread = chats.reduce((s, c) => s + c.unread, 0);
 	useEffect(() => {
@@ -6234,8 +6354,6 @@ export function ChatLayout() {
 			document.title = "Powehi";
 		};
 	}, [tabTotalUnread]);
-
-	const active = chats.find((c) => c.id === activeId);
 
 	// Countdown tick — forces a re-render every second when the active chat has any
 	// disappearing message so `formatTimeLeft` stays current without polling for each
@@ -6264,6 +6382,12 @@ export function ChatLayout() {
 		const until = slowModeCooldownUntil[activeId] ?? 0;
 		return Math.max(0, Math.ceil((until - Date.now()) / 1000));
 	}, [slowModeCooldownUntil, activeId, slowModeTick]);
+
+	// Clamp chatSearchIndex whenever the match set changes.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: chatSearchMatchIds identity is the trigger; setChatSearchIndex is stable
+	useEffect(() => {
+		setChatSearchIndex(0);
+	}, [chatSearchMatchIds]);
 
 	const mediaMessages = useMemo(
 		() => (active?.messages ?? []).filter((m) => !!m.media),
@@ -7560,6 +7684,7 @@ export function ChatLayout() {
 						msgSearch={msgSearch}
 						onMsgSearch={setMsgSearch}
 						onAddMember={active.isGroup ? () => setAddMemberOpen(true) : undefined}
+						onChatSearchOpen={() => setChatSearchOpen(true)}
 					/>
 					{active.pinnedMessageId && (
 						<PinnedBanner
@@ -7574,6 +7699,9 @@ export function ChatLayout() {
 						messages={active.messages}
 						partner={active.name}
 						searchQuery={msgSearch}
+						searchMatchIds={chatSearchMatchIds}
+						searchMatchIndex={chatSearchIndex}
+						searchMatchQuery={chatSearchQuery || undefined}
 						myDeviceId={useAuthStore.getState().deviceId ?? undefined}
 						isGroup={active.isGroup}
 						isTyping={active.typing}
@@ -7598,6 +7726,134 @@ export function ChatLayout() {
 						onJumpComplete={handleJumpComplete}
 						countdownTick={countdownTick}
 					/>
+					{chatSearchOpen && (
+						<div
+							data-testid="chat-search-bar"
+							style={{
+								flex: "none",
+								display: "flex",
+								alignItems: "center",
+								gap: 8,
+								padding: "8px 16px",
+								background: "var(--bg-surface)",
+								borderTop: "1px solid var(--border-soft)",
+								borderBottom: "1px solid var(--border-soft)",
+							}}
+						>
+							<Icon name="search" size={14} color="var(--fg-3)" />
+							<input
+								ref={chatSearchInputRef}
+								type="text"
+								data-testid="chat-search-input"
+								placeholder="Search messages…"
+								value={chatSearchQuery}
+								onChange={(e) => setChatSearchQuery(e.target.value)}
+								onKeyDown={(e) => {
+									if (e.key === "Escape") {
+										setChatSearchOpen(false);
+										setChatSearchQuery("");
+										setChatSearchIndex(0);
+									} else if (e.key === "Enter") {
+										if (chatSearchMatchIds.length > 0) {
+											setChatSearchIndex((i) => (i + 1) % chatSearchMatchIds.length);
+										}
+									}
+								}}
+								style={{
+									flex: 1,
+									background: "transparent",
+									border: "none",
+									outline: "none",
+									color: "var(--fg-1)",
+									fontFamily: "var(--font-sans)",
+									fontSize: 13,
+								}}
+							/>
+							<span
+								data-testid="chat-search-count"
+								style={{
+									fontSize: 11,
+									color: "var(--fg-3)",
+									fontFamily: "var(--font-mono)",
+									whiteSpace: "nowrap",
+									minWidth: 40,
+									textAlign: "right",
+								}}
+							>
+								{chatSearchQuery && chatSearchMatchIds.length > 0
+									? `${chatSearchIndex + 1} / ${chatSearchMatchIds.length}`
+									: chatSearchQuery
+										? "0 / 0"
+										: ""}
+							</span>
+							<button
+								type="button"
+								data-testid="chat-search-prev"
+								aria-label="Previous match"
+								onClick={() => {
+									if (chatSearchMatchIds.length === 0) return;
+									setChatSearchIndex(
+										(i) => (i - 1 + chatSearchMatchIds.length) % chatSearchMatchIds.length,
+									);
+								}}
+								style={{
+									background: "none",
+									border: "none",
+									color: "var(--fg-3)",
+									cursor: "pointer",
+									display: "flex",
+									alignItems: "center",
+									padding: 4,
+									borderRadius: 6,
+								}}
+							>
+								<Icon name="chevron-up" size={14} />
+							</button>
+							<button
+								type="button"
+								data-testid="chat-search-next"
+								aria-label="Next match"
+								onClick={() => {
+									if (chatSearchMatchIds.length === 0) return;
+									setChatSearchIndex((i) => (i + 1) % chatSearchMatchIds.length);
+								}}
+								style={{
+									background: "none",
+									border: "none",
+									color: "var(--fg-3)",
+									cursor: "pointer",
+									display: "flex",
+									alignItems: "center",
+									padding: 4,
+									borderRadius: 6,
+								}}
+							>
+								<Icon name="chevron-down" size={14} />
+							</button>
+							<button
+								type="button"
+								data-testid="chat-search-close"
+								aria-label="Close search"
+								onClick={() => {
+									setChatSearchOpen(false);
+									setChatSearchQuery("");
+									setChatSearchIndex(0);
+								}}
+								style={{
+									background: "none",
+									border: "none",
+									color: "var(--fg-3)",
+									cursor: "pointer",
+									display: "flex",
+									alignItems: "center",
+									padding: 4,
+									borderRadius: 6,
+								}}
+							>
+								<Icon name="x" size={14} />
+							</button>
+						</div>
+					)}
 					<Composer
 						onSend={sendMessage}
 						partner={active.name}

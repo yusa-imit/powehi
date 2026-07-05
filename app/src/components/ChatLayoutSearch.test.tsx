@@ -1,5 +1,5 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { type MockedFunction, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db/schema";
 import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
 import * as UseMessagesModule from "../hooks/useMessages";
@@ -152,5 +152,181 @@ describe("ChatLayout — sidebar message search", () => {
 		fireEvent.change(searchInput, { target: { value: "deletable_secret_phrase" } });
 		await waitFor(() => expect(screen.getByTestId("msg-search-result")).toBeInTheDocument());
 		expect(deletePayload).toContain("delete"); // sanity: payload is structured correctly
+	});
+});
+
+// ── In-chat search bar (Ctrl+F) ────────────────────────────────────────────
+describe("ChatLayout — in-chat search bar", () => {
+	beforeEach(async () => {
+		// jsdom doesn't implement scrollIntoView — mock it so the scroll useEffect doesn't throw
+		Element.prototype.scrollIntoView = vi.fn();
+		await db.verifiedContacts.clear();
+		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
+			MOCK_WORKER as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
+		);
+		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_, __, onMessage) => {
+			captureIncoming = onMessage;
+		});
+	});
+
+	afterEach(() => {
+		cleanup();
+		vi.restoreAllMocks();
+		captureIncoming = null;
+	});
+
+	it("search bar is hidden by default", () => {
+		render(<ChatLayout />);
+		expect(screen.queryByTestId("chat-search-bar")).not.toBeInTheDocument();
+	});
+
+	it("Ctrl+F opens the in-chat search bar", () => {
+		render(<ChatLayout />);
+		fireEvent.keyDown(window, { key: "f", ctrlKey: true });
+		expect(screen.getByTestId("chat-search-bar")).toBeInTheDocument();
+	});
+
+	it("search bar contains input, count, prev, next, and close controls", () => {
+		render(<ChatLayout />);
+		fireEvent.keyDown(window, { key: "f", ctrlKey: true });
+		expect(screen.getByTestId("chat-search-input")).toBeInTheDocument();
+		expect(screen.getByTestId("chat-search-count")).toBeInTheDocument();
+		expect(screen.getByTestId("chat-search-prev")).toBeInTheDocument();
+		expect(screen.getByTestId("chat-search-next")).toBeInTheDocument();
+		expect(screen.getByTestId("chat-search-close")).toBeInTheDocument();
+	});
+
+	it("count is empty when no query is typed", () => {
+		render(<ChatLayout />);
+		fireEvent.keyDown(window, { key: "f", ctrlKey: true });
+		expect(screen.getByTestId("chat-search-count").textContent).toBe("");
+	});
+
+	it("typing a query that matches messages shows N / M count", async () => {
+		render(<ChatLayout />);
+		// Deliver a message with a unique phrase so it has a server-assigned ID
+		await act(async () => {
+			captureIncoming?.({
+				id: "env-count-001",
+				senderId: "device-maya",
+				groupId: MAYA_GROUP_ID,
+				text: "inchat_search_marker_one",
+				ciphertextB64: "a",
+				epochSeq: 9100,
+			});
+		});
+		fireEvent.keyDown(window, { key: "f", ctrlKey: true });
+		fireEvent.change(screen.getByTestId("chat-search-input"), {
+			target: { value: "inchat_search_marker" },
+		});
+		const count = screen.getByTestId("chat-search-count").textContent ?? "";
+		expect(count).toMatch(/1\s*\/\s*[0-9]+/);
+	});
+
+	it("typing a query with no matches shows 0 / 0", () => {
+		render(<ChatLayout />);
+		fireEvent.keyDown(window, { key: "f", ctrlKey: true });
+		fireEvent.change(screen.getByTestId("chat-search-input"), {
+			target: { value: "xyzzy_no_match_ever" },
+		});
+		expect(screen.getByTestId("chat-search-count").textContent).toBe("0 / 0");
+	});
+
+	it("close button hides the bar and clears the query", () => {
+		render(<ChatLayout />);
+		fireEvent.keyDown(window, { key: "f", ctrlKey: true });
+		fireEvent.change(screen.getByTestId("chat-search-input"), { target: { value: "cafe" } });
+		fireEvent.click(screen.getByTestId("chat-search-close"));
+		expect(screen.queryByTestId("chat-search-bar")).not.toBeInTheDocument();
+	});
+
+	it("next button advances the match index", async () => {
+		render(<ChatLayout />);
+		// Deliver two messages with a unique marker so IDs are set
+		await act(async () => {
+			captureIncoming?.({
+				id: "env-next-01",
+				senderId: "device-maya",
+				groupId: MAYA_GROUP_ID,
+				text: "nextmarker_alpha",
+				ciphertextB64: "a",
+				epochSeq: 9020,
+			});
+			captureIncoming?.({
+				id: "env-next-02",
+				senderId: "device-maya",
+				groupId: MAYA_GROUP_ID,
+				text: "nextmarker_beta",
+				ciphertextB64: "b",
+				epochSeq: 9021,
+			});
+		});
+		fireEvent.keyDown(window, { key: "f", ctrlKey: true });
+		fireEvent.change(screen.getByTestId("chat-search-input"), { target: { value: "nextmarker" } });
+		const countBefore = screen.getByTestId("chat-search-count").textContent ?? "";
+		// Should be "1 / 2"
+		expect(countBefore).toMatch(/1\s*\/\s*2/);
+		fireEvent.click(screen.getByTestId("chat-search-next"));
+		const countAfter = screen.getByTestId("chat-search-count").textContent ?? "";
+		// Should now be "2 / 2"
+		expect(countAfter).toMatch(/2\s*\/\s*2/);
+	});
+
+	it("prev button wraps around to last match from first", async () => {
+		render(<ChatLayout />);
+		await act(async () => {
+			captureIncoming?.({
+				id: "env-prev-01",
+				senderId: "device-maya",
+				groupId: MAYA_GROUP_ID,
+				text: "prevmarker_gamma",
+				ciphertextB64: "c",
+				epochSeq: 9030,
+			});
+			captureIncoming?.({
+				id: "env-prev-02",
+				senderId: "device-maya",
+				groupId: MAYA_GROUP_ID,
+				text: "prevmarker_delta",
+				ciphertextB64: "d",
+				epochSeq: 9031,
+			});
+		});
+		fireEvent.keyDown(window, { key: "f", ctrlKey: true });
+		fireEvent.change(screen.getByTestId("chat-search-input"), { target: { value: "prevmarker" } });
+		// At index 1 / 2 — click prev → wraps to last (2 / 2)
+		fireEvent.click(screen.getByTestId("chat-search-prev"));
+		const count = screen.getByTestId("chat-search-count").textContent ?? "";
+		const parts = count.split("/").map((s) => s.trim());
+		expect(parts[0]).toBe(parts[1]); // index == total (last match)
+	});
+
+	it("switching active chat resets the search bar state", () => {
+		render(<ChatLayout />);
+		fireEvent.keyDown(window, { key: "f", ctrlKey: true });
+		fireEvent.change(screen.getByTestId("chat-search-input"), { target: { value: "cafe" } });
+		// Switch to Jordan's chat
+		fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+		expect(screen.queryByTestId("chat-search-bar")).not.toBeInTheDocument();
+	});
+
+	it("matching message text is wrapped in a <mark> element", async () => {
+		render(<ChatLayout />);
+		await act(async () => {
+			captureIncoming?.({
+				id: "env-mark-01",
+				senderId: "device-maya",
+				groupId: MAYA_GROUP_ID,
+				text: "markable_unique_phrase",
+				ciphertextB64: "m",
+				epochSeq: 9040,
+			});
+		});
+		fireEvent.keyDown(window, { key: "f", ctrlKey: true });
+		fireEvent.change(screen.getByTestId("chat-search-input"), {
+			target: { value: "markable_unique" },
+		});
+		const marks = document.querySelectorAll("mark");
+		expect(marks.length).toBeGreaterThan(0);
 	});
 });
