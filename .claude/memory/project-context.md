@@ -17,7 +17,27 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-06, cycle 242 — FEATURE: group slow mode)
+## Current state (2026-07-06, cycle 243 — FEATURE: in-chat search bar)
+- **Cycle 243 (commits 8dbd316 + 78e3e6c):** FEATURE — In-chat search bar (Ctrl+F) with match navigation.
+  - **Mode:** FEATURE (counter 243 % 5 ≠ 0). CI was RED on main — fixed first.
+  - **CI fix (8dbd316):** Two lint regressions from cycle 242:
+    1. `ChatLayoutSlowMode.test.tsx:6` — unused `waitFor` import (TS6133) removed.
+    2. `auth_service.rs:1341` — `vec![id1, id2]` → `[id1, id2]` (clippy::useless-vec under Rust 1.96.1 -D warnings).
+  - **Feature (78e3e6c):** In-chat message search bar opens with Ctrl+F/Cmd+F.
+    - `chatSearchOpen / chatSearchQuery / chatSearchIndex` state in ChatLayout.
+    - `chatSearchMatchIds`: useMemo — case-insensitive substring filter on `active.messages`; excludes media/deleted; maps to server-assigned message IDs only.
+    - Hoisted `const active` and `chatSearchMatchIds` useMemo BEFORE the scroll useEffect that depends on them (fixes TDZ: `Cannot access 'chatSearchMatchIds' before initialization`).
+    - Search bar (`data-testid="chat-search-bar"`) slides in above the composer when open.
+    - Input auto-focuses; count shows "N / M"; prev/next cycle with wrap-around; close resets.
+    - Escape key closes bar; chat switch resets bar.
+    - `searchMatchQuery` prop added to MessageList → used as `highlightQuery` in MessageBubble via `HighlightedText`; matched substrings wrapped in `<mark>` (JSX children — no XSS, no dangerouslySetInnerHTML). `applyHighlight` uses `indexOf`/`slice`.
+    - `CSS.escape(currentId)` in scroll querySelector (existing pattern).
+    - **security-auditor: GREEN** — local-only, no server call, no logging, no XSS, CSS.escape guard.
+  - **11 tests** in `ChatLayoutSearch.test.tsx` (new describe block "in-chat search bar"): bar hidden by default, Ctrl+F opens, controls present, count empty, N/M count, 0/0 on no-match, close clears, next advances, prev wraps, chat switch resets, mark appears.
+  - **Frontend: 1057 tests pass** (was 1046, +11); tsc clean; biome clean.
+  - **Next cycle:** PQ hybrid Phase A, keyboard shortcut help modal, or per-group theme/background.
+
+## Previous state (2026-07-06, cycle 242 — FEATURE: group slow mode)
 - **Cycle 242 (commits 78582d7 + e241c77):** FEATURE — Group slow mode + CI fix.
   - **Mode:** FEATURE (counter 242 % 5 ≠ 0). CI was RED on main (Rust 1.96.1 fmt drift in auth_service.rs) — fixed first.
   - **CI fix (78582d7):** `cargo fmt --all` on `crates/application/powehi-application/src/auth_service.rs` — DeviceRegistrationRequest struct literal formatting changed by Rust 1.96.1 stable update. 87 Rust tests still pass.
