@@ -17,7 +17,24 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-06, cycle 243 — FEATURE: in-chat search bar)
+## Current state (2026-07-06, cycle 244 — FEATURE: keyboard shortcut help modal)
+- **Cycle 244 (commits 25fec82 + f90f482):** FEATURE — CI fix + Keyboard shortcut help modal (`?` key).
+  - **Mode:** FEATURE (counter 244 % 5 ≠ 0). CI was RED on main — fixed first.
+  - **CI fix (25fec82):** Two TS6133 unused-variable regressions from cycle 243:
+    1. `ChatLayout.tsx:1861` — `onChatSearchOpen` destructured but never used in `ConversationHeader` body; removed from props + type annotation + caller.
+    2. `ChatLayoutSearch.test.tsx:2` — `type MockedFunction` imported but never used; removed.
+  - **Feature (f90f482):** Keyboard shortcut help modal — press `?` (no modifier, not in INPUT/TEXTAREA) to toggle.
+    - `shortcutsOpen: boolean` state added near other modal state in ChatLayout.
+    - Global `keydown` handler extended: `key === "?"` without modifiers and `activeElement.tagName` not INPUT/TEXTAREA → `setShortcutsOpen(v => !v)`.
+    - `KeyboardShortcutsModal` component: `<dialog open>` with backdrop-click + Escape-to-close (consistent with 8 other dialogs). Lists 9 shortcuts in a `<table>` with `<kbd>` elements using inline CSS custom properties. Static content only.
+    - `SHORTCUT_ROWS` constant: Open search (Ctrl+F/Cmd+F), Close search (Esc), Shortcuts (?), Send (Enter), New line (Shift+Enter), Toggle info (i), Jump to latest (End), Navigate up (↑), Navigate down (↓).
+    - `data-testid="keyboard-shortcuts-modal"` on dialog; `data-testid="keyboard-shortcuts-close"` on close button.
+    - **security-auditor: GREEN** — static content only, no server call, no crypto state, no user input rendered, no XSS vector. Noted: if contentEditable ever added, `?` guard should be extended (not a current defect).
+  - **11 tests** in `ChatLayoutShortcuts.test.tsx`: hidden by default, `?` opens, `?` no-op in textarea, correct testid, title content, Ctrl+F listed, close button, Escape closes, toggle, backdrop click, `?` no-op in input.
+  - **Frontend: 1068 tests pass** (was 1057, +11); tsc clean; biome clean.
+  - **Next cycle:** PQ hybrid Phase A (ML-KEM768 openmls stable) or per-group theme/background.
+
+## Previous state (2026-07-06, cycle 243 — FEATURE: in-chat search bar)
 - **Cycle 243 (commits 8dbd316 + 78e3e6c):** FEATURE — In-chat search bar (Ctrl+F) with match navigation.
   - **Mode:** FEATURE (counter 243 % 5 ≠ 0). CI was RED on main — fixed first.
   - **CI fix (8dbd316):** Two lint regressions from cycle 242:
