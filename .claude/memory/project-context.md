@@ -17,7 +17,23 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-06, cycle 246 — FEATURE: per-chat background theme)
+## Current state (2026-07-06, cycle 247 — FEATURE: message thread panel)
+- **Cycle 247 (commit fe5808a):** FEATURE — Message thread panel (slide-in right panel for threaded replies).
+  - **Mode:** FEATURE (counter 247 % 5 ≠ 0). CI was green on main.
+  - **Feature (fe5808a):** Messages with one or more replies now show a "N replies ▸" button below the bubble. Clicking opens a Thread Panel (300 px) to the right of the main chat area.
+    - `threadReplyMap` memo: `Map<string, number>` — maps `msg.id` → count of messages with `replyTo.messageId === msg.id`. Recomputed on `active.messages` change.
+    - `threadPanelMsgId: string | null` state: ID of the root message whose thread is open. Populated from `msg.id` only (never from user input).
+    - `threadRootMsg`/`threadReplies` memos: derived from `active.messages` — no new data structures.
+    - `ThreadPanel` component: root message card (avatar initial, sender name, time, text), reply-count divider, reply list, mini-composer (textarea + Send button, Enter to send). Closes with X button.
+    - `handleSendThreadReply(text)`: pure `setChats` append — no API call, no MLS op, no logging. Creates `ChatMessage` with `replyTo: { messageId: threadPanelMsgId, excerpt: root.text.slice(0, 80) }`.
+    - `MessageBubble`: `threadCount?: number` + `onOpenThread?: () => void` props. Thread badge renders JSX text children only (no dangerouslySetInnerHTML). Chevron-right icon from Icon.tsx.
+    - `MessageList`: `threadCountMap?: Map<string, number>` + `onOpenThread?: (msg: ChatMessage) => void` props, threaded to `MessageBubble`.
+  - **security-auditor: GREEN** — no server calls, no MLS ops, no XSS (all JSX text children), no plaintext logging, thread panel styles are static literals, `threadPanelMsgId` comes only from `msg.id` values (never raw user input), thread text renders via `msg.text` JSX child.
+  - **11 tests** in `ChatLayoutThread.test.tsx`: no-reply (no button), 1-reply button, 2-replies button, clicking opens panel, panel testid, root text, reply text, close button, reply count, composer present, send adds reply.
+  - **Frontend: 1091 tests pass** (+11); tsc clean; biome clean.
+  - **Next cycle:** PQ hybrid Phase A (ML-KEM768 openmls stable) or more UX polish (e.g. message reactions in thread panel, per-chat notification sound picker).
+
+## Previous state (2026-07-06, cycle 246 — FEATURE: per-chat background theme)
 - **Cycle 246 (commit f18fa8b):** FEATURE — Per-chat background theme in InfoPanel.
   - **Mode:** FEATURE (counter 246 % 5 ≠ 0). CI was green on main.
   - **Feature (f18fa8b):** Users can pick from 6 preset background themes (Warm / Ocean / Forest / Rose / Lavender / Slate) or reset to default in the InfoPanel.
