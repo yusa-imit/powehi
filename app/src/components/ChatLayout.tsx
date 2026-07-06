@@ -2065,6 +2065,8 @@ function MessageBubble({
 	onOpenLightbox,
 	onJumpToReply,
 	countdownTick,
+	threadCount,
+	onOpenThread,
 }: {
 	msg: ChatMessage;
 	partner: string;
@@ -2097,6 +2099,10 @@ function MessageBubble({
 	onJumpToReply?: (messageId: string) => void;
 	/** Incremented every second when there are expiring messages; drives countdown re-render. */
 	countdownTick?: number;
+	/** Number of threaded replies to this message. When > 0 a "N replies" button is shown. */
+	threadCount?: number;
+	/** Called when the user clicks the thread-replies button to open the thread panel. */
+	onOpenThread?: () => void;
 }) {
 	const isMe = msg.from === "me";
 	const [pickerOpen, setPickerOpen] = useState(false);
@@ -2785,6 +2791,30 @@ function MessageBubble({
 					{`· ${totalReactionCount} reaction${totalReactionCount === 1 ? "" : "s"}`}
 				</span>
 			)}
+			{!!threadCount && threadCount > 0 && onOpenThread && !msg.deleted && (
+				<button
+					type="button"
+					data-testid="thread-replies-btn"
+					onClick={onOpenThread}
+					aria-label={`${threadCount} ${threadCount === 1 ? "reply" : "replies"} in thread`}
+					style={{
+						background: "none",
+						border: "none",
+						padding: "2px 0",
+						paddingLeft: isMe ? 0 : 36,
+						cursor: "pointer",
+						fontSize: 11,
+						color: "var(--accent-orange, #FF8A3D)",
+						display: "flex",
+						alignItems: "center",
+						gap: 4,
+						marginTop: 2,
+					}}
+				>
+					{`${threadCount} ${threadCount === 1 ? "reply" : "replies"}`}
+					<Icon name="chevron-right" size={10} />
+				</button>
+			)}
 		</div>
 	);
 }
@@ -2875,6 +2905,8 @@ function MessageList({
 	onJumpComplete,
 	countdownTick,
 	background,
+	threadCountMap,
+	onOpenThread,
 }: {
 	chatId: string;
 	messages: ChatMessage[];
@@ -2911,6 +2943,10 @@ function MessageList({
 	countdownTick?: number;
 	/** CSS background value for the message area; overrides the default gradient when set. */
 	background?: string;
+	/** Maps message ID → number of replies; drives the "N replies" thread badge. */
+	threadCountMap?: Map<string, number>;
+	/** Called when the user clicks the "N replies" thread badge to open the thread panel. */
+	onOpenThread?: (msg: ChatMessage) => void;
 }) {
 	const ref = useRef<HTMLDivElement>(null);
 	const [flashingId, setFlashingId] = useState<string | null>(null);
@@ -3190,6 +3226,8 @@ function MessageList({
 								}
 								onJumpToReply={onJumpToReply}
 								countdownTick={countdownTick}
+								threadCount={g.msg.id ? (threadCountMap?.get(g.msg.id) ?? 0) : 0}
+								onOpenThread={onOpenThread && g.msg.id ? () => onOpenThread(g.msg) : undefined}
 							/>
 						</div>
 					),
@@ -5950,6 +5988,255 @@ function InfoPanel({
 	);
 }
 
+// ── Thread Panel ──────────────────────────────────────────────────────────────
+
+function ThreadPanel({
+	rootMsg,
+	replies,
+	onClose,
+	onSendReply,
+	partner,
+}: {
+	rootMsg: ChatMessage;
+	replies: ChatMessage[];
+	onClose: () => void;
+	onSendReply: (text: string) => void;
+	partner: string;
+}) {
+	const [compose, setCompose] = useState("");
+
+	const handleSend = () => {
+		const text = compose.trim();
+		if (!text) return;
+		onSendReply(text);
+		setCompose("");
+	};
+
+	const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+		if (e.key === "Enter" && !e.shiftKey) {
+			e.preventDefault();
+			handleSend();
+		}
+	};
+
+	const senderName = (msg: ChatMessage) => {
+		if (msg.from === "me") return "You";
+		return partner;
+	};
+
+	const MsgCard = ({ msg, isRoot }: { msg: ChatMessage; isRoot?: boolean }) => {
+		const isMe = msg.from === "me";
+		return (
+			<div
+				style={{
+					display: "flex",
+					flexDirection: "column",
+					gap: 2,
+					padding: isRoot ? "10px 16px 10px" : "6px 16px",
+					borderBottom: isRoot ? "1px solid var(--border-faint)" : undefined,
+					background: isRoot ? "rgba(255,255,255,0.02)" : undefined,
+				}}
+			>
+				<div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+					<div
+						style={{
+							width: 22,
+							height: 22,
+							borderRadius: "50%",
+							background: isMe ? "rgba(255,138,61,0.25)" : "rgba(168,200,255,0.2)",
+							display: "flex",
+							alignItems: "center",
+							justifyContent: "center",
+							fontSize: 10,
+							fontWeight: 700,
+							color: isMe ? "#FF8A3D" : "#A8C8FF",
+							flexShrink: 0,
+						}}
+					>
+						{senderName(msg).slice(0, 1).toUpperCase()}
+					</div>
+					<span style={{ fontSize: 12, fontWeight: 600, color: "var(--fg-2)" }}>
+						{senderName(msg)}
+					</span>
+					{msg.time && (
+						<span style={{ fontSize: 10, color: "var(--fg-4)", marginLeft: "auto" }}>
+							{msg.time}
+						</span>
+					)}
+				</div>
+				<p
+					data-testid={isRoot ? "thread-root-text" : "thread-reply-text"}
+					style={{
+						margin: 0,
+						fontSize: 13,
+						color: "var(--fg-1)",
+						paddingLeft: 28,
+						lineHeight: 1.5,
+					}}
+				>
+					{msg.deleted ? (
+						<span style={{ color: "var(--fg-4)", fontStyle: "italic" }}>Message deleted</span>
+					) : (
+						msg.text
+					)}
+				</p>
+			</div>
+		);
+	};
+
+	return (
+		<aside
+			data-testid="thread-panel"
+			style={{
+				width: 300,
+				borderLeft: "1px solid var(--border-faint)",
+				background: "var(--bg-void)",
+				display: "flex",
+				flexDirection: "column",
+				flexShrink: 0,
+			}}
+		>
+			{/* Header */}
+			<div
+				style={{
+					display: "flex",
+					alignItems: "center",
+					justifyContent: "space-between",
+					padding: "14px 16px 12px",
+					borderBottom: "1px solid var(--border-faint)",
+					flexShrink: 0,
+				}}
+			>
+				<span
+					style={{
+						fontSize: 13,
+						fontWeight: 600,
+						letterSpacing: "0.05em",
+						color: "var(--fg-2)",
+					}}
+				>
+					Thread
+				</span>
+				<button
+					type="button"
+					data-testid="thread-panel-close"
+					aria-label="Close thread"
+					onClick={onClose}
+					style={{
+						background: "none",
+						border: "none",
+						cursor: "pointer",
+						color: "var(--fg-3)",
+						display: "flex",
+						alignItems: "center",
+						padding: 4,
+						borderRadius: 6,
+					}}
+				>
+					<Icon name="x" size={14} />
+				</button>
+			</div>
+
+			{/* Scrollable message area */}
+			<div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}>
+				{/* Root message */}
+				<MsgCard msg={rootMsg} isRoot />
+
+				{/* Reply count divider */}
+				{replies.length > 0 && (
+					<div
+						data-testid="thread-reply-count"
+						style={{
+							display: "flex",
+							alignItems: "center",
+							gap: 8,
+							padding: "8px 16px",
+							fontSize: 11,
+							color: "var(--fg-4)",
+						}}
+					>
+						<span>{`${replies.length} ${replies.length === 1 ? "reply" : "replies"}`}</span>
+						<div style={{ flex: 1, height: 1, background: "var(--border-faint)" }} />
+					</div>
+				)}
+
+				{/* Replies */}
+				{replies.map((r, i) => (
+					<MsgCard key={r.id ?? `thread-reply-${i}`} msg={r} />
+				))}
+
+				{replies.length === 0 && (
+					<p
+						style={{
+							margin: 0,
+							padding: "16px",
+							fontSize: 12,
+							color: "var(--fg-4)",
+							textAlign: "center",
+						}}
+					>
+						No replies yet. Start the thread below.
+					</p>
+				)}
+			</div>
+
+			{/* Mini composer */}
+			<div
+				style={{
+					borderTop: "1px solid var(--border-faint)",
+					padding: "10px 12px",
+					display: "flex",
+					gap: 8,
+					flexShrink: 0,
+				}}
+			>
+				<textarea
+					data-testid="thread-compose"
+					value={compose}
+					onChange={(e) => setCompose(e.target.value)}
+					onKeyDown={handleKeyDown}
+					placeholder="Reply in thread…"
+					rows={2}
+					style={{
+						flex: 1,
+						background: "var(--bg-elevated)",
+						border: "1px solid var(--border-faint)",
+						borderRadius: 10,
+						padding: "8px 10px",
+						color: "var(--fg-1)",
+						fontSize: 13,
+						resize: "none",
+						fontFamily: "var(--font-sans)",
+						lineHeight: 1.4,
+						outline: "none",
+					}}
+				/>
+				<button
+					type="button"
+					data-testid="thread-send"
+					aria-label="Send thread reply"
+					onClick={handleSend}
+					disabled={!compose.trim()}
+					style={{
+						background: compose.trim() ? "var(--accent-orange, #FF8A3D)" : "rgba(255,138,61,0.2)",
+						border: "none",
+						borderRadius: 10,
+						width: 36,
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "center",
+						cursor: compose.trim() ? "pointer" : "default",
+						color: compose.trim() ? "#fff" : "rgba(255,138,61,0.4)",
+						flexShrink: 0,
+					}}
+				>
+					<Icon name="send" size={14} />
+				</button>
+			</div>
+		</aside>
+	);
+}
+
 // ── Call overlay ──────────────────────────────────────────────────────────────
 
 type CallState = "idle" | "outgoing" | "active" | "incoming";
@@ -6241,6 +6528,9 @@ export function ChatLayout() {
 	const [chatSearchIndex, setChatSearchIndex] = useState(0);
 	const chatSearchInputRef = useRef<HTMLInputElement>(null);
 
+	// ── Thread panel ──────────────────────────────────────────────────────────
+	const [threadPanelMsgId, setThreadPanelMsgId] = useState<string | null>(null);
+
 	const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
 	const [editingMessage, setEditingMessage] = useState<ChatMessage | null>(null);
 	const [forwardMsg, setForwardMsg] = useState<{ id: string; text: string } | null>(null);
@@ -6511,6 +6801,66 @@ export function ChatLayout() {
 	const mediaMessages = useMemo(
 		() => (active?.messages ?? []).filter((m) => !!m.media),
 		[active?.messages],
+	);
+
+	// Maps message ID → count of replies (messages with replyTo.messageId === that ID).
+	const threadReplyMap = useMemo<Map<string, number>>(() => {
+		const map = new Map<string, number>();
+		for (const m of active?.messages ?? []) {
+			if (m.replyTo?.messageId) {
+				map.set(m.replyTo.messageId, (map.get(m.replyTo.messageId) ?? 0) + 1);
+			}
+		}
+		return map;
+	}, [active?.messages]);
+
+	const threadRootMsg = useMemo(
+		() =>
+			threadPanelMsgId
+				? (active?.messages ?? []).find((m) => m.id === threadPanelMsgId)
+				: undefined,
+		[threadPanelMsgId, active?.messages],
+	);
+
+	const threadReplies = useMemo(
+		() =>
+			threadPanelMsgId
+				? (active?.messages ?? []).filter((m) => m.replyTo?.messageId === threadPanelMsgId)
+				: [],
+		[threadPanelMsgId, active?.messages],
+	);
+
+	const handleSendThreadReply = useCallback(
+		(text: string) => {
+			if (!threadPanelMsgId || !active) return;
+			const root = active.messages.find((m) => m.id === threadPanelMsgId);
+			if (!root) return;
+			const excerpt = root.text.slice(0, 80);
+			const replyContext: ReplyContext = { messageId: threadPanelMsgId, excerpt };
+			const now = new Date();
+			setChats((prev) =>
+				prev.map((c) =>
+					c.id === activeId
+						? {
+								...c,
+								messages: [
+									...c.messages,
+									{
+										from: "me" as const,
+										text,
+										time: `${now.getHours()}:${String(now.getMinutes()).padStart(2, "0")}`,
+										ts: now.getTime(),
+										replyTo: replyContext,
+									},
+								],
+								last: text,
+								time: `${now.getHours()}:${String(now.getMinutes()).padStart(2, "0")}`,
+							}
+						: c,
+				),
+			);
+		},
+		[threadPanelMsgId, active, activeId],
 	);
 	const handleOpenLightbox = useCallback(
 		(msg: ChatMessage) => {
@@ -7853,6 +8203,8 @@ export function ChatLayout() {
 								? CHAT_THEMES.find((t) => t.key === active.chatTheme)?.background
 								: undefined
 						}
+						threadCountMap={threadReplyMap}
+						onOpenThread={(msg) => setThreadPanelMsgId(msg.id ?? null)}
 					/>
 					{chatSearchOpen && (
 						<div
@@ -8023,6 +8375,16 @@ export function ChatLayout() {
 				style={{ display: "none" }}
 				onChange={handleFileSelect}
 			/>
+
+			{threadPanelMsgId && active && threadRootMsg && (
+				<ThreadPanel
+					rootMsg={threadRootMsg}
+					replies={threadReplies}
+					onClose={() => setThreadPanelMsgId(null)}
+					onSendReply={handleSendThreadReply}
+					partner={active.name}
+				/>
+			)}
 
 			{infoOpen && active && (
 				<InfoPanel
