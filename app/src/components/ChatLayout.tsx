@@ -5995,12 +5995,15 @@ function ThreadPanel({
 	replies,
 	onClose,
 	onSendReply,
+	onReact,
 	partner,
 }: {
 	rootMsg: ChatMessage;
 	replies: ChatMessage[];
 	onClose: () => void;
 	onSendReply: (text: string) => void;
+	/** Called when the user reacts to a thread message (root or reply). */
+	onReact?: (msgId: string, emoji: string) => void;
 	partner: string;
 }) {
 	const [compose, setCompose] = useState("");
@@ -6024,10 +6027,24 @@ function ThreadPanel({
 		return partner;
 	};
 
-	const MsgCard = ({ msg, isRoot }: { msg: ChatMessage; isRoot?: boolean }) => {
+	const MsgCard = ({
+		msg,
+		isRoot,
+		onMsgReact,
+	}: {
+		msg: ChatMessage;
+		isRoot?: boolean;
+		onMsgReact?: (msgId: string, emoji: string) => void;
+	}) => {
 		const isMe = msg.from === "me";
+		const [hovered, setHovered] = useState(false);
+		const reactionEntries = msg.reactions ? Object.entries(msg.reactions) : [];
+
 		return (
 			<div
+				data-testid="thread-msg-card"
+				onMouseEnter={() => setHovered(true)}
+				onMouseLeave={() => setHovered(false)}
 				style={{
 					display: "flex",
 					flexDirection: "column",
@@ -6080,6 +6097,73 @@ function ThreadPanel({
 						msg.text
 					)}
 				</p>
+
+				{/* Existing reaction chips */}
+				{reactionEntries.length > 0 && (
+					<div
+						data-testid="thread-reaction-chips"
+						style={{ display: "flex", flexWrap: "wrap", gap: 4, paddingLeft: 28, marginTop: 2 }}
+					>
+						{reactionEntries.map(([emoji, senders]) => (
+							<button
+								key={emoji}
+								type="button"
+								data-testid={`thread-reaction-chip-${emoji}`}
+								onClick={() => msg.id && onMsgReact?.(msg.id, emoji)}
+								style={{
+									display: "inline-flex",
+									alignItems: "center",
+									gap: 3,
+									padding: "2px 6px",
+									borderRadius: 12,
+									border: "1px solid var(--border-faint)",
+									background: "var(--bg-elevated)",
+									cursor: onMsgReact ? "pointer" : "default",
+									fontSize: 12,
+									color: "var(--fg-2)",
+								}}
+							>
+								{emoji}
+								<span style={{ fontSize: 10 }}>{senders.length}</span>
+							</button>
+						))}
+					</div>
+				)}
+
+				{/* Quick emoji picker row on hover */}
+				{hovered && !msg.deleted && onMsgReact && msg.id && (
+					<div
+						data-testid="thread-react-row"
+						style={{
+							display: "flex",
+							gap: 2,
+							paddingLeft: 28,
+							marginTop: 2,
+						}}
+					>
+						{ALLOWED_REACTION_EMOJIS.map((e) => (
+							<button
+								key={e}
+								type="button"
+								data-testid={`thread-react-btn-${e}`}
+								aria-label={`React with ${e}`}
+								onClick={() => msg.id && onMsgReact(msg.id, e)}
+								style={{
+									background: "none",
+									border: "none",
+									cursor: "pointer",
+									fontSize: 14,
+									padding: "2px 3px",
+									borderRadius: 6,
+									lineHeight: 1,
+									opacity: 0.7,
+								}}
+							>
+								{e}
+							</button>
+						))}
+					</div>
+				)}
 			</div>
 		);
 	};
@@ -6140,7 +6224,7 @@ function ThreadPanel({
 			{/* Scrollable message area */}
 			<div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}>
 				{/* Root message */}
-				<MsgCard msg={rootMsg} isRoot />
+				<MsgCard msg={rootMsg} isRoot onMsgReact={onReact} />
 
 				{/* Reply count divider */}
 				{replies.length > 0 && (
@@ -6162,7 +6246,7 @@ function ThreadPanel({
 
 				{/* Replies */}
 				{replies.map((r, i) => (
-					<MsgCard key={r.id ?? `thread-reply-${i}`} msg={r} />
+					<MsgCard key={r.id ?? `thread-reply-${i}`} msg={r} onMsgReact={onReact} />
 				))}
 
 				{replies.length === 0 && (
@@ -8382,6 +8466,7 @@ export function ChatLayout() {
 					replies={threadReplies}
 					onClose={() => setThreadPanelMsgId(null)}
 					onSendReply={handleSendThreadReply}
+					onReact={sendReaction}
 					partner={active.name}
 				/>
 			)}
