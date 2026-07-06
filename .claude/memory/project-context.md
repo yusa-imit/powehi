@@ -17,7 +17,17 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-06, cycle 244 — FEATURE: keyboard shortcut help modal)
+## Current state (2026-07-06, cycle 245 — STABILIZATION)
+- **Cycle 245 (commit 5789e3f):** STABILIZATION — CI fix (Biome formatter) + security sweep.
+  - **Mode:** STABILIZATION (counter 245 % 5 == 0). CI was RED on main.
+  - **CI fix (5789e3f):** `ChatLayout.tsx:8181-8184` — `<KeyboardShortcutsModal>` JSX was multi-line (4 lines) but Biome formatter requires it to fit on one line. Collapsed to single line. Only formatting change, no logic change.
+  - **Security sweep — GREEN:** `security-auditor` reviewed all backend handler crates (`crates/adapters/inbound/` + `crates/application/`). All non-negotiables hold: auth extractor rejects missing/malformed Bearer before handlers, OPAQUE login_finish closes nonce race via `get_del`, errors collapse to `Unauthorized` (no oracle), invite code 32-char hex validation, push subscription SSRF guard (loopback/RFC-1918/ULA/IPv4-mapped IPv6/userinfo bypass), logging uses only opaque UUIDs + coarse size buckets (no plaintext content, handles, or tokens).
+  - **Target dir:** No target dir found (clean; CI builds on remote runners only).
+  - **Rust tests:** 87 application + 120 rest-api + 40 + 85 + 143 + ... all pass (zero failures, zero broken tests).
+  - **Frontend: 1068 tests pass** (unchanged); tsc clean; biome clean.
+  - **Next cycle:** PQ hybrid Phase A (ML-KEM768 openmls stable) or per-group theme/background.
+
+## Previous state (2026-07-06, cycle 244 — FEATURE: keyboard shortcut help modal)
 - **Cycle 244 (commits 25fec82 + f90f482):** FEATURE — CI fix + Keyboard shortcut help modal (`?` key).
   - **Mode:** FEATURE (counter 244 % 5 ≠ 0). CI was RED on main — fixed first.
   - **CI fix (25fec82):** Two TS6133 unused-variable regressions from cycle 243:
