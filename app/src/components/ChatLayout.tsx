@@ -560,14 +560,14 @@ function applyHighlight(text: string, highlight: string, isCurrentMatch?: boolea
 
 // ── parseFormatting ───────────────────────────────────────────────────────────
 // Splits a plain-text string into segments: bold (**text**), italic (*text*),
-// inline code (`text`), or plain text. Bold must be matched before italic so
-// that ** is consumed as a unit before the * alternative is tried.
+// inline code (`text`), @mention, or plain text. Bold must be matched before
+// italic so that ** is consumed as a unit before the * alternative is tried.
 
-type FmtSegment = { type: "text" | "bold" | "italic" | "code"; value: string };
+type FmtSegment = { type: "text" | "bold" | "italic" | "code" | "mention"; value: string };
 
 function parseFormatting(text: string): FmtSegment[] {
 	const segs: FmtSegment[] = [];
-	const FMT_RE = /`([^`]+)`|\*\*([^*]+)\*\*|\*([^*]+)\*/g;
+	const FMT_RE = /`([^`]+)`|\*\*([^*]+)\*\*|\*([^*]+)\*|(@[A-Za-z0-9_.-]+)/g;
 	let last = 0;
 	let m: RegExpExecArray | null;
 	// biome-ignore lint/suspicious/noAssignInExpressions: idiomatic exec loop
@@ -576,6 +576,7 @@ function parseFormatting(text: string): FmtSegment[] {
 		if (m[1] !== undefined) segs.push({ type: "code", value: m[1] });
 		else if (m[2] !== undefined) segs.push({ type: "bold", value: m[2] });
 		else if (m[3] !== undefined) segs.push({ type: "italic", value: m[3] });
+		else if (m[4] !== undefined) segs.push({ type: "mention", value: m[4] });
 		last = m.index + m[0].length;
 	}
 	if (last < text.length) segs.push({ type: "text", value: text.slice(last) });
@@ -588,6 +589,7 @@ function renderFmtWithHighlight(
 	highlight: string,
 	kp: string,
 	isCurrentMatch?: boolean,
+	myHandle?: string,
 ): ReactNode {
 	const inner = (v: string): ReactNode =>
 		highlight ? applyHighlight(v, highlight, isCurrentMatch) : v;
@@ -622,6 +624,25 @@ function renderFmtWithHighlight(
 						{f.value}
 					</code>
 				);
+			case "mention": {
+				const lc = f.value.toLowerCase();
+				const isSelf = lc === "@all" || (myHandle != null && lc === `@${myHandle.toLowerCase()}`);
+				return (
+					<span
+						key={fk}
+						data-testid={isSelf ? "mention-self" : "mention-other"}
+						style={{
+							background: isSelf ? "rgba(255,138,61,0.20)" : "rgba(255,255,255,0.09)",
+							color: isSelf ? "#FF8A3D" : "#C8C0B8",
+							borderRadius: 4,
+							padding: "0 3px",
+							fontWeight: isSelf ? 600 : 400,
+						}}
+					>
+						{inner(f.value)}
+					</span>
+				);
+			}
 			default:
 				return <span key={fk}>{inner(f.value)}</span>;
 		}
@@ -632,10 +653,12 @@ function HighlightedText({
 	text,
 	highlight,
 	isCurrentMatch,
+	myHandle,
 }: {
 	text: string;
 	highlight: string;
 	isCurrentMatch?: boolean;
+	myHandle?: string;
 }) {
 	const urlSegs = parseMessageLinks(text);
 	const isPlainText = urlSegs.length === 1 && urlSegs[0].type === "text";
@@ -643,7 +666,7 @@ function HighlightedText({
 		const fmtSegs = parseFormatting(text);
 		const noFmt = fmtSegs.length === 1 && fmtSegs[0].type === "text";
 		if (noFmt && !highlight) return <>{text}</>;
-		return <>{renderFmtWithHighlight(fmtSegs, highlight, "root", isCurrentMatch)}</>;
+		return <>{renderFmtWithHighlight(fmtSegs, highlight, "root", isCurrentMatch, myHandle)}</>;
 	}
 	return (
 		<>
@@ -668,7 +691,11 @@ function HighlightedText({
 					);
 				}
 				const fmtSegs = parseFormatting(seg.value);
-				return <span key={k}>{renderFmtWithHighlight(fmtSegs, highlight, k, isCurrentMatch)}</span>;
+				return (
+					<span key={k}>
+						{renderFmtWithHighlight(fmtSegs, highlight, k, isCurrentMatch, myHandle)}
+					</span>
+				);
 			})}
 		</>
 	);
@@ -2048,6 +2075,7 @@ function MessageBubble({
 	highlightQuery,
 	isCurrentMatch,
 	myDeviceId,
+	myHandle,
 	isGroup,
 	members,
 	showAvatar,
@@ -2076,6 +2104,8 @@ function MessageBubble({
 	/** True when this bubble is the current navigated match in the in-chat search. */
 	isCurrentMatch?: boolean;
 	myDeviceId?: string;
+	/** The authenticated user's own handle — used to highlight self-mentions. */
+	myHandle?: string;
 	isGroup?: boolean;
 	members?: ChatMember[];
 	/** When false, suppress the sender avatar and collapse the top margin (same-group continuation). */
@@ -2235,6 +2265,7 @@ function MessageBubble({
 										text={msg.text}
 										highlight={highlightQuery ?? highlight ?? ""}
 										isCurrentMatch={isCurrentMatch}
+										myHandle={myHandle}
 									/>
 								)}
 								{msg.last && msg.time && (
@@ -2884,6 +2915,7 @@ function MessageList({
 	searchMatchIndex,
 	searchMatchQuery,
 	myDeviceId,
+	myHandle,
 	isGroup,
 	members,
 	isTyping,
@@ -2919,6 +2951,8 @@ function MessageList({
 	/** The raw query string for the in-chat search bar — used to highlight matched text. */
 	searchMatchQuery?: string;
 	myDeviceId?: string;
+	/** The authenticated user's own handle — forwarded to MessageBubble for self-mention highlighting. */
+	myHandle?: string;
 	isGroup?: boolean;
 	members?: ChatMember[];
 	isTyping?: boolean;
@@ -3183,6 +3217,7 @@ function MessageList({
 										: false
 								}
 								myDeviceId={myDeviceId}
+								myHandle={myHandle}
 								isGroup={isGroup}
 								members={members}
 								showAvatar={g.showAvatar}
@@ -8260,6 +8295,7 @@ export function ChatLayout() {
 						searchMatchIndex={chatSearchIndex}
 						searchMatchQuery={chatSearchQuery || undefined}
 						myDeviceId={useAuthStore.getState().deviceId ?? undefined}
+						myHandle={useAuthStore.getState().myHandle ?? undefined}
 						isGroup={active.isGroup}
 						isTyping={active.typing}
 						members={active.members}
