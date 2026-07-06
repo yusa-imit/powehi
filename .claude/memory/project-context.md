@@ -17,7 +17,24 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-06, cycle 248 — FEATURE: emoji reactions in thread panel)
+## Current state (2026-07-07, cycle 249 — FEATURE: @mention highlighting in message bubbles)
+- **Cycle 249 (commit 7feb09c):** FEATURE — @mention highlighting in message bubbles.
+  - **Mode:** FEATURE (counter 249 % 5 ≠ 0). CI was green on main.
+  - **Feature (7feb09c):** `@username` tokens in message text now render as visually distinct chips.
+    - `FmtSegment` type extended to include `"mention"` variant.
+    - `FMT_RE` in `parseFormatting` extended: `|(@[A-Za-z0-9_.-]+)` — captures any `@handle` as a `mention` segment.
+    - `renderFmtWithHighlight` gains optional `myHandle?: string` param. New `"mention"` case:
+      - Self-mention (`@all` or `@{myHandle}` case-insensitive) → orange tinted chip: `background: rgba(255,138,61,0.20)`, `color: #FF8A3D`, `fontWeight: 600`, `data-testid="mention-self"`.
+      - Other-handle mention → muted chip: `background: rgba(255,255,255,0.09)`, `color: #C8C0B8`, `data-testid="mention-other"`.
+    - `HighlightedText`, `MessageBubble`, `MessageList` each gain `myHandle?: string` prop, threaded through.
+    - ChatLayout passes `myHandle={useAuthStore.getState().myHandle ?? undefined}` to `MessageList`.
+    - Seed message in Design Team (`"@you ... @all feedback welcome"`) immediately demos the feature.
+  - **security-auditor: GREEN** — no XSS (`f.value` is always JSX text child, React auto-escapes), no ReDoS (`@[A-Za-z0-9_.-]+` is linear-time character class), `myHandle` never reaches DOM attribute/style (comparison only), no plaintext logging.
+  - **10 tests** in `ChatLayoutMentionHighlight.test.tsx`: @all renders mention-self, non-myHandle renders mention-other, incoming @myHandle renders mention-self, self-mention chip orange color, other-mention chip muted color, no chips on plain message, @myHandle + @all = two self chips, mixed mention types in one message, case-insensitive myHandle match, mention chips in DM chats.
+  - **Frontend: 1114 tests pass** (+10); tsc clean; biome clean.
+  - **Next cycle:** PQ hybrid Phase A (ML-KEM768 openmls stable) or more UX polish (e.g. per-chat notification sound picker, message pinning indicator in sidebar).
+
+## Previous state (2026-07-06, cycle 248 — FEATURE: emoji reactions in thread panel)
 - **Cycle 248 (commit 8566522):** FEATURE — Emoji reactions in thread panel (root + reply messages).
   - **Mode:** FEATURE (counter 248 % 5 ≠ 0). CI was green on main.
   - **Feature (8566522):** Thread panel `MsgCard` now supports emoji reactions — both root and reply messages.
