@@ -1858,7 +1858,6 @@ function ConversationHeader({
 	msgSearch,
 	onMsgSearch,
 	onAddMember,
-	onChatSearchOpen,
 }: {
 	chat: Chat;
 	onCall: () => void;
@@ -1869,8 +1868,6 @@ function ConversationHeader({
 	msgSearch: string;
 	onMsgSearch: (q: string) => void;
 	onAddMember?: () => void;
-	/** Called when the user clicks the search icon to open the in-chat search bar. */
-	onChatSearchOpen?: () => void;
 }) {
 	const [searchOpen, setSearchOpen] = useState(false);
 
@@ -7684,7 +7681,6 @@ export function ChatLayout() {
 						msgSearch={msgSearch}
 						onMsgSearch={setMsgSearch}
 						onAddMember={active.isGroup ? () => setAddMemberOpen(true) : undefined}
-						onChatSearchOpen={() => setChatSearchOpen(true)}
 					/>
 					{active.pinnedMessageId && (
 						<PinnedBanner
