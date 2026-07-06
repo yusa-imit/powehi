@@ -17,7 +17,21 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-06, cycle 245 — STABILIZATION)
+## Current state (2026-07-06, cycle 246 — FEATURE: per-chat background theme)
+- **Cycle 246 (commit f18fa8b):** FEATURE — Per-chat background theme in InfoPanel.
+  - **Mode:** FEATURE (counter 246 % 5 ≠ 0). CI was green on main.
+  - **Feature (f18fa8b):** Users can pick from 6 preset background themes (Warm / Ocean / Forest / Rose / Lavender / Slate) or reset to default in the InfoPanel.
+    - `Chat.chatTheme?: string` — optional field, local-only, never sent to server, never in MLS payload, never logged.
+    - `CHAT_THEMES` constant: 6 entries with `{ key, label, swatch, background }`. Background values are hardcoded CSS gradient strings. Closed set — no user-supplied strings enter style.
+    - `MessageList background?: string` prop: overrides the default gradient when set. Value comes only from `CHAT_THEMES.find(...).background` (closed lookup).
+    - InfoPanel "Chat theme" section: 7 swatch buttons (default + 6 presets) with orange border on active selection. Shows theme label below swatches.
+    - `handleSetChatTheme(chatId, key)` in ChatLayout: pure `setChats` update, no API call, no MLS op, no logging.
+  - **security-auditor: GREEN** — no server calls, no XSS, no plaintext logging, chatTheme string never reaches style attribute directly (closed constant lookup only).
+  - **12 tests** in `ChatLayoutTheme.test.tsx`: theme section in DM InfoPanel, theme section in group InfoPanel, default label "Default", default swatch present, all 6 presets rendered, clicking swatch updates label, default swatch resets to Default, message list background changes after theme applied, background resets to default when cleared, per-chat isolation (different chats have independent themes), theme persists across chat switches, aria-labels on swatches.
+  - **Frontend: 1080 tests pass** (+12); tsc clean; biome clean.
+  - **Next cycle:** PQ hybrid Phase A (ML-KEM768 openmls stable) or message threading panel.
+
+## Previous state (2026-07-06, cycle 245 — STABILIZATION)
 - **Cycle 245 (commit 5789e3f):** STABILIZATION — CI fix (Biome formatter) + security sweep.
   - **Mode:** STABILIZATION (counter 245 % 5 == 0). CI was RED on main.
   - **CI fix (5789e3f):** `ChatLayout.tsx:8181-8184` — `<KeyboardShortcutsModal>` JSX was multi-line (4 lines) but Biome formatter requires it to fit on one line. Collapsed to single line. Only formatting change, no logic change.
