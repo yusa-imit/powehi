@@ -17,7 +17,22 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-06, cycle 247 — FEATURE: message thread panel)
+## Current state (2026-07-06, cycle 248 — FEATURE: emoji reactions in thread panel)
+- **Cycle 248 (commit 8566522):** FEATURE — Emoji reactions in thread panel (root + reply messages).
+  - **Mode:** FEATURE (counter 248 % 5 ≠ 0). CI was green on main.
+  - **Feature (8566522):** Thread panel `MsgCard` now supports emoji reactions — both root and reply messages.
+    - `MsgCard` updated: accepts `onMsgReact?: (msgId: string, emoji: string) => void` prop. Added `hovered: boolean` state + `onMouseEnter`/`onMouseLeave` on the card container.
+    - On hover (non-deleted, has `msg.id`): shows `data-testid="thread-react-row"` with 6 quick-emoji buttons from `ALLOWED_REACTION_EMOJIS` (`data-testid="thread-react-btn-{emoji}"`).
+    - Existing reactions displayed as chips (`data-testid="thread-reaction-chip-{emoji}"`) with sender count below message text.
+    - `data-testid="thread-msg-card"` added to MsgCard outer div for reliable test targeting.
+    - `ThreadPanel` new prop `onReact?: (msgId: string, emoji: string) => void` — threaded to both root and reply `MsgCard`s.
+    - Call site passes `onReact={sendReaction}` — same MLS-encrypt path used by main message list. No new server surface.
+  - **security-auditor: GREEN** — no XSS (JSX text children only; emoji from closed ALLOWED_REACTION_EMOJIS constant), no plaintext logging, no new API calls, `msg.id` non-null guard on every `onMsgReact` call, deleted-message react row suppressed (`!msg.deleted`), `sendReaction` validates emoji + sessionToken + mlsGroupId + mlsIdentityId before encrypting.
+  - **13 tests** in `ChatLayoutThreadReactions.test.tsx`: chip on root, chip on reply, count, hover root shows row, hover reply shows row, 6 emoji btns, mlsEncrypt called, no chips without reactions, mouse leave removes row, multiple emojis show separate chips, deleted reply no react row, aria-labels, chips container present.
+  - **Frontend: 1104 tests pass** (+13); tsc clean; biome clean.
+  - **Next cycle:** PQ hybrid Phase A (ML-KEM768 openmls stable) or more UX polish (e.g. per-chat notification sound picker, @mention message highlighting).
+
+## Previous state (2026-07-06, cycle 247 — FEATURE: message thread panel)
 - **Cycle 247 (commit fe5808a):** FEATURE — Message thread panel (slide-in right panel for threaded replies).
   - **Mode:** FEATURE (counter 247 % 5 ≠ 0). CI was green on main.
   - **Feature (fe5808a):** Messages with one or more replies now show a "N replies ▸" button below the bubble. Clicking opens a Thread Panel (300 px) to the right of the main chat area.
