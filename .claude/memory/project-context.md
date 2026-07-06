@@ -2928,6 +2928,16 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - Review is part of writing: implement → run the relevant review agent → fix → commit.
 
 ## Cycle log (recent)
+- Cycle 250 STABILIZATION: Security dependency fixes + domain proptest suite (commit c0c8179).
+  - Fixed RUSTSEC-2026-0204 (crossbeam-epoch 0.9.18→0.9.20, invalid ptr deref via metrics-exporter-prometheus + openmls).
+  - Fixed RUSTSEC-2026-0190 (anyhow 1.0.102→1.0.103, unsound downcast_mut).
+  - Replaced yanked bitcoin_hashes 0.14.100→0.14.101 (via bip39 in powehi-crypto-wasm).
+  - Upgraded vitest ^3.2.0→^3.2.7 (critical UI-server file-read advisory, dev-only).
+  - Added 12 proptest property-based tests in crates/domain/powehi-domain/tests/prop_serde.rs:
+    JSON serde roundtrips + UUID identity + Display/FromStr for GroupId/DeviceId/UserId/EnvelopeId/Epoch/MessageType.
+  - security-auditor: GREEN (no RED findings; Y-LOW rate_limit XFF deploy-time precondition documented, already waived).
+  - cargo audit: clean (1 existing waiver: RUSTSEC-2024-0384 instant via openmls).
+  - All tests: 1114 frontend (92 files) + 52 backend domain tests (40 unit + 12 proptest) + all workspace tests passing.
 - Cycle 231 FEATURE: Linked Devices panel + GET /v1/auth/devices endpoint (commit 85a4a54).
   - Fixed CI-Frontend failure: proptest moved to [target.cfg(not(wasm32)).dev-dependencies] in powehi-crypto-wasm (wait-timeout doesn't compile on wasm32).
   - Backend: DeviceInfo type (device_id, created_at, last_seen_at; no mls_credential), list_devices in AuthUseCase + AuthService, GET /v1/auth/devices handler (rate-limited, auth-gated), 2 new backend tests.
