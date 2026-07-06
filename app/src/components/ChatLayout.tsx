@@ -6122,6 +6122,9 @@ export function ChatLayout() {
 
 	// ── In-chat message search bar (above composer) ───────────────────────────
 	const [chatSearchOpen, setChatSearchOpen] = useState(false);
+
+	// ── Keyboard shortcuts help modal ─────────────────────────────────────────
+	const [shortcutsOpen, setShortcutsOpen] = useState(false);
 	const [chatSearchQuery, setChatSearchQuery] = useState("");
 	const [chatSearchIndex, setChatSearchIndex] = useState(0);
 	const chatSearchInputRef = useRef<HTMLInputElement>(null);
@@ -6328,6 +6331,7 @@ export function ChatLayout() {
 	}, []);
 
 	// Global Ctrl+F / Cmd+F opens the in-chat search bar; Escape closes it.
+	// `?` (not in input/textarea) toggles the keyboard shortcuts help modal.
 	useEffect(() => {
 		function onKey(e: globalThis.KeyboardEvent) {
 			if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
@@ -6337,6 +6341,12 @@ export function ChatLayout() {
 				setChatSearchOpen(false);
 				setChatSearchQuery("");
 				setChatSearchIndex(0);
+			} else if (e.key === "?" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+				const tag = (document.activeElement as HTMLElement).tagName;
+				if (tag !== "INPUT" && tag !== "TEXTAREA") {
+					e.preventDefault();
+					setShortcutsOpen((v) => !v);
+				}
 			}
 		}
 		window.addEventListener("keydown", onKey);
@@ -8166,6 +8176,164 @@ export function ChatLayout() {
 					onClose={() => setStatusEditorOpen(false)}
 				/>
 			)}
+
+			{/* ── Keyboard shortcuts help modal ─────────────────────────────────── */}
+			<KeyboardShortcutsModal
+				open={shortcutsOpen}
+				onClose={() => setShortcutsOpen(false)}
+			/>
 		</div>
+	);
+}
+
+// ── KeyboardShortcutsModal ────────────────────────────────────────────────────
+
+const SHORTCUT_ROWS: { action: string; keys: string[] }[] = [
+	{ action: "Open search bar", keys: ["Ctrl+F", "Cmd+F"] },
+	{ action: "Close search bar", keys: ["Esc"] },
+	{ action: "Keyboard shortcuts", keys: ["?"] },
+	{ action: "Send message", keys: ["Enter"] },
+	{ action: "New line in message", keys: ["Shift+Enter"] },
+	{ action: "Toggle info panel", keys: ["i"] },
+	{ action: "Jump to latest", keys: ["End"] },
+	{ action: "Navigate up", keys: ["↑"] },
+	{ action: "Navigate down", keys: ["↓"] },
+];
+
+function KeyboardShortcutsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+	if (!open) return null;
+
+	return (
+		<dialog
+			open
+			data-testid="keyboard-shortcuts-modal"
+			aria-label="Keyboard shortcuts"
+			onClick={(e) => {
+				if (e.target === e.currentTarget) onClose();
+			}}
+			onKeyDown={(e) => {
+				if (e.key === "Escape") onClose();
+			}}
+			style={{
+				position: "fixed",
+				inset: 0,
+				width: "100vw",
+				height: "100vh",
+				maxWidth: "100vw",
+				maxHeight: "100vh",
+				background: "rgba(4,4,8,0.72)",
+				display: "flex",
+				alignItems: "center",
+				justifyContent: "center",
+				zIndex: 1000,
+				border: "none",
+				padding: 0,
+				margin: 0,
+			}}
+		>
+			<div
+				onClick={(e) => e.stopPropagation()}
+				onKeyDown={(e) => e.stopPropagation()}
+				style={{
+					background: "var(--bg-void)",
+					border: "1px solid var(--border-soft)",
+					borderRadius: 16,
+					padding: "24px 28px 20px",
+					width: 440,
+					display: "flex",
+					flexDirection: "column",
+					gap: 16,
+					fontFamily: "var(--font-sans)",
+				}}
+			>
+				{/* Header */}
+				<div
+					style={{
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "space-between",
+					}}
+				>
+					<span style={{ fontSize: 15, fontWeight: 600, color: "var(--fg-1)" }}>
+						Keyboard Shortcuts
+					</span>
+					<button
+						type="button"
+						data-testid="keyboard-shortcuts-close"
+						onClick={onClose}
+						aria-label="Close keyboard shortcuts"
+						style={{
+							background: "none",
+							border: "none",
+							cursor: "pointer",
+							color: "var(--fg-3)",
+							fontSize: 18,
+							lineHeight: 1,
+							padding: "2px 6px",
+							borderRadius: 6,
+						}}
+					>
+						&times;
+					</button>
+				</div>
+
+				{/* Shortcuts table */}
+				<table
+					style={{
+						width: "100%",
+						borderCollapse: "collapse",
+					}}
+				>
+					<tbody>
+						{SHORTCUT_ROWS.map((row) => (
+							<tr key={row.action}>
+								<td
+									style={{
+										color: "var(--fg-2)",
+										fontSize: 13,
+										paddingBottom: 10,
+										paddingRight: 24,
+										verticalAlign: "middle",
+									}}
+								>
+									{row.action}
+								</td>
+								<td
+									style={{
+										verticalAlign: "middle",
+										paddingBottom: 10,
+										whiteSpace: "nowrap",
+									}}
+								>
+									{row.keys.map((k, i) => (
+										<span key={k}>
+											{i > 0 && (
+												<span style={{ color: "var(--fg-3)", fontSize: 11, margin: "0 4px" }}>
+													/
+												</span>
+											)}
+											<kbd
+												style={{
+													display: "inline-block",
+													background: "var(--bg-surface)",
+													border: "1px solid var(--border-soft)",
+													borderRadius: 4,
+													padding: "1px 6px",
+													fontSize: 11,
+													fontFamily: "var(--font-mono, monospace)",
+													color: "var(--fg-1)",
+												}}
+											>
+												{k}
+											</kbd>
+										</span>
+									))}
+								</td>
+							</tr>
+						))}
+					</tbody>
+				</table>
+			</div>
+		</dialog>
 	);
 }
