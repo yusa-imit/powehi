@@ -8178,10 +8178,7 @@ export function ChatLayout() {
 			)}
 
 			{/* ── Keyboard shortcuts help modal ─────────────────────────────────── */}
-			<KeyboardShortcutsModal
-				open={shortcutsOpen}
-				onClose={() => setShortcutsOpen(false)}
-			/>
+			<KeyboardShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
 		</div>
 	);
 }
