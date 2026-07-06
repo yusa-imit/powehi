@@ -127,6 +127,8 @@ interface Chat {
 	description?: string;
 	/** Custom display name set by the local user for this DM contact (local-only, never sent to server). */
 	nickname?: string;
+	/** Per-chat background theme key (local-only, never sent to server). */
+	chatTheme?: string;
 }
 
 // ── Day-label helpers ─────────────────────────────────────────────────────────
@@ -160,6 +162,53 @@ function formatTtl(s: number | undefined): string {
 	if (s < 604800) return `${s / 86400}d`;
 	return "1w";
 }
+
+// ── Chat theme helpers ─────────────────────────────────────────────────────────
+
+const CHAT_THEMES: { key: string; label: string; swatch: string; background: string }[] = [
+	{
+		key: "warm",
+		label: "Warm",
+		swatch: "#2a1a08",
+		background:
+			"radial-gradient(ellipse 100% 60% at 50% 110%, rgba(255,138,61,0.13), transparent 60%), #120d06",
+	},
+	{
+		key: "ocean",
+		label: "Ocean",
+		swatch: "#061a2e",
+		background:
+			"radial-gradient(ellipse 100% 60% at 50% 110%, rgba(100,180,255,0.11), transparent 60%), #060d16",
+	},
+	{
+		key: "forest",
+		label: "Forest",
+		swatch: "#061a0c",
+		background:
+			"radial-gradient(ellipse 100% 60% at 50% 110%, rgba(80,200,120,0.11), transparent 60%), #060f0a",
+	},
+	{
+		key: "rose",
+		label: "Rose",
+		swatch: "#2a0810",
+		background:
+			"radial-gradient(ellipse 100% 60% at 50% 110%, rgba(255,100,130,0.11), transparent 60%), #12060a",
+	},
+	{
+		key: "lavender",
+		label: "Lavender",
+		swatch: "#160c2a",
+		background:
+			"radial-gradient(ellipse 100% 60% at 50% 110%, rgba(160,120,255,0.11), transparent 60%), #0b0714",
+	},
+	{
+		key: "slate",
+		label: "Slate",
+		swatch: "#0c1220",
+		background:
+			"radial-gradient(ellipse 100% 60% at 50% 110%, rgba(120,160,220,0.11), transparent 60%), #070c14",
+	},
+];
 
 // ── Slow mode helpers ──────────────────────────────────────────────────────────
 
@@ -2825,6 +2874,7 @@ function MessageList({
 	jumpToMessageId,
 	onJumpComplete,
 	countdownTick,
+	background,
 }: {
 	chatId: string;
 	messages: ChatMessage[];
@@ -2859,6 +2909,8 @@ function MessageList({
 	onJumpComplete?: () => void;
 	/** Incremented every second when there are expiring messages; drives countdown re-render. */
 	countdownTick?: number;
+	/** CSS background value for the message area; overrides the default gradient when set. */
+	background?: string;
 }) {
 	const ref = useRef<HTMLDivElement>(null);
 	const [flashingId, setFlashingId] = useState<string | null>(null);
@@ -2958,6 +3010,7 @@ function MessageList({
 					flexDirection: "column",
 					gap: 4,
 					background:
+						background ??
 						"radial-gradient(ellipse 100% 60% at 50% 110%, rgba(255,138,61,0.07), transparent 60%), var(--bg-void)",
 				}}
 			>
@@ -4644,6 +4697,7 @@ function InfoPanel({
 	slowModeDelay: infoPanelSlowMode = 0,
 	onSetSlowMode,
 	isAdmin = false,
+	onSetChatTheme,
 }: {
 	chat: Chat;
 	onClose: () => void;
@@ -4669,6 +4723,7 @@ function InfoPanel({
 	slowModeDelay?: SlowModeDelay;
 	onSetSlowMode?: (d: SlowModeDelay) => void;
 	isAdmin?: boolean;
+	onSetChatTheme?: (key: string | undefined) => void;
 }) {
 	const [descEditing, setDescEditing] = useState(false);
 	const [contactCard, setContactCard] = useState<ChatMember | null>(null);
@@ -5471,6 +5526,63 @@ function InfoPanel({
 				</div>
 			)}
 
+			<InfoSection title="Chat theme">
+				<div
+					data-testid="chat-theme-section"
+					style={{ padding: "8px 18px 14px", display: "flex", flexDirection: "column", gap: 10 }}
+				>
+					<div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+						{/* Default swatch — void background */}
+						<button
+							type="button"
+							data-testid="chat-theme-swatch-default"
+							aria-label="Default theme"
+							onClick={() => onSetChatTheme?.(undefined)}
+							style={{
+								width: 28,
+								height: 28,
+								borderRadius: "50%",
+								background: "#040408",
+								border:
+									chat.chatTheme == null ? "2px solid #FF8A3D" : "2px solid rgba(242,237,227,0.18)",
+								cursor: "pointer",
+								padding: 0,
+								flexShrink: 0,
+							}}
+						/>
+						{CHAT_THEMES.map((t) => (
+							<button
+								key={t.key}
+								type="button"
+								data-testid={`chat-theme-swatch-${t.key}`}
+								aria-label={`${t.label} theme`}
+								onClick={() => onSetChatTheme?.(t.key)}
+								style={{
+									width: 28,
+									height: 28,
+									borderRadius: "50%",
+									background: t.swatch,
+									border:
+										chat.chatTheme === t.key
+											? "2px solid #FF8A3D"
+											: "2px solid rgba(242,237,227,0.18)",
+									cursor: "pointer",
+									padding: 0,
+									flexShrink: 0,
+								}}
+							/>
+						))}
+					</div>
+					<div
+						data-testid="chat-theme-label"
+						style={{ fontSize: 11, color: "var(--fg-4)", marginTop: 2 }}
+					>
+						{chat.chatTheme
+							? (CHAT_THEMES.find((t) => t.key === chat.chatTheme)?.label ?? "Custom")
+							: "Default"}
+					</div>
+				</div>
+			</InfoSection>
 			<InfoSection title="Notifications">
 				<InfoRow label="Mute" trailing={muted ? "On" : "Off"} onClick={onToggleMute} />
 				<InfoRow label="Sound" trailing={sound ? "On" : "Off"} onClick={onToggleSound} />
@@ -7035,6 +7147,11 @@ export function ChatLayout() {
 		setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, description: desc } : c)));
 	}, []);
 
+	/** Set (or clear) the per-chat background theme. Local-only — never sent to server. */
+	const handleSetChatTheme = useCallback((chatId: string, key: string | undefined) => {
+		setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, chatTheme: key } : c)));
+	}, []);
+
 	/** Set (or clear) a custom display nickname for a DM contact. Local-only — never sent to server. */
 	const handleUpdateNickname = useCallback((chatId: string, nickname: string) => {
 		setChats((cs) =>
@@ -7731,6 +7848,11 @@ export function ChatLayout() {
 						jumpToMessageId={jumpToMessageId ?? undefined}
 						onJumpComplete={handleJumpComplete}
 						countdownTick={countdownTick}
+						background={
+							active.chatTheme
+								? CHAT_THEMES.find((t) => t.key === active.chatTheme)?.background
+								: undefined
+						}
 					/>
 					{chatSearchOpen && (
 						<div
@@ -7934,6 +8056,7 @@ export function ChatLayout() {
 								m.handle.toLowerCase() === (useAuthStore.getState().myHandle ?? "").toLowerCase(),
 						) ?? false
 					}
+					onSetChatTheme={(key) => handleSetChatTheme(active.id, key)}
 				/>
 			)}
 
