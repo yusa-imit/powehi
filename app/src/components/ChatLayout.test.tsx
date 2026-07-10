@@ -4,10 +4,12 @@ import * as GroupsApiModule from "../api/groups";
 import * as MessagesApiModule from "../api/messages";
 import * as EncryptedDbModule from "../db/encrypted-db";
 import { db } from "../db/schema";
+import type { MessageRow } from "../db/schema";
 import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
 import * as UseMessagesModule from "../hooks/useMessages";
 import type { IncomingMessage } from "../hooks/useMessages";
 import { useAuthStore } from "../store/auth";
+import { textToBase64 } from "../utils/base64";
 import { ChatLayout } from "./ChatLayout";
 
 // The stable mock worker singleton — same reference on every useCryptoWorker() call
@@ -36,6 +38,7 @@ const KAT_SN =
 describe("ChatLayout", () => {
 	beforeEach(async () => {
 		await db.verifiedContacts.clear();
+		await db.messages.clear();
 		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
 			MOCK_WORKER as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
 		);
@@ -1914,6 +1917,147 @@ describe("ChatLayout", () => {
 				// memberCount is 1 so it just shows "Group" (no member count suffix when <= 1)
 				expect(groupStatus.textContent).toBe("Group");
 			});
+		});
+	});
+
+	describe("message history rehydration (Dexie -> chats)", () => {
+		const MAYA_GROUP = "11111111-1111-1111-1111-111111111111";
+		const JORDAN_GROUP = "33333333-3333-3333-3333-333333333333";
+
+		function seedRow(row: Partial<MessageRow> & Pick<MessageRow, "id" | "groupId">): MessageRow {
+			return {
+				ciphertextB64: "Zg==",
+				senderDeviceId: "peer-device-x",
+				epochSeq: 1,
+				receivedAt: 1000,
+				...row,
+			};
+		}
+
+		it("rehydrates a plain, an edited, and a deleted row for the active chat on mount", async () => {
+			await db.messages.bulkPut([
+				seedRow({
+					id: "rehydrate-plain-1",
+					groupId: MAYA_GROUP,
+					receivedAt: 1000,
+					plaintextB64: textToBase64("rehydrated plain text"),
+				}),
+				seedRow({
+					id: "rehydrate-edited-1",
+					groupId: MAYA_GROUP,
+					receivedAt: 2000,
+					plaintextB64: textToBase64("original text before edit"),
+					editedText: textToBase64("rehydrated edited text"),
+				}),
+				seedRow({
+					id: "rehydrate-deleted-1",
+					groupId: MAYA_GROUP,
+					receivedAt: 3000,
+					plaintextB64: textToBase64("text that got deleted"),
+					deletedAt: 4000,
+				}),
+			]);
+
+			render(<ChatLayout />);
+
+			await waitFor(() => {
+				expect(screen.getAllByText("rehydrated plain text").length).toBeGreaterThan(0);
+			});
+			// Edited row shows the new text (not the stale original) plus the edited badge.
+			expect(screen.getAllByText("rehydrated edited text").length).toBeGreaterThan(0);
+			expect(screen.queryByText("original text before edit")).not.toBeInTheDocument();
+			expect(screen.getByTestId("edited-badge")).toBeInTheDocument();
+			// Deleted row renders the tombstone placeholder, not the raw text.
+			expect(screen.getByTestId("deleted-placeholder")).toBeInTheDocument();
+			expect(screen.queryByText("text that got deleted")).not.toBeInTheDocument();
+		});
+
+		it("switching chats loads the newly active chat's own rows without leaking the previous chat's rows", async () => {
+			await db.messages.bulkPut([
+				seedRow({
+					id: "maya-only-row",
+					groupId: MAYA_GROUP,
+					receivedAt: 1000,
+					plaintextB64: textToBase64("maya exclusive history"),
+				}),
+				seedRow({
+					id: "jordan-only-row",
+					groupId: JORDAN_GROUP,
+					receivedAt: 1000,
+					plaintextB64: textToBase64("jordan exclusive history"),
+				}),
+			]);
+
+			render(<ChatLayout />);
+
+			await waitFor(() => {
+				expect(screen.getAllByText("maya exclusive history").length).toBeGreaterThan(0);
+			});
+			expect(screen.queryByText("jordan exclusive history")).not.toBeInTheDocument();
+
+			fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+
+			await waitFor(() => {
+				expect(screen.getAllByText("jordan exclusive history").length).toBeGreaterThan(0);
+			});
+			// Jordan's message pane must not show Maya's rehydrated history.
+			expect(screen.queryByText("maya exclusive history")).not.toBeInTheDocument();
+		});
+
+		it("skips a row with no plaintextB64 and no editedText without crashing", async () => {
+			await db.messages.bulkPut([
+				seedRow({
+					id: "ciphertext-only-row",
+					groupId: MAYA_GROUP,
+					receivedAt: 1000,
+					// No plaintextB64, no editedText — nothing decryptable/renderable yet.
+				}),
+				seedRow({
+					id: "renderable-row",
+					groupId: MAYA_GROUP,
+					receivedAt: 2000,
+					plaintextB64: textToBase64("still renders fine"),
+				}),
+			]);
+
+			expect(() => render(<ChatLayout />)).not.toThrow();
+
+			await waitFor(() => {
+				expect(screen.getAllByText("still renders fine").length).toBeGreaterThan(0);
+			});
+		});
+
+		it("does not duplicate a message already present in chats state (same id) on rehydration", async () => {
+			const DUP_ID = "dup-msg-live-and-persisted";
+			await db.messages.bulkPut([
+				seedRow({
+					id: DUP_ID,
+					groupId: MAYA_GROUP,
+					receivedAt: 1000,
+					plaintextB64: textToBase64("duplicate-safe text"),
+				}),
+			]);
+
+			render(<ChatLayout />);
+
+			await waitFor(() => {
+				expect(screen.getAllByText("duplicate-safe text").length).toBeGreaterThan(0);
+			});
+			const countAfterMount = screen.getAllByText("duplicate-safe text").length;
+
+			// Switch away and back — the hook reloads rows for each group change,
+			// re-running rehydration against a chats state that already has DUP_ID.
+			fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+			await waitFor(() => {
+				expect(screen.queryByText("duplicate-safe text")).not.toBeInTheDocument();
+			});
+			fireEvent.click(screen.getByRole("button", { name: /maya/i }));
+
+			await waitFor(() => {
+				expect(screen.getAllByText("duplicate-safe text").length).toBeGreaterThan(0);
+			});
+			// Same bubble count as the first mount — no duplicate bubble was created.
+			expect(screen.getAllByText("duplicate-safe text").length).toBe(countAfterMount);
 		});
 	});
 });

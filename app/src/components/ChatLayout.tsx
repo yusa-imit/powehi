@@ -27,7 +27,7 @@ import { useRegionDetect } from "../hooks/useRegionDetect";
 import { useTauriNotification } from "../hooks/useTauriNotification";
 import { type NewGroupEvent, useWelcomePoller } from "../hooks/useWelcomePoller";
 import { useAuthStore } from "../store/auth";
-import { uint8ToBase64 } from "../utils/base64";
+import { base64ToText, uint8ToBase64 } from "../utils/base64";
 import { AddMemberModal } from "./AddMemberModal";
 import { CreateGroupModal } from "./CreateGroupModal";
 import { Icon } from "./Icon";
@@ -6998,9 +6998,9 @@ export function ChatLayout() {
 		[mediaMessages.length],
 	);
 
-	const { sessionToken, identityId } = useAuthStore();
+	const { sessionToken, identityId, deviceId } = useAuthStore();
 	const cryptoWorker = useCryptoWorker();
-	const { persistIncoming, persistOutgoing, purgeExpired, persistEdit, persistDelete } =
+	const { rows, persistIncoming, persistOutgoing, purgeExpired, persistEdit, persistDelete } =
 		usePersistentMessages(active?.mlsGroupId);
 	const showTauriNotification = useTauriNotification();
 	const fileInputRef = useRef<HTMLInputElement>(null);
@@ -7008,6 +7008,76 @@ export function ChatLayout() {
 		identityId: active?.mlsIdentityId,
 		groupId: active?.mlsGroupId,
 	});
+
+	// Rehydrate persisted message history from Dexie into the active chat's
+	// message list. `rows` reloads whenever the active group changes (see
+	// usePersistentMessages), so this effect fires on mount and on chat switch —
+	// restoring history that would otherwise be lost after a reload or a switch
+	// away and back. Dedupes by id against messages already in React state (e.g.
+	// a live/optimistic message added this session) so rehydration never clobbers
+	// or duplicates an in-memory bubble; only the matching chat's `messages` array
+	// is touched, no other Chat fields.
+	useEffect(() => {
+		const groupId = active?.mlsGroupId;
+		if (!groupId || rows.length === 0) return;
+		const rehydrated: ChatMessage[] = [];
+		for (const row of rows) {
+			// `rows` briefly holds the *previous* group's rows while
+			// usePersistentMessages awaits the next getMessagesByGroup() call after
+			// a chat switch — guard against merging a stale group's history into
+			// the newly active chat during that transition window.
+			if (row.groupId !== groupId) continue;
+			// Rows without decrypted text (neither an edit nor original plaintext)
+			// can't be rendered — skip rather than push an empty bubble.
+			const textB64 = row.editedText ?? row.plaintextB64;
+			if (!textB64) continue;
+			// getMessagesByGroup() does not filter by TTL — an already-expired
+			// disappearing message must not flash back on screen after a reload;
+			// the periodic purgeExpired() sweep only runs every 30s, too slow to
+			// rely on here (security-auditor finding, cycle 253).
+			if (row.expiresAt && row.expiresAt <= Date.now()) continue;
+			rehydrated.push({
+				id: row.id,
+				text: base64ToText(textB64),
+				// senderDeviceId is the authenticated-device value the server bound
+				// to the envelope at send time (AuthenticatedDevice extractor), not
+				// a client-suppliable field — but it is not an MLS-cryptographic
+				// sender proof either, so a compromised server could in principle
+				// mislabel a peer's message as self-authored here. Deferred: live
+				// (non-rehydrated) incoming messages already hardcode "them"
+				// regardless of sender, so this divergence is scoped to the
+				// rehydration path and only matters under a compromised-server
+				// assumption outside the current threat model (security-auditor
+				// finding, cycle 253).
+				from: row.senderDeviceId === deviceId ? "me" : "them",
+				ts: row.receivedAt,
+				expiresAt: row.expiresAt,
+				edited: !!row.editedText,
+				deleted: !!row.deletedAt,
+			});
+		}
+		if (rehydrated.length === 0) return;
+		setChats((cs) =>
+			cs.map((c) => {
+				if (c.mlsGroupId !== groupId) return c;
+				// Dedup is add-only: an id already present in React state is left
+				// untouched rather than reconciled against the freshly-loaded Dexie
+				// row. This means an out-of-band edit/delete-for-everyone applied to
+				// Dexie while this id was already in `chats` (e.g. another session
+				// wrote it, then this tab switched away and back without a full
+				// reload) won't retroactively redact an in-memory bubble. A full
+				// page reload still heals this, since `chats` starts empty. Deferred
+				// (security-auditor finding, cycle 253) — would need reconciling
+				// deleted/edited/expiresAt for existing ids, not just add-missing.
+				const existingIds = new Set(c.messages.map((m) => m.id).filter(Boolean));
+				const toAdd = rehydrated.filter((m) => !m.id || !existingIds.has(m.id));
+				if (toAdd.length === 0) return c;
+				// rows are pre-sorted ascending by receivedAt (getMessagesByGroup) —
+				// append, oldest first, matching how handleIncoming/handleSend append.
+				return { ...c, messages: [...c.messages, ...toAdd] };
+			}),
+		);
+	}, [rows, active?.mlsGroupId, deviceId]);
 
 	// Load persisted disappearing timer when the active conversation changes.
 	useEffect(() => {
