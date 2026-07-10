@@ -2928,6 +2928,37 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - Review is part of writing: implement → run the relevant review agent → fix → commit.
 
 ## Cycle log (recent)
+- Cycle 253 FEATURE: Rehydrate persisted chat history from Dexie into `chats` state (commit fcab6c4).
+  - Closed the follow-up noted in cycle 252: `usePersistentMessages().rows` was write-only — never
+    consumed in ChatLayout.tsx — so Dexie-stored message history (incl. edited text and delete-for-
+    everyone tombstones) silently vanished from the UI after a reload or a switch away-and-back.
+  - New `useEffect` in ChatLayout.tsx maps decrypted `MessageRow[]` → `ChatMessage[]` (text from
+    `editedText ?? plaintextB64` via `base64ToText`, `from` via `senderDeviceId === deviceId`,
+    `edited`/`deleted` flags, `expiresAt`), merges by dedup-on-`id` into the active chat's `messages`,
+    guarded by `row.groupId !== groupId` against the async chat-switch transition window where
+    `usePersistentMessages`'s `rows` briefly still holds the previous group's data.
+  - **security-auditor YELLOW → fixed in-cycle:** rows from `getMessagesByGroup` aren't TTL-filtered
+    and the `purgeExpired()` sweep only runs every 30s, so an already-expired disappearing message
+    could flash back on screen for up to 30s after every mount — added
+    `if (row.expiresAt && row.expiresAt <= Date.now()) continue;` in the rehydration loop.
+  - **security-auditor YELLOW → documented/deferred (not fixed):** (1) `from: "me"` attribution
+    trusts `senderDeviceId` (server-authenticated via `AuthenticatedDevice` extractor at send time,
+    but not an MLS-cryptographic sender proof) — a compromised server could in principle mislabel a
+    peer's message as self-authored on rehydration specifically (live/non-rehydrated incoming always
+    hardcodes "them" regardless of sender, so this divergence is scoped to the rehydration path only,
+    under a compromised-server assumption outside current threat model). (2) dedup is add-only —
+    an id already in `chats` is left untouched even if Dexie's copy was since edited/deleted
+    out-of-band (e.g. another tab), so an inactive tab that switches away-and-back (not a full reload)
+    won't retroactively redact an in-memory bubble; a full reload still heals it since `chats` starts
+    empty. Both documented inline in ChatLayout.tsx with "security-auditor finding, cycle 253" comments.
+  - Reactions/pins/mentions remain session-only (no MessageRow/GroupRow fields exist for them) —
+    explicitly out of scope; a real fix needs a schema bump, left as a future item.
+  - 4 new tests in ChatLayout.test.tsx (mount rehydrates incl. edited/deleted, chat-switch doesn't
+    leak, missing-plaintext row skipped safely, no duplicate for already-in-state id); also added
+    `db.messages.clear()` to `beforeEach` in ChatLayout.test.tsx + 4 sibling ChatLayout*.test.tsx files
+    (previously only `verifiedContacts` was cleared — cross-test Dexie pollution was latent until this
+    cycle made `rows` actually get read). All 1127 frontend tests green (92 files, was 1123); tsc clean;
+    Biome clean.
 - Cycle 252 FEATURE: Persist edit/delete-for-everyone state to Dexie (commit 97b1f14).
   - Gap: "edit message" / "delete for everyone" were already fully implemented end-to-end over MLS
     control envelopes ({type:"edit"|"delete",...} in useMessages.ts/ChatLayout.tsx), but the edited
