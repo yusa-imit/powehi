@@ -2928,6 +2928,32 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - Review is part of writing: implement → run the relevant review agent → fix → commit.
 
 ## Cycle log (recent)
+- Cycle 252 FEATURE: Persist edit/delete-for-everyone state to Dexie (commit 97b1f14).
+  - Gap: "edit message" / "delete for everyone" were already fully implemented end-to-end over MLS
+    control envelopes ({type:"edit"|"delete",...} in useMessages.ts/ChatLayout.tsx), but the edited
+    text and deleted tombstone lived only in React `chats` state — a page reload reverted edits and
+    un-deleted tombstoned messages, since `usePersistentMessages`'s Dexie-loaded `rows` were never
+    hydrated back into `chats` (that hydration gap is separate/larger — noted as a follow-up below).
+  - `MessageRow.editedText?: string` (encrypted at rest, added to SENSITIVE.messages) + `.deletedAt?: number`
+    (plain, same tier as receivedAt/expiresAt); schema.ts bumped to `version(7)`, no index change.
+  - `EncryptedPowehiDb.markMessageEdited(id, newTextB64)` / `.markMessageDeleted(id)` — Dexie `update()`
+    no-ops safely on a missing id (attacker-influenced targetMessageId from peer envelopes, confirmed safe).
+  - `usePersistentMessages` gained `persistEdit`/`persistDelete`, mirroring the existing
+    `persistIncoming`/`persistOutgoing` fire-and-forget + `writeErrorCount` pattern.
+  - **security-auditor YELLOW → fixed in-cycle:** `handleIncomingEdit`/`handleIncomingDelete` called
+    `persistEdit`/`persistDelete` unconditionally, bypassing the `m.from === "them"` guard that already
+    protected the `setChats` mutation — a forged peer envelope targeting the victim's own "me" message
+    could still poison the local Dexie mirror even though in-memory state stayed correct. Fixed by
+    gating persistence on the same `chatsRef`-derived from==="them" check used by the state guard.
+    Added regression tests (ChatLayout.test.tsx) asserting `markMessageEdited`/`markMessageDeleted` are
+    NOT called for forged edits/deletes targeting own messages, and ARE called for legitimate peer ones.
+  - 9 new tests (encrypted-db.test.ts ×3, usePersistentMessages.test.ts ×6); all 1123 frontend tests green
+    (92 files); tsc clean; Biome clean.
+  - **Follow-up (not done this cycle):** `usePersistentMessages`'s loaded `rows` are still never read back
+    into `ChatLayout`'s `chats` state on mount/group-change — full chat history (and now edited/deleted
+    state) does not actually rehydrate into the UI after a reload. This is a larger, separate feature
+    (mapping decrypted `MessageRow[]` → `ChatMessage[]` incl. reactions/pins/mentions/sender resolution)
+    that deserves its own cycle rather than a half-finished addition here.
 - Cycle 250 STABILIZATION: Security dependency fixes + domain proptest suite (commit c0c8179).
   - Fixed RUSTSEC-2026-0204 (crossbeam-epoch 0.9.18→0.9.20, invalid ptr deref via metrics-exporter-prometheus + openmls).
   - Fixed RUSTSEC-2026-0190 (anyhow 1.0.102→1.0.103, unsound downcast_mut).
