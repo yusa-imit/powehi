@@ -14,6 +14,10 @@ export interface MessageRow {
 	plaintextB64?: string; // only after decrypt — optional, user-clearable
 	/** Unix ms at which this message expires (disappearing messages). undefined = no TTL. */
 	expiresAt?: number;
+	/** Latest edited text (base64 UTF-8), if this message was edited. Encrypted at rest like plaintextB64. */
+	editedText?: string;
+	/** Unix ms at which this message was tombstoned by a "delete for everyone" signal. undefined = not deleted. */
+	deletedAt?: number;
 }
 
 // GroupRow — MLS group state snapshot.
@@ -98,6 +102,14 @@ export class PowehiDb extends Dexie {
 		// v6: added disappearingTtlSeconds to GroupRow — per-conversation timer
 		// setting (prd.md §9.4.3). Not sensitive (bounded enum, not content); not indexed.
 		this.version(6).stores({
+			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v7: added editedText and deletedAt to MessageRow so "edit message" and
+		// "delete for everyone" state survives a reload (previously React-state-only).
+		this.version(7).stores({
 			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
 			groups: "id, lastActivity",
 			identity: "id",

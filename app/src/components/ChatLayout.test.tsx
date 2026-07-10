@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as GroupsApiModule from "../api/groups";
 import * as MessagesApiModule from "../api/messages";
+import * as EncryptedDbModule from "../db/encrypted-db";
 import { db } from "../db/schema";
 import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
 import * as UseMessagesModule from "../hooks/useMessages";
@@ -1061,6 +1062,7 @@ describe("ChatLayout", () => {
 		});
 
 		it("incoming edit updates matching peer message text and shows edited badge", async () => {
+			const editSpy = vi.spyOn(EncryptedDbModule.EncryptedPowehiDb.prototype, "markMessageEdited");
 			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
 			let capturedOnEdit:
 				| ((
@@ -1116,9 +1118,12 @@ describe("ChatLayout", () => {
 			// Updated text must appear; edited badge must be present
 			expect(screen.getAllByText("updated peer text").length).toBeGreaterThan(0);
 			expect(screen.getByTestId("edited-badge")).toBeInTheDocument();
+			// Legitimate peer edit must persist to Dexie so it survives a reload.
+			await waitFor(() => expect(editSpy).toHaveBeenCalledWith(MSG_ID, expect.any(String)));
 		});
 
 		it("incoming edit does NOT rewrite 'me' messages (own message protection)", async () => {
+			const editSpy = vi.spyOn(EncryptedDbModule.EncryptedPowehiDb.prototype, "markMessageEdited");
 			let capturedOnEdit:
 				| ((
 						groupId: string,
@@ -1165,6 +1170,9 @@ describe("ChatLayout", () => {
 			// Own message must remain; hacked content must not appear anywhere
 			expect(screen.getAllByText("my protected message").length).toBeGreaterThan(0);
 			expect(screen.queryByText("hacked content")).not.toBeInTheDocument();
+			// A forged edit that doesn't match a "them" message must never reach Dexie —
+			// the persistence layer must honor the same guard as the in-memory state.
+			expect(editSpy).not.toHaveBeenCalled();
 		});
 	});
 
@@ -1228,6 +1236,10 @@ describe("ChatLayout", () => {
 		});
 
 		it("incoming delete marks peer message as deleted and shows placeholder", async () => {
+			const deleteSpy = vi.spyOn(
+				EncryptedDbModule.EncryptedPowehiDb.prototype,
+				"markMessageDeleted",
+			);
 			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
 			let capturedOnDelete: ((groupId: string, targetMessageId: string) => void) | undefined;
 			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
@@ -1270,9 +1282,15 @@ describe("ChatLayout", () => {
 
 			// Deleted placeholder must be present in the message bubble area.
 			expect(screen.getByTestId("deleted-placeholder")).toBeInTheDocument();
+			// Legitimate peer delete must persist to Dexie so it survives a reload.
+			await waitFor(() => expect(deleteSpy).toHaveBeenCalledWith(PEER_MSG_ID));
 		});
 
 		it("incoming delete does NOT erase own 'me' messages", async () => {
+			const deleteSpy = vi.spyOn(
+				EncryptedDbModule.EncryptedPowehiDb.prototype,
+				"markMessageDeleted",
+			);
 			let capturedOnDelete: ((groupId: string, targetMessageId: string) => void) | undefined;
 			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
 				(
@@ -1306,6 +1324,9 @@ describe("ChatLayout", () => {
 			expect(screen.getAllByText("my own message").length).toBeGreaterThan(0);
 			expect(screen.queryByTestId("deleted-placeholder")).not.toBeInTheDocument();
 			await act(async () => {});
+			// A forged delete that doesn't match a "them" message must never reach Dexie —
+			// the persistence layer must honor the same guard as the in-memory state.
+			expect(deleteSpy).not.toHaveBeenCalled();
 		});
 	});
 

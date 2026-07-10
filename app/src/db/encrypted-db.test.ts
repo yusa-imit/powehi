@@ -176,4 +176,50 @@ describe("EncryptedPowehiDb", () => {
 		expect(group?.mlsStateB64).toBe("c2Vuc2l0aXZlLXN0YXRl");
 		expect(group?.disappearingTtlSeconds).toBe(604800);
 	});
+
+	it("markMessageEdited persists the new text (encrypted at rest) and survives reload", async () => {
+		await encDb.addMessage({
+			id: "msg-edit",
+			groupId: "grp-edit",
+			ciphertextB64: "b3JpZ2luYWw=",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+		});
+		await encDb.markMessageEdited("msg-edit", "bmV3IHRleHQ=");
+
+		const retrieved = await encDb.getMessage("msg-edit");
+		expect(retrieved?.editedText).toBe("bmV3IHRleHQ=");
+		// Original ciphertext untouched.
+		expect(retrieved?.ciphertextB64).toBe("b3JpZ2luYWw=");
+
+		// Raw stored value must not equal the plaintext-encoded edit — it's encrypted at rest.
+		const rawRow = await rawDb.messages.get("msg-edit");
+		expect(rawRow?.editedText).not.toBe("bmV3IHRleHQ=");
+	});
+
+	it("markMessageEdited is a no-op when the target row does not exist locally", async () => {
+		await expect(encDb.markMessageEdited("no-such-msg", "bmV3")).resolves.not.toThrow();
+		const retrieved = await encDb.getMessage("no-such-msg");
+		expect(retrieved).toBeUndefined();
+	});
+
+	it("markMessageDeleted tombstones the row with a deletion timestamp", async () => {
+		await encDb.addMessage({
+			id: "msg-delete",
+			groupId: "grp-delete",
+			ciphertextB64: "dG9EZWxldGU=",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+		});
+		expect((await encDb.getMessage("msg-delete"))?.deletedAt).toBeUndefined();
+
+		await encDb.markMessageDeleted("msg-delete");
+		const retrieved = await encDb.getMessage("msg-delete");
+		expect(retrieved?.deletedAt).toBeGreaterThan(0);
+		// Ciphertext row remains (tombstone, not a hard delete) — consistent with UI's
+		// "message was deleted" placeholder rendering rather than removing history.
+		expect(retrieved?.ciphertextB64).toBe("dG9EZWxldGU=");
+	});
 });

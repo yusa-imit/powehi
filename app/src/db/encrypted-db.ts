@@ -17,7 +17,7 @@ import type { PowehiDb } from "./schema";
 // MUST NOT appear here — Dexie cannot query encrypted index values.
 // identity has no sensitive unindexed fields (exportKeyB64 was removed in schema v3).
 const SENSITIVE: Record<string, readonly string[]> = {
-	messages: ["ciphertextB64", "plaintextB64"],
+	messages: ["ciphertextB64", "plaintextB64", "editedText"],
 	groups: ["mlsStateB64"],
 	verifiedContacts: ["safetyNumber"],
 };
@@ -94,6 +94,24 @@ export class EncryptedPowehiDb {
 	async getMessage(id: string): Promise<MessageRow | undefined> {
 		const row = await this.db.messages.get(id);
 		return decOptional(this.encryptor, row, "messages");
+	}
+
+	/**
+	 * Persist an "edit message" signal: stores the new text (encrypted at rest)
+	 * against the existing row so a reload reflects the edit. No-op if the row
+	 * does not exist locally (e.g. optimistic message not yet backfilled).
+	 */
+	async markMessageEdited(id: string, newTextB64: string): Promise<void> {
+		const enc = await this.encryptor.encryptDbField(newTextB64);
+		await this.db.messages.update(id, { editedText: enc });
+	}
+
+	/**
+	 * Persist a "delete for everyone" signal: tombstones the row with a
+	 * deletion timestamp so a reload keeps the message deleted.
+	 */
+	async markMessageDeleted(id: string): Promise<void> {
+		await this.db.messages.update(id, { deletedAt: Date.now() });
 	}
 
 	async getMessagesByGroup(groupId: string): Promise<MessageRow[]> {

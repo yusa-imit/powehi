@@ -7000,9 +7000,8 @@ export function ChatLayout() {
 
 	const { sessionToken, identityId } = useAuthStore();
 	const cryptoWorker = useCryptoWorker();
-	const { persistIncoming, persistOutgoing, purgeExpired } = usePersistentMessages(
-		active?.mlsGroupId,
-	);
+	const { persistIncoming, persistOutgoing, purgeExpired, persistEdit, persistDelete } =
+		usePersistentMessages(active?.mlsGroupId);
 	const showTauriNotification = useTauriNotification();
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	const { sendMedia } = useMediaSend({
@@ -7360,8 +7359,14 @@ export function ChatLayout() {
 					return { ...c, messages: msgs };
 				}),
 			);
+			// Only persist if the target was actually a peer ("them") message in this
+			// group — mirrors the setChats guard above so a forged edit envelope
+			// targeting our own "me" message can't poison the local Dexie mirror.
+			const chat = chatsRef.current.find((c) => c.mlsGroupId === gId);
+			const target = chat?.messages.find((m) => m.id === targetMessageId);
+			if (target?.from === "them") persistEdit(targetMessageId, newText);
 		},
-		[],
+		[persistEdit],
 	);
 
 	/**
@@ -7388,6 +7393,7 @@ export function ChatLayout() {
 			setEditingMessage(null);
 			// Skip network send for optimistic messages that haven't received a server ID yet.
 			if (targetMessageId.startsWith("opt_")) return;
+			persistEdit(targetMessageId, newText);
 			const plaintext = new TextEncoder().encode(
 				JSON.stringify({ type: "edit", targetMessageId, newText }),
 			);
@@ -7397,7 +7403,7 @@ export function ChatLayout() {
 				.catch(() => {})
 				.finally(() => plaintext.fill(0));
 		},
-		[active, activeId, cryptoWorker, sessionToken],
+		[active, activeId, cryptoWorker, sessionToken, persistEdit],
 	);
 
 	/**
@@ -7405,18 +7411,27 @@ export function ChatLayout() {
 	 * Only applies to messages from the peer (`from === "them"`) — prevents a
 	 * malicious delete envelope from erasing our own sent messages.
 	 */
-	const handleIncomingDelete = useCallback((gId: string, targetMessageId: string) => {
-		setChats((cs) =>
-			cs.map((c) => {
-				if (c.mlsGroupId !== gId) return c;
-				const msgs = c.messages.map((m) => {
-					if (m.id !== targetMessageId || m.from !== "them") return m;
-					return { ...m, deleted: true };
-				});
-				return { ...c, messages: msgs };
-			}),
-		);
-	}, []);
+	const handleIncomingDelete = useCallback(
+		(gId: string, targetMessageId: string) => {
+			setChats((cs) =>
+				cs.map((c) => {
+					if (c.mlsGroupId !== gId) return c;
+					const msgs = c.messages.map((m) => {
+						if (m.id !== targetMessageId || m.from !== "them") return m;
+						return { ...m, deleted: true };
+					});
+					return { ...c, messages: msgs };
+				}),
+			);
+			// Only persist if the target was actually a peer ("them") message in this
+			// group — mirrors the setChats guard above so a forged delete envelope
+			// targeting our own "me" message can't poison the local Dexie mirror.
+			const chat = chatsRef.current.find((c) => c.mlsGroupId === gId);
+			const target = chat?.messages.find((m) => m.id === targetMessageId);
+			if (target?.from === "them") persistDelete(targetMessageId);
+		},
+		[persistDelete],
+	);
 
 	/**
 	 * Delete a previously sent "me" message: optimistically mark it deleted locally,
@@ -7440,6 +7455,7 @@ export function ChatLayout() {
 			);
 			// opt_* ids are pending server acknowledgement — skip network send.
 			if (targetMessageId.startsWith("opt_")) return;
+			persistDelete(targetMessageId);
 			const plaintext = new TextEncoder().encode(
 				JSON.stringify({ type: "delete", targetMessageId }),
 			);
@@ -7449,7 +7465,7 @@ export function ChatLayout() {
 				.catch(() => {})
 				.finally(() => plaintext.fill(0));
 		},
-		[active, activeId, cryptoWorker, sessionToken],
+		[active, activeId, cryptoWorker, sessionToken, persistDelete],
 	);
 
 	/**

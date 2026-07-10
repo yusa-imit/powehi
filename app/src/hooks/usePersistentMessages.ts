@@ -26,6 +26,10 @@ export interface PersistedMessages {
 	persistOutgoing: (id: string, groupId: string, text: string, ciphertextB64: string) => void;
 	/** Delete expired messages from Dexie and update local rows state. */
 	purgeExpired: () => void;
+	/** Persist an "edit message" signal so the new text survives a reload. Best-effort. */
+	persistEdit: (targetMessageId: string, newText: string) => void;
+	/** Persist a "delete for everyone" signal so the tombstone survives a reload. Best-effort. */
+	persistDelete: (targetMessageId: string) => void;
 }
 
 /**
@@ -124,5 +128,35 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 		encryptedDb.purgeExpiredMessages().catch(() => {});
 	}, [encryptedDb]);
 
-	return { rows, writeErrorCount, persistIncoming, persistOutgoing, purgeExpired };
+	const persistEdit = useCallback(
+		(targetMessageId: string, newText: string) => {
+			if (!encryptedDb) return;
+			const editedText = textToBase64(newText);
+			setRows((prev) => prev.map((r) => (r.id === targetMessageId ? { ...r, editedText } : r)));
+			encryptedDb
+				.markMessageEdited(targetMessageId, editedText)
+				.catch(() => setWriteErrorCount((n) => n + 1));
+		},
+		[encryptedDb],
+	);
+
+	const persistDelete = useCallback(
+		(targetMessageId: string) => {
+			if (!encryptedDb) return;
+			const deletedAt = Date.now();
+			setRows((prev) => prev.map((r) => (r.id === targetMessageId ? { ...r, deletedAt } : r)));
+			encryptedDb.markMessageDeleted(targetMessageId).catch(() => setWriteErrorCount((n) => n + 1));
+		},
+		[encryptedDb],
+	);
+
+	return {
+		rows,
+		writeErrorCount,
+		persistIncoming,
+		persistOutgoing,
+		purgeExpired,
+		persistEdit,
+		persistDelete,
+	};
 }

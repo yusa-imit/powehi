@@ -288,6 +288,87 @@ describe("usePersistentMessages", () => {
 		expect(result.current.rows[0].id).toBe("no-ttl");
 	});
 
+	it("persistEdit updates rows state with the new text (base64-encoded)", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistIncoming(makeIncoming({ id: "edit-target" }));
+		});
+		await act(async () => {
+			result.current.persistEdit("edit-target", "corrected text");
+		});
+
+		expect(result.current.rows[0].editedText).toBe(textToBase64("corrected text"));
+		expect(base64ToText(result.current.rows[0].editedText ?? "")).toBe("corrected text");
+	});
+
+	it("persistEdit is a no-op when the crypto worker is unavailable", async () => {
+		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(null);
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {
+			result.current.persistEdit("edit-target", "text");
+		});
+		expect(result.current.rows).toHaveLength(0);
+	});
+
+	it("persistDelete marks the row deletedAt in rows state", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistIncoming(makeIncoming({ id: "delete-target" }));
+		});
+		await act(async () => {
+			result.current.persistDelete("delete-target");
+		});
+
+		expect(result.current.rows[0].deletedAt).toBeGreaterThan(0);
+	});
+
+	it("persistDelete is a no-op when the crypto worker is unavailable", async () => {
+		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(null);
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {
+			result.current.persistDelete("delete-target");
+		});
+		expect(result.current.rows).toHaveLength(0);
+	});
+
+	it("writeErrorCount increments when markMessageEdited throws on persistEdit", async () => {
+		vi.spyOn(
+			EncryptedDbModule.EncryptedPowehiDb.prototype,
+			"markMessageEdited",
+		).mockRejectedValueOnce(new Error("db full"));
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistEdit("edit-target", "text");
+		});
+
+		await waitFor(() => {
+			expect(result.current.writeErrorCount).toBe(1);
+		});
+	});
+
+	it("writeErrorCount increments when markMessageDeleted throws on persistDelete", async () => {
+		vi.spyOn(
+			EncryptedDbModule.EncryptedPowehiDb.prototype,
+			"markMessageDeleted",
+		).mockRejectedValueOnce(new Error("db full"));
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistDelete("delete-target");
+		});
+
+		await waitFor(() => {
+			expect(result.current.writeErrorCount).toBe(1);
+		});
+	});
+
 	it("no plaintext is logged — calls produce no console output", async () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
