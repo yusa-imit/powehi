@@ -26,6 +26,12 @@ import { usePersistentMessages } from "../hooks/usePersistentMessages";
 import { useRegionDetect } from "../hooks/useRegionDetect";
 import { useTauriNotification } from "../hooks/useTauriNotification";
 import { type NewGroupEvent, useWelcomePoller } from "../hooks/useWelcomePoller";
+import {
+	NOTIFICATION_SOUNDS,
+	NOTIFICATION_SOUND_LABELS,
+	type NotificationSoundId,
+	playNotificationSound,
+} from "../lib/notificationSound";
 import { useAuthStore } from "../store/auth";
 import { base64ToText, uint8ToBase64 } from "../utils/base64";
 import { AddMemberModal } from "./AddMemberModal";
@@ -115,6 +121,8 @@ interface Chat {
 	muted?: boolean;
 	/** When false, incoming messages do not trigger notification sounds. Local-only, never sent to server. */
 	sound?: boolean;
+	/** Selected notification sound id for this chat. Local-only, never sent to server. undefined behaves as "default". */
+	notificationSoundId?: NotificationSoundId;
 	/** When false, incoming messages do not trigger device vibration. Local-only, never sent to server. */
 	vibrate?: boolean;
 	/** Count of @mention messages in this chat that the user hasn't yet read. Local-only, never sent to server. */
@@ -4781,6 +4789,8 @@ function InfoPanel({
 	onSetSlowMode,
 	isAdmin = false,
 	onSetChatTheme,
+	notificationSoundId,
+	onSetNotificationSound,
 }: {
 	chat: Chat;
 	onClose: () => void;
@@ -4807,6 +4817,8 @@ function InfoPanel({
 	onSetSlowMode?: (d: SlowModeDelay) => void;
 	isAdmin?: boolean;
 	onSetChatTheme?: (key: string | undefined) => void;
+	notificationSoundId?: NotificationSoundId;
+	onSetNotificationSound?: (id: NotificationSoundId) => void;
 }) {
 	const [descEditing, setDescEditing] = useState(false);
 	const [contactCard, setContactCard] = useState<ChatMember | null>(null);
@@ -5669,6 +5681,44 @@ function InfoPanel({
 			<InfoSection title="Notifications">
 				<InfoRow label="Mute" trailing={muted ? "On" : "Off"} onClick={onToggleMute} />
 				<InfoRow label="Sound" trailing={sound ? "On" : "Off"} onClick={onToggleSound} />
+				{sound && (
+					<div
+						data-testid="notification-sound-picker"
+						style={{
+							display: "flex",
+							gap: 8,
+							flexWrap: "wrap",
+							alignItems: "center",
+							padding: "0 18px 12px",
+						}}
+					>
+						{NOTIFICATION_SOUNDS.map((id) => {
+							const selected = (notificationSoundId ?? "default") === id;
+							return (
+								<button
+									key={id}
+									type="button"
+									data-testid={`notification-sound-option-${id}`}
+									aria-label={`${NOTIFICATION_SOUND_LABELS[id]} tone`}
+									aria-pressed={selected}
+									onClick={() => onSetNotificationSound?.(id)}
+									style={{
+										padding: "5px 10px",
+										borderRadius: 14,
+										fontSize: 12,
+										fontFamily: "var(--font-sans)",
+										cursor: "pointer",
+										background: selected ? "rgba(255,138,61,0.16)" : "rgba(242,237,227,0.05)",
+										border: selected ? "1px solid #FF8A3D" : "1px solid rgba(242,237,227,0.14)",
+										color: selected ? "#FF8A3D" : "var(--fg-2)",
+									}}
+								>
+									{NOTIFICATION_SOUND_LABELS[id]}
+								</button>
+							);
+						})}
+					</div>
+				)}
 				<InfoRow label="Vibrate" trailing={vibrate ? "On" : "Off"} onClick={onToggleVibrate} />
 				<InfoRow label="Pin to top" trailing={pinnedTop ? "On" : "Off"} onClick={onTogglePinTop} />
 			</InfoSection>
@@ -7217,6 +7267,12 @@ export function ChatLayout() {
 			if (incomingChat && !incomingChat.muted && (incomingChat.vibrate ?? true)) {
 				navigator.vibrate?.([100]);
 			}
+			// Play a short synthesized notification tone unless sound is disabled or the chat is
+			// muted. Only an opaque NotificationSoundId crosses this boundary — never message
+			// content or sender identity (no-plaintext-logging.md).
+			if (incomingChat && !incomingChat.muted && (incomingChat.sound ?? true)) {
+				playNotificationSound(incomingChat.notificationSoundId ?? "default");
+			}
 			// Show a native OS notification when the app window is in the background.
 			// The hook internally guards on !document.hasFocus() and Tauri availability.
 			// Title/body are fixed ("Powehi" / "New message") — no content or sender exposed.
@@ -7757,6 +7813,13 @@ export function ChatLayout() {
 	/** Set (or clear) the per-chat background theme. Local-only — never sent to server. */
 	const handleSetChatTheme = useCallback((chatId: string, key: string | undefined) => {
 		setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, chatTheme: key } : c)));
+	}, []);
+
+	/** Set the per-chat notification sound id and play a preview so the user can audition it.
+	 * Local-only — never sent to server, never in MLS payload. */
+	const handleSetNotificationSound = useCallback((chatId: string, soundId: NotificationSoundId) => {
+		setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, notificationSoundId: soundId } : c)));
+		playNotificationSound(soundId);
 	}, []);
 
 	/** Set (or clear) a custom display nickname for a DM contact. Local-only — never sent to server. */
@@ -8678,6 +8741,8 @@ export function ChatLayout() {
 						) ?? false
 					}
 					onSetChatTheme={(key) => handleSetChatTheme(active.id, key)}
+					notificationSoundId={active.notificationSoundId}
+					onSetNotificationSound={(id) => handleSetNotificationSound(active.id, id)}
 				/>
 			)}
 
