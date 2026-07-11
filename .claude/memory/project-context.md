@@ -2928,6 +2928,36 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - Review is part of writing: implement → run the relevant review agent → fix → commit.
 
 ## Cycle log (recent)
+- Cycle 256 FEATURE: CI fix + sidebar pinned-message indicator (commits 098bfe6, eb016fc).
+  - **Mode:** FEATURE (counter 256 % 5 ≠ 0). CI quick check found main RED (cycle 255's commit
+    83dcf6e failed `CI — Rust` Format check).
+  - **CI fix (098bfe6):** `crates/adapters/outbound/powehi-redis/tests/redis_cache_it.rs` was
+    never run through `cargo fmt` before commit in cycle 255 — two blocks (a chained method call,
+    a `vec![...]` literal) were left multi-line where rustfmt collapses them to one line. Ran
+    `cargo fmt --all`, diff matched the CI failure log exactly. `cargo fmt --all --check` and
+    `cargo clippy --workspace --all-targets -- -D warnings` both clean after.
+  - **Feature (eb016fc):** Sidebar pinned-message indicator. `Chat.pinnedMessageId` (set by the
+    pin/unpin feature since cycle 161) was previously only surfaced via the in-chat `PinnedBanner`
+    — the sidebar `ChatRow` gave no signal that a chat had a pinned message. Added a small pin
+    badge (`data-testid="pinned-message-indicator"`, `Icon name="pin"` at `#FF8A3D` — accretion
+    orange per DESIGN.md action-color rule, since pinning is a user action) next to the existing
+    `pinnedTop`/"pin chat to top" indicator (`#A8C8FF`, an unrelated local-only feature — kept
+    visually and semantically distinct via separate testid/color/title).
+  - Pure new rendering consumer of existing state — no new API calls, no new MLS ops, no new
+    Zustand/Dexie fields. `title`/`aria-label` are static strings only (no plaintext, message ID,
+    or sender identity in the DOM).
+  - **security-auditor: GREEN** — no plaintext/PII/ciphertext leak (static title/aria-label only),
+    no XSS (boolean truthiness gate, not string interpolation; `Icon` renders static SVG), no new
+    logging, no weakened trust boundary (same local-state scope as the existing `pinnedTop`
+    indicator it sits beside).
+  - **5 new tests** in `ChatLayoutPinIndicatorSidebar.test.tsx`: absent by default, appears on
+    incoming pin, disappears on unpin, chat-scoped (Maya pin doesn't mark Jordan's row), coexists
+    correctly with the independent pin-to-top indicator.
+  - **Frontend: 1141 tests pass** (was 1136, +5, 93 files); tsc clean; biome clean.
+  - **Backend:** all workspace tests green (unchanged, 87+120+40+85+143+... across crates).
+  - **Next cycle:** PQ hybrid Phase A still blocked on openmls stable `MLS_128_MLKEM768`. Other
+    open UX items: per-chat notification sound picker, `powehi-r2` testcontainers integration
+    suite (S3-compatible, deferred from cycle 255 — the last outbound adapter still missing one).
 - Cycle 255 STABILIZATION: Redis testcontainers integration suite (commit 7f9d213).
   - CI green (no red runs), `gh issue list` empty, `cargo audit` clean (only the pre-existing
     waived RUSTSEC-2024-0384 `instant` advisory via openmls/fluvio-wasm-timer), `cargo clippy
