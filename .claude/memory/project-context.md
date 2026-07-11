@@ -3136,6 +3136,58 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
   - **Next cycle:** the SSRF-via-DNS-rebinding hardening above (resolve-then-validate at webpush
     send time), or the group-row-creation gap (cycle 259), or PQ hybrid Phase A (still blocked on
     openmls stable `MLS_128_MLKEM768`).
+- Cycle 261 FEATURE: CI fix + webpush send-time SSRF/DNS-rebinding hardening (commits 91a7045, b71d241).
+  - **Mode:** FEATURE (counter 261 % 5 ≠ 0). CI check found `CI — Rust` red on main (cycle 260's
+    Content-Type-validation commit `f446b12` never ran through `cargo fmt` — a boolean-chain and a
+    test array literal in `media_service.rs` were left in rustfmt's pre-collapse shape).
+  - **CI fix (91a7045):** `cargo fmt --all` on `media_service.rs`, no logic change. Verified
+    `cargo build --workspace` and `cargo test --workspace` both green before pushing.
+  - **Feature (b71d241):** closed the SSRF-via-DNS-rebinding gap cycle 260's security sweep flagged
+    (documented, not fixed, at the time): the push-subscription registration-time guard
+    (`is_private_host` in `powehi-rest-api::routes::push_subscription`) only validates the endpoint
+    hostname once, at registration — a hostname that resolved to a public IP at registration time can
+    later resolve to an internal/private address (DNS rebinding, or just a changed DNS record), and
+    nothing re-checked that before the outbound `reqwest` client in `powehi-webpush` connected to it.
+    1. Extracted the private-IP-range predicate (loopback/RFC-1918/link-local/ULA/unspecified/
+       broadcast/IPv4-mapped-IPv6/`localhost`) out of `push_subscription.rs` into a new shared
+       `powehi_domain::net_guard` module (`is_private_ip` + `is_private_host`) — single source of
+       truth for both the inbound registration-time check and the new outbound send-time check, so
+       they can't silently drift apart. `push_subscription.rs`'s registration-time behavior is
+       unchanged (verified byte-identical logic); its now-redundant local unit tests were removed
+       (the pure-logic cases moved to `net_guard`'s own tests, HTTP-level wiring tests kept in place).
+    2. New `PublicOnlyResolver` in `powehi-webpush::lib` implementing reqwest's `Resolve` trait: real
+       DNS resolution via `tokio::net::lookup_host`, filters out every resolved `SocketAddr` whose IP
+       is private per `is_private_ip`, fails the connection if nothing public remains. Wired into
+       `VapidWebPushAdapter::build_client()` via `.dns_resolver(Arc::new(PublicOnlyResolver))` — runs
+       on every single send, not just at registration.
+    3. **Documented scope boundary (found by security-auditor, addressed same commit):** reqwest/
+       hyper-util short-circuits IP-literal hosts (e.g. `https://169.254.169.254/...`) straight to a
+       socket address and never calls `Resolve::resolve` for them — so `PublicOnlyResolver` cannot see
+       or block IP-literal endpoints; that class stays covered solely by the registration-time
+       `is_private_host` check. The two layers are complementary (literal-IP SSRF vs.
+       hostname-rebinding SSRF), not redundant — documented explicitly in `PublicOnlyResolver`'s doc
+       comment so a future reader doesn't assume the resolver alone is sufficient.
+    4. The auditor also flagged the original test (`notify_rejects_endpoint_that_resolves_to_private_ip`,
+       using the `169.254.169.254` IP literal) as misleading: it passed only because the address is
+       unreachable in CI (transport error), never because the resolver actually ran. Rewrote it as
+       `notify_rejects_hostname_that_resolves_to_private_ip` using `https://localhost/...` — a real
+       hostname that goes through DNS resolution (not the IP-literal short-circuit) and genuinely
+       exercises the send-time resolver end-to-end via `notify()`.
+  - **security-auditor: PASS** (no RED). One YELLOW (the IP-literal bypass scope gap above) — fixed
+    in-cycle via the doc comment + corrected test, not deferred. Confirmed: no info leak (resolver's
+    error string/resolved IP never reach a log or HTTP response — `notify()` collapses every failure
+    to `error_kind="transport"` + a static `DomainError::Internal` string), no panics/unwraps added,
+    no unbounded-DoS surface (DNS resolution runs inside the client's existing 10s `.timeout()`),
+    `redirect(Policy::none())` (pre-existing) still closes the open-redirect-to-internal-address angle
+    independently of the resolver.
+  - 4 new tests in `powehi-webpush` (resolver blocks private IPv4/IPv6 literals directly, resolver
+    allows a public IP literal, `notify()` end-to-end rejects a private-resolving hostname) — 13/13
+    `powehi-webpush` tests pass (was 9). `cargo test --workspace`: zero failures across all crates.
+    `cargo fmt --all --check` clean, `cargo clippy --workspace --all-targets -- -D warnings` clean.
+  - **Frontend:** untouched this cycle (pure backend security-hardening feature).
+  - **Next cycle:** the group-row-creation gap (cycle 259 — no code path calls `db.groups.add()`, so
+    Dexie pin/theme persistence is a no-op in the live app until group-row creation is wired up), or
+    PQ hybrid Phase A (still blocked on openmls stable `MLS_128_MLKEM768`).
 - Cycle 255 STABILIZATION: Redis testcontainers integration suite (commit 7f9d213).
   - CI green (no red runs), `gh issue list` empty, `cargo audit` clean (only the pre-existing
     waived RUSTSEC-2024-0384 `instant` advisory via openmls/fluvio-wasm-timer), `cargo clippy
