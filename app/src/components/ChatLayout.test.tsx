@@ -501,6 +501,102 @@ describe("ChatLayout", () => {
 			expect(chip.textContent).toContain("2");
 		});
 
+		it("incoming reaction persists the reaction map to Dexie so it survives a reload", async () => {
+			const reactionSpy = vi.spyOn(
+				EncryptedDbModule.EncryptedPowehiDb.prototype,
+				"markMessageReactions",
+			);
+			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+			let capturedOnReaction:
+				| ((groupId: string, targetId: string, emoji: string, senderId: string) => void)
+				| undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(_id, _gid, onMsg, _onPq, _onTyping, onReaction) => {
+					capturedOnMessage = onMsg;
+					capturedOnReaction = onReaction;
+				},
+			);
+			render(<ChatLayout />);
+
+			const MSG_ID = "12121212-1212-1212-1212-121212121212";
+			await act(async () => {
+				capturedOnMessage?.({
+					id: MSG_ID,
+					groupId: "11111111-1111-1111-1111-111111111111",
+					senderId: "sender-1",
+					text: "persist my reaction",
+					ciphertextB64: "Zg==",
+					epochSeq: 1,
+				});
+			});
+
+			await act(async () => {
+				capturedOnReaction?.("11111111-1111-1111-1111-111111111111", MSG_ID, "👍", "peer-device-1");
+			});
+
+			await waitFor(() =>
+				expect(reactionSpy).toHaveBeenCalledWith(
+					MSG_ID,
+					JSON.stringify({ "👍": ["peer-device-1"] }),
+				),
+			);
+		});
+
+		it("reaction_remove persists the updated (emoji key dropped) map to Dexie", async () => {
+			const reactionSpy = vi.spyOn(
+				EncryptedDbModule.EncryptedPowehiDb.prototype,
+				"markMessageReactions",
+			);
+			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+			let capturedOnReaction:
+				| ((groupId: string, targetId: string, emoji: string, senderId: string) => void)
+				| undefined;
+			let capturedOnReactionRemove:
+				| ((groupId: string, targetId: string, emoji: string, senderId: string) => void)
+				| undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(_id, _gid, onMsg, _onPq, _onTyping, onReaction, onReactionRemove) => {
+					capturedOnMessage = onMsg;
+					capturedOnReaction = onReaction;
+					capturedOnReactionRemove = onReactionRemove;
+				},
+			);
+			render(<ChatLayout />);
+
+			const MSG_ID = "13131313-1313-1313-1313-131313131313";
+			await act(async () => {
+				capturedOnMessage?.({
+					id: MSG_ID,
+					groupId: "11111111-1111-1111-1111-111111111111",
+					senderId: "sender-1",
+					text: "reaction then remove",
+					ciphertextB64: "Zg==",
+					epochSeq: 1,
+				});
+			});
+			await act(async () => {
+				capturedOnReaction?.("11111111-1111-1111-1111-111111111111", MSG_ID, "🔥", "peer-device-1");
+			});
+			await waitFor(() =>
+				expect(reactionSpy).toHaveBeenCalledWith(
+					MSG_ID,
+					JSON.stringify({ "🔥": ["peer-device-1"] }),
+				),
+			);
+
+			await act(async () => {
+				capturedOnReactionRemove?.(
+					"11111111-1111-1111-1111-111111111111",
+					MSG_ID,
+					"🔥",
+					"peer-device-1",
+				);
+			});
+
+			// Last sender for that emoji removed — the emoji key is dropped entirely.
+			await waitFor(() => expect(reactionSpy).toHaveBeenLastCalledWith(MSG_ID, JSON.stringify({})));
+		});
+
 		it("incoming reaction is NOT forwarded to the message list as a new message", async () => {
 			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
 			let capturedOnReaction:
@@ -2058,6 +2154,45 @@ describe("ChatLayout", () => {
 			});
 			// Same bubble count as the first mount — no duplicate bubble was created.
 			expect(screen.getAllByText("duplicate-safe text").length).toBe(countAfterMount);
+		});
+
+		it("rehydrates a persisted reaction map for the active chat on mount", async () => {
+			await db.messages.bulkPut([
+				seedRow({
+					id: "rehydrate-reacted-1",
+					groupId: MAYA_GROUP,
+					receivedAt: 1000,
+					plaintextB64: textToBase64("message with a reaction"),
+					reactionsJson: JSON.stringify({ "👍": ["peer-device-x"] }),
+				}),
+			]);
+
+			render(<ChatLayout />);
+
+			await waitFor(() => {
+				expect(screen.getByTestId("reaction-chip-👍")).toBeInTheDocument();
+			});
+		});
+
+		it("skips reactionsJson that fails to parse without crashing the whole row", async () => {
+			await db.messages.bulkPut([
+				seedRow({
+					id: "rehydrate-bad-reactions-1",
+					groupId: MAYA_GROUP,
+					receivedAt: 1000,
+					plaintextB64: textToBase64("still renders despite bad reactions json"),
+					reactionsJson: "{not valid json",
+				}),
+			]);
+
+			expect(() => render(<ChatLayout />)).not.toThrow();
+
+			await waitFor(() => {
+				expect(
+					screen.getAllByText("still renders despite bad reactions json").length,
+				).toBeGreaterThan(0);
+			});
+			expect(screen.queryByTestId("reaction-chips")).not.toBeInTheDocument();
 		});
 	});
 });

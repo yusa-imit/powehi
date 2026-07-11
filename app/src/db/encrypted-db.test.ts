@@ -222,4 +222,34 @@ describe("EncryptedPowehiDb", () => {
 		// "message was deleted" placeholder rendering rather than removing history.
 		expect(retrieved?.ciphertextB64).toBe("dG9EZWxldGU=");
 	});
+
+	it("markMessageReactions persists the reaction map (encrypted at rest) and survives reload", async () => {
+		await encDb.addMessage({
+			id: "msg-react",
+			groupId: "grp-react",
+			ciphertextB64: "cmVhY3Rpb25zVGFyZ2V0",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+		});
+		const reactionsJson = JSON.stringify({ "\u{1F44D}": ["dev-1", "dev-2"] });
+		await encDb.markMessageReactions("msg-react", reactionsJson);
+
+		const retrieved = await encDb.getMessage("msg-react");
+		expect(retrieved?.reactionsJson).toBe(reactionsJson);
+		// Original ciphertext untouched.
+		expect(retrieved?.ciphertextB64).toBe("cmVhY3Rpb25zVGFyZ2V0");
+
+		// Raw stored value must not equal the plaintext JSON — it's encrypted at rest.
+		const rawRow = await rawDb.messages.get("msg-react");
+		expect(rawRow?.reactionsJson).not.toBe(reactionsJson);
+	});
+
+	it("markMessageReactions is a no-op when the target row does not exist locally", async () => {
+		await expect(
+			encDb.markMessageReactions("no-such-msg", JSON.stringify({})),
+		).resolves.not.toThrow();
+		const retrieved = await encDb.getMessage("no-such-msg");
+		expect(retrieved).toBeUndefined();
+	});
 });

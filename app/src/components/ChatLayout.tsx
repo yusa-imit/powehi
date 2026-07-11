@@ -7000,8 +7000,15 @@ export function ChatLayout() {
 
 	const { sessionToken, identityId, deviceId } = useAuthStore();
 	const cryptoWorker = useCryptoWorker();
-	const { rows, persistIncoming, persistOutgoing, purgeExpired, persistEdit, persistDelete } =
-		usePersistentMessages(active?.mlsGroupId);
+	const {
+		rows,
+		persistIncoming,
+		persistOutgoing,
+		purgeExpired,
+		persistEdit,
+		persistDelete,
+		persistReaction,
+	} = usePersistentMessages(active?.mlsGroupId);
 	const showTauriNotification = useTauriNotification();
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	const { sendMedia } = useMediaSend({
@@ -7036,9 +7043,20 @@ export function ChatLayout() {
 			// the periodic purgeExpired() sweep only runs every 30s, too slow to
 			// rely on here (security-auditor finding, cycle 253).
 			if (row.expiresAt && row.expiresAt <= Date.now()) continue;
+			// Corrupt/malformed reactionsJson must not abort rehydration of the whole
+			// row — fail safe by dropping just the reactions for this one message.
+			let reactions: Record<string, string[]> | undefined;
+			if (row.reactionsJson) {
+				try {
+					reactions = JSON.parse(row.reactionsJson) as Record<string, string[]>;
+				} catch {
+					reactions = undefined;
+				}
+			}
 			rehydrated.push({
 				id: row.id,
 				text: base64ToText(textB64),
+				reactions,
 				// senderDeviceId is the authenticated-device value the server bound
 				// to the envelope at send time (AuthenticatedDevice extractor), not
 				// a client-suppliable field — but it is not an MLS-cryptographic
@@ -7299,8 +7317,18 @@ export function ChatLayout() {
 					return { ...c, messages: msgs };
 				}),
 			);
+			// Recompute the same result from the pre-update snapshot to persist it —
+			// mirrors handleIncomingEdit/handleIncomingDelete's chatsRef.current read,
+			// since setChats is async and its updater result isn't otherwise available here.
+			const chat = chatsRef.current.find((c) => c.mlsGroupId === gId);
+			const target = chat?.messages.find((m) => m.id === targetId);
+			const existing = target?.reactions ?? {};
+			const senders = existing[emoji] ?? [];
+			if (!senders.includes(senderId)) {
+				persistReaction(targetId, { ...existing, [emoji]: [...senders, senderId] });
+			}
 		},
-		[],
+		[persistReaction],
 	);
 
 	/**
@@ -7327,8 +7355,22 @@ export function ChatLayout() {
 					return { ...c, messages: msgs };
 				}),
 			);
+			// See handleIncomingReaction — recompute from the pre-update snapshot to persist.
+			const chat = chatsRef.current.find((c) => c.mlsGroupId === gId);
+			const target = chat?.messages.find((m) => m.id === targetId);
+			const existing = target?.reactions ?? {};
+			const senders = existing[emoji] ?? [];
+			if (senders.includes(senderId)) {
+				const newSenders = senders.filter((s) => s !== senderId);
+				if (newSenders.length === 0) {
+					const { [emoji]: _removed, ...rest } = existing;
+					persistReaction(targetId, rest);
+				} else {
+					persistReaction(targetId, { ...existing, [emoji]: newSenders });
+				}
+			}
 		},
-		[],
+		[persistReaction],
 	);
 
 	/**

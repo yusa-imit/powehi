@@ -17,7 +17,7 @@ import type { PowehiDb } from "./schema";
 // MUST NOT appear here — Dexie cannot query encrypted index values.
 // identity has no sensitive unindexed fields (exportKeyB64 was removed in schema v3).
 const SENSITIVE: Record<string, readonly string[]> = {
-	messages: ["ciphertextB64", "plaintextB64", "editedText"],
+	messages: ["ciphertextB64", "plaintextB64", "editedText", "reactionsJson"],
 	groups: ["mlsStateB64"],
 	verifiedContacts: ["safetyNumber"],
 };
@@ -112,6 +112,17 @@ export class EncryptedPowehiDb {
 	 */
 	async markMessageDeleted(id: string): Promise<void> {
 		await this.db.messages.update(id, { deletedAt: Date.now() });
+	}
+
+	/**
+	 * Persist the current emoji reaction state for a message (encrypted at rest)
+	 * so reactions survive a reload. Takes the full JSON-serialized senders map —
+	 * callers pass the post-mutation state, not a diff. No-op if the row does not
+	 * exist locally, same as markMessageEdited/markMessageDeleted.
+	 */
+	async markMessageReactions(id: string, reactionsJson: string): Promise<void> {
+		const enc = await this.encryptor.encryptDbField(reactionsJson);
+		await this.db.messages.update(id, { reactionsJson: enc });
 	}
 
 	async getMessagesByGroup(groupId: string): Promise<MessageRow[]> {

@@ -369,6 +369,48 @@ describe("usePersistentMessages", () => {
 		});
 	});
 
+	it("persistReaction updates rows state with the serialized reaction map", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistIncoming(makeIncoming({ id: "react-target" }));
+		});
+		await act(async () => {
+			result.current.persistReaction("react-target", { "\u{1F44D}": ["dev-a", "dev-b"] });
+		});
+
+		expect(result.current.rows[0].reactionsJson).toBe(
+			JSON.stringify({ "\u{1F44D}": ["dev-a", "dev-b"] }),
+		);
+	});
+
+	it("persistReaction is a no-op when the crypto worker is unavailable", async () => {
+		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(null);
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {
+			result.current.persistReaction("react-target", { "\u{1F44D}": ["dev-a"] });
+		});
+		expect(result.current.rows).toHaveLength(0);
+	});
+
+	it("writeErrorCount increments when markMessageReactions throws on persistReaction", async () => {
+		vi.spyOn(
+			EncryptedDbModule.EncryptedPowehiDb.prototype,
+			"markMessageReactions",
+		).mockRejectedValueOnce(new Error("db full"));
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistReaction("react-target", { "\u{1F44D}": ["dev-a"] });
+		});
+
+		await waitFor(() => {
+			expect(result.current.writeErrorCount).toBe(1);
+		});
+	});
+
 	it("no plaintext is logged — calls produce no console output", async () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});

@@ -30,6 +30,8 @@ export interface PersistedMessages {
 	persistEdit: (targetMessageId: string, newText: string) => void;
 	/** Persist a "delete for everyone" signal so the tombstone survives a reload. Best-effort. */
 	persistDelete: (targetMessageId: string) => void;
+	/** Persist the current reaction map for a message so reactions survive a reload. Best-effort. */
+	persistReaction: (targetMessageId: string, reactions: Record<string, string[]>) => void;
 }
 
 /**
@@ -150,6 +152,18 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 		[encryptedDb],
 	);
 
+	const persistReaction = useCallback(
+		(targetMessageId: string, reactions: Record<string, string[]>) => {
+			if (!encryptedDb) return;
+			const reactionsJson = JSON.stringify(reactions);
+			setRows((prev) => prev.map((r) => (r.id === targetMessageId ? { ...r, reactionsJson } : r)));
+			encryptedDb
+				.markMessageReactions(targetMessageId, reactionsJson)
+				.catch(() => setWriteErrorCount((n) => n + 1));
+		},
+		[encryptedDb],
+	);
+
 	return {
 		rows,
 		writeErrorCount,
@@ -158,5 +172,6 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 		purgeExpired,
 		persistEdit,
 		persistDelete,
+		persistReaction,
 	};
 }

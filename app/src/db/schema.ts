@@ -18,6 +18,8 @@ export interface MessageRow {
 	editedText?: string;
 	/** Unix ms at which this message was tombstoned by a "delete for everyone" signal. undefined = not deleted. */
 	deletedAt?: number;
+	/** JSON-serialized emoji→senderDeviceId[] reaction map. Encrypted at rest like editedText. undefined = no reactions. */
+	reactionsJson?: string;
 }
 
 // GroupRow — MLS group state snapshot.
@@ -110,6 +112,15 @@ export class PowehiDb extends Dexie {
 		// v7: added editedText and deletedAt to MessageRow so "edit message" and
 		// "delete for everyone" state survives a reload (previously React-state-only).
 		this.version(7).stores({
+			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v8: added reactionsJson to MessageRow so emoji reactions survive a reload
+		// (previously React-state-only, same gap edit/delete had before v7). No index
+		// change needed — reactions are never queried by Dexie, only read per-row.
+		this.version(8).stores({
 			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
 			groups: "id, lastActivity",
 			identity: "id",
