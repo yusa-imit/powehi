@@ -3096,6 +3096,46 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
     clean.
   - **Next cycle:** the group-row-creation gap above, or PQ hybrid Phase A (still blocked on
     openmls stable `MLS_128_MLKEM768`).
+- Cycle 260 STABILIZATION: Media Content-Type validation + full security/crypto sweep (commit f446b12).
+  - **Mode:** STABILIZATION (counter 260 % 5 == 0). CI green on main (`gh run list`), `gh issue
+    list --state open` empty, working tree clean at start.
+  - `cargo audit`: clean (only the pre-existing waived RUSTSEC-2024-0384 `instant` advisory via
+    openmls/fluvio-wasm-timer, unchanged). `cargo-deny` not installed in this sandbox — skipped
+    (not previously a gating tool in this repo's cycles either).
+  - Ran the full local gate before touching anything: `cargo test --workspace` all green (91 + 12
+    + 85 + 8 + 7 + 4(+1 ignored) + 4 + 7 + 14 + 143 + 9 + 33 = all `ok`, zero failures), `cargo
+    clippy --workspace --all-targets -- -D warnings` clean, frontend `pnpm test` 1164/1164 green
+    (95 files) — matched cycle 259's counts exactly, no drift.
+  - **security-auditor sweep (backend handlers + application services): PASS, no RED.** Two
+    YELLOW findings:
+    1. **Fixed this cycle:** `media_service.rs::request_upload` persisted and signed an
+       unvalidated client `content_type` string into `MediaBlob` metadata and the R2 presigned PUT
+       URL — no shape or length check. Added `is_valid_content_type`/`is_valid_media_type_token`
+       (RFC 6838 §4.2 `type/subtype` token grammar, ASCII alnum + `!#$&-^_.+`, 128-char cap) and a
+       fail-closed check in `request_upload` (mirrors the existing `size_bytes` defense-in-depth
+       check, single source of truth in the application layer so gRPC/non-REST callers can't
+       bypass it either). 4 new tests (2 pure-function table tests incl. a CRLF-injection-shaped
+       string, 1 oversized-length test, 1 `request_upload` behavioral test) — `powehi-application`
+       now 91/91 (was 87).
+    2. **Documented, not fixed (architecture-level, deferred):** `push_subscription.rs`'s
+       `is_private_host` SSRF guard only inspects IP literals in the endpoint URL; a registered
+       hostname whose DNS resolves to an internal/link-local address at *send* time (not
+       registration time) bypasses it (SSRF via DNS rebinding). Already mitigated in depth by the
+       k8s egress NetworkPolicy blocking `169.254.169.254/32` + RFC-1918 (infra cycles 248/250).
+       A real fix is resolve-then-validate-then-connect at send time, which is a bigger behavioral
+       change to the webpush send path — left as a named candidate for a future cycle rather than
+       bundled into this pass.
+  - **crypto-reviewer sweep (all 7 `powehi-crypto-wasm` src files): GREEN, no regressions, no
+    required changes.** Re-verified MLS state transitions stay entirely inside openmls, OPAQUE KE
+    ordering intact, ML-KEM-768 sizes/KATs/implicit-rejection still correct, kem_credential domain
+    separation intact, HKDF recovery-phrase derivation unchanged, AES-256-GCM media encryption
+    fresh-key-per-call. Three previously-accepted findings (Y-B-1 unprefixed HKDF info, Y-3
+    unverified-extract footgun-by-design, opaque-ke 3.0/draft-16 RFC-9807 waiver) reconfirmed as
+    standing, not regressions — explicitly told not to re-action them.
+  - **Target dir hygiene:** 13G, under the 20G prune threshold — no pruning needed this cycle.
+  - **Next cycle:** the SSRF-via-DNS-rebinding hardening above (resolve-then-validate at webpush
+    send time), or the group-row-creation gap (cycle 259), or PQ hybrid Phase A (still blocked on
+    openmls stable `MLS_128_MLKEM768`).
 - Cycle 255 STABILIZATION: Redis testcontainers integration suite (commit 7f9d213).
   - CI green (no red runs), `gh issue list` empty, `cargo audit` clean (only the pre-existing
     waived RUSTSEC-2024-0384 `instant` advisory via openmls/fluvio-wasm-timer), `cargo clippy
