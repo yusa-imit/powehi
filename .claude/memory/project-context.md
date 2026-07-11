@@ -2958,6 +2958,43 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
   - **Next cycle:** PQ hybrid Phase A still blocked on openmls stable `MLS_128_MLKEM768`. Other
     open UX items: per-chat notification sound picker, `powehi-r2` testcontainers integration
     suite (S3-compatible, deferred from cycle 255 — the last outbound adapter still missing one).
+- Cycle 257 FEATURE: Per-chat notification sound picker (commit e5d8c26).
+  - **Mode:** FEATURE (counter 257 % 5 ≠ 0). CI green on main (`gh run list` clean) — proceeded
+    straight to implementation.
+  - Cycle 256 flagged that `Chat.sound` (on/off toggle, local-only since early cycles) was never
+    actually wired to play audio, and there was no way to choose WHICH sound plays. Closed that gap.
+  - `app/src/lib/notificationSound.ts` (new): fixed catalog `NOTIFICATION_SOUNDS = ["default",
+    "chime", "pop", "none"]`, synthesized via Web Audio API (`OscillatorNode`+`GainNode`, quick
+    attack/decay envelope) — no binary audio assets, no new npm deps, no fetch. Lazily-created
+    shared `AudioContext`, per-note node cleanup via `onended`; never throws (feature-detects and
+    no-ops without Web Audio, e.g. jsdom/SSR).
+  - `Chat.notificationSoundId?: NotificationSoundId` added, following the same local-only pattern
+    as `muted`/`sound`/`vibrate`/`chatTheme` (React state only, never persisted to Dexie — schema
+    stays at v8, never sent to server).
+  - Sound picker UI added to the chat's Notifications `InfoSection`, visible only when the Sound
+    toggle is on; selecting an option updates state and plays an immediate preview.
+  - Wired into the incoming-message handler: `playNotificationSound(incomingChat.notificationSoundId
+    ?? "default")`, gated on the same `!muted && (sound ?? true)` condition already used for vibrate/
+    OS notification — did not weaken or duplicate existing gating.
+  - **security-auditor: GREEN** — only an opaque `NotificationSoundId` enum value ever crosses into
+    `playNotificationSound()` or the DOM (no message content/sender/group ID); no plaintext logging;
+    no XSS surface (fixed compile-time catalog, nothing peer/user-interpolated); confirmed local-only
+    scoping (no Dexie/network); AudioContext lifecycle bounded (short-lived nodes, self-cleaning,
+    shared context reused — no leak under a message flood); existing mute/sound gates unchanged.
+  - Fixed a test collision along the way: the picker's `aria-label` originally contained the word
+    "sound" (`"${label} notification sound"`), which broke pre-existing `getByRole("button", { name:
+    /sound/i })` queries in `ChatLayoutSound.test.tsx`/`ChatLayoutVibrate.test.tsx` (multiple matches).
+    Renamed to `"${label} tone"` instead of touching the older tests.
+  - 17 new tests: `notificationSound.test.ts` (11 — catalog shape, no-AudioContext no-op path,
+    node-creation when available, distinct note counts per sound, construction-failure safety) +
+    `ChatLayoutNotificationSoundPicker.test.tsx` (6 — renders catalog, defaults to "default", hides
+    when sound off, selection updates + previews, chat-scoped, opaque-id-only assertion).
+  - **Frontend: 1158 tests pass** (was 1141, +17, 95 files); tsc clean; biome clean (after
+    `--write` autofix for import ordering + an unsafe `delete` → assignment lint fix).
+  - **Backend:** untouched this cycle (pure frontend feature).
+  - **Next cycle:** `powehi-r2` testcontainers integration suite (S3-compatible) still deferred —
+    now the only outbound adapter without one (Postgres and Redis both have testcontainers suites).
+    Also open: PQ hybrid Phase A (blocked on openmls stable `MLS_128_MLKEM768`).
 - Cycle 255 STABILIZATION: Redis testcontainers integration suite (commit 7f9d213).
   - CI green (no red runs), `gh issue list` empty, `cargo audit` clean (only the pre-existing
     waived RUSTSEC-2024-0384 `instant` advisory via openmls/fluvio-wasm-timer), `cargo clippy
