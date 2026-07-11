@@ -2928,6 +2928,37 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - Review is part of writing: implement → run the relevant review agent → fix → commit.
 
 ## Cycle log (recent)
+- Cycle 254 FEATURE: Persist emoji reactions to Dexie (commit 4cde17a).
+  - Closed the last remaining gap in the cycle 252/253 series: reactions (already fully
+    implemented end-to-end over MLS control envelopes — `{type:"reaction"|"reaction_remove",...}`
+    in useMessages.ts/ChatLayout.tsx) lived only in React `chats` state; a reload reverted them,
+    same gap edit/delete had before cycles 252-253 closed it for those.
+  - `MessageRow.reactionsJson?: string` (JSON-serialized `Record<emoji, senderDeviceId[]>`,
+    encrypted at rest like editedText) added to schema.ts, bumped to `version(8)` (additive,
+    no migration needed).
+  - `EncryptedPowehiDb.markMessageReactions(id, reactionsJson)` — encrypts + `db.messages.update()`,
+    no-ops safely on a missing id, mirrors markMessageEdited/markMessageDeleted.
+  - `usePersistentMessages` gained `persistReaction(targetMessageId, reactions)`, same
+    fire-and-forget + `writeErrorCount` pattern as persistEdit/persistDelete.
+  - `handleIncomingReaction`/`handleRemoveReaction` in ChatLayout.tsx now also call
+    `persistReaction` with the recomputed post-mutation map (recomputed from `chatsRef.current`
+    since `setChats` is async — same technique handleIncomingEdit/handleIncomingDelete already use).
+  - Rehydration `useEffect` (cycle 253) now also parses `row.reactionsJson` via `JSON.parse` in a
+    try/catch — a corrupt/malformed value drops reactions for just that one row rather than
+    aborting the whole rehydration.
+  - **security-auditor: GREEN.** Two LOW findings noted as pre-existing (not introduced this
+    cycle): (1) fire-and-forget Dexie writes can race under rapid react/unreact toggles — same
+    exposure persistEdit/persistDelete already have; (2) reaction attribution trusts `env.sender`
+    (server-authenticated device id) which is not an MLS-cryptographic sender proof — same gap the
+    live (non-persisted) reaction feature already had; persistence doesn't change severity since
+    the state was already forgeable-and-displayed before this cycle.
+  - 9 new tests (encrypted-db.test.ts ×2, usePersistentMessages.test.ts ×3, ChatLayout.test.tsx ×4:
+    incoming-reaction persists, reaction_remove persists emoji-key-dropped map, rehydrates a
+    persisted reaction chip, skips unparseable reactionsJson safely). All 1136 frontend tests green
+    (92 files, was 1127); tsc clean; Biome clean.
+  - This closes out the edit/delete/reaction persistence trio — no further known gaps in
+    message-adjacent state persistence. Reactions/pins/mentions note from cycle 253 is now just
+    "pins/mentions remain session-only", reactions no longer included.
 - Cycle 253 FEATURE: Rehydrate persisted chat history from Dexie into `chats` state (commit fcab6c4).
   - Closed the follow-up noted in cycle 252: `usePersistentMessages().rows` was write-only — never
     consumed in ChatLayout.tsx — so Dexie-stored message history (incl. edited text and delete-for-
