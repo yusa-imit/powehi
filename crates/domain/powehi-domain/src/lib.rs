@@ -5,6 +5,7 @@ pub mod event;
 pub mod group;
 pub mod key_package;
 pub mod media;
+pub mod net_guard;
 pub mod push_subscription;
 pub mod region;
 pub mod user;

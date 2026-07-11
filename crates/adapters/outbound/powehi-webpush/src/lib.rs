@@ -13,15 +13,60 @@
 //!   - NEVER log p256dh or auth_secret.
 //!   - Logs carry only an outcome word and an error category.
 
+use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use base64ct::{Base64UrlUnpadded, Encoding};
 use p256::ecdsa::{signature::Signer, Signature, SigningKey};
 use p256::pkcs8::DecodePrivateKey;
-use powehi_domain::{error::DomainError, push_subscription::PushSubscription};
+use powehi_domain::{
+    error::DomainError, net_guard::is_private_ip, push_subscription::PushSubscription,
+};
 use powehi_port_outbound::web_push::WebPushPort;
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::Client;
+
+/// Resolve-then-validate-then-connect SSRF guard for *hostname* endpoints.
+///
+/// `push_subscription::register` only checks the endpoint host at
+/// registration time; a registered public **hostname**'s DNS answer can
+/// change (or be adversarially steered — DNS rebinding) by the time we
+/// actually send. This resolver re-validates on every send: it performs
+/// real DNS resolution, drops any resolved address that lands in a
+/// private/internal/loopback range, and fails the connection if nothing
+/// public remains.
+///
+/// Scope note: reqwest/hyper-util short-circuits IP-literal hosts (e.g.
+/// `https://169.254.169.254/...`) straight to a socket address and never
+/// calls `Resolve::resolve` for them, so this resolver cannot see or block
+/// IP-literal endpoints — that class is covered solely by the
+/// registration-time `is_private_host` check in
+/// `powehi-rest-api::routes::push_subscription`. The two layers are
+/// complementary, not redundant: registration-time blocks literal-IP SSRF,
+/// this resolver blocks hostname-rebinding SSRF that registration-time
+/// checking cannot (a hostname that was public when registered can be
+/// re-pointed at an internal address at send time).
+#[derive(Debug, Default)]
+struct PublicOnlyResolver;
+
+impl Resolve for PublicOnlyResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        Box::pin(async move {
+            // Port is irrelevant: reqwest overwrites it with the URL's port
+            // (or the scheme default) after resolution.
+            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((name.as_str(), 0))
+                .await?
+                .filter(|addr| !is_private_ip(addr.ip()))
+                .collect();
+            if addrs.is_empty() {
+                return Err("push endpoint resolved only to private/internal addresses".into());
+            }
+            Ok(Box::new(addrs.into_iter()) as Addrs)
+        })
+    }
+}
 
 /// VAPID TTL header (seconds the push service should retain an undelivered push).
 const PUSH_TTL_SECS: u64 = 86_400;
@@ -140,6 +185,11 @@ impl VapidWebPushAdapter {
             // Redirects are disabled: a public push service must never redirect
             // the VAPID-signed POST into an internal address (open-redirect SSRF).
             .redirect(reqwest::redirect::Policy::none())
+            // Resolve-then-validate-then-connect: re-checks the DNS answer
+            // against the private-IP guard on every send (see
+            // `PublicOnlyResolver`), closing the DNS-rebinding gap that a
+            // registration-time-only host check can't.
+            .dns_resolver(Arc::new(PublicOnlyResolver))
             .build()
             // A misconfigured TLS backend is a startup-time bug, not a runtime
             // condition; fall back to the default client rather than panicking.
@@ -313,6 +363,58 @@ mod tests {
             vec![0u8; 16],
         );
         assert!(adapter.notify(&sub).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn resolver_blocks_private_ip_literal() {
+        // "127.0.0.1" as a DNS name is resolved by `lookup_host` without any
+        // real DNS query (it's already an address literal) — this exercises
+        // the filter itself, independent of network conditions.
+        let name: Name = "127.0.0.1".parse().unwrap();
+        match PublicOnlyResolver.resolve(name).await {
+            Err(e) => assert!(e.to_string().contains("private/internal")),
+            Ok(_) => panic!("expected private IP literal to be rejected"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolver_blocks_ipv6_loopback_literal() {
+        let name: Name = "::1".parse().unwrap();
+        assert!(PublicOnlyResolver.resolve(name).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn resolver_allows_public_ip_literal() {
+        let name: Name = "8.8.8.8".parse().unwrap();
+        let addrs: Vec<SocketAddr> = PublicOnlyResolver.resolve(name).await.unwrap().collect();
+        assert_eq!(addrs, vec!["8.8.8.8:0".parse::<SocketAddr>().unwrap()]);
+    }
+
+    #[tokio::test]
+    async fn notify_rejects_hostname_that_resolves_to_private_ip() {
+        // Simulates a DNS-rebinding attempt with a *hostname* endpoint (not an
+        // IP literal — reqwest/hyper-util short-circuits IP literals straight
+        // to a socket address and never calls our `Resolve::resolve` for
+        // them, so a literal like `169.254.169.254` would NOT exercise this
+        // resolver; see the scope note on `PublicOnlyResolver`). "localhost"
+        // is a real hostname that goes through DNS resolution and resolves to
+        // a loopback address on every platform, so it genuinely exercises the
+        // send-time resolver end-to-end via `notify()`. Nothing here checked
+        // the hostname string against the registration-time guard (this
+        // PushSubscription is built directly, bypassing registration).
+        let cfg = VapidConfig {
+            signing_key: test_signing_key(),
+            contact: "mailto:ops@example.com".into(),
+        };
+        let adapter = VapidWebPushAdapter::new(cfg);
+        let sub = PushSubscription::new(
+            powehi_domain::device::DeviceId::new(),
+            "https://localhost/latest/meta-data".into(),
+            vec![4u8; 65],
+            vec![0u8; 16],
+        );
+        let err = adapter.notify(&sub).await.unwrap_err();
+        assert!(matches!(err, DomainError::Internal(_)));
     }
 
     #[tokio::test]

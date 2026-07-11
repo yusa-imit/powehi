@@ -12,7 +12,9 @@
 
 use axum::{extract::State, http::StatusCode, Json};
 use base64ct::{Base64UrlUnpadded, Encoding};
-use powehi_domain::{error::DomainError, push_subscription::PushSubscription};
+use powehi_domain::{
+    error::DomainError, net_guard::is_private_host, push_subscription::PushSubscription,
+};
 use serde::Deserialize;
 
 use crate::{error::ApiError, middleware::AuthenticatedDevice, AppState};
@@ -29,51 +31,6 @@ pub struct RegisterRequest {
 
 fn bad_input(msg: &str) -> ApiError {
     ApiError::from(DomainError::InvalidInput(msg.into()))
-}
-
-/// Returns `true` if the hostname belongs to a private/internal/loopback range
-/// that must never be used as a push endpoint (SSRF guard).
-///
-/// We reject: loopback (127.x, ::1), link-local (169.254.x, fe80::),
-/// RFC-1918 private (10.x, 172.16-31.x, 192.168.x), ULA (fc00::/7),
-/// bare "localhost", and IPv4-mapped/compatible IPv6 addresses whose
-/// embedded IPv4 address is private (e.g. `::ffff:169.254.169.254`).
-fn is_private_host(host: &str) -> bool {
-    let h = host.to_ascii_lowercase();
-    // Bare hostname checks
-    if h == "localhost" || h == "ip6-localhost" {
-        return true;
-    }
-    // Parse as IPv4 or IPv6
-    if let Ok(ip) = h.parse::<std::net::IpAddr>() {
-        return match ip {
-            std::net::IpAddr::V4(v4) => is_private_v4(v4),
-            std::net::IpAddr::V6(v6) => {
-                // IPv4-mapped (::ffff:a.b.c.d) embeds a real IPv4 address. Check
-                // it first so that `::ffff:169.254.169.254` is correctly blocked.
-                // We do NOT call to_ipv4() (deprecated compat form ::a.b.c.d) as
-                // that matches ::1 as 0.0.0.1 and would skip is_loopback() below.
-                if let Some(v4) = v6.to_ipv4_mapped() {
-                    return is_private_v4(v4);
-                }
-                v6.is_loopback()    // ::1
-                    || v6.is_unspecified() // ::
-                    // Link-local fe80::/10
-                    || (v6.segments()[0] & 0xffc0) == 0xfe80
-                    // ULA fc00::/7
-                    || (v6.segments()[0] & 0xfe00) == 0xfc00
-            }
-        };
-    }
-    false
-}
-
-fn is_private_v4(v4: std::net::Ipv4Addr) -> bool {
-    v4.is_loopback()       // 127.0.0.0/8
-        || v4.is_private() // 10.x / 172.16-31.x / 192.168.x
-        || v4.is_link_local() // 169.254.x.x
-        || v4.is_unspecified() // 0.0.0.0
-        || v4.is_broadcast() // 255.255.255.255
 }
 
 /// Extract just the host (without port) from an `https://host[:port]/...` URL.
@@ -786,54 +743,10 @@ mod tests {
         assert_eq!(extract_host("https://"), None);
     }
 
-    #[test]
-    fn is_private_host_blocks_rfc1918_172_range() {
-        // 172.16.0.0/12 covers 172.16.0.0–172.31.255.255 — tested only at corners
-        // in the HTTP-level tests; explicit unit tests here ensure no regression if
-        // the `is_private()` stdlib call changes or is manually reimplemented.
-        assert!(
-            is_private_host("172.16.0.1"),
-            "172.16.0.1 is RFC-1918 private"
-        );
-        assert!(
-            is_private_host("172.31.255.255"),
-            "172.31.255.255 is RFC-1918 private"
-        );
-        assert!(
-            is_private_host("172.20.0.1"),
-            "172.20.0.1 is RFC-1918 private"
-        );
-    }
-
-    #[test]
-    fn is_private_host_blocks_unspecified_and_broadcast() {
-        assert!(is_private_host("0.0.0.0"), "0.0.0.0 is unspecified");
-        assert!(
-            is_private_host("255.255.255.255"),
-            "255.255.255.255 is broadcast"
-        );
-    }
-
-    #[test]
-    fn is_private_host_blocks_ipv6_unspecified() {
-        assert!(is_private_host("::"), ":: is IPv6 unspecified");
-    }
-
-    #[test]
-    fn is_private_host_allows_public_ips() {
-        assert!(
-            !is_private_host("8.8.8.8"),
-            "8.8.8.8 (Google DNS) is public"
-        );
-        assert!(
-            !is_private_host("1.1.1.1"),
-            "1.1.1.1 (Cloudflare DNS) is public"
-        );
-        assert!(
-            !is_private_host("push.example.com"),
-            "domain name is not an IP"
-        );
-    }
+    // `is_private_host`'s pure-logic cases (RFC-1918, unspecified/broadcast,
+    // IPv6, localhost aliases) are unit-tested where the function now lives:
+    // `powehi_domain::net_guard`. The HTTP-level tests below cover this
+    // route's wiring of that check (400 on a private-host endpoint).
 
     #[tokio::test]
     async fn post_userinfo_ssrf_attempt_returns_400() {
