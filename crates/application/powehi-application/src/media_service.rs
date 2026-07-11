@@ -13,6 +13,33 @@ fn size_bucket(bytes: u64) -> &'static str {
     }
 }
 
+/// RFC 6838 §4.2 restricted-name token: ALPHA / DIGIT / "!" / "#" / "$" / "&"
+/// / "-" / "^" / "_" / "." / "+", non-empty.
+fn is_valid_media_type_token(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "!#$&-^_.+".contains(c))
+}
+
+/// Validate a client-supplied `Content-Type` before it is persisted and
+/// signed into the R2 presigned URL: must be a `type/subtype` pair (RFC 6838)
+/// and capped well under typical MIME-type lengths. An unvalidated value here
+/// is a weak trust boundary (security-auditor finding, cycle 260) — it isn't
+/// logged or interpreted as a path/command, but nothing previously stopped an
+/// arbitrary/oversized string from riding along into stored metadata and the
+/// signed upload URL.
+const MAX_CONTENT_TYPE_LEN: usize = 128;
+
+fn is_valid_content_type(content_type: &str) -> bool {
+    if content_type.is_empty() || content_type.len() > MAX_CONTENT_TYPE_LEN {
+        return false;
+    }
+    match content_type.split_once('/') {
+        Some((type_, subtype)) => {
+            is_valid_media_type_token(type_) && is_valid_media_type_token(subtype)
+        }
+        None => false,
+    }
+}
+
 use async_trait::async_trait;
 use powehi_domain::{
     device::DeviceId,
@@ -52,6 +79,9 @@ impl MediaUseCase for MediaService {
         // checks. Non-REST callers (gRPC, tests) must not bypass this cap.
         if size_bytes == 0 || size_bytes > MAX_MEDIA_BYTES {
             return Err(DomainError::InvalidInput("size_bytes out of range".into()));
+        }
+        if !is_valid_content_type(content_type) {
+            return Err(DomainError::InvalidInput("content_type invalid".into()));
         }
         // Membership check: when a group_id is supplied, verify the uploader is
         // an actual member of that group before associating the blob with it.
@@ -293,6 +323,44 @@ mod tests {
         let s = svc(Arc::new(MockMediaRepo::new("u", "d")));
         let err = s
             .request_upload(&DeviceId::new(), "image/jpeg", MAX_MEDIA_BYTES + 1, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn content_type_validation_accepts_common_mime_types() {
+        for ct in ["image/jpeg", "image/png", "video/mp4", "audio/mpeg", "application/pdf"] {
+            assert!(is_valid_content_type(ct), "{ct} should be valid");
+        }
+    }
+
+    #[test]
+    fn content_type_validation_rejects_malformed_input() {
+        for ct in [
+            "",
+            "no-slash",
+            "/missing-type",
+            "missing-subtype/",
+            "too/many/slashes",
+            "has space/x",
+            "text/html\r\nX-Injected: 1",
+        ] {
+            assert!(!is_valid_content_type(ct), "{ct:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn content_type_validation_rejects_oversized_input() {
+        let huge = format!("image/{}", "a".repeat(200));
+        assert!(!is_valid_content_type(&huge));
+    }
+
+    #[tokio::test]
+    async fn request_upload_invalid_content_type_returns_invalid_input() {
+        let s = svc(Arc::new(MockMediaRepo::new("u", "d")));
+        let err = s
+            .request_upload(&DeviceId::new(), "not-a-mime-type", 1024, None)
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::InvalidInput(_)));
