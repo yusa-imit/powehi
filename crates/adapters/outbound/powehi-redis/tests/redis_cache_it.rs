@@ -42,10 +42,7 @@ async fn setup() -> (testcontainers::ContainerAsync<Redis>, RedisCache) {
         .start()
         .await
         .expect("Redis container started");
-    let port = container
-        .get_host_port_ipv4(6379)
-        .await
-        .expect("host port");
+    let port = container.get_host_port_ipv4(6379).await.expect("host port");
     let url = format!("redis://127.0.0.1:{port}");
     let cache = RedisCache::new(&url).await.expect("connect RedisCache");
     (container, cache)
@@ -167,11 +164,7 @@ async fn set_add_and_set_members_round_trip() {
     members.sort();
     assert_eq!(
         members,
-        vec![
-            "alpha".to_string(),
-            "beta".to_string(),
-            "gamma".to_string()
-        ],
+        vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()],
         "set_members must return all added members (order-independent)"
     );
 }
