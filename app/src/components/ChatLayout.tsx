@@ -6696,6 +6696,13 @@ export function ChatLayout() {
 	const [createGroupOpen, setCreateGroupOpen] = useState(false);
 	const [addMemberOpen, setAddMemberOpen] = useState(false);
 	const [disappearingTtl, setDisappearingTtl] = useState<TtlOption>(undefined);
+	// Persisted pin state loaded from GroupRow.pinnedMessageId (cycle 259) — separate from
+	// the `rows`-driven message rehydration effect below since pinnedMessageId lives on the
+	// group row, not a message row. See the "Apply persisted pin state" effect for why this
+	// is applied in its own effect rather than inline in the group-row fetch below.
+	const [persistedPinnedMessageId, setPersistedPinnedMessageId] = useState<string | undefined>(
+		undefined,
+	);
 	const [msgSearch, setMsgSearch] = useState("");
 
 	// ── In-chat message search bar (above composer) ───────────────────────────
@@ -7157,11 +7164,12 @@ export function ChatLayout() {
 		);
 	}, [rows, active?.mlsGroupId, deviceId]);
 
-	// Load persisted disappearing timer when the active conversation changes.
+	// Load persisted disappearing timer + pinned message id when the active conversation changes.
 	useEffect(() => {
 		let cancelled = false;
 		if (!active?.mlsGroupId) {
 			setDisappearingTtl(undefined);
+			setPersistedPinnedMessageId(undefined);
 			return;
 		}
 		const groupId = active.mlsGroupId;
@@ -7173,14 +7181,44 @@ export function ChatLayout() {
 				setDisappearingTtl(
 					TTL_OPTIONS.includes(persisted as TtlOption) ? (persisted as TtlOption) : undefined,
 				);
+				setPersistedPinnedMessageId(row?.pinnedMessageId);
 			})
 			.catch(() => {
-				if (!cancelled) setDisappearingTtl(undefined);
+				if (!cancelled) {
+					setDisappearingTtl(undefined);
+					setPersistedPinnedMessageId(undefined);
+				}
 			});
 		return () => {
 			cancelled = true;
 		};
 	}, [active?.mlsGroupId]);
+
+	// Apply the persisted pin state (loaded above) to the active chat once its messages
+	// exist. Deliberately a separate effect from the fetch above and re-keyed on `rows`:
+	// the GroupRow fetch and the `rows`-driven message rehydration effect race each other
+	// (both async, no ordering guarantee), so the pinned message may not be in `c.messages`
+	// yet when persistedPinnedMessageId first resolves. Re-running whenever `rows` changes
+	// retries the mark until it lands; it's idempotent (no-ops once already applied) and
+	// never clobbers an in-session pin/unpin (`c.pinnedMessageId` already set is left alone).
+	// biome-ignore lint/correctness/useExhaustiveDependencies: rows isn't read in the body but is the retry trigger — see comment above
+	useEffect(() => {
+		if (!active?.mlsGroupId || !persistedPinnedMessageId) return;
+		const groupId = active.mlsGroupId;
+		const pinnedMessageId = persistedPinnedMessageId;
+		setChats((cs) =>
+			cs.map((c) => {
+				if (c.mlsGroupId !== groupId || c.pinnedMessageId !== undefined) return c;
+				const target = c.messages.find((m) => m.id === pinnedMessageId);
+				if (!target || target.pinned) return c;
+				return {
+					...c,
+					pinnedMessageId,
+					messages: c.messages.map((m) => (m.id === pinnedMessageId ? { ...m, pinned: true } : m)),
+				};
+			}),
+		);
+	}, [persistedPinnedMessageId, active?.mlsGroupId, rows]);
 
 	const handleToggleTtl = () => {
 		const next = nextTtl(disappearingTtl);
@@ -7671,6 +7709,28 @@ export function ChatLayout() {
 					};
 				}),
 			);
+			// Persist pinnedMessageId to Dexie so the pin survives a reload (cycle 259).
+			// Recompute from the pre-update snapshot (chatsRef) since setChats is async —
+			// mirrors handleIncomingReaction's persist pattern above.
+			const chat = chatsRef.current.find((c) => c.mlsGroupId === gId);
+			const nextPinnedMessageId =
+				action === "pin"
+					? targetMessageId
+					: chat?.pinnedMessageId === targetMessageId
+						? undefined
+						: chat?.pinnedMessageId;
+			db.groups.update(gId, { pinnedMessageId: nextPinnedMessageId }).catch(() => {});
+			// Keep persistedPinnedMessageId in sync with what this event just wrote so the
+			// "apply persisted pin state" effect doesn't resurrect a stale value on the next
+			// `rows` change (security-auditor finding, cycle 259: an unpin left the old
+			// persisted id in state, and a later rows update silently re-pinned the message).
+			// Only touch it when this event is for the currently active group — updating it
+			// for a background group would make that effect misapply this value to whatever
+			// chat happens to be active when it next re-runs.
+			const activeGroupId = chatsRef.current.find((c) => c.id === activeIdRef.current)?.mlsGroupId;
+			if (activeGroupId === gId) {
+				setPersistedPinnedMessageId(nextPinnedMessageId);
+			}
 		},
 		[],
 	);
@@ -7733,6 +7793,15 @@ export function ChatLayout() {
 					};
 				}),
 			);
+			// Persist pinnedMessageId to Dexie so the pin survives a reload (cycle 259).
+			// Deterministic from local vars (no chatsRef read needed — unlike
+			// handleIncomingReaction, sendPin already knows the outcome synchronously).
+			const nextPinnedMessageId = action === "pin" ? targetMessageId : undefined;
+			db.groups.update(mlsGroupId, { pinnedMessageId: nextPinnedMessageId }).catch(() => {});
+			// mlsGroupId is always the active group here (early return above), so this is
+			// always safe to sync unconditionally — see handleIncomingPin for why the
+			// background-group case needs the extra guard (security-auditor, cycle 259).
+			setPersistedPinnedMessageId(nextPinnedMessageId);
 			const plaintext = new TextEncoder().encode(JSON.stringify({ type: action, targetMessageId }));
 			cryptoWorker
 				.mlsEncrypt(mlsIdentityId, mlsGroupId, plaintext)

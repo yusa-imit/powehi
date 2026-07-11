@@ -31,6 +31,7 @@ let captureOnPin: ((gId: string, targetMessageId: string, action: "pin" | "unpin
 describe("ChatLayout — pinned banner jump-to-message", () => {
 	beforeEach(async () => {
 		await db.verifiedContacts.clear();
+		await db.groups.clear();
 		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
 			MOCK_WORKER as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
 		);

@@ -39,6 +39,7 @@ describe("ChatLayout", () => {
 	beforeEach(async () => {
 		await db.verifiedContacts.clear();
 		await db.messages.clear();
+		await db.groups.clear();
 		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
 			MOCK_WORKER as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
 		);
@@ -1561,6 +1562,213 @@ describe("ChatLayout", () => {
 
 			expect(screen.queryByTestId("pinned-banner")).not.toBeInTheDocument();
 		});
+
+		it("clicking pin button persists pinnedMessageId to Dexie so it survives a reload", async () => {
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(() => {});
+			useAuthStore.setState({
+				phase: "app",
+				deviceId: "my-device-pin-persist-1",
+				sessionToken: "tok-pin-persist-1",
+			});
+			await db.groups.add({
+				id: "11111111-1111-1111-1111-111111111111",
+				name: "Maya Akana",
+				mlsStateB64: "",
+				lastActivity: 1000,
+			});
+			const sendSpy = vi
+				.spyOn(MessagesApiModule, "sendMessage")
+				.mockResolvedValue("pin-persist-env-1");
+			render(<ChatLayout />);
+
+			const textarea = screen.getByPlaceholderText(/encrypted/i);
+			fireEvent.change(textarea, { target: { value: "message to persist pin" } });
+			fireEvent.click(screen.getByRole("button", { name: /send message/i }));
+			await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+			await act(async () => {});
+
+			const bubbles = screen.getAllByTestId("message-bubble");
+			const lastBubble = bubbles[bubbles.length - 1];
+			fireEvent.mouseEnter(lastBubble);
+			fireEvent.click(screen.getByTestId("pin-button"));
+
+			await waitFor(async () => {
+				const row = await db.groups.get("11111111-1111-1111-1111-111111111111");
+				expect(row?.pinnedMessageId).toBeTruthy();
+			});
+		});
+
+		it("unpin clears the persisted pinnedMessageId in Dexie", async () => {
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(() => {});
+			useAuthStore.setState({
+				phase: "app",
+				deviceId: "my-device-pin-persist-2",
+				sessionToken: "tok-pin-persist-2",
+			});
+			await db.groups.add({
+				id: "11111111-1111-1111-1111-111111111111",
+				name: "Maya Akana",
+				mlsStateB64: "",
+				lastActivity: 1000,
+			});
+			const sendSpy = vi
+				.spyOn(MessagesApiModule, "sendMessage")
+				.mockResolvedValue("pin-persist-env-2");
+			render(<ChatLayout />);
+
+			const textarea = screen.getByPlaceholderText(/encrypted/i);
+			fireEvent.change(textarea, { target: { value: "message to unpin" } });
+			fireEvent.click(screen.getByRole("button", { name: /send message/i }));
+			await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+			await act(async () => {});
+
+			const bubbles = screen.getAllByTestId("message-bubble");
+			const lastBubble = bubbles[bubbles.length - 1];
+			fireEvent.mouseEnter(lastBubble);
+			fireEvent.click(screen.getByTestId("pin-button"));
+			await waitFor(async () => {
+				const row = await db.groups.get("11111111-1111-1111-1111-111111111111");
+				expect(row?.pinnedMessageId).toBeTruthy();
+			});
+
+			fireEvent.click(screen.getByTestId("unpin-button"));
+
+			await waitFor(async () => {
+				const row = await db.groups.get("11111111-1111-1111-1111-111111111111");
+				expect(row?.pinnedMessageId).toBeUndefined();
+			});
+		});
+
+		it("incoming pin persists pinnedMessageId to Dexie keyed by the peer's group id", async () => {
+			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+			let capturedOnPin:
+				| ((groupId: string, targetMessageId: string, action: "pin" | "unpin") => void)
+				| undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(
+					_id,
+					_gid,
+					onMsg,
+					_onPq,
+					_onTyping,
+					_onReaction,
+					_onReactionRemove,
+					_onRead,
+					_onDelivery,
+					_onEdit,
+					_onDelete,
+					onPin,
+				) => {
+					capturedOnMessage = onMsg;
+					capturedOnPin = onPin;
+				},
+			);
+			await db.groups.add({
+				id: "11111111-1111-1111-1111-111111111111",
+				name: "Maya Akana",
+				mlsStateB64: "",
+				lastActivity: 1000,
+			});
+			render(<ChatLayout />);
+
+			const PEER_MSG_ID = "pin-persist-peer-uuid-1111-1111111111";
+			await act(async () => {
+				capturedOnMessage?.({
+					id: PEER_MSG_ID,
+					groupId: "11111111-1111-1111-1111-111111111111",
+					senderId: "peer-device-pin-persist",
+					text: "peer message to persist pin",
+					ciphertextB64: "Zg==",
+					epochSeq: 1,
+				});
+			});
+			await act(async () => {
+				capturedOnPin?.("11111111-1111-1111-1111-111111111111", PEER_MSG_ID, "pin");
+			});
+
+			await waitFor(async () => {
+				const row = await db.groups.get("11111111-1111-1111-1111-111111111111");
+				expect(row?.pinnedMessageId).toBe(PEER_MSG_ID);
+			});
+		});
+
+		it("unpinning a restored-from-Dexie pin does not get resurrected by a later message arrival", async () => {
+			// Regression test for a security-auditor finding (cycle 259): the "apply persisted
+			// pin state" effect re-runs on every `rows` change (to retry against the mount race),
+			// but `persistedPinnedMessageId` was only ever set once at load time — an in-session
+			// unpin cleared `chats` + Dexie but left the stale persisted id in state, so the next
+			// unrelated `rows` update (e.g. an incoming message) silently re-pinned the message.
+			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+			let capturedOnPin:
+				| ((groupId: string, targetMessageId: string, action: "pin" | "unpin") => void)
+				| undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(
+					_id,
+					_gid,
+					onMsg,
+					_onPq,
+					_onTyping,
+					_onReaction,
+					_onReactionRemove,
+					_onRead,
+					_onDelivery,
+					_onEdit,
+					_onDelete,
+					onPin,
+				) => {
+					capturedOnMessage = onMsg;
+					capturedOnPin = onPin;
+				},
+			);
+			const GROUP_ID = "11111111-1111-1111-1111-111111111111";
+			const PINNED_ID = "resurrect-regression-pinned-1";
+			await db.messages.add({
+				id: PINNED_ID,
+				groupId: GROUP_ID,
+				ciphertextB64: "Zg==",
+				senderDeviceId: "peer-device-resurrect",
+				epochSeq: 1,
+				receivedAt: 1000,
+				plaintextB64: textToBase64("message pinned before this session started"),
+			});
+			await db.groups.add({
+				id: GROUP_ID,
+				name: "Maya Akana",
+				mlsStateB64: "",
+				lastActivity: 1000,
+				pinnedMessageId: PINNED_ID,
+			});
+
+			render(<ChatLayout />);
+			await waitFor(() => expect(screen.getByTestId("pinned-banner")).toBeInTheDocument());
+
+			// Unpin the restored message.
+			await act(async () => {
+				capturedOnPin?.(GROUP_ID, PINNED_ID, "unpin");
+			});
+			await waitFor(() => expect(screen.queryByTestId("pinned-banner")).not.toBeInTheDocument());
+			await waitFor(async () => {
+				const row = await db.groups.get(GROUP_ID);
+				expect(row?.pinnedMessageId).toBeUndefined();
+			});
+
+			// A later, unrelated message arrival changes `rows` and re-runs the apply effect —
+			// it must not resurrect the pin that was just cleared.
+			await act(async () => {
+				capturedOnMessage?.({
+					id: "resurrect-regression-followup-1",
+					groupId: GROUP_ID,
+					senderId: "peer-device-resurrect",
+					text: "an unrelated later message",
+					ciphertextB64: "Zg==",
+					epochSeq: 2,
+				});
+			});
+			expect(screen.queryByTestId("pinned-banner")).not.toBeInTheDocument();
+			const row = await db.groups.get(GROUP_ID);
+			expect(row?.pinnedMessageId).toBeUndefined();
+		});
 	});
 
 	describe("user presence", () => {
@@ -2193,6 +2401,57 @@ describe("ChatLayout", () => {
 				).toBeGreaterThan(0);
 			});
 			expect(screen.queryByTestId("reaction-chips")).not.toBeInTheDocument();
+		});
+
+		it("restores a persisted pinned message on mount for the active chat", async () => {
+			await db.messages.bulkPut([
+				seedRow({
+					id: "rehydrate-pinned-1",
+					groupId: MAYA_GROUP,
+					receivedAt: 1000,
+					plaintextB64: textToBase64("this message was pinned before reload"),
+				}),
+			]);
+			await db.groups.add({
+				id: MAYA_GROUP,
+				name: "Maya Akana",
+				mlsStateB64: "",
+				lastActivity: 1000,
+				pinnedMessageId: "rehydrate-pinned-1",
+			});
+
+			render(<ChatLayout />);
+
+			await waitFor(() => {
+				expect(screen.getByTestId("pinned-banner")).toBeInTheDocument();
+			});
+			expect(screen.getByTestId("pinned-banner").textContent).toContain(
+				"this message was pinned before reload",
+			);
+		});
+
+		it("does not restore a persisted pin for a different (inactive) chat's messages", async () => {
+			await db.messages.bulkPut([
+				seedRow({
+					id: "rehydrate-pinned-jordan-1",
+					groupId: JORDAN_GROUP,
+					receivedAt: 1000,
+					plaintextB64: textToBase64("jordan's pinned message"),
+				}),
+			]);
+			await db.groups.add({
+				id: JORDAN_GROUP,
+				name: "Jordan",
+				mlsStateB64: "",
+				lastActivity: 1000,
+				pinnedMessageId: "rehydrate-pinned-jordan-1",
+			});
+
+			// Maya is the default active chat — Jordan's pin must not leak into it.
+			render(<ChatLayout />);
+			await act(async () => {});
+
+			expect(screen.queryByTestId("pinned-banner")).not.toBeInTheDocument();
 		});
 	});
 });

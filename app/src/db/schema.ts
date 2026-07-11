@@ -30,6 +30,8 @@ export interface GroupRow {
 	lastActivity: number;
 	/** Per-conversation disappearing timer in seconds. undefined = off. Not sensitive. */
 	disappearingTtlSeconds?: number;
+	/** id of the currently pinned MessageRow in this group, if any. Not sensitive — an opaque UUID reference, not content. */
+	pinnedMessageId?: string;
 }
 
 // LocalIdentity — singleton device identity record.
@@ -121,6 +123,16 @@ export class PowehiDb extends Dexie {
 		// (previously React-state-only, same gap edit/delete had before v7). No index
 		// change needed — reactions are never queried by Dexie, only read per-row.
 		this.version(8).stores({
+			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v9: added pinnedMessageId to GroupRow so a pinned message survives a reload
+		// (previously React-state-only, same gap edit/delete/reactions had before v7/v8).
+		// Not sensitive (opaque UUID reference, like disappearingTtlSeconds); not indexed —
+		// only ever read/written per-group, never queried across groups.
+		this.version(9).stores({
 			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
 			groups: "id, lastActivity",
 			identity: "id",
