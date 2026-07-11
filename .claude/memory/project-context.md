@@ -2928,6 +2928,38 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - Review is part of writing: implement → run the relevant review agent → fix → commit.
 
 ## Cycle log (recent)
+- Cycle 255 STABILIZATION: Redis testcontainers integration suite (commit 7f9d213).
+  - CI green (no red runs), `gh issue list` empty, `cargo audit` clean (only the pre-existing
+    waived RUSTSEC-2024-0384 `instant` advisory via openmls/fluvio-wasm-timer), `cargo clippy
+    --workspace --all-targets -- -D warnings` clean, backend `cargo test --workspace` all green,
+    frontend `pnpm test` 1136/1136 green (92 files) — no regressions found, so this cycle targeted
+    the test-gap sweep instead (testing-conventions.md item 3).
+  - Gap found: testing-conventions.md requires a `testcontainers` integration test per outbound
+    adapter (Postgres/Redis/R2); only Postgres had one (`pg_security_it.rs`). `powehi-redis`'s
+    `RedisCache` (`CachePort` impl) had only inline unit tests — never touched a real Redis.
+  - Added `crates/adapters/outbound/powehi-redis/tests/redis_cache_it.rs`: 9 `#[ignore]`d
+    `#[tokio::test]`s against a real ephemeral `redis:7-alpine` testcontainer (overrides the
+    testcontainers-modules 0.11 default tag of 5.0, which predates GETDEL/Redis 6.2 that
+    `RedisCache::get_del` issues) — covers set/get round-trip, missing-key None, TTL expiry
+    (real sleep-past-deadline, not mocked), delete + idempotent delete-on-missing, exists
+    presence tracking, GETDEL atomicity, SADD/SMEMBERS round-trip, and set_expire TTL-on-existing-
+    key. Per-test unique key prefixes (`it:{uuid}:...`) though containers are already per-test.
+  - Wired into `.github/workflows/ci-rust.yml`'s existing `integration-test` job: added a
+    `docker pull redis:7-alpine` pre-pull + `cargo nextest run -p powehi-redis --run-ignored all
+    -E 'binary(redis_cache_it)'` step, mirroring the existing Postgres testcontainers step.
+  - Cargo.toml: added `"redis"` to workspace `testcontainers-modules` features; powehi-redis
+    Cargo.toml: added `tokio`/`testcontainers`/`testcontainers-modules` to `[dev-dependencies]`.
+  - Delegated implementation to `backend-lead`; verified `cargo test --no-run -p powehi-redis`
+    compiles clean and `cargo clippy --workspace --all-targets -- -D warnings` stays clean (Docker
+    unavailable in this sandbox, so the `#[ignore]`d tests themselves run for real only in CI).
+  - **security-auditor: GREEN**, no findings. Test fixtures are synthetic/opaque (no plaintext
+    content or PII), container lifecycle correct (`_c` binding keeps `ContainerAsync` alive,
+    Drop tears it down), test isolation sound, CI change low-risk (mirrors existing Postgres step,
+    no new secrets/permissions). Minor non-blocking nit: `redis:7-alpine` is tag- not
+    digest-pinned, consistent with the existing `postgres:16-alpine` step (not a regression).
+  - `powehi-r2` (S3-compatible testcontainers via minio/localstack) intentionally left as a
+    separate future stabilization item — did not want to scope-creep this pass.
+  - target/ at 11G (well under the 20G prune threshold) — no hygiene pass needed this cycle.
 - Cycle 254 FEATURE: Persist emoji reactions to Dexie (commit 4cde17a).
   - Closed the last remaining gap in the cycle 252/253 series: reactions (already fully
     implemented end-to-end over MLS control envelopes — `{type:"reaction"|"reaction_remove",...}`
