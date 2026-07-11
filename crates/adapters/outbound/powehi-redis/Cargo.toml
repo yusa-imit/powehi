@@ -19,3 +19,6 @@ futures-core = "0.3"
 [dev-dependencies]
 uuid = { workspace = true }
 chrono = { workspace = true }
+tokio = { workspace = true }
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }
