@@ -1334,6 +1334,16 @@ function ChatRow({
 							<Icon name="pin" size={10} color="#A8C8FF" />
 						</span>
 					)}
+					{chat.pinnedMessageId && (
+						<span
+							data-testid="pinned-message-indicator"
+							title="This chat has a pinned message"
+							aria-label="Pinned message"
+							style={{ lineHeight: 0 }}
+						>
+							<Icon name="pin" size={10} color="#FF8A3D" />
+						</span>
+					)}
 					{chat.isGroup && (
 						<span
 							data-testid="group-badge"
