@@ -16,7 +16,9 @@ fn size_bucket(bytes: u64) -> &'static str {
 /// RFC 6838 §4.2 restricted-name token: ALPHA / DIGIT / "!" / "#" / "$" / "&"
 /// / "-" / "^" / "_" / "." / "+", non-empty.
 fn is_valid_media_type_token(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "!#$&-^_.+".contains(c))
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "!#$&-^_.+".contains(c))
 }
 
 /// Validate a client-supplied `Content-Type` before it is persisted and
@@ -330,7 +332,13 @@ mod tests {
 
     #[test]
     fn content_type_validation_accepts_common_mime_types() {
-        for ct in ["image/jpeg", "image/png", "video/mp4", "audio/mpeg", "application/pdf"] {
+        for ct in [
+            "image/jpeg",
+            "image/png",
+            "video/mp4",
+            "audio/mpeg",
+            "application/pdf",
+        ] {
             assert!(is_valid_content_type(ct), "{ct} should be valid");
         }
     }
