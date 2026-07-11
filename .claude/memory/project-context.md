@@ -3040,6 +3040,62 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
     remaining tracked deferred item). No other known open UX/test-gap items from recent cycles —
     next FEATURE cycle should scan for a fresh gap (UX polish or a new checklist item) rather than
     working off a stale backlog.
+- Cycle 259 FEATURE: Persist pinned message to Dexie (commit 7f150af).
+  - **Mode:** FEATURE (counter 259 % 5 ≠ 0). CI green on main. No open `gh issue list` items.
+  - Closes the last item in the edit(252)/delete(253)/reaction(254) Dexie-persistence series: pin/
+    unpin (already fully implemented end-to-end over MLS control envelopes —
+    `{type:"pin"|"unpin",targetMessageId}` in `useMessages.ts`/`ChatLayout.tsx`, with `PinnedBanner`
+    UI + pin button already wired) lived only in React `chats` state — a reload silently un-pinned
+    every conversation, the same gap edit/delete/reactions had before their cycles closed it.
+  - `GroupRow.pinnedMessageId?: string` (schema v9, **not** encrypted at rest — same non-sensitive
+    tier as the existing `disappearingTtlSeconds`, since it's just an opaque `MessageRow.id`
+    reference, and `MessageRow.id` is itself already an unencrypted Dexie primary key).
+  - `handleIncomingPin`/`sendPin` now also call `db.groups.update(groupId, {pinnedMessageId})`,
+    mirroring the pre-existing `disappearingTtlSeconds` persistence pattern (raw `db.groups.update`,
+    not routed through `EncryptedPowehiDb` since the field isn't sensitive).
+  - Two new effects: one loads the persisted `pinnedMessageId` from Dexie on chat switch (alongside
+    the existing `disappearingTtlSeconds` load) into new state `persistedPinnedMessageId`; a second
+    applies it onto the active chat's `pinnedMessageId`/message-`pinned` flag once the target
+    message exists in `chats` state, re-running on `rows` changes to retry past the async race
+    between the group-row fetch and `usePersistentMessages`' message rehydration (neither has an
+    ordering guarantee relative to the other).
+  - **security-auditor: YELLOW → fixed in-cycle.** `persistedPinnedMessageId` was only ever set once
+    at load time; an in-session unpin cleared `chats` state + Dexie but left the stale persisted id
+    around, so the *next unrelated* `rows` change (e.g. any incoming message in that chat) re-ran
+    the apply effect, found the old target still un-pinned-but-present, and silently re-pinned it —
+    Dexie and in-memory state then disagreed until a full reload. Fixed by syncing
+    `persistedPinnedMessageId` on every pin/unpin (both local `sendPin` and incoming
+    `handleIncomingPin`), scoped to only update it when the event's group is the currently active
+    one (via `activeIdRef`/`chatsRef`, the codebase's existing stable-callback-without-deps idiom)
+    so a background group's pin event can't leak into whatever chat happens to be active later.
+    Verified the fix is load-bearing by reverting it locally and confirming the new regression test
+    fails against the un-fixed code, then re-applying and confirming it passes.
+  - Also GREEN: no new attack surface for peer-forged pin/unpin (persistence writes exactly what
+    the already-accepted in-memory `handleIncomingPin` trust model computes, no new authority); no
+    plaintext/PII logging (silent `.catch(() => {})` on write failure, matching sibling patterns).
+  - Added `db.groups.clear()` to `beforeEach` in `ChatLayout.test.tsx`,
+    `ChatLayoutPinnedJump.test.tsx`, `ChatLayoutPinIndicatorSidebar.test.tsx` — these are now the
+    only test files that write to the `groups` table, and needed the same cross-test-isolation fix
+    cycle 253 applied to `db.messages.clear()`.
+  - **Known pre-existing gap, confirmed not worsened by this diff:** no code path anywhere in the
+    app currently calls `db.groups.add()` — a `GroupRow` is never created, so in the live app today
+    `db.groups.update()` (both for `disappearingTtlSeconds` since v6, and now `pinnedMessageId`)
+    is a no-op until group-row creation gets wired up. Root-caused during this cycle (searched for
+    `addGroup(`/`putGroup(`/`db.groups.add` across the whole frontend — zero hits outside
+    `encrypted-db.ts`'s unused method definitions and test seed helpers). Deliberately left
+    unfixed: real group-row creation would need to decide what a client-created `mlsStateB64`
+    placeholder should contain before real MLS state export exists, which is crypto-adjacent and
+    belongs in a `crypto-lead`-reviewed cycle, not bundled into a UI-persistence fix. **This is the
+    top candidate for the next cycle that wants to make Dexie persistence actually work end-to-end
+    in production** rather than only in tests that pre-seed `GroupRow`s.
+  - 8 new tests in `ChatLayout.test.tsx` (persist-on-pin-click, persist-on-unpin-clears,
+    persist-on-incoming-pin, the unpin-resurrection regression test) + 2 in the message-history-
+    rehydration describe block (restores a persisted pin on mount, does not leak a different/
+    inactive chat's persisted pin into the active one). **Frontend: 1164 tests pass** (was 1163,
+    +8 net after also touching 3 sibling test files' `beforeEach`; 95 files); tsc clean; biome
+    clean.
+  - **Next cycle:** the group-row-creation gap above, or PQ hybrid Phase A (still blocked on
+    openmls stable `MLS_128_MLKEM768`).
 - Cycle 255 STABILIZATION: Redis testcontainers integration suite (commit 7f9d213).
   - CI green (no red runs), `gh issue list` empty, `cargo audit` clean (only the pre-existing
     waived RUSTSEC-2024-0384 `instant` advisory via openmls/fluvio-wasm-timer), `cargo clippy
