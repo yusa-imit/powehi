@@ -2995,6 +2995,51 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
   - **Next cycle:** `powehi-r2` testcontainers integration suite (S3-compatible) still deferred —
     now the only outbound adapter without one (Postgres and Redis both have testcontainers suites).
     Also open: PQ hybrid Phase A (blocked on openmls stable `MLS_128_MLKEM768`).
+- Cycle 258 FEATURE: powehi-r2 testcontainers integration suite (commit d75c01c).
+  - **Mode:** FEATURE (counter 258 % 5 ≠ 0). CI check found `CI — Frontend` red on main for the
+    latest real code push (e5d8c26, cycle 257's sound picker) — investigated before implementing:
+    a byte-for-byte fresh clone + `pnpm install --frozen-lockfile` + `pnpm --filter app build` at
+    that exact commit reproduced ZERO TypeScript errors, so the failure (mass `TS2339: Property
+    'toBeInTheDocument' does not exist` across ~20 unrelated test files, in the `Bundle budget
+    check` job's `tsc -b` step) was a transient CI cache/runner artifact, not a real regression.
+    Confirmed via `gh run rerun --failed`: all jobs including Bundle budget check went green on
+    rerun with zero code changes. Proceeded to FEATURE work once confirmed green.
+  - Closed the last outbound-adapter test-coverage gap (testing-conventions.md item: every
+    outbound adapter needs a `testcontainers` integration test) — Postgres and Redis already had
+    one (cycles pre-255 and 255), `powehi-r2` (Cloudflare R2 / S3-compatible `R2MediaAdapter`) did
+    not.
+  - Added `testcontainers-modules`' `"minio"` feature to the root workspace Cargo.toml (image
+    `minio/minio:RELEASE.2022-02-07T08-17-33Z`, default creds `minioadmin`/`minioadmin`, S3 API on
+    container port 9000).
+  - New `crates/adapters/outbound/powehi-r2/tests/r2_media_it.rs` (12 `#[ignore]`d tests): each
+    spins up BOTH a real Postgres (media_blobs metadata + FK rows via `powehi_postgres::
+    run_migrations`) and a real MinIO container per test — no mocks. Covers save/find_by_id
+    round-trip (group_id Some AND None), save idempotency (`ON CONFLICT (id) DO NOTHING`),
+    `presigned_upload_url` validates content-type BEFORE touching S3 (verified against the actual
+    `lib.rs` impl rather than assumed), NotFound paths for missing rows, `delete` removing both the
+    S3 object and the Postgres row (delete of an absent id is a no-op, not an error — also verified
+    against the impl), and a full presigned upload→download byte round-trip via `reqwest`.
+  - Wired into `.github/workflows/ci-rust.yml`'s `integration-test` job: `docker pull minio/minio:
+    RELEASE.2022-02-07T08-17-33Z` pre-pull + `cargo nextest run -p powehi-r2 --run-ignored all
+    -E 'binary(r2_media_it)'`, mirroring the existing Postgres/Redis steps.
+  - Delegated implementation to `backend-lead`; verified independently: `cargo test --no-run -p
+    powehi-r2` compiles clean, `cargo fmt --all --check` clean, `cargo clippy --workspace
+    --all-targets -- -D warnings` clean, `cargo test --workspace` all green (Docker unavailable in
+    sandbox so the 12 `#[ignore]`d tests run for real only in CI).
+  - **security-auditor: GREEN** (one YELLOW-informational, not a blocker): all fixtures are opaque
+    metadata (random UUIDs, content-type hints, sizes) or test-authored synthetic bytes for the
+    upload round-trip — never real content/PII; MinIO default test creds are scoped to the test
+    file only, pointing at an ephemeral local Docker container, not committed secrets; confirmed
+    `src/lib.rs` (the actual adapter) diff is empty — this is a genuinely test-only + CI-config
+    change; noted (not fixed, informational only) that `assert_eq!` on the round-trip payload bytes
+    (synthetic, not real ciphertext) would print full bytes on failure — fine for synthetic test
+    data, flagged as a pattern to avoid copy-pasting into any future test that touches real content.
+  - `powehi-r2` is now the last outbound adapter with `testcontainers` coverage — all three
+    (Postgres, Redis, R2) now have one. This closes the multi-cycle-tracked test-gap item.
+  - **Next cycle:** PQ hybrid Phase A still blocked on openmls stable `MLS_128_MLKEM768` (only
+    remaining tracked deferred item). No other known open UX/test-gap items from recent cycles —
+    next FEATURE cycle should scan for a fresh gap (UX polish or a new checklist item) rather than
+    working off a stale backlog.
 - Cycle 255 STABILIZATION: Redis testcontainers integration suite (commit 7f9d213).
   - CI green (no red runs), `gh issue list` empty, `cargo audit` clean (only the pre-existing
     waived RUSTSEC-2024-0384 `instant` advisory via openmls/fluvio-wasm-timer), `cargo clippy
