@@ -252,4 +252,66 @@ describe("EncryptedPowehiDb", () => {
 		const retrieved = await encDb.getMessage("no-such-msg");
 		expect(retrieved).toBeUndefined();
 	});
+
+	// crypto-reviewer finding 2 (RED): the MLS provider-state generation counter
+	// must be bundled INSIDE the same authenticated ciphertext as the state blob
+	// (a single JSON envelope, encrypted once) rather than stored as an
+	// independent, unencrypted Dexie column — otherwise an attacker with raw
+	// IndexedDB write access could roll the counter back to 0 on its own and
+	// replay an older-but-still-AEAD-valid state blob, defeating the freshness/
+	// anti-replay gate entirely.
+	describe("setMlsProviderState / getMlsProviderState (finding 2: bundled generation envelope)", () => {
+		it("round-trips stateB64 + generation through a single encrypted field", async () => {
+			await encDb.setIdentity({ id: 1, deviceId: "dev-mls-1" });
+			await encDb.setMlsProviderState("c3RhdGUtYnl0ZXM=", 7);
+
+			const state = await encDb.getMlsProviderState();
+			expect(state?.stateB64).toBe("c3RhdGUtYnl0ZXM=");
+			expect(state?.generation).toBe(7);
+		});
+
+		it("stores ONE encrypted blob, not a separate plaintext generation column", async () => {
+			await encDb.setIdentity({ id: 1, deviceId: "dev-mls-2" });
+			await encDb.setMlsProviderState("cGxhaW50ZXh0LXN0YXRl", 3);
+
+			const rawRow = await rawDb.identity.get(1);
+			expect(rawRow).toBeDefined();
+			// No independent plaintext generation column exists on the raw row.
+			expect(
+				(rawRow as unknown as Record<string, unknown>).mlsProviderStateGeneration,
+			).toBeUndefined();
+			// The raw field is encrypted — neither the state bytes nor a bare "7"
+			// integer appear in plaintext, and it must not parse as our envelope JSON.
+			expect(rawRow?.mlsProviderStateB64).not.toBe(
+				JSON.stringify({ stateB64: "cGxhaW50ZXh0LXN0YXRl", generation: 3 }),
+			);
+			expect(() => JSON.parse(rawRow?.mlsProviderStateB64 ?? "")).toThrow();
+		});
+
+		it("tampering the raw ciphertext (simulating rolled-back generation) fails AEAD auth on read, not a silent bypass", async () => {
+			await encDb.setIdentity({ id: 1, deviceId: "dev-mls-3" });
+			await encDb.setMlsProviderState("b3JpZ2luYWwtc3RhdGU=", 5);
+
+			const rawRow = await rawDb.identity.get(1);
+			const tampered = `${(rawRow?.mlsProviderStateB64 ?? "").slice(0, -2)}xx`;
+			await rawDb.identity.update(1, { mlsProviderStateB64: tampered });
+
+			// Because generation now lives inside the same AEAD-protected envelope as
+			// the state bytes, a raw-storage tamper attempt (the only way to try to
+			// roll back generation independently) corrupts the ciphertext and fails
+			// authentication on decrypt — it can no longer silently reset just the
+			// counter while leaving a valid-looking envelope.
+			await expect(encDb.getMlsProviderState()).rejects.toThrow();
+		});
+
+		it("getMlsProviderState returns undefined when no envelope has ever been persisted", async () => {
+			await encDb.setIdentity({ id: 1, deviceId: "dev-mls-4" });
+			const state = await encDb.getMlsProviderState();
+			expect(state).toBeUndefined();
+		});
+
+		it("setMlsProviderState is a no-op (does not throw) when the identity row does not exist yet", async () => {
+			await expect(encDb.setMlsProviderState("c3RhdGU=", 1)).resolves.not.toThrow();
+		});
+	});
 });

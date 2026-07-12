@@ -25,6 +25,29 @@ export type MlsIdentityResult = {
 };
 export type MlsGroupResult = { groupId: string };
 export type MlsKeyPackageResult = { keyPackage: Uint8Array; pqDecapKeyHandle: string };
+// MLS full-context export/import (worker-reload persistence, wasm_exports.rs
+// "MLS full-context export/import" section). stateBytes/state_bytes carry live
+// key material — callers MUST only ever persist/pass bytes that round-tripped
+// through the encrypted-db.ts AES-GCM at-rest layer (see gate 1 in that module).
+export type MlsExportStateResult = { stateBytes: Uint8Array; generation: number };
+export type MlsImportStateResult = { identityId: string; groupIds: string[]; generation: number };
+
+/**
+ * Thrown by mlsImportState when the WASM freshness/format gate rejects a blob
+ * (stale-generation, corrupt/tampered-at-rest, or unsupported-version). A
+ * content-free discriminated category — carries NO blob bytes, key material,
+ * or generation value, only a stable `name` — so callers can distinguish a
+ * genuine import rejection from a routine "no stored envelope yet" case
+ * without violating no-plaintext-logging. The `name` survives Comlink's error
+ * serialization, so main-thread callers can branch on `err.name`.
+ */
+export class MlsImportRejectedError extends Error {
+	constructor() {
+		super("mls_import_rejected");
+		this.name = "MlsImportRejectedError";
+	}
+}
+
 // prd.md §5.3 Phase B — extract ML-KEM encap key from a peer's KeyPackage extension.
 export type MlsPqEncapKeyResult = { encapKey: Uint8Array; signature: Uint8Array };
 export type MlsWelcomeResult = { welcome: Uint8Array };
@@ -83,6 +106,9 @@ interface WasmModule {
 	mls_group_members: (identityId: string, groupId: string) => MlsGroupMember[];
 	mls_compute_safety_number: (sigKeyA: Uint8Array, sigKeyB: Uint8Array) => MlsSafetyNumberResult;
 	mls_clear_session: () => void;
+	// MLS full-context export/import (worker-reload persistence).
+	mls_export_state: (identityId: string, generation: number) => MlsExportStateResult;
+	mls_import_state: (stateBytes: Uint8Array, minGeneration: number) => MlsImportStateResult;
 	// §8.5 Recovery: BIP-39 phrase generation and phrase-derived identity.
 	mls_generate_recovery_phrase: () => { words: string[] };
 	mls_init_identity_from_phrase: (phrase: string, identityBytes: Uint8Array) => MlsIdentityResult;
@@ -382,6 +408,74 @@ const api = {
 	): Promise<MlsPlaintextResult> {
 		const wasm = await getWasm();
 		return wasm.mls_decrypt(identityId, groupId, ciphertext);
+	},
+
+	/**
+	 * Export the full MLS context (identity + provider key store + every group)
+	 * for at-rest persistence across a worker reload (wasm_exports.rs).
+	 *
+	 * `generation` MUST be a monotonically increasing counter the caller
+	 * maintains — pass the last-used value + 1. Returns { stateBytes, generation }.
+	 *
+	 * SECURITY: stateBytes contains live key material (Ed25519 signing key) and
+	 * MLS epoch secrets for every group. Callers MUST persist it only through
+	 * the encrypted-db.ts AES-GCM at-rest layer — never log it, never send it
+	 * to the server (no-plaintext-logging: the blob itself is key material).
+	 */
+	async mlsExportState(identityId: string, generation: number): Promise<MlsExportStateResult> {
+		const wasm = await getWasm();
+		return wasm.mls_export_state(identityId, generation);
+	},
+
+	/**
+	 * Reconstruct a full MLS context from bytes produced by mlsExportState,
+	 * installing it under a freshly minted identityId (wasm_exports.rs).
+	 *
+	 * `minGeneration` is the anti-replay floor: a blob whose bundled generation
+	 * is strictly less than it is rejected. It defaults to 0 and is normally
+	 * NOT supplied by the caller — the useCryptoWorker persistence wrapper owns
+	 * the only trustworthy floor (the in-session high-water-mark) and injects
+	 * it. On the first import of a fresh worker the floor is 0, so no authentic
+	 * blob is rejected (cross-reload wholesale replay is out of scope for this
+	 * gate — see useCryptoWorker.ts SECURITY header); a later in-session import
+	 * cannot roll back below already-advanced state.
+	 *
+	 * SECURITY (gate 1, mandatory precondition): `stateBytes` MUST only ever be
+	 * bytes that already round-tripped through the encrypted-db.ts AES-GCM
+	 * *authenticated* decryption path — never raw/unauthenticated bytes. A
+	 * well-formed-but-corrupt envelope can panic deep inside openmls's storage
+	 * read path; AEAD-at-rest integrity is what makes that path safe to call.
+	 *
+	 * Returns { identityId, groupIds, generation } on success; throws on a
+	 * stale/corrupt/wrong-version blob. Does NOT return a fresh KeyPackage —
+	 * callers should separately call mlsGetKeyPackage(identityId) afterward.
+	 */
+	async mlsImportState(stateBytes: Uint8Array, minGeneration = 0): Promise<MlsImportStateResult> {
+		const wasm = await getWasm();
+		try {
+			return wasm.mls_import_state(stateBytes, minGeneration);
+		} catch (caught) {
+			// Only normalize a DELIBERATE WASM-side rejection (mls_import_state's
+			// documented Err path: stale generation, unsupported version, corrupt/
+			// malformed structure, missing group — see wasm_exports.rs
+			// import_mls_context_inner) to the content-free MlsImportRejectedError
+			// category. wasm-bindgen constructs those via `JsError::new`, which
+			// throws a genuine `Error` instance whose `.name` is exactly "Error".
+			//
+			// An unexpected WASM trap (a real Rust panic deep in openmls's storage
+			// read path — see the gate-1 doc above) surfaces to JS as a
+			// `WebAssembly.RuntimeError` (`.name === "RuntimeError"`), and any other
+			// unrecognized thrown value is likewise NOT a routine "bad blob"
+			// rejection. Rethrow those as-is instead of collapsing them into
+			// MlsImportRejectedError — crypto-reviewer finding Y1: misclassifying a
+			// genuine internal failure as a routine stale/corrupt-envelope
+			// rejection previously let callers (Login.tsx) treat it as safe to
+			// discard/replace the on-disk state, when it is not.
+			if (caught instanceof Error && caught.name === "Error") {
+				throw new MlsImportRejectedError();
+			}
+			throw caught;
+		}
 	},
 
 	/**

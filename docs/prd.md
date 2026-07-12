@@ -163,6 +163,7 @@
 - ❌ 상대방이 의도적으로 메시지를 공개하는 경우
 - ❌ 트래픽 패턴 분석 기반의 사용자 식별 (T5 부분 대응만)
 - ❌ 강제 (rubber-hose) 공격 — 디바이스 비밀번호 강요
+- ❌ **로컬 저장소 쓰기 접근을 통한 MLS provider-state 스냅샷의 wholesale 리플레이** (T4 로컬 침해 경계 내, 이 단계에서 미방어): XSS 또는 로컬 디바이스 접근으로 IndexedDB에 직접 쓸 수 있는 공격자가 이전에 캡처한(여전히 AES-GCM 인증이 유효한) 오래된 MLS provider-state envelope 전체를 리로드 시점에 통째로 복원하는 경우. envelope에 번들된 monotonic `generation` 카운터는 카운터만 독립적으로 롤백하는 변종(AEAD로 blob과 함께 인증됨)은 막지만, 리로드 후 첫 import 시점에는 클라이언트 단독으로 신뢰 가능한 freshness floor가 0이므로(서버/하드웨어 앵커 부재) envelope 통째 리플레이는 방어하지 않음 → 오래된 ratchet 위치로 되돌아가 AEAD nonce/key 재사용 가능. 세션 내에서는 in-session high-water-mark로 두 번째 import의 롤백을 차단함. **완화(추후 단계로 연기, 추적 항목)**: 로그인 시 서버가 per-device monotonic generation high-water-mark를 반환해 import floor로 사용 (`import_provider_state`의 `min_generation` 배관이 이미 end-to-end로 존재하므로 서버 앵커 연동은 additive). 근거: crypto-reviewer approve + threat-model-checker ACCEPT-WITH-CONDITIONS.
 
 ### 3.3 메타데이터 노출 한계
 

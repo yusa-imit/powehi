@@ -15,10 +15,26 @@ import type { PowehiDb } from "./schema";
 // Per-table list of fields encrypted at rest.
 // Indexed fields (id, groupId, epochSeq, receivedAt, contactId, verifiedAt, lastActivity)
 // MUST NOT appear here — Dexie cannot query encrypted index values.
-// identity has no sensitive unindexed fields (exportKeyB64 was removed in schema v3).
+// identity.mlsProviderStateB64 (added schema v10, envelope shape changed v11) carries
+// live MLS key material (Ed25519 signing key + epoch secrets, see mls_export_state),
+// with a companion `generation` value bundled into the same JSON.stringify({
+// stateB64, generation }) plaintext before a single encryptDbField call — see
+// setMlsProviderState/getMlsProviderState below and schema.ts's doc comment.
+// NOTE (crypto-reviewer finding Y3): this envelope-level `generation` is inert
+// bookkeeping, not a security control — it is never used as a gate/decision
+// input (Login.tsx reads it back only to re-persist it verbatim on a failed-
+// import restore; it is never compared against anything). The REAL freshness
+// gate compares the generation embedded INSIDE stateBytes (checked by
+// mls_import_state against useCryptoWorker.ts's in-session currentGeneration
+// floor); bundling this outer field alongside stateB64 only means it can't be
+// edited independently of the ciphertext, not that anything
+// currently relies on it being correct. deviceId/mlsIdentityId/mlsIdentityB64
+// remain unencrypted — mlsIdentityB64 is a documented public label, not a
+// secret (schema.ts).
 const SENSITIVE: Record<string, readonly string[]> = {
 	messages: ["ciphertextB64", "plaintextB64", "editedText", "reactionsJson"],
 	groups: ["mlsStateB64", "name"],
+	identity: ["mlsProviderStateB64"],
 	verifiedContacts: ["safetyNumber"],
 };
 
@@ -194,11 +210,65 @@ export class EncryptedPowehiDb {
 	// ── Identity ───────────────────────────────────────────────────────────────
 
 	async setIdentity(row: LocalIdentity): Promise<void> {
-		await this.db.identity.put(row);
+		const enc = await encRow(this.encryptor, row, "identity");
+		await this.db.identity.put(enc);
 	}
 
 	async getIdentity(): Promise<LocalIdentity | undefined> {
-		return this.db.identity.get(1);
+		const row = await this.db.identity.get(1);
+		return decOptional(this.encryptor, row, "identity");
+	}
+
+	/**
+	 * Persist a fresh MLS provider-state export (mls_export_state) against the
+	 * identity singleton row, encrypted at rest.
+	 *
+	 * SECURITY: `stateB64` and `generation` are JSON-encoded together into ONE
+	 * string and passed through encryptDbField ONCE, so both are covered by the
+	 * same AES-GCM authentication tag — this envelope-level `generation` cannot
+	 * be edited independently of the ciphertext without forging the AEAD tag.
+	 * That said, it is inert bookkeeping, NOT the mechanism enforcing the
+	 * anti-replay gate: getMlsProviderState's caller (Login.tsx) reads this
+	 * field back only to re-persist it verbatim on a failed-import restore —
+	 * it is never compared against anything. The real freshness check compares
+	 * the generation embedded INSIDE stateBytes against useCryptoWorker.ts's
+	 * in-session currentGeneration floor, which is only meaningful in-session
+	 * (0 on the first import after a reload). It does NOT defend against wholesale
+	 * replay of an entire older-but-authentic envelope; see schema.ts's
+	 * mlsProviderStateB64 SCOPE note and useCryptoWorker.ts's SECURITY header.
+	 *
+	 * Uses a partial Dexie update (not put) so deviceId/mlsIdentityId/
+	 * mlsIdentityB64 are never touched by a persist that only has the exported
+	 * blob + generation, not the full LocalIdentity row. No-op if the identity
+	 * row does not exist yet — callers only invoke this after an MLS identity
+	 * is already established, so the row is normally present; if it is not
+	 * (e.g. a persist attempt racing before the identity row's first write),
+	 * this silently does nothing rather than throwing.
+	 */
+	async setMlsProviderState(stateB64: string, generation: number): Promise<void> {
+		const envelope = JSON.stringify({ stateB64, generation });
+		const encrypted = await this.encryptor.encryptDbField(envelope);
+		await this.db.identity.update(1, { mlsProviderStateB64: encrypted });
+	}
+
+	/**
+	 * Read back the MLS provider-state envelope persisted by setMlsProviderState,
+	 * decrypting the single AES-GCM field and JSON-parsing the bundled
+	 * { stateB64, generation } pair. Returns undefined if no identity row exists
+	 * yet, or no provider-state envelope has ever been persisted.
+	 *
+	 * Throws if the ciphertext fails AES-GCM authentication (tampered/wrong key)
+	 * or the decrypted plaintext is not valid JSON (corrupt/pre-v11 legacy
+	 * shape) — callers MUST catch this and fall back to re-deriving MLS state
+	 * from scratch (see Login.tsx's sign-in rehydration path), never crash on it.
+	 */
+	async getMlsProviderState(): Promise<{ stateB64: string; generation: number } | undefined> {
+		const row = await this.db.identity.get(1);
+		const raw = row?.mlsProviderStateB64;
+		if (typeof raw !== "string") return undefined;
+		const decrypted = await this.encryptor.decryptDbField(raw);
+		const parsed = JSON.parse(decrypted) as { stateB64: string; generation: number };
+		return parsed;
 	}
 
 	// ── VerifiedContacts ───────────────────────────────────────────────────────

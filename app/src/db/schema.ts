@@ -52,6 +52,51 @@ export interface LocalIdentity {
 	mlsIdentityId?: string;
 	/** base64(16-byte BasicCredential identity bytes) — public label, not a secret. */
 	mlsIdentityB64?: string;
+	/**
+	 * ENCRYPTED JSON ENVELOPE: base64(AES-GCM(JSON.stringify({ stateB64, generation }))).
+	 * Carries the full MLS context export from mls_export_state (identity + provider
+	 * key store + every group). Closes the "MLS_CTX is a thread_local! that starts
+	 * empty on every worker reload" gap (wasm_exports.rs). Contains live key material
+	 * (Ed25519 signing key, MLS epoch secrets) — encrypted at rest, see
+	 * db/encrypted-db.ts SENSITIVE.identity. NEVER read/write this field outside
+	 * the EncryptedPowehiDb encrypted path (getMlsProviderState/setMlsProviderState).
+	 *
+	 * The bundled `generation` in THIS outer JSON envelope is an inert mirror of
+	 * the same number that is separately embedded inside `stateB64` itself (see
+	 * mls_group.rs `ProviderStateEnvelope.generation`). It is never used as a
+	 * gate/decision input — Login.tsx's sign-in path reads it back only to
+	 * re-persist it VERBATIM alongside the original stateB64 when a failed
+	 * import is not allowed to discard the on-disk envelope (see Login.tsx's
+	 * restore-on-failed-import comment); it is never compared against anything.
+	 * It is NOT the security control; keeping it bundled in the same AEAD field
+	 * as stateB64 (rather than a separate plaintext Dexie column) is defense-in-
+	 * depth only — since it's never checked, a tampered copy would not by itself
+	 * defeat anything. Do not mistake this field for the real freshness gate:
+	 * see SCOPE below.
+	 *
+	 * SCOPE — what the ACTUAL generation check defends (read together with the
+	 * useCryptoWorker.ts SECURITY header, which owns the import floor, and
+	 * mls_group.rs, which owns the real comparison against the copy embedded
+	 * inside stateB64):
+	 *   • The import freshness gate (mls_import_state:
+	 *     `state.generation < min_generation`) only rejects a blob below the
+	 *     caller's floor, and the ONLY trustworthy floor is the worker's
+	 *     in-session high-water-mark. On the first import of a fresh worker
+	 *     (every reload / login) that floor is 0, so an authentic blob is never
+	 *     rejected there.
+	 *   • Therefore this counter does NOT prevent a wholesale replay of an entire
+	 *     older-but-authentic envelope across a reload: an attacker with raw
+	 *     IndexedDB write access who restores a captured older { ciphertext +
+	 *     its own authentic generation } as one atomic unit is not defended
+	 *     against — there is no monotonic hardware- or server-backed counter in
+	 *     this client-only storage model to anchor the floor against (the
+	 *     Delivery Service tracks only a per-group, client-driven, last-writer-
+	 *     wins epoch with no login-time read endpoint). This residual risk is
+	 *     accepted for this phase (threat-model-checker sign-off).
+	 *   • Within a single live session it DOES prevent a second import from
+	 *     rolling back below state already advanced this session.
+	 */
+	mlsProviderStateB64?: string;
 }
 
 // VerifiedContact — Safety Numbers verification state.
@@ -138,6 +183,34 @@ export class PowehiDb extends Dexie {
 		// Not sensitive (opaque UUID reference, like disappearingTtlSeconds); not indexed —
 		// only ever read/written per-group, never queried across groups.
 		this.version(9).stores({
+			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v10: added mlsProviderStateB64 and mlsProviderStateGeneration to LocalIdentity —
+		// persists the full MLS context (identity + provider key store + every group) across
+		// a worker reload/re-login, fixing "every MLS group's state is wiped on every page
+		// reload" (mls_export_state/mls_import_state, wasm_exports.rs). mlsProviderStateB64
+		// is encrypted at rest (see db/encrypted-db.ts SENSITIVE.identity) — no index change
+		// needed (identity table remains a singleton keyed by id=1). GroupRow.mlsStateB64 is
+		// intentionally left untouched — it is a pre-existing unused placeholder, not this field.
+		this.version(10).stores({
+			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v11: removed LocalIdentity.mlsProviderStateGeneration as an independent
+		// top-level column (crypto-reviewer finding 2, RED — see mlsProviderStateB64
+		// doc comment above). The generation counter is now bundled INSIDE the
+		// encrypted mlsProviderStateB64 envelope (JSON.stringify({ stateB64,
+		// generation }), encrypted as one AES-GCM field) so it can no longer be
+		// independently rolled back by an attacker with raw IndexedDB write access.
+		// No .stores() index change needed — mlsProviderStateGeneration was never
+		// indexed (identity table stays "id" only); this version bump exists solely
+		// to document the LocalIdentity shape change for anyone diffing schema history.
+		this.version(11).stores({
 			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
 			groups: "id, lastActivity",
 			identity: "id",

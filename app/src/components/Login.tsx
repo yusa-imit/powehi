@@ -7,6 +7,7 @@ import {
 	regInit,
 	uploadKeyPackage,
 } from "../api/auth";
+import { EncryptedPowehiDb } from "../db/encrypted-db";
 import { db } from "../db/schema";
 import { useCryptoWorker } from "../hooks/useCryptoWorker";
 import { useAuthStore } from "../store/auth";
@@ -212,24 +213,146 @@ export function Login() {
 			device_id = identity.deviceId;
 			({ token } = await doLogin(pw, handle_hash, device_id));
 
-			// Re-initialise MLS identity in the WASM worker using stored bytes.
-			// Each login produces a fresh identityId handle (the WASM map is cleared
-			// on logout), but the signing keys are derived from the same seed bytes
-			// so KeyPackages from this session are associated with this device.
+			// Rehydrate MLS state in the WASM worker. Preferred path: restore the full
+			// exported MLS context (identity + provider key store + every group) via
+			// mlsImportState so existing groups survive a reload — otherwise the
+			// WASM MLS_CTX thread_local starts empty on this fresh worker instance
+			// and every group would appear to need rejoining. Falls back to
+			// re-deriving just the signer from the stored seed bytes (mlsInitIdentity,
+			// today's behavior) when there is no stored provider-state blob yet, or
+			// the stored blob fails to import (stale/corrupt/wrong-version — must
+			// never crash sign-in on this).
 			let pqDecapKeyHandle: string | undefined;
-			if (identity.mlsIdentityB64 && cryptoWorker) {
-				const bytes = base64ToUint8Array(identity.mlsIdentityB64);
-				const {
-					identityId: id,
-					keyPackage,
-					pqDecapKeyHandle: pqHandle,
-				} = await cryptoWorker.mlsInitIdentity(bytes);
-				identityId = id;
-				pqDecapKeyHandle = pqHandle;
-				// Update the current session handle in the DB; don't overwrite mlsIdentityB64.
-				await db.identity.update(1, { mlsIdentityId: id });
-				// Upload a fresh KeyPackage for this session (non-fatal).
-				uploadKeyPackage(token, device_id, keyPackage).catch(() => {});
+			if (cryptoWorker) {
+				let restored: {
+					identityId: string;
+					keyPackage?: Uint8Array;
+					pqDecapKeyHandle?: string;
+				} | null = null;
+
+				// mlsProviderStateB64 is an encrypted JSON envelope { stateB64, generation }
+				// (db/encrypted-db.ts SENSITIVE.identity, schema v11) — it must be read through
+				// EncryptedPowehiDb.getMlsProviderState()'s decrypt+parse path, never off the
+				// raw `identity` row fetched above via db.identity.get(1). (encDb.getIdentity()
+				// also decrypts the field via the SENSITIVE.identity path, but returns it as the
+				// raw envelope STRING without JSON-parsing { stateB64, generation };
+				// getMlsProviderState() is the method that additionally parses it.) The
+				// envelope's own `generation` field is discarded below (never passed to
+				// mlsImportState) — it is an inert mirror of the copy already embedded
+				// inside stateB64, not itself the security check. The real import floor
+				// is owned by the worker wrapper (the in-session high-water-mark), NOT
+				// sourced from this envelope (that would compare a value to itself); see
+				// useCryptoWorker.ts and schema.ts's mlsProviderStateB64 doc comment.
+				const encDb = new EncryptedPowehiDb(db, cryptoWorker);
+				let providerState: { stateB64: string; generation: number } | undefined;
+				try {
+					providerState = await encDb.getMlsProviderState();
+				} catch {
+					// Corrupt/tampered envelope failed AES-GCM auth, or decrypted plaintext
+					// was not valid JSON — fall through to the mlsIdentityB64 path below.
+					// Never log the caught error (content could embed blob fragments in
+					// some engines' error messages).
+					providerState = undefined;
+				}
+
+				let importAttemptedAndFailed = false;
+				if (providerState) {
+					let importedId: string | null = null;
+					try {
+						const stateBytes = base64ToUint8Array(providerState.stateB64);
+						// Do NOT pass a floor from the envelope's own generation — the worker
+						// wrapper owns the anti-replay floor (the in-session high-water-mark)
+						// and injects it (useCryptoWorker.ts). Passing the blob's own
+						// generation here would make the WASM freshness gate compare a value
+						// against itself and never reject.
+						const { identityId: id } = await cryptoWorker.mlsImportState(stateBytes);
+						importedId = id;
+					} catch (importErr) {
+						// A present-but-rejected envelope is a genuine anomaly (corrupt or
+						// tampered-at-rest, unsupported version, or — for an in-session
+						// re-import — a stale-generation replay), distinct from the routine
+						// "no envelope yet" case, which never reaches here (providerState
+						// would be undefined). Surface only the content-free error CATEGORY
+						// (never the blob, key material, or generation — no-plaintext-logging)
+						// so this is observably different from a clean first login, then fall
+						// back to re-deriving the signer from the seed below.
+						const category =
+							importErr instanceof Error && importErr.name === "MlsImportRejectedError"
+								? "mls_import_rejected"
+								: "mls_import_unknown";
+						console.warn("mls_state_rehydration_failed", category);
+						importedId = null;
+						importAttemptedAndFailed = true;
+					}
+
+					if (importedId) {
+						// Import SUCCEEDED — the full multi-group context is live in the worker
+						// and the encrypted on-disk blob is intact. Mint a fresh KeyPackage for
+						// this session. If minting/persisting the KeyPackage fails, do NOT
+						// discard the successfully-imported group state by falling through to
+						// mlsInitIdentity (that would reset the identity and overwrite the good
+						// multi-group blob on disk with a groupless one). Keep the imported
+						// identity and simply skip this session's KeyPackage upload.
+						try {
+							const { keyPackage, pqDecapKeyHandle: pqHandle } =
+								await cryptoWorker.mlsGetKeyPackage(importedId);
+							restored = { identityId: importedId, keyPackage, pqDecapKeyHandle: pqHandle };
+						} catch {
+							restored = { identityId: importedId };
+						}
+					}
+				}
+
+				if (!restored && identity.mlsIdentityB64) {
+					// Each login produces a fresh identityId handle (the WASM map is
+					// cleared on logout), but the signing keys are derived from the
+					// same seed bytes so KeyPackages from this session are associated
+					// with this device.
+					const bytes = base64ToUint8Array(identity.mlsIdentityB64);
+					const {
+						identityId: id,
+						keyPackage,
+						pqDecapKeyHandle: pqHandle,
+					} = await cryptoWorker.mlsInitIdentity(bytes);
+					restored = { identityId: id, keyPackage, pqDecapKeyHandle: pqHandle };
+
+					if (importAttemptedAndFailed && providerState) {
+						// crypto-reviewer finding Y2: mlsInitIdentity's own persistence
+						// wrapper (useCryptoWorker.ts IDENTITY_INIT_METHODS) already
+						// durably overwrote the on-disk envelope with this fresh,
+						// groupless identity's state as a side effect of the call
+						// above. An import FAILURE (even a genuine stale/corrupt one)
+						// must not forfeit the still-possibly-recoverable prior
+						// envelope — only a SUCCESSFUL import may replace it. Restore
+						// the pre-existing snapshot immediately after so a same-app-
+						// version retry (e.g. next reload, before this fallback
+						// session performs any MLS mutation) can still attempt to
+						// recover the groups instead of them being unconditionally
+						// lost. NOTE: this recovery window is only until the FIRST
+						// ratchet-advancing op in this fallback session — the next
+						// doFlush (useCryptoWorker.ts) persists the groupless state's
+						// own advancing generation and overwrites this restored
+						// envelope again; it is not open-ended recoverability.
+						try {
+							await encDb.setMlsProviderState(providerState.stateB64, providerState.generation);
+						} catch {
+							// Best-effort restore only — never block sign-in on this.
+						}
+					}
+				}
+
+				if (restored) {
+					identityId = restored.identityId;
+					pqDecapKeyHandle = restored.pqDecapKeyHandle;
+					// Update the current session handle in the DB; don't overwrite mlsIdentityB64.
+					await db.identity.update(1, { mlsIdentityId: restored.identityId });
+					// Upload a fresh KeyPackage for this session (non-fatal). Absent only when
+					// an import succeeded but minting this session's KeyPackage failed — the
+					// imported group state is still kept (see above).
+					if (restored.keyPackage) {
+						uploadKeyPackage(token, device_id, restored.keyPackage).catch(() => {});
+					}
+				}
 			}
 
 			// Advance to app phase (sign-in path) — DB key was derived inside the crypto worker.
