@@ -17,7 +17,63 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-12, cycle 263 — FEATURE: wire AcceptInviteModal into ChatLayout chat list)
+## Current state (2026-07-12, cycle 264 — FEATURE: MLS provider state export/import, Rust-core Phase 1)
+- Commit e9b9ce4. Started closing the cycle-263-noted `mlsStateB64` placeholder gap. Research
+  first: dispatched a general-purpose agent to check whether "real MLS group-state export" is
+  actually implementable or blocked on bigger unfinished work — it found something more serious
+  than the placeholder itself: the WASM crypto worker's `MLS_CTX` is a `thread_local!` that starts
+  empty on every fresh worker instance, so **any existing group's MLS state (not just the Dexie
+  mirror) is fully wiped on every page reload today** — `mls_encrypt`/`mls_decrypt` return
+  `"unknown mls identity"/"unknown mls group"` for any group after a refresh until it's somehow
+  rejoined. That's a real, previously-undocumented bug, not just missing persistence.
+  - I then did my own source-level check (not the agent's conclusion) of `openmls_memory_storage`
+    0.5.0 and `openmls_rust_crypto` 0.5.1 and found the fix is NOT blocked on a custom
+    `StorageProvider` redesign as initially assumed: `MemoryStorage.values: pub RwLock<HashMap<Vec<u8>,
+    Vec<u8>>>` is already public, `OpenMlsRustCrypto::storage()` returns `&MemoryStorage` (mutable
+    through the RwLock via shared ref), and `openmls::group::MlsGroup::load(storage, group_id)`
+    already reconstructs a full group purely from provider storage — no `MlsGroup`-level
+    serialization needed. The existing `generate_identity_from_keypair` (§8.5 recovery) can already
+    re-derive the signer deterministically, so the exporter doesn't need to carry the signing key
+    across reload either (though it happens to be included since it's in the same storage map).
+  - Delegated to `crypto-lead`: added `export_provider_state(provider) -> Vec<u8>` /
+    `import_provider_state(bytes) -> Provider` in `crates/client/powehi-crypto-wasm/src/mls_group.rs`
+    (serde_json pair-array of the storage map, no new dep), plus a full persist→drop→reimport→
+    reload-via-`MlsGroup::load`→continue-messaging round-trip test and a garbage-input rejection test.
+  - **Scope deliberately capped to Rust-core only this cycle** — wasm-bindgen export, the
+    `CryptoWorkerApi`/worker glue, and the `ChatLayout.tsx`/Dexie call sites are NOT touched yet;
+    nothing outside `mls_group.rs`'s own tests calls these functions today.
+  - **crypto-reviewer: YELLOW, fixed in-cycle.** (1) `import_provider_state`'s docstring overclaimed
+    "garbage input can never panic" — true only for the outer pair-array shape; a well-formed pair
+    array with a corrupted inner value panics inside openmls's own `MemoryStorage::read_list`/entity
+    reads (`.unwrap()` internally) the moment `MlsGroup::load` touches it, which would poison the
+    whole WASM worker. Fixed: corrected the docstring to state this explicitly + added
+    `test_import_well_formed_but_corrupt_value_panics_in_openmls_load` (via `catch_unwind`) so the
+    surface is captured/test-locked, not silently regressed. (2) Verified (traced
+    `merge_pending_commit`/`delete_previous_epoch_keypairs`/`max_past_epochs(0)`) that a fresh export
+    never resurrects already-deleted prior-epoch key material — forward secrecy holds for an honest
+    export→import cycle. (3) **Hard gates flagged for Phase 2 (NOT yet implemented, do this before
+    wiring to Dexie/JS):** (a) `import_provider_state` must only ever receive bytes that already
+    passed through `encrypted-db.ts`'s AES-GCM authenticated decryption — never raw/unauthenticated
+    bytes, since corrupt input can panic; (b) needs a monotonic epoch/generation guard rejecting
+    stale re-imports — AEAD-at-rest gives integrity but not freshness, so replaying an old (but
+    validly-authenticated) blob after the live group has advanced would resume encryption at an
+    already-used ratchet position (AES-128-GCM nonce reuse); (c) current export is **provider-wide**
+    (every group under one identity) but the frontend's `GroupRow.mlsStateB64` is a **per-group**
+    field — granularity must be resolved (e.g. switch to a per-identity Dexie row, or filter storage
+    keys by group) before wiring, storing the full per-identity blob under every group row as-is
+    would be wasteful and widen stale-copy exposure.
+  - `cargo test --workspace`: all green (5/5 `mls_group` tests incl. 3 new). `cargo clippy
+    --workspace --all-targets -- -D warnings`: clean. `cargo fmt --all --check`: clean.
+  - **Frontend: untouched this cycle** (deliberately Rust-core only).
+  - **Next cycle:** MLS-state-export Phase 2 (resolve per-group-vs-per-identity granularity, add the
+    monotonic epoch/generation replay guard, wasm-bindgen export + `CryptoWorkerApi` methods, and
+    wire `ChatLayout.tsx` mount/reload to actually rehydrate MLS groups from Dexie — this is the
+    real fix for the newly-confirmed "MLS state is wiped on every reload" bug, delegate to
+    `crypto-lead` + `frontend-lead`/`indexeddb-engineer`, mandatory `crypto-reviewer` pass again since
+    it adds an untrusted-input boundary), or PQ hybrid Phase A (still blocked on openmls stable
+    `MLS_128_MLKEM768`).
+
+## Previous state (2026-07-12, cycle 263 — FEATURE: wire AcceptInviteModal into ChatLayout chat list)
 - Commit 89bffb2. Closed the cycle-262-noted gap: accepting a contact invite completed the full
   MLS handshake (create group, add inviter, send Welcome) but the resulting chat never appeared
   in the sidebar or Dexie — `AcceptInviteModal` was a sibling of `ChatLayout` in `App.tsx` with no
