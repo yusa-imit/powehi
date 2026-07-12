@@ -17,7 +17,57 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-12, cycle 264 — FEATURE: MLS provider state export/import, Rust-core Phase 1)
+## Current state (2026-07-12, cycle 265 — STABILIZATION: cargo-deny AGPL fix + wired into CI)
+- Commit 4e59c96. CI was green on main, `gh issue list` empty, so this cycle ran the security
+  sweep: `cargo audit` clean (only the pre-existing waived `instant` advisory), but `cargo deny
+  check` — installed fresh via `brew install cargo-deny` since it wasn't present — was FAILING
+  on both `advisories` and `licenses`, and had apparently been failing silently for a long time
+  since **`cargo-deny` was never wired into CI** (only `cargo audit` was in `ci-rust.yml`).
+- **Real bug found:** every one of the 18 first-party `powehi-*` crates was being flagged as an
+  AGPL-3.0-only license violation by cargo-deny's third-party allowlist — but AGPL-3.0-only is
+  the workspace's own deliberately-declared license (`Cargo.toml` `[workspace.package] license`),
+  not a dependency. Root cause: no crate had `publish = false`, so cargo-deny treated all of them
+  as publishable-to-crates.io and checked their own license against the third-party allowlist.
+  Fix: added `publish = false` to `[workspace.package]` + `publish.workspace = true` to all 18
+  crate `Cargo.toml`s, plus `[licenses.private] ignore = true` in `deny.toml` — this is
+  cargo-deny's intended mechanism for exempting unpublished first-party crates; verified (and
+  security-auditor independently confirmed) this cannot let a real third-party dependency slip
+  through, since only workspace members with `publish = false` are exempted.
+  Also added `CDLA-Permissive-2.0` to the allowlist (webpki-roots' bundled Mozilla CA data
+  license — data, not code, standard for any rustls consumer).
+- **Also closed RUSTSEC-2025-0111** (`tokio-tar` PAX-header file-smuggling, dev-only via
+  `testcontainers`): bumped `testcontainers` 0.23.3→0.27.3 / `testcontainers-modules`
+  0.11.6→0.15.0, which drops `tokio-tar` entirely in favor of the actively-maintained
+  `astral-tokio-tar` fork. No code changes needed in the three testcontainers IT suites
+  (`pg_security_it.rs`, `redis_cache_it.rs`, `r2_media_it.rs`) — API-compatible bump.
+  Confirmed via dependency-tree trace (both mine and security-auditor's) that everything new
+  the bump pulled in (`bollard`, `tonic 0.14.6`, `axum 0.8.9`, etc.) is scoped to
+  `[dev-dependencies]` only; production still resolves `tonic 0.12.3` for `powehi-grpc` unchanged.
+- Synced `deny.toml`'s advisory `ignore` list with the already-vetted `.cargo/audit.toml`
+  waivers (added `RUSTSEC-2024-0384` `instant`-unmaintained and `RUSTSEC-2026-0173`
+  `proc-macro-error2`-unmaintained, both pre-existing accepted waivers now documented in both
+  files) and dropped the now-stale `tokio-tar` waiver from `.cargo/audit.toml`.
+- **security-auditor: GREEN**, two YELLOW hygiene findings fixed in-cycle: (1) the two waiver
+  files were still out of sync as first committed (`instant` missing from `.cargo/audit.toml`
+  with no impact writeup, stale `tokio-tar` line lingering) — fixed by adding the `instant`
+  writeup and removing the stale line; (2) new `deny` CI job had no explicit `permissions:`
+  block — added `permissions: { contents: read }` (least privilege for a read-only lint job).
+- Added the `deny` job to `.github/workflows/ci-rust.yml` (`EmbarkStudios/cargo-deny-action@v2`)
+  so this class of gap can't silently reappear.
+- `cargo build --workspace --tests`, `cargo test --workspace` (all green, only the
+  Docker-requiring `#[ignore]`d testcontainers tests skipped locally — no Docker in this
+  sandbox, they run in CI), `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt
+  --all --check` all clean. `cargo audit` and `cargo deny check` both fully green post-fix.
+- Target dir at 19G (just under the 20G prune threshold) — pruned 0-byte `.rmeta` stubs only,
+  no size-based pruning triggered.
+- **Frontend: untouched this cycle** (pure backend dependency/config sweep).
+- **Next cycle:** MLS-state-export Phase 2 (per-group-vs-per-identity granularity, monotonic
+  epoch/generation replay guard, wasm-bindgen export + `CryptoWorkerApi` methods, wire
+  `ChatLayout.tsx` to rehydrate MLS groups from Dexie on reload — the real fix for the
+  cycle-264-confirmed "MLS state wiped on every page reload" bug), or PQ hybrid Phase A (still
+  blocked on openmls stable `MLS_128_MLKEM768`).
+
+## Previous state (2026-07-12, cycle 264 — FEATURE: MLS provider state export/import, Rust-core Phase 1)
 - Commit e9b9ce4. Started closing the cycle-263-noted `mlsStateB64` placeholder gap. Research
   first: dispatched a general-purpose agent to check whether "real MLS group-state export" is
   actually implementable or blocked on bigger unfinished work — it found something more serious
