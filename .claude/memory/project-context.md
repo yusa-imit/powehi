@@ -17,7 +17,30 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-12, cycle 262 — FEATURE: wire GroupRow creation into Dexie)
+## Current state (2026-07-12, cycle 263 — FEATURE: wire AcceptInviteModal into ChatLayout chat list)
+- Commit 89bffb2. Closed the cycle-262-noted gap: accepting a contact invite completed the full
+  MLS handshake (create group, add inviter, send Welcome) but the resulting chat never appeared
+  in the sidebar or Dexie — `AcceptInviteModal` was a sibling of `ChatLayout` in `App.tsx` with no
+  way to push state into it. Moved invite-code detection (URL hash + Tauri deep-link) and the
+  modal render from `App.tsx` into `ChatLayout.tsx`; new `handleInviteAccepted(groupId,
+  peerDeviceId)` delegates to the existing `handleNewGroup` (same `NewGroupEvent` shape the
+  Welcome-poller path already uses) for dedup + Dexie mirror + chat-list prepend, then
+  `handleSelectChat(groupId)` navigates in. `AcceptInviteModal.onAccepted` grew a `peerDeviceId`
+  second param (captured from `redeemInvite`'s `inviterDeviceId`) so the caller can derive the
+  same "Contact <shortId>" naming convention. `App.tsx` now just picks `<Login />` vs
+  `<ChatLayout />`. Delegated implementation to `frontend-lead`; it hit one flaky-test bug
+  (`afterEach` ordering — RTL's own cleanup ran after `vi.restoreAllMocks()`/store reset, crashing
+  `useDeepLink`'s `useRef` on a stale mock) which it found and fixed itself in a follow-up pass.
+  1166 frontend tests (was 1166 — net even: 2 App.test.tsx describe blocks moved to a new
+  `ChatLayoutAcceptInvite.test.tsx` plus 2 new chat-list-wiring tests, offset by no net file-count
+  change elsewhere), tsc clean, biome clean. **security-auditor: GREEN**, no findings (peerDeviceId
+  never logged/rendered/sent anywhere but the Dexie mirror + display name, same handling as the
+  pre-existing Welcome-poller path; no auth-gating regression since `ChatLayout` only ever mounts
+  at `phase === "app"`; handleNewGroup's existing dedup-by-mlsGroupId guard covers the
+  Welcome-poller-race scenario). Next: MLS-state exporter (mlsStateB64 is still a `""` placeholder
+  nothing reads back), or PQ hybrid Phase A (still blocked on openmls stable `MLS_128_MLKEM768`).
+
+## Previous state (2026-07-12, cycle 262 — FEATURE: wire GroupRow creation into Dexie)
 - See "Cycle log (recent)" below for the cycle 262 write-up (commit ae67d72). TL;DR: closed the
   cycle-259 group-row-creation gap — `handleNewGroup`/`handleGroupCreated` in ChatLayout.tsx now
   `putGroup()` into Dexie, `GroupRow.name` is now encrypted at rest, `mlsStateB64` is an explicitly
