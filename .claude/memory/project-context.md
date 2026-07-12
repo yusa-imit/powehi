@@ -17,7 +17,63 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-12, cycle 265 — STABILIZATION: cargo-deny AGPL fix + wired into CI)
+## Current state (2026-07-13, cycle 269 — FEATURE: wire MLS full-context export/import into sign-in + crypto-worker persistence, Phase 2 finish)
+
+- Commit 5258dee. This was the real fix for the long-standing "MLS_CTX thread_local starts empty
+  on every worker reload" bug (flagged since cycle 264/33d6e65, which only landed the Rust-side
+  `mls_export_state`/`mls_import_state` WASM exports — the frontend never called them).
+- **Found substantial uncommitted work already in the working tree at cycle start** (Login.tsx,
+  encrypted-db.ts/schema.ts, useCryptoWorker.ts, crypto.worker.ts, a new Login.signin.test.tsx —
+  841 lines, clearly a prior cycle's in-progress work that was never committed/reviewed, likely
+  from an interrupted cycle 266-268 that left no memory trail). Verified it built/tested clean
+  (1182 frontend tests, tsc, biome all green) before treating it as this cycle's deliverable and
+  running the review gate CLAUDE.md requires before any commit.
+- **Design:** `useCryptoWorker.ts` gained `wrapWithPersistence()`, a Proxy wrapping the Comlink
+  worker proxy — every ratchet-advancing MLS call (encrypt/decrypt/createGroup/addMember/
+  joinGroup) and `mlsGetKeyPackage` now synchronously re-exports the full MLS context and
+  persists it to Dexie (encrypted, `identity.mlsProviderStateB64`, schema v11) BEFORE the wrapped
+  call resolves, rejecting the caller if the persist fails (persist-before-release — prevents a
+  crash+reload from resuming a ratchet at an already-used position → nonce/key reuse). Login.tsx's
+  sign-in path now tries `mlsImportState` first (restores every group), falling back to the
+  pre-existing `mlsInitIdentity(seedBytes)` path only when no envelope exists or import fails.
+- **crypto-reviewer (mandatory gate, ran twice this cycle):** first pass returned
+  needs-rework/block: Y1 (`crypto.worker.ts`'s `mlsImportState` catch-all collapsed a genuine WASM
+  panic/trap and a routine stale/corrupt-blob rejection into the same category) + Y2 (Login.tsx's
+  `mlsInitIdentity` fallback let its own auto-flush silently/irreversibly overwrite the on-disk
+  multi-group envelope on ANY import failure, including a possibly-transient one) as the merge
+  blocker, plus Y3 (doc comments overstated the security role of the envelope-level `generation`
+  field bundled alongside `stateB64` — Login.tsx never reads it back for the actual gate, which
+  compares the generation embedded *inside* `stateBytes` against the in-session floor instead).
+  Fixed all three in-cycle: narrowed the worker catch to `caught.name === "Error"` (wasm-bindgen's
+  `JsError` signature) so only a deliberate rejection is normalized, rethrowing anything else;
+  added `importAttemptedAndFailed` tracking in Login.tsx so a failed import re-persists the
+  original snapshotted envelope after the fallback's destructive flush, so only a *successful*
+  import ever replaces stored group state; corrected the misleading doc comments. Second
+  crypto-reviewer pass: **GREEN on security substance** (no nonce/key reuse, no replay-gate
+  bypass, no plaintext logging), flagged one more nit (the Y3 doc fix itself said the envelope
+  generation is "discarded/never read back" when the Y2 fix now reads-and-re-persists it verbatim
+  on restore — needed "never used as a gate input" instead) + softened an overstated
+  recoverability-window claim in Login.tsx's restore comment (the restored envelope only survives
+  until the *next* ratchet-advancing op in the fallback session, not indefinitely) — both fixed,
+  re-verified tests/tsc/biome green, then committed.
+- Added a regression test in Login.signin.test.tsx for the Y2 restore behavior (spies on
+  `EncryptedPowehiDb.prototype.setMlsProviderState`, asserts the original envelope is re-persisted
+  verbatim after a failed-import fallback). All 1183 frontend tests green (97 files, was 1182);
+  tsc clean; Biome clean. Backend untouched this cycle (pure frontend wiring of already-committed
+  Rust/WASM exports).
+- **Residual/accepted risk (documented in prd.md §3.2, cycle 264):** wholesale replay of an
+  entire older-but-authentic provider-state envelope is not defended on the very first import
+  after a reload (floor is 0, no server/hardware anchor in this client-only model) — unchanged by
+  this cycle, still threat-model-checker accepted.
+- **Next cycle:** the cycle-264 "Next cycle" note about per-group-vs-per-identity granularity is
+  now superseded (this cycle wires the whole-context approach end-to-end); consider whether the
+  server-anchored `min_generation` mitigation prd.md flags as a tracked future item is worth
+  starting, or continue with PQ hybrid Phase A (still blocked on openmls stable
+  `MLS_128_MLKEM768`). Also: double-check cycles 266-268 aren't referenced anywhere expecting
+  distinct commits — this session found no memory entries for them and no orphaned commits, so
+  the uncommitted diff was likely all one prior interrupted session, not three separate cycles.
+
+## Previous state (2026-07-12, cycle 265 — STABILIZATION: cargo-deny AGPL fix + wired into CI)
 - Commit 4e59c96. CI was green on main, `gh issue list` empty, so this cycle ran the security
   sweep: `cargo audit` clean (only the pre-existing waived `instant` advisory), but `cargo deny
   check` — installed fresh via `brew install cargo-deny` since it wasn't present — was FAILING
