@@ -328,6 +328,27 @@ pub fn join_group(
         .map_err(|_| MlsError::Membership)
 }
 
+/// On-disk / at-rest envelope for [`export_provider_state`] /
+/// [`import_provider_state`]. Bundles a monotonic `generation` counter INSIDE
+/// the serialized bytes (not passed alongside them) so a replayed old blob
+/// necessarily replays its own old generation — a caller cannot swap the
+/// generation number independently of the ciphertext/key material it
+/// describes. See [`import_provider_state`]'s freshness-gate doc for why this
+/// matters (nonce-reuse risk from resuming the ratchet at an already-used
+/// position).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedProviderState {
+    /// Format version. Only `1` is currently accepted.
+    version: u16,
+    /// Monotonic generation counter, minted by the caller at export time.
+    generation: u64,
+    /// The provider's raw `MemoryStorage` key/value map.
+    pairs: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+/// Current [`PersistedProviderState::version`].
+const PROVIDER_STATE_VERSION: u16 = 1;
+
 /// Serialize the provider's entire storage backend to a self-contained byte blob
 /// for at-rest persistence (e.g. the frontend's `GroupRow.mlsStateB64` Dexie
 /// field).
@@ -341,13 +362,22 @@ pub fn join_group(
 /// group the provider knows about via [`openmls::group::MlsGroup::load`]; no
 /// separate serialization of an `MlsGroup` is needed.
 ///
+/// # Generation / freshness
+/// `generation` is a caller-minted monotonic counter (e.g. incremented on every
+/// successful export) bundled *inside* the serialized bytes via
+/// [`PersistedProviderState`]. [`import_provider_state`] rejects any blob whose
+/// bundled generation is less than the caller-supplied `min_generation`,
+/// preventing a stale (but validly-AEAD-authenticated-at-rest) snapshot from
+/// being replayed to resume the ratchet at an already-used position.
+///
 /// # Serialization format
-/// A `serde_json` array of `[key, value]` pairs, where each key/value is a JSON
-/// array of byte values (`serde_json` renders `Vec<u8>` as a number array). This
-/// is chosen over a JSON object because the map keys are opaque, frequently
-/// non-UTF-8 byte strings that openmls constructs internally and cannot be used
-/// as JSON object keys without an extra encoding step. The pair-array form
-/// round-trips arbitrary bytes losslessly with no added dependency.
+/// `serde_json` encoding of [`PersistedProviderState`]; `pairs` is a JSON array
+/// of `[key, value]` pairs, where each key/value is a JSON array of byte values
+/// (`serde_json` renders `Vec<u8>` as a number array). This is chosen over a
+/// JSON object because the map keys are opaque, frequently non-UTF-8 byte
+/// strings that openmls constructs internally and cannot be used as JSON object
+/// keys without an extra encoding step. The pair-array form round-trips
+/// arbitrary bytes losslessly with no added dependency.
 ///
 /// # Security
 /// The returned bytes contain **live key material and ciphertext** (epoch
@@ -355,15 +385,23 @@ pub fn join_group(
 /// secret: they MUST only ever be written to the client-side encrypted store,
 /// never logged, and never sent to the server. The error path is content-free
 /// (rule: no-plaintext-logging).
-pub fn export_provider_state(provider: &Provider) -> Result<Vec<u8>, MlsError> {
+pub fn export_provider_state(provider: &Provider, generation: u64) -> Result<Vec<u8>, MlsError> {
     let values = provider
         .storage()
         .values
         .read()
         .map_err(|_| MlsError::Persistence)?;
-    // Serialize borrowed references directly to avoid cloning secret bytes.
-    let pairs: Vec<(&Vec<u8>, &Vec<u8>)> = values.iter().collect();
-    serde_json::to_vec(&pairs).map_err(|_| MlsError::Persistence)
+    // The struct owns its fields, so pairs must be cloned out of the RwLock
+    // guard; the guard itself is dropped at the end of this block. No secret
+    // bytes are logged or otherwise observed along the way.
+    let pairs: Vec<(Vec<u8>, Vec<u8>)> =
+        values.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let state = PersistedProviderState {
+        version: PROVIDER_STATE_VERSION,
+        generation,
+        pairs,
+    };
+    serde_json::to_vec(&state).map_err(|_| MlsError::Persistence)
 }
 
 /// Reconstruct a [`Provider`] from bytes produced by [`export_provider_state`].
@@ -372,7 +410,20 @@ pub fn export_provider_state(provider: &Provider) -> Result<Vec<u8>, MlsError> {
 /// backend with the deserialized key/value map. The returned provider is ready
 /// to serve [`openmls::group::MlsGroup::load`] for any group the original
 /// provider held, and to continue encrypt/decrypt/commit operations from the
-/// persisted epoch.
+/// persisted epoch. On success, also returns the bundled `generation` so the
+/// caller can persist it as the new floor for the next `min_generation`.
+///
+/// # Freshness gate
+/// `min_generation` is the last-known generation the caller has already
+/// consumed (or `0` on first load). If the blob's bundled `generation` is
+/// strictly less than `min_generation`, this returns [`MlsError::Persistence`]
+/// without touching anything else. AEAD-at-rest (the caller's AES-GCM
+/// encrypted-store layer) gives *integrity* — it proves the bytes were not
+/// tampered with — but not *freshness*: an attacker (or a buggy caller) who
+/// replays an old, validly-encrypted snapshot could otherwise resume the
+/// message-secrets ratchet at an already-used position, which is a nonce-reuse
+/// risk for the AEAD scheme MLS uses internally. Binding `generation` inside
+/// the signed/encrypted envelope and rejecting stale values closes that gap.
 ///
 /// # Signing keys
 /// Signature key pairs stored via `signer.store(..)` are included in the exported
@@ -382,29 +433,41 @@ pub fn export_provider_state(provider: &Provider) -> Result<Vec<u8>, MlsError> {
 /// signing key alone.
 ///
 /// # Errors
-/// Returns [`MlsError::Persistence`] on malformed input or a poisoned state lock.
-/// No `unwrap`/`expect` is used in this function itself, so bytes that are not a
-/// well-formed `[key, value]` pair array can never panic *here*.
+/// Returns [`MlsError::Persistence`] on malformed input, an unsupported
+/// `version`, a stale `generation`, or a poisoned state lock. No
+/// `unwrap`/`expect` is used in this function itself, so bytes that are not a
+/// well-formed [`PersistedProviderState`] can never panic *here*, and no
+/// partial state is ever installed on any error path (the fresh `Provider` is
+/// only returned after every prior check succeeds).
 ///
 /// **This does NOT make the function safe to call on untrusted bytes.** This
-/// function only validates the outer pair-array shape; it does not validate the
-/// inner entity values openmls itself stored (tree, group context, transcript
-/// hash, signature key pairs, ...). `openmls_memory_storage::MemoryStorage`'s own
-/// reads (reached via the intended follow-up call,
-/// [`openmls::group::MlsGroup::load`]) use `serde_json::from_slice(..).unwrap()`
-/// internally on those inner values — a well-formed pair array with a
-/// *corrupted* inner value therefore panics inside openmls, not here (see
+/// function only validates the outer envelope shape (version, generation,
+/// pair-array); it does not validate the inner entity values openmls itself
+/// stored (tree, group context, transcript hash, signature key pairs, ...).
+/// `openmls_memory_storage::MemoryStorage`'s own reads (reached via the
+/// intended follow-up call, [`openmls::group::MlsGroup::load`]) use
+/// `serde_json::from_slice(..).unwrap()` internally on those inner values — a
+/// well-formed envelope with a *corrupted* inner value therefore panics inside
+/// openmls, not here (see
 /// `test_import_well_formed_but_corrupt_value_panics_in_openmls_load`, which
 /// documents this instead of hiding it). In WASM a panic aborts/poisons the
-/// whole crypto-worker instance. Callers (crypto-worker glue, not yet
-/// implemented) MUST therefore only ever pass bytes that have already
-/// round-tripped through an authenticated decryption step (e.g. the AES-GCM
-/// field-level decryption `encrypted-db.ts` performs before this blob would
-/// ever reach Rust) — never raw bytes sourced from an untrusted or
-/// unauthenticated channel.
-pub fn import_provider_state(bytes: &[u8]) -> Result<Provider, MlsError> {
-    let pairs: Vec<(Vec<u8>, Vec<u8>)> =
+/// whole crypto-worker instance. Callers (crypto-worker glue) MUST therefore
+/// only ever pass bytes that have already round-tripped through an
+/// authenticated decryption step (e.g. the AES-GCM field-level decryption
+/// `encrypted-db.ts` performs before this blob would ever reach Rust) — never
+/// raw bytes sourced from an untrusted or unauthenticated channel.
+pub fn import_provider_state(
+    bytes: &[u8],
+    min_generation: u64,
+) -> Result<(Provider, u64), MlsError> {
+    let state: PersistedProviderState =
         serde_json::from_slice(bytes).map_err(|_| MlsError::Persistence)?;
+    if state.version != PROVIDER_STATE_VERSION {
+        return Err(MlsError::Persistence);
+    }
+    if state.generation < min_generation {
+        return Err(MlsError::Persistence);
+    }
     let provider = Provider::default();
     {
         let mut values = provider
@@ -412,9 +475,9 @@ pub fn import_provider_state(bytes: &[u8]) -> Result<Provider, MlsError> {
             .values
             .write()
             .map_err(|_| MlsError::Persistence)?;
-        *values = pairs.into_iter().collect();
+        *values = state.pairs.into_iter().collect();
     }
-    Ok(provider)
+    Ok((provider, state.generation))
 }
 
 #[cfg(test)]
@@ -587,12 +650,13 @@ mod tests {
 
         // Capture the group id, then export and destroy every original handle.
         let alice_group_id = alice_group.group_id().clone();
-        let exported = export_provider_state(&alice_provider).unwrap();
+        let exported = export_provider_state(&alice_provider, 1).unwrap();
         drop(alice_group);
         drop(alice_provider);
 
         // Reconstruct purely from the exported bytes.
-        let new_provider = import_provider_state(&exported).unwrap();
+        let (new_provider, generation) = import_provider_state(&exported, 1).unwrap();
+        assert_eq!(generation, 1, "bundled generation must round-trip");
         let alice2 =
             generate_identity_from_keypair(b"alice", &alice_priv, &alice_pub, &new_provider)
                 .unwrap();
@@ -618,14 +682,34 @@ mod tests {
     fn test_import_provider_state_rejects_garbage() {
         let garbage: &[u8] = b"\x00 not json at all \xff\xfe {[";
         assert!(matches!(
-            import_provider_state(garbage),
+            import_provider_state(garbage, 0),
             Err(MlsError::Persistence)
         ));
         // Empty input is also malformed JSON, not a panic.
         assert!(matches!(
-            import_provider_state(b""),
+            import_provider_state(b"", 0),
             Err(MlsError::Persistence)
         ));
+    }
+
+    /// [`import_provider_state`] rejects a well-formed but *stale* blob: the
+    /// bundled `generation` is strictly less than the caller-supplied
+    /// `min_generation`. This is the freshness gate that prevents replaying an
+    /// old (but validly AEAD-authenticated-at-rest) snapshot to resume the
+    /// message-secrets ratchet at an already-used position.
+    #[test]
+    fn test_import_provider_state_rejects_stale_generation() {
+        let alice_provider = OpenMlsRustCrypto::default();
+        let alice = generate_identity(b"alice", &alice_provider).unwrap();
+        let _alice_group = create_group(&alice, &alice_provider).unwrap();
+
+        let exported = export_provider_state(&alice_provider, 5).unwrap();
+        assert!(matches!(
+            import_provider_state(&exported, 6),
+            Err(MlsError::Persistence)
+        ));
+        // Exactly-equal generation is accepted (not strictly stale).
+        assert!(import_provider_state(&exported, 5).is_ok());
     }
 
     /// Documents (rather than hides) a known panic surface: a byte blob that is a
@@ -643,22 +727,22 @@ mod tests {
         let alice_group = create_group(&alice, &alice_provider).unwrap();
         let alice_group_id = alice_group.group_id().clone();
 
-        let exported = export_provider_state(&alice_provider).unwrap();
-        let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = serde_json::from_slice(&exported).unwrap();
+        let exported = export_provider_state(&alice_provider, 1).unwrap();
+        let mut state: PersistedProviderState = serde_json::from_slice(&exported).unwrap();
         assert!(
-            !pairs.is_empty(),
+            !state.pairs.is_empty(),
             "a freshly created group must have persisted at least one storage entry"
         );
         // Corrupt every stored value's bytes (still valid JSON at the outer
-        // pair-array level, so import_provider_state succeeds) so whichever
+        // envelope level, so import_provider_state succeeds) so whichever
         // entity MlsGroup::load reads first is guaranteed to be corrupt.
-        for (_key, value) in pairs.iter_mut() {
+        for (_key, value) in state.pairs.iter_mut() {
             *value = b"not a valid openmls entity".to_vec();
         }
-        let corrupted = serde_json::to_vec(&pairs).unwrap();
+        let corrupted = serde_json::to_vec(&state).unwrap();
 
         // Also acceptable: import itself rejects the corrupt blob cleanly.
-        let Ok(new_provider) = import_provider_state(&corrupted) else {
+        let Ok((new_provider, _generation)) = import_provider_state(&corrupted, 0) else {
             return;
         };
 

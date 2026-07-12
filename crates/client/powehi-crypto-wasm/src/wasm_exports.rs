@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use js_sys::{Object, Reflect, Uint8Array};
 use opaque_ke::rand::rngs::OsRng;
 use openmls::prelude::{tls_codec::Deserialize as _, *};
+use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use wasm_bindgen::prelude::*;
 use zeroize::Zeroizing;
@@ -26,6 +27,7 @@ use zeroize::Zeroizing;
 use crate::kem;
 use crate::kem_credential;
 use crate::media;
+use crate::mls_group;
 use crate::mls_group::{
     add_member, create_group, decrypt_message, encrypt_message, generate_identity,
     generate_identity_from_keypair, generate_key_package_with_pq_ext, join_group, Identity,
@@ -692,6 +694,265 @@ pub fn mls_decrypt(
         decrypt_message(group, ciphertext, &c.provider).map_err(|e| js_err(&e.to_string()))
     })?;
     js_obj(&[("plaintext", bytes_js(&plaintext))])
+}
+
+// ── MLS full-context export/import (worker-reload persistence) ────────────────
+//
+// `MLS_CTX` is a `thread_local!` that starts empty on every fresh worker
+// instance — a page reload wipes all MLS group state. These exports close
+// that gap by serializing an entire `MlsContext` (identity + provider storage
+// + group id list) to a byte blob the caller persists through the AES-GCM
+// at-rest layer (encrypted-db.ts), and reconstructing it on the next load.
+//
+// Security posture (see doc-comments on the individual functions below):
+//   - The blob contains live key material, ciphertext, and the signature
+//     private key. It MUST only ever be persisted through the encrypted-db.ts
+//     AES-GCM layer — never logged, never sent to the server.
+//   - Import MUST only ever receive bytes that already passed through that
+//     layer's authenticated decryption. AEAD-at-rest gives integrity, not
+//     freshness; the bundled `generation` counter (see `mls_group::export_provider_state`)
+//     is the freshness gate — see `import_mls_context_inner`.
+//   - Reconstruction is atomic: either the full context (identity + every
+//     group) is installed under a freshly minted `identity_id`, or nothing is
+//     installed at all. An old `identity_id` never survives a reload (the
+//     session-local counter resets), so import always mints a new one.
+
+/// Bounds the `group_ids` list on import. This list is untrusted-shaped input
+/// at this point in the pipeline: it has passed AEAD-at-rest integrity (via
+/// the caller's encrypted-db.ts decryption) but its *contents* — including how
+/// many entries it claims to have — are not otherwise validated before this
+/// loop runs. Without a cap, a corrupted or maliciously crafted blob could
+/// claim an unbounded number of group ids and drive an unbounded number of
+/// `MlsGroup::load` calls / memory allocations before any of them are found to
+/// be invalid. 4096 is far beyond any real user's group count.
+const MAX_IMPORT_GROUPS: usize = 4096;
+
+/// At-rest / wasm-boundary envelope for the full [`MlsContext`] export.
+///
+/// This is intentionally a JS-boundary-shaped struct local to this module —
+/// NOT part of `mls_group.rs`'s crypto-core surface (which stays free of any
+/// wasm/JS-shaped types).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct MlsContextState {
+    /// Format version. Only `1` is currently accepted.
+    version: u16,
+    /// Raw `BasicCredential` identity bytes (`credential.serialized_content()`).
+    identity_bytes: Vec<u8>,
+    /// Ed25519 signature public key (`signer.to_public_vec()`).
+    sig_public_key: Vec<u8>,
+    /// Hex-encoded group ids (see `group_id_hex`) for every group this
+    /// identity belongs to.
+    group_ids: Vec<String>,
+    /// Output of `mls_group::export_provider_state` — carries its own bundled
+    /// generation counter for the freshness gate on import.
+    provider_state: Vec<u8>,
+}
+
+/// Current [`MlsContextState::version`].
+const MLS_CONTEXT_STATE_VERSION: u16 = 1;
+
+/// Hex-decode a lowercase hex string (inverse of `group_id_hex`). Not a
+/// crypto primitive — plain byte decoding. Rejects odd length or any non-hex
+/// character.
+fn hex_decode(s: &str) -> Result<Vec<u8>, &'static str> {
+    let bytes = s.as_bytes();
+    if !bytes.len().is_multiple_of(2) {
+        return Err("odd-length hex string");
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for chunk in bytes.chunks_exact(2) {
+        let byte_str = std::str::from_utf8(chunk).map_err(|_| "invalid hex string")?;
+        let byte = u8::from_str_radix(byte_str, 16).map_err(|_| "invalid hex string")?;
+        out.push(byte);
+    }
+    Ok(out)
+}
+
+/// Native-testable core of `mls_export_state`. See the `#[wasm_bindgen]`
+/// wrapper for the security posture doc-comment.
+fn export_mls_context_inner(identity_id: &str, generation: u64) -> Result<Vec<u8>, &'static str> {
+    MLS_CTX.with(|ctx| -> Result<Vec<u8>, &'static str> {
+        let ctx = ctx.borrow();
+        let c = ctx.get(identity_id).ok_or("unknown mls identity")?;
+        let identity_bytes = c
+            .identity
+            .credential_with_key
+            .credential
+            .serialized_content()
+            .to_vec();
+        let sig_public_key = c.identity.signer.to_public_vec();
+        let group_ids: Vec<String> = c.groups.keys().cloned().collect();
+        let provider_state = mls_group::export_provider_state(&c.provider, generation)
+            .map_err(|_| "provider state export failed")?;
+        let state = MlsContextState {
+            version: MLS_CONTEXT_STATE_VERSION,
+            identity_bytes,
+            sig_public_key,
+            group_ids,
+            provider_state,
+        };
+        serde_json::to_vec(&state).map_err(|_| "context state serialization failed")
+    })
+}
+
+/// Native-testable core of `mls_import_state`. See the `#[wasm_bindgen]`
+/// wrapper for the security posture doc-comment.
+///
+/// Returns `(identity_id, group_ids, generation)` on success. `identity_id` is
+/// always freshly minted via `next_id()` — a pre-reload `identity_id` from the
+/// exporting session is meaningless after the session-local counter resets, so
+/// this function never accepts one as input.
+///
+/// Atomicity: all groups are reconstructed into a local `HashMap` first; only
+/// after every group loads successfully is a new `MlsContext` built and
+/// inserted into `MLS_CTX`. Any failure along the way leaves `MLS_CTX`
+/// completely untouched (no partial identity_id, no partial group set).
+fn import_mls_context_inner(
+    state_bytes: &[u8],
+    min_generation: u64,
+) -> Result<(String, Vec<String>, u64), &'static str> {
+    let state: MlsContextState =
+        serde_json::from_slice(state_bytes).map_err(|_| "context state deserialization failed")?;
+    if state.version != MLS_CONTEXT_STATE_VERSION {
+        return Err("unsupported context state version");
+    }
+    if state.group_ids.len() > MAX_IMPORT_GROUPS {
+        return Err("too many groups in context state");
+    }
+
+    // Freshness gate enforced inside import_provider_state via min_generation.
+    let (provider, generation) =
+        mls_group::import_provider_state(&state.provider_state, min_generation)
+            .map_err(|_| "provider state import failed")?;
+
+    let signer = SignatureKeyPair::read(
+        provider.storage(),
+        &state.sig_public_key,
+        mls_group::CIPHERSUITE.signature_algorithm(),
+    )
+    .ok_or("signature key pair not found in imported provider state")?;
+
+    let credential_with_key = CredentialWithKey {
+        credential: BasicCredential::new(state.identity_bytes).into(),
+        signature_key: signer.to_public_vec().into(),
+    };
+    let identity = Identity {
+        credential_with_key,
+        signer,
+    };
+
+    // Reconstruct every group into a LOCAL map first (atomicity: nothing is
+    // committed to MLS_CTX until every group has loaded successfully).
+    let mut groups: HashMap<String, MlsGroup> = HashMap::with_capacity(state.group_ids.len());
+    for group_id_hex_str in &state.group_ids {
+        let raw = hex_decode(group_id_hex_str)?;
+        let gid = GroupId::from_slice(&raw);
+        let group = MlsGroup::load(provider.storage(), &gid)
+            .map_err(|_| "group load failed")?
+            .ok_or("group not present in imported provider state")?;
+        groups.insert(group_id_hex_str.clone(), group);
+    }
+
+    let identity_id = next_id();
+    let group_ids: Vec<String> = groups.keys().cloned().collect();
+    MLS_CTX.with(|ctx| {
+        ctx.borrow_mut().insert(
+            identity_id.clone(),
+            MlsContext {
+                identity,
+                provider,
+                groups,
+            },
+        );
+    });
+
+    Ok((identity_id, group_ids, generation))
+}
+
+/// Convert a JS-boundary `f64` generation counter to `u64`, rejecting
+/// negative, non-finite, non-integer, or too-large values. Content-free
+/// error: the caller only ever sees a static string, never the offending
+/// value.
+fn f64_to_generation(value: f64) -> Result<u64, &'static str> {
+    // `u64::MAX as f64` rounds up to 2^64 (not exactly representable as f64),
+    // so a strict `>` guard would let `value == 2^64` through and silently
+    // clamp to u64::MAX on cast. Use `>=` so any value at or beyond that
+    // rounded bound is rejected outright.
+    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value >= (u64::MAX as f64) {
+        return Err("invalid generation value");
+    }
+    Ok(value as u64)
+}
+
+/// Export the full MLS context (identity + provider key store + every group
+/// this identity belongs to) for at-rest persistence across a worker reload.
+///
+/// `generation` MUST be a monotonically increasing counter the caller
+/// maintains per identity (e.g. incremented on every successful export); pass
+/// it back as `min_generation` to `mls_import_state` on the next load.
+///
+/// Returns `{ stateBytes: Uint8Array, generation: number }`.
+///
+/// # Security
+/// `stateBytes` contains **live key material** (the Ed25519 signature private
+/// key), **ciphertext**, and MLS ratchet/epoch secrets for every group this
+/// identity belongs to. The caller MUST:
+/// - only ever persist `stateBytes` through the client-side AES-GCM at-rest
+///   layer (`encrypted-db.ts`);
+/// - never log it, and never send it to the server;
+/// - pass the last-known generation as `min_generation` on the matching
+///   `mls_import_state` call, so a stale re-import is rejected.
+#[wasm_bindgen]
+pub fn mls_export_state(identity_id: &str, generation: f64) -> Result<JsValue, JsError> {
+    let generation = f64_to_generation(generation).map_err(js_err)?;
+    let blob = export_mls_context_inner(identity_id, generation).map_err(js_err)?;
+    js_obj(&[
+        ("stateBytes", bytes_js(&blob)),
+        ("generation", JsValue::from_f64(generation as f64)),
+    ])
+}
+
+/// Reconstruct a full MLS context from bytes produced by `mls_export_state`,
+/// installing it under a freshly minted `identityId`.
+///
+/// `min_generation` MUST be the last-known generation the caller has already
+/// consumed for this identity (or `0` on first load after registration). A
+/// blob whose bundled generation is strictly less than `min_generation` is
+/// rejected — see `mls_group::import_provider_state`'s freshness-gate doc.
+///
+/// Returns `{ identityId: string, groupIds: string[], generation: number }`.
+/// `identityId` is always new — a pre-reload `identityId` is meaningless once
+/// the session-local id counter has reset, so this call never accepts one as
+/// input.
+///
+/// # Security
+/// Gate 1 (mandatory precondition): this function MUST only ever receive
+/// `state_bytes` that have already round-tripped through the caller's
+/// `encrypted-db.ts` AES-GCM **authenticated** decryption. No code path in
+/// this crate accepts MLS context state bytes from any implicit or otherwise
+/// untrusted source — only the explicit `state_bytes` argument the caller
+/// supplies. A well-formed-but-corrupt envelope can still panic deep inside
+/// openmls's storage read path (documented on
+/// `mls_group::import_provider_state`); that panic-safety property, not this
+/// function's own error handling, is why gate 1 is mandatory.
+///
+/// Reconstruction is atomic: on any error (bad version, stale generation, a
+/// group that fails to load, ...) no partial state is installed — the
+/// previously active session (if any) under other identity ids is untouched.
+#[wasm_bindgen]
+pub fn mls_import_state(state_bytes: &[u8], min_generation: f64) -> Result<JsValue, JsError> {
+    let min_generation = f64_to_generation(min_generation).map_err(js_err)?;
+    let (identity_id, group_ids, generation) =
+        import_mls_context_inner(state_bytes, min_generation).map_err(js_err)?;
+    let group_ids_arr = js_sys::Array::new();
+    for gid in &group_ids {
+        group_ids_arr.push(&JsValue::from_str(gid));
+    }
+    js_obj(&[
+        ("identityId", JsValue::from_str(&identity_id)),
+        ("groupIds", group_ids_arr.into()),
+        ("generation", JsValue::from_f64(generation as f64)),
+    ])
 }
 
 // ── Safety Numbers ─────────────────────────────────────────────────────────────
@@ -1686,6 +1947,252 @@ mod tests {
         let a = next_id();
         let b = next_id();
         assert_ne!(a, b, "consecutive IDs must be unique");
+    }
+
+    // ── MLS full-context export/import ────────────────────────────────────────
+
+    /// Full round-trip across two groups: export the entire `MlsContext`,
+    /// clear `MLS_CTX` (simulating a worker reload wiping `thread_local!`
+    /// state), import the blob back under a freshly minted `identity_id`, and
+    /// prove BOTH groups' epoch/ratchet state survived by encrypting a NEW
+    /// message from each reloaded group and having bob (who never left
+    /// memory) decrypt it correctly.
+    ///
+    /// Forward secrecy note: the underlying provider-state primitive's FS
+    /// guarantee (a fresh export/import can never resurrect deleted
+    /// prior-epoch key material because `max_past_epochs(0)` deletes it
+    /// immediately on commit) is validated directly by
+    /// `mls_group::test_mls_forward_secrecy` (cycle 264). This test builds on
+    /// top of that: it proves the *live* current-epoch ratchet state
+    /// round-trips correctly through the full `MlsContextState` envelope
+    /// (identity + provider + group id list), not just the raw provider-state
+    /// bytes.
+    #[test]
+    fn test_full_context_export_import_roundtrip_two_groups() {
+        use ed25519_dalek::SigningKey as Ed25519SigningKey;
+
+        let alice_provider = OpenMlsRustCrypto::default();
+        let bob_provider = OpenMlsRustCrypto::default();
+
+        // Fixed seed for alice so the signer is reproducible post-reload
+        // (mirrors the §8.5 recovery path / mls_group's roundtrip test).
+        let alice_priv: [u8; 32] = [11u8; 32];
+        let alice_pub: [u8; 32] = Ed25519SigningKey::from_bytes(&alice_priv)
+            .verifying_key()
+            .to_bytes();
+        let alice =
+            generate_identity_from_keypair(b"alice", &alice_priv, &alice_pub, &alice_provider)
+                .unwrap();
+        // Bob lives entirely outside MLS_CTX — a separate peer, never persisted.
+        let bob = generate_identity(b"bob", &bob_provider).unwrap();
+
+        // Group A: alice creates, adds bob.
+        let bob_kp = generate_key_package(&bob, &bob_provider).unwrap();
+        let mut alice_group_a = create_group(&alice, &alice_provider).unwrap();
+        let welcome_a = add_member(
+            &mut alice_group_a,
+            &alice.signer,
+            bob_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+        let mut bob_group_a = join_group(&welcome_a, &bob_provider).unwrap();
+        let group_a_id = group_id_hex(&alice_group_a);
+
+        // Group B: bob creates, adds alice (so alice has one created + one joined group).
+        let alice_kp = generate_key_package(&alice, &alice_provider).unwrap();
+        let mut bob_group_b = create_group(&bob, &bob_provider).unwrap();
+        let welcome_b = add_member(
+            &mut bob_group_b,
+            &bob.signer,
+            alice_kp.key_package().clone(),
+            &bob_provider,
+        )
+        .unwrap();
+        let mut alice_group_b = join_group(&welcome_b, &alice_provider).unwrap();
+        let group_b_id = group_id_hex(&bob_group_b);
+
+        // Send + receive a message in EACH group to advance ratchet/epoch state
+        // before export.
+        let msg_a = b"hello in group A";
+        let ct_a =
+            encrypt_message(&mut alice_group_a, &alice.signer, msg_a, &alice_provider).unwrap();
+        assert_eq!(
+            decrypt_message(&mut bob_group_a, &ct_a, &bob_provider).unwrap(),
+            msg_a
+        );
+        let msg_b = b"hello in group B";
+        let ct_b = encrypt_message(&mut bob_group_b, &bob.signer, msg_b, &bob_provider).unwrap();
+        assert_eq!(
+            decrypt_message(&mut alice_group_b, &ct_b, &alice_provider).unwrap(),
+            msg_b
+        );
+
+        // Install alice's full context (both groups) into MLS_CTX.
+        let mut alice_groups = HashMap::new();
+        alice_groups.insert(group_a_id.clone(), alice_group_a);
+        alice_groups.insert(group_b_id.clone(), alice_group_b);
+        let ctx_id = next_id();
+        MLS_CTX.with(|ctx| {
+            ctx.borrow_mut().insert(
+                ctx_id.clone(),
+                MlsContext {
+                    identity: alice,
+                    provider: alice_provider,
+                    groups: alice_groups,
+                },
+            );
+        });
+
+        // Export, then clear MLS_CTX entirely (simulates a worker reload
+        // wiping the thread_local! state), then import.
+        let blob = export_mls_context_inner(&ctx_id, 1).unwrap();
+        mls_clear_session();
+        assert_eq!(
+            MLS_CTX.with(|ctx| ctx.borrow().len()),
+            0,
+            "mls_clear_session must fully wipe MLS_CTX before import"
+        );
+
+        let (new_id, group_ids, generation) = import_mls_context_inner(&blob, 1).unwrap();
+        assert_eq!(generation, 1, "bundled generation must round-trip");
+        assert_eq!(group_ids.len(), 2, "both groups must be reconstructed");
+        assert!(group_ids.contains(&group_a_id));
+        assert!(group_ids.contains(&group_b_id));
+        assert_ne!(
+            new_id, ctx_id,
+            "import must mint a fresh identity_id, never reuse the pre-reload one"
+        );
+
+        // A NEW message from EACH reloaded group must still decrypt correctly
+        // for bob (who was never cleared) — proving epoch/ratchet state
+        // survived the full export/import round trip.
+        let msg_a2 = b"after reload, group A";
+        let ct_a2 = MLS_CTX.with(|ctx| -> Vec<u8> {
+            let mut ctx = ctx.borrow_mut();
+            let c = ctx.get_mut(&new_id).unwrap();
+            let group = c.groups.get_mut(&group_a_id).unwrap();
+            encrypt_message(group, &c.identity.signer, msg_a2, &c.provider).unwrap()
+        });
+        assert_eq!(
+            decrypt_message(&mut bob_group_a, &ct_a2, &bob_provider).unwrap(),
+            msg_a2
+        );
+
+        let msg_b2 = b"after reload, group B";
+        let ct_b2 = MLS_CTX.with(|ctx| -> Vec<u8> {
+            let mut ctx = ctx.borrow_mut();
+            let c = ctx.get_mut(&new_id).unwrap();
+            let group = c.groups.get_mut(&group_b_id).unwrap();
+            encrypt_message(group, &c.identity.signer, msg_b2, &c.provider).unwrap()
+        });
+        assert_eq!(
+            decrypt_message(&mut bob_group_b, &ct_b2, &bob_provider).unwrap(),
+            msg_b2
+        );
+
+        mls_clear_session();
+    }
+
+    /// A stale (bundled generation < min_generation) blob is rejected, and
+    /// `MLS_CTX` is left completely untouched by the failed import.
+    #[test]
+    fn test_import_mls_context_rejects_stale_generation() {
+        let provider = OpenMlsRustCrypto::default();
+        let identity = generate_identity(b"alice@stale-gen-test", &provider).unwrap();
+        let ctx_id = next_id();
+        MLS_CTX.with(|ctx| {
+            ctx.borrow_mut().insert(
+                ctx_id.clone(),
+                MlsContext {
+                    identity,
+                    provider,
+                    groups: HashMap::new(),
+                },
+            );
+        });
+
+        let blob = export_mls_context_inner(&ctx_id, 5).unwrap();
+        mls_clear_session();
+        assert_eq!(MLS_CTX.with(|ctx| ctx.borrow().len()), 0);
+
+        let result = import_mls_context_inner(&blob, 6);
+        assert!(result.is_err(), "stale generation must be rejected");
+        assert_eq!(
+            MLS_CTX.with(|ctx| ctx.borrow().len()),
+            0,
+            "MLS_CTX must remain empty after a rejected stale import"
+        );
+
+        mls_clear_session();
+    }
+
+    /// Garbage bytes are rejected cleanly (no panic) and leave no partial
+    /// `MLS_CTX` entry.
+    #[test]
+    fn test_import_mls_context_rejects_garbage() {
+        mls_clear_session();
+        let result = import_mls_context_inner(b"not a valid MlsContextState blob", 0);
+        assert!(result.is_err());
+        assert_eq!(
+            MLS_CTX.with(|ctx| ctx.borrow().len()),
+            0,
+            "a garbage blob must not create any MLS_CTX entry"
+        );
+        mls_clear_session();
+    }
+
+    /// A well-formed `MlsContextState` envelope whose `group_ids` references a
+    /// group that does not actually exist in the imported provider state is
+    /// rejected atomically — no partial `MLS_CTX` entry with only some groups
+    /// (or zero groups but a live identity) is ever installed.
+    #[test]
+    fn test_import_mls_context_rejects_unloadable_group_atomically() {
+        mls_clear_session();
+
+        let provider = OpenMlsRustCrypto::default();
+        let identity = generate_identity(b"alice@atomic-test", &provider).unwrap();
+        // No group is actually created — provider_state has no group for this id.
+        let provider_state = mls_group::export_provider_state(&provider, 1).unwrap();
+        let state = MlsContextState {
+            version: MLS_CONTEXT_STATE_VERSION,
+            identity_bytes: identity
+                .credential_with_key
+                .credential
+                .serialized_content()
+                .to_vec(),
+            sig_public_key: identity.signer.to_public_vec(),
+            // A syntactically valid hex group id that was never created.
+            group_ids: vec!["00".repeat(16)],
+            provider_state,
+        };
+        let blob = serde_json::to_vec(&state).unwrap();
+
+        let result = import_mls_context_inner(&blob, 0);
+        assert!(
+            result.is_err(),
+            "a group_ids entry that fails to load must reject the whole import"
+        );
+        assert_eq!(
+            MLS_CTX.with(|ctx| ctx.borrow().len()),
+            0,
+            "MLS_CTX must remain untouched when any group fails to load"
+        );
+
+        mls_clear_session();
+    }
+
+    /// `hex_decode` rejects odd-length and non-hex input (used to reject
+    /// malformed group ids before ever calling into openmls).
+    #[test]
+    fn test_hex_decode_rejects_malformed_input() {
+        assert!(hex_decode("abc").is_err(), "odd length must be rejected");
+        assert!(
+            hex_decode("zz").is_err(),
+            "non-hex characters must be rejected"
+        );
+        assert_eq!(hex_decode("").unwrap(), Vec::<u8>::new());
+        assert_eq!(hex_decode("00ff").unwrap(), vec![0x00, 0xff]);
     }
 
     // ── Session clear ─────────────────────────────────────────────────────────
