@@ -53,6 +53,12 @@ pub enum MlsError {
     /// A processed message was not an application message as expected.
     #[error("mls unexpected message type")]
     UnexpectedMessage,
+    /// Serializing, deserializing, or restoring persisted provider state failed,
+    /// or a state lock was poisoned. Content-free by construction: the persisted
+    /// bytes are ciphertext / key material and are never embedded in the error
+    /// (rule: no-plaintext-logging).
+    #[error("mls persistence error")]
+    Persistence,
 }
 
 /// A freshly generated MLS identity: the public credential bound to a signature
@@ -322,6 +328,95 @@ pub fn join_group(
         .map_err(|_| MlsError::Membership)
 }
 
+/// Serialize the provider's entire storage backend to a self-contained byte blob
+/// for at-rest persistence (e.g. the frontend's `GroupRow.mlsStateB64` Dexie
+/// field).
+///
+/// # What is captured
+/// [`Provider`] (`OpenMlsRustCrypto`) keeps **all** MLS group state — ratchet
+/// tree, epoch secrets, the message-secrets store, resumption PSKs, group config,
+/// leaf nodes, group state, and stored signature key pairs — in a single
+/// `HashMap<Vec<u8>, Vec<u8>>` behind an `RwLock` inside its `MemoryStorage`
+/// backend. Serializing that map is therefore sufficient to reconstruct every
+/// group the provider knows about via [`openmls::group::MlsGroup::load`]; no
+/// separate serialization of an `MlsGroup` is needed.
+///
+/// # Serialization format
+/// A `serde_json` array of `[key, value]` pairs, where each key/value is a JSON
+/// array of byte values (`serde_json` renders `Vec<u8>` as a number array). This
+/// is chosen over a JSON object because the map keys are opaque, frequently
+/// non-UTF-8 byte strings that openmls constructs internally and cannot be used
+/// as JSON object keys without an extra encoding step. The pair-array form
+/// round-trips arbitrary bytes losslessly with no added dependency.
+///
+/// # Security
+/// The returned bytes contain **live key material and ciphertext** (epoch
+/// secrets, signature private keys, the message-secrets store). Treat them as
+/// secret: they MUST only ever be written to the client-side encrypted store,
+/// never logged, and never sent to the server. The error path is content-free
+/// (rule: no-plaintext-logging).
+pub fn export_provider_state(provider: &Provider) -> Result<Vec<u8>, MlsError> {
+    let values = provider
+        .storage()
+        .values
+        .read()
+        .map_err(|_| MlsError::Persistence)?;
+    // Serialize borrowed references directly to avoid cloning secret bytes.
+    let pairs: Vec<(&Vec<u8>, &Vec<u8>)> = values.iter().collect();
+    serde_json::to_vec(&pairs).map_err(|_| MlsError::Persistence)
+}
+
+/// Reconstruct a [`Provider`] from bytes produced by [`export_provider_state`].
+///
+/// Builds a fresh `Provider::default()` and repopulates its `MemoryStorage`
+/// backend with the deserialized key/value map. The returned provider is ready
+/// to serve [`openmls::group::MlsGroup::load`] for any group the original
+/// provider held, and to continue encrypt/decrypt/commit operations from the
+/// persisted epoch.
+///
+/// # Signing keys
+/// Signature key pairs stored via `signer.store(..)` are included in the exported
+/// map, so a reloaded provider can sign. Independently, the §8.5 recovery path
+/// ([`generate_identity_from_keypair`]) can always re-derive the same signer from
+/// the recovery phrase, so a caller is never dependent on this blob for the
+/// signing key alone.
+///
+/// # Errors
+/// Returns [`MlsError::Persistence`] on malformed input or a poisoned state lock.
+/// No `unwrap`/`expect` is used in this function itself, so bytes that are not a
+/// well-formed `[key, value]` pair array can never panic *here*.
+///
+/// **This does NOT make the function safe to call on untrusted bytes.** This
+/// function only validates the outer pair-array shape; it does not validate the
+/// inner entity values openmls itself stored (tree, group context, transcript
+/// hash, signature key pairs, ...). `openmls_memory_storage::MemoryStorage`'s own
+/// reads (reached via the intended follow-up call,
+/// [`openmls::group::MlsGroup::load`]) use `serde_json::from_slice(..).unwrap()`
+/// internally on those inner values — a well-formed pair array with a
+/// *corrupted* inner value therefore panics inside openmls, not here (see
+/// `test_import_well_formed_but_corrupt_value_panics_in_openmls_load`, which
+/// documents this instead of hiding it). In WASM a panic aborts/poisons the
+/// whole crypto-worker instance. Callers (crypto-worker glue, not yet
+/// implemented) MUST therefore only ever pass bytes that have already
+/// round-tripped through an authenticated decryption step (e.g. the AES-GCM
+/// field-level decryption `encrypted-db.ts` performs before this blob would
+/// ever reach Rust) — never raw bytes sourced from an untrusted or
+/// unauthenticated channel.
+pub fn import_provider_state(bytes: &[u8]) -> Result<Provider, MlsError> {
+    let pairs: Vec<(Vec<u8>, Vec<u8>)> =
+        serde_json::from_slice(bytes).map_err(|_| MlsError::Persistence)?;
+    let provider = Provider::default();
+    {
+        let mut values = provider
+            .storage()
+            .values
+            .write()
+            .map_err(|_| MlsError::Persistence)?;
+        *values = pairs.into_iter().collect();
+    }
+    Ok(provider)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,6 +534,143 @@ mod tests {
         assert!(
             result.is_err(),
             "stale-epoch ciphertext must not decrypt after the epoch advances"
+        );
+    }
+
+    /// Full persist -> reload -> continue-messaging round trip for provider state.
+    ///
+    /// Alice is created from a **fixed seed** via [`generate_identity_from_keypair`]
+    /// so the same signing key is reproducible after "reload" (the §8.5 recovery
+    /// path), mirroring how the frontend re-derives the signer from the recovery
+    /// phrase. We prove pre-export state works (alice -> bob message), export
+    /// alice's provider state, then **drop the original provider and group
+    /// entirely** so nothing but the exported bytes can be used for
+    /// reconstruction. After importing into a fresh provider and reloading the
+    /// group via [`MlsGroup::load`], a *new* message encrypted from the reloaded
+    /// group still decrypts for bob — proving the ratchet/epoch state survived the
+    /// round trip.
+    #[test]
+    fn test_provider_state_export_import_roundtrip() {
+        let alice_provider = OpenMlsRustCrypto::default();
+        let bob_provider = OpenMlsRustCrypto::default();
+
+        // Fixed seed for alice so the signer is reproducible post-reload.
+        let alice_priv: [u8; 32] = [7u8; 32];
+        let alice_pub: [u8; 32] = Ed25519SigningKey::from_bytes(&alice_priv)
+            .verifying_key()
+            .to_bytes();
+        let alice =
+            generate_identity_from_keypair(b"alice", &alice_priv, &alice_pub, &alice_provider)
+                .unwrap();
+        let bob = generate_identity(b"bob", &bob_provider).unwrap();
+
+        let bob_kp = generate_key_package(&bob, &bob_provider).unwrap();
+        let mut alice_group = create_group(&alice, &alice_provider).unwrap();
+        let welcome = add_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+        let mut bob_group = join_group(&welcome, &bob_provider).unwrap();
+
+        // Prove the pre-export state works: alice -> bob message round-trips.
+        let msg1 = b"before export";
+        let ct1 = encrypt_message(&mut alice_group, &alice.signer, msg1, &alice_provider).unwrap();
+        assert_eq!(
+            decrypt_message(&mut bob_group, &ct1, &bob_provider)
+                .unwrap()
+                .as_slice(),
+            msg1
+        );
+
+        // Capture the group id, then export and destroy every original handle.
+        let alice_group_id = alice_group.group_id().clone();
+        let exported = export_provider_state(&alice_provider).unwrap();
+        drop(alice_group);
+        drop(alice_provider);
+
+        // Reconstruct purely from the exported bytes.
+        let new_provider = import_provider_state(&exported).unwrap();
+        let alice2 =
+            generate_identity_from_keypair(b"alice", &alice_priv, &alice_pub, &new_provider)
+                .unwrap();
+        let mut reloaded = MlsGroup::load(new_provider.storage(), &alice_group_id)
+            .unwrap()
+            .expect("group must be present in the reloaded provider state");
+
+        // A NEW message from the reloaded group must still decrypt for bob.
+        let msg2 = b"after reload";
+        let ct2 = encrypt_message(&mut reloaded, &alice2.signer, msg2, &new_provider).unwrap();
+        assert_eq!(
+            decrypt_message(&mut bob_group, &ct2, &bob_provider)
+                .unwrap()
+                .as_slice(),
+            msg2
+        );
+    }
+
+    /// [`import_provider_state`] must reject malformed input with
+    /// [`MlsError::Persistence`] rather than panicking (no `unwrap`/`expect` on
+    /// the deserialization path in lib code).
+    #[test]
+    fn test_import_provider_state_rejects_garbage() {
+        let garbage: &[u8] = b"\x00 not json at all \xff\xfe {[";
+        assert!(matches!(
+            import_provider_state(garbage),
+            Err(MlsError::Persistence)
+        ));
+        // Empty input is also malformed JSON, not a panic.
+        assert!(matches!(
+            import_provider_state(b""),
+            Err(MlsError::Persistence)
+        ));
+    }
+
+    /// Documents (rather than hides) a known panic surface: a byte blob that is a
+    /// *well-formed* `[key, value]` pair array (so [`import_provider_state`]
+    /// itself returns `Ok`) but carries a corrupted value under a real openmls
+    /// storage key still panics — inside openmls's own `MemoryStorage` read path,
+    /// not in this crate — the moment [`openmls::group::MlsGroup::load`] tries to
+    /// deserialize that entity. See the security note on [`import_provider_state`]:
+    /// this is why callers must only ever feed it bytes that already passed
+    /// through an authenticated decryption step, never raw/untrusted bytes.
+    #[test]
+    fn test_import_well_formed_but_corrupt_value_panics_in_openmls_load() {
+        let alice_provider = OpenMlsRustCrypto::default();
+        let alice = generate_identity(b"alice", &alice_provider).unwrap();
+        let alice_group = create_group(&alice, &alice_provider).unwrap();
+        let alice_group_id = alice_group.group_id().clone();
+
+        let exported = export_provider_state(&alice_provider).unwrap();
+        let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = serde_json::from_slice(&exported).unwrap();
+        assert!(
+            !pairs.is_empty(),
+            "a freshly created group must have persisted at least one storage entry"
+        );
+        // Corrupt every stored value's bytes (still valid JSON at the outer
+        // pair-array level, so import_provider_state succeeds) so whichever
+        // entity MlsGroup::load reads first is guaranteed to be corrupt.
+        for (_key, value) in pairs.iter_mut() {
+            *value = b"not a valid openmls entity".to_vec();
+        }
+        let corrupted = serde_json::to_vec(&pairs).unwrap();
+
+        // Also acceptable: import itself rejects the corrupt blob cleanly.
+        let Ok(new_provider) = import_provider_state(&corrupted) else {
+            return;
+        };
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            MlsGroup::load(new_provider.storage(), &alice_group_id)
+        }));
+        assert!(
+            result.is_err(),
+            "corrupt inner values are currently expected to panic inside openmls's \
+             MemoryStorage read path, not return a clean Err — if this assertion \
+             starts failing (openmls now returns Err instead), the security note \
+             on import_provider_state should be relaxed to match"
         );
     }
 
