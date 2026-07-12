@@ -17,7 +17,15 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-07, cycle 249 — FEATURE: @mention highlighting in message bubbles)
+## Current state (2026-07-12, cycle 262 — FEATURE: wire GroupRow creation into Dexie)
+- See "Cycle log (recent)" below for the cycle 262 write-up (commit ae67d72). TL;DR: closed the
+  cycle-259 group-row-creation gap — `handleNewGroup`/`handleGroupCreated` in ChatLayout.tsx now
+  `putGroup()` into Dexie, `GroupRow.name` is now encrypted at rest, `mlsStateB64` is an explicitly
+  documented `""` sentinel pending a real MLS-state exporter. 1166 frontend tests, security-auditor
+  PASS (3 YELLOW, all fixed in-cycle). Next: AcceptInviteModal chat-list wiring gap, MLS-state
+  exporter, or PQ hybrid Phase A.
+
+## Previous state (2026-07-07, cycle 249 — FEATURE: @mention highlighting in message bubbles)
 - **Cycle 249 (commit 7feb09c):** FEATURE — @mention highlighting in message bubbles.
   - **Mode:** FEATURE (counter 249 % 5 ≠ 0). CI was green on main.
   - **Feature (7feb09c):** `@username` tokens in message text now render as visually distinct chips.
@@ -2928,6 +2936,58 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - Review is part of writing: implement → run the relevant review agent → fix → commit.
 
 ## Cycle log (recent)
+- Cycle 262 FEATURE: wire GroupRow creation into Dexie — closes the cycle-259 group-row gap (commit ae67d72).
+  - **Mode:** FEATURE (counter 262 % 5 ≠ 0). CI green on main at cycle start.
+  - **Gap closed:** no code path anywhere ever called `db.groups.add()`/`putGroup()` — a `GroupRow`
+    was never created client-side, so every existing `db.groups.update()` call (pinnedMessageId,
+    disappearingTtlSeconds, per-chat theme) was a silent no-op in the live app; it only worked in
+    tests that pre-seeded a `GroupRow` fixture. Root-caused in cycle 259, explicitly flagged as
+    "top candidate for the next cycle that wants to make Dexie persistence actually work end-to-end."
+  - `ChatLayout.tsx`'s `handleNewGroup` (Welcome-envelope auto-join) and `handleGroupCreated` (local
+    "New Group" creation) now call a new `encryptedDb.putGroup({...})` (upsert, not `.add`, so a
+    duplicate Welcome or a double-fire can't throw a Dexie ConstraintError). Both were the two flows
+    already wired into `chats` React state with a `mlsGroupId` — the `AcceptInviteModal` DM-accept
+    flow (a third group-creation site) was deliberately left alone: `App.tsx`'s `handleAccepted`
+    never threads that flow's `groupId` into `ChatLayout`'s `chats` state at all (a separate,
+    larger, pre-existing gap — the "Open chat" button doesn't actually open a chat), so persisting a
+    `GroupRow` there today would be a Dexie row unreachable from the UI; noted as a follow-up, not
+    bundled in.
+  - `mlsStateB64` (the field literally named "serialized MLS group state") has no producer anywhere
+    in the codebase — confirmed via Explore agent: no export/serialize function exists in
+    `CryptoWorkerApi`, `crypto.worker.ts`, or the Rust WASM crate (`MlsGroup` state lives only in
+    the WASM thread_local `MLS_CTX`, never serialized to bytes). Both write sites persist `""` as an
+    explicit "not yet serialized" sentinel — confirmed via grep that nothing anywhere reads
+    `GroupRow.mlsStateB64` back to reconstruct crypto state today, so the placeholder is genuinely
+    inert, not a foot-gun in the current codebase. Documented the sentinel contract directly on the
+    `GroupRow.mlsStateB64` JSDoc in `schema.ts` ("never treat `\"\"` as valid state to deserialize")
+    so a future reader building the real exporter doesn't get tripped up. A real MLS-state exporter
+    is crypto-adjacent (needs a new Rust serialize fn + wasm-bindgen export) and belongs in a
+    `crypto-lead`/`crypto-reviewer`-gated cycle, not bundled into this UI-persistence fix — left as
+    a named follow-up, same as cycle 259 scoped it.
+  - **security-auditor: PASS, no RED, 3 YELLOW — all three fixed in-cycle, not deferred:**
+    1. `GroupRow.name` was about to start landing in IndexedDB in plaintext for the first time (it's
+       not in `encrypted-db.ts`'s `SENSITIVE.groups` list) — for `handleGroupCreated` that's the
+       user-supplied group name, real conversation metadata in a zero-knowledge messenger. Fixed:
+       added `"name"` to `SENSITIVE.groups` (not Dexie-indexed, so safe to encrypt) — now encrypted
+       at rest like every other sensitive field.
+    2. The `putGroup` call was a side effect inside the `setChats` updater body — harmless today
+       since `put` is idempotent, but a latent StrictMode-double-invoke footgun. Fixed: moved the
+       persistence decision to a `chatsRef.current.some(...)` check *before* calling `setChats`
+       (same pattern `handleIncomingEdit`/`handleIncomingDelete` already use), so the updater itself
+       stays pure.
+    3. The `""` sentinel in a field named "serialized MLS group state" could mislead a future
+       reader — addressed via the `schema.ts` JSDoc above.
+  - 2 new tests in `ChatLayout.test.tsx` ("persists a GroupRow to Dexie when a group is created",
+    "... when a Welcome envelope joins a new group" — the latter via `vi.spyOn` capturing
+    `useWelcomePoller`'s `onNewGroup` callback directly rather than driving the real poll loop).
+    **Frontend: 1166 tests pass** (was 1164, +2; 95 files); tsc clean; biome clean. Production build
+    still green (initial route 158.03 kB gzip / WASM 567.35 kB gzip, both under the prd.md §7
+    200KB/800KB budgets — unaffected by this diff).
+  - **Backend:** untouched this cycle (pure frontend Dexie-persistence feature).
+  - **Next cycle:** the AcceptInviteModal DM-accept-flow chat-list wiring gap noted above (bigger
+    than group-row persistence — the accepted chat never reaches `ChatLayout`'s `chats` state at
+    all), the real MLS-state exporter for `mlsStateB64` (crypto-lead cycle), or PQ hybrid Phase A
+    (still blocked on openmls stable `MLS_128_MLKEM768`).
 - Cycle 256 FEATURE: CI fix + sidebar pinned-message indicator (commits 098bfe6, eb016fc).
   - **Mode:** FEATURE (counter 256 % 5 ≠ 0). CI quick check found main RED (cycle 255's commit
     83dcf6e failed `CI — Rust` Format check).
