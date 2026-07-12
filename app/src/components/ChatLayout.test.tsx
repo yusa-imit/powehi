@@ -8,6 +8,7 @@ import type { MessageRow } from "../db/schema";
 import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
 import * as UseMessagesModule from "../hooks/useMessages";
 import type { IncomingMessage } from "../hooks/useMessages";
+import * as WelcomePollerModule from "../hooks/useWelcomePoller";
 import { useAuthStore } from "../store/auth";
 import { textToBase64 } from "../utils/base64";
 import { ChatLayout } from "./ChatLayout";
@@ -2221,6 +2222,61 @@ describe("ChatLayout", () => {
 				// memberCount is 1 so it just shows "Group" (no member count suffix when <= 1)
 				expect(groupStatus.textContent).toBe("Group");
 			});
+		});
+
+		it("persists a GroupRow to Dexie when a group is created (closes the group-row-creation gap)", async () => {
+			vi.spyOn(GroupsApiModule, "createGroup").mockResolvedValue(undefined);
+			const dexieWorker = {
+				...MOCK_WORKER,
+				mlsCreateGroup: vi.fn(async () => ({ groupId: "group-dexie-created" })),
+			};
+			vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
+				dexieWorker as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
+			);
+			useAuthStore.setState({ sessionToken: "tok-d", identityId: "id-d", deviceId: "dev-d" });
+
+			render(<ChatLayout />);
+			fireEvent.click(screen.getByRole("button", { name: /new group/i }));
+			fireEvent.change(screen.getByTestId("group-name-input"), {
+				target: { value: "Dexie Group" },
+			});
+			fireEvent.click(screen.getByTestId("create-group-submit"));
+			await waitFor(() => {
+				expect(screen.getByText("Dexie Group")).toBeInTheDocument();
+			});
+
+			const row = await db.groups.get("group-dexie-created");
+			expect(row).toBeDefined();
+			expect(row?.name).toBe("Dexie Group");
+			// No MLS state export exists yet — placeholder, not yet consumed anywhere.
+			expect(row?.mlsStateB64).toBe("");
+		});
+
+		it("persists a GroupRow to Dexie when a Welcome envelope joins a new group", async () => {
+			let capturedOnNewGroup:
+				| ((event: { groupId: string; senderDeviceId: string }) => void)
+				| null = null;
+			vi.spyOn(WelcomePollerModule, "useWelcomePoller").mockImplementation(
+				(_identityId, onNewGroup) => {
+					capturedOnNewGroup = onNewGroup;
+				},
+			);
+			useAuthStore.setState({ sessionToken: "tok-w", identityId: "id-w", deviceId: "dev-w" });
+
+			render(<ChatLayout />);
+			await waitFor(() => expect(capturedOnNewGroup).not.toBeNull());
+
+			act(() => {
+				capturedOnNewGroup?.({ groupId: "welcome-group-1", senderDeviceId: "peer-device-9999" });
+			});
+
+			await waitFor(async () => {
+				const row = await db.groups.get("welcome-group-1");
+				expect(row).toBeDefined();
+			});
+			const row = await db.groups.get("welcome-group-1");
+			expect(row?.name).toBe("Contact peer-dev");
+			expect(row?.mlsStateB64).toBe("");
 		});
 	});
 

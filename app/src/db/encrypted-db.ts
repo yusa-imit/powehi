@@ -18,7 +18,7 @@ import type { PowehiDb } from "./schema";
 // identity has no sensitive unindexed fields (exportKeyB64 was removed in schema v3).
 const SENSITIVE: Record<string, readonly string[]> = {
 	messages: ["ciphertextB64", "plaintextB64", "editedText", "reactionsJson"],
-	groups: ["mlsStateB64"],
+	groups: ["mlsStateB64", "name"],
 	verifiedContacts: ["safetyNumber"],
 };
 

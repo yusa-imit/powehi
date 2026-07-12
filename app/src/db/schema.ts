@@ -25,8 +25,13 @@ export interface MessageRow {
 // GroupRow — MLS group state snapshot.
 export interface GroupRow {
 	id: string; // MLS group UUID
-	name: string;
-	mlsStateB64: string; // serialized MLS group state
+	name: string; // user-visible conversation name — encrypted at rest, like message content
+	/**
+	 * Serialized MLS group state. No exporter for this exists yet (crypto-adjacent,
+	 * not yet implemented) — writers currently persist "" as an explicit "not yet
+	 * serialized" sentinel. Never treat "" as valid state to deserialize.
+	 */
+	mlsStateB64: string;
 	lastActivity: number;
 	/** Per-conversation disappearing timer in seconds. undefined = off. Not sensitive. */
 	disappearingTtlSeconds?: number;

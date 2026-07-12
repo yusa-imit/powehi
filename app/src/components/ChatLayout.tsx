@@ -7067,6 +7067,13 @@ export function ChatLayout() {
 
 	const { sessionToken, identityId, deviceId } = useAuthStore();
 	const cryptoWorker = useCryptoWorker();
+	// Used only to create the GroupRow at the moment a group is first known
+	// (handleNewGroup / handleGroupCreated below) — message read/write for the
+	// active chat goes through usePersistentMessages' own encryptedDb instance.
+	const encryptedDb = useMemo(
+		() => (cryptoWorker ? new EncryptedPowehiDb(db, cryptoWorker) : null),
+		[cryptoWorker],
+	);
 	const {
 		rows,
 		persistIncoming,
@@ -8205,6 +8212,26 @@ export function ChatLayout() {
 	// Add a new chat entry when another device invites us (Welcome envelope received).
 	const handleNewGroup = useCallback(
 		(event: NewGroupEvent) => {
+			// Read chatsRef (not the setChats updater) to decide whether to persist —
+			// keeps the updater itself free of side effects, so React re-invoking it
+			// (e.g. StrictMode dev double-render) can never double-write to Dexie.
+			if (!chatsRef.current.some((c) => c.mlsGroupId === event.groupId)) {
+				const shortId = event.senderDeviceId.slice(0, 8);
+				// Mirror the new chat into Dexie so group-scoped local state (pinned
+				// message, disappearing-timer, per-chat theme) has a row to persist
+				// against — without this, db.groups.update() calls elsewhere are
+				// silent no-ops. mlsStateB64 is a placeholder ("") until a real MLS
+				// group-state export exists (crypto-adjacent, not yet implemented);
+				// nothing in the app reads it back to reconstruct crypto state today.
+				encryptedDb
+					?.putGroup({
+						id: event.groupId,
+						name: `Contact ${shortId}`,
+						mlsStateB64: "",
+						lastActivity: Date.now(),
+					})
+					.catch(() => {});
+			}
 			setChats((prev) => {
 				if (prev.some((c) => c.mlsGroupId === event.groupId)) return prev;
 				const shortId = event.senderDeviceId.slice(0, 8);
@@ -8227,11 +8254,22 @@ export function ChatLayout() {
 				];
 			});
 		},
-		[identityId],
+		[identityId, encryptedDb],
 	);
 	const handleGroupCreated = useCallback(
 		(groupId: string, groupName: string) => {
 			setCreateGroupOpen(false);
+			// See handleNewGroup above — same chatsRef-gated Dexie mirror, placeholder mlsStateB64.
+			if (!chatsRef.current.some((c) => c.mlsGroupId === groupId)) {
+				encryptedDb
+					?.putGroup({
+						id: groupId,
+						name: groupName,
+						mlsStateB64: "",
+						lastActivity: Date.now(),
+					})
+					.catch(() => {});
+			}
 			setChats((prev) => {
 				if (prev.some((c) => c.mlsGroupId === groupId)) return prev;
 				const now = new Date();
@@ -8255,7 +8293,7 @@ export function ChatLayout() {
 				];
 			});
 		},
-		[identityId],
+		[identityId, encryptedDb],
 	);
 	const handleMemberAdded = useCallback(
 		(_contactId: string, _contactName: string) => {
