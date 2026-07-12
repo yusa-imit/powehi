@@ -27,6 +27,7 @@ edition = "2021"
 rust-version = "1.87"
 license = "AGPL-3.0-only"
 repository = "https://github.com/yusa-imit/powehi"
+publish = false
 
 [workspace.dependencies]
 # async runtime
@@ -122,8 +123,8 @@ aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-ve
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-credential-types = "1"
 # integration testing
-testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["postgres", "redis", "minio"] }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres", "redis", "minio"] }
 # property-based testing (testing-conventions.md: crypto round-trips and serialization)
 proptest = "1"
 # workspace crates

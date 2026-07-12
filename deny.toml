@@ -2,11 +2,14 @@
 # Advisory ignores are in .cargo/audit.toml (cargo-audit config).
 
 [advisories]
-# cargo-deny advisory policy — see .cargo/audit.toml for cargo-audit ignores.
+# cargo-deny advisory policy — kept in sync with .cargo/audit.toml (cargo-audit's own ignore
+# list); same waivers, same reasoning, both files must be updated together.
 ignore = [
     { id = "RUSTSEC-2023-0071", reason = "rsa not compiled; sqlx-mysql transitive dep only" },
     { id = "RUSTSEC-2026-0124", reason = "DoS only; no fix in openmls_rust_crypto 0.5.1" },
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; transitive via tonic 0.12.3; no upgrade path until tonic 0.13 drops" },
+    { id = "RUSTSEC-2024-0384", reason = "instant unmaintained; transitive via fluvio-wasm-timer -> openmls 0.8.1; no fix available, no upgrade path within current openmls release" },
+    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained; compile-time-only proc-macro via hax-lib -> libcrux -> openmls_rust_crypto 0.5.1 (PQ support); not present in any built binary, no upgrade path until openmls_rust_crypto updates libcrux" },
 ]
 
 [licenses]
@@ -24,7 +27,17 @@ allow = [
     "MPL-2.0",
     "OpenSSL",
     "Zlib",
+    # webpki-roots bundles Mozilla's CA certificate data under this license — it's a data
+    # license for the bundled CA list, not a code license; standard to allow for rustls users.
+    "CDLA-Permissive-2.0",
 ]
+
+[licenses.private]
+# All powehi-* workspace crates are unpublished (publish = false) and intentionally
+# AGPL-3.0-only licensed (see Cargo.toml [workspace.package]) — that's our own project's
+# license, not a dependency we're pulling in, so it must not be checked against the
+# third-party allow list above.
+ignore = true
 
 [bans]
 # Deny duplicate versions of security-critical crates to keep the dependency graph tight.

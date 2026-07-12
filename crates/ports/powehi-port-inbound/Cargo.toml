@@ -4,6 +4,7 @@ description = "Inbound port (use-case) trait definitions. Depends only on powehi
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [dependencies]
 powehi-domain = { workspace = true }

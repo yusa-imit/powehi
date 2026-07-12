@@ -4,6 +4,7 @@ description = "Composition root — wires all adapters and starts the server."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [[bin]]
 name = "powehi-server"

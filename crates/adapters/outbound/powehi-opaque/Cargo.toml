@@ -4,6 +4,7 @@ description = "OPAQUE (RFC 9807) authentication adapter using opaque-ke."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [dependencies]
 powehi-domain = { workspace = true }

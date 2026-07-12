@@ -4,6 +4,7 @@ description = "Cloudflare R2 / S3-compatible media storage adapter (presigned UR
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [dependencies]
 powehi-domain = { workspace = true }

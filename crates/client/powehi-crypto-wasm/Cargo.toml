@@ -4,6 +4,7 @@ description = "WASM crypto core: MLS (openmls) + OPAQUE (opaque-ke) + Comlink wo
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [lib]
 crate-type = ["cdylib", "rlib"]

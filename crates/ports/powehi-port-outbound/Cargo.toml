@@ -4,6 +4,7 @@ description = "Outbound port (repository/service) trait definitions. Depends onl
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [dependencies]
 powehi-domain = { workspace = true }

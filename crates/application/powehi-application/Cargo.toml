@@ -4,6 +4,7 @@ description = "Use-case implementations. Depends only on domain + port traits."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [dependencies]
 powehi-domain = { workspace = true }

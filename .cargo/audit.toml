@@ -17,14 +17,6 @@
 # Transitively pulled via tonic 0.12.3; no upgrade path until tonic 0.13+.
 # Revisit when tonic bumps its rustls-pemfile dependency.
 #
-# RUSTSEC-2025-0111: tokio-tar 0.3.1 — PAX extended header parsing allows file smuggling
-# Impact: tokio-tar is used internally by testcontainers (dev/test-only dep) to create tar
-# archives that are sent TO the Docker daemon during container startup. It is never used to
-# untar untrusted archives received from external sources.
-# The file smuggling attack requires an adversary to supply a crafted tar archive; Powehi
-# never processes untrusted tar data in any code path. No production binary includes this dep.
-# No fixed version available upstream. Revisit when testcontainers upgrades tokio-tar.
-#
 # RUSTSEC-2026-0173: proc-macro-error2 2.0.1 — crate unmaintained
 # Impact: proc-macro-error2 is a COMPILE-TIME proc-macro crate (hax-lib-macros → hax-lib →
 # libcrux → openmls_rust_crypto). It runs on the host machine during build to generate code
@@ -33,4 +25,13 @@
 # Maintenance advisory only; no CVE or vulnerability disclosed.
 # Cannot upgrade: openmls_rust_crypto 0.5.1 is the latest release; upstream must release a
 # new version with updated libcrux to resolve. Revisit when openmls_rust_crypto is updated.
-ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0124", "RUSTSEC-2025-0134", "RUSTSEC-2025-0111", "RUSTSEC-2026-0173"]
+#
+# RUSTSEC-2024-0384: instant 0.1.13 — crate unmaintained
+# Impact: maintenance warning only, no CVE or vulnerability disclosed. Unlike proc-macro-error2
+# above, `instant` IS present in the runtime graph (openmls 0.8.1 → fluvio-wasm-timer →
+# parking_lot 0.11 → instant), including the WASM crypto worker build — it does ship, but only
+# provides a monotonic-clock shim; it holds no key material and is not on any plaintext/crypto
+# data path, so the "server never sees plaintext" invariant is unaffected.
+# No safe upgrade available (author recommends `web-time`, which openmls/fluvio-wasm-timer do
+# not use). Revisit when openmls bumps its fluvio-wasm-timer/parking_lot dependency.
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0124", "RUSTSEC-2025-0134", "RUSTSEC-2026-0173", "RUSTSEC-2024-0384"]

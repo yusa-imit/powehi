@@ -4,6 +4,7 @@ description = "WebSocket hub inbound adapter — real-time envelope delivery not
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [dependencies]
 powehi-domain = { workspace = true }

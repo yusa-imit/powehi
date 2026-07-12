@@ -122,3 +122,15 @@ jobs:
       - name: cargo audit
         # Ignored advisories are listed with full impact analysis in .cargo/audit.toml.
         run: cargo audit
+
+  deny:
+    name: cargo-deny (licenses, bans, sources)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: cargo deny check
+        # Waivers + rationale live in deny.toml, kept in sync with .cargo/audit.toml.
+        uses: EmbarkStudios/cargo-deny-action@v2

@@ -4,6 +4,7 @@ description = "Web Push (RFC 8291 + RFC 8292 VAPID) outbound adapter."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [dependencies]
 powehi-domain = { workspace = true }
