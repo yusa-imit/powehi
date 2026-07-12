@@ -28,8 +28,8 @@ import { Icon } from "./Icon";
 interface AcceptInviteModalProps {
 	inviteCode: string;
 	onClose: () => void;
-	/** Called with the new groupId after the full accept flow succeeds. */
-	onAccepted: (groupId: string) => void;
+	/** Called with the new groupId and the inviter's deviceId after the full accept flow succeeds. */
+	onAccepted: (groupId: string, peerDeviceId: string) => void;
 }
 
 type Step = "idle" | "loading" | "accepted" | "error";
@@ -56,6 +56,7 @@ export function AcceptInviteModal({ inviteCode, onClose, onAccepted }: AcceptInv
 	const [step, setStep] = useState<Step>("idle");
 	const [errorKind, setErrorKind] = useState<ErrorKind>("generic");
 	const [newGroupId, setNewGroupId] = useState("");
+	const [peerDeviceId, setPeerDeviceId] = useState("");
 	const [pqBindingHex, setPqBindingHex] = useState<string | null>(null);
 
 	const handleAccept = async () => {
@@ -71,6 +72,7 @@ export function AcceptInviteModal({ inviteCode, onClose, onAccepted }: AcceptInv
 		try {
 			// Step 1: redeem the one-time code → inviter's DeviceId
 			const { device_id: inviterDeviceId } = await redeemInvite(sessionToken, inviteCode);
+			setPeerDeviceId(inviterDeviceId);
 
 			// Step 2: fetch inviter's KeyPackage (single-use, atomically consumed)
 			let keyPackage: Uint8Array;
@@ -148,12 +150,13 @@ export function AcceptInviteModal({ inviteCode, onClose, onAccepted }: AcceptInv
 		setStep("idle");
 		setErrorKind("generic");
 		setNewGroupId("");
+		setPeerDeviceId("");
 		setPqBindingHex(null);
 		onClose();
 	};
 
 	const handleOpen = () => {
-		onAccepted(newGroupId);
+		onAccepted(newGroupId, peerDeviceId);
 	};
 
 	return (

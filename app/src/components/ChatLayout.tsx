@@ -10,10 +10,12 @@ import {
 	useRef,
 	useState,
 } from "react";
+import { extractInviteCode } from "../api/invites";
 import { sendMessage as sendMessageApi } from "../api/messages";
 import { EncryptedPowehiDb } from "../db/encrypted-db";
 import { db } from "../db/schema";
 import { useCryptoWorker } from "../hooks/useCryptoWorker";
+import { useDeepLink } from "../hooks/useDeepLink";
 import { useMediaSend } from "../hooks/useMediaSend";
 import {
 	ALLOWED_REACTION_EMOJIS,
@@ -34,6 +36,7 @@ import {
 } from "../lib/notificationSound";
 import { useAuthStore } from "../store/auth";
 import { base64ToText, uint8ToBase64 } from "../utils/base64";
+import { AcceptInviteModal } from "./AcceptInviteModal";
 import { AddMemberModal } from "./AddMemberModal";
 import { CreateGroupModal } from "./CreateGroupModal";
 import { Icon } from "./Icon";
@@ -6695,6 +6698,23 @@ export function ChatLayout() {
 	}, []);
 	const [createGroupOpen, setCreateGroupOpen] = useState(false);
 	const [addMemberOpen, setAddMemberOpen] = useState(false);
+	const [inviteCode, setInviteCode] = useState<string | null>(null);
+
+	// Detect invite code in URL fragment. The fragment is never transmitted to
+	// the server (RFC 3986 §3.5). ChatLayout only mounts once phase === "app",
+	// so no auth-phase guard is needed here (moved from App.tsx).
+	useEffect(() => {
+		const code = extractInviteCode(window.location.hash);
+		if (code) {
+			setInviteCode(code);
+			// Clear the hash so navigating away and back doesn't re-trigger the modal.
+			history.replaceState(null, "", window.location.pathname + window.location.search);
+		}
+	}, []);
+
+	// Receive invite codes from Tauri deep-link events (mobile/desktop).
+	// Silently ignored when running in a plain browser context.
+	useDeepLink(useCallback((code: string) => setInviteCode(code), []));
 	const [disappearingTtl, setDisappearingTtl] = useState<TtlOption>(undefined);
 	// Persisted pin state loaded from GroupRow.pinnedMessageId (cycle 259) — separate from
 	// the `rows`-driven message rehydration effect below since pinnedMessageId lives on the
@@ -8295,6 +8315,22 @@ export function ChatLayout() {
 		},
 		[identityId, encryptedDb],
 	);
+	// Add the newly-created chat when the user accepts a contact invite
+	// (AcceptInviteModal.onAccepted). Delegates the dedup + Dexie mirror + chats
+	// prepend to handleNewGroup (same NewGroupEvent shape) so there is a single
+	// source of truth for the "add a chat row" shape, then navigates into the
+	// new chat and clears the invite-accept modal. handleSelectChat immediately
+	// resets unread to 0, so handleNewGroup's unread: 1 default is momentary
+	// and harmless here.
+	const handleInviteAccepted = useCallback(
+		(groupId: string, peerDeviceId: string) => {
+			handleNewGroup({ groupId, senderDeviceId: peerDeviceId });
+			handleSelectChat(groupId);
+			setInviteCode(null);
+		},
+		[handleNewGroup, handleSelectChat],
+	);
+
 	const handleMemberAdded = useCallback(
 		(_contactId: string, _contactName: string) => {
 			setChats((prev) =>
@@ -8903,6 +8939,14 @@ export function ChatLayout() {
 				onClose={() => setCreateGroupOpen(false)}
 				onGroupCreated={handleGroupCreated}
 			/>
+
+			{inviteCode !== null && (
+				<AcceptInviteModal
+					inviteCode={inviteCode}
+					onClose={() => setInviteCode(null)}
+					onAccepted={handleInviteAccepted}
+				/>
+			)}
 
 			{active?.isGroup && (
 				<AddMemberModal

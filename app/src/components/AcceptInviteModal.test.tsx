@@ -175,7 +175,7 @@ describe("AcceptInviteModal — accept flow success", () => {
 
 		await waitFor(() => screen.getByTestId("open-chat-btn"));
 		fireEvent.click(screen.getByTestId("open-chat-btn"));
-		expect(onAccepted).toHaveBeenCalledWith(MOCK_GROUP_ID);
+		expect(onAccepted).toHaveBeenCalledWith(MOCK_GROUP_ID, INVITER_DEVICE_ID);
 	});
 });
 
