@@ -17,6 +17,52 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-07-13, cycle 271 — FEATURE: rehydration reconciliation + pendingWriteIds race fix)
+
+- Commit `a61661d`. Closed the cycle 253/259 documented gap: `ChatLayout.tsx`'s message-history
+  rehydration effect (Dexie → `chats` React state) was add-only — an id already in `chats` was
+  never reconciled against a fresher Dexie row, so an edit/delete-for-everyone/reaction written
+  by another browser tab on the same account (while this tab already had that message id loaded)
+  silently didn't show up short of a full page reload. Fixed by reconciling `text`/`edited`/
+  `deleted`/`reactions` for already-present ids too, not just appending missing ones. `from`,
+  `senderDeviceId` attribution, `pinned`, `read`, `delivered` are untouched by the reconciliation.
+- `security-auditor` first pass: YELLOW. Found a real same-tab race: `markMessageEdited`/
+  `markMessageReactions` await an `encryptDbField` crypto-worker round-trip before the IndexedDB
+  write lands; a fast switch-away-and-back on the SAME tab could re-read Dexie via
+  `getMessagesByGroup` before that tab's own pending write landed, and the new reconciliation
+  would then revert a live edit/reaction back to stale pre-mutation data (or transiently
+  resurrect a delete-for-everyone tombstone, since the plaintext row still exists until the
+  write completes). Fixed by adding `pendingWriteIds: Set<string>` to `usePersistentMessages` —
+  `persistEdit`/`persistDelete`/`persistReaction` add the target id before calling
+  `encryptedDb.markMessage*` and remove it in a `.finally()` once the write settles (success or
+  failure); the rehydration effect skips reconciling any id still in that set, trusting the
+  already-correct in-memory value (which was applied directly by `handleIncomingEdit`/`Delete`/
+  `Reaction`, independent of the rehydration path) instead of a possibly-stale Dexie read.
+  Re-reviewed after the fix: GREEN.
+- Also fixed a **latent cross-test Dexie pollution bug** the new reconciliation logic exposed:
+  5 sibling test files (`ChatLayoutFormatting.test.tsx`, `ChatLayoutGroupReactions.test.tsx`,
+  `ChatLayoutLinks.test.tsx`, `ChatLayoutReactions.test.tsx`, `ChatLayoutThreadReactions.test.tsx`)
+  only cleared `db.verifiedContacts` in `beforeEach`, never `db.messages` — several tests reuse
+  fixed message ids (e.g. `ChatLayoutLinks.test.tsx`'s `switchToJordanAndDeliver` defaults to
+  `id = "link-test-id"`), so a leftover row from a prior test in the same file would be picked up
+  by rehydration. Previously the add-only merge silently no-op'd on the duplicate id (masking the
+  leak); the new reconciliation actively overwrote the live-correct bubble with the stale row,
+  turning the latent bug into 18 test failures. Added `db.messages.clear()` to all 5 files'
+  `beforeEach`, matching the pattern cycle 253 already applied to `ChatLayout.tsx` + 4 other
+  sibling files for the same reason.
+- 3 new tests: `ChatLayout.test.tsx` (reconciles an out-of-band edit/delete/reaction into a chat
+  id already in state, via direct `db.messages.update()` simulating another tab), and 2 in
+  `usePersistentMessages.test.ts` (`pendingWriteIds` tracks a `persistEdit` write in flight and
+  clears once it settles; clears a `persistReaction` write even when the underlying write
+  rejects). 1186 frontend tests green (was 1183, 97 files). `tsc --noEmit` clean, Biome clean.
+- **Backend:** untouched this cycle (pure frontend correctness/security fix).
+- Note for future cycles: the "Known deferred/documented" bullet about rehydration dedup being
+  add-only (referenced in the auto-memory pointer file) is now CLOSED — do not re-open it as a
+  future work item. The remaining documented gaps (from cycles 253-254) are unchanged: `from: "me"`
+  attribution on rehydrated messages still trusts server-bound `senderDeviceId`, not an
+  MLS-cryptographic sender proof (compromised-server-only risk, outside current threat model);
+  mentions remain session-only by design.
+
 ## Current state (2026-07-13, cycle 270 — STABILIZATION: unwrap() cleanup + stale cargo-deny ignores)
 
 - Commit aa1d88e. CI green on main (no red runs), `gh issue list --state open` empty, so this
