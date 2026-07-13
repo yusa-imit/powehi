@@ -6740,6 +6740,7 @@ export function ChatLayout() {
 	const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
 	const [editingMessage, setEditingMessage] = useState<ChatMessage | null>(null);
 	const [forwardMsg, setForwardMsg] = useState<{ id: string; text: string } | null>(null);
+	const [forwardSelected, setForwardSelected] = useState<Set<string>>(new Set());
 	const [jumpToMessageId, setJumpToMessageId] = useState<string | null>(null);
 	const [lightboxMsgIdx, setLightboxMsgIdx] = useState<number | null>(null);
 	const handleJumpComplete = useCallback(() => setJumpToMessageId(null), []);
@@ -8151,11 +8152,11 @@ export function ChatLayout() {
 	}, []);
 
 	/**
-	 * Forward `forwardMsg.text` to the target chat as a new MLS-encrypted message.
+	 * Forward `forwardMsg.text` to a single target chat as a new MLS-encrypted message.
 	 * Optimistically appends to the target chat's message list, then sends via API.
 	 * Fire-and-forget — failure leaves the optimistic bubble in place (same as sendMessage).
 	 */
-	const sendForward = (targetId: string) => {
+	const sendForwardToOne = (targetId: string) => {
 		if (!forwardMsg || !sessionToken || !cryptoWorker) return;
 		const targetChat = chats.find((c) => c.id === targetId);
 		if (!targetChat?.mlsGroupId || !targetChat?.mlsIdentityId) return;
@@ -8163,7 +8164,6 @@ export function ChatLayout() {
 		const text = forwardMsg.text;
 		const now = new Date();
 		const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-		setForwardMsg(null);
 		// Optimistic update on the target chat.
 		setChats((cs) =>
 			cs.map((c) => {
@@ -8185,6 +8185,24 @@ export function ChatLayout() {
 			.then(({ ciphertext }) => sendMessageApi(sessionToken, mlsGroupId, ciphertext, undefined))
 			.catch(() => {})
 			.finally(() => plaintext.fill(0));
+	};
+
+	/** Toggle a chat's selection state in the (multi-select) forward modal. */
+	const toggleForwardTarget = (targetId: string) => {
+		setForwardSelected((prev) => {
+			const next = new Set(prev);
+			if (next.has(targetId)) next.delete(targetId);
+			else next.add(targetId);
+			return next;
+		});
+	};
+
+	/** Forward to every currently selected chat, then close the modal and clear selection. */
+	const sendForwardToSelected = () => {
+		if (!forwardMsg || forwardSelected.size === 0) return;
+		for (const targetId of forwardSelected) sendForwardToOne(targetId);
+		setForwardMsg(null);
+		setForwardSelected(new Set());
 	};
 
 	/**
@@ -8725,7 +8743,10 @@ export function ChatLayout() {
 						onDelete={sendDelete}
 						onPin={sendPin}
 						onForward={(msg) => {
-							if (msg.id && !msg.deleted) setForwardMsg({ id: msg.id, text: msg.text });
+							if (msg.id && !msg.deleted) {
+								setForwardMsg({ id: msg.id, text: msg.text });
+								setForwardSelected(new Set());
+							}
 						}}
 						onStar={(msgId, msgText) => handleStarMessage(activeId, msgId, msgText)}
 						onShare={handleShareMessage}
@@ -9049,9 +9070,15 @@ export function ChatLayout() {
 						justifyContent: "center",
 						zIndex: 100,
 					}}
-					onClick={() => setForwardMsg(null)}
+					onClick={() => {
+						setForwardMsg(null);
+						setForwardSelected(new Set());
+					}}
 					onKeyDown={(e) => {
-						if (e.key === "Escape") setForwardMsg(null);
+						if (e.key === "Escape") {
+							setForwardMsg(null);
+							setForwardSelected(new Set());
+						}
 					}}
 				>
 					<div
@@ -9088,13 +9115,16 @@ export function ChatLayout() {
 									textTransform: "uppercase",
 								}}
 							>
-								Forward to
+								Forward to{forwardSelected.size > 0 ? ` (${forwardSelected.size})` : ""}
 							</span>
 							<button
 								type="button"
 								aria-label="Cancel forward"
 								data-testid="forward-modal-close"
-								onClick={() => setForwardMsg(null)}
+								onClick={() => {
+									setForwardMsg(null);
+									setForwardSelected(new Set());
+								}}
 								style={{
 									background: "none",
 									border: "none",
@@ -9112,60 +9142,80 @@ export function ChatLayout() {
 						<div style={{ overflowY: "auto", padding: "8px 0" }}>
 							{chats
 								.filter((c) => c.id !== activeId && c.mlsGroupId && c.mlsIdentityId)
-								.map((c) => (
-									<button
-										key={c.id}
-										type="button"
-										data-testid={`forward-target-${c.id}`}
-										onClick={() => sendForward(c.id)}
-										style={{
-											width: "100%",
-											display: "flex",
-											alignItems: "center",
-											gap: 12,
-											padding: "10px 20px",
-											background: "none",
-											border: "none",
-											color: "var(--fg-1)",
-											cursor: "pointer",
-											textAlign: "left",
-										}}
-									>
-										<div
+								.map((c) => {
+									const selected = forwardSelected.has(c.id);
+									return (
+										<button
+											key={c.id}
+											type="button"
+											aria-pressed={selected}
+											data-testid={`forward-target-${c.id}`}
+											onClick={() => toggleForwardTarget(c.id)}
 											style={{
-												width: 36,
-												height: 36,
-												borderRadius: "50%",
-												background: "var(--bg-void)",
+												width: "100%",
 												display: "flex",
 												alignItems: "center",
-												justifyContent: "center",
-												fontSize: 14,
-												fontWeight: 600,
-												color: "#A8C8FF",
-												flexShrink: 0,
+												gap: 12,
+												padding: "10px 20px",
+												background: selected ? "var(--bg-void)" : "none",
+												border: "none",
+												color: "var(--fg-1)",
+												cursor: "pointer",
+												textAlign: "left",
 											}}
 										>
-											{c.name[0]}
-										</div>
-										<div>
-											<div style={{ fontSize: 13, fontWeight: 500 }}>{c.name}</div>
 											<div
+												data-testid={`forward-checkbox-${c.id}`}
 												style={{
-													fontSize: 11,
-													color: "var(--fg-3)",
-													marginTop: 1,
+													width: 18,
+													height: 18,
+													borderRadius: 4,
+													border: selected ? "1px solid #FF8A3D" : "1px solid var(--border-faint)",
+													background: selected ? "#FF8A3D" : "none",
+													display: "flex",
+													alignItems: "center",
+													justifyContent: "center",
+													flexShrink: 0,
 												}}
 											>
-												{c.last
-													? c.last.length > 30
-														? `${c.last.slice(0, 30)}…`
-														: c.last
-													: "No messages yet"}
+												{selected && <Icon name="check" size={12} />}
 											</div>
-										</div>
-									</button>
-								))}
+											<div
+												style={{
+													width: 36,
+													height: 36,
+													borderRadius: "50%",
+													background: "var(--bg-void)",
+													display: "flex",
+													alignItems: "center",
+													justifyContent: "center",
+													fontSize: 14,
+													fontWeight: 600,
+													color: "#A8C8FF",
+													flexShrink: 0,
+												}}
+											>
+												{c.name[0]}
+											</div>
+											<div>
+												<div style={{ fontSize: 13, fontWeight: 500 }}>{c.name}</div>
+												<div
+													style={{
+														fontSize: 11,
+														color: "var(--fg-3)",
+														marginTop: 1,
+													}}
+												>
+													{c.last
+														? c.last.length > 30
+															? `${c.last.slice(0, 30)}…`
+															: c.last
+														: "No messages yet"}
+												</div>
+											</div>
+										</button>
+									);
+								})}
 							{chats.filter((c) => c.id !== activeId && c.mlsGroupId && c.mlsIdentityId).length ===
 								0 && (
 								<div
@@ -9179,6 +9229,32 @@ export function ChatLayout() {
 									No other conversations
 								</div>
 							)}
+						</div>
+						<div
+							style={{
+								padding: "12px 20px 4px",
+								borderTop: "1px solid var(--border-faint)",
+							}}
+						>
+							<button
+								type="button"
+								data-testid="forward-send-button"
+								disabled={forwardSelected.size === 0}
+								onClick={sendForwardToSelected}
+								style={{
+									width: "100%",
+									padding: "10px 0",
+									borderRadius: 10,
+									border: "none",
+									background: forwardSelected.size === 0 ? "var(--bg-void)" : "#FF8A3D",
+									color: forwardSelected.size === 0 ? "var(--fg-4)" : "#040408",
+									fontSize: 13,
+									fontWeight: 600,
+									cursor: forwardSelected.size === 0 ? "default" : "pointer",
+								}}
+							>
+								{forwardSelected.size === 0 ? "Send" : `Send (${forwardSelected.size})`}
+							</button>
 						</div>
 					</div>
 				</div>

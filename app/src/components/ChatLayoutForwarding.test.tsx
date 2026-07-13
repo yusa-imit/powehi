@@ -1,9 +1,11 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db/schema";
 import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
 import * as UseMessagesModule from "../hooks/useMessages";
 import type { IncomingMessage } from "../hooks/useMessages";
+import * as WelcomePollerModule from "../hooks/useWelcomePoller";
+import { useAuthStore } from "../store/auth";
 import { ChatLayout } from "./ChatLayout";
 
 const MOCK_WORKER = {
@@ -178,5 +180,230 @@ describe("ChatLayout — message forwarding", () => {
 		fireEvent.click(screen.getByTestId("forward-button"));
 
 		expect(screen.getByText(/no other conversations/i)).toBeInTheDocument();
+	});
+
+	it("clicking a forward target toggles its selection instead of sending immediately", async () => {
+		let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+		let capturedOnNewGroup:
+			| ((event: { groupId: string; senderDeviceId: string }) => void)
+			| undefined;
+		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_id, _gid, onMsg) => {
+			capturedOnMessage = onMsg;
+		});
+		vi.spyOn(WelcomePollerModule, "useWelcomePoller").mockImplementation(
+			(_identityId, onNewGroup) => {
+				capturedOnNewGroup = onNewGroup;
+			},
+		);
+		useAuthStore.setState({
+			sessionToken: "tok-fwd-1",
+			identityId: "id-fwd-1",
+			deviceId: "dev-fwd-1",
+		});
+		render(<ChatLayout />);
+		await waitFor(() => expect(capturedOnNewGroup).toBeTypeOf("function"));
+
+		act(() => {
+			capturedOnNewGroup?.({ groupId: "fwd-toggle-target", senderDeviceId: "peer-device-toggle" });
+		});
+
+		await act(async () => {
+			capturedOnMessage?.({
+				id: "fwd-toggle-uuid-0006",
+				senderId: "peer-device-fwd",
+				groupId: "11111111-1111-1111-1111-111111111111",
+				text: "Toggle me",
+				ciphertextB64: "Zg==",
+				epochSeq: 1,
+			});
+		});
+
+		const bubbles = screen.getAllByTestId("message-bubble");
+		fireEvent.mouseEnter(bubbles[bubbles.length - 1]);
+		fireEvent.click(screen.getByTestId("forward-button"));
+
+		const target = screen.getByTestId("forward-target-fwd-toggle-target");
+		expect(target).toHaveAttribute("aria-pressed", "false");
+
+		fireEvent.click(target);
+		expect(target).toHaveAttribute("aria-pressed", "true");
+		// The modal stays open and no send happened yet — selection only.
+		expect(screen.getByTestId("forward-modal")).toBeInTheDocument();
+
+		fireEvent.click(target);
+		expect(target).toHaveAttribute("aria-pressed", "false");
+	});
+
+	it("forwards to every selected target in one send and closes the modal", async () => {
+		let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+		let capturedOnNewGroup:
+			| ((event: { groupId: string; senderDeviceId: string }) => void)
+			| undefined;
+		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_id, _gid, onMsg) => {
+			capturedOnMessage = onMsg;
+		});
+		vi.spyOn(WelcomePollerModule, "useWelcomePoller").mockImplementation(
+			(_identityId, onNewGroup) => {
+				capturedOnNewGroup = onNewGroup;
+			},
+		);
+		useAuthStore.setState({
+			sessionToken: "tok-fwd-2",
+			identityId: "id-fwd-2",
+			deviceId: "dev-fwd-2",
+		});
+		render(<ChatLayout />);
+		await waitFor(() => expect(capturedOnNewGroup).toBeTypeOf("function"));
+
+		act(() => {
+			capturedOnNewGroup?.({ groupId: "fwd-target-a", senderDeviceId: "peer-device-aaaa" });
+		});
+		act(() => {
+			capturedOnNewGroup?.({ groupId: "fwd-target-b", senderDeviceId: "peer-device-bbbb" });
+		});
+
+		await act(async () => {
+			capturedOnMessage?.({
+				id: "fwd-multi-uuid-0007",
+				senderId: "peer-device-fwd",
+				groupId: "11111111-1111-1111-1111-111111111111",
+				text: "Forward to both",
+				ciphertextB64: "Zg==",
+				epochSeq: 1,
+			});
+		});
+
+		const bubbles = screen.getAllByTestId("message-bubble");
+		fireEvent.mouseEnter(bubbles[bubbles.length - 1]);
+		fireEvent.click(screen.getByTestId("forward-button"));
+
+		const targetA = screen.getByTestId("forward-target-fwd-target-a");
+		const targetB = screen.getByTestId("forward-target-fwd-target-b");
+		fireEvent.click(targetA);
+		fireEvent.click(targetB);
+
+		expect(screen.getByText("Forward to (2)")).toBeInTheDocument();
+		expect(screen.getByTestId("forward-send-button")).not.toBeDisabled();
+
+		const encryptCallsBefore = MOCK_WORKER.mlsEncrypt.mock.calls.length;
+
+		await act(async () => {
+			fireEvent.click(screen.getByTestId("forward-send-button"));
+		});
+
+		expect(MOCK_WORKER.mlsEncrypt.mock.calls.length).toBe(encryptCallsBefore + 2);
+		expect(screen.queryByTestId("forward-modal")).not.toBeInTheDocument();
+	});
+
+	it("the send button is disabled until at least one target is selected", async () => {
+		let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+		let capturedOnNewGroup:
+			| ((event: { groupId: string; senderDeviceId: string }) => void)
+			| undefined;
+		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_id, _gid, onMsg) => {
+			capturedOnMessage = onMsg;
+		});
+		vi.spyOn(WelcomePollerModule, "useWelcomePoller").mockImplementation(
+			(_identityId, onNewGroup) => {
+				capturedOnNewGroup = onNewGroup;
+			},
+		);
+		useAuthStore.setState({
+			sessionToken: "tok-fwd-3",
+			identityId: "id-fwd-3",
+			deviceId: "dev-fwd-3",
+		});
+		render(<ChatLayout />);
+		await waitFor(() => expect(capturedOnNewGroup).toBeTypeOf("function"));
+
+		act(() => {
+			capturedOnNewGroup?.({ groupId: "fwd-disabled-target", senderDeviceId: "peer-device-dddd" });
+		});
+
+		await act(async () => {
+			capturedOnMessage?.({
+				id: "fwd-disabled-uuid-0008",
+				senderId: "peer-device-fwd",
+				groupId: "11111111-1111-1111-1111-111111111111",
+				text: "No selection yet",
+				ciphertextB64: "Zg==",
+				epochSeq: 1,
+			});
+		});
+
+		const bubbles = screen.getAllByTestId("message-bubble");
+		fireEvent.mouseEnter(bubbles[bubbles.length - 1]);
+		fireEvent.click(screen.getByTestId("forward-button"));
+
+		expect(screen.getByTestId("forward-send-button")).toBeDisabled();
+	});
+
+	it("does not carry a stale selection into a freshly reopened forward modal", async () => {
+		let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+		let capturedOnNewGroup:
+			| ((event: { groupId: string; senderDeviceId: string }) => void)
+			| undefined;
+		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_id, _gid, onMsg) => {
+			capturedOnMessage = onMsg;
+		});
+		vi.spyOn(WelcomePollerModule, "useWelcomePoller").mockImplementation(
+			(_identityId, onNewGroup) => {
+				capturedOnNewGroup = onNewGroup;
+			},
+		);
+		useAuthStore.setState({
+			sessionToken: "tok-fwd-4",
+			identityId: "id-fwd-4",
+			deviceId: "dev-fwd-4",
+		});
+		render(<ChatLayout />);
+		await waitFor(() => expect(capturedOnNewGroup).toBeTypeOf("function"));
+
+		act(() => {
+			capturedOnNewGroup?.({ groupId: "fwd-reopen-target", senderDeviceId: "peer-device-eeee" });
+		});
+
+		await act(async () => {
+			capturedOnMessage?.({
+				id: "fwd-reopen-uuid-0009",
+				senderId: "peer-device-fwd",
+				groupId: "11111111-1111-1111-1111-111111111111",
+				text: "First message",
+				ciphertextB64: "Zg==",
+				epochSeq: 1,
+			});
+		});
+		await act(async () => {
+			capturedOnMessage?.({
+				id: "fwd-reopen-uuid-0010",
+				senderId: "peer-device-fwd",
+				groupId: "11111111-1111-1111-1111-111111111111",
+				text: "Second message",
+				ciphertextB64: "Zg==",
+				epochSeq: 1,
+			});
+		});
+
+		let bubbles = screen.getAllByTestId("message-bubble");
+		fireEvent.mouseEnter(bubbles[bubbles.length - 2]);
+		fireEvent.click(screen.getAllByTestId("forward-button")[0]);
+		fireEvent.click(screen.getByTestId("forward-target-fwd-reopen-target"));
+		expect(screen.getByText("Forward to (1)")).toBeInTheDocument();
+
+		// Dismiss via the backdrop (not the explicit close button) to mimic every
+		// real dismiss path, then reopen the modal for a different message.
+		fireEvent.click(screen.getByTestId("forward-modal-backdrop"));
+		expect(screen.queryByTestId("forward-modal")).not.toBeInTheDocument();
+
+		bubbles = screen.getAllByTestId("message-bubble");
+		fireEvent.mouseEnter(bubbles[bubbles.length - 1]);
+		fireEvent.click(screen.getAllByTestId("forward-button")[0]);
+
+		expect(screen.getByText("Forward to")).toBeInTheDocument();
+		expect(screen.getByTestId("forward-target-fwd-reopen-target")).toHaveAttribute(
+			"aria-pressed",
+			"false",
+		);
+		expect(screen.getByTestId("forward-send-button")).toBeDisabled();
 	});
 });
