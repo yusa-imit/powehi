@@ -17,7 +17,55 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-14, cycle 275 — STABILIZATION: sync stale RUSTSEC-2026-0124 waiver comment)
+## Current state (2026-07-14, cycle 276 — FEATURE: per-member "Seen by N" group read receipts)
+
+- Commit `155cdaf`. Closed the gap flagged at the end of cycles 274/275 (CI green, `gh issue list`
+  empty): `ChatMessage.read` was a single boolean, so a group read_receipt from ANY member flipped
+  every group message straight to the single "Read" double-check with no per-member breakdown —
+  `handleIncomingReadReceipt`'s 4th param was literally named `_senderDeviceId` to mark it unused,
+  even though `useMessages.ts`'s `read_receipt` branch already forwards the MLS/server-authenticated
+  `env.sender` for it (same field `handleIncomingReaction`/`handleIncomingDeliveryReceipt` already
+  consume for their own per-sender tracking — this was the one receipt type that dropped it).
+- `ChatMessage` gained `readBy?: string[]` (deduped device IDs that have read the message).
+  `handleIncomingReadReceipt` now appends the authenticated `senderDeviceId` into `readBy` (dedup via
+  `.includes`) alongside the existing `read: true` set, so DM behavior (`msg.read` boolean) is
+  unchanged bit-for-bit. `MessageBubble`'s read-indicator span gained a second, purely additive
+  conditional block: `isMe && isGroup && (msg.readBy?.length ?? 0) > 0` renders `Seen by N`
+  (`data-testid="seen-by-indicator"`) plus a hover tooltip (`data-testid="seen-by-tooltip"`) listing
+  reader handles — reusing the existing `getReactionHandles(senders, members, myDeviceId)` helper
+  already used for reaction-chip tooltips (same "You" / roster-handle / `id.slice(0,8)` fallback
+  logic, no new lookup path). DM chats are unaffected — the existing single-checkmark icon path is
+  untouched, `isGroup` gates the new block off entirely there.
+- **security-auditor: GREEN.** Reviewed: (1) no new info exposure — `env.sender` was already forwarded
+  identically for `reaction`/`reaction_remove`/`delivery_receipt`, this closes the one receipt type
+  that discarded it, nothing new crosses the wire; (2) `readBy` growth is bounded by distinct MLS
+  group members (server-authenticated sender field, not client-fabricatable) and deduped, so no
+  unbounded-growth risk beyond existing group-size assumptions; (3) rendered as plain JSX text
+  (`{...}.join(", ")`), no `dangerouslySetInnerHTML`, same safe pattern as the pre-existing reaction
+  tooltip; (4) `readBy` is never persisted to Dexie — grepped `usePersistentMessages`/the rehydration
+  reconciler (only touches `text/edited/deleted/reactions` on chat-switch) and confirmed it's pure
+  ephemeral React state, consistent with `react-hooks-only.md`'s ephemeral-state pattern; (5) render
+  gated on `isMe && isGroup`, mutation scoped per `c.mlsGroupId` map — no cross-chat leak, verified by
+  a dedicated test.
+- New test file `ChatLayoutGroupReadReceipts.test.tsx` (4 tests): "Seen by 2" after two distinct
+  members read-receipt the same message id; a repeated receipt from the same device doesn't
+  double-count ("Seen by 1" stays); hovering the indicator reveals the tooltip with reader handles;
+  a DM chat never renders `seen-by-indicator` even after multiple distinct-sender receipts (the
+  existing single "Read" checkmark still shows instead). Used the same real "New group" UI flow
+  (`new-group` button → `group-name-input` → `create-group-submit`) cycle 273/274's test suite
+  already established as the pattern for synthesizing a group chat with both `mlsGroupId` +
+  `mlsIdentityId` set (the static SEED_CHATS `design-team` entry lacks `mlsIdentityId`, so it can't
+  send a real "me" message in a test — same reason those cycles didn't use it either). 1207 frontend
+  tests green (was 1203, 98 files — 1 new file). `tsc --noEmit` clean, Biome clean.
+- **Backend:** untouched this cycle (pure frontend feature, no new server-visible metadata — the
+  `read_receipt` envelope wire format is unchanged, only client-side tracking of who-already-sent-one
+  changed).
+- **Next cycle:** no more known gaps in the read-receipt UI. Remaining candidates: a live-backend
+  Playwright E2E harness (test-infra, own cycle, still not started), PQ hybrid ciphersuite activation
+  (ADR-0003 Phase A, blocked on upstream openmls `MLS_128_MLKEM768` support, not actionable from this
+  repo).
+
+## Previous state (2026-07-14, cycle 275 — STABILIZATION: sync stale RUSTSEC-2026-0124 waiver comment)
 
 - Commit `ca27f05`. Full sweep: CI green (no red runs), `gh issue list` empty, `cargo audit`
   clean, `cargo deny check` clean (advisories/bans/licenses/sources ok), `cargo fmt --all --check`
