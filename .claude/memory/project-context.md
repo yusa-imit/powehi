@@ -17,7 +17,43 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-14, cycle 274 — FEATURE: forward media attachments, not just text)
+## Current state (2026-07-14, cycle 275 — STABILIZATION: sync stale RUSTSEC-2026-0124 waiver comment)
+
+- Commit `ca27f05`. Full sweep: CI green (no red runs), `gh issue list` empty, `cargo audit`
+  clean, `cargo deny check` clean (advisories/bans/licenses/sources ok), `cargo fmt --all --check`
+  clean, `cargo clippy --workspace --all-targets -- -D warnings` clean, `cargo test --workspace`
+  all green (nextest not installed in this sandbox — used the `cargo test` fallback per CLAUDE.md),
+  frontend `pnpm test` 1203/1203 green (97 files), `pnpm audit --prod` clean, no `console.log` leaks,
+  no `TODO`/`FIXME` markers, no uncommitted backend `.rs` changes since cycle 270's unwrap sweep
+  (cycles 271-274 were pure frontend) so that sweep is still current. target/ at 14G, under the
+  20G prune threshold — hygiene pass not needed.
+- **Finding:** `.cargo/audit.toml`'s RUSTSEC-2026-0124 (libcrux-chacha20poly1305) comment claimed
+  the crate is "transitively pulled via openmls_rust_crypto 0.5.1 → libcrux-aead 0.0.7" — stale.
+  Verified via `cargo tree -i libcrux-chacha20poly1305 --target all` (zero output) and Cargo.lock's
+  own `openmls_rust_crypto` dependency list (uses RustCrypto's `chacha20poly1305` directly, no
+  libcrux) that the real (inactive) path is hpke-rs's optional `hpke-rs-libcrux` backend, which is
+  never activated — same "resolved into Cargo.lock but not compiled into any binary" category as
+  the rsa/RUSTSEC-2023-0071 entry right above it. `deny.toml`'s `[advisories]` comment already had
+  the correct explanation (fixed in some earlier cycle) — the two waiver files had silently
+  drifted apart despite `deny.toml`'s own note that "both files must be updated together." Fixed
+  `.cargo/audit.toml`'s comment to match, cross-referencing `deny.toml` to make re-divergence more
+  visible next time either file is touched. No ignore entries added/removed, no behavior change —
+  `cargo audit` still clean after the edit.
+- Did not run a dedicated security-auditor/crypto-reviewer pass — this was a comment-only fix in a
+  cargo tooling config file (no code, no handler, no crypto logic, no architecture change), outside
+  what CLAUDE.md's mandatory review gates cover.
+- Investigated and ruled out as this cycle's target: E2E test coverage (`app/e2e/chat.spec.ts` /
+  `login.spec.ts` only test login-screen guards, not a real register→message round trip — there's
+  no docker-compose/CI harness to stand up a live backend+Postgres+Redis+R2 for Playwright, and
+  `chat.spec.ts` has a comment explaining this is an intentional, already-accepted scope limit, not
+  a regression). Building that harness would be a large, separate infra-lift item, not a
+  same-cycle stabilization fix.
+- **Next cycle:** FEATURE candidates still open: group read receipts (`ChatMessage.read` boolean
+  collapses per-member "seen by N" in group chats — noted cycle 274, medium scope). Larger,
+  not-yet-started items: a live-backend Playwright E2E harness (test-infra, own cycle), PQ hybrid
+  ciphersuite activation (ADR-0003 Phase A, still blocked on openmls stable `MLS_128_MLKEM768`).
+
+## Previous state (2026-07-14, cycle 274 — FEATURE: forward media attachments, not just text)
 
 - Commit `096dc0f`. Closed a real correctness/data-loss bug found via a dedicated research
   agent sweep (CI green, no open issues, all 6 roadmap phases already `[x]`): forwarding a
