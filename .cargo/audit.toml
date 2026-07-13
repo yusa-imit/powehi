@@ -8,9 +8,13 @@
 # RUSTSEC-2026-0124: libcrux-chacha20poly1305 0.0.7 — Potential Panic on Overlong Ciphertext Buffer
 # Impact: panic/DoS only — does NOT leak plaintext, keys, or ciphertext.
 # Powehi non-negotiable (server never sees plaintext) is NOT violated.
-# Transitively pulled via openmls_rust_crypto 0.5.1 → libcrux-aead 0.0.7.
-# openmls_rust_crypto 0.5.1 is the latest; cannot upgrade to libcrux >=0.0.8 within
-# the current dep graph.  Revisit when openmls_rust_crypto releases a new version.
+# Reached only via a non-activated PQ feature path (hpke-rs's optional libcrux backend,
+# hpke-rs-libcrux) in openmls_rust_crypto 0.5.1 — NOT openmls_rust_crypto's actual AEAD
+# choice, which is RustCrypto's `chacha20poly1305` crate directly (verified in Cargo.lock's
+# openmls_rust_crypto dependency list). `cargo tree -i libcrux-chacha20poly1305` (even with
+# `--target all`) produces no output — like the rsa entry above, it's resolved into Cargo.lock
+# but not compiled into any Powehi binary. Kept in sync with deny.toml's `[advisories]` comment,
+# which already documented this correctly. Revisit when openmls_rust_crypto releases a new version.
 #
 # RUSTSEC-2025-0134: rustls-pemfile 2.2.0 — crate unmaintained
 # Impact: maintenance warning only, no security vulnerability.
