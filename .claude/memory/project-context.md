@@ -17,7 +17,65 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-13, cycle 269 — FEATURE: wire MLS full-context export/import into sign-in + crypto-worker persistence, Phase 2 finish)
+## Current state (2026-07-13, cycle 270 — STABILIZATION: unwrap() cleanup + stale cargo-deny ignores)
+
+- Commit aa1d88e. CI green on main (no red runs), `gh issue list --state open` empty, so this
+  cycle ran the standard STABILIZATION sweep instead of a specific bug fix.
+- `cargo audit`: clean, exit 0. `cargo deny check`: clean but surfaced two
+  `advisory-not-detected` warnings — the `deny.toml` ignore entries for RUSTSEC-2023-0071 (`rsa`)
+  and RUSTSEC-2026-0124 (`libcrux-chacha20poly1305`) no longer match anything in cargo-deny's
+  feature-aware dependency graph. Verified with `cargo tree -e no-dev --target all --all-features
+  --workspace -i rsa` / `-i libcrux-chacha20poly1305`: both return empty even with all features
+  forced on — neither crate is reachable via any activated feature (no `sqlx` "mysql" feature, no
+  active openmls PQ path), so the ignores were dead config. Removed both from `deny.toml` only;
+  `.cargo/audit.toml` keeps them since `cargo audit` scans `Cargo.lock` directly without feature
+  resolution and still surfaces both. Documented the intentional divergence in a `deny.toml`
+  comment block (with a "re-add if a feature activates" note) so the two files staying in sync
+  remains the default expectation, not a silently-broken invariant.
+- Grepped all `crates/**/src/**/*.rs` for `unwrap()`/`expect()` outside `#[cfg(test)]` blocks (the
+  `crates-naming.md` rule: "No `unwrap()` or `expect()` in library code — propagate errors with
+  `?`"). Found one genuine hit:
+  `crates/adapters/inbound/powehi-grpc/src/client.rs:291` — `Err(GrpcError::Status(last_err.unwrap()))`
+  in the inter-region gRPC retry loop's exhausted-retries path. Traced the control flow: the loop
+  is `for _ in 0..=max_retries` (always ≥1 iteration), with exactly three exits — `Ok` returns
+  early, non-retryable `Err` returns early, and the only fall-through path (retryable `Err`)
+  unconditionally sets `last_err = Some(e)` before the next iteration or loop exit. So `last_err`
+  is provably `Some` whenever this line runs — the panic was already unreachable, but a bare
+  `unwrap()` had no documented justification (unlike the codebase's existing convention of
+  `.expect("reason")` for this class of "type system can't prove it, but here's why it's safe"
+  case — see `auth_service.rs:69`, `rate_limit.rs:72`, `powehi-opaque/lib.rs:158`). Swapped to
+  `.expect(...)` with the invariant spelled out; behavior-identical (both panic only on
+  unreachable `None`; error content/retry count/backoff/circuit-breaker semantics untouched).
+  Other 4 grep hits were already justified `.expect()` calls or a doc-comment mentioning
+  `.unwrap()` in prose (not code) — no changes needed there.
+- Everything else in the sweep was clean: `cargo test --workspace` all green, `pnpm test` 1183/1183
+  (97 files, no regression from cycle 269's 1183), `cargo fmt --all --check` clean, `cargo clippy
+  --workspace --all-targets -- -D warnings` clean, all outbound adapters already have
+  `testcontainers` integration tests (Postgres/Redis/R2 — `powehi-r2`'s `r2_media_it.rs` landed
+  sometime between cycle 255's note and now, closing that previously-flagged gap).
+- **security-auditor: GREEN**, no findings, on both the client.rs and deny.toml changes — confirmed
+  the unwrap→expect swap is behavior-identical and the panic path truly unreachable (not just
+  unlikely), and confirmed the deny.toml removal doesn't weaken real advisory coverage (the
+  entries were dead, not load-bearing).
+- **Target dir hygiene:** was at 20977648 KB (~6 MB over the 20 GB / 20971520 KB threshold) —
+  pruned 0-byte `.rmeta` stubs and build artifacts older than 7 days per the runbook. Now 13 GB.
+- **Verified the cycle 259 "no `db.groups.add()` caller" gap is CLOSED**, contradicting the stale
+  pointer still in `MEMORY.md`'s cross-session `project-context.md` summary. Grepped
+  `app/src/**/*.{ts,tsx}` for non-test callers: `EncryptedPowehiDb.addGroup()` itself has no
+  caller, but cycle 262 (`ae67d72`, "wire GroupRow creation into Dexie for new/joined groups")
+  wired `.putGroup()` (Dexie `put` = upsert-or-create, functionally equivalent to `add` for a
+  first-write) into `ChatLayout.tsx` at two call sites (new group creation + joined-group
+  acceptance) — so `GroupRow`s ARE created in the live app today, not just in tests.
+  Disappearing-timer + pin persistence (cycles 252-259) do survive a reload in production.
+  **Action for whoever next touches the cross-session memory:** update/remove the stale gap note
+  in `~/.claude/…/memory/project-context.md`'s "Last closed item — cycle 259" section next time
+  that memory file is edited.
+- **Next cycle candidates:** ADR-0003 Y-4 (ML-KEM shared secret not mixed into MLS epoch key
+  schedule) remains blocked on openmls exposing a hook to mix external PSK/KEM material into epoch
+  secret derivation; not actionable purely from this repo. PQ hybrid ciphersuite activation still
+  blocked on openmls shipping a stable `MLS_128_MLKEM768` (or equivalent) ciphersuite upstream.
+
+## Previous state (2026-07-13, cycle 269 — FEATURE: wire MLS full-context export/import into sign-in + crypto-worker persistence, Phase 2 finish)
 
 - Commit 5258dee. This was the real fix for the long-standing "MLS_CTX thread_local starts empty
   on every worker reload" bug (flagged since cycle 264/33d6e65, which only landed the Rust-side
