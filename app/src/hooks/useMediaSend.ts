@@ -12,8 +12,7 @@
  */
 
 import { useCallback } from "react";
-import { confirmMediaUpload, requestMediaUpload } from "../api/media";
-import { sendMessage as sendMessageApi } from "../api/messages";
+import { encryptAndSendMedia } from "../lib/mediaTransfer";
 import { useAuthStore } from "../store/auth";
 import { useCryptoWorker } from "./useCryptoWorker";
 
@@ -71,10 +70,6 @@ export function useMediaSend({ identityId, groupId }: MediaSendOptions): MediaSe
 			// Read file bytes — stays in JS memory only until passed to WASM encrypt.
 			const fileBytes = new Uint8Array(await file.arrayBuffer());
 
-			// AES-256-GCM encrypt. mediaKeyHandle is opaque — raw key stays in WASM.
-			const { ciphertext, mediaKeyHandle, iv, blobHash } =
-				await cryptoWorker.mediaEncrypt(fileBytes);
-
 			// §9.4.1: try to generate and encrypt a thumbnail (non-fatal if unavailable).
 			let thumbHandle: string | null = null;
 			try {
@@ -88,52 +83,18 @@ export function useMediaSend({ identityId, groupId }: MediaSendOptions): MediaSe
 			}
 
 			try {
-				// Allocate MediaId and get presigned R2 PUT URL from the server.
-				const { mediaId, uploadUrl } = await requestMediaUpload(
-					sessionToken,
+				await encryptAndSendMedia(
+					fileBytes,
 					file.type || "application/octet-stream",
-					ciphertext.length,
+					identityId,
 					groupId,
+					sessionToken,
+					cryptoWorker,
+					thumbHandle,
 				);
-
-				// PUT encrypted bytes directly to R2 — server never sees plaintext.
-				// .slice(0) copies into a fresh ArrayBuffer so the BodyInit type is
-				// unambiguous across DOM and Bun TypeScript environments.
-				await fetch(uploadUrl, {
-					method: "PUT",
-					body: ciphertext.slice(0),
-					headers: { "Content-Type": "application/octet-stream" },
-				});
-
-				// Tell the server the upload is complete.
-				await confirmMediaUpload(sessionToken, mediaId);
-
-				// Build and MLS-encrypt the app message payload.
-				// Raw media key stays inside WASM; only the MLS ciphertext is returned.
-				const { ciphertext: mlsCiphertext } = thumbHandle
-					? await cryptoWorker.mediaMessageCreateWithThumbnail(
-							identityId,
-							groupId,
-							mediaKeyHandle,
-							mediaId,
-							blobHash,
-							iv,
-							thumbHandle,
-						)
-					: await cryptoWorker.mediaMessageCreate(
-							identityId,
-							groupId,
-							mediaKeyHandle,
-							mediaId,
-							blobHash,
-							iv,
-						);
-
-				// Deliver the MLS envelope to the delivery service.
-				await sendMessageApi(sessionToken, groupId, mlsCiphertext);
 			} finally {
-				// Always drop both handles regardless of success or failure.
-				await cryptoWorker.mediaDropKey(mediaKeyHandle);
+				// Always drop the thumbnail handle regardless of success or failure
+				// (the media key handle is dropped inside encryptAndSendMedia itself).
 				if (thumbHandle !== null) {
 					await cryptoWorker.mediaThumbnailDrop(thumbHandle).catch(() => {});
 				}

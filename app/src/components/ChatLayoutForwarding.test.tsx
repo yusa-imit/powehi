@@ -1,9 +1,11 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as MediaApi from "../api/media";
+import * as MessagesApi from "../api/messages";
 import { db } from "../db/schema";
 import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
 import * as UseMessagesModule from "../hooks/useMessages";
-import type { IncomingMessage } from "../hooks/useMessages";
+import type { IncomingMessage, MediaPayload } from "../hooks/useMessages";
 import * as WelcomePollerModule from "../hooks/useWelcomePoller";
 import { useAuthStore } from "../store/auth";
 import { ChatLayout } from "./ChatLayout";
@@ -21,6 +23,16 @@ const MOCK_WORKER = {
 	mlsDecrypt: vi.fn(async () => ({ plaintext: new Uint8Array() })),
 	encryptDbField: vi.fn(async (v: string) => v),
 	decryptDbField: vi.fn(async (v: string) => v),
+	// JPEG magic bytes so sniffMimeType resolves to image/jpeg during forward re-encrypt.
+	mediaDecryptWithRawKey: vi.fn(async () => new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4])),
+	mediaEncrypt: vi.fn(async () => ({
+		ciphertext: new Uint8Array(48),
+		mediaKeyHandle: "mock-fwd-media-key-handle",
+		iv: new Uint8Array(12),
+		blobHash: new Uint8Array(32),
+	})),
+	mediaMessageCreate: vi.fn(async () => ({ ciphertext: new Uint8Array(64) })),
+	mediaDropKey: vi.fn(async () => true),
 };
 
 describe("ChatLayout — message forwarding", () => {
@@ -405,5 +417,115 @@ describe("ChatLayout — message forwarding", () => {
 			"false",
 		);
 		expect(screen.getByTestId("forward-send-button")).toBeDisabled();
+	});
+
+	it("forwards a media message by decrypting once and re-encrypting fresh for the target group", async () => {
+		let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+		let capturedOnNewGroup:
+			| ((event: { groupId: string; senderDeviceId: string }) => void)
+			| undefined;
+		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_id, _gid, onMsg) => {
+			capturedOnMessage = onMsg;
+		});
+		vi.spyOn(WelcomePollerModule, "useWelcomePoller").mockImplementation(
+			(_identityId, onNewGroup) => {
+				capturedOnNewGroup = onNewGroup;
+			},
+		);
+		useAuthStore.setState({
+			sessionToken: "tok-fwd-media",
+			identityId: "id-fwd-media",
+			deviceId: "dev-fwd-media",
+		});
+
+		const getMediaDownloadUrlSpy = vi
+			.spyOn(MediaApi, "getMediaDownloadUrl")
+			.mockResolvedValue({ downloadUrl: "https://r2.test/original-ciphertext" });
+		const requestMediaUploadSpy = vi
+			.spyOn(MediaApi, "requestMediaUpload")
+			.mockResolvedValue({ mediaId: "fwd-new-media-id", uploadUrl: "https://r2.test/put" });
+		const confirmMediaUploadSpy = vi
+			.spyOn(MediaApi, "confirmMediaUpload")
+			.mockResolvedValue(undefined);
+		const sendMessageSpy = vi.spyOn(MessagesApi, "sendMessage").mockResolvedValue("env-id-media");
+
+		const fetchMock = vi.fn().mockResolvedValue({
+			ok: true,
+			arrayBuffer: async () => new ArrayBuffer(64),
+		});
+		globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+		render(<ChatLayout />);
+		await waitFor(() => expect(capturedOnNewGroup).toBeTypeOf("function"));
+
+		act(() => {
+			capturedOnNewGroup?.({ groupId: "fwd-media-target", senderDeviceId: "peer-device-media" });
+		});
+
+		const media: MediaPayload = {
+			blobId: "original-blob-id",
+			blobHash: Array.from<number>({ length: 32 }).fill(7),
+			mediaKey: Array.from<number>({ length: 32 }).fill(9),
+			iv: Array.from<number>({ length: 12 }).fill(3),
+		};
+
+		await act(async () => {
+			capturedOnMessage?.({
+				id: "fwd-media-uuid-0011",
+				senderId: "peer-device-fwd",
+				groupId: "11111111-1111-1111-1111-111111111111",
+				text: "[image]",
+				media,
+				ciphertextB64: "Zg==",
+				epochSeq: 1,
+			});
+		});
+
+		const bubbles = screen.getAllByTestId("message-bubble");
+		fireEvent.mouseEnter(bubbles[bubbles.length - 1]);
+		fireEvent.click(screen.getByTestId("forward-button"));
+		fireEvent.click(screen.getByTestId("forward-target-fwd-media-target"));
+
+		await act(async () => {
+			fireEvent.click(screen.getByTestId("forward-send-button"));
+		});
+
+		// Decrypts the ORIGINAL blob (the source message's own blobId), not a re-derived one.
+		await waitFor(() =>
+			expect(getMediaDownloadUrlSpy).toHaveBeenCalledWith("tok-fwd-media", "original-blob-id"),
+		);
+		// Re-encrypts fresh (new key, new blob) rather than reusing the source ciphertext/key.
+		await waitFor(() => expect(MOCK_WORKER.mediaEncrypt).toHaveBeenCalledOnce());
+		expect(requestMediaUploadSpy).toHaveBeenCalledWith(
+			"tok-fwd-media",
+			"image/jpeg",
+			48,
+			"fwd-media-target",
+		);
+		await waitFor(() =>
+			expect(confirmMediaUploadSpy).toHaveBeenCalledWith("tok-fwd-media", "fwd-new-media-id"),
+		);
+		await waitFor(() =>
+			expect(MOCK_WORKER.mediaMessageCreate).toHaveBeenCalledWith(
+				"id-fwd-media",
+				"fwd-media-target",
+				"mock-fwd-media-key-handle",
+				"fwd-new-media-id",
+				expect.any(Uint8Array),
+				expect.any(Uint8Array),
+			),
+		);
+		await waitFor(() =>
+			expect(sendMessageSpy).toHaveBeenCalledWith(
+				"tok-fwd-media",
+				"fwd-media-target",
+				expect.any(Uint8Array),
+			),
+		);
+		// The opaque media key handle is always dropped after use.
+		await waitFor(() =>
+			expect(MOCK_WORKER.mediaDropKey).toHaveBeenCalledWith("mock-fwd-media-key-handle"),
+		);
+		expect(screen.queryByTestId("forward-modal")).not.toBeInTheDocument();
 	});
 });

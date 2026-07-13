@@ -28,6 +28,7 @@ import { usePersistentMessages } from "../hooks/usePersistentMessages";
 import { useRegionDetect } from "../hooks/useRegionDetect";
 import { useTauriNotification } from "../hooks/useTauriNotification";
 import { type NewGroupEvent, useWelcomePoller } from "../hooks/useWelcomePoller";
+import { downloadAndDecryptMedia, encryptAndSendMedia, sniffMimeType } from "../lib/mediaTransfer";
 import {
 	NOTIFICATION_SOUNDS,
 	NOTIFICATION_SOUND_LABELS,
@@ -6739,7 +6740,11 @@ export function ChatLayout() {
 
 	const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
 	const [editingMessage, setEditingMessage] = useState<ChatMessage | null>(null);
-	const [forwardMsg, setForwardMsg] = useState<{ id: string; text: string } | null>(null);
+	const [forwardMsg, setForwardMsg] = useState<{
+		id: string;
+		text: string;
+		media?: MediaPayload;
+	} | null>(null);
 	const [forwardSelected, setForwardSelected] = useState<Set<string>>(new Set());
 	const [jumpToMessageId, setJumpToMessageId] = useState<string | null>(null);
 	const [lightboxMsgIdx, setLightboxMsgIdx] = useState<number | null>(null);
@@ -8152,19 +8157,12 @@ export function ChatLayout() {
 	}, []);
 
 	/**
-	 * Forward `forwardMsg.text` to a single target chat as a new MLS-encrypted message.
-	 * Optimistically appends to the target chat's message list, then sends via API.
-	 * Fire-and-forget — failure leaves the optimistic bubble in place (same as sendMessage).
+	 * Optimistically append `text` as a "me" bubble to `targetId`'s chat.
+	 * Shared by both the plain-text and media forward paths below.
 	 */
-	const sendForwardToOne = (targetId: string) => {
-		if (!forwardMsg || !sessionToken || !cryptoWorker) return;
-		const targetChat = chats.find((c) => c.id === targetId);
-		if (!targetChat?.mlsGroupId || !targetChat?.mlsIdentityId) return;
-		const { mlsGroupId, mlsIdentityId } = targetChat;
-		const text = forwardMsg.text;
+	const appendForwardOptimistic = (targetId: string, text: string) => {
 		const now = new Date();
 		const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-		// Optimistic update on the target chat.
 		setChats((cs) =>
 			cs.map((c) => {
 				if (c.id !== targetId) return c;
@@ -8179,6 +8177,21 @@ export function ChatLayout() {
 				return { ...c, messages: msgs, last: text, time };
 			}),
 		);
+	};
+
+	/**
+	 * Forward `forwardMsg.text` to a single target chat as a new MLS-encrypted message.
+	 * Optimistically appends to the target chat's message list, then sends via API.
+	 * Fire-and-forget — failure leaves the optimistic bubble in place (same as sendMessage).
+	 * Only used for text-only forwards; see `sendForwardToSelected` for media.
+	 */
+	const sendForwardToOne = (targetId: string) => {
+		if (!forwardMsg || !sessionToken || !cryptoWorker) return;
+		const targetChat = chats.find((c) => c.id === targetId);
+		if (!targetChat?.mlsGroupId || !targetChat?.mlsIdentityId) return;
+		const { mlsGroupId, mlsIdentityId } = targetChat;
+		const text = forwardMsg.text;
+		appendForwardOptimistic(targetId, text);
 		const plaintext = new TextEncoder().encode(text);
 		cryptoWorker
 			.mlsEncrypt(mlsIdentityId, mlsGroupId, plaintext)
@@ -8197,10 +8210,45 @@ export function ChatLayout() {
 		});
 	};
 
-	/** Forward to every currently selected chat, then close the modal and clear selection. */
+	/**
+	 * Forward to every currently selected chat, then close the modal and clear selection.
+	 *
+	 * A media message can't just be re-sent as-is: the original ciphertext/AES
+	 * key is bound to the source group, and other groups' members have no way
+	 * to obtain it. Each target group needs its own fresh key + R2 blob, so the
+	 * original attachment is decrypted ONCE (it's already client-visible — the
+	 * media key arrives inline in the MLS-decrypted payload, prd.md §9.2) and
+	 * then re-encrypted+uploaded once per target via the shared
+	 * `encryptAndSendMedia` pipeline (same one useMediaSend uses).
+	 */
 	const sendForwardToSelected = () => {
 		if (!forwardMsg || forwardSelected.size === 0) return;
-		for (const targetId of forwardSelected) sendForwardToOne(targetId);
+		const targets = Array.from(forwardSelected);
+		const media = forwardMsg.media;
+
+		if (media && sessionToken && cryptoWorker) {
+			for (const targetId of targets) appendForwardOptimistic(targetId, "Image attachment");
+			downloadAndDecryptMedia(media, sessionToken, cryptoWorker)
+				.then((bytes) => {
+					const mimeType = sniffMimeType(bytes);
+					for (const targetId of targets) {
+						const targetChat = chats.find((c) => c.id === targetId);
+						if (!targetChat?.mlsGroupId || !targetChat?.mlsIdentityId) continue;
+						encryptAndSendMedia(
+							bytes,
+							mimeType,
+							targetChat.mlsIdentityId,
+							targetChat.mlsGroupId,
+							sessionToken,
+							cryptoWorker,
+						).catch(() => {});
+					}
+				})
+				.catch(() => {});
+		} else {
+			for (const targetId of targets) sendForwardToOne(targetId);
+		}
+
 		setForwardMsg(null);
 		setForwardSelected(new Set());
 	};
@@ -8744,7 +8792,7 @@ export function ChatLayout() {
 						onPin={sendPin}
 						onForward={(msg) => {
 							if (msg.id && !msg.deleted) {
-								setForwardMsg({ id: msg.id, text: msg.text });
+								setForwardMsg({ id: msg.id, text: msg.text, media: msg.media });
 								setForwardSelected(new Set());
 							}
 						}}

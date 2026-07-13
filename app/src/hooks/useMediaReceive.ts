@@ -12,7 +12,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { getMediaDownloadUrl } from "../api/media";
+import { downloadAndDecryptMedia, sniffMimeType } from "../lib/mediaTransfer";
 import { useAuthStore } from "../store/auth";
 import { useCryptoWorker } from "./useCryptoWorker";
 import type { MediaPayload } from "./useMessages";
@@ -23,31 +23,6 @@ export interface MediaReceiveState {
 	loading: boolean;
 	/** True when download or decryption failed (opaque — no details). */
 	error: boolean;
-}
-
-/** Detect image MIME type from leading magic bytes; falls back to image/jpeg. */
-function sniffMimeType(bytes: Uint8Array): string {
-	if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff)
-		return "image/jpeg";
-	if (
-		bytes.length >= 4 &&
-		bytes[0] === 0x89 &&
-		bytes[1] === 0x50 &&
-		bytes[2] === 0x4e &&
-		bytes[3] === 0x47
-	)
-		return "image/png";
-	if (bytes.length >= 3 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46)
-		return "image/gif";
-	if (
-		bytes.length >= 12 &&
-		bytes[8] === 0x57 &&
-		bytes[9] === 0x45 &&
-		bytes[10] === 0x42 &&
-		bytes[11] === 0x50
-	)
-		return "image/webp";
-	return "image/jpeg";
 }
 
 export function useMediaReceive(media: MediaPayload | undefined): MediaReceiveState {
@@ -68,28 +43,8 @@ export function useMediaReceive(media: MediaPayload | undefined): MediaReceiveSt
 
 		const run = async () => {
 			setState({ objectUrl: null, loading: true, error: false });
-			const mediaKey = new Uint8Array(media.mediaKey);
 			try {
-				const { downloadUrl } = await getMediaDownloadUrl(sessionToken, media.blobId);
-				if (cancelled) return;
-
-				// redirect: "error" prevents silent SSRF via R2 redirect (defense-in-depth).
-				const resp = await fetch(downloadUrl, { redirect: "error" });
-				if (!resp.ok) throw new Error("download_failed");
-				const ciphertextBuf = await resp.arrayBuffer();
-				if (cancelled) return;
-
-				const ciphertext = new Uint8Array(ciphertextBuf);
-				const iv = new Uint8Array(media.iv);
-				const blobHash = new Uint8Array(media.blobHash);
-
-				// WASM verifies blobHash before AES-GCM decrypt (R-2 blob-swap detection).
-				const plaintext = await cryptoWorker.mediaDecryptWithRawKey(
-					mediaKey,
-					iv,
-					ciphertext,
-					blobHash,
-				);
+				const plaintext = await downloadAndDecryptMedia(media, sessionToken, cryptoWorker);
 				if (cancelled) return;
 
 				const url = URL.createObjectURL(
@@ -101,9 +56,6 @@ export function useMediaReceive(media: MediaPayload | undefined): MediaReceiveSt
 				if (!cancelled) {
 					setState({ objectUrl: null, loading: false, error: true });
 				}
-			} finally {
-				// Always zero key bytes — invariant from prd.md §9.2.
-				mediaKey.fill(0);
 			}
 		};
 
