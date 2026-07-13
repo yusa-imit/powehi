@@ -17,7 +17,55 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-13, cycle 272 — FEATURE: persist mute/sound/vibrate/theme/notification-sound to Dexie)
+## Current state (2026-07-13, cycle 273 — FEATURE: forward a message to multiple chats at once)
+
+- Commit `da3c9c7`. Closed the "forward-to-multiple-chats-at-once" gap noted as a candidate at the
+  end of cycle 272 (the other candidate, a blocked-users list, was skipped — no code or prd.md
+  mention found, low confidence it's an intended gap vs. out of scope, left for a future sanity-check
+  rather than picked speculatively).
+- `ChatLayout.tsx`'s "Forward to" modal (`app/src/components/ChatLayout.tsx` ~L8153-9270) previously
+  sent immediately on clicking a single target row (`sendForward(targetId)` called `mlsEncrypt` +
+  `sendMessageApi` once and closed the modal). Split into `sendForwardToOne(targetId)` (unchanged
+  internals — same one-`mlsEncrypt`-plus-one-`sendMessageApi`-per-target logic as before) +
+  `toggleForwardTarget(targetId)` (adds/removes from a new `forwardSelected: Set<string>` state,
+  modal stays open) + `sendForwardToSelected()` (loops `sendForwardToOne` over every id currently in
+  `forwardSelected`, then closes the modal and clears selection).
+- Each row gained a checkbox indicator (`data-testid="forward-checkbox-{id}"`, `aria-pressed` on the
+  row button — NOT `role="checkbox"`/`aria-checked`, Biome's `useSemanticElements` a11y lint flagged
+  that combination on a `<button>`; `aria-pressed` is the correct toggle-button ARIA pattern) and the
+  modal header shows a live `Forward to (N)` count. A new footer "Send" button
+  (`data-testid="forward-send-button"`) is disabled until at least one target is selected.
+- **security-auditor: GREEN.** Reviewed for (1) selection leaking to an unselected chat or surviving
+  stale across forwards, (2) races between toggle clicks and the async encrypt/send calls, (3) any
+  new plaintext-exposure surface from looping the per-target send, (4) optimistic-UI dedup across
+  targets — all clean; the per-target loop is synchronous over a `Set` with each target's
+  `mlsGroupId`/`mlsIdentityId`/plaintext captured before any `await`, so no cross-target interference
+  is possible. One LOW/advisory finding, applied as defense-in-depth even though not a live bug: the
+  modal-open handler (`onForward` callback, sets `forwardMsg`) didn't itself reset
+  `forwardSelected` — correctness relied entirely on every *close* path remembering to clear it. Now
+  `onForward` also calls `setForwardSelected(new Set())` on open, so a future dismiss path that
+  forgets to clear can't leak a stale selection into the next forward. Added a regression test
+  (`ChatLayoutForwarding.test.tsx`: "does not carry a stale selection into a freshly reopened forward
+  modal") that dismisses via the backdrop (not the explicit close button) and reopens for a second
+  message, asserting the previously-checked target comes back unchecked and Send stays disabled.
+- 4 new tests total in `ChatLayoutForwarding.test.tsx` (toggle-does-not-send, N-target fan-out
+  asserting `mlsEncrypt` call count increases by exactly the selected count, send-button-disabled-
+  until-selected, stale-selection-on-reopen). Needed `useWelcomePoller`'s mocked `onNewGroup` capture
+  (same pattern as `ChatLayout.test.tsx`'s welcome-poller tests) to synthesize real forward-target
+  chats, since only the static "maya" SEED_CHATS entry has both `mlsGroupId`+`mlsIdentityId` set
+  without going through a live group-join/create flow, and maya is the default active chat (excluded
+  from her own forward-target list). 1202 frontend tests green (was 1198, 98 files unchanged except
+  this one). `tsc --noEmit` clean, Biome clean (including the `useSemanticElements` a11y rule and a
+  formatter pass this cycle triggered).
+- **Backend:** untouched this cycle (pure frontend feature, no new server-visible metadata — still
+  one MLS-encrypted envelope per target group over the existing `sendMessageApi`, just N of them
+  instead of always exactly 1).
+- **Next cycle:** no more known gaps in the forward feature. Remaining candidate from cycle 272's
+  research sweep: blocked-users list — still unverified against prd.md, sanity-check before picking.
+  ADR-0003 Y-4 (ML-KEM mixing into MLS epoch schedule) and PQ hybrid ciphersuite activation remain
+  blocked on upstream openmls support, not actionable from this repo.
+
+## Previous state (2026-07-13, cycle 272 — FEATURE: persist mute/sound/vibrate/theme/notification-sound to Dexie)
 
 - Commit `b4109b6`. Closed the last remaining gap in the local-preference persistence series
   (edit/delete/reaction/pin already survived a reload since cycles 252-259, but muted, sound,
