@@ -123,6 +123,41 @@ describe("ChatLayout — per-chat mute", () => {
 		await waitFor(() => expect(screen.getByTestId("unread-badge")).toBeInTheDocument());
 	});
 
+	it("persists the muted flag to Dexie GroupRow so it survives a reload", async () => {
+		await db.groups.clear();
+		await db.groups.add({
+			id: JORDAN_GROUP_ID,
+			name: "Jordan",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+		});
+		render(<ChatLayout />);
+		fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+		fireEvent.click(screen.getByRole("button", { name: /info/i }));
+		fireEvent.click(screen.getByRole("button", { name: /mute/i }));
+		await waitFor(async () => {
+			const row = await db.groups.get(JORDAN_GROUP_ID);
+			expect(row?.muted).toBe(true);
+		});
+	});
+
+	it("rehydrates a persisted muted flag from Dexie when switching to that chat", async () => {
+		await db.groups.clear();
+		await db.groups.add({
+			id: JORDAN_GROUP_ID,
+			name: "Jordan",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+			muted: true,
+		});
+		render(<ChatLayout />);
+		fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+		fireEvent.click(screen.getByRole("button", { name: /info/i }));
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: /mute/i })).toHaveTextContent("On"),
+		);
+	});
+
 	it("mute is chat-specific — muting Jordan leaves Maya unmuted", async () => {
 		render(<ChatLayout />);
 		// Mute Jordan

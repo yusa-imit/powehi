@@ -7239,6 +7239,27 @@ export function ChatLayout() {
 					TTL_OPTIONS.includes(persisted as TtlOption) ? (persisted as TtlOption) : undefined,
 				);
 				setPersistedPinnedMessageId(row?.pinnedMessageId);
+				// Rehydrate mute/sound/vibrate/theme/notification-sound prefs (previously
+				// React-state-only, same gap disappearingTtl/pinnedMessageId had before v6/v9).
+				// Only overwrite a field the row actually has a value for — undefined leaves
+				// the in-memory default alone rather than forcing it off/blank.
+				if (row) {
+					setChats((cs) =>
+						cs.map((c) => {
+							if (c.mlsGroupId !== groupId) return c;
+							return {
+								...c,
+								muted: row.muted ?? c.muted,
+								sound: row.sound ?? c.sound,
+								vibrate: row.vibrate ?? c.vibrate,
+								notificationSoundId:
+									(row.notificationSoundId as NotificationSoundId | undefined) ??
+									c.notificationSoundId,
+								chatTheme: row.chatTheme ?? c.chatTheme,
+							};
+						}),
+					);
+				}
 			})
 			.catch(() => {
 				if (!cancelled) {
@@ -7903,21 +7924,36 @@ export function ChatLayout() {
 		navigator.clipboard.writeText(msg.text).catch(() => {});
 	}, []);
 
-	/** Toggle the muted flag on a chat. Local-only — no MLS message sent, no server contact. */
+	/** Toggle the muted flag on a chat. Local-only — no MLS message sent, no server contact.
+	 * Persisted to Dexie (GroupRow.muted, schema v12) so it survives a reload. */
 	const handleToggleMute = useCallback((chatId: string) => {
 		setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, muted: !c.muted } : c)));
+		const chat = chatsRef.current.find((c) => c.id === chatId);
+		if (chat?.mlsGroupId) {
+			db.groups.update(chat.mlsGroupId, { muted: !chat.muted }).catch(() => {});
+		}
 	}, []);
 
-	/** Toggle the sound flag on a chat. Local-only — no MLS message sent, no server contact. */
+	/** Toggle the sound flag on a chat. Local-only — no MLS message sent, no server contact.
+	 * Persisted to Dexie (GroupRow.sound, schema v12) so it survives a reload. */
 	const handleToggleSound = useCallback((chatId: string) => {
 		setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, sound: !(c.sound ?? true) } : c)));
+		const chat = chatsRef.current.find((c) => c.id === chatId);
+		if (chat?.mlsGroupId) {
+			db.groups.update(chat.mlsGroupId, { sound: !(chat.sound ?? true) }).catch(() => {});
+		}
 	}, []);
 
-	/** Toggle the vibrate flag on a chat. Local-only — no MLS message sent, no server contact. */
+	/** Toggle the vibrate flag on a chat. Local-only — no MLS message sent, no server contact.
+	 * Persisted to Dexie (GroupRow.vibrate, schema v12) so it survives a reload. */
 	const handleToggleVibrate = useCallback((chatId: string) => {
 		setChats((cs) =>
 			cs.map((c) => (c.id === chatId ? { ...c, vibrate: !(c.vibrate ?? true) } : c)),
 		);
+		const chat = chatsRef.current.find((c) => c.id === chatId);
+		if (chat?.mlsGroupId) {
+			db.groups.update(chat.mlsGroupId, { vibrate: !(chat.vibrate ?? true) }).catch(() => {});
+		}
 	}, []);
 
 	/** Toggle the archived flag on a chat. Local-only — no MLS message sent, no server contact. */
@@ -7936,16 +7972,26 @@ export function ChatLayout() {
 		setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, description: desc } : c)));
 	}, []);
 
-	/** Set (or clear) the per-chat background theme. Local-only — never sent to server. */
+	/** Set (or clear) the per-chat background theme. Local-only — never sent to server.
+	 * Persisted to Dexie (GroupRow.chatTheme, schema v12) so it survives a reload. */
 	const handleSetChatTheme = useCallback((chatId: string, key: string | undefined) => {
 		setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, chatTheme: key } : c)));
+		const chat = chatsRef.current.find((c) => c.id === chatId);
+		if (chat?.mlsGroupId) {
+			db.groups.update(chat.mlsGroupId, { chatTheme: key }).catch(() => {});
+		}
 	}, []);
 
 	/** Set the per-chat notification sound id and play a preview so the user can audition it.
-	 * Local-only — never sent to server, never in MLS payload. */
+	 * Local-only — never sent to server, never in MLS payload. Persisted to Dexie
+	 * (GroupRow.notificationSoundId, schema v12) so it survives a reload. */
 	const handleSetNotificationSound = useCallback((chatId: string, soundId: NotificationSoundId) => {
 		setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, notificationSoundId: soundId } : c)));
 		playNotificationSound(soundId);
+		const chat = chatsRef.current.find((c) => c.id === chatId);
+		if (chat?.mlsGroupId) {
+			db.groups.update(chat.mlsGroupId, { notificationSoundId: soundId }).catch(() => {});
+		}
 	}, []);
 
 	/** Set (or clear) a custom display nickname for a DM contact. Local-only — never sent to server. */

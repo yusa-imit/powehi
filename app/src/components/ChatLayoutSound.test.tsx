@@ -61,6 +61,43 @@ describe("ChatLayout — per-chat sound toggle", () => {
 		await waitFor(() => expect(soundBtn()).toHaveTextContent("On"));
 	});
 
+	it("persists the sound flag to Dexie GroupRow so it survives a reload", async () => {
+		const JORDAN_GROUP_ID = "33333333-3333-3333-3333-333333333333";
+		await db.groups.clear();
+		await db.groups.add({
+			id: JORDAN_GROUP_ID,
+			name: "Jordan",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+		});
+		render(<ChatLayout />);
+		fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+		fireEvent.click(screen.getByRole("button", { name: /info/i }));
+		fireEvent.click(screen.getByRole("button", { name: /sound/i }));
+		await waitFor(async () => {
+			const row = await db.groups.get(JORDAN_GROUP_ID);
+			expect(row?.sound).toBe(false);
+		});
+	});
+
+	it("rehydrates a persisted sound-off flag from Dexie when switching to that chat", async () => {
+		const JORDAN_GROUP_ID = "33333333-3333-3333-3333-333333333333";
+		await db.groups.clear();
+		await db.groups.add({
+			id: JORDAN_GROUP_ID,
+			name: "Jordan",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+			sound: false,
+		});
+		render(<ChatLayout />);
+		fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+		fireEvent.click(screen.getByRole("button", { name: /info/i }));
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: /sound/i })).toHaveTextContent("Off"),
+		);
+	});
+
 	it("sound is chat-specific — toggling Jordan leaves Maya's sound On", async () => {
 		render(<ChatLayout />);
 		// Mute Jordan's sound

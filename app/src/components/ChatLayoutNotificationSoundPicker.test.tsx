@@ -101,6 +101,42 @@ describe("ChatLayout — per-chat notification sound picker", () => {
 		);
 	});
 
+	it("persists the selected sound id to Dexie GroupRow so it survives a reload", async () => {
+		const JORDAN_GROUP_ID = "33333333-3333-3333-3333-333333333333";
+		await db.groups.clear();
+		await db.groups.add({
+			id: JORDAN_GROUP_ID,
+			name: "Jordan",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+		});
+		openJordanNotifications();
+		fireEvent.click(screen.getByTestId("notification-sound-option-chime"));
+		await waitFor(async () => {
+			const row = await db.groups.get(JORDAN_GROUP_ID);
+			expect(row?.notificationSoundId).toBe("chime");
+		});
+	});
+
+	it("rehydrates a persisted sound id from Dexie when switching to that chat", async () => {
+		const JORDAN_GROUP_ID = "33333333-3333-3333-3333-333333333333";
+		await db.groups.clear();
+		await db.groups.add({
+			id: JORDAN_GROUP_ID,
+			name: "Jordan",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+			notificationSoundId: "pop",
+		});
+		openJordanNotifications();
+		await waitFor(() =>
+			expect(screen.getByTestId("notification-sound-option-pop")).toHaveAttribute(
+				"aria-pressed",
+				"true",
+			),
+		);
+	});
+
 	it("never passes message content or sender identity to playNotificationSound — only an opaque sound id", async () => {
 		openJordanNotifications();
 		fireEvent.click(screen.getByTestId("notification-sound-option-chime"));

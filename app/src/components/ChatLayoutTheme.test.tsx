@@ -3,7 +3,7 @@
  * Users can pick from 6 preset themes (or reset to default) in the InfoPanel.
  * The theme is local-only — never sent to server, never in MLS payload, never logged.
  */
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db/schema";
 import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
@@ -149,6 +149,39 @@ describe("ChatLayout — per-chat theme", () => {
 		fireEvent.click(screen.getByRole("button", { name: /maya akana/i }));
 		const after = screen.getByTestId("message-list-scroll").style.background;
 		expect(after).toBe(before);
+	});
+
+	it("persists the chosen theme to Dexie GroupRow so it survives a reload", async () => {
+		const MAYA_GROUP_ID = "11111111-1111-1111-1111-111111111111";
+		await db.groups.clear();
+		await db.groups.add({
+			id: MAYA_GROUP_ID,
+			name: "Maya Akana",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+		});
+		render(<ChatLayout />);
+		openMayaInfo();
+		fireEvent.click(screen.getByTestId("chat-theme-swatch-forest"));
+		await waitFor(async () => {
+			const row = await db.groups.get(MAYA_GROUP_ID);
+			expect(row?.chatTheme).toBe("forest");
+		});
+	});
+
+	it("rehydrates a persisted theme from Dexie when switching to that chat", async () => {
+		const MAYA_GROUP_ID = "11111111-1111-1111-1111-111111111111";
+		await db.groups.clear();
+		await db.groups.add({
+			id: MAYA_GROUP_ID,
+			name: "Maya Akana",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+			chatTheme: "slate",
+		});
+		render(<ChatLayout />);
+		openMayaInfo();
+		await waitFor(() => expect(screen.getByTestId("chat-theme-label")).toHaveTextContent("Slate"));
 	});
 
 	it("theme swatches have descriptive aria-labels", () => {

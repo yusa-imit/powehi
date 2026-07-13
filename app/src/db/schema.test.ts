@@ -78,6 +78,41 @@ describe("PowehiDb", () => {
 		expect(found?.mlsIdentityB64).toBe("AAAAAAAAAAAAAAAAAAAAAA==");
 	});
 
+	it("stores and retrieves muted/sound/vibrate/notificationSoundId/chatTheme on GroupRow (v12)", async () => {
+		await db.groups.add({
+			id: "grp-v12",
+			name: "Prefs Group",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+			muted: true,
+			sound: false,
+			vibrate: false,
+			notificationSoundId: "chime",
+			chatTheme: "ocean",
+		});
+		const grp = await db.groups.get("grp-v12");
+		expect(grp?.muted).toBe(true);
+		expect(grp?.sound).toBe(false);
+		expect(grp?.vibrate).toBe(false);
+		expect(grp?.notificationSoundId).toBe("chime");
+		expect(grp?.chatTheme).toBe("ocean");
+	});
+
+	it("leaves muted/sound/vibrate/notificationSoundId/chatTheme undefined when not set (v12)", async () => {
+		await db.groups.add({
+			id: "grp-v12-default",
+			name: "Default Group",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+		});
+		const grp = await db.groups.get("grp-v12-default");
+		expect(grp?.muted).toBeUndefined();
+		expect(grp?.sound).toBeUndefined();
+		expect(grp?.vibrate).toBeUndefined();
+		expect(grp?.notificationSoundId).toBeUndefined();
+		expect(grp?.chatTheme).toBeUndefined();
+	});
+
 	it("queries messages by groupId index", async () => {
 		await db.messages.bulkAdd([
 			{

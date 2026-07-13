@@ -37,6 +37,16 @@ export interface GroupRow {
 	disappearingTtlSeconds?: number;
 	/** id of the currently pinned MessageRow in this group, if any. Not sensitive — an opaque UUID reference, not content. */
 	pinnedMessageId?: string;
+	/** When true, incoming messages for this chat do not increment the unread badge. Local-only, never sent to server. */
+	muted?: boolean;
+	/** When false, incoming messages for this chat do not trigger notification sounds. Local-only, never sent to server. */
+	sound?: boolean;
+	/** When false, incoming messages for this chat do not trigger device vibration. Local-only, never sent to server. */
+	vibrate?: boolean;
+	/** Selected notification sound id for this chat. Opaque enum id, not content — not encrypted. undefined behaves as "default". */
+	notificationSoundId?: string;
+	/** Per-chat background theme key. Opaque enum key, not content — not encrypted. */
+	chatTheme?: string;
 }
 
 // LocalIdentity — singleton device identity record.
@@ -211,6 +221,17 @@ export class PowehiDb extends Dexie {
 		// indexed (identity table stays "id" only); this version bump exists solely
 		// to document the LocalIdentity shape change for anyone diffing schema history.
 		this.version(11).stores({
+			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v12: added muted, sound, vibrate, notificationSoundId, chatTheme to GroupRow —
+		// these per-chat local preferences (previously React-state-only, same gap edit/
+		// delete/reactions/pin had before v7-v9) now survive a reload. None are sensitive
+		// (bounded booleans/opaque enum ids, like disappearingTtlSeconds/pinnedMessageId);
+		// no index change needed — never queried across groups, only read/written per-group.
+		this.version(12).stores({
 			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
 			groups: "id, lastActivity",
 			identity: "id",

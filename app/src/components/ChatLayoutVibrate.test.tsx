@@ -61,6 +61,43 @@ describe("ChatLayout — per-chat vibrate toggle", () => {
 		await waitFor(() => expect(vibrateBtn()).toHaveTextContent("On"));
 	});
 
+	it("persists the vibrate flag to Dexie GroupRow so it survives a reload", async () => {
+		const JORDAN_GROUP_ID = "33333333-3333-3333-3333-333333333333";
+		await db.groups.clear();
+		await db.groups.add({
+			id: JORDAN_GROUP_ID,
+			name: "Jordan",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+		});
+		render(<ChatLayout />);
+		fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+		fireEvent.click(screen.getByRole("button", { name: /info/i }));
+		fireEvent.click(screen.getByRole("button", { name: /vibrate/i }));
+		await waitFor(async () => {
+			const row = await db.groups.get(JORDAN_GROUP_ID);
+			expect(row?.vibrate).toBe(false);
+		});
+	});
+
+	it("rehydrates a persisted vibrate-off flag from Dexie when switching to that chat", async () => {
+		const JORDAN_GROUP_ID = "33333333-3333-3333-3333-333333333333";
+		await db.groups.clear();
+		await db.groups.add({
+			id: JORDAN_GROUP_ID,
+			name: "Jordan",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+			vibrate: false,
+		});
+		render(<ChatLayout />);
+		fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+		fireEvent.click(screen.getByRole("button", { name: /info/i }));
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: /vibrate/i })).toHaveTextContent("Off"),
+		);
+	});
+
 	it("vibrate is chat-specific — toggling Jordan leaves Maya's vibrate On", async () => {
 		render(<ChatLayout />);
 		// Disable Jordan's vibrate
