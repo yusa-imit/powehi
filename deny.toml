@@ -3,10 +3,19 @@
 
 [advisories]
 # cargo-deny advisory policy — kept in sync with .cargo/audit.toml (cargo-audit's own ignore
-# list); same waivers, same reasoning, both files must be updated together.
+# list) EXCEPT where noted below; same waivers, same reasoning, both files must be updated
+# together unless a divergence is explicitly documented.
+#
+# RUSTSEC-2023-0071 (rsa) and RUSTSEC-2026-0124 (libcrux-chacha20poly1305) are intentionally
+# NOT listed here even though they're still ignored in .cargo/audit.toml. cargo-deny resolves
+# the dependency graph with feature-unification (same as `cargo tree`), which confirms both
+# crates are never actually compiled into any Powehi target (rsa: sqlx "mysql" feature is not
+# activated; libcrux-chacha20poly1305: reached only via a non-activated PQ feature path in
+# openmls_rust_crypto) — cargo-deny reports "no crate matched advisory criteria" for both, i.e.
+# they cannot fire. cargo-audit scans Cargo.lock directly without feature resolution, so it still
+# needs the explicit ignore. If cargo-deny ever starts reporting these again (e.g. a feature gets
+# activated), re-add the ignore entries here and re-verify the "not compiled" claim.
 ignore = [
-    { id = "RUSTSEC-2023-0071", reason = "rsa not compiled; sqlx-mysql transitive dep only" },
-    { id = "RUSTSEC-2026-0124", reason = "DoS only; no fix in openmls_rust_crypto 0.5.1" },
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; transitive via tonic 0.12.3; no upgrade path until tonic 0.13 drops" },
     { id = "RUSTSEC-2024-0384", reason = "instant unmaintained; transitive via fluvio-wasm-timer -> openmls 0.8.1; no fix available, no upgrade path within current openmls release" },
     { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained; compile-time-only proc-macro via hax-lib -> libcrux -> openmls_rust_crypto 0.5.1 (PQ support); not present in any built binary, no upgrade path until openmls_rust_crypto updates libcrux" },

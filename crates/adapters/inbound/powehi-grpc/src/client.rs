@@ -288,7 +288,10 @@ where
     }
 
     peer.lock().await.circuit.record_failure();
-    Err(GrpcError::Status(last_err.unwrap()))
+    Err(GrpcError::Status(last_err.expect(
+        "loop runs max_retries+1 >= 1 times; only exits here via the retryable-error \
+         branch, which always sets last_err before the next iteration or loop exit",
+    )))
 }
 
 #[cfg(test)]
