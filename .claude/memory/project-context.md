@@ -17,7 +17,72 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-13, cycle 273 — FEATURE: forward a message to multiple chats at once)
+## Current state (2026-07-14, cycle 274 — FEATURE: forward media attachments, not just text)
+
+- Commit `096dc0f`. Closed a real correctness/data-loss bug found via a dedicated research
+  agent sweep (CI green, no open issues, all 6 roadmap phases already `[x]`): forwarding a
+  media/image message (via cycle 273's multi-target forward modal) silently dropped the
+  attachment and sent an empty/placeholder text message instead — `sendForwardToOne` only ever
+  read `forwardMsg.text`, never `forwardMsg.media`. The dead `<button>Block · Report</button>`
+  at `ChatLayout.tsx` (no `onClick`, never wired) was investigated as part of the same sweep and
+  confirmed OUT OF SCOPE — no "block" concept anywhere in prd.md or the codebase; left as-is,
+  not a gap.
+- **Design:** each target group needs its OWN fresh AES-256-GCM key + R2 blob — the source
+  message's ciphertext/key is bound to the source group and isn't reusable/re-wrappable across
+  groups. So `sendForwardToSelected` now: if `forwardMsg.media` is set, downloads+decrypts the
+  original attachment ONCE (authorized via the source group membership, using the media key
+  already inline in the MLS-decrypted payload — same client-visible-key design as normal
+  receive, not a new exposure), then re-encrypts+uploads+sends fresh per selected target via a
+  new shared `encryptAndSendMedia`. Optimistic UI shows a plain "Image attachment" placeholder
+  per target immediately (matching `handleFileSelect`'s existing convention), same
+  fire-and-forget failure semantics as the rest of the forward/send paths.
+- **Extracted `app/src/lib/mediaTransfer.ts`** (new file) so the security-critical download+
+  decrypt and encrypt+upload+send pipeline has exactly one implementation instead of being
+  duplicated across the receive path, the send path, and the new forward path: `sniffMimeType`
+  (moved verbatim from `useMediaReceive.ts`), `downloadAndDecryptMedia(media, sessionToken,
+  cryptoWorker)` (same key-zeroing/blobHash-verify logic, unchanged in substance), and
+  `encryptAndSendMedia(bytes, mimeType, identityId, groupId, sessionToken, cryptoWorker,
+  thumbHandle?)` (same mediaEncrypt→upload→confirm→mediaMessageCreate[WithThumbnail]→
+  sendMessage→mediaDropKey(finally) flow `useMediaSend.ts` had inline, unchanged in substance).
+  `useMediaReceive.ts` and `useMediaSend.ts` now call the shared functions instead of inlining —
+  refactor only, no behavior change (verified by crypto-reviewer against the actual diff, not
+  just the summary).
+- **crypto-reviewer: GREEN** (mandatory gate — this touches `mediaEncrypt`/
+  `mediaDecryptWithRawKey`/handle lifecycle). Verified: key-zeroing and handle-drop `finally`
+  blocks survived the extraction unchanged for every throw path (including
+  `requestMediaUpload`/`fetch`/`confirmMediaUpload`/`mediaMessageCreate`/`sendMessageApi`
+  throwing); thumbnail-handle drop in `useMediaSend.ts`'s caller-level finally still fires in
+  all the same cases; positional argument order intact for
+  `mediaDecryptWithRawKey`/`mediaMessageCreate[WithThumbnail]`/`requestMediaUpload`; fan-out
+  (decrypt once, encrypt fresh per target) produces independent key/handle/IV per target with no
+  cross-target reuse; decrypt-with-source-key-then-re-encrypt-fresh-per-target confirmed as the
+  only cryptographically correct approach (vs. the bug of reusing source ciphertext/key across
+  groups); no new plaintext-logging surface. Two non-blocking advisories (not fixed): decrypted
+  plaintext `bytes` aren't zeroed after the forward loop (consistent with the already-accepted
+  receive-path design — it's content, not key material); if `downloadAndDecryptMedia` rejects,
+  the optimistic bubbles persist with no surfaced error (matches the pre-existing fire-and-forget
+  forward/send pattern everywhere else, not a regression).
+- 1 new test: `ChatLayoutForwarding.test.tsx` ("forwards a media message by decrypting once and
+  re-encrypting fresh for the target group") — asserts `getMediaDownloadUrl` is called with the
+  SOURCE blobId, `mediaEncrypt` produces a fresh handle, `requestMediaUpload`/
+  `confirmMediaUpload`/`mediaMessageCreate`/`sendMessage` all target the correct
+  identity/group/mediaId, and `mediaDropKey` always fires. 1203 frontend tests green (was 1202,
+  97 files unchanged except this one + the new `mediaTransfer.ts` — no dedicated test file for
+  it since its two functions are already fully exercised transitively through
+  `useMediaSend.test.ts`, `useMediaReceive.test.ts`, and the new forward test, per the existing
+  convention of not adding redundant direct-unit-test coverage for a pure extraction). `tsc
+  --noEmit` clean, Biome clean.
+- **Backend:** untouched this cycle (pure frontend feature/fix, no new server-visible metadata —
+  still one MLS-encrypted media envelope per target group over the existing R2 upload +
+  `sendMessageApi`, just re-encrypted per target instead of shared).
+- **Next cycle:** no more known gaps in the forward feature (text + media both covered now).
+  Candidate noted but NOT picked (lower confidence / larger scope): group read receipts collapse
+  to a single boolean (`ChatMessage.read`, `ChatLayout.tsx`'s `handleIncomingReadReceipt`) with no
+  per-member "seen by N" tracking for group chats — would need a state-shape change, medium-sized.
+  ADR-0003 Y-4 (ML-KEM mixing into MLS epoch schedule) and PQ hybrid ciphersuite activation remain
+  blocked on upstream openmls support, not actionable from this repo.
+
+## Previous state (2026-07-13, cycle 273 — FEATURE: forward a message to multiple chats at once)
 
 - Commit `da3c9c7`. Closed the "forward-to-multiple-chats-at-once" gap noted as a candidate at the
   end of cycle 272 (the other candidate, a blocked-users list, was skipped — no code or prd.md
