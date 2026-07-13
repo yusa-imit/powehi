@@ -17,7 +17,56 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-13, cycle 271 — FEATURE: rehydration reconciliation + pendingWriteIds race fix)
+## Current state (2026-07-13, cycle 272 — FEATURE: persist mute/sound/vibrate/theme/notification-sound to Dexie)
+
+- Commit `b4109b6`. Closed the last remaining gap in the local-preference persistence series
+  (edit/delete/reaction/pin already survived a reload since cycles 252-259, but muted, sound,
+  vibrate, notificationSoundId, and chatTheme were React-state-only and reverted on every page
+  reload — found via a dedicated research agent sweep since CI was green and no issues were open).
+- `GroupRow` (`app/src/db/schema.ts`) gained 5 optional fields: `muted?`, `sound?`, `vibrate?:
+  boolean`, `notificationSoundId?`, `chatTheme?: string`. Schema bumped to `version(12)` — purely
+  additive (all fields optional, no index change, no migration needed), same shape as the
+  `disappearingTtlSeconds`/`pinnedMessageId` precedent. None of these 5 fields are in
+  `encrypted-db.ts`'s `SENSITIVE` list — they're opaque local UI toggles/enum keys, not content/PII,
+  written via the raw (unencrypted) `db.groups.update()` Dexie call, matching the existing
+  precedent exactly.
+- `ChatLayout.tsx`: the existing "load persisted disappearing timer + pinned message id when the
+  active conversation changes" `useEffect` now also reads `row.muted/sound/vibrate/
+  notificationSoundId/chatTheme` and merges them into the matching chat's in-memory state — but
+  ONLY when the DB row actually has a value (`row.muted ?? c.muted` etc.), so it never clobbers an
+  unsaved in-session value with `undefined` on a chat that's never been persisted. The 5 existing
+  toggle/setter handlers (`handleToggleMute`/`handleToggleSound`/`handleToggleVibrate`/
+  `handleSetChatTheme`/`handleSetNotificationSound`) each gained a `db.groups.update(mlsGroupId,
+  {...}).catch(() => {})` call, resolving `mlsGroupId` via the pre-existing `chatsRef` pattern
+  (same technique 5+ other handlers already use, e.g. `handleIncomingPin`).
+- **security-auditor: GREEN.** One non-blocking correctness nit (not fixed, no security impact):
+  the rehydration effect has no `pendingWriteIds`-style guard (unlike cycle 271's fix for
+  edit/reaction persistence), so a toggle→switch-chats-away→switch-back sequence executed within a
+  microsecond window could theoretically revert a just-toggled value back to a stale Dexie read.
+  Deemed acceptable: unlike `markMessageEdited`/`markMessageReactions`, these are single-field
+  Dexie writes with no crypto-worker (`encryptDbField`) round-trip delay, so the window is far
+  smaller than the one that motivated cycle 271's fix, and the worst case is a reverted UI
+  preference toggle — no security or data-integrity consequence.
+- **Same caveat as the pre-existing `disappearingTtlSeconds`/`pinnedMessageId` persistence** (not
+  new to this cycle): `db.groups.update()` silently no-ops if no `GroupRow` exists yet for that
+  chat's `mlsGroupId` — for the hardcoded SEED_CHATS demo contacts (Maya/Jordan/etc.), no GroupRow
+  is ever auto-created, so toggling a pref on one of those before it has a real GroupRow (e.g.
+  before any message triggers a `putGroup` call, or before a real invited/joined group) won't
+  actually persist. This is a pre-existing limitation of the whole persistence series, not
+  something this cycle introduced or worsened.
+- 12 new tests: 2 in `db/schema.test.ts` (stores all 5 fields; leaves them undefined when unset),
+  and persist+rehydrate pairs (2 tests each) in `ChatLayoutMute.test.tsx`, `ChatLayoutSound.test.tsx`,
+  `ChatLayoutVibrate.test.tsx`, `ChatLayoutTheme.test.tsx`, `ChatLayoutNotificationSoundPicker.test.tsx`.
+  1198 frontend tests green (was 1186, 97 files unchanged). `tsc --noEmit` clean, Biome clean.
+- **Backend:** untouched this cycle (pure frontend feature, no new server-visible metadata).
+- **Next cycle:** no more known gaps in the message/chat-preference persistence series. Remaining
+  candidates from research this cycle: (1) forward-to-multiple-chats-at-once (currently single-
+  target only, `sendForward`/forward modal in ChatLayout.tsx ~L8112-9090); (2) blocked-users list
+  (no code found anywhere — lower confidence this is an intended gap vs. out-of-scope, sanity-check
+  against prd.md first). ADR-0003 Y-4 (ML-KEM mixing into MLS epoch schedule) and PQ hybrid
+  ciphersuite activation remain blocked on upstream openmls support, not actionable from this repo.
+
+## Previous state (2026-07-13, cycle 271 — FEATURE: rehydration reconciliation + pendingWriteIds race fix)
 
 - Commit `a61661d`. Closed the cycle 253/259 documented gap: `ChatLayout.tsx`'s message-history
   rehydration effect (Dexie → `chats` React state) was add-only — an id already in `chats` was
