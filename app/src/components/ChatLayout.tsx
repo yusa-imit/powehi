@@ -7102,6 +7102,7 @@ export function ChatLayout() {
 		persistEdit,
 		persistDelete,
 		persistReaction,
+		pendingWriteIds,
 	} = usePersistentMessages(active?.mlsGroupId);
 	const showTauriNotification = useTauriNotification();
 	const fileInputRef = useRef<HTMLInputElement>(null);
@@ -7169,27 +7170,56 @@ export function ChatLayout() {
 			});
 		}
 		if (rehydrated.length === 0) return;
+		// Reconcile mutable fields (text/edited/deleted/reactions) for ids already present
+		// in React state against the freshly-loaded Dexie row, in addition to appending
+		// missing ones. Closes the cycle 253/259 gap: an out-of-band edit/delete-for-
+		// everyone/reaction written to Dexie while this id was already in `chats` (e.g.
+		// another browser tab on the same account wrote it, then this tab switched away
+		// and back without a full reload) previously left the stale in-memory bubble
+		// untouched. Dexie is trusted as authoritative here EXCEPT for ids this tab still
+		// has an in-flight persist* write for (`pendingWriteIds`) — markMessageEdited/
+		// markMessageReactions await an encryptDbField crypto-worker round-trip before
+		// the IndexedDB write lands, so a fast switch-away-and-back can otherwise re-read
+		// Dexie before this tab's own mutation has been written, reconciling the correct
+		// in-memory bubble back to stale pre-mutation data (security-auditor finding,
+		// cycle 271). Skipping pending ids leaves the existing in-memory value in place —
+		// it's already correct, since handleIncomingEdit/Delete/Reaction apply it directly
+		// to `chats` independent of this rehydration path.
+		const rehydratedById = new Map(rehydrated.filter((m) => m.id).map((m) => [m.id as string, m]));
 		setChats((cs) =>
 			cs.map((c) => {
 				if (c.mlsGroupId !== groupId) return c;
-				// Dedup is add-only: an id already present in React state is left
-				// untouched rather than reconciled against the freshly-loaded Dexie
-				// row. This means an out-of-band edit/delete-for-everyone applied to
-				// Dexie while this id was already in `chats` (e.g. another session
-				// wrote it, then this tab switched away and back without a full
-				// reload) won't retroactively redact an in-memory bubble. A full
-				// page reload still heals this, since `chats` starts empty. Deferred
-				// (security-auditor finding, cycle 253) — would need reconciling
-				// deleted/edited/expiresAt for existing ids, not just add-missing.
+				let anyReconciled = false;
+				const reconciled = c.messages.map((m) => {
+					if (!m.id || pendingWriteIds.has(m.id)) return m;
+					const fresh = rehydratedById.get(m.id);
+					if (!fresh) return m;
+					if (
+						m.text === fresh.text &&
+						!!m.edited === !!fresh.edited &&
+						!!m.deleted === !!fresh.deleted &&
+						JSON.stringify(m.reactions ?? {}) === JSON.stringify(fresh.reactions ?? {})
+					) {
+						return m;
+					}
+					anyReconciled = true;
+					return {
+						...m,
+						text: fresh.text,
+						edited: fresh.edited,
+						deleted: fresh.deleted,
+						reactions: fresh.reactions,
+					};
+				});
 				const existingIds = new Set(c.messages.map((m) => m.id).filter(Boolean));
 				const toAdd = rehydrated.filter((m) => !m.id || !existingIds.has(m.id));
-				if (toAdd.length === 0) return c;
+				if (toAdd.length === 0 && !anyReconciled) return c;
 				// rows are pre-sorted ascending by receivedAt (getMessagesByGroup) —
 				// append, oldest first, matching how handleIncoming/handleSend append.
-				return { ...c, messages: [...c.messages, ...toAdd] };
+				return { ...c, messages: [...reconciled, ...toAdd] };
 			}),
 		);
-	}, [rows, active?.mlsGroupId, deviceId]);
+	}, [rows, active?.mlsGroupId, deviceId, pendingWriteIds]);
 
 	// Load persisted disappearing timer + pinned message id when the active conversation changes.
 	useEffect(() => {

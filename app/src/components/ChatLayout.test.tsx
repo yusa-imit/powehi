@@ -2420,6 +2420,67 @@ describe("ChatLayout", () => {
 			expect(screen.getAllByText("duplicate-safe text").length).toBe(countAfterMount);
 		});
 
+		it("reconciles an out-of-band edit/delete/reaction into a chat id already in state", async () => {
+			const EDIT_ID = "reconcile-edit-live";
+			const DELETE_ID = "reconcile-delete-live";
+			const REACT_ID = "reconcile-reaction-live";
+			await db.messages.bulkPut([
+				seedRow({
+					id: EDIT_ID,
+					groupId: MAYA_GROUP,
+					receivedAt: 1000,
+					plaintextB64: textToBase64("stale pre-edit text"),
+				}),
+				seedRow({
+					id: DELETE_ID,
+					groupId: MAYA_GROUP,
+					receivedAt: 2000,
+					plaintextB64: textToBase64("not yet deleted"),
+				}),
+				seedRow({
+					id: REACT_ID,
+					groupId: MAYA_GROUP,
+					receivedAt: 3000,
+					plaintextB64: textToBase64("not yet reacted to"),
+				}),
+			]);
+
+			render(<ChatLayout />);
+			await waitFor(() => {
+				expect(screen.getAllByText("stale pre-edit text").length).toBeGreaterThan(0);
+			});
+			expect(screen.getAllByText("not yet deleted").length).toBeGreaterThan(0);
+			expect(screen.queryByTestId("edited-badge")).not.toBeInTheDocument();
+			expect(screen.queryByTestId("deleted-placeholder")).not.toBeInTheDocument();
+			expect(screen.queryByTestId("reaction-chip-🎉")).not.toBeInTheDocument();
+
+			// Simulate another browser tab on the same account mutating these rows in
+			// Dexie directly — this tab's own handleIncomingEdit/Delete/Reaction never
+			// ran, so these ids are already in `chats` state with the pre-mutation data.
+			await db.messages.update(EDIT_ID, { editedText: textToBase64("edited out of band") });
+			await db.messages.update(DELETE_ID, { deletedAt: 5000 });
+			await db.messages.update(REACT_ID, {
+				reactionsJson: JSON.stringify({ "🎉": ["peer-device-x"] }),
+			});
+
+			// Switch away and back — the hook reloads `rows` for the group, re-running
+			// the rehydration effect against a `chats` state that already has these ids.
+			fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+			await waitFor(() => {
+				expect(screen.queryByText("stale pre-edit text")).not.toBeInTheDocument();
+			});
+			fireEvent.click(screen.getByRole("button", { name: /maya/i }));
+
+			await waitFor(() => {
+				expect(screen.getAllByText("edited out of band").length).toBeGreaterThan(0);
+			});
+			expect(screen.queryByText("stale pre-edit text")).not.toBeInTheDocument();
+			expect(screen.getByTestId("edited-badge")).toBeInTheDocument();
+			expect(screen.getByTestId("deleted-placeholder")).toBeInTheDocument();
+			expect(screen.queryByText("not yet deleted")).not.toBeInTheDocument();
+			expect(screen.getByTestId("reaction-chip-🎉")).toBeInTheDocument();
+		});
+
 		it("rehydrates a persisted reaction map for the active chat on mount", async () => {
 			await db.messages.bulkPut([
 				seedRow({

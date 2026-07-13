@@ -25,6 +25,7 @@ const MOCK_WORKER = {
 describe("ChatLayout — emoji reaction toggle & reaction_remove", () => {
 	beforeEach(async () => {
 		await db.verifiedContacts.clear();
+		await db.messages.clear();
 		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
 			MOCK_WORKER as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
 		);

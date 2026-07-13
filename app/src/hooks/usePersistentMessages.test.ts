@@ -411,6 +411,63 @@ describe("usePersistentMessages", () => {
 		});
 	});
 
+	it("pendingWriteIds tracks a persistEdit write in flight and clears once it settles", async () => {
+		let resolveWrite: () => void = () => {};
+		const writePromise = new Promise<void>((resolve) => {
+			resolveWrite = resolve;
+		});
+		vi.spyOn(
+			EncryptedDbModule.EncryptedPowehiDb.prototype,
+			"markMessageEdited",
+		).mockReturnValueOnce(writePromise);
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+		await act(async () => {
+			result.current.persistIncoming(makeIncoming({ id: "pending-edit-target" }));
+		});
+
+		act(() => {
+			result.current.persistEdit("pending-edit-target", "new text");
+		});
+		// The encryptDbField + IndexedDB write is still in flight — a rehydration
+		// reconciliation running right now must not trust a fresh Dexie read yet.
+		expect(result.current.pendingWriteIds.has("pending-edit-target")).toBe(true);
+
+		await act(async () => {
+			resolveWrite();
+			await writePromise;
+		});
+		expect(result.current.pendingWriteIds.has("pending-edit-target")).toBe(false);
+	});
+
+	it("pendingWriteIds clears a persistReaction write even when the underlying write rejects", async () => {
+		let rejectWrite: (err: Error) => void = () => {};
+		const writePromise = new Promise<void>((_resolve, reject) => {
+			rejectWrite = reject;
+		});
+		vi.spyOn(
+			EncryptedDbModule.EncryptedPowehiDb.prototype,
+			"markMessageReactions",
+		).mockReturnValueOnce(writePromise);
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+		await act(async () => {
+			result.current.persistIncoming(makeIncoming({ id: "pending-reaction-target" }));
+		});
+
+		act(() => {
+			result.current.persistReaction("pending-reaction-target", { "\u{1F44D}": ["dev-a"] });
+		});
+		expect(result.current.pendingWriteIds.has("pending-reaction-target")).toBe(true);
+
+		await act(async () => {
+			rejectWrite(new Error("db full"));
+			await writePromise.catch(() => {});
+		});
+		expect(result.current.pendingWriteIds.has("pending-reaction-target")).toBe(false);
+		expect(result.current.writeErrorCount).toBe(1);
+	});
+
 	it("no plaintext is logged — calls produce no console output", async () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});

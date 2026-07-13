@@ -28,6 +28,7 @@ const MAYA_GROUP = "11111111-1111-1111-1111-111111111111";
 describe("ChatLayout — thread panel emoji reactions", () => {
 	beforeEach(async () => {
 		await db.verifiedContacts.clear();
+		await db.messages.clear();
 		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
 			MOCK_WORKER as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
 		);

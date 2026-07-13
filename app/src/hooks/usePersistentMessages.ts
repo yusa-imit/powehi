@@ -9,7 +9,7 @@
  *   fail closed (no write, no read, no error surfaced to caller).
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EncryptedPowehiDb } from "../db/encrypted-db";
 import type { MessageRow } from "../db/schema";
 import { db } from "../db/schema";
@@ -32,6 +32,17 @@ export interface PersistedMessages {
 	persistDelete: (targetMessageId: string) => void;
 	/** Persist the current reaction map for a message so reactions survive a reload. Best-effort. */
 	persistReaction: (targetMessageId: string, reactions: Record<string, string[]>) => void;
+	/**
+	 * Message ids with a persist* write currently in flight (added when a persist* call
+	 * starts, removed once its Dexie write settles). markMessageEdited/markMessageReactions
+	 * await an encryptDbField crypto-worker round-trip before the IndexedDB write lands —
+	 * a group switch-away-and-back in that window re-reads via getMessagesByGroup and can
+	 * observe the pre-write row. Callers that reconcile in-memory state against freshly
+	 * loaded rows (ChatLayout's rehydration effect) must skip ids in this set rather than
+	 * trust the possibly-stale read. Same Set object identity for the hook's lifetime —
+	 * safe as a stable effect dependency despite being mutated in place.
+	 */
+	pendingWriteIds: Set<string>;
 }
 
 /**
@@ -44,6 +55,7 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 	const cryptoWorker = useCryptoWorker();
 	const [rows, setRows] = useState<MessageRow[]>([]);
 	const [writeErrorCount, setWriteErrorCount] = useState(0);
+	const pendingWriteIdsRef = useRef<Set<string>>(new Set());
 
 	const encryptedDb = useMemo(
 		() => (cryptoWorker ? new EncryptedPowehiDb(db, cryptoWorker) : null),
@@ -135,9 +147,11 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 			if (!encryptedDb) return;
 			const editedText = textToBase64(newText);
 			setRows((prev) => prev.map((r) => (r.id === targetMessageId ? { ...r, editedText } : r)));
+			pendingWriteIdsRef.current.add(targetMessageId);
 			encryptedDb
 				.markMessageEdited(targetMessageId, editedText)
-				.catch(() => setWriteErrorCount((n) => n + 1));
+				.catch(() => setWriteErrorCount((n) => n + 1))
+				.finally(() => pendingWriteIdsRef.current.delete(targetMessageId));
 		},
 		[encryptedDb],
 	);
@@ -147,7 +161,11 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 			if (!encryptedDb) return;
 			const deletedAt = Date.now();
 			setRows((prev) => prev.map((r) => (r.id === targetMessageId ? { ...r, deletedAt } : r)));
-			encryptedDb.markMessageDeleted(targetMessageId).catch(() => setWriteErrorCount((n) => n + 1));
+			pendingWriteIdsRef.current.add(targetMessageId);
+			encryptedDb
+				.markMessageDeleted(targetMessageId)
+				.catch(() => setWriteErrorCount((n) => n + 1))
+				.finally(() => pendingWriteIdsRef.current.delete(targetMessageId));
 		},
 		[encryptedDb],
 	);
@@ -157,9 +175,11 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 			if (!encryptedDb) return;
 			const reactionsJson = JSON.stringify(reactions);
 			setRows((prev) => prev.map((r) => (r.id === targetMessageId ? { ...r, reactionsJson } : r)));
+			pendingWriteIdsRef.current.add(targetMessageId);
 			encryptedDb
 				.markMessageReactions(targetMessageId, reactionsJson)
-				.catch(() => setWriteErrorCount((n) => n + 1));
+				.catch(() => setWriteErrorCount((n) => n + 1))
+				.finally(() => pendingWriteIdsRef.current.delete(targetMessageId));
 		},
 		[encryptedDb],
 	);
@@ -173,5 +193,6 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 		persistEdit,
 		persistDelete,
 		persistReaction,
+		pendingWriteIds: pendingWriteIdsRef.current,
 	};
 }
