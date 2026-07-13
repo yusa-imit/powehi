@@ -62,6 +62,8 @@ interface ChatMessage {
 	delivered?: boolean;
 	/** Peer has read this message (read_receipt received). Supersedes delivered. */
 	read?: boolean;
+	/** Device IDs of group members who have sent a read_receipt for this message (deduped). DM chats only ever gain one entry. */
+	readBy?: string[];
 	/** Unix ms — set when sent with a disappearing TTL. Client-side mock only. */
 	expiresAt?: number;
 	/** §9.2 media attachment — full payload for download + decrypt on the receiver path. */
@@ -2161,6 +2163,7 @@ function MessageBubble({
 	const [hovered, setHovered] = useState(false);
 	const [copied, setCopied] = useState(false);
 	const [hoveredReaction, setHoveredReaction] = useState<string | null>(null);
+	const [seenTooltipOpen, setSeenTooltipOpen] = useState(false);
 	const hasLightbox = !!onOpenLightbox && !!msg.media;
 	const reactionEntries = msg.reactions ? Object.entries(msg.reactions) : [];
 	const totalReactionCount = reactionEntries.reduce((sum, [, senders]) => sum + senders.length, 0);
@@ -2327,6 +2330,41 @@ function MessageBubble({
 													/>
 												</span>
 											))}
+										{isMe && isGroup && (msg.readBy?.length ?? 0) > 0 && (
+											<span
+												style={{ position: "relative", display: "inline-flex" }}
+												onMouseEnter={() => setSeenTooltipOpen(true)}
+												onMouseLeave={() => setSeenTooltipOpen(false)}
+											>
+												{seenTooltipOpen && (
+													<div
+														data-testid="seen-by-tooltip"
+														style={{
+															position: "absolute",
+															bottom: "calc(100% + 6px)",
+															right: 0,
+															background: "rgba(14,14,22,0.96)",
+															border: "1px solid var(--border-faint)",
+															borderRadius: 8,
+															padding: "4px 10px",
+															fontSize: 11,
+															color: "var(--fg-1)",
+															whiteSpace: "nowrap",
+															pointerEvents: "none",
+															zIndex: 20,
+															boxShadow: "0 2px 8px rgba(0,0,0,0.45)",
+															lineHeight: 1.6,
+														}}
+													>
+														{getReactionHandles(msg.readBy ?? [], members, myDeviceId).join(", ")}
+													</div>
+												)}
+												<span
+													data-testid="seen-by-indicator"
+													style={{ marginLeft: 4 }}
+												>{`Seen by ${msg.readBy?.length ?? 0}`}</span>
+											</span>
+										)}
 									</span>
 								)}
 								{msg.edited && (
@@ -7609,14 +7647,22 @@ export function ChatLayout() {
 	 * Updates `read: true` on all messages (regardless of `from`) whose `id` is in `messageIds`.
 	 * The read indicator UI only renders for `from === "me"` messages, so the update is harmless
 	 * for peer messages that happen to share an ID with a receipt.
+	 * Also appends the (server-authenticated) `senderDeviceId` to `readBy` so group chats can show
+	 * a per-member "Seen by N" count instead of collapsing every reader into one boolean.
 	 */
 	const handleIncomingReadReceipt = useCallback(
-		(gId: string, messageIds: string[], _readAt: number, _senderDeviceId: string) => {
+		(gId: string, messageIds: string[], _readAt: number, senderDeviceId: string) => {
 			const idSet = new Set(messageIds);
 			setChats((cs) =>
 				cs.map((c) => {
 					if (c.mlsGroupId !== gId) return c;
-					const msgs = c.messages.map((m) => (m.id && idSet.has(m.id) ? { ...m, read: true } : m));
+					const msgs = c.messages.map((m) => {
+						if (!m.id || !idSet.has(m.id)) return m;
+						const readBy = m.readBy?.includes(senderDeviceId)
+							? m.readBy
+							: [...(m.readBy ?? []), senderDeviceId];
+						return { ...m, read: true, readBy };
+					});
 					return { ...c, messages: msgs };
 				}),
 			);
