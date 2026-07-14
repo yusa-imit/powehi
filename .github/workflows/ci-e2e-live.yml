@@ -42,7 +42,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Start postgres/redis/minio
-        run: docker compose up -d --wait postgres redis minio minio-init
+        run: docker compose up -d --wait postgres redis minio
+
+      - name: Create the powehi-media bucket (minio-init)
+        # `docker compose up --wait` (above) can't include minio-init: it's a
+        # one-shot container that's supposed to exit, but --wait treats ANY
+        # exit — even code 0 — as a failed wait (confirmed by CI run
+        # 29299877192, cycle 277). Run it as its own step instead.
+        run: docker compose up minio-init
 
       - uses: dtolnay/rust-toolchain@stable
         with:
