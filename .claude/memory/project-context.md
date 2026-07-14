@@ -17,7 +17,70 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-14, cycle 276 — FEATURE: per-member "Seen by N" group read receipts)
+## Current state (2026-07-14, cycle 277 — FEATURE: live-backend Playwright E2E harness, Phase 1)
+
+- No commit hash yet (this cycle). Started the "live-backend Playwright E2E harness" item flagged
+  as a gap at the end of cycles 274/275/276 ("still not started", scoped as its own cycle — this is
+  Phase 1: real OPAQUE register + sign-in only, NOT message send/receive yet).
+- **`docker-compose.yml`** (repo root, new) — prd.md §12.1 ("local | 개발자 머신 | docker-compose | 실제
+  데이터 X"): `postgres:16-alpine` + `redis:7-alpine` + `minio/minio:RELEASE.2022-02-07T08-17-33Z`
+  (image tags match the ones already pinned in the powehi-postgres/-redis/-r2 testcontainers IT
+  suites, so local/CI/dev behavior is identical) + a one-shot `minio-init` (mc) container that
+  creates the `powehi-media` bucket `R2MediaAdapter` expects. Ports bound to `127.0.0.1` only
+  (security-auditor finding, fixed in-cycle — were `0.0.0.0` by default, which would expose
+  weak-cred dev Postgres/Redis/MinIO to the LAN on a dev laptop).
+- **`app/vite.config.ts`**: added a dev-only `server.proxy` for `/v1` → `POWEHI_DEV_BACKEND_URL` env
+  var (default `http://localhost:8080`). Gap found: every `src/api/*.ts` file hardcodes a relative
+  `API_BASE = "/v1"` (matches the production reverse-proxy topology) but `vite dev` had zero proxy
+  config, so `pnpm dev` could never reach any real backend even manually before this change.
+  `server.*` is dev-server-only — never bundled into `vite build` output (confirmed by
+  security-auditor).
+- **`app/src/components/ChatLayout.tsx`**: added `data-testid="chat-sidebar"` to the `Sidebar`
+  component's root `<aside>` (~line 1577). Gap found: `app/e2e/chat.spec.ts` already referenced
+  this exact testid (asserting `not.toBeVisible()` pre-login) but it never actually existed in the
+  DOM — the assertion passed trivially either way. Now it's a real, addable post-login marker.
+- **`app/playwright.live.config.ts`** (new) + **`app/e2e-live/auth.spec.ts`** (new) — a SECOND
+  Playwright config/testDir, deliberately separate from `playwright.config.ts`'s `./e2e` (which
+  intentionally has no backend — asserts UI-only behavior). `pnpm --filter app e2e:live` runs it.
+  The one spec: toggles Login.tsx to "create-account" mode, registers a unique
+  `e2e-${randomUUID()}` handle through the REAL OPAQUE + MLS-identity-init worker flow hitting a
+  real backend, confirms the recovery-phrase modal, asserts `chat-sidebar` renders, then
+  `page.reload()` (clears the in-memory session token per `auth.ts`'s "in-memory only" comment,
+  but keeps IndexedDB-persisted `device_id`/MLS identity) and signs back in with the same
+  handle/password through Login.tsx's "sign-in" mode — proving both the register AND the manual
+  sign-in path round-trip for real. Message send/receive (needs a second identity + MLS group
+  join) is explicitly left as a follow-up, noted in the spec file's own comment.
+- **`.github/workflows/ci-e2e-live.yml`** (new workflow, separate from `ci-frontend.yml` so the
+  existing backend-less `playwright` job is untouched): triggers on `app/**`, `crates/**`, `bin/**`
+  (broad, since this suite depends on the whole stack together) → `docker compose up -d --wait` →
+  `wasm-pack build ... --out-dir ../../../app/src/wasm` (matches the local-dev convention the
+  gitignored `app/src/wasm/*` artifacts already use — without a real WASM build there, the
+  dev-only stub plugin no-ops every crypto call and the spec would silently exercise nothing) →
+  `cargo build --release -p powehi-server` → start it with dev env vars matching
+  `docker-compose.yml`'s creds → poll `GET /health` → `pnpm --filter app e2e:live`. Uploads
+  `backend.log` as an artifact only on failure.
+- **security-auditor: GREEN** (2 low YELLOW advisories, both fixed in-cycle): (1) docker-compose
+  ports were `0.0.0.0`-bound by default → fixed to `127.0.0.1:PORT:PORT` for all three services;
+  (2) `playwright.live.config.ts`'s `trace: "on-first-retry"` would capture the recovery-phrase
+  mnemonic + typed password in a retry trace's DOM snapshot — not currently exfiltrated (no step
+  uploads `test-results/`), but added an explicit code comment warning against adding one without
+  redacting the recovery-phrase/login steps first. Full backend logging surface verified
+  content-free (only address/boolean/UUID/error-code fields, redacting `AppConfig::Debug`, no
+  sqlx bound-arg logging) — the failure-path `backend.log` artifact upload is safe.
+- `pnpm exec tsc -b --noEmit` clean, `pnpm exec biome check` clean (143 files), all 98
+  `ChatLayout.test.tsx` tests still green (the new `chat-sidebar` testid didn't regress anything —
+  pre-login assertion in `chat.spec.ts` still passes, now meaningfully instead of trivially).
+  Did NOT run the new `e2e:live` suite itself in this sandbox (no Docker daemon available here —
+  `docker compose config` failed with "command not found: docker"); it will get its first real
+  run in CI. `cargo build --workspace` untouched/unaffected (no backend crate code changed this
+  cycle, only CI/infra/frontend).
+- **Next cycle:** watch the first `ci-e2e-live.yml` run on `main` — if the real backend boot,
+  wasm-pack build, or the spec itself has issues, that's this feature's own follow-up before
+  anything else. Once green, Phase 2 (message send/receive across two real devices — needs a
+  second identity + real MLS group join over the wire) is the natural continuation. PQ hybrid
+  Phase A remains blocked on upstream openmls `MLS_128_MLKEM768` support.
+
+## Previous state (2026-07-14, cycle 276 — FEATURE: per-member "Seen by N" group read receipts)
 
 - Commit `155cdaf`. Closed the gap flagged at the end of cycles 274/275 (CI green, `gh issue list`
   empty): `ChatMessage.read` was a single boolean, so a group read_receipt from ANY member flipped
