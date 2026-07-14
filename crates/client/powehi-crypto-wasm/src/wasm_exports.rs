@@ -3311,8 +3311,7 @@ mod tests {
         let a_id = generate_identity(b"device-a", &a_provider).unwrap();
         let (a_payload, a_decap) = pq_build_payload(&a_id.signer).unwrap();
         let a_handle = commit_pq_decap_key(a_decap);
-        let a_bundle =
-            generate_key_package_with_pq_ext(&a_id, &a_provider, &a_payload).unwrap();
+        let a_bundle = generate_key_package_with_pq_ext(&a_id, &a_provider, &a_payload).unwrap();
         let a_kp_wire = MlsMessageOut::from(a_bundle).to_bytes().unwrap();
         let a_kp_json = serde_json::to_vec(&a_kp_wire).unwrap();
         let a_kp_wire: Vec<u8> = serde_json::from_slice(&a_kp_json).unwrap();
@@ -3375,7 +3374,6 @@ mod tests {
         });
     }
 
-
     /// REGRESSION variant: device B registered via the §8.5 RECOVERY path
     /// (mlsInitIdentityFromPhrase -> generate_identity_from_keypair, i.e.
     /// SignatureKeyPair::from_raw + store) — NOT generate_identity — then RESTORES
@@ -3383,23 +3381,24 @@ mod tests {
     /// This mirrors registration exactly (Login.tsx doRegister).
     #[test]
     fn test_invite_accept_recovery_identity_restored_provider_roundtrip() {
-        use ed25519_dalek::SigningKey as Ed25519SigningKey;
         use crate::mls_group::generate_identity_from_keypair;
+        use ed25519_dalek::SigningKey as Ed25519SigningKey;
 
         // Device A: identity + PQ KeyPackage -> wire bytes -> JSON round-trip.
         let a_provider = OpenMlsRustCrypto::default();
         let a_id = generate_identity(b"device-a", &a_provider).unwrap();
         let (a_payload, a_decap) = pq_build_payload(&a_id.signer).unwrap();
         let a_handle = commit_pq_decap_key(a_decap);
-        let a_bundle =
-            generate_key_package_with_pq_ext(&a_id, &a_provider, &a_payload).unwrap();
+        let a_bundle = generate_key_package_with_pq_ext(&a_id, &a_provider, &a_payload).unwrap();
         let a_kp_wire = MlsMessageOut::from(a_bundle).to_bytes().unwrap();
         let a_kp_json = serde_json::to_vec(&a_kp_wire).unwrap();
         let a_kp_wire: Vec<u8> = serde_json::from_slice(&a_kp_json).unwrap();
 
         // Device B registers via the RECOVERY path (from_raw + store).
         let b_priv: [u8; 32] = [42u8; 32];
-        let b_pub: [u8; 32] = Ed25519SigningKey::from_bytes(&b_priv).verifying_key().to_bytes();
+        let b_pub: [u8; 32] = Ed25519SigningKey::from_bytes(&b_priv)
+            .verifying_key()
+            .to_bytes();
         let b_label = b"device-b-label";
         let b_reg_provider = OpenMlsRustCrypto::default();
         let b_reg_id =

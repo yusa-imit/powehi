@@ -100,14 +100,119 @@ const IDENTITY_INIT_METHODS: ReadonlySet<string> = new Set([
 	"mlsInitIdentityFromPhrase",
 ]);
 
+// A crypto-worker call (the raw Comlink RPC, or the doFlush persist that
+// follows it) must never be able to hang forever: since every persisting
+// method is serialized through the single shared `flushChain` (runOnChain
+// below), one wedged call would permanently block every later call in the
+// same page session — not just its own caller, but every subsequent MLS
+// operation for the rest of the session (see runOnChain's doc comment for
+// why a never-settling `fn()` poisons `flushChain` itself, not just `link`).
+// Bound every call so a hang degrades to a diagnosable rejection instead.
+//
+// The "call" vs "persist" phase tag (logged via a content-free console.error
+// — method name + phase only, never args/results — so it is safe under
+// no-plaintext-logging and is picked up by e2e-live's forwardBrowserErrors)
+// pinpoints which half timed out: the raw WASM/Comlink round trip, or the
+// mlsExportState+encrypted-Dexie-write persist that follows it.
+export const CRYPTO_CALL_TIMEOUT_MS = 15_000;
+
+export class CryptoWorkerTimeoutError extends Error {
+	constructor(method: string, phase: "call" | "persist") {
+		super(`crypto_worker_timeout:${method}:${phase}`);
+		this.name = "CryptoWorkerTimeoutError";
+	}
+}
+
+function withTimeout<T>(
+	promise: Promise<T>,
+	method: string,
+	phase: "call" | "persist",
+): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		const timer = setTimeout(() => {
+			console.error("crypto_worker_timeout", method, phase);
+			reject(new CryptoWorkerTimeoutError(method, phase));
+		}, CRYPTO_CALL_TIMEOUT_MS);
+		promise.then(
+			(value) => {
+				clearTimeout(timer);
+				resolve(value);
+			},
+			(err) => {
+				clearTimeout(timer);
+				reject(err);
+			},
+		);
+	});
+}
+
 // Generation high-water-mark for the current worker session. It is the
 // generation of the last state DURABLY PERSISTED in this session (0 before the
 // first persist). Reset to 0 by a fresh mlsInitIdentity(FromPhrase) or by
-// clearSessionState (see those wrappers); raised only inside doFlush AFTER a
-// persist succeeds, and by a successful mlsImportState. Never mutated off the
-// serialization chain below (that would race an in-flight flush and let the
-// persisted generation disagree with this value — see runOnChain).
+// clearSessionState (see resetGeneration below); raised only inside doFlush
+// AFTER a persist succeeds, and by a successful mlsImportState — always via
+// bumpCurrentGeneration, never a plain assignment (see its doc comment).
 let currentGeneration = 0;
+
+// Highest generation NUMBER ever issued to an export attempt (doFlush),
+// whether or not that attempt ever completes. Candidate generation numbers
+// for a new doFlush come from THIS counter, not `currentGeneration + 1` —
+// see doFlush's doc comment for why: since withTimeout (above) lets a caller
+// give up on a still-running export without truly cancelling it, more than
+// one doFlush attempt can be in flight at once, and issuing from
+// `currentGeneration + 1` would let two overlapping attempts compute the
+// IDENTICAL candidate number. Always kept >= currentGeneration by
+// bumpCurrentGeneration, so a freshly issued number is always provably newer
+// than anything already durable.
+let issuedGeneration = 0;
+
+// Bumped by resetGeneration (identity re-init / clearSessionState). An
+// abandoned doFlush issued in a PRIOR epoch must never be allowed to persist
+// after a reset — its generation number means nothing relative to the new
+// identity's numbering — regardless of what that number happens to be. See
+// doFlush's write-time check.
+let generationEpoch = 0;
+
+/**
+ * Reset the generation bookkeeping for a fresh identity/session.
+ *
+ * Runs serialized on writeChain (via runOnWriteChain below), NOT as a plain
+ * synchronous mutation — this closes a crypto-reviewer RED finding: a plain
+ * `generationEpoch += 1` here could land in the middle of an in-flight
+ * doFlush write's check-then-write body (the check at the top of that body
+ * and its `await encDb.setMlsProviderState(...)` are two separate ticks of
+ * the event loop), letting an old-identity write's epoch check pass, then
+ * physically persist to disk AFTER the reset, while the new identity's own
+ * doFlush was wrongly skipped as "superseded" by that stale write's
+ * subsequent bumpCurrentGeneration. Because writeChain gives every queued
+ * task exclusive occupancy of the chain for its ENTIRE async body (a later
+ * task can only start after the earlier one's promise fully settles), moving
+ * the epoch flip onto the same chain guarantees it can only happen strictly
+ * before or strictly after any given write's check-then-write body, never
+ * during it.
+ */
+function resetGeneration(): Promise<void> {
+	return runOnWriteChain(() => {
+		currentGeneration = 0;
+		issuedGeneration = 0;
+		generationEpoch += 1;
+	});
+}
+
+/**
+ * Advance currentGeneration (and keep issuedGeneration in lockstep) after a
+ * generation value becomes durable — either a completed Dexie write (doFlush)
+ * or a completed mlsImportState. Math.max, not a plain assignment: an
+ * abandoned-but-still-running call (see withTimeout) can resolve out of order
+ * relative to a later one that already advanced past it — this must never
+ * roll currentGeneration BACKWARDS. issuedGeneration is raised alongside it so
+ * a later doFlush's freshly issued number is always > any durable value,
+ * keeping the write-time supersede check in doFlush correct.
+ */
+function bumpCurrentGeneration(generation: number): void {
+	currentGeneration = Math.max(currentGeneration, generation);
+	issuedGeneration = Math.max(issuedGeneration, currentGeneration);
+}
 
 // Serializes every bookkeeping op (flushes, import floor read, resets) so they
 // can never invoke mlsExportState concurrently against the single-threaded WASM
@@ -116,31 +221,80 @@ let currentGeneration = 0;
 // see runOnChain.
 let flushChain: Promise<void> = Promise.resolve();
 
+// Serializes the ACTUAL Dexie write step of doFlush AND every generation-
+// epoch flip (resetGeneration) — deliberately separate from flushChain/
+// runOnChain, which withTimeout can now let a caller walk away from while the
+// export itself is still running (see doFlush). Every write, once it reaches
+// the front of this chain, does a final generation/epoch check against the
+// freshest currentGeneration/generationEpoch and skips if superseded. Because
+// the check-and-write happens serialized here, whichever task actually
+// reaches the front of the queue LAST always sees the truest
+// currentGeneration/generationEpoch — a stale (superseded) write can never
+// physically land after a fresher one, regardless of the real-time
+// completion order of the mlsExportState calls that produced them, AND
+// resetGeneration's epoch flip can never land in the middle of an in-flight
+// write's check-then-write body (see resetGeneration's doc comment) — only
+// strictly before or strictly after it.
+let writeChain: Promise<void> = Promise.resolve();
+
+/**
+ * Run `fn` serialized on writeChain and return the promise for THIS op — see
+ * writeChain's doc comment for why doFlush's write and resetGeneration's
+ * epoch flip must share this one chain.
+ */
+function runOnWriteChain<T>(fn: () => T | Promise<T>): Promise<T> {
+	const link = writeChain.then(fn);
+	writeChain = link.then(
+		() => undefined,
+		() => undefined,
+	);
+	return link;
+}
+
 /**
  * Export the current full MLS context (identity + every group) and durably
  * persist it to the encrypted `identity` row in Dexie.
  *
- * The candidate generation is currentGeneration + 1. currentGeneration is
- * raised to it ONLY after the encrypted Dexie write resolves — so the
- * high-water-mark always matches the last state actually on disk.
+ * The candidate generation comes from issuedGeneration (see its doc comment),
+ * not currentGeneration — this is what lets doFlush safely reissue a fresh,
+ * collision-free number even while an earlier, abandoned (see withTimeout)
+ * doFlush for the same identity might still be in flight.
  *
- * THROWS if the export or the encrypted persist fails (no swallow). Callers
- * that await this (via runOnChain) therefore reject too — a ratchet-advanced
- * result must never be released while its advanced state is not durably saved
- * (persist-before-release; see the SECURITY header). Never logs the blob,
- * identityId, or generation (no-plaintext-logging).
+ * The actual write is additionally guarded by writeChain: once the export
+ * resolves, the write only lands if the exported generation is still newer
+ * than the current durable high-water-mark AND was issued in the current
+ * generationEpoch — otherwise a later, already-completed write has superseded
+ * it (only reachable via an abandoned withTimeout tail; see writeChain's doc
+ * comment), and persisting this stale snapshot now would clobber the newer
+ * on-disk state with older data. In that case doFlush resolves normally
+ * WITHOUT writing — safe because the caller that issued this exact attempt
+ * already observed a timeout rejection for it and never saw this result
+ * (persist-before-release is therefore preserved for every caller that is
+ * actually still waiting on this call).
  *
- * MUST be invoked serialized (runOnChain) — it reads and writes
- * currentGeneration without further locking.
+ * THROWS if the export or the encrypted persist fails (no swallow, superseded-
+ * skip aside). Callers that await this (via runOnChain) therefore reject too —
+ * a ratchet-advanced result must never be released while its advanced state is
+ * not durably saved (persist-before-release; see the SECURITY header). Never
+ * logs the blob, identityId, or generation (no-plaintext-logging).
  */
 async function doFlush(raw: Comlink.Remote<CryptoWorkerApi>, identityId: string): Promise<void> {
-	const generation = currentGeneration + 1;
+	issuedGeneration += 1;
+	const generation = issuedGeneration;
+	const epochAtIssuance = generationEpoch;
 	const result: MlsExportStateResult = await raw.mlsExportState(identityId, generation);
 	const stateB64 = uint8ToBase64(result.stateBytes);
 	const encDb = new EncryptedPowehiDb(db, raw);
-	await encDb.setMlsProviderState(stateB64, result.generation);
-	// Durable now — advance the high-water-mark to match on-disk state.
-	currentGeneration = result.generation;
+
+	await runOnWriteChain(async () => {
+		if (epochAtIssuance !== generationEpoch || result.generation <= currentGeneration) {
+			// Superseded — see doFlush's doc comment. Skip the write entirely.
+			return;
+		}
+		await encDb.setMlsProviderState(stateB64, result.generation);
+		// Durable now — advance the high-water-mark to match on-disk state.
+		bumpCurrentGeneration(result.generation);
+	});
 }
 
 /**
@@ -195,14 +349,20 @@ export function wrapWithPersistence(
 
 			if (IDENTITY_INIT_METHODS.has(prop)) {
 				return async (...args: unknown[]) => {
-					const result = (await orig(...args)) as MlsIdentityResult;
+					const result = (await withTimeout(orig(...args), prop, "call")) as MlsIdentityResult;
 					// Reset + first persist serialized together: the reset to 0 must
 					// be ordered w.r.t. any still-pending flush from a prior op, and
 					// the persist must reject the init call if it fails.
-					await runOnChain(async () => {
-						currentGeneration = 0;
-						await doFlush(raw, result.identityId);
-					});
+					await runOnChain(() =>
+						withTimeout(
+							(async () => {
+								await resetGeneration();
+								await doFlush(raw, result.identityId);
+							})(),
+							prop,
+							"persist",
+						),
+					);
 					return result;
 				};
 			}
@@ -217,25 +377,34 @@ export function wrapWithPersistence(
 					// rejected — cross-reload wholesale replay is NOT defended (see the
 					// SECURITY header). A later in-session import cannot roll back below
 					// already-advanced state.
-					return runOnChain(async () => {
-						const floor = currentGeneration;
-						const result = (await orig(stateBytes, floor)) as MlsImportStateResult;
-						// The gate guarantees result.generation >= floor.
-						currentGeneration = result.generation;
-						return result;
-					});
+					return runOnChain(() =>
+						withTimeout(
+							(async () => {
+								const floor = currentGeneration;
+								const result = (await orig(stateBytes, floor)) as MlsImportStateResult;
+								// The gate guarantees result.generation >= floor. Via
+								// bumpCurrentGeneration (not a plain assignment) for the same
+								// orphaned-late-continuation reason as doFlush above — see its
+								// doc comment.
+								bumpCurrentGeneration(result.generation);
+								return result;
+							})(),
+							prop,
+							"call",
+						),
+					);
 				};
 			}
 
 			if (SYNC_FLUSH_ARG_METHODS.has(prop)) {
 				return async (...args: unknown[]) => {
-					const result = await orig(...args);
+					const result = await withTimeout(orig(...args), prop, "call");
 					const identityId = args[0];
 					if (typeof identityId === "string") {
 						// Rejects (propagating out of the wrapped call) if the persist
 						// fails — the ratchet-advanced result must not be released while
 						// its advanced state is not durably saved.
-						await runOnChain(() => doFlush(raw, identityId));
+						await runOnChain(() => withTimeout(doFlush(raw, identityId), prop, "persist"));
 					}
 					return result;
 				};
@@ -247,10 +416,8 @@ export function wrapWithPersistence(
 			// currentGeneration).
 			if (prop === "clearSessionState") {
 				return async (...args: unknown[]) => {
-					const result = await orig(...args);
-					await runOnChain(async () => {
-						currentGeneration = 0;
-					});
+					const result = await withTimeout(orig(...args), prop, "call");
+					await runOnChain(() => withTimeout(resetGeneration(), prop, "persist"));
 					return result;
 				};
 			}
