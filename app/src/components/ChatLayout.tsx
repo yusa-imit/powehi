@@ -1575,6 +1575,7 @@ function Sidebar({
 
 	return (
 		<aside
+			data-testid="chat-sidebar"
 			style={{
 				width: 320,
 				flex: "none",

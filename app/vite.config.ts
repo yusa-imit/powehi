@@ -115,6 +115,20 @@ function sriPlugin(): Plugin {
 
 export default defineConfig({
 	plugins: [powehiWasmStub(), react(), tailwindcss(), sriPlugin()],
+	server: {
+		// Dev-only: `src/api/*.ts` fetches relative `/v1/...` (matches the
+		// production reverse-proxy topology, prd.md §12.2), but `vite dev`
+		// itself doesn't proxy anything by default. Without this, `pnpm dev`
+		// can never reach a real backend. Overridable for the live-backend
+		// E2E harness (docker-compose.yml + e2e-live/) via an env var so a
+		// differently-mapped CI backend port doesn't require editing this file.
+		proxy: {
+			"/v1": {
+				target: process.env.POWEHI_DEV_BACKEND_URL ?? "http://localhost:8080",
+				changeOrigin: true,
+			},
+		},
+	},
 	worker: {
 		format: "es",
 		// The stub plugin must also run in the worker-build context so that

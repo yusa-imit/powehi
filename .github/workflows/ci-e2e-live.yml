@@ -1,0 +1,127 @@
+name: CI — Live-backend E2E
+
+# Boots a real bin/powehi-server against real Postgres/Redis/MinIO
+# (docker-compose.yml, prd.md §12.1: local = docker-compose) and drives it
+# through the browser with app/e2e-live/*.spec.ts (real OPAQUE registration +
+# sign-in). Separate from CI — Frontend's `playwright` job, which only runs
+# the backend-less app/e2e/*.spec.ts and is unaffected by this workflow.
+# Triggers broadly (app/**, crates/**, bin/**) since this suite depends on
+# the full backend + frontend + WASM crypto stack together.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'crates/**'
+      - 'bin/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'docker-compose.yml'
+      - '.github/workflows/ci-e2e-live.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'crates/**'
+      - 'bin/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'docker-compose.yml'
+      - '.github/workflows/ci-e2e-live.yml'
+
+concurrency:
+  group: ci-e2e-live-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  playwright-live-backend:
+    name: Playwright E2E (real backend)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start postgres/redis/minio
+        run: docker compose up -d --wait postgres redis minio minio-init
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build WASM crypto module
+        # Out-dir matches the local-dev convention vite.config.ts expects
+        # (src/wasm/powehi_crypto_wasm.js) — without a real build there, the
+        # dev-only stub plugin no-ops every crypto call and OPAQUE/MLS in this
+        # spec would silently fail rather than exercising real crypto.
+        run: wasm-pack build crates/client/powehi-crypto-wasm --target web --out-dir ../../../app/src/wasm
+
+      - name: Build backend server
+        run: cargo build --release -p powehi-server
+
+      - name: Start backend server
+        # No production secrets here — dev-only credentials matching
+        # docker-compose.yml's throwaway local containers (rule:
+        # no-plaintext-logging is about message/PII content, not these).
+        env:
+          POWEHI__DATABASE_URL: postgres://powehi:powehi@localhost:5432/powehi
+          POWEHI__REDIS_URL: redis://localhost:6379
+          POWEHI__R2_ENDPOINT: http://localhost:9000
+          POWEHI__R2_BUCKET: powehi-media
+          POWEHI__R2_ACCESS_KEY_ID: minioadmin
+          POWEHI__R2_SECRET_ACCESS_KEY: minioadmin
+          POWEHI__HOST: 127.0.0.1
+          POWEHI__PORT: "8080"
+        run: |
+          ./target/release/powehi-server > backend.log 2>&1 &
+          echo $! > backend.pid
+
+      - name: Wait for backend /health
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8080/health > /dev/null; then
+              echo "backend healthy"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "backend did not become healthy in time" >&2
+          cat backend.log >&2 || true
+          exit 1
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: pnpm --filter app exec playwright install chromium --with-deps
+
+      - name: Run live-backend Playwright E2E
+        run: pnpm --filter app e2e:live
+
+      - name: Upload backend log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-log
+          path: backend.log
+
+      - name: Stop backend
+        if: always()
+        run: kill "$(cat backend.pid)" 2>/dev/null || true
+
+      - name: Stop docker compose stack
+        if: always()
+        run: docker compose down -v
