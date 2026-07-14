@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { expect, test } from "@playwright/test";
-import { registerAndReachChat, signIn, uniqueHandle } from "./helpers";
+import { registerAndReachChat, signIn, simulateDistinctClientIp, uniqueHandle } from "./helpers";
 
 // Live-backend E2E, Phase 2 (testing-conventions.md: "E2E: Playwright for
 // ... message send/receive"). Builds on auth.spec.ts's real OPAQUE
@@ -32,6 +32,13 @@ test.describe("Live backend: contact invite + message exchange", () => {
 		const pageB = await contextB.newPage();
 
 		try {
+			// Distinct simulated client IPs so A's and B's auth calls (and
+			// auth.spec.ts's, which ran earlier in this same worker) land in
+			// separate auth_governor buckets instead of exhausting one shared
+			// fallback bucket — see simulateDistinctClientIp's doc comment.
+			await simulateDistinctClientIp(page.context());
+			await simulateDistinctClientIp(contextB);
+
 			await registerAndReachChat(page, handleA, password);
 			await registerAndReachChat(pageB, handleB, password);
 

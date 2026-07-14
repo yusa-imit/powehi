@@ -1,10 +1,27 @@
-import { randomUUID } from "node:crypto";
-import type { Page } from "@playwright/test";
+import { randomInt, randomUUID } from "node:crypto";
+import type { BrowserContext, Page } from "@playwright/test";
 import { expect } from "@playwright/test";
 
 /** A random unique handle, safe to register repeatedly against a persistent backend. */
 export function uniqueHandle(): string {
 	return `e2e-${randomUUID()}`;
+}
+
+/**
+ * `auth_governor` (rate_limit.rs) rate-limits `/v1/auth/*` per client IP.
+ * Playwright's requests carry no `CF-Connecting-IP`/`X-Forwarded-For`/
+ * `X-Real-IP` header, so every `BrowserContext` in this suite falls through
+ * to the same `0.0.0.0` fallback bucket and simulated devices exhaust each
+ * other's burst — auth.spec.ts alone fits inside burst=8, but adding
+ * message.spec.ts's two-device flow on top blows it. Give each simulated
+ * device its own X-Real-IP so the governor treats them as distinct clients,
+ * same as it would behind a real reverse proxy. This is a test-harness
+ * fidelity fix, not a rate-limit change — `auth_governor`'s production
+ * burst/refill values are untouched.
+ */
+export async function simulateDistinctClientIp(context: BrowserContext): Promise<void> {
+	const ip = `10.${randomInt(1, 255)}.${randomInt(1, 255)}.${randomInt(1, 255)}`;
+	await context.setExtraHTTPHeaders({ "x-real-ip": ip });
 }
 
 /**

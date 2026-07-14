@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { registerAndReachChat, signIn, uniqueHandle } from "./helpers";
+import { registerAndReachChat, signIn, simulateDistinctClientIp, uniqueHandle } from "./helpers";
 
 // Live-backend E2E (testing-conventions.md: "E2E: Playwright for register/login
 // (OPAQUE) ..."). Unlike ./e2e/*.spec.ts (which assert UI behavior with no
@@ -22,6 +22,7 @@ test.describe("Live backend: registration + sign-in", () => {
 		const handle = uniqueHandle();
 		const password = "CorrectHorseBattery9!";
 
+		await simulateDistinctClientIp(page.context());
 		await registerAndReachChat(page, handle, password);
 
 		// A reload clears the in-memory session token (auth.ts) but keeps the

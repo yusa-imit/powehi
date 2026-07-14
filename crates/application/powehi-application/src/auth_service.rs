@@ -270,7 +270,7 @@ impl AuthUseCase for AuthService {
         // at the application layer — a hard DB-level invariant would require a
         // serializable transaction in the outbound adapter (future hardening).
         // Practical risk is very low: registration requires an active session
-        // and is governed by auth_governor (burst=5, 1 token/6s).
+        // and is governed by auth_governor (burst=8, 1 token/6s).
         let existing = self.device_repo.find_by_user(user_id).await?;
         if existing.len() >= MAX_DEVICES_PER_USER {
             return Err(DomainError::InvalidInput("device_limit_exceeded".into()));
