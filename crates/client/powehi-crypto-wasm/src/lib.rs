@@ -19,3 +19,14 @@ pub mod wasm_exports;
 pub fn version() -> String {
     format!("powehi-crypto-wasm {}", env!("CARGO_PKG_VERSION"))
 }
+
+/// Runs once when the WASM module is instantiated (before any other export is
+/// callable). Installs `console_error_panic_hook` so a panic — e.g. deep
+/// inside openmls's storage read path on a corrupt state blob — surfaces to
+/// the browser console as a real message + location instead of an opaque
+/// "unreachable executed" trap. Diagnostics only; never touches key material.
+#[wasm_bindgen(start)]
+pub fn init_panic_hook() {
+    #[cfg(target_arch = "wasm32")]
+    console_error_panic_hook::set_once();
+}

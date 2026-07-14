@@ -57,6 +57,14 @@ openmls = { workspace = true, features = ["js"] }
 openmls_rust_crypto = { workspace = true }
 openmls_basic_credential = { workspace = true }
 openmls_traits = { workspace = true }
+# wasm32-unknown-unknown traps (rather than unwinds) on panic by default, which
+# surfaces to JS as an opaque "unreachable executed" RuntimeError with no panic
+# message or location. This crate's own docs (wasm_exports.rs, mls_group.rs)
+# already document that a well-formed-but-corrupt state blob "can still panic
+# deep inside openmls's storage read path" — without this hook that panic is
+# undiagnosable from the browser console. Not a crypto primitive (diagnostics
+# only); does not fall under crypto-libraries-pinned.md's crypto-library list.
+console_error_panic_hook = "0.1"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
