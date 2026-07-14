@@ -17,7 +17,62 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-14, cycle 279 — FEATURE: live-backend Playwright E2E harness, Phase 2)
+## Current state (2026-07-14, cycle 280 — STABILIZATION: fix ci-e2e-live 429 flake, commit 4bf56fc)
+
+- Mode: STABILIZATION (counter 280 % 5 == 0). CI check at cycle start: `CI — Rust`/`CI — Frontend`
+  green on main, but `CI — Live-backend E2E` (the workflow cycle 279's Phase 2 push triggered) had
+  **failed** — `message.spec.ts` timed out waiting for the recovery-phrase dialog on both the
+  initial attempt and retry #1, meaning even user A's registration (the very first auth call in
+  that spec) never completed.
+- **Root cause (not what cycle 279 anticipated):** `auth_governor` (`rate_limit.rs`) rate-limits
+  `/v1/auth/*` per client IP via `TrustedProxyKeyExtractor`, which checks `CF-Connecting-IP` →
+  rightmost `X-Forwarded-For` → `X-Real-IP` → falls back to a single shared `0.0.0.0` bucket.
+  Playwright's default requests carry none of those headers, so **every** `BrowserContext` across
+  the whole CI job — `auth.spec.ts`'s context AND both of `message.spec.ts`'s two simulated devices
+  — collapsed onto that one fallback bucket and cumulatively exhausted the shared burst=8 budget
+  (auth.spec.ts alone: ~6 tokens, already close to the ceiling; message.spec.ts stacking two more
+  full registrations on top blew it immediately). Not a mis-sized rate limit — a test-harness
+  fidelity gap (in a real deployment behind a proxy, each device really would get its own IP/bucket).
+- **Fix, not another rate-limit bump:** raising burst a third time (5→8→??) would have "fixed" CI by
+  further weakening the production brute-force/enumeration control — explicitly avoided per the
+  non-negotiable ("never weaken a security control to make progress"). Instead added
+  `simulateDistinctClientIp(context)` to `app/e2e-live/helpers.ts`: sets a random `10.x.x.x`
+  `X-Real-IP` header per Playwright `BrowserContext` via `context.setExtraHTTPHeaders()`, so each
+  simulated device is routed to its own rate-limit bucket — matching how it would actually look
+  behind a real reverse proxy. Wired into `auth.spec.ts` (one call before `registerAndReachChat`)
+  and `message.spec.ts` (one call per device, `page.context()` and `contextB`, before either
+  registers). `crates/adapters/inbound/powehi-rest-api/src/rate_limit.rs` (the actual limiter) is
+  completely untouched — verified via `git diff --stat` before committing.
+  - Also fixed a stale doc comment in `auth_service.rs:273` ("burst=5" — never updated when
+    `cab703b` bumped it to 8).
+- **security-auditor: GREEN.** Confirmed: (1) `rate_limit.rs` not in the diff, production
+  burst/refill unchanged; (2) `X-Real-IP` was already trusted as priority-4 fallback by
+  `TrustedProxyKeyExtractor` *before* this change (pre-existing, not introduced) — a real
+  deployment's reverse proxy must still overwrite it (standing caveat already documented at
+  `rate_limit.rs:25`), this diff neither adds nor worsens that; (3) no plaintext/PII logging (random
+  RFC1918 IPs only, no handles/passwords touched); (4) `randomInt(1,255)` collision-per-run is
+  possible but harmless (worst case: a flaky retry, not a security issue).
+- `pnpm exec tsc -b --noEmit` clean, `pnpm exec biome check` clean, all 1207 frontend Vitest tests
+  green (98 files, unchanged — these are Playwright specs, not Vitest). Backend:
+  `cargo build -p powehi-application` clean, `cargo clippy --workspace --all-targets -- -D
+  warnings` clean, `cargo test --workspace` all green (0 failures across every crate),
+  `cargo audit` clean (only 2 pre-existing yanked-crate warnings — `spin` 0.9.8/0.10.0 via
+  aws-sdk-s3, not vulnerabilities, not new this cycle). `nextest` isn't installed in this sandbox;
+  fell back to `cargo test --workspace` per the Mandatory Rules fallback clause.
+- `gh issue list --state open`: empty. Target dir: 15G (under the 20G prune threshold, no hygiene
+  pass needed).
+- **Did NOT run `e2e:live` itself in this sandbox** (no Docker daemon here, same limitation noted
+  every cycle since 277) — verification is watching the CI run this push triggers on `main`.
+- **Next cycle:** watch `ci-e2e-live.yml` on this push (commit `4bf56fc`). If `message.spec.ts`
+  still 429s despite distinct IPs, check whether Playwright's `context.setExtraHTTPHeaders` is
+  actually reaching the server before the first request (a race with `page.goto` on the very first
+  call) — may need to set headers immediately on context creation rather than after. If green: no
+  more known gaps in the live-backend E2E harness's core register/invite/message coverage; group
+  chats with 3+ real members, media upload, and disappearing messages remain uncovered by
+  `e2e-live/*` but are lower priority. PQ hybrid Phase A remains blocked on upstream openmls
+  `MLS_128_MLKEM768` support.
+
+## Previous state (2026-07-14, cycle 279 — FEATURE: live-backend Playwright E2E harness, Phase 2)
 
 - Commit `3c5f93f`. CI check at cycle start: `CI — Live-backend E2E` and `CI — Rust` both green
   on main (cycle 278's `cab703b` auth_governor burst 5→8 fix landed and passed) — proceeded with
