@@ -17,7 +17,113 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-14, cycle 280 — STABILIZATION: fix ci-e2e-live 429 flake, commit 4bf56fc)
+## Current state (2026-07-15, cycle 282 — FEATURE(treated as CI-red override): message.spec.ts accept-invite instrumentation + restore-flow test gap, commit 16db466)
+
+- Mode nominally FEATURE (counter 282 % 5 != 0), but per Mandatory Rules ("CI
+  quick check ... if red on main, switch to STABILIZATION") switched to a CI-fix
+  cycle: `gh run list` showed `CI — Live-backend E2E` **failing** on both pushes
+  since cycle 280's 429 fix (`4bf56fc`) — the 429s are gone (auth.spec.ts now
+  passes), but `message.spec.ts` fails at a NEW spot: after device B clicks
+  "Connect" on an invite, `open-chat-btn` never appears (30s timeout),
+  reproducible on both the initial attempt and retry #1.
+- **Found leftover uncommitted WIP from a prior cycle** at session start: two
+  regression tests in `wasm_exports.rs` (`test_invite_accept_cross_device_
+  restored_provider_roundtrip`, `test_invite_accept_recovery_identity_
+  restored_provider_roundtrip`) reproducing device B's sign-in-restored-
+  provider accept-invite flow at the native Rust level. Ran them — **both
+  passed** — so the bug is not in the core MLS restore/create_group/add_member
+  logic itself, at least not in the exact shape those two tests covered.
+- **Root-caused via the CI backend-log artifact** (`gh run download -n
+  backend-log`, not previously done — no Docker in this sandbox so can't run
+  e2e:live locally, but the backend log from a failed run is downloadable and
+  readable): both the initial attempt and retry #1 show `key_package.fetch_one`
+  (AcceptInviteModal.tsx step 2, B fetching A's KeyPackage) succeeding, and then
+  **zero further server calls ever occur** for that flow — not even
+  `groups.create` (step 5a, the very next server round trip). Since steps 3-4
+  (`mlsCreateGroup`, `mlsAddMember`) are pure local WASM calls with no network
+  round trip, this pins the failure precisely inside those two calls, 100%
+  reproducible (not flaky) at that exact spot on device B's sign-in-restored
+  identity.
+- Dispatched an Explore agent to independently trace the frontend sign-in/
+  restore path (`Login.tsx`, `useAuthStore`, `useCryptoWorker.ts`,
+  `crypto.worker.ts`) end-to-end for a stale-`identityId`/race/null-proxy bug —
+  found none: `phase` only flips to `"app"` (mounting `ChatLayout` /
+  `AcceptInviteModal`) after `identityId` is fully assigned from the
+  restore/import result; the Comlink proxy is a non-nullable module singleton;
+  no stale-closure risk in `handleAccept`. Also checked `groups.rs`/`invite.rs`/
+  `messaging.rs` server handlers for anything that would reject a second
+  device or sign-in-restored identity — nothing found.
+- **Added a third regression test** closing the one operational gap versus the
+  real sequence: `test_invite_accept_restored_provider_with_intervening_key_
+  package_mint` mirrors Login.tsx's "Upload a fresh KeyPackage for this
+  session" step (`mlsGetKeyPackage`, which mints a SECOND KeyPackage — fresh
+  HPKE leaf keypair + PQ decap key — into the SAME restored provider) between
+  restore and `mls_create_group`/`mls_add_member`, and uses the true production
+  floor (`min_generation: 0`, a fresh worker's `currentGeneration`, not `1` as
+  the two prior tests used). **This also passed** (132/132 total,
+  `cargo clippy -p powehi-crypto-wasm --all-targets -- -D warnings` clean) —
+  confirms the bug is NOT reproducible in native (non-wasm32) Rust and must be
+  at the actual wasm32/browser execution boundary (getrandom backend, WASM
+  panic behavior, or something genuinely runtime-environment-specific).
+  **crypto-reviewer: GREEN**, no required changes (test-only diff, real
+  openmls/RustCrypto primitives throughout, epoch-authenticator equality is a
+  correct RFC 9420 invariant, decap-key handles cleaned up).
+- **Given blind CI push-and-observe is expensive** (this is the second
+  CI-red cycle in a row on this same E2E harness) and no Docker in this
+  sandbox to reproduce directly, added `forwardBrowserErrors(page, label)` to
+  `app/e2e-live/helpers.ts` — forwards only `pageerror` (uncaught exceptions)
+  and `error`-level `console` messages to CI stdout, prefixed per-device.
+  Wired into `message.spec.ts` for both devices right after context/page
+  creation. **security-auditor: GREEN** — confirmed no plaintext/PII/key
+  material can reach an `Error.message` on any traced code path in this app
+  (all API-layer throws are content-free category codes; the crypto worker's
+  own errors are either a fixed enum or a raw WASM panic message, never
+  key material); test-harness-only, not shipped to production.
+- `pnpm exec tsc -b --noEmit` clean, `pnpm exec biome check e2e-live/` clean.
+  `cargo build -p powehi-crypto-wasm` + `cargo test -p powehi-crypto-wasm --lib`
+  clean (132 passed, 0 failed, 2 ignored). `cargo clippy -p powehi-crypto-wasm
+  --all-targets -- -D warnings` clean. Did NOT run the full workspace build/
+  test (only the touched crate) — no other crate was touched this cycle.
+  `gh issue list --state open`: empty. Target dir: 15G (under 20G threshold).
+- **Follow-up commit `1b67762`**: while investigating, found that
+  `console_error_panic_hook` was NOT installed anywhere in
+  `powehi-crypto-wasm` (grepped — zero hits, not even in `Cargo.toml`).
+  wasm32-unknown-unknown traps (not unwinds) on panic by default, so any panic
+  today — e.g. the exact "can still panic deep inside openmls's storage read
+  path" risk this crate's own docs already call out — would surface as an
+  opaque, undiagnosable "unreachable executed" RuntimeError. Added the dep
+  (wasm32-only target table) + a `#[wasm_bindgen(start)]` init function
+  calling `set_once()`. Verified: native build/test/clippy clean, `cargo build
+  -p powehi-crypto-wasm --target wasm32-unknown-unknown` clean, `cargo clippy
+  ... --target wasm32-unknown-unknown --all-targets -- -D warnings` clean, and
+  a full `wasm-pack build crates/client/powehi-crypto-wasm --target web`
+  release build (the actual `pnpm build:wasm` command) succeeds end-to-end.
+  **crypto-reviewer: GREEN** (second pass, this diff only) — not a crypto
+  primitive, zero `unwrap()`/`expect()`/`panic!` in this crate's *production*
+  (non-test) code so no secret can be interpolated into any panic message this
+  crate itself can emit, `console.error` is a client-local sink that never
+  crosses the server/network boundary. Audited every unwrap/expect/panic/
+  assert site in the crate and confirmed all are test-only.
+- **Next cycle: watch `ci-e2e-live.yml` on this push (commits `16db466` +
+  `1b67762`).** If it fails again, `gh run download -n backend-log` first
+  (fast, no Docker needed), then check the CI *test runner's own stdout* (not
+  just backend.log) for the new `[device-A pageerror]` / `[device-B
+  console.error]` / `[device-B pageerror]` lines — with the panic hook now
+  installed, a WASM panic inside `mlsCreateGroup`/`mlsAddMember` should now
+  print a real message + location instead of an opaque trap, turning this from
+  "silent hang, unknown cause" into an actionable bug report. If it's a clean
+  JS exception (not a panic): that pins the exact failing assertion/call
+  directly. If it's STILL a silent hang even with both the panic hook and
+  console forwarding in place: suspect a genuine Promise-never-resolves bug in
+  the Comlink/worker message-handling layer itself (not a WASM panic at all) —
+  next step would be adding a timeout race (`Promise.race` vs. a short
+  deadline) around the `mlsCreateGroup`/`mlsAddMember` calls in
+  `AcceptInviteModal.tsx` to at least fail fast with a diagnosable error.
+  Group chats with 3+ real members, media upload, and disappearing messages
+  remain uncovered by `e2e-live/*` but are lower priority. PQ hybrid Phase A
+  remains blocked on upstream openmls `MLS_128_MLKEM768` support.
+
+## Previous state (2026-07-14, cycle 280 — STABILIZATION: fix ci-e2e-live 429 flake, commit 4bf56fc)
 
 - Mode: STABILIZATION (counter 280 % 5 == 0). CI check at cycle start: `CI — Rust`/`CI — Frontend`
   green on main, but `CI — Live-backend E2E` (the workflow cycle 279's Phase 2 push triggered) had
