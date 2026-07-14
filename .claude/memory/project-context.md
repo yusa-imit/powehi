@@ -17,6 +17,80 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-07-15, cycle 284 — FEATURE: crypto-worker call timeout — accept-invite hang now degrades to a diagnosable rejection, commit 4878c9d)
+
+- Continuation of cycle 282's investigation: found substantial uncommitted WIP
+  already sitting in the working tree at session start (from an interrupted,
+  never-logged cycle 283) — `wrapWithPersistence` in `useCryptoWorker.ts`
+  reworked to wrap every crypto-worker call phase ("call" raw Comlink RPC,
+  "persist" doFlush export+Dexie-write) in a 15s `withTimeout`, so a wedged
+  call now rejects with `CryptoWorkerTimeoutError` instead of permanently
+  poisoning the single shared `flushChain` (which is exactly what cycle 282
+  pinned as the accept-invite CI hang's shape: `mlsCreateGroup`/`mlsAddMember`
+  never returning, zero further signal). Verified the WIP (16 new tests, all
+  green) and picked it up rather than redoing the investigation.
+- **crypto-reviewer: RED on first pass.** The WIP's generation bookkeeping
+  (`issuedGeneration`/`generationEpoch`/`resetGeneration`, added so an
+  abandoned-but-still-running doFlush can't collide generation numbers with a
+  fresh one) had a genuine cross-chain race: `resetGeneration()`'s epoch flip
+  was a plain synchronous mutation NOT serialized against `writeChain` (the
+  chain doFlush's actual Dexie write runs on, deliberately separate from
+  `flushChain` so a caller can give up on a wedged write without truly
+  cancelling it). Concrete exploit: an old identity's wedged
+  `encDb.setMlsProviderState` write could pass its epoch check, then a
+  `clearSessionState`/`mlsInitIdentity` reset flips the epoch, then a NEW
+  identity's own doFlush write reaches the front of writeChain and gets
+  wrongly skipped as "superseded" (epoch-blind `bumpCurrentGeneration`) —
+  while the OLD write's physical Dexie commit then lands, clobbering the new
+  identity's row with the old identity's MLS state, AND the new identity's
+  `mlsInitIdentity` caller receives a **resolved** promise despite its persist
+  being silently dropped. Violated persist-before-release.
+- **Fixed in-cycle:** added `runOnWriteChain()` (mirrors `runOnChain` but for
+  `writeChain`) and routed `resetGeneration()`'s epoch flip through it, same
+  chain as doFlush's write body. Since a writeChain task holds the chain for
+  its entire async body (a next task can't start until the previous one's
+  promise fully settles, including internal awaits), the epoch flip can now
+  only happen strictly before or strictly after any given write's
+  check-then-write body, never during it — closes the race by construction.
+  Added a new regression test hanging `encryptDbField` (the write itself,
+  not `mlsExportState`) concurrently with a `clearSessionState()`, per the
+  reviewer's explicit ask; confirmed both the wedged write's caller and the
+  concurrent reset's caller get diagnosable timeout rejections (not
+  corruption, not a silent skip), and a later fresh identity init lands the
+  correct on-disk generation.
+- **crypto-reviewer: GREEN on re-review.** All 4 original concerns
+  (persist-before-release, no-regress, no-post-reset-clobber, no-silent-drop)
+  confirmed closed; log content-free; no RFC 9420/homegrown-crypto issues;
+  `wasm_exports.rs`'s part of the diff is pure rustfmt (line-wrap/import
+  order), no logic change. Two non-blocking notes for awareness (not fixed,
+  not required): (1) a genuinely-permanent (not just slow) Dexie write hang
+  has no in-session `writeChain` recovery — every later persist times out
+  for the rest of the page session, reload is the only recovery (same
+  degrade-not-corrupt tradeoff as the original flushChain design, just now
+  diagnosable); (2) `mlsImportState`'s `bumpCurrentGeneration` still runs on
+  `flushChain` not `writeChain` — checked, not exploitable (Math.max-only,
+  no disk write, worst case is a fail-safe floor-too-high rejection), so left
+  as-is rather than expanding scope.
+- Tests: `useCryptoWorker.test.ts` 17/17 (was 16 pre-fix, was 12 pre-WIP);
+  full frontend suite 1212/1212 (98 files); `tsc -b --noEmit` clean; Biome
+  clean. `powehi-crypto-wasm`: 132/132 native tests, `cargo clippy -p
+  powehi-crypto-wasm --all-targets -- -D warnings` clean (wasm_exports.rs
+  diff is test-module formatting only, not re-reviewed beyond the
+  crypto-reviewer pass above which already covered it).
+- Pushed (commit `4878c9d`); `CI — Rust`/`CI — Frontend`/`CI — Live-backend
+  E2E` were queued at cycle end, not yet observed green/red — **next cycle
+  MUST check `gh run list` first**: if `CI — Live-backend E2E`'s
+  `message.spec.ts` still fails, the backend-log artifact should now also
+  show a `crypto_worker_timeout mlsCreateGroup call` (or `mlsAddMember`)
+  line via cycle 282's `forwardBrowserErrors` — that would confirm the raw
+  WASM/Comlink call itself is what's wedging in-browser (vs. e.g. the
+  `open-chat-btn` UI just never mounting for an unrelated reason), and
+  narrows the next step to instrumenting inside `mls_create_group`/
+  `mls_add_member` in `wasm_exports.rs` itself. If no timeout line appears,
+  the hang is upstream of the crypto worker call (something not even
+  reaching `mlsCreateGroup`), redirect investigation to Login.tsx/
+  AcceptInviteModal.tsx's call sequencing instead.
+
 ## Current state (2026-07-15, cycle 282 — FEATURE(treated as CI-red override): message.spec.ts accept-invite instrumentation + restore-flow test gap, commit 16db466)
 
 - Mode nominally FEATURE (counter 282 % 5 != 0), but per Mandatory Rules ("CI
