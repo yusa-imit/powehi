@@ -3292,4 +3292,277 @@ mod tests {
             "THUMBNAIL_HANDLES must be empty after mls_clear_session"
         );
     }
+
+    /// REGRESSION (cycle 281): reproduces app/e2e-live/message.spec.ts device-B
+    /// "accept invite" path end-to-end with a provider that went through the
+    /// sign-in export/import RESTORE cycle — the exact combination no prior test
+    /// covered (existing PQ tests either skip the wire round-trip+validate before
+    /// add_members, or never restore the provider first).
+    ///
+    /// Device A registers and publishes a PQ-extended KeyPackage; the bytes are
+    /// JSON-array round-tripped exactly as the server does (api/key_packages.ts).
+    /// Device B registers, PERSISTS its provider state, then — as on a fresh
+    /// worker at sign-in — RESTORES it, reads its signer back, creates a group,
+    /// and adds A. Finally A joins from the Welcome.
+    #[test]
+    fn test_invite_accept_cross_device_restored_provider_roundtrip() {
+        // Device A: identity + PQ KeyPackage -> wire bytes -> JSON round-trip.
+        let a_provider = OpenMlsRustCrypto::default();
+        let a_id = generate_identity(b"device-a", &a_provider).unwrap();
+        let (a_payload, a_decap) = pq_build_payload(&a_id.signer).unwrap();
+        let a_handle = commit_pq_decap_key(a_decap);
+        let a_bundle =
+            generate_key_package_with_pq_ext(&a_id, &a_provider, &a_payload).unwrap();
+        let a_kp_wire = MlsMessageOut::from(a_bundle).to_bytes().unwrap();
+        let a_kp_json = serde_json::to_vec(&a_kp_wire).unwrap();
+        let a_kp_wire: Vec<u8> = serde_json::from_slice(&a_kp_json).unwrap();
+
+        // Device B: register (fresh provider) + KeyPackage, then PERSIST state.
+        let b_reg_provider = OpenMlsRustCrypto::default();
+        let b_reg_id = generate_identity(b"device-b", &b_reg_provider).unwrap();
+        let (b_payload, b_decap) = pq_build_payload(&b_reg_id.signer).unwrap();
+        let b_handle = commit_pq_decap_key(b_decap);
+        let _b_bundle =
+            generate_key_package_with_pq_ext(&b_reg_id, &b_reg_provider, &b_payload).unwrap();
+        let b_sig_pub = b_reg_id.signer.to_public_vec();
+        let b_state = mls_group::export_provider_state(&b_reg_provider, 1).unwrap();
+        drop(b_reg_id);
+        drop(b_reg_provider);
+
+        // Device B at sign-in: RESTORE provider, read signer, rebuild Identity
+        // (mirrors wasm_exports::import_mls_context_inner).
+        let (b_provider, _gen) = mls_group::import_provider_state(&b_state, 1).unwrap();
+        let b_signer = SignatureKeyPair::read(
+            b_provider.storage(),
+            &b_sig_pub,
+            mls_group::CIPHERSUITE.signature_algorithm(),
+        )
+        .expect("signer must be present in restored provider state");
+        let b_id = Identity {
+            credential_with_key: CredentialWithKey {
+                credential: BasicCredential::new(b"device-b".to_vec()).into(),
+                signature_key: b_signer.to_public_vec().into(),
+            },
+            signer: b_signer,
+        };
+
+        // Device B accept: create group, validate A's KP, add A.
+        let mut b_group = create_group(&b_id, &b_provider)
+            .expect("Step 3: mls_create_group on restored provider must succeed");
+        let msg = MlsMessageIn::tls_deserialize_exact(&a_kp_wire).unwrap();
+        let kp_in = match msg.extract() {
+            MlsMessageBodyIn::KeyPackage(kp) => kp,
+            _ => panic!("expected key package body"),
+        };
+        let kp = kp_in
+            .validate(b_provider.crypto(), ProtocolVersion::Mls10)
+            .expect("Step 4a: KeyPackage validation must succeed");
+        let welcome = add_member(&mut b_group, &b_id.signer, kp, &b_provider)
+            .expect("Step 4b: mls_add_member on restored provider must succeed");
+
+        // Device A: join via the Welcome.
+        let b_group_epoch = b_group.epoch_authenticator().as_slice().to_vec();
+        let a_group = join_group(&welcome, &a_provider).expect("device A must join from Welcome");
+        assert_eq!(
+            a_group.epoch_authenticator().as_slice(),
+            b_group_epoch.as_slice(),
+            "both devices must agree on the epoch after the invite handshake"
+        );
+
+        KEM_DECAP_KEYS.with(|m| {
+            m.borrow_mut().remove(&a_handle);
+            m.borrow_mut().remove(&b_handle);
+        });
+    }
+
+
+    /// REGRESSION variant: device B registered via the §8.5 RECOVERY path
+    /// (mlsInitIdentityFromPhrase -> generate_identity_from_keypair, i.e.
+    /// SignatureKeyPair::from_raw + store) — NOT generate_identity — then RESTORES
+    /// its provider at sign-in (SignatureKeyPair::read) and accepts the invite.
+    /// This mirrors registration exactly (Login.tsx doRegister).
+    #[test]
+    fn test_invite_accept_recovery_identity_restored_provider_roundtrip() {
+        use ed25519_dalek::SigningKey as Ed25519SigningKey;
+        use crate::mls_group::generate_identity_from_keypair;
+
+        // Device A: identity + PQ KeyPackage -> wire bytes -> JSON round-trip.
+        let a_provider = OpenMlsRustCrypto::default();
+        let a_id = generate_identity(b"device-a", &a_provider).unwrap();
+        let (a_payload, a_decap) = pq_build_payload(&a_id.signer).unwrap();
+        let a_handle = commit_pq_decap_key(a_decap);
+        let a_bundle =
+            generate_key_package_with_pq_ext(&a_id, &a_provider, &a_payload).unwrap();
+        let a_kp_wire = MlsMessageOut::from(a_bundle).to_bytes().unwrap();
+        let a_kp_json = serde_json::to_vec(&a_kp_wire).unwrap();
+        let a_kp_wire: Vec<u8> = serde_json::from_slice(&a_kp_json).unwrap();
+
+        // Device B registers via the RECOVERY path (from_raw + store).
+        let b_priv: [u8; 32] = [42u8; 32];
+        let b_pub: [u8; 32] = Ed25519SigningKey::from_bytes(&b_priv).verifying_key().to_bytes();
+        let b_label = b"device-b-label";
+        let b_reg_provider = OpenMlsRustCrypto::default();
+        let b_reg_id =
+            generate_identity_from_keypair(b_label, &b_priv, &b_pub, &b_reg_provider).unwrap();
+        let (b_payload, b_decap) = pq_build_payload(&b_reg_id.signer).unwrap();
+        let b_handle = commit_pq_decap_key(b_decap);
+        let _b_bundle =
+            generate_key_package_with_pq_ext(&b_reg_id, &b_reg_provider, &b_payload).unwrap();
+        let b_sig_pub = b_reg_id.signer.to_public_vec();
+        let b_state = mls_group::export_provider_state(&b_reg_provider, 1).unwrap();
+        drop(b_reg_id);
+        drop(b_reg_provider);
+
+        // Device B at sign-in: RESTORE provider, read signer back out.
+        let (b_provider, _gen) = mls_group::import_provider_state(&b_state, 1).unwrap();
+        let b_signer = SignatureKeyPair::read(
+            b_provider.storage(),
+            &b_sig_pub,
+            mls_group::CIPHERSUITE.signature_algorithm(),
+        )
+        .expect("recovery-path signer must be present in restored provider state");
+        let b_id = Identity {
+            credential_with_key: CredentialWithKey {
+                credential: BasicCredential::new(b_label.to_vec()).into(),
+                signature_key: b_signer.to_public_vec().into(),
+            },
+            signer: b_signer,
+        };
+
+        // Device B accept: create group, validate A's KP, add A.
+        let mut b_group = create_group(&b_id, &b_provider)
+            .expect("Step 3: mls_create_group (recovery identity) must succeed");
+        let msg = MlsMessageIn::tls_deserialize_exact(&a_kp_wire).unwrap();
+        let kp_in = match msg.extract() {
+            MlsMessageBodyIn::KeyPackage(kp) => kp,
+            _ => panic!("expected key package body"),
+        };
+        let kp = kp_in
+            .validate(b_provider.crypto(), ProtocolVersion::Mls10)
+            .expect("Step 4a: KeyPackage validation must succeed");
+        let welcome = add_member(&mut b_group, &b_id.signer, kp, &b_provider)
+            .expect("Step 4b: mls_add_member (recovery identity) must succeed");
+
+        let b_group_epoch = b_group.epoch_authenticator().as_slice().to_vec();
+        let a_group = join_group(&welcome, &a_provider).expect("device A must join from Welcome");
+        assert_eq!(
+            a_group.epoch_authenticator().as_slice(),
+            b_group_epoch.as_slice(),
+            "both devices must agree on the epoch after the invite handshake"
+        );
+
+        KEM_DECAP_KEYS.with(|m| {
+            m.borrow_mut().remove(&a_handle);
+            m.borrow_mut().remove(&b_handle);
+        });
+    }
+
+    /// REGRESSION (cycle 282, CI investigation): closes the one operational gap
+    /// left by the two restored-provider tests above against the REAL frontend
+    /// sequence (Login.tsx sign-in branch, `app/e2e-live/message.spec.ts`
+    /// device B) — a session-scoped `mls_get_key_package` call happens BETWEEN
+    /// restore and accept (Login.tsx: "Upload a fresh KeyPackage for this
+    /// session", `restored.keyPackage` path) that neither prior test exercised.
+    /// That call mutates the SAME restored provider's key-material storage
+    /// (writes a fresh HPKE leaf keypair + PQ decap key) before
+    /// `mls_create_group`/`mls_add_member` run on it. Also matches the real
+    /// floor exactly: a fresh worker's in-session high-water-mark is 0
+    /// (`useCryptoWorker.ts` `currentGeneration`), not 1 — the prior two tests
+    /// used `min_generation: 1`, which happened to equal the export's own
+    /// generation; this test uses 0, the true production floor.
+    ///
+    /// CI symptom under investigation: `message.spec.ts` device B's
+    /// `open-chat-btn` never appears after clicking "Connect"; the live-backend
+    /// log shows `key_package.fetch_one` (AcceptInviteModal step 2) succeeding
+    /// and then NO further server call ever arrives (not `groups.create`, step
+    /// 5a) — meaning the failure is strictly inside the two purely-local WASM
+    /// calls between them: `mls_create_group` / `mls_add_member` (steps 3-4).
+    /// If this test passes, the bug is not reproducible at the native
+    /// (non-wasm32) Rust core level and must be chased at the actual
+    /// wasm32/browser boundary instead (see `simulateDistinctClientIp`-style
+    /// console/pageerror forwarding added to `message.spec.ts` this cycle).
+    #[test]
+    fn test_invite_accept_restored_provider_with_intervening_key_package_mint() {
+        // Device A: identity + PQ KeyPackage -> wire bytes -> JSON round-trip.
+        let a_provider = OpenMlsRustCrypto::default();
+        let a_id = generate_identity(b"device-a", &a_provider).unwrap();
+        let (a_payload, a_decap) = pq_build_payload(&a_id.signer).unwrap();
+        let a_handle = commit_pq_decap_key(a_decap);
+        let a_bundle = generate_key_package_with_pq_ext(&a_id, &a_provider, &a_payload).unwrap();
+        let a_kp_wire = MlsMessageOut::from(a_bundle).to_bytes().unwrap();
+        let a_kp_json = serde_json::to_vec(&a_kp_wire).unwrap();
+        let a_kp_wire: Vec<u8> = serde_json::from_slice(&a_kp_json).unwrap();
+
+        // Device B: register (fresh provider) + KeyPackage, PERSIST at generation 1
+        // (mirrors the IDENTITY_INIT_METHODS doFlush in useCryptoWorker.ts).
+        let b_reg_provider = OpenMlsRustCrypto::default();
+        let b_reg_id = generate_identity(b"device-b", &b_reg_provider).unwrap();
+        let (b_payload, b_decap) = pq_build_payload(&b_reg_id.signer).unwrap();
+        let b_reg_handle = commit_pq_decap_key(b_decap);
+        let _b_bundle =
+            generate_key_package_with_pq_ext(&b_reg_id, &b_reg_provider, &b_payload).unwrap();
+        let b_sig_pub = b_reg_id.signer.to_public_vec();
+        let b_state = mls_group::export_provider_state(&b_reg_provider, 1).unwrap();
+        drop(b_reg_id);
+        drop(b_reg_provider);
+
+        // Device B at sign-in: a fresh worker's in-session floor is 0 (not 1) —
+        // the true production `currentGeneration` before any import.
+        let (b_provider, _gen) = mls_group::import_provider_state(&b_state, 0).unwrap();
+        let b_signer = SignatureKeyPair::read(
+            b_provider.storage(),
+            &b_sig_pub,
+            mls_group::CIPHERSUITE.signature_algorithm(),
+        )
+        .expect("signer must be present in restored provider state");
+        let b_id = Identity {
+            credential_with_key: CredentialWithKey {
+                credential: BasicCredential::new(b"device-b".to_vec()).into(),
+                signature_key: b_signer.to_public_vec().into(),
+            },
+            signer: b_signer,
+        };
+
+        // Login.tsx: "Upload a fresh KeyPackage for this session" — mints a
+        // SECOND KeyPackage (fresh HPKE leaf keypair + PQ decap key) into the
+        // SAME restored provider's storage, on the SAME identity, before any
+        // group operation runs. This is the one step neither prior regression
+        // test exercised.
+        let (session_payload, session_decap) = pq_build_payload(&b_id.signer).unwrap();
+        let session_handle = commit_pq_decap_key(session_decap);
+        let _session_bundle =
+            generate_key_package_with_pq_ext(&b_id, &b_provider, &session_payload)
+                .expect("Login.tsx session KeyPackage mint on restored provider must succeed");
+
+        // Device B accept: create group, validate A's KP, add A — exactly
+        // AcceptInviteModal.tsx steps 3-4, on the provider now carrying BOTH
+        // the restored registration keypair AND the freshly minted session one.
+        let mut b_group = create_group(&b_id, &b_provider)
+            .expect("Step 3: mls_create_group after intervening key-package mint must succeed");
+        let msg = MlsMessageIn::tls_deserialize_exact(&a_kp_wire).unwrap();
+        let kp_in = match msg.extract() {
+            MlsMessageBodyIn::KeyPackage(kp) => kp,
+            _ => panic!("expected key package body"),
+        };
+        let kp = kp_in
+            .validate(b_provider.crypto(), ProtocolVersion::Mls10)
+            .expect("Step 4a: KeyPackage validation must succeed");
+        let welcome = add_member(&mut b_group, &b_id.signer, kp, &b_provider)
+            .expect("Step 4b: mls_add_member after intervening key-package mint must succeed");
+
+        // Device A: join via the Welcome.
+        let b_group_epoch = b_group.epoch_authenticator().as_slice().to_vec();
+        let a_group = join_group(&welcome, &a_provider).expect("device A must join from Welcome");
+        assert_eq!(
+            a_group.epoch_authenticator().as_slice(),
+            b_group_epoch.as_slice(),
+            "both devices must agree on the epoch after the invite handshake"
+        );
+
+        KEM_DECAP_KEYS.with(|m| {
+            m.borrow_mut().remove(&a_handle);
+            m.borrow_mut().remove(&b_reg_handle);
+            m.borrow_mut().remove(&session_handle);
+        });
+    }
 }

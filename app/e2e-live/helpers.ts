@@ -25,6 +25,28 @@ export async function simulateDistinctClientIp(context: BrowserContext): Promise
 }
 
 /**
+ * Forward uncaught page exceptions and `console.error` output to the test
+ * runner's stdout (captured by CI logs), prefixed with `label` so a two-device
+ * spec can tell which page a failure came from.
+ *
+ * Diagnostic only — a WASM panic message or a JS `Error.message`/stack is a
+ * code-path description, never message content, PII, or ciphertext, so this
+ * does not violate `no-plaintext-logging`. Only `error`-level console output
+ * and `pageerror` are forwarded (not every `console.log`), to avoid dragging
+ * in incidental app state.
+ */
+export function forwardBrowserErrors(page: Page, label: string): void {
+	page.on("pageerror", (err) => {
+		console.error(`[${label} pageerror]`, err.message);
+	});
+	page.on("console", (msg) => {
+		if (msg.type() === "error") {
+			console.error(`[${label} console.error]`, msg.text());
+		}
+	});
+}
+
+/**
  * Drives the real "create account" flow (OPAQUE registration + MLS identity
  * init, all real network round trips) through to the chat layout rendering,
  * and dismisses the recovery-phrase dialog.

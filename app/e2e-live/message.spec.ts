@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { expect, test } from "@playwright/test";
-import { registerAndReachChat, signIn, simulateDistinctClientIp, uniqueHandle } from "./helpers";
+import {
+	forwardBrowserErrors,
+	registerAndReachChat,
+	signIn,
+	simulateDistinctClientIp,
+	uniqueHandle,
+} from "./helpers";
 
 // Live-backend E2E, Phase 2 (testing-conventions.md: "E2E: Playwright for
 // ... message send/receive"). Builds on auth.spec.ts's real OPAQUE
@@ -30,6 +36,13 @@ test.describe("Live backend: contact invite + message exchange", () => {
 		// collide both "devices" onto the same local identity.
 		const contextB = await browser.newContext();
 		const pageB = await contextB.newPage();
+
+		// Surface WASM panics / uncaught exceptions (e.g. inside the
+		// mlsCreateGroup/mlsAddMember crypto-worker calls) in CI logs instead of
+		// only observing a downstream `open-chat-btn` timeout with no clue which
+		// step failed.
+		forwardBrowserErrors(page, "device-A");
+		forwardBrowserErrors(pageB, "device-B");
 
 		try {
 			// Distinct simulated client IPs so A's and B's auth calls (and
