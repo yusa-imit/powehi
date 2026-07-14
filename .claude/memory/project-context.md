@@ -17,7 +17,64 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-14, cycle 277 — FEATURE: live-backend Playwright E2E harness, Phase 1)
+## Current state (2026-07-14, cycle 279 — FEATURE: live-backend Playwright E2E harness, Phase 2)
+
+- Commit `3c5f93f`. CI check at cycle start: `CI — Live-backend E2E` and `CI — Rust` both green
+  on main (cycle 278's `cab703b` auth_governor burst 5→8 fix landed and passed) — proceeded with
+  the Phase 2 follow-up flagged at the end of cycle 277 ("Once green, Phase 2 — message send/receive
+  across two real devices — needs a second identity + real MLS group join over the wire").
+- Explored the real (non-mocked) two-party contact flow first: there is no handle-search "new DM"
+  UI — contact-adding is invite-link/QR based only. `InviteModal` (`aria-label="New chat"` button →
+  `createInvite()` → `data-testid="invite-url"`) + `AcceptInviteModal` (detects `#<code>` in the URL
+  fragment, `redeemInvite → fetchKeyPackage → mlsCreateGroup → mlsAddMember → createGroup →
+  addMember → sendWelcome`, `data-testid="open-chat-btn"` on success) is the real end-to-end MLS
+  bootstrap between two devices — confirmed via `AcceptInviteModal.tsx`'s own doc comment and
+  `crates/adapters/inbound/powehi-rest-api/src/routes/{key_package,groups,invite,messaging}.rs`.
+  "New group" (`CreateGroupModal`) only creates a solo group — no real second-party test coverage
+  needed there.
+- **`app/e2e-live/helpers.ts`** (new) — factored the register/sign-in steps shared between
+  `auth.spec.ts` and the new spec into `registerAndReachChat()` / `signIn()` / `uniqueHandle()`;
+  refactored `auth.spec.ts` to use them (no behavior change, same assertions/timeouts).
+- **`app/e2e-live/message.spec.ts`** (new) — Phase 2: two independent real users (separate
+  `BrowserContext`s, so each gets its own IndexedDB-persisted device_id/MLS identity) register,
+  user A creates an invite link, user B navigates to it (a full navigation — lands back on the
+  login screen since the in-memory session token clears the same way a reload does, but the
+  `#code` fragment survives in the URL bar until `ChatLayout` mounts post-login and reads it),
+  signs back in, and redeems the invite through the real `AcceptInviteModal` flow. B sends a
+  message; A's `useWelcomePoller` (3s interval) surfaces the new "Contact <deviceId prefix>"
+  sidebar row, A selects it (which starts `useMessages`' per-group 3s poller) and asserts B's
+  message decrypts and renders; A replies and B (still on the already-active chat) asserts the
+  reply arrives too — full bidirectional real MLS-encrypted round trip over the wire, two real
+  devices, real backend. `test.setTimeout(150_000)` (config default is 60s) given two full
+  register flows + the invite/KeyPackage/Welcome handshake + two 3s-interval poll waits.
+- **Rate-limit risk assessed, not preemptively changed:** `auth_governor` is per-IP (burst=8, 1
+  token/6s refill, shared across ALL of `/v1/auth/*`) and this test drives TWO users' worth of
+  register(4)+signin(2) auth calls (≈10 tokens total, vs. the single-user 6-token flow `cab703b`
+  just sized burst=8 for). Deliberately did NOT raise the production auth rate limit again for
+  test convenience (non-negotiable: never weaken a security control to make progress) — unlike
+  `cab703b`'s tight single-user register→immediate-reload→immediate-signin burst, this test's two
+  auth bursts are separated by substantial real intervening work (full invite/KeyPackage/MLS/
+  Welcome handshake, real WASM crypto), giving the bucket several multiples of the 6s refill
+  window to recover in between. If the first live CI run 429s anyway, that's next cycle's fix
+  (same watch-then-fix pattern as cycle 277→278).
+- **security-auditor: GREEN.** No `console.*`/stdout in either new file — message bodies, invite
+  URL, password, and handles only ever flow through Playwright locators, never logged. Same
+  fixed-test-password pattern already accepted in `auth.spec.ts`. No new artifact/upload surface
+  beyond cycle 277's already-accepted `trace: "on-first-retry"` DOM-snapshot finding (no `attach`/
+  screenshot/upload step added; `finally` block only closes the second `BrowserContext`).
+- `pnpm exec tsc -b --noEmit` clean, `pnpm exec biome check` clean (162 files), all 1207 frontend
+  Vitest tests still green (98 files, unchanged — these are Playwright specs, not Vitest). Did NOT
+  run `e2e:live` itself in this sandbox (no Docker daemon here, same limitation noted in cycle
+  277) — first real run happens in CI on this push.
+- **Next cycle:** watch the `ci-e2e-live.yml` run on `main` for `message.spec.ts` — if the
+  auth_governor burst estimate above was wrong, or the Welcome/message poll timeouts are too
+  tight for CI's real network/WASM-build latency, that's the immediate follow-up. Once green, no
+  more known gaps in the live-backend E2E harness's core register/invite/message coverage (group
+  chats with 3+ real members, media upload, and disappearing messages remain uncovered by
+  `e2e-live/*` but are lower priority). PQ hybrid Phase A remains blocked on upstream openmls
+  `MLS_128_MLKEM768` support.
+
+## Previous state (2026-07-14, cycle 277 — FEATURE: live-backend Playwright E2E harness, Phase 1)
 
 - No commit hash yet (this cycle). Started the "live-backend Playwright E2E harness" item flagged
   as a gap at the end of cycles 274/275/276 ("still not started", scoped as its own cycle — this is
