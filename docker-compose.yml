@@ -46,7 +46,10 @@ services:
   # One-shot: creates the `powehi-media` bucket that R2MediaAdapter expects.
   # Exits after bucket creation; not part of the long-running service set.
   minio-init:
-    image: minio/mc:RELEASE.2022-02-07T08-17-33Z
+    # minio/mc does not publish tags matching the minio/minio server's dated
+    # RELEASE.* scheme (confirmed by a failed CI pull, cycle 277) — mc has its
+    # own independent tag history, so `latest` is used here instead.
+    image: minio/mc:latest
     depends_on:
       minio:
         condition: service_healthy
