@@ -76,11 +76,14 @@ fn make_layer(period_secs: u64, burst: u32) -> IpGovernorLayer {
 }
 
 /// Strict per-IP limit for auth endpoints — brute-force / enumeration protection.
-/// Token bucket: burst=5, 1 token refilled every 6 s → ~10 req/min sustained.
-/// A normal register (2 req) + login (2 req) = 4 tokens; fits within the burst.
-/// Complemented by `HandleRateLimiter` which adds a per-handle-hash bucket.
+/// Token bucket: burst=8, 1 token refilled every 6 s → ~10 req/min sustained.
+/// A normal register (init + finish, which itself performs an internal auto-login
+/// of init + finish = 4 req) followed by a later real sign-in (init + finish =
+/// 2 req) is 6 tokens total; burst=8 leaves headroom for a retry without waiting
+/// on the refill window. Complemented by `HandleRateLimiter` which adds a
+/// per-handle-hash bucket.
 pub fn auth_governor() -> IpGovernorLayer {
-    make_layer(6, 5)
+    make_layer(6, 8)
 }
 
 /// General per-IP limit for authenticated API endpoints.
@@ -103,7 +106,8 @@ pub(crate) fn tight_governor() -> IpGovernorLayer {
 ///
 /// Complementary to the per-IP `auth_governor()`. An attacker rotating IP
 /// addresses is still bounded to 5 attempts per handle per refill window, which
-/// is enough for a normal register (1) + login (1) = 2 tokens.
+/// is enough for a normal register (register_init + internal auto-login's
+/// login_init = 2) followed by a later real sign-in (login_init = 1) = 3 tokens.
 ///
 /// NOTE: The underlying `DefaultKeyedStateStore` grows without bound;
 /// pair with periodic `retain_recent` shrinkage in long-lived processes.
