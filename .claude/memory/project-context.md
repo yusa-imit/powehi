@@ -17,6 +17,66 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-07-16, cycle 292 — FEATURE: chunked media streaming, prd.md §9.4.2, commit 039a236)
+
+- Found substantial uncommitted work already sitting in the working tree at
+  cycle start (media.rs, wasm_exports.rs, crypto.worker.ts, mediaTransfer.ts,
+  useMessages.ts + tests, ~950 lines) — an interrupted prior session had
+  fully implemented prd.md §9.4.2 "chunked media encryption for large video
+  streaming" but never got to review/commit. Verified it built and all
+  existing tests still passed, then finished the cycle by reviewing and
+  committing it rather than discarding good work to start something new.
+- **What it does:** files strictly larger than `MEDIA_CHUNK_THRESHOLD` (16
+  MiB) route through a new chunked AES-256-GCM path instead of the existing
+  single-shot `mediaEncrypt`/`mediaDecryptWithRawKey`. Each 16 MiB chunk gets
+  a distinct nonce (`base_iv` XOR big-endian chunk index — the TLS 1.3
+  per-record-nonce construction) under one fresh key; the last chunk is
+  zero-padded so total ciphertext length only leaks plaintext size bucketed
+  to the nearest 16 MiB; blob-hash is verified before any AES-GCM decrypt
+  (same oracle-avoidance rule as the non-chunked path). New WASM exports:
+  `media_encrypt_chunked`, `media_decrypt_chunked_with_raw_key`,
+  `media_message_create_chunked`. Receiver-side (`useMessages.ts`) parses the
+  new `{type:"video", chunked:true, ...}` payload with strict type/shape
+  checks, falling through to legacy text handling on any malformed field.
+- **crypto-reviewer: RED → GREEN (fixed in-cycle).** First pass caught a real
+  blocking ABI bug: `media_decrypt_chunked_with_raw_key` and
+  `media_message_create_chunked` took `total_size: u64` directly on a
+  `#[wasm_bindgen]` export. wasm-bindgen marshals a Rust `u64` param as a JS
+  `bigint`, not `number` — every real call from `crypto.worker.ts` (which
+  passes a plain `number`) would throw `TypeError` at runtime. Invisible to
+  the entire test suite because native Rust tests and the `mediaTransfer.ts`
+  mocked-worker tests both bypass the actual wasm-bindgen JS boundary. Fixed
+  by generalizing the pre-existing `f64_to_generation` helper (already used
+  by `mls_export_state`/`mls_import_state` for exactly this reason) into
+  `f64_to_u64_checked`, switching both new exports to take `f64` +
+  convert-with-validation, and adding 6 new boundary tests (2^53 exact-
+  representability edge, rejects negative/non-finite/non-integer/at-or-
+  beyond-`u64::MAX`-as-f64, content-free error). Re-verified GREEN. Noted but
+  accepted as non-blocking: no true end-to-end JS-boundary test exists (would
+  need a compiled wasm-pack + Node harness) — matches the pre-existing gap
+  for `mls_export_state`'s own f64 boundary, deferred.
+- Verified clean: `cargo build --workspace`, `cargo build -p
+  powehi-crypto-wasm --target wasm32-unknown-unknown`, `cargo test
+  --workspace` (153 powehi-crypto-wasm tests incl. new chunked round-trip +
+  proptest + f64 boundary tests, zero regressions elsewhere), `cargo clippy
+  --workspace --all-targets -- -D warnings` clean, `cargo fmt --all --check`
+  clean (one pre-existing formatting drift in media.rs fixed via `cargo fmt`
+  before commit). Frontend: 1237/1237 tests green (94 files, was 92 — new
+  `mediaTransfer.test.ts` + new `useMessages.test.ts` cases), `tsc --noEmit`
+  clean, `biome check` clean.
+- **Housekeeping note:** the immediately preceding commit (`e36220c`, "close
+  last silent-failure gap in useMessages poll loop") was never given its own
+  memory entry before this session started — recorded here for the record;
+  no further action needed, it was already reviewed (crypto-reviewer GREEN
+  per its own commit message) and pushed.
+- **Next cycle candidate:** chunked video has no UI-side send/receive
+  wiring yet beyond the payload plumbing (no composer path calls
+  `encryptAndSendMedia` with a >16 MiB file today, and the receiver shows
+  `[video]` as static text with no playback/progressive-download UI) — a
+  natural follow-up feature. Also still open: the two cycle-289
+  security-auditor YELLOWs (unpaginated `run_gc` query, ack-on-grant-not-
+  confirmed-transfer) and the long-standing PQ hybrid Phase A block.
+
 ## Current state (2026-07-15, cycle 289 — FEATURE: media garbage collection, prd.md §9.4.3, commit 993f05b)
 
 - CI was confirmed green on `main` at cycle start (all three workflows passed
