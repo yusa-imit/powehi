@@ -261,14 +261,66 @@ pub fn opaque_login_finish(
 
 // ── MLS exports ────────────────────────────────────────────────────────────────
 
-/// Derive the openmls GroupId as a lowercase hex string for use as map key.
+/// Derive the openmls GroupId as an opaque ID string for use as a map key,
+/// as the `groupId` handed to JS/the server, AND as the HKDF `info` context
+/// for the PQ group binding (`pq_derive_binding_inner` below feeds this exact
+/// string, not the raw bytes, into `Hkdf::expand` — see `mlsPqDeriveBinding`
+/// call sites `AcceptInviteModal.tsx`/`useMessages.ts`).
+///
+/// CRYPTO INVARIANT: because this string is an HKDF context (RFC 5869 §3.2),
+/// the encoding MUST stay an injective function of the raw GroupId bytes — a
+/// non-injective (lossy/truncating) encoding would collapse the binding's
+/// domain separation between distinct groups. Dashed-hex is injective (`-`
+/// never collides with a hex digit, and dash positions are fixed), so this
+/// is safe; do not change this to anything lossy (e.g. truncating the id)
+/// without re-deriving the PQ-binding security argument.
+///
+/// Formatted as canonical dashed-hex (UUID's 8-4-4-4-12 layout) when the
+/// underlying GroupId is the expected 16 bytes (every GroupId this crate
+/// *creates* comes from `openmls::group::GroupId::random`, which always
+/// produces 16 bytes, preserved verbatim through Welcome/export-import) — this
+/// matches every other opaque ID in the system (device_id, and the server's
+/// domain `GroupId(Uuid)`/`Path<Uuid>` route extractors), which is what the
+/// frontend's `assertOpaqueId` (api/groups.ts `OPAQUE_ID_RE`) requires. A
+/// prior revision emitted a flat 32-char hex dump with no dashes, which
+/// `assertOpaqueId` rejected client-side before any network call — the exact,
+/// 100% reproducible cause of `message.spec.ts`'s live-backend E2E failure
+/// (accept-invite never got past `mlsCreateGroup`/`mlsAddMember`, and the
+/// error was invisible until AcceptInviteModal.tsx's catch block started
+/// logging it). NOTE (rollout only, self-healing): a peer still running the
+/// old flat-hex format derives a different PQ binding hex than a peer on this
+/// format for the same group — the "PQ Protected" badge just fails to match
+/// (fails conservative-safe: shows as unconfirmed, never a false-positive
+/// match), and self-heals once both peers are on this format, since the
+/// binding is recomputed per session and never persisted.
+///
+/// Falls back to plain (dashless) hex for any other length — reachable only
+/// via a peer-crafted non-standard GroupId arriving in a Welcome message
+/// (`mls_join_group` accepts whatever length `GroupId::from_slice` was given),
+/// never for a GroupId this crate creates itself. Still injective (no `-`
+/// possible in this branch, so it can never collide with a dashed 16-byte
+/// id), still round-trips through `hex_decode`, and a non-16-byte id is
+/// rejected by `assertOpaqueId` client-side regardless — availability-only
+/// failure (join fails safely), no confidentiality/integrity impact. `hex_decode`
+/// below is the exact inverse (dash-tolerant) of both branches.
 fn group_id_hex(group: &MlsGroup) -> String {
-    group
-        .group_id()
-        .as_slice()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    bytes_to_opaque_id_hex(group.group_id().as_slice())
+}
+
+fn bytes_to_opaque_id_hex(bytes: &[u8]) -> String {
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    if bytes.len() == 16 {
+        format!(
+            "{}-{}-{}-{}-{}",
+            &hex[0..8],
+            &hex[8..12],
+            &hex[12..16],
+            &hex[16..20],
+            &hex[20..32]
+        )
+    } else {
+        hex
+    }
 }
 
 // ── PQ extension helpers ───────────────────────────────────────────────────────
@@ -751,11 +803,15 @@ struct MlsContextState {
 /// Current [`MlsContextState::version`].
 const MLS_CONTEXT_STATE_VERSION: u16 = 1;
 
-/// Hex-decode a lowercase hex string (inverse of `group_id_hex`). Not a
-/// crypto primitive — plain byte decoding. Rejects odd length or any non-hex
+/// Hex-decode a lowercase hex string (inverse of `group_id_hex` /
+/// `bytes_to_opaque_id_hex`) — `-` separators (the UUID-layout dashes
+/// `bytes_to_opaque_id_hex` inserts for a 16-byte input) are stripped before
+/// decoding, so both the dashed and plain-hex forms round-trip. Not a crypto
+/// primitive — plain byte decoding. Rejects odd length or any other non-hex
 /// character.
 fn hex_decode(s: &str) -> Result<Vec<u8>, &'static str> {
-    let bytes = s.as_bytes();
+    let filtered: String = s.chars().filter(|&c| c != '-').collect();
+    let bytes = filtered.as_bytes();
     if !bytes.len().is_multiple_of(2) {
         return Err("odd-length hex string");
     }
@@ -2193,6 +2249,51 @@ mod tests {
         );
         assert_eq!(hex_decode("").unwrap(), Vec::<u8>::new());
         assert_eq!(hex_decode("00ff").unwrap(), vec![0x00, 0xff]);
+    }
+
+    /// hex_decode must also accept the dashed form (its actual input in
+    /// practice, since it decodes `group_id_hex`'s output).
+    #[test]
+    fn test_hex_decode_strips_dashes() {
+        assert_eq!(
+            hex_decode("00ff").unwrap(),
+            hex_decode("00-ff").unwrap(),
+            "dashes must not change the decoded bytes"
+        );
+    }
+
+    /// group_id_hex must emit the same opaque-ID shape as every other ID in
+    /// the system (UUID's 8-4-4-4-12 dashed-hex layout) — the frontend's
+    /// `assertOpaqueId` (app/src/api/groups.ts `OPAQUE_ID_RE`) and the
+    /// server's `Path<Uuid>` route extractors (routes/groups.rs) both require
+    /// it. A prior revision emitted a flat 32-char hex dump with no dashes,
+    /// which `assertOpaqueId` rejected before any network call — this was the
+    /// 100% reproducible cause of message.spec.ts's live-backend E2E failure.
+    #[test]
+    fn test_group_id_hex_matches_opaque_id_format() {
+        let provider = OpenMlsRustCrypto::default();
+        let identity = generate_identity(b"group-id-format-test", &provider).unwrap();
+        let group = create_group(&identity, &provider).unwrap();
+        let id = group_id_hex(&group);
+
+        let parts: Vec<&str> = id.split('-').collect();
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12],
+            "group id {id:?} must be dashed as 8-4-4-4-12 (UUID layout)"
+        );
+        assert!(
+            id.chars().all(|c| c == '-' || c.is_ascii_hexdigit()),
+            "group id {id:?} must be lowercase hex + dashes only"
+        );
+        assert!(
+            id.chars().filter(|c| c.is_ascii_hexdigit()).all(|c| !c.is_ascii_uppercase()),
+            "group id {id:?} must be lowercase"
+        );
+
+        // And it must round-trip back to the original 16 raw GroupId bytes —
+        // this is exactly what mls_export_state/mls_import_state rely on.
+        assert_eq!(hex_decode(&id).unwrap(), group.group_id().as_slice());
     }
 
     // ── Session clear ─────────────────────────────────────────────────────────
