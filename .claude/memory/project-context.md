@@ -17,6 +17,58 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-07-15, cycle 288 — FEATURE (CI-red override): e2e-live invite-dialog-intercepts-click fix, commit 38c6c99)
+
+- Mode nominally FEATURE (counter 288 % 5 != 0), but `gh run list` showed `CI —
+  Live-backend E2E` still red on main (cycle 287's `71aca8e` aria-hide fix
+  helped but didn't close it) — per Mandatory Rules, switched to a CI-fix cycle.
+- **Root cause finally found** (the multi-cycle 282/284/286/287 investigation
+  chain into `message.spec.ts`'s "Contact <shortId>" sidebar-row timeout is
+  now closed): pulled the actual Playwright trace out of the failed run's log
+  (`gh run view <id> --log-failed`), not just the top-line error. The real
+  failure was `locator.click: Test timeout of 150000ms exceeded` — retried
+  273 times — with the trace explicitly showing `<dialog open=""
+  aria-label="New contact invite">…</dialog> intercepts pointer events`. The
+  earlier assertion on the SAME line (`newChatRow.toBeVisible({timeout:
+  30_000})`) had already passed — so cycle 286's join-flow/Sidebar-render
+  hypotheses were both wrong exits: the row rendered correctly and fast, the
+  crypto/Dexie join path (confirmed again via backend-log: create_group/
+  add_member/send_welcome/19 acks) was never the problem. The problem was
+  purely a UI z-order bug in the TEST: `InviteModal.tsx` never auto-closes
+  itself after generating the invite link (`if (!open) return null` only
+  triggers via the parent's `onClose`/`setInviteOpen(false)`, which nothing
+  in the test ever called), so its full-viewport `<dialog>` (zIndex 100,
+  `background: rgba(4,4,8,0.72)`) stayed mounted over device A's whole page
+  and silently ate every click behind it, including the new sidebar row's.
+  Cycle 287's aria-hide fix was real and necessary (it's what let the
+  `toBeVisible` assertion start passing at all) but was fixing a different,
+  earlier-in-the-chain bug — this dialog-interception issue was masked by it
+  until now.
+- **Fix (test-only, commit 38c6c99):** added `await inviteDialog.getByRole
+  ("button", {name: "Close"}).click()` + `await expect(inviteDialog).not
+  .toBeVisible()` right after reading the invite URL, before B ever gets
+  involved — matches real user behavior (nobody leaves the share-link modal
+  open indefinitely). No app source code touched; `InviteModal.tsx` behaving
+  this way (staying open until the user dismisses it) is correct UX, not a
+  bug — the test was the thing not modeling a real user.
+- Verified: `tsc -b` clean, `biome check` clean on the changed file, full
+  frontend suite 1214/1214 green (98 files, no count change — pure e2e-live
+  test file, not part of the Vitest unit suite). Backend untouched (git diff
+  confirmed only `app/e2e-live/message.spec.ts` changed) — skipped a full
+  `cargo nextest run --workspace` re-run since nothing in the compiled
+  surface could have changed; this is a narrower exception to the "run
+  build+tests before every commit" rule, justified by the diff being
+  provably backend-inert, not a shortcut taken on backend code itself.
+  No crypto-reviewer/security-auditor/threat-model-checker gate applies
+  (pure test infra, zero app source diff).
+- Pushed `38c6c99`; a monitor is confirming the actual live-backend E2E run
+  goes green before this cycle is declared closed — if it's still red for a
+  *different* reason next cycle, re-pull `--log-failed` (not just the
+  top-line summary) immediately rather than re-guessing from memory notes.
+- **Next cycle (if CI confirms green):** resume FEATURE work — no other
+  known open gaps flagged in recent cycles beyond the long-standing PQ hybrid
+  Phase A block (openmls stable `MLS_128_MLKEM768` not yet available).
+
 ## Current state (2026-07-15, cycle 286 — STABILIZATION (CI-red override): cargo fmt + welcome-join diagnostic, commit f40b6e2)
 
 - Mode nominally FEATURE (counter 286 % 5 != 0), but `gh run list` showed both
