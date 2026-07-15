@@ -67,6 +67,14 @@ test.describe("Live backend: contact invite + message exchange", () => {
 			// biome-ignore lint/style/noNonNullAssertion: asserted truthy above
 			const url = inviteUrl!;
 
+			// Close the invite dialog the way a real user would (it never
+			// auto-closes — InviteModal.tsx stays mounted until the "Close"
+			// button, backdrop click, or Escape fires onClose). Left open, its
+			// full-viewport `<dialog>` (zIndex 100) intercepts pointer events on
+			// everything behind it, including the sidebar row asserted below.
+			await inviteDialog.getByRole("button", { name: "Close" }).click();
+			await expect(inviteDialog).not.toBeVisible();
+
 			// B opens the invite link. This is a full navigation, so B lands back
 			// on the login screen (in-memory session token cleared, same as a
 			// reload) but the code survives in the URL fragment; ChatLayout only
