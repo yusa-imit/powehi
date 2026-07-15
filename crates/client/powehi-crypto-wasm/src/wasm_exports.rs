@@ -925,17 +925,24 @@ fn import_mls_context_inner(
     Ok((identity_id, group_ids, generation))
 }
 
-/// Convert a JS-boundary `f64` generation counter to `u64`, rejecting
+/// Convert a JS-boundary `f64` (a plain JS `number`) to `u64`, rejecting
 /// negative, non-finite, non-integer, or too-large values. Content-free
 /// error: the caller only ever sees a static string, never the offending
 /// value.
-fn f64_to_generation(value: f64) -> Result<u64, &'static str> {
+///
+/// wasm-bindgen maps a Rust `u64` parameter to a JS `bigint`, not `number` —
+/// passing a plain `number` from JS throws `TypeError` at the boundary. Every
+/// exported function that needs a `u64` (generation counters, byte lengths)
+/// must therefore take `f64` and convert internally via this helper, since
+/// `f64` exactly represents every integer up to 2^53 — far beyond any
+/// realistic generation counter or media byte length.
+fn f64_to_u64_checked(value: f64) -> Result<u64, &'static str> {
     // `u64::MAX as f64` rounds up to 2^64 (not exactly representable as f64),
     // so a strict `>` guard would let `value == 2^64` through and silently
     // clamp to u64::MAX on cast. Use `>=` so any value at or beyond that
     // rounded bound is rejected outright.
     if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value >= (u64::MAX as f64) {
-        return Err("invalid generation value");
+        return Err("invalid numeric value");
     }
     Ok(value as u64)
 }
@@ -960,7 +967,7 @@ fn f64_to_generation(value: f64) -> Result<u64, &'static str> {
 ///   `mls_import_state` call, so a stale re-import is rejected.
 #[wasm_bindgen]
 pub fn mls_export_state(identity_id: &str, generation: f64) -> Result<JsValue, JsError> {
-    let generation = f64_to_generation(generation).map_err(js_err)?;
+    let generation = f64_to_u64_checked(generation).map_err(js_err)?;
     let blob = export_mls_context_inner(identity_id, generation).map_err(js_err)?;
     js_obj(&[
         ("stateBytes", bytes_js(&blob)),
@@ -997,7 +1004,7 @@ pub fn mls_export_state(identity_id: &str, generation: f64) -> Result<JsValue, J
 /// previously active session (if any) under other identity ids is untouched.
 #[wasm_bindgen]
 pub fn mls_import_state(state_bytes: &[u8], min_generation: f64) -> Result<JsValue, JsError> {
-    let min_generation = f64_to_generation(min_generation).map_err(js_err)?;
+    let min_generation = f64_to_u64_checked(min_generation).map_err(js_err)?;
     let (identity_id, group_ids, generation) =
         import_mls_context_inner(state_bytes, min_generation).map_err(js_err)?;
     let group_ids_arr = js_sys::Array::new();
@@ -1835,6 +1842,215 @@ pub fn media_message_create_with_thumbnail(
     js_obj(&[("ciphertext", bytes_js(&ciphertext))])
 }
 
+// ── §9.4.2 Chunked streaming (large video) ─────────────────────────────────────
+
+/// Encrypt large media as fixed-size AES-256-GCM chunks (prd.md §9.4.2 sender path).
+///
+/// Same handle-map storage and cap as `media_encrypt`: the raw 32-byte media key is
+/// stored under an opaque handle and **never crosses the WASM-JS boundary**; only the
+/// handle string is returned. Every chunk is zero-padded to 16 MiB before encryption, so
+/// the ciphertext length only leaks the plaintext size bucketed to the nearest 16 MiB.
+///
+/// Returns `{ ciphertext: Uint8Array, mediaKeyHandle: string, iv: Uint8Array,
+/// blobHash: Uint8Array, totalSize: number, chunkSize: number }`:
+/// - `ciphertext`: all chunk ciphertexts concatenated (upload to R2). Length is always a
+///   multiple of `chunkSize + 16`.
+/// - `mediaKeyHandle`: opaque handle; drop with `media_drop_key` when done.
+/// - `iv`: 12-byte base nonce; per-chunk nonces are derived from it (public).
+/// - `blobHash`: SHA-256 of the concatenated ciphertext.
+/// - `totalSize`: exact original plaintext length in bytes (needed to strip padding on decrypt).
+/// - `chunkSize`: `MEDIA_CHUNK_SIZE` (16 MiB) — the padded per-chunk plaintext size.
+#[wasm_bindgen]
+pub fn media_encrypt_chunked(plaintext: &[u8]) -> Result<JsValue, JsError> {
+    MEDIA_KEYS
+        .with(|m| {
+            let len = m.borrow().len();
+            if len >= MAX_MEDIA_HANDLES {
+                Err("media key cap exceeded")
+            } else {
+                Ok(())
+            }
+        })
+        .map_err(js_err)?;
+
+    let res = media::encrypt_chunked(plaintext).map_err(|e| js_err(&e.to_string()))?;
+
+    let handle = next_id();
+    // Build the JS result BEFORE inserting into the map (Y-7: no orphan handle on failure).
+    let result = js_obj(&[
+        ("ciphertext", bytes_js(&res.ciphertext)),
+        ("mediaKeyHandle", JsValue::from_str(&handle)),
+        ("iv", bytes_js(&res.base_iv)),
+        ("blobHash", bytes_js(&res.blob_hash)),
+        (
+            "totalSize",
+            JsValue::from_f64(res.total_plaintext_len as f64),
+        ),
+        (
+            "chunkSize",
+            JsValue::from_f64(media::MEDIA_CHUNK_SIZE as f64),
+        ),
+    ])?;
+    MEDIA_KEYS.with(|m| m.borrow_mut().insert(handle, res.key));
+    Ok(result)
+}
+
+/// Decrypt and reassemble a chunked R2 blob using raw key bytes from an MLS-decrypted
+/// message (prd.md §9.4.2 receiver path).
+///
+/// Mirrors `media_decrypt_with_raw_key`: `SHA-256(ciphertext)` is verified against
+/// `blob_hash` (authenticated inside the MLS envelope) BEFORE any AES-GCM decrypt, so a
+/// server-side R2 blob swap is rejected without exposing a decryption oracle. The blob is
+/// additionally rejected if its length is not a whole number of 16 MiB + 16 chunks, or if
+/// the chunk count does not match `total_size`.
+///
+/// `media_key`: 32-byte AES-256-GCM key from the payload.
+/// `iv`: 12-byte base nonce from the payload.
+/// `ciphertext`: the full chunked blob downloaded from R2.
+/// `blob_hash`: 32-byte SHA-256 of the ciphertext embedded in the MLS message.
+/// `total_size`: exact original plaintext length (from the payload's `totalSize`), as a
+/// JS `number` — a Rust `u64` param maps to a JS `bigint` at the wasm-bindgen boundary,
+/// which a caller passing a `number` would fail with a `TypeError`, so this takes `f64`
+/// and validates via `f64_to_u64_checked` (same convention as `mls_export_state`).
+///
+/// **Y-2 (crypto-reviewer):** the caller MUST zero `media_key` immediately after this
+/// call returns (`mediaKey.fill(0)`).
+#[wasm_bindgen]
+pub fn media_decrypt_chunked_with_raw_key(
+    media_key: &[u8],
+    iv: &[u8],
+    ciphertext: &[u8],
+    blob_hash: &[u8],
+    total_size: f64,
+) -> Result<Uint8Array, JsError> {
+    let key_arr: &[u8; 32] = media_key
+        .try_into()
+        .map_err(|_| js_err("media_key must be 32 bytes"))?;
+    let iv_arr: &[u8; 12] = iv.try_into().map_err(|_| js_err("iv must be 12 bytes"))?;
+    let blob_hash_arr: &[u8; 32] = blob_hash
+        .try_into()
+        .map_err(|_| js_err("blob_hash must be 32 bytes"))?;
+    let total_size = f64_to_u64_checked(total_size).map_err(js_err)?;
+    let plaintext = media::decrypt_chunked(key_arr, iv_arr, ciphertext, total_size, blob_hash_arr)
+        .map_err(|e| js_err(&e.to_string()))?;
+    Ok(Uint8Array::from(plaintext.as_slice()))
+}
+
+/// Build a chunked-media application-message JSON payload.
+///
+/// Pure function — no `JsValue`/`JsError`, callable in native tests. Extends the
+/// non-chunked shape with `chunked: true, totalSize, chunkSize` so the receiver knows to
+/// use the chunked decrypt path. The non-chunked `build_media_payload_json` is left
+/// byte-for-byte unchanged (no `chunked` field at all) for backward compatibility with
+/// already-sent messages and existing tests.
+///
+/// # Errors
+/// Returns `Err` if `blob_hash` is not 32 bytes, `iv` is not 12 bytes, or serialisation fails.
+fn build_media_payload_json_chunked(
+    blob_id: &str,
+    blob_hash: &[u8],
+    media_key: &[u8],
+    iv: &[u8],
+    total_size: u64,
+    chunk_size: u64,
+) -> Result<Vec<u8>, &'static str> {
+    if blob_hash.len() != 32 {
+        return Err("blob_hash must be 32 bytes");
+    }
+    if iv.len() != 12 {
+        return Err("iv must be 12 bytes");
+    }
+    #[derive(serde::Serialize)]
+    struct ChunkedMediaPayload<'a> {
+        #[serde(rename = "type")]
+        msg_type: &'static str,
+        #[serde(rename = "blobId")]
+        blob_id: &'a str,
+        #[serde(rename = "blobHash")]
+        blob_hash: &'a [u8],
+        #[serde(rename = "mediaKey")]
+        media_key: &'a [u8],
+        iv: &'a [u8],
+        chunked: bool,
+        #[serde(rename = "totalSize")]
+        total_size: u64,
+        #[serde(rename = "chunkSize")]
+        chunk_size: u64,
+    }
+    serde_json::to_vec(&ChunkedMediaPayload {
+        msg_type: "video",
+        blob_id,
+        blob_hash,
+        media_key,
+        iv,
+        chunked: true,
+        total_size,
+        chunk_size,
+    })
+    .map_err(|_| "json serialisation failed")
+}
+
+/// Build and MLS-encrypt a chunked-media attachment application message (prd.md §9.4.2).
+///
+/// Like `media_message_create`, but embeds `chunked: true, totalSize, chunkSize` so the
+/// receiver picks the chunked decrypt path (`media_decrypt_chunked_with_raw_key`). Reads
+/// the raw AES key from `media_key_handle` entirely inside WASM — it never crosses the
+/// WASM-JS boundary; only the MLS-encrypted envelope is returned.
+///
+/// # Arguments
+/// - `identity_id`      — local MLS identity handle.
+/// - `group_id`         — MLS group UUID.
+/// - `media_key_handle` — handle returned by `media_encrypt_chunked`.
+/// - `blob_id`          — MediaId UUID from `POST /v1/media/upload-url`.
+/// - `blob_hash`        — 32-byte SHA-256 of the concatenated ciphertext.
+/// - `iv`               — 12-byte base nonce (from `media_encrypt_chunked.iv`).
+/// - `total_size`       — exact original plaintext length (from `media_encrypt_chunked.totalSize`),
+///   as a JS `number`/`f64` — see `media_decrypt_chunked_with_raw_key`'s doc comment for why
+///   this can't be a `u64` at the wasm-bindgen boundary.
+///
+/// # Returns
+/// `{ ciphertext: Uint8Array }` — the MLS-encrypted application envelope.
+#[wasm_bindgen]
+pub fn media_message_create_chunked(
+    identity_id: &str,
+    group_id: &str,
+    media_key_handle: &str,
+    blob_id: &str,
+    blob_hash: &[u8],
+    iv: &[u8],
+    total_size: f64,
+) -> Result<JsValue, JsError> {
+    let key = MEDIA_KEYS
+        .with(|m| m.borrow().get(media_key_handle).cloned())
+        .ok_or_else(|| js_err("unknown media key handle"))?;
+
+    let total_size = f64_to_u64_checked(total_size).map_err(js_err)?;
+    let json_bytes = build_media_payload_json_chunked(
+        blob_id,
+        blob_hash,
+        key.as_ref(),
+        iv,
+        total_size,
+        media::MEDIA_CHUNK_SIZE as u64,
+    )
+    .map_err(js_err)?;
+
+    let ciphertext = MLS_CTX.with(|ctx| -> Result<Vec<u8>, JsError> {
+        let mut ctx = ctx.borrow_mut();
+        let c = ctx
+            .get_mut(identity_id)
+            .ok_or_else(|| js_err("unknown mls identity"))?;
+        let group = c
+            .groups
+            .get_mut(group_id)
+            .ok_or_else(|| js_err("unknown mls group"))?;
+        encrypt_message(group, &c.identity.signer, &json_bytes, &c.provider)
+            .map_err(|e| js_err(&e.to_string()))
+    })?;
+
+    js_obj(&[("ciphertext", bytes_js(&ciphertext))])
+}
+
 // ── Session lifecycle ──────────────────────────────────────────────────────────
 
 /// Clear all MLS, OPAQUE, and ML-KEM session state from the WASM heap on logout.
@@ -1871,6 +2087,58 @@ mod tests {
     use super::*;
     use crate::mls_group::generate_key_package;
     use opaque_ke::{ClientLogin, ClientRegistration};
+
+    // ── f64/u64 wasm-bindgen boundary conversion ──────────────────────────────
+    //
+    // Every exported fn needing a u64 (generation counters, §9.4.2 media byte
+    // lengths) takes f64 and converts via this helper, since wasm-bindgen maps
+    // a Rust u64 param to a JS bigint — a caller passing a plain `number`
+    // fails with a TypeError. These tests lock in the boundary-value behavior
+    // so a future f64-vs-u64 regression is caught here rather than only at
+    // the real JS call site.
+
+    #[test]
+    fn test_f64_to_u64_checked_valid_values() {
+        assert_eq!(f64_to_u64_checked(0.0), Ok(0));
+        assert_eq!(f64_to_u64_checked(1.0), Ok(1));
+        assert_eq!(f64_to_u64_checked(33_554_432.0), Ok(33_554_432));
+        // Largest exactly-representable f64 integer (2^53).
+        assert_eq!(f64_to_u64_checked(2f64.powi(53)), Ok(1u64 << 53));
+    }
+
+    #[test]
+    fn test_f64_to_u64_checked_rejects_negative() {
+        assert!(f64_to_u64_checked(-1.0).is_err());
+        assert!(f64_to_u64_checked(-0.5).is_err());
+    }
+
+    #[test]
+    fn test_f64_to_u64_checked_rejects_non_finite() {
+        assert!(f64_to_u64_checked(f64::NAN).is_err());
+        assert!(f64_to_u64_checked(f64::INFINITY).is_err());
+        assert!(f64_to_u64_checked(f64::NEG_INFINITY).is_err());
+    }
+
+    #[test]
+    fn test_f64_to_u64_checked_rejects_non_integer() {
+        assert!(f64_to_u64_checked(1.5).is_err());
+        assert!(f64_to_u64_checked(0.1).is_err());
+    }
+
+    #[test]
+    fn test_f64_to_u64_checked_rejects_at_and_beyond_u64_max_as_f64() {
+        // u64::MAX as f64 rounds up to 2^64 (not exactly representable), so
+        // this exact boundary value must be rejected, not silently clamped.
+        assert!(f64_to_u64_checked(u64::MAX as f64).is_err());
+        assert!(f64_to_u64_checked(f64::MAX).is_err());
+    }
+
+    #[test]
+    fn test_f64_to_u64_checked_error_is_content_free() {
+        // The error must be a static string, never echoing the offending value.
+        let err = f64_to_u64_checked(-42.0).unwrap_err();
+        assert!(!err.contains("42"));
+    }
 
     // ── OPAQUE session state ──────────────────────────────────────────────────
 

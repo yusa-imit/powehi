@@ -74,6 +74,18 @@ export type MediaEncryptResult = {
 	blobHash: Uint8Array;
 };
 
+// prd.md §9.4.2 Chunked media encryption (large video streaming). Same
+// opaque-handle pattern as MediaEncryptResult, plus totalSize (true plaintext
+// length) and chunkSize (constant 16 MiB, echoed back for forward-compat).
+export type MediaEncryptChunkedResult = {
+	ciphertext: Uint8Array;
+	mediaKeyHandle: string;
+	iv: Uint8Array;
+	blobHash: Uint8Array;
+	totalSize: number;
+	chunkSize: number;
+};
+
 // ── Internal WASM raw return types (include exportKey — consumed in worker) ──
 
 type WasmRegFinishResult = { exportKey: Uint8Array; upload: Uint8Array };
@@ -148,6 +160,25 @@ interface WasmModule {
 		blobId: string,
 		blobHash: Uint8Array,
 		iv: Uint8Array,
+	) => { ciphertext: Uint8Array };
+	// prd.md §9.4.2 Chunked media encryption (large video streaming) — AES-256-GCM
+	// chunked at 16MiB with zero-padded last chunk for size-bucket leak mitigation.
+	media_encrypt_chunked: (plaintext: Uint8Array) => MediaEncryptChunkedResult;
+	media_decrypt_chunked_with_raw_key: (
+		mediaKey: Uint8Array,
+		iv: Uint8Array,
+		ciphertext: Uint8Array,
+		blobHash: Uint8Array,
+		totalSize: number,
+	) => Uint8Array;
+	media_message_create_chunked: (
+		identityId: string,
+		groupId: string,
+		mediaKeyHandle: string,
+		blobId: string,
+		blobHash: Uint8Array,
+		iv: Uint8Array,
+		totalSize: number,
 	) => { ciphertext: Uint8Array };
 	// §9.4.1 Thumbnail encryption: AES-256-GCM opaque-handle API.
 	// Thumbnail key stays in WASM on the sender path (same as mediaKey).
@@ -784,6 +815,84 @@ const api = {
 	): Promise<{ ciphertext: Uint8Array }> {
 		const wasm = await getWasm();
 		return wasm.media_message_create(identityId, groupId, mediaKeyHandle, blobId, blobHash, iv);
+	},
+
+	// ── §9.4.2 Chunked media encryption (large video streaming) ──────────────
+
+	/**
+	 * Encrypt a large media file with chunked AES-256-GCM (prd.md §9.4.2).
+	 *
+	 * Chunks are 16MiB with the last chunk zero-padded for size-bucket leak
+	 * mitigation; per-chunk nonces are derived internally from the returned
+	 * base `iv`. Returns { ciphertext, mediaKeyHandle, iv, blobHash, totalSize,
+	 * chunkSize }. Upload `ciphertext` to R2 exactly like mediaEncrypt.
+	 * The raw 32-byte AES key stays inside the worker; only the opaque handle
+	 * crosses. Call mediaDropKey(mediaKeyHandle) when the handle is no longer needed.
+	 */
+	async mediaEncryptChunked(plaintext: Uint8Array): Promise<MediaEncryptChunkedResult> {
+		const wasm = await getWasm();
+		return wasm.media_encrypt_chunked(plaintext);
+	},
+
+	/**
+	 * Decrypt+reassemble a chunked R2 blob using raw key bytes from an
+	 * MLS-decrypted message (receiver path, prd.md §9.4.2).
+	 *
+	 * WASM verifies the blob hash before any AES-GCM attempt, same as
+	 * mediaDecryptWithRawKey (R-2, blob-swap detection).
+	 *
+	 * @param mediaKey    32-byte AES-256-GCM key from the MLS message payload
+	 * @param iv          12-byte base nonce from the MLS message payload
+	 * @param ciphertext  encrypted blob from R2
+	 * @param blobHash    32-byte SHA-256(ciphertext) from the MLS message payload
+	 * @param totalSize   true plaintext length from the MLS message payload
+	 */
+	async mediaDecryptChunkedWithRawKey(
+		mediaKey: Uint8Array,
+		iv: Uint8Array,
+		ciphertext: Uint8Array,
+		blobHash: Uint8Array,
+		totalSize: number,
+	): Promise<Uint8Array> {
+		const wasm = await getWasm();
+		return wasm.media_decrypt_chunked_with_raw_key(mediaKey, iv, ciphertext, blobHash, totalSize);
+	},
+
+	/**
+	 * Build and MLS-encrypt a chunked media attachment message (prd.md §9.4.2 sender path).
+	 *
+	 * The raw 32-byte AES-256-GCM media key is retrieved from the handle inside WASM,
+	 * wrapped in a JSON payload (`{ type: "video", ..., chunked: true, totalSize, chunkSize }`),
+	 * and MLS-encrypted — the raw key never crosses the WASM-JS boundary.
+	 * POST the returned ciphertext to /v1/groups/:id/messages.
+	 *
+	 * @param identityId     Local MLS identity handle (from mlsInitIdentity).
+	 * @param groupId        MLS group UUID.
+	 * @param mediaKeyHandle Handle returned by mediaEncryptChunked.
+	 * @param blobId         MediaId UUID from requestMediaUpload.
+	 * @param blobHash       32-byte SHA-256 of the ciphertext (from mediaEncryptChunked.blobHash).
+	 * @param iv             12-byte AES-GCM base nonce (from mediaEncryptChunked.iv).
+	 * @param totalSize      true plaintext length (from mediaEncryptChunked.totalSize).
+	 */
+	async mediaMessageCreateChunked(
+		identityId: string,
+		groupId: string,
+		mediaKeyHandle: string,
+		blobId: string,
+		blobHash: Uint8Array,
+		iv: Uint8Array,
+		totalSize: number,
+	): Promise<{ ciphertext: Uint8Array }> {
+		const wasm = await getWasm();
+		return wasm.media_message_create_chunked(
+			identityId,
+			groupId,
+			mediaKeyHandle,
+			blobId,
+			blobHash,
+			iv,
+			totalSize,
+		);
 	},
 
 	// ── §9.4.1 Thumbnail encryption (AES-256-GCM opaque-handle API) ──────────

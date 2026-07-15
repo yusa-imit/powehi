@@ -2086,3 +2086,115 @@ describe("useMessages — presence handling", () => {
 		});
 	});
 });
+
+describe("useMessages — §9.4.2 chunked video parsing", () => {
+	function makeVideoPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+		return {
+			type: "video",
+			chunked: true,
+			blobId: "test-video-blob-id",
+			blobHash: Array.from({ length: 32 }, () => 0xab),
+			mediaKey: Array.from({ length: 32 }, () => 0xcd),
+			iv: Array.from({ length: 12 }, () => 0xef),
+			totalSize: 33_554_432,
+			chunkSize: 16 * 1024 * 1024,
+			...overrides,
+		};
+	}
+
+	afterEach(() => {
+		mockWorker.mlsDecrypt.mockResolvedValue({
+			plaintext: new TextEncoder().encode(DECRYPTED_TEXT),
+		});
+	});
+
+	it('parses a valid chunked video payload into media.chunked === true and text === "[video]"', async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(JSON.stringify(makeVideoPayload())),
+		});
+		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
+
+		const received: IncomingMessage[] = [];
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
+
+		await waitFor(() => expect(received).toHaveLength(1));
+		expect(received[0].text).toBe("[video]");
+		expect(received[0].media?.chunked).toBe(true);
+		expect(received[0].media?.blobId).toBe("test-video-blob-id");
+		expect(received[0].media?.totalSize).toBe(33_554_432);
+		expect(received[0].media?.chunkSize).toBe(16 * 1024 * 1024);
+	});
+
+	it("falls through to legacy text handling when totalSize is missing (does NOT set media)", async () => {
+		const payload = makeVideoPayload();
+		payload.totalSize = undefined;
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(JSON.stringify(payload)),
+		});
+		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
+
+		const received: IncomingMessage[] = [];
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
+
+		await waitFor(() => expect(received).toHaveLength(1));
+		expect(received[0].media).toBeUndefined();
+		// Falls through to legacy text handling — the raw JSON string is used as text.
+		expect(received[0].text).toBe(JSON.stringify(payload));
+	});
+
+	it("falls through to legacy text handling when chunkSize is missing", async () => {
+		const payload = makeVideoPayload();
+		payload.chunkSize = undefined;
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(JSON.stringify(payload)),
+		});
+		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
+
+		const received: IncomingMessage[] = [];
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
+
+		await waitFor(() => expect(received).toHaveLength(1));
+		expect(received[0].media).toBeUndefined();
+	});
+
+	it("falls through to legacy text handling when chunked is not exactly true", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(JSON.stringify(makeVideoPayload({ chunked: "true" }))),
+		});
+		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
+
+		const received: IncomingMessage[] = [];
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
+
+		await waitFor(() => expect(received).toHaveLength(1));
+		expect(received[0].media).toBeUndefined();
+	});
+
+	it("falls through to legacy text handling when blobHash is not an array", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify(makeVideoPayload({ blobHash: "not-an-array" })),
+			),
+		});
+		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
+
+		const received: IncomingMessage[] = [];
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, (m) => received.push(m)));
+
+		await waitFor(() => expect(received).toHaveLength(1));
+		expect(received[0].media).toBeUndefined();
+	});
+
+	it("acks the chunked video envelope after processing", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValueOnce({
+			plaintext: new TextEncoder().encode(JSON.stringify(makeVideoPayload())),
+		});
+		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
+
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn()));
+
+		await waitFor(() => {
+			expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID);
+		});
+	});
+});

@@ -47,6 +47,12 @@ export interface MediaPayload {
 	iv: number[];
 	/** Optional inline thumbnail from §9.4.1. Present when sender used mediaMessageCreateWithThumbnail. */
 	thumbnail?: ThumbnailPayload;
+	/** True when this is a §9.4.2 chunked video attachment (large file streaming). */
+	chunked?: boolean;
+	/** True plaintext length in bytes. Present only when chunked === true. */
+	totalSize?: number;
+	/** Chunk size in bytes (constant 16 MiB, echoed from the sender). Present only when chunked === true. */
+	chunkSize?: number;
 }
 
 /**
@@ -286,6 +292,30 @@ export function useMessages(
 							mediaKey: parsed.mediaKey as number[],
 							iv: parsed.iv as number[],
 							thumbnail: thumbRaw,
+						};
+					} else if (
+						parsed.type === "video" &&
+						parsed.chunked === true &&
+						typeof parsed.blobId === "string" &&
+						Array.isArray(parsed.blobHash) &&
+						Array.isArray(parsed.mediaKey) &&
+						Array.isArray(parsed.iv) &&
+						typeof parsed.totalSize === "number" &&
+						parsed.totalSize >= 0 &&
+						typeof parsed.chunkSize === "number" &&
+						parsed.chunkSize > 0
+					) {
+						// §9.4.2: chunked video attachment. No inline thumbnail this cycle
+						// (§9.4.1 thumbnails are image-only) — do not invent one.
+						text = "[video]";
+						media = {
+							blobId: parsed.blobId as string,
+							blobHash: parsed.blobHash as number[],
+							mediaKey: parsed.mediaKey as number[],
+							iv: parsed.iv as number[],
+							chunked: true,
+							totalSize: parsed.totalSize as number,
+							chunkSize: parsed.chunkSize as number,
 						};
 					} else if (parsed.type === "typing_indicator") {
 						// Peer is typing — notify ChatLayout; never displayed as a message.
