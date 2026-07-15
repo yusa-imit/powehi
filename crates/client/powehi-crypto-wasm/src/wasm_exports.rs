@@ -2287,7 +2287,9 @@ mod tests {
             "group id {id:?} must be lowercase hex + dashes only"
         );
         assert!(
-            id.chars().filter(|c| c.is_ascii_hexdigit()).all(|c| !c.is_ascii_uppercase()),
+            id.chars()
+                .filter(|c| c.is_ascii_hexdigit())
+                .all(|c| !c.is_ascii_uppercase()),
             "group id {id:?} must be lowercase"
         );
 

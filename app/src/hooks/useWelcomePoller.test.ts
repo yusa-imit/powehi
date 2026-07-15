@@ -163,6 +163,19 @@ describe("useWelcomePoller", () => {
 		expect(ackSpy).not.toHaveBeenCalled();
 	});
 
+	it("logs a content-free diagnostic when mlsJoinGroup fails", async () => {
+		const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		mockWorker.mlsJoinGroup.mockRejectedValueOnce(new Error("stale_welcome"));
+		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
+
+		renderHook(() => useWelcomePoller(IDENTITY_ID, vi.fn()));
+
+		await waitFor(() => {
+			expect(consoleSpy).toHaveBeenCalledWith("welcome_join_failed", "Error", "stale_welcome");
+		});
+		consoleSpy.mockRestore();
+	});
+
 	it("does not ack when onNewGroup callback throws (ack-after-callback ordering)", async () => {
 		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
 		const throwingCallback = vi.fn().mockImplementation(() => {

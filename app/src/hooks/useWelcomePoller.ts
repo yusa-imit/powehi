@@ -82,9 +82,20 @@ export function useWelcomePoller(
 				onNewGroupRef.current({ groupId, senderDeviceId: env.sender });
 				await ackMessage(sessionToken, env.id).catch(() => {});
 				advanceSince(env.created_at);
-			} catch {
+			} catch (err) {
 				// mlsJoinGroup or callback failure (stale Welcome, wrong KeyPackage epoch, etc.).
-				// Do NOT ack — server TTL will eventually expire the envelope.
+				// Do NOT ack — server TTL will eventually expire the envelope. Diagnostic only —
+				// err.name/message here is always an internal error code (e.g. a WASM/wasm-bindgen
+				// error string describing which crypto step failed, or "setChats panic"), never
+				// message content, PII, or ciphertext — see no-plaintext-logging.md's "error
+				// categories, not payload" allowance. Without this, a Welcome that never joins
+				// (the exact "contact never shows up" failure mode) is completely invisible —
+				// mirrors AcceptInviteModal.tsx's accept_invite_failed logging (cycle 282).
+				console.error(
+					"welcome_join_failed",
+					err instanceof Error ? err.name : typeof err,
+					err instanceof Error ? err.message : String(err),
+				);
 			}
 		};
 
