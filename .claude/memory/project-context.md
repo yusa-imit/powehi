@@ -17,6 +17,77 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-07-15, cycle 289 — FEATURE: media garbage collection, prd.md §9.4.3, commit 993f05b)
+
+- CI was confirmed green on `main` at cycle start (all three workflows passed
+  on `38c6c99`), so this cycle ran as ordinary FEATURE work. Committed the
+  pending cycle-288 memory chore first (`b99693e`) since it had been left
+  uncommitted at the end of the prior session.
+- **Feature picked:** prd.md §9.4.3 media GC ("모든 수신자가 ACK 한 blob은 N일
+  후 자동 삭제") — surveyed for open gaps first (no `qrcode`/streaming-range/
+  GC code anywhere in the tree; `blocked-users list` from cycles 272-273 was
+  never in prd.md, still skip it) and this was the cleanest unimplemented
+  prd item with a concrete, bounded scope.
+- **Design:** `MediaRepository` gained `record_ack`/`list_ack_device_ids`/
+  `list_undeleted`; `MediaUseCase` gained `run_gc`. `get_download_url`
+  records a best-effort ack (warn-logged on failure, never blocks the
+  response) whenever a non-uploader group member is granted a download URL
+  — this reuses the existing download-URL-request event as the "recipient
+  consumed it" signal, no new endpoint needed. `run_gc()` scans all
+  undeleted blobs; eligibility = `now >= expires_at.unwrap_or(uploaded_at +
+  30d)` AND (no group_id, or every group member except the uploader appears
+  in that blob's ack list). Wired into `bin/powehi-server/src/main.rs` as an
+  hourly `tokio::spawn` loop, mirroring the pre-existing disappearing-
+  message envelope GC task in the same file (same log-only-a-count style).
+  New Postgres table `media_acks(media_id, device_id)` — composite PK,
+  `ON DELETE CASCADE` from both `media_blobs` and `devices`, migration
+  `0008_media_acks.sql` (+ rollback).
+- **Review gates (both run in-session before commit, per CLAUDE.md):**
+  - `threat-model-checker`: **YELLOW** (passes the "green/yellow" gate, but
+    real findings, all addressed before commit, not just accepted as-is):
+    (a) `media_acks` is a new durable server-visible metadata category not
+    listed in prd.md §3.3 — added a bullet documenting it. (b) GC timing
+    creates a coarse, binary, delayed "did the whole group download this"
+    oracle inferable by re-requesting a presigned URL after the retention
+    window (404 ⇒ all-acked) — added a §3.4 honesty note. (c) The original
+    design stored an `acked_at` timestamp that `run_gc`'s actual algorithm
+    never reads (it only needs ack *set membership*, not per-ack time) —
+    flagged as a P5-minimalism violation, so the column was dropped from the
+    migration before commit (table is now just `(media_id, device_id)` PK,
+    no index needed beyond the PK itself since media_id is the PK's leading
+    column). (d) tightened §9.4.3's wording to state explicitly that "ACK" =
+    "download URL was issued", not "bytes were received or decrypted" —
+    matters because a failed download after URL grant still counts, bounded
+    by the 30-day floor.
+  - `security-auditor`: **GREEN** (2 non-blocking YELLOW advisories, left
+    open as future-cycle notes, not fixed this cycle): `run_gc` loads ALL
+    undeleted blobs in one unpaginated query (N+1 per-blob group/ack
+    lookups) — fine at current scale, flag for pagination before blob count
+    grows large; and the ack-on-grant-not-confirmed-transfer tradeoff noted
+    above (same finding threat-model-checker raised, security lens: not
+    exploitable cross-user since `record_ack`'s device_id comes only from
+    the authenticated bearer token, never request body — a device can only
+    ack for itself). Confirmed `run_gc` has no REST route (unreachable by
+    any HTTP actor, background-only). No SQL injection surface (all queries
+    parameterized).
+- Verified: `cargo build --workspace` clean, `cargo clippy --workspace
+  --all-targets -- -D warnings` clean, `cargo fmt --check` clean (after one
+  `cargo fmt` pass), full `cargo test --workspace` green (no regressions;
+  one `powehi-telemetry` OTLP-env-var test is a pre-existing flake under
+  parallel test execution — confirmed passes in isolation, unrelated to this
+  change, not touched). New `r2_media_it.rs` testcontainers tests (5 added:
+  ack round-trip, ack idempotency, ack-on-unknown-media-id FK rejection,
+  list_undeleted add/delete visibility, cascade-delete of orphaned acks)
+  compile clean via `cargo test --no-run` but could not actually execute —
+  **no Docker available in this environment**, same limitation as every
+  prior testcontainers-touching cycle; they'll run for real in CI.
+- **Next cycle candidate:** none of the two security-auditor YELLOWs are
+  urgent; if blob volume becomes a concern, paginate `list_undeleted` +
+  batch the group/ack lookups in `run_gc`. Otherwise resume normal FEATURE
+  scanning — no other open prd.md gaps identified this cycle beyond the
+  long-standing PQ hybrid Phase A block (still blocked on upstream openmls
+  `MLS_128_MLKEM768`).
+
 ## Current state (2026-07-15, cycle 288 — FEATURE (CI-red override): e2e-live invite-dialog-intercepts-click fix, commit 38c6c99)
 
 - Mode nominally FEATURE (counter 288 % 5 != 0), but `gh run list` showed `CI —
