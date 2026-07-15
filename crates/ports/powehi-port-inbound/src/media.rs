@@ -32,4 +32,9 @@ pub trait MediaUseCase: Send + Sync {
         media_id: &MediaId,
         requestor_device: &DeviceId,
     ) -> Result<(), DomainError>;
+
+    /// Delete blobs whose retention grace period has elapsed AND every
+    /// required recipient (group members other than the uploader) has
+    /// acknowledged a download. Returns the number of blobs deleted.
+    async fn run_gc(&self) -> Result<usize, DomainError>;
 }

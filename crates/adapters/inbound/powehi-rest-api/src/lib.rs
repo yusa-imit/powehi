@@ -521,6 +521,9 @@ mod tests {
         async fn delete(&self, _id: &MediaId, _device: &DeviceId) -> Result<(), DomainError> {
             unimplemented!()
         }
+        async fn run_gc(&self) -> Result<usize, DomainError> {
+            unimplemented!()
+        }
     }
 
     /// No-op group mock used in tests that don't exercise group creation.
@@ -924,6 +927,9 @@ mod tests {
         async fn delete(&self, _id: &MediaId, _device: &DeviceId) -> Result<(), DomainError> {
             Ok(())
         }
+        async fn run_gc(&self) -> Result<usize, DomainError> {
+            Ok(0)
+        }
     }
 
     struct MockMediaUnauthorized;
@@ -953,6 +959,9 @@ mod tests {
             unimplemented!()
         }
         async fn delete(&self, _id: &MediaId, _device: &DeviceId) -> Result<(), DomainError> {
+            unimplemented!()
+        }
+        async fn run_gc(&self) -> Result<usize, DomainError> {
             unimplemented!()
         }
     }

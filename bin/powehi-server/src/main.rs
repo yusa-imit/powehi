@@ -211,6 +211,7 @@ async fn main() -> Result<()> {
     ));
     let media: Arc<dyn powehi_port_inbound::media::MediaUseCase> =
         Arc::new(MediaService::new(media_r2, group_repo_media));
+    let media_gc = Arc::clone(&media);
 
     let invite: Arc<dyn powehi_port_inbound::invite::InviteUseCase> =
         Arc::new(InviteService::new(cache.clone()));
@@ -384,6 +385,24 @@ async fn main() -> Result<()> {
         loop {
             interval.tick().await;
             handle_rl_gc.retain_recent();
+        }
+    });
+
+    // ── Background GC: media blobs (prd.md §9.4.3) ──────────────────────────
+    // Delete blobs once every required recipient has acknowledged a download
+    // and the retention grace period has elapsed (or, absent full ack, once
+    // the retention ceiling alone has elapsed). ZK invariant preserved: this
+    // task only reads/writes opaque UUIDs (media_id, device_id, timestamps) —
+    // never content, filenames, or plaintext. Logs carry only a count.
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            match media_gc.run_gc().await {
+                Ok(n) if n > 0 => tracing::info!(deleted = n, "gc.media_expired"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error_kind = "gc", error = %e, "gc.media_run_failed"),
+            }
         }
     });
 

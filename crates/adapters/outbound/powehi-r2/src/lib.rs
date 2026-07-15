@@ -21,6 +21,7 @@ use aws_sdk_s3::{
 };
 use chrono::{DateTime, Utc};
 use powehi_domain::{
+    device::DeviceId,
     error::DomainError,
     group::GroupId,
     media::{MediaBlob, MediaId},
@@ -249,6 +250,48 @@ impl MediaRepository for R2MediaAdapter {
             .map_err(|e| map_r2(R2Error::S3(e.to_string())))?;
 
         Ok(url.uri().to_string())
+    }
+
+    #[instrument(skip(self), fields(media_id = %media_id))]
+    async fn record_ack(
+        &self,
+        media_id: &MediaId,
+        device_id: &DeviceId,
+    ) -> Result<(), DomainError> {
+        sqlx::query(
+            "INSERT INTO media_acks (media_id, device_id)
+             VALUES ($1, $2)
+             ON CONFLICT (media_id, device_id) DO NOTHING",
+        )
+        .bind(media_id.as_uuid())
+        .bind(device_id.as_uuid())
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    #[instrument(skip(self), fields(media_id = %media_id))]
+    async fn list_ack_device_ids(&self, media_id: &MediaId) -> Result<Vec<DeviceId>, DomainError> {
+        let rows: Vec<(Uuid,)> =
+            sqlx::query_as("SELECT device_id FROM media_acks WHERE media_id = $1")
+                .bind(media_id.as_uuid())
+                .fetch_all(&self.pool)
+                .await
+                .map_err(map_sqlx)?;
+        Ok(rows.into_iter().map(|(id,)| DeviceId::from(id)).collect())
+    }
+
+    #[instrument(skip(self))]
+    async fn list_undeleted(&self) -> Result<Vec<MediaBlob>, DomainError> {
+        let rows = sqlx::query_as::<_, MediaBlobRow>(
+            "SELECT id, uploader_device_id, storage_key, content_type, size_bytes, uploaded_at, expires_at, group_id
+             FROM media_blobs",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows.into_iter().map(MediaBlob::from).collect())
     }
 }
 

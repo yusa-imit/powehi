@@ -508,3 +508,127 @@ async fn presigned_upload_then_download_round_trips_bytes() {
         "downloaded bytes must equal the uploaded bytes"
     );
 }
+
+// ── media_acks (GC bookkeeping) ────────────────────────────────────────────────
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn record_ack_then_list_ack_device_ids_round_trips() {
+    let h = setup().await;
+    let uploader = insert_device(&h.pool).await;
+    let recipient = insert_device(&h.pool).await;
+    let blob = media_fixture(uploader, None);
+    h.adapter.save(&blob).await.expect("save");
+
+    assert!(
+        h.adapter
+            .list_ack_device_ids(&blob.id)
+            .await
+            .expect("list_ack_device_ids")
+            .is_empty(),
+        "no acks recorded yet"
+    );
+
+    h.adapter
+        .record_ack(&blob.id, &recipient)
+        .await
+        .expect("record_ack");
+
+    let acked = h
+        .adapter
+        .list_ack_device_ids(&blob.id)
+        .await
+        .expect("list_ack_device_ids");
+    assert_eq!(acked, vec![recipient]);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn record_ack_is_idempotent_on_conflict() {
+    let h = setup().await;
+    let uploader = insert_device(&h.pool).await;
+    let recipient = insert_device(&h.pool).await;
+    let blob = media_fixture(uploader, None);
+    h.adapter.save(&blob).await.expect("save");
+
+    h.adapter
+        .record_ack(&blob.id, &recipient)
+        .await
+        .expect("first record_ack");
+    h.adapter
+        .record_ack(&blob.id, &recipient)
+        .await
+        .expect("second record_ack must not error (ON CONFLICT DO NOTHING)");
+
+    let acked = h
+        .adapter
+        .list_ack_device_ids(&blob.id)
+        .await
+        .expect("list_ack_device_ids");
+    assert_eq!(acked.len(), 1, "duplicate ack must not create a second row");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn record_ack_for_unknown_media_id_is_rejected() {
+    let h = setup().await;
+    let device = insert_device(&h.pool).await;
+    let unknown = MediaId::from(Uuid::new_v4());
+    let err = h
+        .adapter
+        .record_ack(&unknown, &device)
+        .await
+        .expect_err("media_id FK must reject an unknown blob id");
+    assert!(matches!(err, DomainError::Internal(_)));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn list_undeleted_returns_all_saved_blobs_and_omits_deleted() {
+    let h = setup().await;
+    let device = insert_device(&h.pool).await;
+    let a = media_fixture(device.clone(), None);
+    let b = media_fixture(device.clone(), None);
+    h.adapter.save(&a).await.expect("save a");
+    h.adapter.save(&b).await.expect("save b");
+
+    let undeleted = h.adapter.list_undeleted().await.expect("list_undeleted");
+    assert_eq!(undeleted.len(), 2);
+    assert!(undeleted.iter().any(|blob| blob.id == a.id));
+    assert!(undeleted.iter().any(|blob| blob.id == b.id));
+
+    h.adapter.delete(&a.id).await.expect("delete a");
+    let undeleted = h
+        .adapter
+        .list_undeleted()
+        .await
+        .expect("list_undeleted after delete");
+    assert_eq!(undeleted.len(), 1);
+    assert_eq!(undeleted[0].id, b.id);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn deleting_a_blob_cascades_its_acks() {
+    let h = setup().await;
+    let uploader = insert_device(&h.pool).await;
+    let recipient = insert_device(&h.pool).await;
+    let blob = media_fixture(uploader, None);
+    h.adapter.save(&blob).await.expect("save");
+    h.adapter
+        .record_ack(&blob.id, &recipient)
+        .await
+        .expect("record_ack");
+
+    h.adapter.delete(&blob.id).await.expect("delete");
+
+    let acked = h
+        .adapter
+        .list_ack_device_ids(&blob.id)
+        .await
+        .expect("list_ack_device_ids after delete");
+    assert!(
+        acked.is_empty(),
+        "ON DELETE CASCADE must remove orphaned acks"
+    );
+}

@@ -2,6 +2,11 @@ use std::sync::Arc;
 
 const MAX_MEDIA_BYTES: u64 = 100 * 1024 * 1024;
 
+/// prd.md §9.4.3: blobs acknowledged by every recipient are deleted after N
+/// days. This is also the fallback retention ceiling for blobs that are
+/// never fully acknowledged (or have no recipients besides the uploader).
+const GC_RETENTION_DAYS: i64 = 30;
+
 fn size_bucket(bytes: u64) -> &'static str {
     match bytes {
         0..=1_024 => "<=1KB",
@@ -156,7 +161,13 @@ impl MediaUseCase for MediaService {
         if let Some(gid) = &blob.group_id {
             let members = self.group_repo.list_members(gid).await?;
             if members.iter().any(|m| &m.device_id == requestor_device) {
-                return self.media_repo.presigned_download_url(media_id).await;
+                let url = self.media_repo.presigned_download_url(media_id).await?;
+                // Best-effort: a download URL was already granted, so a failure
+                // here must not block the requestor — it only delays GC eligibility.
+                if let Err(e) = self.media_repo.record_ack(media_id, requestor_device).await {
+                    tracing::warn!(error_kind = "media_ack", error = %e, "record_ack failed");
+                }
+                return Ok(url);
             }
         }
 
@@ -179,6 +190,41 @@ impl MediaUseCase for MediaService {
         }
         self.media_repo.delete(media_id).await
     }
+
+    #[instrument(skip(self))]
+    async fn run_gc(&self) -> Result<usize, DomainError> {
+        let now = chrono::Utc::now();
+        let retention = chrono::Duration::days(GC_RETENTION_DAYS);
+        let mut deleted = 0usize;
+        for blob in self.media_repo.list_undeleted().await? {
+            let eligible_at = blob.expires_at.unwrap_or(blob.uploaded_at + retention);
+            if now < eligible_at {
+                continue;
+            }
+            let required_ackers: Vec<DeviceId> = match &blob.group_id {
+                Some(gid) => self
+                    .group_repo
+                    .list_members(gid)
+                    .await?
+                    .into_iter()
+                    .map(|m| m.device_id)
+                    .filter(|d| d != &blob.uploader_device)
+                    .collect(),
+                None => Vec::new(),
+            };
+            let all_acked = if required_ackers.is_empty() {
+                true
+            } else {
+                let acked = self.media_repo.list_ack_device_ids(&blob.id).await?;
+                required_ackers.iter().all(|d| acked.contains(d))
+            };
+            if all_acked {
+                self.media_repo.delete(&blob.id).await?;
+                deleted += 1;
+            }
+        }
+        Ok(deleted)
+    }
 }
 
 #[cfg(test)]
@@ -193,6 +239,7 @@ mod tests {
 
     struct MockMediaRepo {
         saved: Mutex<Vec<MediaBlob>>,
+        acks: Mutex<Vec<(MediaId, DeviceId)>>,
         upload_url: String,
         download_url: String,
     }
@@ -201,6 +248,7 @@ mod tests {
         fn new(upload_url: &str, download_url: &str) -> Self {
             Self {
                 saved: Mutex::new(vec![]),
+                acks: Mutex::new(vec![]),
                 upload_url: upload_url.into(),
                 download_url: download_url.into(),
             }
@@ -231,6 +279,32 @@ mod tests {
         }
         async fn presigned_download_url(&self, _id: &MediaId) -> Result<String, DomainError> {
             Ok(self.download_url.clone())
+        }
+        async fn record_ack(
+            &self,
+            media_id: &MediaId,
+            device_id: &DeviceId,
+        ) -> Result<(), DomainError> {
+            let mut locked = self.acks.lock().unwrap();
+            let key = (media_id.clone(), device_id.clone());
+            if !locked.contains(&key) {
+                locked.push(key);
+            }
+            Ok(())
+        }
+        async fn list_ack_device_ids(
+            &self,
+            media_id: &MediaId,
+        ) -> Result<Vec<DeviceId>, DomainError> {
+            let locked = self.acks.lock().unwrap();
+            Ok(locked
+                .iter()
+                .filter(|(mid, _)| mid == media_id)
+                .map(|(_, did)| did.clone())
+                .collect())
+        }
+        async fn list_undeleted(&self) -> Result<Vec<MediaBlob>, DomainError> {
+            Ok(self.saved.lock().unwrap().clone())
         }
     }
 
@@ -588,5 +662,138 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, DomainError::Unauthorized));
         assert!(repo.saved.lock().unwrap().is_empty());
+    }
+
+    fn old_blob(uploader: DeviceId, group_id: Option<GroupId>) -> MediaBlob {
+        MediaBlob {
+            id: MediaId::new(),
+            uploader_device: uploader,
+            storage_key: "media/gc-fixture".into(),
+            content_type: "image/jpeg".into(),
+            size_bytes: 1,
+            uploaded_at: chrono::Utc::now() - chrono::Duration::days(GC_RETENTION_DAYS + 1),
+            expires_at: None,
+            group_id,
+        }
+    }
+
+    #[tokio::test]
+    async fn get_download_url_by_group_member_records_ack() {
+        let repo = Arc::new(MockMediaRepo::new("u", "https://r2.example/download"));
+        let uploader = DeviceId::new();
+        let member = DeviceId::new();
+        let group = GroupId::new();
+        let group_repo = FakeGroupRepo::with_members(vec![
+            (group.clone(), uploader.clone()),
+            (group.clone(), member.clone()),
+        ]);
+        let s = MediaService::new(repo.clone(), group_repo);
+        let (id, _) = s
+            .request_upload(&uploader, "image/jpeg", 512, Some(&group))
+            .await
+            .unwrap();
+        s.get_download_url(&id, &member).await.unwrap();
+        let acked = repo.list_ack_device_ids(&id).await.unwrap();
+        assert_eq!(acked, vec![member]);
+    }
+
+    #[tokio::test]
+    async fn run_gc_deletes_ungrouped_blob_past_retention() {
+        let repo = Arc::new(MockMediaRepo::new("u", "d"));
+        let blob = old_blob(DeviceId::new(), None);
+        repo.save(&blob).await.unwrap();
+        let s = svc(repo.clone());
+        let deleted = s.run_gc().await.unwrap();
+        assert_eq!(deleted, 1);
+        assert!(repo.saved.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_gc_leaves_ungrouped_blob_within_retention() {
+        let repo = Arc::new(MockMediaRepo::new("u", "d"));
+        let mut blob = old_blob(DeviceId::new(), None);
+        blob.uploaded_at = chrono::Utc::now();
+        repo.save(&blob).await.unwrap();
+        let s = svc(repo.clone());
+        let deleted = s.run_gc().await.unwrap();
+        assert_eq!(deleted, 0);
+        assert_eq!(repo.saved.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_gc_leaves_grouped_blob_with_unacked_recipient() {
+        let repo = Arc::new(MockMediaRepo::new("u", "d"));
+        let uploader = DeviceId::new();
+        let member = DeviceId::new();
+        let group = GroupId::new();
+        let blob = old_blob(uploader.clone(), Some(group.clone()));
+        repo.save(&blob).await.unwrap();
+        let group_repo = FakeGroupRepo::with_members(vec![
+            (group.clone(), uploader.clone()),
+            (group.clone(), member.clone()),
+        ]);
+        let s = MediaService::new(repo.clone(), group_repo);
+        let deleted = s.run_gc().await.unwrap();
+        assert_eq!(deleted, 0, "member has not acked yet");
+        assert_eq!(repo.saved.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_gc_deletes_grouped_blob_once_all_recipients_acked() {
+        let repo = Arc::new(MockMediaRepo::new("u", "d"));
+        let uploader = DeviceId::new();
+        let member = DeviceId::new();
+        let group = GroupId::new();
+        let blob = old_blob(uploader.clone(), Some(group.clone()));
+        repo.save(&blob).await.unwrap();
+        repo.record_ack(&blob.id, &member).await.unwrap();
+        let group_repo = FakeGroupRepo::with_members(vec![
+            (group.clone(), uploader.clone()),
+            (group.clone(), member.clone()),
+        ]);
+        let s = MediaService::new(repo.clone(), group_repo);
+        let deleted = s.run_gc().await.unwrap();
+        assert_eq!(deleted, 1);
+        assert!(repo.saved.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_gc_ignores_uploaders_own_ack_requirement() {
+        // The uploader is never a "required" acker of their own upload — the
+        // group has exactly one other member and that member has acked.
+        let repo = Arc::new(MockMediaRepo::new("u", "d"));
+        let uploader = DeviceId::new();
+        let member = DeviceId::new();
+        let group = GroupId::new();
+        let blob = old_blob(uploader.clone(), Some(group.clone()));
+        repo.save(&blob).await.unwrap();
+        repo.record_ack(&blob.id, &member).await.unwrap();
+        // Only the member's ack is recorded, not the uploader's — must still GC.
+        let group_repo = FakeGroupRepo::with_members(vec![
+            (group.clone(), uploader.clone()),
+            (group.clone(), member.clone()),
+        ]);
+        let s = MediaService::new(repo.clone(), group_repo);
+        assert_eq!(s.run_gc().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_gc_honors_explicit_expires_at_over_default_retention() {
+        // expires_at set in the past, uploaded_at recent — explicit override wins.
+        let repo = Arc::new(MockMediaRepo::new("u", "d"));
+        let mut blob = old_blob(DeviceId::new(), None);
+        blob.uploaded_at = chrono::Utc::now();
+        blob.expires_at = Some(chrono::Utc::now() - chrono::Duration::hours(1));
+        repo.save(&blob).await.unwrap();
+        let s = svc(repo.clone());
+        let deleted = s.run_gc().await.unwrap();
+        assert_eq!(deleted, 1);
+    }
+
+    #[tokio::test]
+    async fn run_gc_returns_zero_when_no_blobs_exist() {
+        let repo = Arc::new(MockMediaRepo::new("u", "d"));
+        let s = svc(repo.clone());
+        assert_eq!(s.run_gc().await.unwrap(), 0);
     }
 }

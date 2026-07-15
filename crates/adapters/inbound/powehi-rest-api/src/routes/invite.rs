@@ -247,6 +247,9 @@ mod tests {
         async fn delete(&self, _: &MediaId, _: &DeviceId) -> Result<(), DomainError> {
             unimplemented!()
         }
+        async fn run_gc(&self) -> Result<usize, DomainError> {
+            unimplemented!()
+        }
     }
 
     #[async_trait]
