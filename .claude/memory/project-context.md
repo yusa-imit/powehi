@@ -17,6 +17,69 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-07-15, cycle 286 — STABILIZATION (CI-red override): cargo fmt + welcome-join diagnostic, commit f40b6e2)
+
+- Mode nominally FEATURE (counter 286 % 5 != 0), but `gh run list` showed both
+  `CI — Rust` and `CI — Live-backend E2E` **red** on main from cycle 284's
+  push (`cfb31c3`) — per Mandatory Rules, switched to a CI-fix cycle.
+- **CI — Rust (Format check) root cause:** `cfb31c3`'s new test module had a
+  long `assert!` line that `cargo fmt --all --check` rejected (line-wrap of a
+  chained `.filter().all()`). Trivial: ran `cargo fmt --all`, matches CI's
+  expected diff exactly.
+- **CI — Live-backend E2E: real forward progress, not yet fully fixed.**
+  `cfb31c3`'s dashed-hex group_id fix (previous cycle) worked — downloaded
+  the failed run's backend-log artifact (`gh run download 29383399972 -n
+  backend-log`) and confirmed device B's accept-invite flow now completes
+  fully server-side: `groups.create_group`, `groups.add_member`,
+  `messaging.send_welcome` all succeed, and A's device polls once and **acks
+  all 5 queued envelopes** (1 Welcome + 4 Application-type, all within ~40ms
+  of the Welcome being sent — the AcceptInviteModal PQ-init `sendMessage`
+  accounts for 1; the other 3 are unexplained and worth a closer look next
+  time, possibly React StrictMode's dev-only double-effect-invoke on
+  `useWelcomePoller`/`useMessages` since `e2e:live` runs against `pnpm dev`,
+  not a production build — didn't confirm, flagged as a loose thread).
+  Despite the full ack, `message.spec.ts` still fails: A's sidebar never
+  shows the "Contact <shortId>" row within 30s. Since ack-after-callback
+  ordering means an ack only happens if `mlsJoinGroup` AND the `onNewGroup`
+  callback (`handleNewGroup` in ChatLayout.tsx) both succeeded, the crypto
+  join and `setChats` call for the new row very likely DID fire — pointing
+  next investigation away from the MLS/crypto layer and toward either (a) a
+  later `setChats` call clobbering the new row, or (b) a Sidebar
+  render/filter issue hiding it, rather than another join-flow instrumentation
+  round.
+- **Fixed the one confirmed instrumentation gap this cycle regardless:**
+  `useWelcomePoller.ts`'s catch block around `mlsJoinGroup`/`onNewGroup` was
+  completely silent (no signal at all if either fails) — unlike
+  `AcceptInviteModal.tsx`'s `accept_invite_failed` logging (cycle 282). Added
+  the same content-free `console.error("welcome_join_failed", err.name,
+  err.message)` pattern. **security-auditor: GREEN** (dedicated subagent
+  review) — traced every throw source on this path (`MlsError` in
+  `mls_group.rs` is a `thiserror` enum with only static messages, never
+  interpolates Welcome bytes/keys; `handleNewGroup` only ever builds a
+  `Contact <deviceId-prefix-8>` string from a server-assigned UUID, no
+  plaintext/PII/ciphertext reachable via either's `.message`). This is
+  belt-and-suspenders given the ack evidence above suggests the join *is*
+  succeeding, but closes the gap either way.
+- 1 new regression test (`useWelcomePoller.test.ts`, asserts the exact
+  console.error call shape on a rejected `mlsJoinGroup`); 1213/1213 frontend
+  tests green (98 files, was 1212); `tsc -b --noEmit` clean; Biome clean.
+  `powehi-crypto-wasm`: 134/134 native tests, `cargo clippy --all-targets -D
+  warnings` clean (unchanged from cycle 284, re-verified after the fmt fix).
+- Pushed `f40b6e2`. **Next cycle MUST check `gh run list` first.** If
+  `message.spec.ts` still fails with no `welcome_join_failed` line in the
+  backend-log/forwardBrowserErrors output, redirect investigation per the
+  ack-evidence above: read `ChatLayout.tsx`'s post-`handleNewGroup` effects
+  for anything that could reset/filter `chats` between the Welcome landing
+  and Playwright's 30s wait, and check `Sidebar`'s `filtered`/`matchesSearch`
+  logic (`ChatLayout.tsx:1533-1546`) for a stale `searchQuery`/`chatFilter`
+  carried over from an earlier step in the same test. Also worth resolving
+  the "3 unexplained extra sends" loose thread noted above (add a one-line
+  `console.debug` count of concurrent `useWelcomePoller` mounts, gated to
+  dev, or just confirm via React DevTools-style instrumentation that only one
+  interval survives) since duplicate MLS traffic on a StrictMode dev server
+  is a plausible source of subtle double-processing even if this specific
+  poller's cancellation logic looks correct on inspection.
+
 ## Current state (2026-07-15, cycle 284 — FEATURE: crypto-worker call timeout — accept-invite hang now degrades to a diagnosable rejection, commit 4878c9d)
 
 - Continuation of cycle 282's investigation: found substantial uncommitted WIP
