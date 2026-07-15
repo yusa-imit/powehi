@@ -224,6 +224,17 @@ export function useMessages(
 			}
 			if (env.message_type !== "Application" || env.group_id !== groupId) {
 				// Commit / Proposal / off-group Application: ack silently.
+				// Diagnostic only when an Application envelope is dropped here for a
+				// group mismatch (not the routine Commit/Proposal case) — env.group_id
+				// and groupId are both opaque server-assigned UUIDs (never PII/content,
+				// same allowance as no-plaintext-logging.md's "opaque internal IDs").
+				// This is the one gap left after the message.spec.ts CI investigation
+				// (cycles 282-289) ruled out the join/sidebar-row path: if a real
+				// message is being silently acked away here instead of reaching the
+				// decrypt path below, this line will show it on the next CI run.
+				if (env.message_type === "Application" && env.group_id !== groupId) {
+					console.error("message_group_mismatch", env.group_id, groupId);
+				}
 				await ackMessage(sessionToken, env.id).catch(() => {});
 				return;
 			}
@@ -447,10 +458,24 @@ export function useMessages(
 					});
 				}
 				await ackMessage(sessionToken, env.id).catch(() => {});
-			} catch {
+			} catch (err) {
 				// Decryption failure (wrong epoch, tampered, etc.) — skip envelope.
 				// Do NOT ack: the server should GC via TTL, not by client acknowledgement
 				// of a message it couldn't read (could mask delivery bugs).
+				// Diagnostic only — err.name/message here is always an internal error
+				// code (a WASM/wasm-bindgen error string describing which crypto step
+				// failed), never message content, PII, or ciphertext — same allowance
+				// AcceptInviteModal.tsx's accept_invite_failed and useWelcomePoller.ts's
+				// welcome_join_failed already rely on. Closes the last silent-failure
+				// gap in the message.spec.ts CI investigation (cycles 282-289): if a
+				// real Application message for the active group is failing to decrypt,
+				// this line will show it on the next CI run instead of leaving the
+				// 30s toBeVisible timeout as the only signal.
+				console.error(
+					"message_decrypt_failed",
+					err instanceof Error ? err.name : typeof err,
+					err instanceof Error ? err.message : String(err),
+				);
 			}
 
 			// Advance the since pointer to avoid re-fetching delivered envelopes.
