@@ -450,6 +450,13 @@ function Avatar({
 	const isCool = a === "#A8C8FF" || a === "#C8DCFF" || a === "#5EE6A8" || a === "#FFD78A";
 	return (
 		<span
+			// Decorative — every call site renders Avatar next to a visible name
+			// label (ChatRow, conversation header, InfoPanel, member rows, contact
+			// card). Without aria-hidden, the initials text node ("CP", etc.) is
+			// the first descendant text in DOM order and gets prepended to the
+			// accessible name of any enclosing <button>/<a>, breaking name-based
+			// queries anchored on the real label (e.g. /^Contact /).
+			aria-hidden="true"
 			style={{
 				position: "relative",
 				width: size,

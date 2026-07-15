@@ -2278,6 +2278,35 @@ describe("ChatLayout", () => {
 			expect(row?.name).toBe("Contact peer-dev");
 			expect(row?.mlsStateB64).toBe("");
 		});
+
+		// Regression test for a live-backend E2E failure (message.spec.ts): the
+		// sidebar row's accessible name must start with "Contact " so
+		// page.getByRole("button", { name: /^Contact / }) can find it. Avatar's
+		// decorative initials span used to be the first text node inside the
+		// row <button>, so its text ("CP", etc.) was prepended to the computed
+		// accessible name and broke the anchored regex — see Avatar's
+		// aria-hidden fix in ChatLayout.tsx.
+		it("new sidebar row's accessible name starts with 'Contact ' (matches /^Contact /)", async () => {
+			let capturedOnNewGroup:
+				| ((event: { groupId: string; senderDeviceId: string }) => void)
+				| null = null;
+			vi.spyOn(WelcomePollerModule, "useWelcomePoller").mockImplementation(
+				(_identityId, onNewGroup) => {
+					capturedOnNewGroup = onNewGroup;
+				},
+			);
+			useAuthStore.setState({ sessionToken: "tok-w2", identityId: "id-w2", deviceId: "dev-w2" });
+
+			render(<ChatLayout />);
+			await waitFor(() => expect(capturedOnNewGroup).not.toBeNull());
+
+			act(() => {
+				capturedOnNewGroup?.({ groupId: "welcome-group-name", senderDeviceId: "peer-device-9999" });
+			});
+
+			const row = await screen.findByRole("button", { name: /^Contact / });
+			expect(row).toBeInTheDocument();
+		});
 	});
 
 	describe("message history rehydration (Dexie -> chats)", () => {
