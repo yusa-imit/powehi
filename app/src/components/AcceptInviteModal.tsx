@@ -137,6 +137,20 @@ export function AcceptInviteModal({ inviteCode, onClose, onAccepted }: AcceptInv
 			setStep("accepted");
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : "";
+			// Diagnostic only — err.name/message here is always an internal error
+			// code (e.g. "invite_not_found", CryptoWorkerTimeoutError's
+			// "crypto_worker_timeout:<method>:<phase>", or a WASM/wasm-bindgen
+			// error string describing which crypto step failed), never message
+			// content, PII, or ciphertext — see no-plaintext-logging.md's
+			// "error categories, not payload" allowance. Without this, the whole
+			// accept-invite flow fails completely silently (only a UI state
+			// change), which left forwardBrowserErrors (e2e-live/helpers.ts) with
+			// nothing to forward when this step breaks.
+			console.error(
+				"accept_invite_failed",
+				err instanceof Error ? err.name : typeof err,
+				msg || String(err),
+			);
 			if (msg === "invite_not_found") {
 				setErrorKind("expired");
 			} else {
