@@ -17,6 +17,53 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-07-16, cycle 297 — STABILIZATION (mode-escalated from FEATURE by red CI): fix WasmModule TS interface drift, commit c2d51da)
+
+- Mode selection gave FEATURE (297 % 5 = 2), but the mandatory `gh run list`
+  CI check found `CI — Frontend` red on `main` (run 29493174951, cea94e5 —
+  the cycle-296 mimeType commit) → escalated to STABILIZATION per the
+  FEATURE-mode step-2 rule, CI-fix-first.
+- **Root cause:** cycle 296 added a `mimeType?: string` trailing param to the
+  Rust `#[wasm_bindgen]` exports `media_message_create` /
+  `_create_chunked` / `_create_with_thumbnail` and updated every call site in
+  `crypto.worker.ts`, but the hand-written `WasmModule` TS interface in that
+  same file (the type `getWasm()` is cast to — this repo does NOT import the
+  wasm-bindgen-generated `.d.ts` directly; `pkg/`/`app/src/wasm/` are
+  gitignored build artifacts) was never updated to match. `tsc -b` caught the
+  arity mismatch (`Expected 6 arguments, but got 7` etc.) at build time; every
+  other CI job (Vitest, Playwright, Biome, WASM compile) passed because none
+  of them run a full `tsc -b` typecheck — only the `Bundle budget check` job's
+  `pnpm --filter app build` (`tsc -b && vite build`) does. **Lesson for future
+  wasm-export arity changes: grep `WasmModule` in `crypto.worker.ts` alongside
+  the call sites — it's a second, easy-to-miss source of truth that no test
+  layer catches except the production build itself.**
+- **Fix:** added the matching `mimeType?: string` param to all 3
+  `WasmModule` interface signatures (3-line diff, `app/src/workers/
+  crypto.worker.ts`). No Rust/WASM/crypto-boundary logic touched — pure TS
+  type-surface fix, so no `crypto-reviewer` pass required (interface-only,
+  zero runtime behavior change; the mock in `__mocks__/useCryptoWorker.ts`
+  already had the correct 7/8-arg signatures, confirming the drift was
+  interface-only).
+- Verified: `pnpm build` (tsc -b + vite build) green, bundle budget script
+  green (155.5KB gz initial JS / 627.4KB gz WASM, both under the 200KB/800KB
+  budgets), full `pnpm test` 1256/1256 green (99 files), `biome check` clean
+  on the touched file.
+- Rest of STABILIZATION checklist: `gh issue list --state open` empty.
+  `cargo audit` + `cargo deny check` both clean (only the same pre-existing
+  allowed `spin` yanked-crate warnings via x509-parser/rsa/aws-sdk-s3
+  transitive deps as prior cycles — no new CVEs). `cargo build --workspace`
+  clean. `target/` at 20GB, under the 20GB prune threshold — no pruning
+  needed this cycle.
+- Did NOT chase the cycle-296-noted `powehi-telemetry` env-var test-race
+  flake this cycle (CI-fix took the stabilization slot); still open for a
+  future stabilization cycle.
+- **Next cycle candidates:** (a) resume FEATURE work — cycle 296's item (c)
+  "resume normal FEATURE scanning for other open prd.md gaps" is still the
+  live pointer; (b) the `powehi-telemetry` env-var test-race flake
+  (STABILIZATION-appropriate); (c) the standing cycle-289 security-auditor
+  YELLOW (ack-on-URL-grant-not-confirmed-transfer, non-urgent). PQ hybrid
+  Phase A still blocked on upstream openmls `MLS_128_MLKEM768`.
+
 ## Current state (2026-07-16, cycle 296 — FEATURE: real mimeType on media envelope, prd.md §9.2/§9.4.2, commit cea94e5)
 
 - Closed the cycle-294 "next candidate": the media wire envelope's `type`
