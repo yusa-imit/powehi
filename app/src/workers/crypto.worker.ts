@@ -160,6 +160,7 @@ interface WasmModule {
 		blobId: string,
 		blobHash: Uint8Array,
 		iv: Uint8Array,
+		mimeType?: string,
 	) => { ciphertext: Uint8Array };
 	// prd.md §9.4.2 Chunked media encryption (large video streaming) — AES-256-GCM
 	// chunked at 16MiB with zero-padded last chunk for size-bucket leak mitigation.
@@ -179,6 +180,7 @@ interface WasmModule {
 		blobHash: Uint8Array,
 		iv: Uint8Array,
 		totalSize: number,
+		mimeType?: string,
 	) => { ciphertext: Uint8Array };
 	// §9.4.1 Thumbnail encryption: AES-256-GCM opaque-handle API.
 	// Thumbnail key stays in WASM on the sender path (same as mediaKey).
@@ -197,6 +199,7 @@ interface WasmModule {
 		blobHash: Uint8Array,
 		iv: Uint8Array,
 		thumbHandle: string,
+		mimeType?: string,
 	) => { ciphertext: Uint8Array };
 	// prd.md §5.3 Phase B — extract PQ KEM encap key + signature from a KeyPackage.
 	mls_pq_extract_encap_key: (keyPackageBytes: Uint8Array) => MlsPqEncapKeyResult;
