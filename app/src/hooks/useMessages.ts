@@ -1,10 +1,15 @@
 /**
  * useMessages — poll for incoming MLS Application messages for an active group.
  *
- * Polls GET /v1/messages every POLL_INTERVAL_MS.  Application messages are
- * decrypted via the crypto worker and forwarded to `onMessage`.  Commit and
- * Proposal envelopes are acked silently.  Welcome envelopes are skipped —
- * useWelcomePoller owns Welcome processing and will ack them after mlsJoinGroup.
+ * Polls GET /v1/messages every POLL_INTERVAL_MS.  Application messages for
+ * this hook's own group are decrypted via the crypto worker and forwarded to
+ * `onMessage`, then acked.  Commit and Proposal envelopes are acked silently.
+ * Welcome envelopes are skipped — useWelcomePoller owns Welcome processing and
+ * will ack them after mlsJoinGroup.  Application envelopes for a DIFFERENT
+ * group are also skipped without acking — `pollMessages` returns envelopes
+ * across all of the identity's groups, and only one useMessages instance (the
+ * active chat's) is mounted at a time, so acking an off-group envelope here
+ * would permanently delete it before its own group's poller ever sees it.
  *
  * Security invariants:
  * - Plaintext is never stored in component state; only the decoded string is
@@ -228,20 +233,28 @@ export function useMessages(
 				// Welcome envelopes are handled by useWelcomePoller — do not ack here.
 				return;
 			}
-			if (env.message_type !== "Application" || env.group_id !== groupId) {
-				// Commit / Proposal / off-group Application: ack silently.
-				// Diagnostic only when an Application envelope is dropped here for a
-				// group mismatch (not the routine Commit/Proposal case) — env.group_id
-				// and groupId are both opaque server-assigned UUIDs (never PII/content,
-				// same allowance as no-plaintext-logging.md's "opaque internal IDs").
-				// This is the one gap left after the message.spec.ts CI investigation
-				// (cycles 282-289) ruled out the join/sidebar-row path: if a real
-				// message is being silently acked away here instead of reaching the
-				// decrypt path below, this line will show it on the next CI run.
-				if (env.message_type === "Application" && env.group_id !== groupId) {
-					console.error("message_group_mismatch", env.group_id, groupId);
-				}
+			if (env.message_type !== "Application") {
+				// Commit / Proposal: ack silently; no content to process in this hook.
 				await ackMessage(sessionToken, env.id).catch(() => {});
+				return;
+			}
+			if (env.group_id !== groupId) {
+				// Application envelope for a group other than the one this hook
+				// instance is bound to (e.g. a background chat while a different
+				// chat is active, or the pre-selection window before a real chat
+				// is opened). Only ONE useMessages instance is mounted at a time
+				// (the active chat's), and `pollMessages` returns envelopes across
+				// ALL of the identity's groups — so acking here would permanently
+				// delete a message before its own group's poller ever mounts.
+				// root-caused in the cycle-293 message.spec.ts CI investigation:
+				// the bug this replaced acked these away unconditionally, which
+				// silently destroyed real cross-group messages, not just the E2E
+				// seed-chat artifact. Leave unacked (mirrors useWelcomePoller's
+				// existing "skip Application, don't touch it" contract) so the
+				// correct group's poller can pick it up once mounted.
+				// Diagnostic only — env.group_id/groupId are opaque server-assigned
+				// UUIDs, never PII/content (no-plaintext-logging.md allowance).
+				console.error("message_group_mismatch", env.group_id, groupId);
 				return;
 			}
 

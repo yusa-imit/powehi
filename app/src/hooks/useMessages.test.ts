@@ -201,15 +201,29 @@ describe("useMessages", () => {
 		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, onMessage));
 
 		await waitFor(() => {
-			expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID);
+			expect(consoleErrorSpy).toHaveBeenCalledWith(
+				"message_group_mismatch",
+				OTHER_GROUP_ID,
+				GROUP_ID,
+			);
 		});
 		expect(onMessage).not.toHaveBeenCalled();
 		expect(mockWorker.mlsDecrypt).not.toHaveBeenCalled();
-		expect(consoleErrorSpy).toHaveBeenCalledWith(
-			"message_group_mismatch",
-			OTHER_GROUP_ID,
-			GROUP_ID,
-		);
+		consoleErrorSpy.mockRestore();
+	});
+
+	it("does NOT ack an Application envelope from a different group (cycle-293 fix — acking here would permanently destroy a background chat's message before its own group's poller mounts)", async () => {
+		const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const OTHER_GROUP_ID = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+		pollSpy.mockResolvedValueOnce([makeEnvelope({ group_id: OTHER_GROUP_ID })]);
+
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn()));
+
+		await waitFor(() => {
+			expect(pollSpy).toHaveBeenCalled();
+		});
+		await new Promise<void>((r) => setTimeout(r, 10));
+		expect(ackSpy).not.toHaveBeenCalled();
 		consoleErrorSpy.mockRestore();
 	});
 
