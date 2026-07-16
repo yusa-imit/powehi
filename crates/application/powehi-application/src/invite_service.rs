@@ -10,6 +10,11 @@ use uuid::Uuid;
 /// One-time invite tokens live in Redis for 24 hours.
 const INVITE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// A real MLS KeyPackage is ~1-2KB; this bounds the amount of Redis storage an
+/// authenticated caller can consume per invite (24h TTL) beyond the global
+/// per-request body limit. Flagged by security-auditor cycle 299 (prd.md §8.3).
+const MAX_KEY_PACKAGE_BYTES: usize = 16 * 1024;
+
 /// Store H(code) not the raw code so a Redis dump yields no usable tokens.
 fn cache_key(code: &str) -> String {
     let hash = Sha256::digest(code.as_bytes());
@@ -45,6 +50,9 @@ impl InviteUseCase for InviteService {
         // verification entirely (caught in review — do not reintroduce this).
         if key_package.is_empty() {
             return Err(DomainError::InvalidInput("empty key package".into()));
+        }
+        if key_package.len() > MAX_KEY_PACKAGE_BYTES {
+            return Err(DomainError::InvalidInput("key package too large".into()));
         }
 
         // 32 lowercase hex chars (UUID v4 simple form) — 122-bit CSPRNG entropy.
@@ -170,6 +178,28 @@ mod tests {
 
         let result = svc.create_invite(&device_id, Vec::new()).await;
         assert!(matches!(result, Err(DomainError::InvalidInput(_))));
+    }
+
+    #[tokio::test]
+    async fn create_invite_with_oversized_key_package_fails() {
+        let cache = FakeCache::new();
+        let svc = InviteService::new(cache);
+        let device_id = test_device_id();
+
+        let oversized = vec![0u8; MAX_KEY_PACKAGE_BYTES + 1];
+        let result = svc.create_invite(&device_id, oversized).await;
+        assert!(matches!(result, Err(DomainError::InvalidInput(_))));
+    }
+
+    #[tokio::test]
+    async fn create_invite_at_max_key_package_size_succeeds() {
+        let cache = FakeCache::new();
+        let svc = InviteService::new(cache);
+        let device_id = test_device_id();
+
+        let at_limit = vec![0u8; MAX_KEY_PACKAGE_BYTES];
+        let result = svc.create_invite(&device_id, at_limit).await;
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
