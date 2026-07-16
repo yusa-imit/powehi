@@ -17,6 +17,65 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-07-16, cycle 294 — FEATURE: chunked video UI wiring, prd.md §9.4.2, commit 8f14a85)
+
+- Closed the gap cycle 292 flagged as its own "next cycle candidate": the
+  chunked AES-256-GCM video pipeline (WASM + wire format) existed but had
+  zero UI reachability — the attach picker was `accept="image/*"` only (no
+  video could ever be selected) and the receiver showed a static "[video]"
+  placeholder with no playback.
+- **What changed (frontend-only, no Rust/WASM touched):** widened the file
+  input to `image/*,video/*`; `MediaImage.tsx` now renders `<video controls>`
+  when `media.chunked === true`, with a non-interactive muted+play-badge
+  variant (`interactive={false}`) for the InfoPanel gallery-grid thumbnails
+  (avoids nesting `<video controls>` inside a `<button>` — invalid HTML,
+  unreachable controls); `sniffMimeType` gained MP4 `ftyp`/WebM EBML
+  magic-byte detection plus a `videoHint` fallback param, used both for the
+  receive-side Blob type and when re-sniffing forwarded media; excluded
+  `"[video]"` placeholder text from the Share/Copy button gates and from the
+  per-message lightbox-open wrapper (same treatment `"[image]"` already had).
+- **Deliberately did NOT change:** `encryptAndSendMedia`'s chunked-vs-single-
+  shot routing predicate. It stays purely size-based (`bytes.length >
+  MEDIA_CHUNK_THRESHOLD`), never mimeType-based — an existing cycle-292 test
+  asserts a `"video/mp4"`-labeled file *at or under* the threshold still
+  takes the non-chunked path, and changing that would've broken a tested,
+  already-reviewed invariant for a much bigger (wire-format) change than this
+  cycle's scope. Net effect: a small (≤16 MiB) video sent through the UI
+  still gets wire-tagged `"image"` by the existing WASM export (pre-existing
+  latent mislabel, now reachable for the first time since video selection is
+  possible at all). Covered with a same-cycle mitigation instead of a
+  protocol change: `MediaImage`'s `<img onError>` falls back to rendering
+  `<video>` when decode-as-image fails, so small videos still play; documented
+  in the component's doc comment as a known, accepted, non-regressing gap.
+  Follow-up candidate for a future cycle: fix the mislabel at the source
+  (tag by real content mimeType, not by size bucket) — bigger scope, needs
+  its own threat-model/crypto-reviewer pass since it changes the wire schema.
+- **crypto-reviewer: GREEN**, no findings. Confirmed no Rust/WASM crypto
+  crate was touched; routing, key-zeroing (`mediaKey.fill(0)` in `finally`),
+  and blob-hash-before-decrypt verification are all unchanged. Mime-sniffing
+  only affects the `Blob` `type` passed to `URL.createObjectURL` on already-
+  decrypted plaintext — cannot influence decryption, cannot be leveraged into
+  XSS (only ever returns `image/*`/`video/*`, consumed via `<img>`/`<video
+  src>`, never executes script). `videoHint` derives from `media.chunked`,
+  an MLS-authenticated field, not attacker-controlled input crossing a trust
+  boundary. threat-model-checker/security-auditor not invoked — no new
+  server-visible metadata, no backend/infra touched (pure frontend diff).
+- Verified: `tsc --noEmit` clean, `biome check .` clean (repo-wide, not just
+  touched files), full Vitest suite 1250/1250 green (99 files, was
+  94/1237 — added tests: `MediaImage.test.tsx` video-rendering branch (4),
+  `mediaTransfer.test.ts` `sniffMimeType` video-detection (5), one `"[video]"`
+  exclusion test each in `ChatLayoutCopy.test.tsx`/`ChatLayoutShare.test.tsx`,
+  one lightbox-exclusion test in `ChatLayoutLightbox.test.tsx`). Backend
+  untouched — skipped `cargo nextest run --workspace` per the same
+  diff-is-provably-backend-inert exception cycle 288 established (`git
+  status` confirmed only files under `app/` changed).
+- **Next cycle candidates (pick one):** (a) the mimeType-based wire-tagging
+  fix noted above (bigger scope, own review pass); (b) the two still-open
+  cycle-289 security-auditor YELLOWs (unpaginated `run_gc` query,
+  ack-on-grant-not-confirmed-transfer — both non-urgent); (c) resume normal
+  FEATURE scanning for other open prd.md gaps. Long-standing PQ hybrid Phase
+  A block is still blocked on upstream openmls `MLS_128_MLKEM768`.
+
 ## Current state (2026-07-16, cycle 292 — FEATURE: chunked media streaming, prd.md §9.4.2, commit 039a236)
 
 - Found substantial uncommitted work already sitting in the working tree at
