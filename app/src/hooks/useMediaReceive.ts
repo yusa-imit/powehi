@@ -47,9 +47,13 @@ export function useMediaReceive(media: MediaPayload | undefined): MediaReceiveSt
 				const plaintext = await downloadAndDecryptMedia(media, sessionToken, cryptoWorker);
 				if (cancelled) return;
 
+				// Real mimeType (cycle-296) is authoritative for the video/image hint when
+				// present; otherwise fall back to the legacy chunked-implies-video heuristic.
+				const videoHint =
+					media.mimeType != null ? media.mimeType.startsWith("video/") : media.chunked === true;
 				const url = URL.createObjectURL(
 					new Blob([plaintext as Uint8Array<ArrayBuffer>], {
-						type: sniffMimeType(plaintext, { videoHint: media.chunked === true }),
+						type: sniffMimeType(plaintext, { videoHint }),
 					}),
 				);
 				urlRef.current = url;

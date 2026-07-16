@@ -135,7 +135,34 @@ const mockWorker = {
 		_blobId: string,
 		_blobHash: Uint8Array,
 		_iv: Uint8Array,
+		_mimeType?: string,
 	) => ({ ciphertext: new Uint8Array(64) }),
+	// §9.4.2 Chunked media encryption/message-create mocks.
+	mediaEncryptChunked: async (bytes: Uint8Array) => ({
+		ciphertext: new Uint8Array(bytes.length + 16),
+		mediaKeyHandle: "mock-chunked-key-handle-0",
+		iv: new Uint8Array(12),
+		blobHash: new Uint8Array(32),
+		totalSize: bytes.length,
+		chunkSize: 16 * 1024 * 1024,
+	}),
+	mediaMessageCreateChunked: async (
+		_identityId: string,
+		_groupId: string,
+		_mediaKeyHandle: string,
+		_blobId: string,
+		_blobHash: Uint8Array,
+		_iv: Uint8Array,
+		_totalSize: number,
+		_mimeType?: string,
+	) => ({ ciphertext: new Uint8Array(96) }),
+	mediaDecryptChunkedWithRawKey: async (
+		_mediaKey: Uint8Array,
+		_iv: Uint8Array,
+		_ciphertext: Uint8Array,
+		_blobHash: Uint8Array,
+		_totalSize: number,
+	) => new Uint8Array(20),
 	// §9.4.1 Thumbnail encryption mocks.
 	mediaThumbnailEncrypt: async (_thumbBytes: Uint8Array) => ({
 		thumbHandle: "mock-thumb-handle-0",
@@ -152,6 +179,7 @@ const mockWorker = {
 		_blobHash: Uint8Array,
 		_iv: Uint8Array,
 		_thumbHandle: string,
+		_mimeType?: string,
 	) => ({ ciphertext: new Uint8Array(64) }),
 };
 

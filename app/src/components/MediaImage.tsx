@@ -10,13 +10,16 @@ import { useThumbnail } from "../hooks/useThumbnail";
  * shows it immediately as a blurred placeholder while the full R2 image loads.
  * Once the full image is ready, replaces the thumbnail with the full image.
  *
- * `media.chunked === true` always means video (§9.4.2 routes only large video
- * through the chunked path) — those go straight to a `<video>` element. Small
- * attachments always use the single-shot path and are wire-tagged "image"
- * regardless of actual content (routing is size-based, not mimeType-based —
- * see mediaTransfer.ts), so a small video sent through that path would fail to
- * decode as an `<img>`: the `onError` handler below falls back to `<video>` in
- * that case rather than showing a permanent "unavailable" state.
+ * Routing to the encrypted blob (chunked vs single-shot) is still purely
+ * size-based (see mediaTransfer.ts) and the legacy wire `type` field only ever
+ * says "image" or "video" per that same size bucket — but since cycle 296 the
+ * envelope also carries the sender's real `mimeType` when available, which is
+ * what decides image-vs-video display here. `media.chunked === true` (no
+ * `mimeType`, e.g. from an older client build) is still trusted as "this is a
+ * video" fallback. Failing that, a small video wire-tagged "image" with no
+ * `mimeType` would fail to decode as an `<img>`: the `onError` handler below
+ * falls back to `<video>` in that case rather than showing a permanent
+ * "unavailable" state.
  *
  * Object URLs are revoked on unmount to prevent memory leaks.
  *
@@ -39,7 +42,12 @@ export function MediaImage({
 	const { objectUrl, loading, error } = useMediaReceive(media);
 	const { objectUrl: thumbUrl } = useThumbnail(loading ? media.thumbnail : undefined);
 	const [imgFailed, setImgFailed] = useState(false);
-	const isVideo = media.chunked === true || imgFailed;
+	// Real mimeType (cycle-296) is authoritative when present; otherwise fall back to
+	// the legacy chunked-implies-video heuristic (older client build, or the not-yet-
+	// decoded default before an `onError` has had a chance to fire).
+	const looksLikeVideo =
+		media.mimeType != null ? media.mimeType.startsWith("video/") : media.chunked === true;
+	const isVideo = looksLikeVideo || imgFailed;
 
 	if (error || (!loading && !objectUrl)) {
 		return (
@@ -52,7 +60,7 @@ export function MediaImage({
 					opacity: 0.7,
 				}}
 			>
-				{media.chunked === true ? "Video unavailable" : "Image unavailable"}
+				{looksLikeVideo ? "Video unavailable" : "Image unavailable"}
 			</div>
 		);
 	}
@@ -89,7 +97,7 @@ export function MediaImage({
 					fontSize: 12,
 					color: "var(--fg-3)",
 				}}
-				aria-label={media.chunked === true ? "Loading video" : "Loading image"}
+				aria-label={looksLikeVideo ? "Loading video" : "Loading image"}
 			>
 				Loading…
 			</div>

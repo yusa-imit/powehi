@@ -513,6 +513,7 @@ describe("ChatLayout — message forwarding", () => {
 				"fwd-new-media-id",
 				expect.any(Uint8Array),
 				expect.any(Uint8Array),
+				"image/jpeg",
 			),
 		);
 		await waitFor(() =>

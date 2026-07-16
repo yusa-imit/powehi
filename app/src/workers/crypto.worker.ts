@@ -812,9 +812,18 @@ const api = {
 		blobId: string,
 		blobHash: Uint8Array,
 		iv: Uint8Array,
+		mimeType?: string,
 	): Promise<{ ciphertext: Uint8Array }> {
 		const wasm = await getWasm();
-		return wasm.media_message_create(identityId, groupId, mediaKeyHandle, blobId, blobHash, iv);
+		return wasm.media_message_create(
+			identityId,
+			groupId,
+			mediaKeyHandle,
+			blobId,
+			blobHash,
+			iv,
+			mimeType,
+		);
 	},
 
 	// ── §9.4.2 Chunked media encryption (large video streaming) ──────────────
@@ -882,6 +891,7 @@ const api = {
 		blobHash: Uint8Array,
 		iv: Uint8Array,
 		totalSize: number,
+		mimeType?: string,
 	): Promise<{ ciphertext: Uint8Array }> {
 		const wasm = await getWasm();
 		return wasm.media_message_create_chunked(
@@ -892,6 +902,7 @@ const api = {
 			blobHash,
 			iv,
 			totalSize,
+			mimeType,
 		);
 	},
 
@@ -944,6 +955,7 @@ const api = {
 		blobHash: Uint8Array,
 		iv: Uint8Array,
 		thumbHandle: string,
+		mimeType?: string,
 	): Promise<{ ciphertext: Uint8Array }> {
 		const wasm = await getWasm();
 		return wasm.media_message_create_with_thumbnail(
@@ -954,6 +966,7 @@ const api = {
 			blobHash,
 			iv,
 			thumbHandle,
+			mimeType,
 		);
 	},
 };

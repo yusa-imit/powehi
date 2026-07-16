@@ -1624,6 +1624,7 @@ fn build_media_payload_json(
     blob_hash: &[u8],
     media_key: &[u8],
     iv: &[u8],
+    mime_type: Option<&str>,
 ) -> Result<Vec<u8>, &'static str> {
     if blob_hash.len() != 32 {
         return Err("blob_hash must be 32 bytes");
@@ -1642,6 +1643,8 @@ fn build_media_payload_json(
         #[serde(rename = "mediaKey")]
         media_key: &'a [u8],
         iv: &'a [u8],
+        #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
+        mime_type: Option<&'a str>,
     }
     serde_json::to_vec(&MediaPayload {
         msg_type: "image",
@@ -1649,6 +1652,7 @@ fn build_media_payload_json(
         blob_hash,
         media_key,
         iv,
+        mime_type,
     })
     .map_err(|_| "json serialisation failed")
 }
@@ -1683,6 +1687,7 @@ pub fn media_message_create(
     blob_id: &str,
     blob_hash: &[u8],
     iv: &[u8],
+    mime_type: Option<String>,
 ) -> Result<JsValue, JsError> {
     // Retrieve the raw key entirely inside WASM — never returned to JS.
     let key = MEDIA_KEYS
@@ -1691,7 +1696,8 @@ pub fn media_message_create(
 
     // Build JSON payload via the pure helper (validates lengths + serialises).
     let json_bytes =
-        build_media_payload_json(blob_id, blob_hash, key.as_ref(), iv).map_err(js_err)?;
+        build_media_payload_json(blob_id, blob_hash, key.as_ref(), iv, mime_type.as_deref())
+            .map_err(js_err)?;
 
     // MLS-encrypt the payload (same logic as mls_encrypt).
     let ciphertext = MLS_CTX.with(|ctx| -> Result<Vec<u8>, JsError> {
@@ -1718,6 +1724,7 @@ pub fn media_message_create(
 /// # Errors
 /// Same as `build_media_payload_json`. Additionally:
 /// - `"thumb_iv must be 12 bytes"` if `thumb_iv.len() != 12`.
+#[allow(clippy::too_many_arguments)]
 fn build_media_payload_json_with_thumbnail(
     blob_id: &str,
     blob_hash: &[u8],
@@ -1726,6 +1733,7 @@ fn build_media_payload_json_with_thumbnail(
     thumb_ct: &[u8],
     thumb_key: &[u8],
     thumb_iv: &[u8],
+    mime_type: Option<&str>,
 ) -> Result<Vec<u8>, &'static str> {
     if blob_hash.len() != 32 {
         return Err("blob_hash must be 32 bytes");
@@ -1755,6 +1763,8 @@ fn build_media_payload_json_with_thumbnail(
         media_key: &'a [u8],
         iv: &'a [u8],
         thumbnail: ThumbField<'a>,
+        #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
+        mime_type: Option<&'a str>,
     }
     serde_json::to_vec(&MediaPayloadWithThumb {
         msg_type: "image",
@@ -1768,6 +1778,7 @@ fn build_media_payload_json_with_thumbnail(
             key: thumb_key,
             iv: thumb_iv,
         },
+        mime_type,
     })
     .map_err(|_| "json serialisation failed")
 }
@@ -1796,6 +1807,7 @@ fn build_media_payload_json_with_thumbnail(
 /// # Returns
 /// `{ ciphertext: Uint8Array }` — the MLS-encrypted application envelope.
 #[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
 pub fn media_message_create_with_thumbnail(
     identity_id: &str,
     group_id: &str,
@@ -1804,6 +1816,7 @@ pub fn media_message_create_with_thumbnail(
     blob_hash: &[u8],
     iv: &[u8],
     thumb_handle: &str,
+    mime_type: Option<String>,
 ) -> Result<JsValue, JsError> {
     let key = MEDIA_KEYS
         .with(|m| m.borrow().get(media_key_handle).cloned())
@@ -1822,6 +1835,7 @@ pub fn media_message_create_with_thumbnail(
                 thumb_ct,
                 thumb_key.as_ref(),
                 thumb_iv,
+                mime_type.as_deref(),
             )
         })
         .map_err(js_err)?;
@@ -1953,6 +1967,7 @@ fn build_media_payload_json_chunked(
     iv: &[u8],
     total_size: u64,
     chunk_size: u64,
+    mime_type: Option<&str>,
 ) -> Result<Vec<u8>, &'static str> {
     if blob_hash.len() != 32 {
         return Err("blob_hash must be 32 bytes");
@@ -1976,6 +1991,8 @@ fn build_media_payload_json_chunked(
         total_size: u64,
         #[serde(rename = "chunkSize")]
         chunk_size: u64,
+        #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
+        mime_type: Option<&'a str>,
     }
     serde_json::to_vec(&ChunkedMediaPayload {
         msg_type: "video",
@@ -1986,6 +2003,7 @@ fn build_media_payload_json_chunked(
         chunked: true,
         total_size,
         chunk_size,
+        mime_type,
     })
     .map_err(|_| "json serialisation failed")
 }
@@ -2011,6 +2029,7 @@ fn build_media_payload_json_chunked(
 /// # Returns
 /// `{ ciphertext: Uint8Array }` — the MLS-encrypted application envelope.
 #[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
 pub fn media_message_create_chunked(
     identity_id: &str,
     group_id: &str,
@@ -2019,6 +2038,7 @@ pub fn media_message_create_chunked(
     blob_hash: &[u8],
     iv: &[u8],
     total_size: f64,
+    mime_type: Option<String>,
 ) -> Result<JsValue, JsError> {
     let key = MEDIA_KEYS
         .with(|m| m.borrow().get(media_key_handle).cloned())
@@ -2032,6 +2052,7 @@ pub fn media_message_create_chunked(
         iv,
         total_size,
         media::MEDIA_CHUNK_SIZE as u64,
+        mime_type.as_deref(),
     )
     .map_err(js_err)?;
 
@@ -3277,14 +3298,14 @@ mod tests {
     /// blob_hash length != 32 → error (pure helper, no wasm-bindgen).
     #[test]
     fn test_build_media_payload_wrong_blob_hash_len_fails() {
-        let result = build_media_payload_json("blob-id", &[0u8; 16], &[0u8; 32], &[0u8; 12]);
+        let result = build_media_payload_json("blob-id", &[0u8; 16], &[0u8; 32], &[0u8; 12], None);
         assert!(result.is_err(), "wrong blob_hash length must return error");
     }
 
     /// iv length != 12 → error (pure helper, no wasm-bindgen).
     #[test]
     fn test_build_media_payload_wrong_iv_len_fails() {
-        let result = build_media_payload_json("blob-id", &[0u8; 32], &[0u8; 32], &[0u8; 8]);
+        let result = build_media_payload_json("blob-id", &[0u8; 32], &[0u8; 32], &[0u8; 8], None);
         assert!(result.is_err(), "wrong iv length must return error");
     }
 
@@ -3295,7 +3316,8 @@ mod tests {
         let blob_hash = [0xabu8; 32];
         let media_key = [0xcdu8; 32];
         let iv = [0xefu8; 12];
-        let json_bytes = build_media_payload_json(blob_id, &blob_hash, &media_key, &iv).unwrap();
+        let json_bytes =
+            build_media_payload_json(blob_id, &blob_hash, &media_key, &iv, None).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
 
         assert_eq!(parsed["type"], "image", "type must be 'image'");
@@ -3315,6 +3337,28 @@ mod tests {
             0xef,
             "first byte of iv must be 0xef"
         );
+        assert!(
+            parsed.get("mimeType").is_none(),
+            "mimeType must be omitted when None, not null"
+        );
+    }
+
+    /// A `Some` mimeType is carried through as the real content type — this is the
+    /// cycle-296 fix for the size-bucket mislabel (a small video was always wire-tagged
+    /// "image" since `type` only reflects chunked-vs-not, never real content).
+    #[test]
+    fn test_build_media_payload_json_carries_real_mime_type() {
+        let json_bytes = build_media_payload_json(
+            "blob-id",
+            &[0u8; 32],
+            &[0u8; 32],
+            &[0u8; 12],
+            Some("video/quicktime"),
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
+        assert_eq!(parsed["type"], "image", "legacy type bucket is unchanged");
+        assert_eq!(parsed["mimeType"], "video/quicktime");
     }
 
     /// Security invariant: raw media key bytes appear only in JSON payload, not as
@@ -3322,7 +3366,7 @@ mod tests {
     #[test]
     fn test_build_media_payload_has_no_raw_key_field() {
         let json_bytes =
-            build_media_payload_json("blob", &[0u8; 32], &[0u8; 32], &[0u8; 12]).unwrap();
+            build_media_payload_json("blob", &[0u8; 32], &[0u8; 32], &[0u8; 12], None).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
         assert!(
             parsed.get("rawKey").is_none(),
@@ -3344,7 +3388,8 @@ mod tests {
         let iv = [0xcdu8; 12];
         let blob_id = "test-blob-id";
 
-        let json_bytes = build_media_payload_json(blob_id, &blob_hash, &media_key, &iv).unwrap();
+        let json_bytes =
+            build_media_payload_json(blob_id, &blob_hash, &media_key, &iv, None).unwrap();
 
         // MLS-encrypt using the internal encrypt_message API (no wasm-bindgen involved).
         let mut group = group;
@@ -3610,7 +3655,7 @@ mod tests {
         let thumb_iv = [0x33_u8; 12];
 
         let json_bytes = build_media_payload_json_with_thumbnail(
-            blob_id, &blob_hash, &media_key, &iv, &thumb_ct, &thumb_key, &thumb_iv,
+            blob_id, &blob_hash, &media_key, &iv, &thumb_ct, &thumb_key, &thumb_iv, None,
         )
         .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
@@ -3625,6 +3670,7 @@ mod tests {
         assert_eq!(thumb["key"].as_array().unwrap().len(), 32);
         assert_eq!(thumb["iv"].as_array().unwrap().len(), 12);
         assert_eq!(thumb["key"][0].as_u64().unwrap(), 0x22);
+        assert!(parsed.get("mimeType").is_none());
     }
 
     /// build_media_payload_json_with_thumbnail: wrong thumb_iv length → error.
@@ -3633,8 +3679,64 @@ mod tests {
         let result = build_media_payload_json_with_thumbnail(
             "bid", &[0u8; 32], &[0u8; 32], &[0u8; 12], &[0u8; 16], &[0u8; 32],
             &[0u8; 8], // thumb_iv wrong (8 bytes)
+            None,
         );
         assert!(result.is_err(), "wrong thumb_iv length must return error");
+    }
+
+    /// build_media_payload_json_with_thumbnail: a real mimeType is carried through.
+    #[test]
+    fn test_build_media_payload_with_thumbnail_carries_real_mime_type() {
+        let json_bytes = build_media_payload_json_with_thumbnail(
+            "bid",
+            &[0u8; 32],
+            &[0u8; 32],
+            &[0u8; 12],
+            &[0u8; 16],
+            &[0u8; 32],
+            &[0u8; 12],
+            Some("image/heic"),
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
+        assert_eq!(parsed["mimeType"], "image/heic");
+    }
+
+    /// build_media_payload_json_chunked: real mimeType is carried through, and the legacy
+    /// size-bucket "video" type + chunked=true fields are unchanged (cycle-296 fix).
+    #[test]
+    fn test_build_media_payload_json_chunked_carries_real_mime_type() {
+        let json_bytes = build_media_payload_json_chunked(
+            "bid",
+            &[0u8; 32],
+            &[0u8; 32],
+            &[0u8; 12],
+            1024,
+            media::MEDIA_CHUNK_SIZE as u64,
+            Some("video/mp4"),
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
+        assert_eq!(parsed["type"], "video");
+        assert_eq!(parsed["chunked"], true);
+        assert_eq!(parsed["mimeType"], "video/mp4");
+    }
+
+    /// build_media_payload_json_chunked: mimeType omitted (not null) when None.
+    #[test]
+    fn test_build_media_payload_json_chunked_omits_mime_type_when_none() {
+        let json_bytes = build_media_payload_json_chunked(
+            "bid",
+            &[0u8; 32],
+            &[0u8; 32],
+            &[0u8; 12],
+            1024,
+            media::MEDIA_CHUNK_SIZE as u64,
+            None,
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
+        assert!(parsed.get("mimeType").is_none());
     }
 
     /// THUMBNAIL_HANDLES lookup for unknown handle returns None (internal guard tested directly).

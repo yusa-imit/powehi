@@ -58,6 +58,13 @@ export interface MediaPayload {
 	totalSize?: number;
 	/** Chunk size in bytes (constant 16 MiB, echoed from the sender). Present only when chunked === true. */
 	chunkSize?: number;
+	/**
+	 * Real sender-side content type (e.g. "video/quicktime"), added cycle-296 alongside
+	 * the legacy `type: "image"|"video"` size-bucket tag. Optional for backward
+	 * compatibility with envelopes sent by an older client build — when absent, callers
+	 * must keep falling back to the `chunked`-based image/video heuristic.
+	 */
+	mimeType?: string;
 }
 
 /**
@@ -305,6 +312,7 @@ export function useMessages(
 							mediaKey: parsed.mediaKey as number[],
 							iv: parsed.iv as number[],
 							thumbnail: thumbRaw,
+							mimeType: typeof parsed.mimeType === "string" ? parsed.mimeType : undefined,
 						};
 					} else if (
 						parsed.type === "video" &&
@@ -329,6 +337,7 @@ export function useMessages(
 							chunked: true,
 							totalSize: parsed.totalSize as number,
 							chunkSize: parsed.chunkSize as number,
+							mimeType: typeof parsed.mimeType === "string" ? parsed.mimeType : undefined,
 						};
 					} else if (parsed.type === "typing_indicator") {
 						// Peer is typing — notify ChatLayout; never displayed as a message.

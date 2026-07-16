@@ -203,5 +203,45 @@ describe("MediaImage", () => {
 			expect(video).toHaveAttribute("src", OBJECT_URL);
 			expect(screen.queryByRole("img")).not.toBeInTheDocument();
 		});
+
+		it("renders <video> immediately (no onError round-trip) for a small video with a real mimeType, not chunked (cycle-296 fix)", () => {
+			vi.spyOn(UseMediaReceiveModule, "useMediaReceive").mockReturnValue({
+				objectUrl: OBJECT_URL,
+				loading: false,
+				error: false,
+			});
+
+			render(<MediaImage media={makeMedia({ mimeType: "video/quicktime" })} />);
+
+			const video = screen.getByLabelText("Encrypted video attachment");
+			expect(video.tagName).toBe("VIDEO");
+			expect(screen.queryByRole("img")).not.toBeInTheDocument();
+		});
+
+		it("shows 'Video unavailable' on error for a real-mimeType video that isn't chunked", () => {
+			vi.spyOn(UseMediaReceiveModule, "useMediaReceive").mockReturnValue({
+				objectUrl: null,
+				loading: false,
+				error: true,
+			});
+
+			render(<MediaImage media={makeMedia({ mimeType: "video/mp4" })} />);
+
+			expect(screen.getByText("Video unavailable")).toBeInTheDocument();
+			expect(screen.queryByText("Image unavailable")).not.toBeInTheDocument();
+		});
+
+		it("still renders <img> for a real image mimeType (mimeType doesn't force video)", () => {
+			vi.spyOn(UseMediaReceiveModule, "useMediaReceive").mockReturnValue({
+				objectUrl: OBJECT_URL,
+				loading: false,
+				error: false,
+			});
+
+			render(<MediaImage media={makeMedia({ mimeType: "image/heic" })} />);
+
+			expect(screen.getByRole("img", { name: "Encrypted attachment" })).toBeInTheDocument();
+			expect(screen.queryByLabelText("Encrypted video attachment")).not.toBeInTheDocument();
+		});
 	});
 });

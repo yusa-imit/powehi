@@ -211,6 +211,25 @@ describe("useMediaReceive (prd.md §9.2 receiver path)", () => {
 		expect(URL.revokeObjectURL).toHaveBeenCalledWith(MOCK_BLOB_URL);
 	});
 
+	it("prefers the real mimeType (cycle-296) over the chunked-based videoHint when sniffing generic bytes", async () => {
+		const genericBytes = new Uint8Array([1, 2, 3, 4]); // no image/video magic bytes
+		mediaDecryptWithRawKeyFn.mockResolvedValueOnce(genericBytes);
+
+		let capturedBlob: Blob | null = null;
+		(globalThis.URL.createObjectURL as ReturnType<typeof vi.fn>).mockImplementation(
+			(blob: Blob) => {
+				capturedBlob = blob;
+				return MOCK_BLOB_URL;
+			},
+		);
+
+		const media: MediaPayload = { ...MOCK_MEDIA, mimeType: "video/quicktime" };
+		renderHook(() => useMediaReceive(media));
+
+		await waitFor(() => expect(capturedBlob).not.toBeNull());
+		expect((capturedBlob as unknown as Blob).type).toBe("video/mp4");
+	});
+
 	it("does nothing when session token is absent", () => {
 		useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null });
 

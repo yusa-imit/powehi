@@ -55,6 +55,7 @@ const mediaMessageCreateFn = vi.fn(
 		_blobId: string,
 		_blobHash: Uint8Array,
 		_iv: Uint8Array,
+		_mimeType?: string,
 	) => ({ ciphertext: new Uint8Array(64) }),
 );
 
@@ -67,6 +68,7 @@ const mediaMessageCreateChunkedFn = vi.fn(
 		_blobHash: Uint8Array,
 		_iv: Uint8Array,
 		_totalSize: number,
+		_mimeType?: string,
 	) => ({ ciphertext: new Uint8Array(96) }),
 );
 
@@ -206,6 +208,52 @@ describe("mediaTransfer (prd.md §9.2 + §9.4.2)", () => {
 				expect.any(Uint8Array),
 				expect.any(Uint8Array),
 				bytes.length,
+				"video/mp4",
+			);
+		});
+
+		it("passes the real mimeType through to mediaMessageCreateChunked (cycle-296 fix — no more size-bucket-only 'video' tag)", async () => {
+			const bytes = new Uint8Array(MEDIA_CHUNK_THRESHOLD + 1);
+			await encryptAndSendMedia(
+				bytes,
+				"video/quicktime",
+				IDENTITY_ID,
+				GROUP_ID,
+				TOKEN,
+				mockWorker as never,
+			);
+
+			expect(mediaMessageCreateChunkedFn).toHaveBeenCalledWith(
+				expect.anything(),
+				expect.anything(),
+				expect.anything(),
+				expect.anything(),
+				expect.anything(),
+				expect.anything(),
+				expect.anything(),
+				"video/quicktime",
+			);
+		});
+
+		it("passes the real mimeType through to mediaMessageCreate on the non-chunked path (small video no longer silently loses its real type)", async () => {
+			const bytes = new Uint8Array(1024);
+			await encryptAndSendMedia(
+				bytes,
+				"video/quicktime",
+				IDENTITY_ID,
+				GROUP_ID,
+				TOKEN,
+				mockWorker as never,
+			);
+
+			expect(mediaMessageCreateFn).toHaveBeenCalledWith(
+				expect.anything(),
+				expect.anything(),
+				expect.anything(),
+				expect.anything(),
+				expect.anything(),
+				expect.anything(),
+				"video/quicktime",
 			);
 		});
 

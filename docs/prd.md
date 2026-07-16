@@ -1209,7 +1209,7 @@ sequenceDiagram
     R2-->>A: 200 OK
 
     Note over CA,B: 미디어 메시지 envelope에 메타 + key 포함
-    CA->>CA: app_msg = {<br/>type: "image",<br/>blob_id, blob_hash,<br/>media_key, iv,<br/>thumbnail (작은 암호화 미리보기)<br/>}
+    CA->>CA: app_msg = {<br/>type: "image",<br/>blob_id, blob_hash,<br/>media_key, iv,<br/>thumbnail (작은 암호화 미리보기),<br/>mimeType (선택, 실제 콘텐츠 타입)<br/>}
     CA->>CA: MLS encrypt → ciphertext
     A->>DS: POST /v1/groups/<gid>/messages
     DS-->>B: deliver via WS

@@ -8311,12 +8311,15 @@ export function ChatLayout() {
 		const media = forwardMsg.media;
 
 		if (media && sessionToken && cryptoWorker) {
-			const isVideo = media.chunked === true;
+			// Real mimeType (cycle-296) is authoritative when present; otherwise fall back
+			// to the legacy chunked-implies-video heuristic.
+			const isVideo =
+				media.mimeType != null ? media.mimeType.startsWith("video/") : media.chunked === true;
 			for (const targetId of targets)
 				appendForwardOptimistic(targetId, isVideo ? "Video attachment" : "Image attachment");
 			downloadAndDecryptMedia(media, sessionToken, cryptoWorker)
 				.then((bytes) => {
-					const mimeType = sniffMimeType(bytes, { videoHint: isVideo });
+					const mimeType = media.mimeType ?? sniffMimeType(bytes, { videoHint: isVideo });
 					for (const targetId of targets) {
 						const targetChat = chats.find((c) => c.id === targetId);
 						if (!targetChat?.mlsGroupId || !targetChat?.mlsIdentityId) continue;

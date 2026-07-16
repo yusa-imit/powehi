@@ -181,6 +181,7 @@ export async function encryptAndSendMedia(
 				blobHash,
 				iv,
 				totalSize,
+				mimeType,
 			);
 
 			await sendMessageApi(sessionToken, groupId, mlsCiphertext);
@@ -218,6 +219,7 @@ export async function encryptAndSendMedia(
 					blobHash,
 					iv,
 					thumbHandle,
+					mimeType,
 				)
 			: await cryptoWorker.mediaMessageCreate(
 					identityId,
@@ -226,6 +228,7 @@ export async function encryptAndSendMedia(
 					mediaId,
 					blobHash,
 					iv,
+					mimeType,
 				);
 
 		await sendMessageApi(sessionToken, groupId, mlsCiphertext);
