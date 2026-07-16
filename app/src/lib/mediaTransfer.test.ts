@@ -21,6 +21,7 @@ import {
 	MEDIA_CHUNK_THRESHOLD,
 	downloadAndDecryptMedia,
 	encryptAndSendMedia,
+	sniffMimeType,
 } from "./mediaTransfer";
 
 const TOKEN = "test-token";
@@ -383,6 +384,33 @@ describe("mediaTransfer (prd.md §9.2 + §9.4.2)", () => {
 			// and no error escaped the security-relevant fill(0) path (implied by the throw
 			// message matching cleanly rather than a secondary key-related error).
 			expect(mediaDecryptChunkedWithRawKeyFn).not.toHaveBeenCalled();
+		});
+	});
+
+	describe("sniffMimeType — video detection (§9.4.2)", () => {
+		it("detects an MP4/QuickTime `ftyp` box as video/mp4", () => {
+			const bytes = new Uint8Array([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d]);
+			expect(sniffMimeType(bytes)).toBe("video/mp4");
+		});
+
+		it("detects a WebM/Matroska EBML header as video/webm", () => {
+			const bytes = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 1, 2, 3, 4]);
+			expect(sniffMimeType(bytes)).toBe("video/webm");
+		});
+
+		it("falls back to video/mp4 (not image/jpeg) for unrecognized bytes when videoHint is set", () => {
+			const bytes = new Uint8Array([1, 2, 3, 4]);
+			expect(sniffMimeType(bytes, { videoHint: true })).toBe("video/mp4");
+		});
+
+		it("still falls back to image/jpeg for unrecognized bytes with no videoHint (prior behavior)", () => {
+			const bytes = new Uint8Array([1, 2, 3, 4]);
+			expect(sniffMimeType(bytes)).toBe("image/jpeg");
+		});
+
+		it("image magic bytes take precedence over videoHint", () => {
+			const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
+			expect(sniffMimeType(jpeg, { videoHint: true })).toBe("image/jpeg");
 		});
 	});
 });

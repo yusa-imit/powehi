@@ -135,6 +135,26 @@ describe("ChatLayout — Web Share API (navigator.share)", () => {
 		expect(screen.queryByTestId("share-button")).not.toBeInTheDocument();
 	});
 
+	it("share button does NOT appear for media-only [video] messages (§9.4.2)", async () => {
+		render(<ChatLayout />);
+
+		await act(async () => {
+			capturedOnMessage?.({
+				id: "share-video-uuid-0004",
+				senderId: "peer-device-share",
+				groupId: SEED_GROUP_ID,
+				text: "[video]",
+				ciphertextB64: "Zg==",
+				epochSeq: 1,
+			});
+		});
+
+		const bubbles = screen.getAllByTestId("message-bubble");
+		fireEvent.mouseEnter(bubbles[bubbles.length - 1]);
+
+		expect(screen.queryByTestId("share-button")).not.toBeInTheDocument();
+	});
+
 	it("clicking share button calls navigator.share", async () => {
 		render(<ChatLayout />);
 

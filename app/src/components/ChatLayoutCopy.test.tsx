@@ -136,6 +136,26 @@ describe("ChatLayout — copy message to clipboard", () => {
 		expect(screen.queryByTestId("copy-button")).not.toBeInTheDocument();
 	});
 
+	it("copy button does NOT appear for media-only [video] messages (§9.4.2)", async () => {
+		render(<ChatLayout />);
+
+		await act(async () => {
+			capturedOnMessage?.({
+				id: "copy-video-uuid-0012",
+				senderId: "peer-device-copy",
+				groupId: SEED_GROUP_ID,
+				text: "[video]",
+				ciphertextB64: "Zg==",
+				epochSeq: 1,
+			});
+		});
+
+		const bubbles = screen.getAllByTestId("message-bubble");
+		fireEvent.mouseEnter(bubbles[bubbles.length - 1]);
+
+		expect(screen.queryByTestId("copy-button")).not.toBeInTheDocument();
+	});
+
 	it("clicking copy button calls navigator.clipboard.writeText with the message text", async () => {
 		render(<ChatLayout />);
 

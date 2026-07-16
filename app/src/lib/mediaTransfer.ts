@@ -37,8 +37,13 @@ type CryptoWorker = Comlink.Remote<CryptoWorkerApi>;
  */
 export const MEDIA_CHUNK_THRESHOLD = 16 * 1024 * 1024;
 
-/** Detect image MIME type from leading magic bytes; falls back to image/jpeg. */
-export function sniffMimeType(bytes: Uint8Array): string {
+/**
+ * Detect image/video MIME type from leading magic bytes.
+ * Falls back to `video/mp4` when `videoHint` is set (caller already knows this is a
+ * §9.4.2 chunked/video attachment) and to `image/jpeg` otherwise, matching prior
+ * behavior for callers that never pass the hint.
+ */
+export function sniffMimeType(bytes: Uint8Array, options?: { videoHint?: boolean }): string {
 	if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff)
 		return "image/jpeg";
 	if (
@@ -59,7 +64,25 @@ export function sniffMimeType(bytes: Uint8Array): string {
 		bytes[11] === 0x50
 	)
 		return "image/webp";
-	return "image/jpeg";
+	// MP4/QuickTime family: ISO base media file format `ftyp` box at byte offset 4.
+	if (
+		bytes.length >= 8 &&
+		bytes[4] === 0x66 &&
+		bytes[5] === 0x74 &&
+		bytes[6] === 0x79 &&
+		bytes[7] === 0x70
+	)
+		return "video/mp4";
+	// WebM/Matroska: EBML magic number.
+	if (
+		bytes.length >= 4 &&
+		bytes[0] === 0x1a &&
+		bytes[1] === 0x45 &&
+		bytes[2] === 0xdf &&
+		bytes[3] === 0xa3
+	)
+		return "video/webm";
+	return options?.videoHint ? "video/mp4" : "image/jpeg";
 }
 
 /**

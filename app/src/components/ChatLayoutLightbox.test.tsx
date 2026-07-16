@@ -274,4 +274,29 @@ describe("ChatLayout — image lightbox", () => {
 		fireEvent.keyDown(window, { key: "ArrowLeft" });
 		expect(screen.getByTestId("lightbox-counter")).toHaveTextContent("1 / 2");
 	});
+
+	it("chunked video attachments render inline (no lightbox trigger wrapper) — §9.4.2", async () => {
+		let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_id, _gid, onMsg) => {
+			capturedOnMessage = onMsg;
+		});
+		render(<ChatLayout />);
+
+		await act(async () => {
+			capturedOnMessage?.({
+				id: "lb-video-uuid-0008",
+				senderId: "peer-device-lb",
+				groupId: "11111111-1111-1111-1111-111111111111",
+				text: "[video]",
+				ciphertextB64: "Zg==",
+				epochSeq: 1,
+				media: { ...MOCK_MEDIA, chunked: true, totalSize: 33_554_432, chunkSize: 16 * 1024 * 1024 },
+			});
+		});
+
+		// No lightbox-open button for video — the <video controls> element handles its
+		// own playback/full-screen, and nesting it in a button would break the controls.
+		expect(screen.queryByTestId("media-open-lightbox")).not.toBeInTheDocument();
+		expect(screen.getByLabelText("Encrypted video attachment").tagName).toBe("VIDEO");
+	});
 });

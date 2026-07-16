@@ -48,7 +48,9 @@ export function useMediaReceive(media: MediaPayload | undefined): MediaReceiveSt
 				if (cancelled) return;
 
 				const url = URL.createObjectURL(
-					new Blob([plaintext as Uint8Array<ArrayBuffer>], { type: sniffMimeType(plaintext) }),
+					new Blob([plaintext as Uint8Array<ArrayBuffer>], {
+						type: sniffMimeType(plaintext, { videoHint: media.chunked === true }),
+					}),
 				);
 				urlRef.current = url;
 				setState({ objectUrl: url, loading: false, error: false });

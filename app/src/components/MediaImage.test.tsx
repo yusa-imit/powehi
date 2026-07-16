@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as UseMediaReceiveModule from "../hooks/useMediaReceive";
 import type { MediaPayload } from "../hooks/useMessages";
@@ -141,5 +141,67 @@ describe("MediaImage", () => {
 		// Thumbnail hook still called (with undefined thumbnail).
 		// No crash and loading placeholder visible.
 		expect(screen.getByLabelText("Loading image")).toBeInTheDocument();
+	});
+
+	describe("video attachments (§9.4.2 chunked)", () => {
+		it("renders a <video> with controls when media.chunked is true and loaded", () => {
+			vi.spyOn(UseMediaReceiveModule, "useMediaReceive").mockReturnValue({
+				objectUrl: OBJECT_URL,
+				loading: false,
+				error: false,
+			});
+
+			render(<MediaImage media={makeMedia({ chunked: true })} />);
+
+			const video = screen.getByLabelText("Encrypted video attachment");
+			expect(video.tagName).toBe("VIDEO");
+			expect(video).toHaveAttribute("src", OBJECT_URL);
+			expect(video).toHaveAttribute("controls");
+			expect(screen.queryByRole("img")).not.toBeInTheDocument();
+		});
+
+		it("omits the controls attribute and shows a play badge when interactive=false", () => {
+			vi.spyOn(UseMediaReceiveModule, "useMediaReceive").mockReturnValue({
+				objectUrl: OBJECT_URL,
+				loading: false,
+				error: false,
+			});
+
+			render(<MediaImage media={makeMedia({ chunked: true })} interactive={false} />);
+
+			const video = screen.getByLabelText("Encrypted video attachment");
+			expect(video).not.toHaveAttribute("controls");
+		});
+
+		it("shows 'Video unavailable' (not 'Image unavailable') on error for chunked media", () => {
+			vi.spyOn(UseMediaReceiveModule, "useMediaReceive").mockReturnValue({
+				objectUrl: null,
+				loading: false,
+				error: true,
+			});
+
+			render(<MediaImage media={makeMedia({ chunked: true })} />);
+
+			expect(screen.getByText("Video unavailable")).toBeInTheDocument();
+			expect(screen.queryByText("Image unavailable")).not.toBeInTheDocument();
+		});
+
+		it("falls back to <video> when a non-chunked attachment fails to decode as an image", () => {
+			vi.spyOn(UseMediaReceiveModule, "useMediaReceive").mockReturnValue({
+				objectUrl: OBJECT_URL,
+				loading: false,
+				error: false,
+			});
+
+			render(<MediaImage media={makeMedia()} />);
+
+			const img = screen.getByRole("img", { name: "Encrypted attachment" });
+			fireEvent.error(img);
+
+			const video = screen.getByLabelText("Encrypted video attachment");
+			expect(video.tagName).toBe("VIDEO");
+			expect(video).toHaveAttribute("src", OBJECT_URL);
+			expect(screen.queryByRole("img")).not.toBeInTheDocument();
+		});
 	});
 });

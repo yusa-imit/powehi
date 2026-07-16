@@ -1013,7 +1013,11 @@ function StarredPanel({
 									whiteSpace: "nowrap",
 								}}
 							>
-								{msg.media ? "Image attachment" : msg.text}
+								{msg.media
+									? msg.media.chunked === true
+										? "Video attachment"
+										: "Image attachment"
+									: msg.text}
 							</div>
 						</button>
 					))
@@ -2172,7 +2176,11 @@ function MessageBubble({
 	const [copied, setCopied] = useState(false);
 	const [hoveredReaction, setHoveredReaction] = useState<string | null>(null);
 	const [seenTooltipOpen, setSeenTooltipOpen] = useState(false);
-	const hasLightbox = !!onOpenLightbox && !!msg.media;
+	// Video attachments are excluded — their own <video controls> already provides
+	// playback/full-screen, and nesting a controls-bearing element inside the
+	// lightbox-trigger button would make the controls unusable (clicks would open
+	// the lightbox instead of reaching the video's own play/seek controls).
+	const hasLightbox = !!onOpenLightbox && !!msg.media && msg.media.chunked !== true;
 	const reactionEntries = msg.reactions ? Object.entries(msg.reactions) : [];
 	const totalReactionCount = reactionEntries.reduce((sum, [, senders]) => sum + senders.length, 0);
 
@@ -2587,74 +2595,84 @@ function MessageBubble({
 					)}
 
 					{/* Share button — Web Share API; appears on hover for non-deleted text messages */}
-					{onShare && hovered && !msg.deleted && msg.text && msg.text !== "[image]" && (
-						<div
-							style={{
-								position: "absolute",
-								top: -10,
-								left: 78,
-							}}
-						>
-							<button
-								type="button"
-								onClick={onShare}
-								aria-label="Share message"
-								data-testid="share-button"
+					{onShare &&
+						hovered &&
+						!msg.deleted &&
+						msg.text &&
+						msg.text !== "[image]" &&
+						msg.text !== "[video]" && (
+							<div
 								style={{
-									width: 22,
-									height: 22,
-									borderRadius: "50%",
-									border: "1px solid var(--border-faint)",
-									background: "var(--bg-elevated)",
-									color: "var(--fg-3)",
-									cursor: "pointer",
-									display: "flex",
-									alignItems: "center",
-									justifyContent: "center",
-									padding: 0,
+									position: "absolute",
+									top: -10,
+									left: 78,
 								}}
 							>
-								<Icon name="share-2" size={11} />
-							</button>
-						</div>
-					)}
+								<button
+									type="button"
+									onClick={onShare}
+									aria-label="Share message"
+									data-testid="share-button"
+									style={{
+										width: 22,
+										height: 22,
+										borderRadius: "50%",
+										border: "1px solid var(--border-faint)",
+										background: "var(--bg-elevated)",
+										color: "var(--fg-3)",
+										cursor: "pointer",
+										display: "flex",
+										alignItems: "center",
+										justifyContent: "center",
+										padding: 0,
+									}}
+								>
+									<Icon name="share-2" size={11} />
+								</button>
+							</div>
+						)}
 
 					{/* Copy button — clipboard; appears on hover for non-deleted text messages */}
-					{onCopy && hovered && !msg.deleted && msg.text && msg.text !== "[image]" && (
-						<div
-							style={{
-								position: "absolute",
-								top: -10,
-								left: 104,
-							}}
-						>
-							<button
-								type="button"
-								onClick={() => {
-									onCopy();
-									setCopied(true);
-									setTimeout(() => setCopied(false), 1500);
-								}}
-								aria-label="Copy message"
-								data-testid="copy-button"
+					{onCopy &&
+						hovered &&
+						!msg.deleted &&
+						msg.text &&
+						msg.text !== "[image]" &&
+						msg.text !== "[video]" && (
+							<div
 								style={{
-									width: 22,
-									height: 22,
-									borderRadius: "50%",
-									border: "1px solid var(--border-faint)",
-									background: copied ? "rgba(255,138,61,0.18)" : "var(--bg-elevated)",
-									color: copied ? "#FF8A3D" : "var(--fg-3)",
-									cursor: "pointer",
-									display: "flex",
-									alignItems: "center",
-									justifyContent: "center",
-									padding: 0,
+									position: "absolute",
+									top: -10,
+									left: 104,
 								}}
 							>
-								<Icon name={copied ? "check" : "copy"} size={11} />
-							</button>
-						</div>
-					)}
+								<button
+									type="button"
+									onClick={() => {
+										onCopy();
+										setCopied(true);
+										setTimeout(() => setCopied(false), 1500);
+									}}
+									aria-label="Copy message"
+									data-testid="copy-button"
+									style={{
+										width: 22,
+										height: 22,
+										borderRadius: "50%",
+										border: "1px solid var(--border-faint)",
+										background: copied ? "rgba(255,138,61,0.18)" : "var(--bg-elevated)",
+										color: copied ? "#FF8A3D" : "var(--fg-3)",
+										cursor: "pointer",
+										display: "flex",
+										alignItems: "center",
+										justifyContent: "center",
+										padding: 0,
+									}}
+								>
+									<Icon name={copied ? "check" : "copy"} size={11} />
+								</button>
+							</div>
+						)}
 
 					{/* Edit button — appears on hover for own messages only, when not deleted */}
 					{onEdit && isMe && hovered && !msg.deleted && (
@@ -3313,7 +3331,11 @@ function MessageList({
 								onStar={onStar ? () => onStar(g.msg.id, g.msg.text) : undefined}
 								onShare={onShare && !g.msg.deleted ? () => onShare(g.msg) : undefined}
 								onCopy={
-									onCopy && !g.msg.deleted && g.msg.text && g.msg.text !== "[image]"
+									onCopy &&
+									!g.msg.deleted &&
+									g.msg.text &&
+									g.msg.text !== "[image]" &&
+									g.msg.text !== "[video]"
 										? () => onCopy(g.msg)
 										: undefined
 								}
@@ -5873,6 +5895,7 @@ function InfoPanel({
 									{msg.media && (
 										<MediaImage
 											media={msg.media}
+											interactive={false}
 											imgStyle={{
 												width: "100%",
 												height: "100%",
@@ -7373,7 +7396,11 @@ export function ChatLayout() {
 							break;
 						}
 					}
-					const displayText = msg.media ? "Image attachment" : msg.text;
+					const displayText = msg.media
+						? msg.media.chunked === true
+							? "Video attachment"
+							: "Image attachment"
+						: msg.text;
 					const dayLabel = getDayLabel(now.getTime());
 					// Find the last explicitly-set day label in the history (sparse field).
 					let prevDay: string | undefined;
@@ -7476,6 +7503,9 @@ export function ChatLayout() {
 			e.target.value = "";
 
 			// Optimistic local update showing a placeholder.
+			const placeholderText = file.type.startsWith("video/")
+				? "Video attachment"
+				: "Image attachment";
 			const now = new Date();
 			const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
 			setChats((cs) =>
@@ -7490,14 +7520,14 @@ export function ChatLayout() {
 					}
 					msgs.push({
 						from: "me",
-						text: "Image attachment",
+						text: placeholderText,
 						last: true,
 						time,
 						ts: now.getTime(),
 						read: false,
 						continued: msgs.length > 0 && msgs[msgs.length - 1].from === "me",
 					});
-					return { ...c, messages: msgs, last: "Image attachment", time };
+					return { ...c, messages: msgs, last: placeholderText, time };
 				}),
 			);
 
@@ -7974,13 +8004,13 @@ export function ChatLayout() {
 	/** Share a message via the Web Share API / Tauri native share sheet.
 	 * Purely client-side — no MLS message sent, no server contact. */
 	const handleShareMessage = useCallback((msg: ChatMessage) => {
-		if (!msg.text || msg.text === "[image]") return;
+		if (!msg.text || msg.text === "[image]" || msg.text === "[video]") return;
 		if (typeof navigator === "undefined" || !navigator.share) return;
 		navigator.share({ text: msg.text }).catch(() => {});
 	}, []);
 
 	const handleCopyMessage = useCallback((msg: ChatMessage) => {
-		if (!msg.text || msg.text === "[image]") return;
+		if (!msg.text || msg.text === "[image]" || msg.text === "[video]") return;
 		navigator.clipboard.writeText(msg.text).catch(() => {});
 	}, []);
 
@@ -8281,10 +8311,12 @@ export function ChatLayout() {
 		const media = forwardMsg.media;
 
 		if (media && sessionToken && cryptoWorker) {
-			for (const targetId of targets) appendForwardOptimistic(targetId, "Image attachment");
+			const isVideo = media.chunked === true;
+			for (const targetId of targets)
+				appendForwardOptimistic(targetId, isVideo ? "Video attachment" : "Image attachment");
 			downloadAndDecryptMedia(media, sessionToken, cryptoWorker)
 				.then((bytes) => {
-					const mimeType = sniffMimeType(bytes);
+					const mimeType = sniffMimeType(bytes, { videoHint: isVideo });
 					for (const targetId of targets) {
 						const targetChat = chats.find((c) => c.id === targetId);
 						if (!targetChat?.mlsGroupId || !targetChat?.mlsIdentityId) continue;
@@ -9029,12 +9061,12 @@ export function ChatLayout() {
 				</main>
 			)}
 
-			{/* Hidden file input for §9.2 media send — triggered by the Photo button. */}
+			{/* Hidden file input for §9.2/§9.4.2 media send — triggered by the Photo button. */}
 			<input
 				ref={fileInputRef}
 				type="file"
-				accept="image/*"
-				aria-label="Select image to send"
+				accept="image/*,video/*"
+				aria-label="Select image or video to send"
 				style={{ display: "none" }}
 				onChange={handleFileSelect}
 			/>
