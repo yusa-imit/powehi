@@ -17,6 +17,70 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-07-16, cycle 295 — STABILIZATION: paginate media GC scan query, commit bc6a4c2)
+
+- CI green (`gh run list`), `gh issue list --state open` empty, `cargo audit`
+  clean (only the pre-existing allowed `spin` yanked-crate warnings via
+  x509-parser/rsa/aws-sdk-s3 transitive deps, already permitted), `cargo deny
+  check` clean (advisories/bans/licenses/sources all ok). No dependency CVEs
+  to fix this cycle, so the pass targeted the one concrete open item from
+  cycle 289's memory: the security-auditor YELLOW that the hourly media-blob
+  GC sweep (`MediaService::run_gc`, prd.md §9.4.3) did an unfiltered,
+  unpaginated `SELECT * FROM media_blobs` into memory every run.
+- **Fix:** `MediaRepository::list_undeleted()` → `list_gc_candidates(now,
+  default_retention_cutoff, after_id, limit)`. The eligibility filter
+  (`expires_at <= now`, or `uploaded_at <= now - 30d` when `expires_at` is
+  unset) now lives in the SQL `WHERE` clause instead of a Rust-side loop over
+  every row in the table, and results are keyset-paginated by `id`
+  (`id > after_id ORDER BY id LIMIT n`, NOT `OFFSET` — `run_gc` deletes
+  matching rows as it scans a page, so `OFFSET` pagination would skip/re-scan
+  rows across pages). `run_gc` now delegates to `run_gc_batched`, looping in
+  pages of `GC_BATCH_SIZE = 500` until a short page signals exhaustion,
+  advancing the cursor to the last id in each page *before* any delete so an
+  eligible-but-currently-undeletable blob (unacked recipients) can't stall
+  the sweep — it's just deferred to the next hourly run, not lost. Retention
+  semantics (30-day default, `expires_at` takes priority) are byte-identical
+  to before; only the fetch mechanism changed. Delegated implementation to
+  `backend-lead`.
+- **security-auditor: GREEN.** Verified: parameterized SQL (no injection),
+  keyset correctness (no permanent skip, no double-delete/panic — undeletable
+  blobs deferred to next sweep, not dropped), no plaintext/PII/ciphertext in
+  the new `#[instrument]` span, no new `unwrap()`/`expect()` in library code,
+  eligibility logic provably unchanged, `list_gc_candidates` reachable only
+  from the internal GC sweep (no REST route exposes it). One non-blocking nit
+  applied in-cycle: the span was auto-capturing all 4 args inconsistently
+  with sibling methods' explicit-field convention — changed to
+  `skip(self, now, default_retention_cutoff, after_id)` +
+  `fields(limit = %limit)`.
+- Tests: `MockMediaRepo` test fake updated to mirror the SQL filter/keyset
+  semantics in-memory; all ~7 pre-existing `run_gc_*` unit tests still green
+  plus 2 new ones (`run_gc_batched_paginates_across_multiple_batches`:
+  5 candidates through a batch size of 2 all get GC'd across 3 pages;
+  `run_gc_batched_does_not_loop_on_undeletable_blob`: sweep terminates and
+  continues past a stuck blob rather than looping forever). New `#[ignore]`d
+  testcontainers test in `r2_media_it.rs` (`list_gc_candidates_filters_
+  paginates_and_keysets`) compiles (`cargo test --no-run -p powehi-r2`) but
+  can't execute — no Docker in this sandbox, same as every prior cycle
+  touching that file; will run for real in CI.
+- Verified clean: `cargo build --workspace`, `cargo test --workspace` (0
+  failures across every crate), `cargo clippy --workspace --all-targets --
+  -D warnings`, `cargo fmt --all --check`. Frontend untouched this cycle
+  (pure backend fix) — skipped `pnpm test`/`tsc`/`biome`.
+- **target/ hygiene:** at 21G (just over the 20G prune threshold) — ran the
+  0-byte-`.rmeta` prune (no matches, already clean) and the mtime+7d prune
+  for `.rlib`/`.rmeta`/`.o`/`.d` + stale incremental dirs; still ~20G after
+  (mostly recent/active build artifacts within the 7-day window, nothing
+  older to reclaim). Not a code change, doesn't count as the cycle's commit.
+- **Next cycle candidates:** (a) the remaining cycle-289 security-auditor
+  YELLOW — ack-on-URL-grant-not-confirmed-transfer (blob GC'd once a
+  recipient *requests* a download URL, not once the download actually
+  completes; bounded by the 30-day retention floor, non-urgent); (b) the
+  cycle-294 mimeType-based wire-tagging fix for chunked video (bigger scope,
+  needs its own crypto-reviewer/threat-model pass since it changes the wire
+  schema); (c) resume normal FEATURE scanning for other open prd.md gaps.
+  Long-standing PQ hybrid Phase A block is still blocked on upstream openmls
+  shipping a stable `MLS_128_MLKEM768` ciphersuite.
+
 ## Current state (2026-07-16, cycle 294 — FEATURE: chunked video UI wiring, prd.md §9.4.2, commit 8f14a85)
 
 - Closed the gap cycle 292 flagged as its own "next cycle candidate": the
