@@ -10,10 +10,9 @@
  * <Login /> and <ChatLayout /> based on auth phase.
  */
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as GroupsApiModule from "../api/groups";
 import * as InvitesApiModule from "../api/invites";
-import * as KeyPackagesApiModule from "../api/key_packages";
 import * as MessagesApiModule from "../api/messages";
 import { db } from "../db/schema";
 import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
@@ -28,6 +27,22 @@ const INVITE_CODE = "a".repeat(32);
 // (ChatLayout.test.tsx) so the derived "Contact <shortId>" naming matches.
 const INVITER_DEVICE_ID = "peer-device-9999";
 const MOCK_GROUP_ID = "invite-accept-group-00000000-0000-0000-0000";
+const MOCK_KEY_PACKAGE = Array.from({ length: 64 }, (_, i) => i);
+
+async function sha256Hex(bytes: number[]): Promise<string> {
+	const digest = await crypto.subtle.digest("SHA-256", new Uint8Array(bytes));
+	return Array.from(new Uint8Array(digest))
+		.map((b) => b.toString(16).padStart(2, "0"))
+		.join("");
+}
+
+// The invite URL's #fragment carries this hash (never seen by the server) —
+// AcceptInviteModal recomputes SHA-256 over the redeemed KeyPackage and
+// compares. Computed once against the real Web Crypto API rather than mocked.
+let MOCK_KEY_PACKAGE_HASH: string;
+beforeAll(async () => {
+	MOCK_KEY_PACKAGE_HASH = await sha256Hex(MOCK_KEY_PACKAGE);
+});
 
 // ── Crypto worker mock ───────────────────────────────────────────────────────
 // Covers both AcceptInviteModal's MLS handshake calls and ChatLayout's own
@@ -74,8 +89,8 @@ beforeEach(async () => {
 	);
 	vi.spyOn(InvitesApiModule, "redeemInvite").mockResolvedValue({
 		device_id: INVITER_DEVICE_ID,
+		key_package: MOCK_KEY_PACKAGE,
 	});
-	vi.spyOn(KeyPackagesApiModule, "fetchKeyPackage").mockResolvedValue(new Uint8Array(200));
 	vi.spyOn(GroupsApiModule, "createGroup").mockResolvedValue(undefined);
 	vi.spyOn(GroupsApiModule, "addMember").mockResolvedValue(undefined);
 	// Step 6 of AcceptInviteModal.handleAccept is unconditional (unlike the
@@ -108,14 +123,24 @@ afterEach(() => {
 // ── Invite hash detection (moved from App.test.tsx) ────────────────────────
 
 describe("ChatLayout — invite hash detection", () => {
-	it("shows AcceptInviteModal when the URL has a valid invite hash", async () => {
-		history.pushState(null, "", `/#${"a".repeat(32)}`);
+	it("shows AcceptInviteModal when the URL has a valid invite code + KeyPackage hash", async () => {
+		history.pushState(null, "", `/#${"a".repeat(32)}.${MOCK_KEY_PACKAGE_HASH}`);
 
 		await act(async () => {
 			render(<ChatLayout />);
 		});
 
 		expect(screen.getByRole("dialog", { name: /accept contact invite/i })).toBeInTheDocument();
+	});
+
+	it("does not show AcceptInviteModal when the hash suffix is missing", async () => {
+		history.pushState(null, "", `/#${"a".repeat(32)}`);
+
+		await act(async () => {
+			render(<ChatLayout />);
+		});
+
+		expect(screen.queryByRole("dialog", { name: /accept contact invite/i })).toBeNull();
 	});
 
 	it("does not show AcceptInviteModal for an invalid hash", async () => {
@@ -132,8 +157,8 @@ describe("ChatLayout — invite hash detection", () => {
 // ── Tauri deep-link invite (moved from App.test.tsx) ────────────────────────
 
 describe("ChatLayout — Tauri deep-link invite", () => {
-	it("opens AcceptInviteModal when a deep-link delivers an invite code", async () => {
-		let capturedCallback: ((code: string) => void) | undefined;
+	it("opens AcceptInviteModal when a deep-link delivers an invite code + hash", async () => {
+		let capturedCallback: ((invite: { code: string; keyPackageHash: string }) => void) | undefined;
 		vi.spyOn(UseDeepLinkModule, "useDeepLink").mockImplementation((cb) => {
 			capturedCallback = cb;
 		});
@@ -143,14 +168,14 @@ describe("ChatLayout — Tauri deep-link invite", () => {
 		});
 
 		await act(async () => {
-			capturedCallback?.("a".repeat(32));
+			capturedCallback?.({ code: "a".repeat(32), keyPackageHash: MOCK_KEY_PACKAGE_HASH });
 		});
 
 		expect(screen.getByRole("dialog", { name: /accept contact invite/i })).toBeInTheDocument();
 	});
 
 	it("clears the modal when onClose is called after a deep-link invite", async () => {
-		let capturedCallback: ((code: string) => void) | undefined;
+		let capturedCallback: ((invite: { code: string; keyPackageHash: string }) => void) | undefined;
 		vi.spyOn(UseDeepLinkModule, "useDeepLink").mockImplementation((cb) => {
 			capturedCallback = cb;
 		});
@@ -159,7 +184,7 @@ describe("ChatLayout — Tauri deep-link invite", () => {
 			render(<ChatLayout />);
 		});
 		await act(async () => {
-			capturedCallback?.("c".repeat(32));
+			capturedCallback?.({ code: "c".repeat(32), keyPackageHash: MOCK_KEY_PACKAGE_HASH });
 		});
 
 		const dialog = screen.getByRole("dialog", { name: /accept contact invite/i });
@@ -178,7 +203,7 @@ describe("ChatLayout — Tauri deep-link invite", () => {
 
 describe("ChatLayout — accept invite adds the chat to the sidebar (chat-list wiring gap)", () => {
 	it("adds the new chat to the sidebar and persists a GroupRow to Dexie after accepting an invite", async () => {
-		history.pushState(null, "", `/#${INVITE_CODE}`);
+		history.pushState(null, "", `/#${INVITE_CODE}.${MOCK_KEY_PACKAGE_HASH}`);
 
 		await act(async () => {
 			render(<ChatLayout />);
@@ -208,7 +233,7 @@ describe("ChatLayout — accept invite adds the chat to the sidebar (chat-list w
 	});
 
 	it("navigates into the new chat (clears unread) after clicking Open chat", async () => {
-		history.pushState(null, "", `/#${INVITE_CODE}`);
+		history.pushState(null, "", `/#${INVITE_CODE}.${MOCK_KEY_PACKAGE_HASH}`);
 
 		await act(async () => {
 			render(<ChatLayout />);

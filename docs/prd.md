@@ -176,7 +176,7 @@
 - KeyPackage 업로드/소비 시점
 - 사용자의 `home_region` 및 현재 접속 `region_id`
 - 크로스 리전 envelope 포워딩 타이밍 (리전 간 메시지 전달 시점)
-- **초대 토큰 생성/소비 시점 및 inviter device ID** (§8.3 Contact Discovery): Redis에 24시간 동안 `H(code) → DeviceId` 형태로 임시 저장됨. 코드는 GETDEL로 1회 소비되므로 영구 기록 없음. 그러나 서버는 창 내에서 inviter의 device_id와 소비 시점을 알 수 있음. 이는 전 단계(MLS Welcome 이전)에 한 방향의 소셜 그래프 간선을 드러낼 수 있음. 완화: Redis 저장값은 원본 코드가 아닌 SHA-256(code)이므로 Redis 덤프로 유효한 토큰을 재현할 수 없음.
+- **초대 토큰 생성/소비 시점 및 inviter device ID** (§8.3 Contact Discovery): Redis에 24시간 동안 `H(code) → (DeviceId ‖ 초대자 KeyPackage bytes)` 형태로 임시 저장됨(cycle 299부터 KeyPackage bytes 포함 — 아래 §8.3 MITM 방지 참조). 코드는 GETDEL로 1회 소비되므로 영구 기록 없음. 그러나 서버는 창 내에서 inviter의 device_id와 소비 시점을 알 수 있음. 이는 전 단계(MLS Welcome 이전)에 한 방향의 소셜 그래프 간선을 드러낼 수 있음. 완화: Redis 저장값은 원본 코드가 아닌 SHA-256(code)이므로 Redis 덤프로 유효한 토큰을 재현할 수 없음. KeyPackage 자체는 이미 서버가 (Postgres 기반 pool로) 상시 보유하는 공개 자료이므로(§8.3, KeyPackage는 공개 데이터) 새로운 비밀 카테고리가 아니며, 오히려 pool보다 수명이 짧고(24시간 TTL, 1회 GETDEL) 단일 리전에만 존재함.
 - **`(group_id, device_id, joined_at_epoch)` — MLS 그룹 토폴로지** (fan-out 푸시 및 미디어 ACL 정합성에 필요): 서버는 어떤 device_id가 어떤 그룹의 멤버인지를 `group_members` 테이블에 영구 저장함. `device.user_id` FK를 통해 서버는 사용자↔디바이스↔그룹 전체 그래프를 보유. 단, MLS LeafNode 암호화 자료(공개 키, 서명 자료)는 포함되지 않으며 서버가 알지 못함. 완화: device_id는 opaque UUID이나 device ↔ user 매핑이 존재하므로 소셜 그래프 노출로 간주할 수 있음.
 - **Push subscription endpoint host** (FCM / Mozilla autopush / Apple APNs 등): RFC 8291 Web Push 운영상 불가피하게 push provider 식별자가 노출됨.
 - **`(media_id, device_id)` — 미디어 다운로드 ACK 존재 여부** (§9.4.3 미디어 GC): 어떤 device_id가 어떤 media_id의 다운로드 URL을 발급받았는지가 `media_acks` 테이블에 영구 저장됨. GC 알고리즘이 필요로 하는 것은 집합 소속 여부뿐이므로(P5 미니멀리즘) 타임스탬프 컬럼은 두지 않음. 다운로드 URL 발급 자체는 기존에도 매 요청마다 서버가 알 수밖에 없는 이벤트였으나(요청 로그), 그 사실을 **영구 저장**한다는 점이 이번에 새로 추가된 메타데이터 카테고리임. 실제 바이트 전송/복호화 성공을 확인하지 않고 URL 발급 시점에 ACK를 기록하므로, "ACK = 다운로드 URL 발급"이며 "ACK = 수신자가 실제로 열람함"이 아님 — §3.4의 정직성 원칙에 따라 명시.
@@ -1149,12 +1149,29 @@ RegionService.HealthCheck            리전 간 헬스 체크
 
 URL 형식:
 ```
-https://powehi.app/i/<short-id>#<one-time-token>
+https://powehi.app/i/connect#<32-hex code>.<64-hex KeyPackage SHA-256 hash>
 ```
 
-- fragment(`#` 이후) 부분은 브라우저 표준상 서버에 전송되지 않음 → 서버는 token을 모름
-- 토큰은 1회 사용, 24시간 만료
-- 토큰 안에는 초대자의 KeyPackage hash 등 검증 정보 포함
+- fragment(`#` 이후) 부분은 브라우저 표준상 서버에 전송되지 않음 → 서버는 code도 hash도 모름
+- 코드는 1회 사용, 24시간 만료
+
+**MITM 방지 — KeyPackage hash pinning (cycle 299, 구현 완료):** 위 줄의 "토큰 안에는 초대자의
+KeyPackage hash 등 검증 정보 포함"이 이제 실제로 구현됨. 초대자 클라이언트가 `mlsGetKeyPackage`로
+새 KeyPackage를 직접 생성하고, 그 바이트를 로컬에서 SHA-256으로 해시한 뒤, 원본 바이트는
+`POST /v1/invites` 바디로 서버에 전달(pin)하고 해시는 URL fragment에 담아 공유한다. 수신자는
+`POST /v1/invites/redeem`으로 pin된 KeyPackage 바이트를 돌려받아 로컬에서 다시 SHA-256을 계산하고
+fragment의 해시와 비교한다 — 일치하지 않으면 `mlsCreateGroup`/`mlsAddMember`/Welcome 전송 전에
+즉시 중단한다. 서버는 이 해시를 계산하거나 반환하지 않는다(코드로 강제됨 — `create` 응답에
+`key_package_hash` 필드 없음, 회귀 테스트로 검증). 이로써 서버가 (bytes, hash) 쌍을 동시에 조작해
+검증을 무력화할 수 있는 경로가 구조적으로 차단된다 — 이전에는 수신자가
+`GET /v1/key-packages/:deviceId`로 서버가 골라주는 KeyPackage를 그대로 신뢰해야 했음(§3.1 서버
+운영자 위협 T3에 대한 방어 강화).
+
+**범위의 한계:** 이 pin은 "서버가 KeyPackage를 바꿔치기"하는 공격(T3)만 막는다. 초대 링크 자체를
+전달하는 out-of-band 채널(악성 링크 단축 서비스, 바꿔치기된 QR 이미지 등)이 손상된 경우는 여전히
+방어 범위 밖이며 — code와 hash를 한 쌍으로 함께 위조하면 자기 일관적인 가짜 초대를 만들 수 있다.
+이는 §8.4의 대면 QR 교환(신뢰할 수 있는 채널 가정)과 이후의 Safety Number 검증이 다루는 T2 영역으로,
+이번 변경으로 새로 생기거나 악화된 gap이 아니다.
 
 ### 8.4 QR 코드
 

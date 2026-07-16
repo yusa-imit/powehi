@@ -29,13 +29,32 @@ impl InviteService {
 
 #[async_trait]
 impl InviteUseCase for InviteService {
-    async fn create_invite(&self, device_id: &DeviceId) -> Result<CreatedInvite, DomainError> {
+    async fn create_invite(
+        &self,
+        device_id: &DeviceId,
+        key_package: Vec<u8>,
+    ) -> Result<CreatedInvite, DomainError> {
+        // This service intentionally does NOT touch the shared KeyPackage pool
+        // (`KeyPackageRepository`) and does NOT compute or return a hash. The
+        // caller (inviting client) generated `key_package` itself and is
+        // expected to have already hashed it locally, before this call, for
+        // embedding in the invite URL's fragment — see the trait doc comment.
+        // If this service computed the hash instead, a compromised server
+        // could return an attacker-controlled KeyPackage + a matching hash for
+        // both this response AND the later `redeem_invite` call, defeating the
+        // verification entirely (caught in review — do not reintroduce this).
+        if key_package.is_empty() {
+            return Err(DomainError::InvalidInput("empty key package".into()));
+        }
+
         // 32 lowercase hex chars (UUID v4 simple form) — 122-bit CSPRNG entropy.
         let code = Uuid::new_v4().simple().to_string();
         let key = cache_key(&code);
-        // Store the inviting device's UUID bytes. 16 bytes is enough to reconstruct
-        // any DeviceId; no other identity material is stored.
-        let value = device_id.as_uuid().as_bytes().to_vec();
+        // Store the inviting device's UUID bytes (fixed 16-byte prefix) followed
+        // by the pinned KeyPackage's raw bytes.
+        let mut value = Vec::with_capacity(16 + key_package.len());
+        value.extend_from_slice(device_id.as_uuid().as_bytes());
+        value.extend_from_slice(&key_package);
         self.cache.set(&key, value, Some(INVITE_TTL)).await?;
         // Invite code itself is never logged — only the creating device.
         tracing::info!(device_id = %device_id, "invite.created");
@@ -51,7 +70,11 @@ impl InviteUseCase for InviteService {
             .get_del(&key)
             .await?
             .ok_or_else(|| DomainError::NotFound("invite code not found".into()))?;
-        let arr: [u8; 16] = bytes
+        if bytes.len() < 16 {
+            return Err(DomainError::Internal("malformed invite payload".into()));
+        }
+        let (device_bytes, key_package) = bytes.split_at(16);
+        let arr: [u8; 16] = device_bytes
             .try_into()
             .map_err(|_| DomainError::Internal("malformed invite payload".into()))?;
         let device_id = DeviceId::from(Uuid::from_bytes(arr));
@@ -59,7 +82,10 @@ impl InviteUseCase for InviteService {
         // create logs could reveal a social-graph edge. Kept below INFO to
         // limit metadata exposure in production log pipelines.
         tracing::debug!(device_id = %device_id, "invite.redeemed");
-        Ok(RedeemedInvite { device_id })
+        Ok(RedeemedInvite {
+            device_id,
+            key_package: key_package.to_vec(),
+        })
     }
 }
 
@@ -108,44 +134,70 @@ mod tests {
         DeviceId::from(Uuid::from_bytes([7u8; 16]))
     }
 
+    fn test_key_package_bytes() -> Vec<u8> {
+        (0u8..64).collect()
+    }
+
     #[tokio::test]
-    async fn create_invite_stores_in_cache() {
+    async fn create_invite_stores_device_id_and_key_package_in_cache() {
         let cache = FakeCache::new();
         let svc = InviteService::new(cache.clone());
         let device_id = test_device_id();
 
-        let invite = svc.create_invite(&device_id).await.unwrap();
+        let invite = svc
+            .create_invite(&device_id, test_key_package_bytes())
+            .await
+            .unwrap();
 
         // Code must be 32 lowercase hex chars (UUID simple form)
         assert_eq!(invite.code.len(), 32);
         assert!(invite.code.chars().all(|c| c.is_ascii_hexdigit()));
-        // Cache must hold the device_id bytes under invite:{sha256(code)} — not the raw code.
+        // Cache must hold device_id bytes (16-byte prefix) + KeyPackage bytes under
+        // invite:{sha256(code)} — not the raw code.
         let hash = Sha256::digest(invite.code.as_bytes());
         let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
         let key = format!("invite:{hex}");
         let stored = cache.get(&key).await.unwrap().expect("code in cache");
-        assert_eq!(stored, device_id.as_uuid().as_bytes().to_vec());
+        assert_eq!(&stored[..16], device_id.as_uuid().as_bytes());
+        assert_eq!(&stored[16..], test_key_package_bytes().as_slice());
     }
 
     #[tokio::test]
-    async fn redeem_invite_returns_device_id() {
+    async fn create_invite_with_empty_key_package_fails() {
         let cache = FakeCache::new();
-        let svc = InviteService::new(cache.clone());
+        let svc = InviteService::new(cache);
         let device_id = test_device_id();
 
-        let invite = svc.create_invite(&device_id).await.unwrap();
+        let result = svc.create_invite(&device_id, Vec::new()).await;
+        assert!(matches!(result, Err(DomainError::InvalidInput(_))));
+    }
+
+    #[tokio::test]
+    async fn redeem_invite_returns_device_id_and_the_pinned_key_package() {
+        let cache = FakeCache::new();
+        let svc = InviteService::new(cache);
+        let device_id = test_device_id();
+
+        let invite = svc
+            .create_invite(&device_id, test_key_package_bytes())
+            .await
+            .unwrap();
         let redeemed = svc.redeem_invite(&invite.code).await.unwrap();
 
         assert_eq!(redeemed.device_id.as_uuid(), device_id.as_uuid());
+        assert_eq!(redeemed.key_package, test_key_package_bytes());
     }
 
     #[tokio::test]
     async fn redeem_invite_consumes_code() {
         let cache = FakeCache::new();
-        let svc = InviteService::new(cache.clone());
+        let svc = InviteService::new(cache);
         let device_id = test_device_id();
 
-        let invite = svc.create_invite(&device_id).await.unwrap();
+        let invite = svc
+            .create_invite(&device_id, test_key_package_bytes())
+            .await
+            .unwrap();
         // First redemption succeeds
         svc.redeem_invite(&invite.code).await.unwrap();
         // Second redemption fails — code consumed

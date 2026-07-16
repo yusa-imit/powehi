@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as InvitesModule from "../api/invites";
+import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
 import { useAuthStore } from "../store/auth";
 import { InviteModal } from "./InviteModal";
 
@@ -8,9 +9,12 @@ import { InviteModal } from "./InviteModal";
 
 vi.mock("../api/invites", () => ({
 	createInvite: vi.fn(),
-	buildInviteUrl: vi.fn((origin: string, code: string) => `${origin}/i/connect#${code}`),
+	buildInviteUrl: vi.fn(
+		(origin: string, code: string, keyPackageHash: string) =>
+			`${origin}/i/connect#${code}.${keyPackageHash}`,
+	),
 	redeemInvite: vi.fn(),
-	extractInviteCode: vi.fn(),
+	extractInviteData: vi.fn(),
 }));
 
 const QR_DATA_URL =
@@ -30,10 +34,37 @@ const createInviteSpy = vi.spyOn(InvitesModule, "createInvite");
 
 const TOKEN = "test-session-token";
 const CODE = "aabbccdd00112233aabbccdd00112233";
-const INVITE_URL = `http://localhost:3000/i/connect#${CODE}`;
+const MOCK_KEY_PACKAGE = new Uint8Array(Array.from({ length: 64 }, (_, i) => i));
+
+async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
+	const digest = await crypto.subtle.digest("SHA-256", bytes);
+	return Array.from(new Uint8Array(digest))
+		.map((b) => b.toString(16).padStart(2, "0"))
+		.join("");
+}
+
+// The invite URL's #fragment must carry the *real* hash InviteModal computes
+// locally (never a server-supplied one) — computed once against the actual
+// Web Crypto API rather than mocked away.
+let HASH: string;
+let INVITE_URL: string;
+beforeAll(async () => {
+	HASH = await sha256Hex(MOCK_KEY_PACKAGE);
+	INVITE_URL = `http://localhost:3000/i/connect#${CODE}.${HASH}`;
+});
+
+const mockCryptoWorker = {
+	mlsGetKeyPackage: vi.fn(async () => ({
+		keyPackage: MOCK_KEY_PACKAGE,
+		pqDecapKeyHandle: "mock-pq-handle",
+	})),
+};
 
 beforeEach(() => {
-	useAuthStore.setState({ sessionToken: TOKEN, phase: "app" });
+	useAuthStore.setState({ sessionToken: TOKEN, phase: "app", identityId: "identity-abc" });
+	vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
+		mockCryptoWorker as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
+	);
 	Object.defineProperty(window, "location", {
 		value: { origin: "http://localhost:3000" },
 		writable: true,
@@ -70,12 +101,28 @@ describe("InviteModal rendering", () => {
 // ── Create flow ───────────────────────────────────────────────────────────────
 
 describe("InviteModal create flow", () => {
-	it("calls createInvite with session token on button click", async () => {
+	it("generates a fresh KeyPackage and calls createInvite with it", async () => {
 		render(<InviteModal open={true} onClose={vi.fn()} />);
 		await act(async () => {
 			fireEvent.click(screen.getByText("Create invite link"));
 		});
-		expect(createInviteSpy).toHaveBeenCalledWith(TOKEN);
+		await waitFor(() => {
+			expect(screen.getByTestId("invite-url")).toBeDefined();
+		});
+		expect(mockCryptoWorker.mlsGetKeyPackage).toHaveBeenCalledWith("identity-abc");
+		expect(createInviteSpy).toHaveBeenCalledWith(TOKEN, MOCK_KEY_PACKAGE);
+	});
+
+	it("shows error state when identityId is missing (crypto not initialised)", async () => {
+		useAuthStore.setState({ identityId: null });
+		render(<InviteModal open={true} onClose={vi.fn()} />);
+		await act(async () => {
+			fireEvent.click(screen.getByText("Create invite link"));
+		});
+		await waitFor(() => {
+			expect(screen.getByText(/Could not create invite link/)).toBeDefined();
+		});
+		expect(createInviteSpy).not.toHaveBeenCalled();
 	});
 
 	it("shows invite URL after successful creation", async () => {
@@ -100,7 +147,7 @@ describe("InviteModal create flow", () => {
 		});
 		const urlText = screen.getByTestId("invite-url").textContent ?? "";
 		const parsed = new URL(urlText);
-		expect(parsed.hash).toBe(`#${CODE}`);
+		expect(parsed.hash).toBe(`#${CODE}.${HASH}`);
 		expect(parsed.pathname).not.toContain(CODE);
 	});
 

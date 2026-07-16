@@ -302,7 +302,11 @@ mod tests {
     struct NoopInvite;
     #[async_trait]
     impl InviteUseCase for NoopInvite {
-        async fn create_invite(&self, _: &DeviceId) -> Result<CreatedInvite, DomainError> {
+        async fn create_invite(
+            &self,
+            _: &DeviceId,
+            _: Vec<u8>,
+        ) -> Result<CreatedInvite, DomainError> {
             unimplemented!()
         }
         async fn redeem_invite(&self, _: &str) -> Result<RedeemedInvite, DomainError> {

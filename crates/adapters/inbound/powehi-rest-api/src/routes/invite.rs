@@ -1,9 +1,9 @@
 //! Contact invite link routes (prd.md §8.3).
 //!
 //! One-time invite codes allow authenticated devices to share a contact URL
-//! out-of-band (QR code, link, etc.). The recipient redeems the code once
-//! to discover the inviting device's ID, then fetches their KeyPackage to
-//! create an MLS group.
+//! out-of-band (QR code, link, etc.). The inviting client generates a fresh
+//! KeyPackage itself and pins it to the invite; the recipient redeems the
+//! code once to get back the inviting device's ID and that exact KeyPackage.
 //!
 //! Routes:
 //!   POST  /v1/invites         — create a 24-hour one-time invite code
@@ -12,12 +12,29 @@
 //! Design note (threat model §8.3): the invite code is sent in the request body,
 //! not the URL path, so it never appears in access logs, WAF rule traces, or CDN
 //! request logs. This preserves the fragment-scheme intent from §8.3.
+//!
+//! Security note: this server deliberately never computes or returns a hash of
+//! the KeyPackage. The inviting client hashes its own locally-generated
+//! KeyPackage bytes BEFORE calling `create`, and embeds that hash in the
+//! invite URL's `#fragment` (never sent to this server). Were this server to
+//! compute the hash instead, a compromised/malicious deployment could return
+//! an attacker-controlled KeyPackage + a matching self-authored hash at both
+//! `create` and `redeem`, defeating verification entirely — the whole point
+//! is that the server has no opportunity to author the value being checked.
 
 use axum::{extract::State, http::StatusCode, Json};
 use powehi_domain::error::DomainError;
 use serde::{Deserialize, Serialize};
 
 use crate::{error::ApiError, middleware::AuthenticatedDevice, AppState};
+
+#[derive(Deserialize)]
+pub struct CreateInviteRequest {
+    /// KeyPackage bytes the inviting client generated itself (never chosen or
+    /// authored by the server). JSON array of integers, matching the existing
+    /// `GET /v1/key-packages/:id` wire convention.
+    pub key_package: Vec<u8>,
+}
 
 #[derive(Serialize)]
 pub struct CreateInviteResponse {
@@ -32,14 +49,22 @@ pub struct RedeemInviteRequest {
 #[derive(Serialize)]
 pub struct RedeemInviteResponse {
     pub device_id: String,
+    /// The exact KeyPackage bytes supplied to `create`. JSON array of
+    /// integers, matching the existing `GET /v1/key-packages/:id` wire convention.
+    pub key_package: Vec<u8>,
 }
 
-/// `POST /v1/invites` — create a one-time 24-hour invite code.
+/// `POST /v1/invites` — create a one-time 24-hour invite code, pinned to a
+/// KeyPackage the calling client generated and supplies in the request body.
 pub async fn create(
     State(state): State<AppState>,
     AuthenticatedDevice(device_id): AuthenticatedDevice,
+    Json(body): Json<CreateInviteRequest>,
 ) -> Result<(StatusCode, Json<CreateInviteResponse>), ApiError> {
-    let invite = state.invite.create_invite(&device_id).await?;
+    let invite = state
+        .invite
+        .create_invite(&device_id, body.key_package)
+        .await?;
     Ok((
         StatusCode::CREATED,
         Json(CreateInviteResponse { code: invite.code }),
@@ -51,8 +76,11 @@ pub async fn create(
 /// The code is sent in the request body (not the URL path) to avoid it
 /// appearing in access logs or WAF traces (threat model §8.3).
 ///
-/// Returns the inviting device's opaque UUID so the caller can fetch their
-/// KeyPackage via `GET /v1/key-packages/:device_id` and initiate an MLS Welcome.
+/// Returns the inviting device's opaque UUID and the KeyPackage pinned at
+/// invite-creation time. The caller MUST recompute SHA-256 over `key_package`
+/// and compare it against the hash it holds out-of-band (from the invite
+/// URL's `#fragment`, produced by the INVITER's client, never this server)
+/// before trusting it for an MLS Welcome.
 pub async fn redeem(
     State(state): State<AppState>,
     AuthenticatedDevice(_caller): AuthenticatedDevice,
@@ -75,6 +103,7 @@ pub async fn redeem(
     let redeemed = state.invite.redeem_invite(&code).await?;
     Ok(Json(RedeemInviteResponse {
         device_id: redeemed.device_id.as_uuid().to_string(),
+        key_package: redeemed.key_package,
     }))
 }
 
@@ -321,7 +350,11 @@ mod tests {
 
     #[async_trait]
     impl InviteUseCase for MockInviteSuccess {
-        async fn create_invite(&self, _: &DeviceId) -> Result<CreatedInvite, DomainError> {
+        async fn create_invite(
+            &self,
+            _: &DeviceId,
+            _: Vec<u8>,
+        ) -> Result<CreatedInvite, DomainError> {
             Ok(CreatedInvite {
                 code: "aabbccdd00112233aabbccdd00112233".to_string(),
             })
@@ -330,6 +363,7 @@ mod tests {
         async fn redeem_invite(&self, _: &str) -> Result<RedeemedInvite, DomainError> {
             Ok(RedeemedInvite {
                 device_id: invited_device_id(),
+                key_package: vec![1, 2, 3, 4],
             })
         }
     }
@@ -338,7 +372,11 @@ mod tests {
 
     #[async_trait]
     impl InviteUseCase for MockInviteNotFound {
-        async fn create_invite(&self, _: &DeviceId) -> Result<CreatedInvite, DomainError> {
+        async fn create_invite(
+            &self,
+            _: &DeviceId,
+            _: Vec<u8>,
+        ) -> Result<CreatedInvite, DomainError> {
             Err(DomainError::Internal("not configured".into()))
         }
 
@@ -420,6 +458,10 @@ mod tests {
         Body::from(serde_json::json!({ "code": code }).to_string())
     }
 
+    fn create_body(key_package: &[u8]) -> Body {
+        Body::from(serde_json::json!({ "key_package": key_package }).to_string())
+    }
+
     // ── Tests ────────────────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -447,7 +489,8 @@ mod tests {
                     .method("POST")
                     .uri("/v1/invites")
                     .header("Authorization", bearer_header())
-                    .body(Body::empty())
+                    .header("content-type", "application/json")
+                    .body(create_body(&[1, 2, 3, 4]))
                     .unwrap(),
             )
             .await
@@ -457,6 +500,10 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json["code"].is_string());
         assert_eq!(json["code"].as_str().unwrap().len(), 32);
+        // No hash in the response — the server never authors or returns one
+        // (see module doc comment: the client must hash its own KeyPackage
+        // locally, before this call, for the invite URL fragment).
+        assert!(json.get("key_package_hash").is_none());
     }
 
     #[tokio::test]

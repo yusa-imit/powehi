@@ -1,8 +1,16 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	type MockInstance,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
 import * as GroupsApi from "../api/groups";
 import * as InvitesApi from "../api/invites";
-import * as KeyPackagesApi from "../api/key_packages";
 import * as MessagesApi from "../api/messages";
 import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
 import { useAuthStore } from "../store/auth";
@@ -13,6 +21,22 @@ import { AcceptInviteModal } from "./AcceptInviteModal";
 const INVITE_CODE = "a".repeat(32);
 const INVITER_DEVICE_ID = "inviter-device-00000000-0000-0000-0000";
 const MOCK_GROUP_ID = "mock-group-id-00000000-0000-0000-0000-000000000000";
+const MOCK_KEY_PACKAGE = Array.from({ length: 200 }, (_, i) => i % 256);
+
+async function sha256Hex(bytes: number[]): Promise<string> {
+	const digest = await crypto.subtle.digest("SHA-256", new Uint8Array(bytes));
+	return Array.from(new Uint8Array(digest))
+		.map((b) => b.toString(16).padStart(2, "0"))
+		.join("");
+}
+
+// The real SHA-256 hex digest of MOCK_KEY_PACKAGE — computed once so tests can
+// exercise the actual verification path (AcceptInviteModal calls crypto.subtle
+// itself), rather than mocking it away.
+let MOCK_KEY_PACKAGE_HASH: string;
+beforeAll(async () => {
+	MOCK_KEY_PACKAGE_HASH = await sha256Hex(MOCK_KEY_PACKAGE);
+});
 
 // ── Crypto worker mock ───────────────────────────────────────────────────────
 
@@ -38,7 +62,6 @@ const mockCryptoWorker = {
 // ── Spies ────────────────────────────────────────────────────────────────────
 
 let redeemInviteSpy: MockInstance<typeof InvitesApi.redeemInvite>;
-let fetchKeyPackageSpy: MockInstance<typeof KeyPackagesApi.fetchKeyPackage>;
 let createGroupSpy: MockInstance<typeof GroupsApi.createGroup>;
 let addMemberSpy: MockInstance<typeof GroupsApi.addMember>;
 let sendWelcomeSpy: MockInstance<typeof MessagesApi.sendWelcome>;
@@ -52,6 +75,7 @@ function renderModal(overrides?: Partial<Parameters<typeof AcceptInviteModal>[0]
 	render(
 		<AcceptInviteModal
 			inviteCode={INVITE_CODE}
+			keyPackageHash={MOCK_KEY_PACKAGE_HASH}
 			onClose={onClose}
 			onAccepted={onAccepted}
 			{...overrides}
@@ -72,12 +96,10 @@ beforeEach(() => {
 	vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
 		mockCryptoWorker as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
 	);
-	redeemInviteSpy = vi
-		.spyOn(InvitesApi, "redeemInvite")
-		.mockResolvedValue({ device_id: INVITER_DEVICE_ID });
-	fetchKeyPackageSpy = vi
-		.spyOn(KeyPackagesApi, "fetchKeyPackage")
-		.mockResolvedValue(new Uint8Array(200));
+	redeemInviteSpy = vi.spyOn(InvitesApi, "redeemInvite").mockResolvedValue({
+		device_id: INVITER_DEVICE_ID,
+		key_package: MOCK_KEY_PACKAGE,
+	});
 	createGroupSpy = vi.spyOn(GroupsApi, "createGroup").mockResolvedValue(undefined);
 	addMemberSpy = vi.spyOn(GroupsApi, "addMember").mockResolvedValue(undefined);
 	sendWelcomeSpy = vi.spyOn(MessagesApi, "sendWelcome").mockResolvedValue(undefined);
@@ -119,7 +141,10 @@ describe("AcceptInviteModal — render", () => {
 describe("AcceptInviteModal — accept flow success", () => {
 	it("shows loading state while accepting", async () => {
 		redeemInviteSpy.mockImplementation(
-			() => new Promise((r) => setTimeout(() => r({ device_id: INVITER_DEVICE_ID }), 50)),
+			() =>
+				new Promise((r) =>
+					setTimeout(() => r({ device_id: INVITER_DEVICE_ID, key_package: MOCK_KEY_PACKAGE }), 50),
+				),
 		);
 		renderModal();
 
@@ -166,6 +191,23 @@ describe("AcceptInviteModal — accept flow success", () => {
 		expect(addMemberSpy).toHaveBeenCalledWith("tok-test", MOCK_GROUP_ID, INVITER_DEVICE_ID, 1);
 	});
 
+	it("passes the redeemed KeyPackage bytes to mlsAddMember once verified", async () => {
+		renderModal();
+
+		await act(async () => {
+			fireEvent.click(screen.getByRole("button", { name: /connect/i }));
+		});
+
+		await waitFor(() =>
+			expect(screen.getByText(/encrypted channel established/i)).toBeInTheDocument(),
+		);
+		expect(mockCryptoWorker.mlsAddMember).toHaveBeenCalledWith(
+			"identity-abc",
+			MOCK_GROUP_ID,
+			new Uint8Array(MOCK_KEY_PACKAGE),
+		);
+	});
+
 	it("calls onAccepted with the groupId when Open chat is clicked", async () => {
 		const { onAccepted } = renderModal();
 
@@ -193,8 +235,14 @@ describe("AcceptInviteModal — error paths", () => {
 		});
 	});
 
-	it("shows 'no_key_package' error when fetchKeyPackage fails", async () => {
-		fetchKeyPackageSpy.mockRejectedValue(new Error("http_404"));
+	it("shows 'verification_failed' error when the redeemed KeyPackage doesn't match the invite hash", async () => {
+		// Simulates a server substituting a different KeyPackage than the one
+		// the inviter actually reserved — the hash embedded in the invite URL
+		// (never seen by the server) won't match what comes back.
+		redeemInviteSpy.mockResolvedValue({
+			device_id: INVITER_DEVICE_ID,
+			key_package: [9, 9, 9, 9],
+		});
 		renderModal();
 
 		await act(async () => {
@@ -202,8 +250,13 @@ describe("AcceptInviteModal — error paths", () => {
 		});
 
 		await waitFor(() => {
-			expect(screen.getByText(/encryption key is unavailable/i)).toBeInTheDocument();
+			expect(
+				screen.getByText(/could not verify this contact.s encryption key/i),
+			).toBeInTheDocument();
 		});
+		// Must abort before ever creating a group or sending a Welcome.
+		expect(createGroupSpy).not.toHaveBeenCalled();
+		expect(sendWelcomeSpy).not.toHaveBeenCalled();
 	});
 
 	it("shows generic error when createGroup fails", async () => {

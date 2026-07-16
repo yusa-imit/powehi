@@ -1,10 +1,12 @@
 /**
  * AcceptInviteModal — invite acceptance flow (prd.md §8.3, receiving side).
  *
- * When a user opens powehi.app/i/connect#<code>, App detects the code and
- * renders this modal. The user clicks "Connect" to:
- *   1. Redeem the one-time code → inviter's DeviceId
- *   2. Fetch the inviter's KeyPackage (single-use)
+ * When a user opens powehi.app/i/connect#<code>.<keyPackageHash>, App detects
+ * the fragment and renders this modal. The user clicks "Connect" to:
+ *   1. Redeem the one-time code → inviter's DeviceId + reserved KeyPackage
+ *   2. Verify the KeyPackage against `keyPackageHash` (from the URL fragment,
+ *      never seen by the server) — detects a compromised server substituting
+ *      an attacker-controlled KeyPackage
  *   3. Create a new MLS group (recipient is creator/sole member)
  *   4. Add the inviter via MLS mlsAddMember → Welcome message
  *   5. Register the group + inviter membership with the server
@@ -14,12 +16,13 @@
  * - The invite code travels in the request body (never URL path).
  * - The server sees only opaque UUIDs (groupId, deviceId) — never plaintext.
  * - The Welcome message is MLS ciphertext — server cannot decrypt it.
+ * - The KeyPackage hash comparison in step 2 happens entirely client-side
+ *   against data the server never had access to (the URL fragment).
  */
 
 import { useState } from "react";
 import { addMember, createGroup } from "../api/groups";
 import { redeemInvite } from "../api/invites";
-import { fetchKeyPackage } from "../api/key_packages";
 import { sendMessage, sendWelcome } from "../api/messages";
 import { useCryptoWorker } from "../hooks/useCryptoWorker";
 import { useAuthStore } from "../store/auth";
@@ -27,6 +30,8 @@ import { Icon } from "./Icon";
 
 interface AcceptInviteModalProps {
 	inviteCode: string;
+	/** SHA-256 hex digest of the inviter's KeyPackage, from the invite URL's #fragment. */
+	keyPackageHash: string;
 	onClose: () => void;
 	/** Called with the new groupId and the inviter's deviceId after the full accept flow succeeds. */
 	onAccepted: (groupId: string, peerDeviceId: string) => void;
@@ -34,14 +39,14 @@ interface AcceptInviteModalProps {
 
 type Step = "idle" | "loading" | "accepted" | "error";
 
-type ErrorKind = "expired" | "no_key_package" | "no_identity" | "generic";
+type ErrorKind = "expired" | "verification_failed" | "no_identity" | "generic";
 
 function errorMessage(kind: ErrorKind): string {
 	switch (kind) {
 		case "expired":
 			return "This invite has already been used or has expired.";
-		case "no_key_package":
-			return "Contact’s encryption key is unavailable. Ask them to send a new invite.";
+		case "verification_failed":
+			return "Could not verify this contact’s encryption key. The invite link may be corrupted — ask them to send a new one.";
 		case "no_identity":
 			return "Secure session not fully initialised. Please log out and log in again.";
 		case "generic":
@@ -49,7 +54,19 @@ function errorMessage(kind: ErrorKind): string {
 	}
 }
 
-export function AcceptInviteModal({ inviteCode, onClose, onAccepted }: AcceptInviteModalProps) {
+async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
+	const digest = await crypto.subtle.digest("SHA-256", bytes);
+	return Array.from(new Uint8Array(digest))
+		.map((b) => b.toString(16).padStart(2, "0"))
+		.join("");
+}
+
+export function AcceptInviteModal({
+	inviteCode,
+	keyPackageHash,
+	onClose,
+	onAccepted,
+}: AcceptInviteModalProps) {
 	const { sessionToken, deviceId, identityId } = useAuthStore();
 	const cryptoWorker = useCryptoWorker();
 
@@ -70,16 +87,21 @@ export function AcceptInviteModal({ inviteCode, onClose, onAccepted }: AcceptInv
 		setStep("loading");
 
 		try {
-			// Step 1: redeem the one-time code → inviter's DeviceId
-			const { device_id: inviterDeviceId } = await redeemInvite(sessionToken, inviteCode);
+			// Step 1: redeem the one-time code → inviter's DeviceId + reserved KeyPackage
+			const { device_id: inviterDeviceId, key_package } = await redeemInvite(
+				sessionToken,
+				inviteCode,
+			);
 			setPeerDeviceId(inviterDeviceId);
+			const keyPackage = new Uint8Array(key_package);
 
-			// Step 2: fetch inviter's KeyPackage (single-use, atomically consumed)
-			let keyPackage: Uint8Array;
-			try {
-				keyPackage = await fetchKeyPackage(sessionToken, inviterDeviceId);
-			} catch {
-				setErrorKind("no_key_package");
+			// Step 2: verify the KeyPackage against the hash embedded in the invite
+			// URL's #fragment — that fragment was never sent to the server, so a
+			// mismatch here means the server substituted a different KeyPackage
+			// (compromised server / MITM) than the one the inviter actually shared.
+			const actualHash = await sha256Hex(keyPackage);
+			if (actualHash !== keyPackageHash) {
+				setErrorKind("verification_failed");
 				setStep("error");
 				return;
 			}

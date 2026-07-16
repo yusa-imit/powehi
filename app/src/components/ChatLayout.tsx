@@ -10,7 +10,7 @@ import {
 	useRef,
 	useState,
 } from "react";
-import { extractInviteCode } from "../api/invites";
+import { extractInviteData } from "../api/invites";
 import { sendMessage as sendMessageApi } from "../api/messages";
 import { EncryptedPowehiDb } from "../db/encrypted-db";
 import { db } from "../db/schema";
@@ -6769,22 +6769,32 @@ export function ChatLayout() {
 	const [createGroupOpen, setCreateGroupOpen] = useState(false);
 	const [addMemberOpen, setAddMemberOpen] = useState(false);
 	const [inviteCode, setInviteCode] = useState<string | null>(null);
+	const [inviteKeyPackageHash, setInviteKeyPackageHash] = useState<string | null>(null);
 
-	// Detect invite code in URL fragment. The fragment is never transmitted to
-	// the server (RFC 3986 §3.5). ChatLayout only mounts once phase === "app",
-	// so no auth-phase guard is needed here (moved from App.tsx).
+	// Detect invite code + KeyPackage hash in the URL fragment. The fragment is
+	// never transmitted to the server (RFC 3986 §3.5), which is what lets the
+	// recipient verify the redeemed KeyPackage against `inviteKeyPackageHash`
+	// (see AcceptInviteModal) using data a compromised server never saw.
+	// ChatLayout only mounts once phase === "app", so no auth-phase guard is
+	// needed here (moved from App.tsx).
 	useEffect(() => {
-		const code = extractInviteCode(window.location.hash);
-		if (code) {
-			setInviteCode(code);
+		const data = extractInviteData(window.location.hash);
+		if (data) {
+			setInviteCode(data.code);
+			setInviteKeyPackageHash(data.keyPackageHash);
 			// Clear the hash so navigating away and back doesn't re-trigger the modal.
 			history.replaceState(null, "", window.location.pathname + window.location.search);
 		}
 	}, []);
 
-	// Receive invite codes from Tauri deep-link events (mobile/desktop).
-	// Silently ignored when running in a plain browser context.
-	useDeepLink(useCallback((code: string) => setInviteCode(code), []));
+	// Receive invite codes + KeyPackage hashes from Tauri deep-link events
+	// (mobile/desktop). Silently ignored when running in a plain browser context.
+	useDeepLink(
+		useCallback((invite: { code: string; keyPackageHash: string }) => {
+			setInviteCode(invite.code);
+			setInviteKeyPackageHash(invite.keyPackageHash);
+		}, []),
+	);
 	const [disappearingTtl, setDisappearingTtl] = useState<TtlOption>(undefined);
 	// Persisted pin state loaded from GroupRow.pinnedMessageId (cycle 259) — separate from
 	// the `rows`-driven message rehydration effect below since pinnedMessageId lives on the
@@ -8558,6 +8568,7 @@ export function ChatLayout() {
 			handleNewGroup({ groupId, senderDeviceId: peerDeviceId });
 			handleSelectChat(groupId);
 			setInviteCode(null);
+			setInviteKeyPackageHash(null);
 		},
 		[handleNewGroup, handleSelectChat],
 	);
@@ -9174,10 +9185,14 @@ export function ChatLayout() {
 				onGroupCreated={handleGroupCreated}
 			/>
 
-			{inviteCode !== null && (
+			{inviteCode !== null && inviteKeyPackageHash !== null && (
 				<AcceptInviteModal
 					inviteCode={inviteCode}
-					onClose={() => setInviteCode(null)}
+					keyPackageHash={inviteKeyPackageHash}
+					onClose={() => {
+						setInviteCode(null);
+						setInviteKeyPackageHash(null);
+					}}
 					onAccepted={handleInviteAccepted}
 				/>
 			)}

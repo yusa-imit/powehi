@@ -1,6 +1,7 @@
 import QRCode from "qrcode";
 import { useEffect, useState } from "react";
 import { buildInviteUrl, createInvite } from "../api/invites";
+import { useCryptoWorker } from "../hooks/useCryptoWorker";
 import { useAuthStore } from "../store/auth";
 import { Icon } from "./Icon";
 
@@ -11,19 +12,38 @@ interface InviteModalProps {
 
 type Step = "idle" | "loading" | "ready" | "error";
 
+async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
+	const digest = await crypto.subtle.digest("SHA-256", bytes);
+	return Array.from(new Uint8Array(digest))
+		.map((b) => b.toString(16).padStart(2, "0"))
+		.join("");
+}
+
 export function InviteModal({ open, onClose }: InviteModalProps) {
-	const { sessionToken } = useAuthStore();
+	const { sessionToken, identityId } = useAuthStore();
+	const cryptoWorker = useCryptoWorker();
 	const [step, setStep] = useState<Step>("idle");
 	const [inviteUrl, setInviteUrl] = useState("");
 	const [copied, setCopied] = useState(false);
 	const [qrDataUrl, setQrDataUrl] = useState("");
 
 	const handleCreate = async () => {
-		if (!sessionToken) return;
+		if (!sessionToken || !identityId || !cryptoWorker) {
+			setStep("error");
+			return;
+		}
 		setStep("loading");
 		try {
-			const { code } = await createInvite(sessionToken);
-			const url = buildInviteUrl(window.location.origin, code);
+			// Generate a fresh KeyPackage ourselves and hash it BEFORE it ever
+			// reaches the server — the invite URL's #fragment carries this
+			// locally-computed hash, never a server-supplied one, so the
+			// recipient can detect a compromised server substituting a
+			// different KeyPackage at redeem time (see AcceptInviteModal).
+			const { keyPackage: rawKeyPackage } = await cryptoWorker.mlsGetKeyPackage(identityId);
+			const keyPackage = new Uint8Array(rawKeyPackage);
+			const keyPackageHash = await sha256Hex(keyPackage);
+			const { code } = await createInvite(sessionToken, keyPackage);
+			const url = buildInviteUrl(window.location.origin, code, keyPackageHash);
 			setInviteUrl(url);
 			setStep("ready");
 		} catch {

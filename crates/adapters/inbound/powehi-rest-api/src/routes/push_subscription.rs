@@ -323,6 +323,7 @@ mod tests {
         async fn create_invite(
             &self,
             _: &DeviceId,
+            _: Vec<u8>,
         ) -> Result<powehi_port_inbound::invite::CreatedInvite, DomainError> {
             unimplemented!()
         }
