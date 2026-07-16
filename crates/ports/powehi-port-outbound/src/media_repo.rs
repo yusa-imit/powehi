@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use powehi_domain::{
     device::DeviceId,
     error::DomainError,
@@ -23,6 +24,23 @@ pub trait MediaRepository: Send + Sync {
         -> Result<(), DomainError>;
     /// Devices that have acknowledged `media_id` so far.
     async fn list_ack_device_ids(&self, media_id: &MediaId) -> Result<Vec<DeviceId>, DomainError>;
-    /// All blobs still present in storage (GC scan input).
-    async fn list_undeleted(&self) -> Result<Vec<MediaBlob>, DomainError>;
+
+    /// GC-eligible blob candidates only: a blob is a candidate when its
+    /// `expires_at` is set and at or before `now`, or (when `expires_at` is
+    /// unset) its `uploaded_at` is at or before `default_retention_cutoff`
+    /// (`now - retention`). Keyset-paginated by `id` for bounded memory per
+    /// call: pass the last returned blob's `id` as `after_id` to fetch the next
+    /// page. Returns rows ordered by `id`, at most `limit` of them; fewer than
+    /// `limit` rows means the candidate set is exhausted.
+    ///
+    /// The eligibility filter is pushed into SQL so the hourly GC sweep never
+    /// loads non-eligible rows into memory (security-auditor cycle 289: the old
+    /// unfiltered full-table scan was an OOM/DoS risk as `media_blobs` grows).
+    async fn list_gc_candidates(
+        &self,
+        now: DateTime<Utc>,
+        default_retention_cutoff: DateTime<Utc>,
+        after_id: Option<MediaId>,
+        limit: i64,
+    ) -> Result<Vec<MediaBlob>, DomainError>;
 }

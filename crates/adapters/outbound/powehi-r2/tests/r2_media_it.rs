@@ -584,27 +584,91 @@ async fn record_ack_for_unknown_media_id_is_rejected() {
 
 #[tokio::test]
 #[ignore = "requires Docker (testcontainers)"]
-async fn list_undeleted_returns_all_saved_blobs_and_omits_deleted() {
+async fn list_gc_candidates_filters_paginates_and_keysets() {
     let h = setup().await;
     let device = insert_device(&h.pool).await;
-    let a = media_fixture(device.clone(), None);
-    let b = media_fixture(device.clone(), None);
-    h.adapter.save(&a).await.expect("save a");
-    h.adapter.save(&b).await.expect("save b");
 
-    let undeleted = h.adapter.list_undeleted().await.expect("list_undeleted");
-    assert_eq!(undeleted.len(), 2);
-    assert!(undeleted.iter().any(|blob| blob.id == a.id));
-    assert!(undeleted.iter().any(|blob| blob.id == b.id));
+    let now = Utc::now();
+    let cutoff = now - chrono::Duration::days(30);
 
-    h.adapter.delete(&a.id).await.expect("delete a");
-    let undeleted = h
+    // Three GC-eligible blobs (uploaded past the 30-day retention window, no
+    // explicit expiry) ...
+    let mut eligible: Vec<MediaId> = Vec::new();
+    for _ in 0..3 {
+        let mut b = media_fixture(device.clone(), None);
+        b.uploaded_at = now - chrono::Duration::days(31);
+        h.adapter.save(&b).await.expect("save eligible");
+        eligible.push(b.id);
+    }
+    // ... and one too-recent blob that must be excluded from candidates.
+    let mut recent = media_fixture(device.clone(), None);
+    recent.uploaded_at = now;
+    h.adapter.save(&recent).await.expect("save recent");
+
+    // Full candidate set: exactly the 3 eligible rows, never the recent one,
+    // ordered by id ascending (the keyset invariant).
+    let all = h
         .adapter
-        .list_undeleted()
+        .list_gc_candidates(now, cutoff, None, 100)
         .await
-        .expect("list_undeleted after delete");
-    assert_eq!(undeleted.len(), 1);
-    assert_eq!(undeleted[0].id, b.id);
+        .expect("list_gc_candidates");
+    assert_eq!(all.len(), 3, "only eligible blobs are candidates");
+    assert!(
+        all.iter().all(|blob| blob.id != recent.id),
+        "too-recent blob must be excluded"
+    );
+    for id in &eligible {
+        assert!(
+            all.iter().any(|blob| &blob.id == id),
+            "each eligible blob must appear"
+        );
+    }
+    assert!(
+        all.windows(2)
+            .all(|w| w[0].id.as_uuid() < w[1].id.as_uuid()),
+        "candidates must be ordered by id ascending"
+    );
+
+    // LIMIT caps the page size ...
+    let page1 = h
+        .adapter
+        .list_gc_candidates(now, cutoff, None, 2)
+        .await
+        .expect("page1");
+    assert_eq!(page1.len(), 2, "LIMIT must cap the page size");
+
+    // ... and keyset pagination from the last id returns the remaining rows
+    // with no repeats and no skips.
+    let last = page1.last().expect("page1 not empty").id.clone();
+    let page2 = h
+        .adapter
+        .list_gc_candidates(now, cutoff, Some(last), 2)
+        .await
+        .expect("page2");
+    assert_eq!(
+        page2.len(),
+        1,
+        "exactly one eligible blob remains after page1"
+    );
+
+    let mut seen: Vec<MediaId> = page1
+        .iter()
+        .chain(page2.iter())
+        .map(|blob| blob.id.clone())
+        .collect();
+    seen.sort_by_key(MediaId::as_uuid);
+    seen.dedup();
+    assert_eq!(
+        seen.len(),
+        3,
+        "the two pages must be disjoint and cover every eligible blob"
+    );
+    for id in &eligible {
+        assert!(
+            seen.contains(id),
+            "every eligible blob must appear exactly once across pages"
+        );
+    }
 }
 
 #[tokio::test]

@@ -282,12 +282,34 @@ impl MediaRepository for R2MediaAdapter {
         Ok(rows.into_iter().map(|(id,)| DeviceId::from(id)).collect())
     }
 
-    #[instrument(skip(self))]
-    async fn list_undeleted(&self) -> Result<Vec<MediaBlob>, DomainError> {
+    #[instrument(skip(self, now, default_retention_cutoff, after_id), fields(limit = %limit))]
+    async fn list_gc_candidates(
+        &self,
+        now: DateTime<Utc>,
+        default_retention_cutoff: DateTime<Utc>,
+        after_id: Option<MediaId>,
+        limit: i64,
+    ) -> Result<Vec<MediaBlob>, DomainError> {
+        // Eligibility is filtered in SQL and keyset-paginated by `id` so the
+        // hourly GC sweep never loads non-eligible or already-scanned rows into
+        // memory (security-auditor cycle 289; prd.md §9.4.3). Keyset (`id > $1`),
+        // NOT OFFSET: run_gc deletes matching rows as it scans, so OFFSET would
+        // skip or re-scan rows across pages.
         let rows = sqlx::query_as::<_, MediaBlobRow>(
             "SELECT id, uploader_device_id, storage_key, content_type, size_bytes, uploaded_at, expires_at, group_id
-             FROM media_blobs",
+             FROM media_blobs
+             WHERE ($1::uuid IS NULL OR id > $1)
+               AND (
+                 (expires_at IS NOT NULL AND expires_at <= $2)
+                 OR (expires_at IS NULL AND uploaded_at <= $3)
+               )
+             ORDER BY id
+             LIMIT $4",
         )
+        .bind(after_id.map(|id| id.as_uuid()))
+        .bind(now)
+        .bind(default_retention_cutoff)
+        .bind(limit)
         .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx)?;

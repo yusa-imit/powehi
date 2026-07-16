@@ -7,6 +7,12 @@ const MAX_MEDIA_BYTES: u64 = 100 * 1024 * 1024;
 /// never fully acknowledged (or have no recipients besides the uploader).
 const GC_RETENTION_DAYS: i64 = 30;
 
+/// Max GC candidates fetched per `list_gc_candidates` call. The hourly sweep
+/// pages through candidates in keyset-paginated batches of this size so a large
+/// `media_blobs` table can never be pulled fully into memory (security-auditor
+/// cycle 289; prd.md §9.4.3).
+const GC_BATCH_SIZE: i64 = 500;
+
 fn size_bucket(bytes: u64) -> &'static str {
     match bytes {
         0..=1_024 => "<=1KB",
@@ -69,6 +75,60 @@ impl MediaService {
             media_repo,
             group_repo,
         }
+    }
+
+    /// GC sweep with an explicit candidate batch size. `run_gc` calls this with
+    /// `GC_BATCH_SIZE`; tests pass a small size to exercise multi-page keyset
+    /// pagination. Candidates arrive from the repo already filtered to the
+    /// GC-eligible set (expires_at / retention cutoff pushed into SQL), so this
+    /// loop only applies the per-blob all-recipients-acked check before deleting.
+    async fn run_gc_batched(&self, limit: i64) -> Result<usize, DomainError> {
+        let now = chrono::Utc::now();
+        let retention = chrono::Duration::days(GC_RETENTION_DAYS);
+        let default_retention_cutoff = now - retention;
+        let mut deleted = 0usize;
+        let mut after_id: Option<MediaId> = None;
+        loop {
+            let batch = self
+                .media_repo
+                .list_gc_candidates(now, default_retention_cutoff, after_id.clone(), limit)
+                .await?;
+            let batch_len = batch.len();
+            // Advance the keyset cursor to the last id in the page BEFORE any
+            // delete. A blob that stays (unacked recipients) must not be
+            // re-fetched on the next page, which would loop forever.
+            if let Some(last) = batch.last() {
+                after_id = Some(last.id.clone());
+            }
+            for blob in batch {
+                let required_ackers: Vec<DeviceId> = match &blob.group_id {
+                    Some(gid) => self
+                        .group_repo
+                        .list_members(gid)
+                        .await?
+                        .into_iter()
+                        .map(|m| m.device_id)
+                        .filter(|d| d != &blob.uploader_device)
+                        .collect(),
+                    None => Vec::new(),
+                };
+                let all_acked = if required_ackers.is_empty() {
+                    true
+                } else {
+                    let acked = self.media_repo.list_ack_device_ids(&blob.id).await?;
+                    required_ackers.iter().all(|d| acked.contains(d))
+                };
+                if all_acked {
+                    self.media_repo.delete(&blob.id).await?;
+                    deleted += 1;
+                }
+            }
+            // A short page means the candidate set is exhausted.
+            if (batch_len as i64) < limit {
+                break;
+            }
+        }
+        Ok(deleted)
     }
 }
 
@@ -193,37 +253,7 @@ impl MediaUseCase for MediaService {
 
     #[instrument(skip(self))]
     async fn run_gc(&self) -> Result<usize, DomainError> {
-        let now = chrono::Utc::now();
-        let retention = chrono::Duration::days(GC_RETENTION_DAYS);
-        let mut deleted = 0usize;
-        for blob in self.media_repo.list_undeleted().await? {
-            let eligible_at = blob.expires_at.unwrap_or(blob.uploaded_at + retention);
-            if now < eligible_at {
-                continue;
-            }
-            let required_ackers: Vec<DeviceId> = match &blob.group_id {
-                Some(gid) => self
-                    .group_repo
-                    .list_members(gid)
-                    .await?
-                    .into_iter()
-                    .map(|m| m.device_id)
-                    .filter(|d| d != &blob.uploader_device)
-                    .collect(),
-                None => Vec::new(),
-            };
-            let all_acked = if required_ackers.is_empty() {
-                true
-            } else {
-                let acked = self.media_repo.list_ack_device_ids(&blob.id).await?;
-                required_ackers.iter().all(|d| acked.contains(d))
-            };
-            if all_acked {
-                self.media_repo.delete(&blob.id).await?;
-                deleted += 1;
-            }
-        }
-        Ok(deleted)
+        self.run_gc_batched(GC_BATCH_SIZE).await
     }
 }
 
@@ -303,8 +333,36 @@ mod tests {
                 .map(|(_, did)| did.clone())
                 .collect())
         }
-        async fn list_undeleted(&self) -> Result<Vec<MediaBlob>, DomainError> {
-            Ok(self.saved.lock().unwrap().clone())
+        async fn list_gc_candidates(
+            &self,
+            now: chrono::DateTime<chrono::Utc>,
+            default_retention_cutoff: chrono::DateTime<chrono::Utc>,
+            after_id: Option<MediaId>,
+            limit: i64,
+        ) -> Result<Vec<MediaBlob>, DomainError> {
+            // Mirror the SQL filter/keyset semantics in-memory so the service's
+            // GC pagination logic is exercised the same way it is against Postgres.
+            let mut rows: Vec<MediaBlob> = self
+                .saved
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|b| {
+                    let eligible = match b.expires_at {
+                        Some(exp) => exp <= now,
+                        None => b.uploaded_at <= default_retention_cutoff,
+                    };
+                    let after = after_id
+                        .as_ref()
+                        .map(|a| b.id.as_uuid() > a.as_uuid())
+                        .unwrap_or(true);
+                    eligible && after
+                })
+                .cloned()
+                .collect();
+            rows.sort_by_key(|b| b.id.as_uuid());
+            rows.truncate(limit as usize);
+            Ok(rows)
         }
     }
 
@@ -795,5 +853,47 @@ mod tests {
         let repo = Arc::new(MockMediaRepo::new("u", "d"));
         let s = svc(repo.clone());
         assert_eq!(s.run_gc().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn run_gc_batched_paginates_across_multiple_batches() {
+        // More eligible candidates than one batch holds must ALL be GC'd, proving
+        // the keyset cursor advances across pages without skipping rows.
+        let repo = Arc::new(MockMediaRepo::new("u", "d"));
+        for _ in 0..5 {
+            repo.save(&old_blob(DeviceId::new(), None)).await.unwrap();
+        }
+        let s = svc(repo.clone());
+        // Batch size 2 over 5 candidates => pages of 2, 2, 1.
+        let deleted = s.run_gc_batched(2).await.unwrap();
+        assert_eq!(deleted, 5);
+        assert!(repo.saved.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_gc_batched_does_not_loop_on_undeletable_blob() {
+        // An eligible-but-undeletable blob (grouped, recipient hasn't acked) must
+        // not stall the sweep: with batch size 1 the cursor still advances past it
+        // so the run terminates and later deletable blobs are still collected.
+        let repo = Arc::new(MockMediaRepo::new("u", "d"));
+        let uploader = DeviceId::new();
+        let member = DeviceId::new();
+        let group = GroupId::new();
+        repo.save(&old_blob(uploader.clone(), Some(group.clone())))
+            .await
+            .unwrap();
+        repo.save(&old_blob(DeviceId::new(), None)).await.unwrap();
+        let group_repo = FakeGroupRepo::with_members(vec![
+            (group.clone(), uploader.clone()),
+            (group.clone(), member.clone()),
+        ]);
+        let s = MediaService::new(repo.clone(), group_repo);
+        let deleted = s.run_gc_batched(1).await.unwrap();
+        assert_eq!(deleted, 1, "only the ungrouped blob is deletable");
+        assert_eq!(
+            repo.saved.lock().unwrap().len(),
+            1,
+            "the unacked grouped blob must remain"
+        );
     }
 }
