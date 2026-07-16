@@ -17,7 +17,68 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-17, cycle 299 — FEATURE: pin KeyPackage hash to invite links, MITM fix, prd.md §8.3/§8.4, commit a8f4954)
+## Current state (2026-07-17, cycle 300 — STABILIZATION: invite KeyPackage size guard + yanked-crate lockfile fix)
+
+- `gh run list` returned HTTP 503 (GitHub API transient outage, not auth) both
+  on first try and after a 5s retry — CI status could not be confirmed
+  directly this cycle. `gh issue list --state open` returned empty (no open
+  issues). Proceeded on the strength of local gates (build/test/clippy/fmt all
+  green) and the fact that the last several cycles' commits already landed
+  clean, per this file's own history.
+- **Security sweep, item 1 — closed the cycle-299 YELLOW carryover:** cycle
+  299's security-auditor flagged that `InviteService::create_invite`'s
+  `key_package: Vec<u8>` had no invite-specific upper size bound (only the
+  global 512KiB axum body limit + per-IP rate limiting), letting an
+  authenticated caller pad a KeyPackage toward the body-limit ceiling and
+  bloat Redis for up to 24h per invite (GETDEL single-use, so bounded but
+  wasteful). Added `const MAX_KEY_PACKAGE_BYTES: usize = 16 * 1024;` in
+  `crates/application/powehi-application/src/invite_service.rs` (real MLS
+  KeyPackages are ~1-2KB, so 16KiB gives ~8-16x headroom) and a
+  `key_package.len() > MAX_KEY_PACKAGE_BYTES` check right after the existing
+  empty-check, reusing `DomainError::InvalidInput` (400) rather than adding a
+  new error variant/HTTP status — matches the existing convention (every
+  size/format rejection in this codebase maps to 400, not a dedicated 413).
+  2 new tests: oversized (limit+1) fails, at-exactly-the-limit succeeds.
+- **security-auditor: GREEN.** Verified the bound actually closes the gap
+  (Redis value = 16-byte device UUID + key_package, so max stored value drops
+  from ~512KiB to ~16KiB + 16B, a ~32x reduction), empty-check-then-size-check
+  ordering is safe (neither oversized nor empty reaches `cache.set`), no
+  bypass via `redeem_invite` (read-then-delete only, can't grow storage), no
+  info leak (only the static `code` field crosses the wire, detail message
+  never serialized). One INFO note, not fixed (out of scope): no per-device
+  cap on *number* of outstanding invites, so aggregate Redis footprint is
+  still bounded only by the per-IP rate limiter, not a per-principal quota —
+  candidate for a future cycle if invite-spam DoS enters the threat model.
+- **Security sweep, item 2 — dependency hygiene:** `cargo audit` and
+  `cargo deny check` both showed only `warning: yanked crate` for `spin`
+  0.9.8 and 0.10.0 (transitive via aws-sdk-s3/sqlx-mysql/tracing-subscriber's
+  dep chains — not a direct dependency, no CVE). Ran
+  `cargo update -p spin@0.9.8` (→0.9.9) and `cargo update -p spin@0.10.0`
+  (→0.10.1), both pure patch bumps to un-yanked releases with no dependency
+  edge changes. Post-update `cargo deny check` shows zero yanked warnings
+  (only pre-existing benign `license-not-encountered`/`duplicate`-version
+  noise, unchanged from before). security-auditor confirmed this is safe and
+  in-scope to bundle with the security-focused commit (verified above).
+  No RUSTSEC advisories were open this cycle (unlike cycle 250's
+  crossbeam-epoch/anyhow/bitcoin_hashes fixes) — this was purely a
+  yanked-version cleanup.
+- Full verification: `cargo build --workspace` clean, `cargo test --workspace`
+  all green (exit 0, incl. 9 invite_service tests: 7 pre-existing + 2 new),
+  `cargo clippy --workspace --all-targets -- -D warnings` clean, `cargo fmt
+  --all --check` clean. (`cargo nextest` binary is not installed in this
+  sandbox — fell back to `cargo test --workspace` per the runbook's documented
+  fallback.)
+- Target dir hygiene: 21G (just over the 20G threshold). Pruned 0-byte
+  aborted `.rmeta` stubs (none found) and attempted a >7-day-old prune of
+  `target/debug/deps` build artifacts + incremental dirs — no effect, since
+  all artifacts are from active daily-cycle development within the last 7
+  days. Not a blocker; noted for a future cycle if growth continues.
+- **Next cycle candidate:** per-device/per-principal cap on outstanding
+  (unredeemed) invite count, if invite-spam DoS should enter the threat model
+  (security-auditor INFO note above, cycle 299's separate unbounded-invite-
+  keypair-accumulation note is a related but distinct client-side item).
+
+## Previous state (2026-07-17, cycle 299 — FEATURE: pin KeyPackage hash to invite links, MITM fix, prd.md §8.3/§8.4, commit a8f4954)
 
 - Session opened with a large uncommitted working-tree diff already present
   (touching invite.rs/invite_service.rs/invites.ts/AcceptInviteModal.tsx/
