@@ -17,6 +17,92 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-07-16, cycle 296 — FEATURE: real mimeType on media envelope, prd.md §9.2/§9.4.2, commit cea94e5)
+
+- Closed the cycle-294 "next candidate": the media wire envelope's `type`
+  field was chosen purely by size bucket (single-shot encrypt → "image",
+  §9.4.2 chunked encrypt → "video"), never by the sender's real file MIME
+  type — so a small video (≤16MiB) sent through the non-chunked path was
+  always mislabeled "image" client-side. Cycle 294's `<img onError>`→
+  `<video>` fallback in `MediaImage.tsx` was a same-cycle mitigation, not a
+  fix; the mislabel was still live.
+- **Fix:** added an OPTIONAL `mimeType` field to the JSON payload (itself
+  inside the existing MLS-encrypted Application message — never
+  server-visible beyond what `content_type` already exposes via
+  `POST /v1/media/upload-url`, unchanged by this diff). Additive/non-breaking:
+  `#[serde(skip_serializing_if = "Option::is_none")]` so it's omitted (not
+  serialized as null) when absent, so older-client envelopes round-trip
+  unchanged.
+  - Rust: `crates/client/powehi-crypto-wasm/src/wasm_exports.rs` —
+    `build_media_payload_json` / `_with_thumbnail` / `_chunked` each gained
+    an `Option<&str> mime_type` param; the three `#[wasm_bindgen] pub fn
+    media_message_create*` exports gained a matching `Option<String>` param
+    (maps to `mimeType?: string | undefined` at the JS boundary — verified
+    by rebuilding via `wasm-pack build --out-dir app/src/wasm` and checking
+    the regenerated `.d.ts`, both `pkg/` and `app/src/wasm/` are gitignored
+    build artifacts, not committed). Added `#[allow(clippy::too_many_arguments)]`
+    to the 3 functions that crossed the 7-arg clippy default (8 args) —
+    no existing precedent in this file, first use.
+  - Frontend: `crypto.worker.ts` / `mediaTransfer.ts` thread the real
+    `mimeType` (already in scope from the file being sent) through to the
+    WASM export on all 3 send paths (single-shot, chunked, with-thumbnail).
+    `useMessages.ts` parses `parsed.mimeType` into a new optional
+    `MediaPayload.mimeType` field. `MediaImage.tsx` / `useMediaReceive.ts`
+    / `ChatLayout.tsx`'s forward-path now prefer `media.mimeType` (when
+    present) over the old `media.chunked === true` heuristic for image-vs-
+    video display + the `sniffMimeType` videoHint + the forwarded
+    `content_type` sent to `requestMediaUpload` — falling back to the old
+    chunked-based heuristic when `mimeType` is absent (legacy envelope from
+    an older client build).
+- **crypto-reviewer: GREEN.** Confirmed: no new server-visible leak (field
+  stays inside the existing MLS trust boundary); the peer-supplied
+  `mimeType` string is only ever consumed via `.startsWith("video/"|"image/")`
+  booleans or as a `Blob.type` — never interpolated into a URL/HTML/eval,
+  no new XSS/injection surface; raw media key retrieval
+  (`MEDIA_KEYS`/`media_key_handle`) is byte-identical, untouched. One
+  YELLOW advisory raised (forwarding a peer's real `mimeType` as
+  `content_type` to the forwarder's own server is a *fidelity* increase
+  within an already-existing, already-server-visible channel) — verified
+  already mitigated by the pre-existing cycle-260 `is_valid_content_type`
+  RFC 6838 fail-closed check in `media_service.rs::request_upload`, which
+  gates every `content_type` regardless of original-send vs. forward-relay
+  origin. Not a new gap.
+- **threat-model-checker: GREEN.** No new server-visible metadata category
+  (unlike cycle-289's `media_acks`, which added a real server-side table —
+  this field never crosses the MLS boundary), no OOS-list movement, no
+  tier (T1-T6) defense reduction. Added a half-sentence to prd.md §9.2's
+  envelope diagram (optional `mimeType` field) as a documentation nicety,
+  not a required update.
+- Tests: 4 new Rust unit tests in `wasm_exports.rs` (omit-when-None +
+  carries-real-value for each of the 3 builders) — crate total 157 passed
+  (was 153) + 2 ignored (pre-existing, Docker-gated), all existing arity-
+  changed call sites updated in place (no test count change from those).
+  Frontend: +6 new tests across `mediaTransfer.test.ts` (+2, real mimeType
+  reaches both chunked and non-chunked `mediaMessageCreate*`),
+  `MediaImage.test.tsx` (+3, mimeType-priority render decision + error
+  text), `useMediaReceive.test.ts` (+1, mimeType wins over chunked for the
+  `sniffMimeType` videoHint on generic/non-magic-byte plaintext). Updated 1
+  existing test (`ChatLayoutForwarding.test.tsx`) whose
+  `mediaMessageCreate` call-arity assertion needed the new trailing
+  mimeType arg. 1256/1256 frontend tests green (99 files), tsc clean,
+  biome clean.
+- Full `cargo build/test/clippy/fmt --workspace` clean. One PRE-EXISTING,
+  UNRELATED flake found and confirmed not caused by this diff:
+  `powehi-telemetry::tests::otlp_config_from_env_returns_none_when_endpoint_absent`
+  fails only under default parallel `cargo test` (env-var race against the
+  sibling `..._returns_some_when_endpoint_set` test mutating the same
+  process env var) and passes clean under `--test-threads=1`. Not touched
+  by this diff (never opened `powehi-telemetry`) — left as a stabilization-
+  cycle candidate, not fixed here (out of scope for a FEATURE cycle).
+- **Next cycle candidates:** (a) the `powehi-telemetry` env-var test-race
+  flake above (STABILIZATION-appropriate: fix via `#[serial]`/`std::sync`
+  guard or per-test env isolation, not a real behavior bug); (b) the
+  remaining cycle-289 security-auditor YELLOW — ack-on-URL-grant-not-
+  confirmed-transfer (non-urgent, bounded by 30-day retention floor); (c)
+  resume normal FEATURE scanning for other open prd.md gaps. Long-standing
+  PQ hybrid Phase A block is still blocked on upstream openmls shipping a
+  stable `MLS_128_MLKEM768` ciphersuite.
+
 ## Current state (2026-07-16, cycle 295 — STABILIZATION: paginate media GC scan query, commit bc6a4c2)
 
 - CI green (`gh run list`), `gh issue list --state open` empty, `cargo audit`
