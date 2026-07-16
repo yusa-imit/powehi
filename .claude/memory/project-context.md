@@ -17,6 +17,99 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-07-17, cycle 299 — FEATURE: pin KeyPackage hash to invite links, MITM fix, prd.md §8.3/§8.4, commit a8f4954)
+
+- Session opened with a large uncommitted working-tree diff already present
+  (touching invite.rs/invite_service.rs/invites.ts/AcceptInviteModal.tsx/
+  ChatLayout.tsx/useDeepLink.ts + their tests) — evidently an interrupted
+  cycle 298 that never reached a commit. No cycle-298 entry exists in this
+  file or in `git log`. Investigated rather than discarded (per the "don't
+  destroy unfamiliar in-progress work" guidance) and found it was a real,
+  well-reasoned security feature: closing an MITM gap where the invite
+  recipient fetched the inviter's KeyPackage via a server-controlled
+  `GET /v1/key-packages/:deviceId` lookup, so a compromised/malicious server
+  could substitute an attacker-controlled KeyPackage undetectably.
+- The redeem/receiving half was fully done and well-tested (AcceptInviteModal
+  hashing + comparing, useDeepLink's `code.hash` fragment parsing, the
+  backend `redeem` endpoint returning the pinned KeyPackage, all with
+  matching tests). **The create/inviting half was broken**: `InviteModal.tsx`
+  never generated or hashed a KeyPackage at all — it called
+  `createInvite(sessionToken)` with no args and destructured a
+  `key_package_hash` field the Rust backend explicitly documents it will
+  NEVER return (a doc comment and a regression test in `routes/invite.rs`
+  assert the create response has no such field, precisely so the server
+  can't author the value being verified). This cycle's actual work was
+  finishing that half correctly, not just verifying the leftover diff.
+- **Fix:** `InviteModal.tsx` now calls `cryptoWorker.mlsGetKeyPackage(identityId)`
+  to mint a fresh KeyPackage, hashes it locally via `crypto.subtle.digest`,
+  and calls the updated `createInvite(sessionToken, keyPackage: Uint8Array)`
+  (POST body `{key_package}`) — the URL is built from the code plus the
+  *locally computed* hash, never anything from the server response.
+  `CreateInviteResponse` narrowed back to `{ code }` (no `key_package_hash`).
+  Updated `invites.test.ts` and `InviteModal.test.tsx` (added a real
+  `useCryptoWorker` mock + `identityId`, and switched the fragment/hash
+  fixtures to the actual SHA-256 of the mocked KeyPackage rather than an
+  arbitrary string, mirroring `AcceptInviteModal.test.tsx`'s existing pattern).
+- **crypto-reviewer: GREEN.** Hash pinning is sound (SHA-256 over the exact
+  bytes later fed to `mlsAddMember`, no TOCTOU gap), server has no path to
+  author/see the hash, Rust `Vec<u8>` concat/split in `invite_service.rs` is
+  panic-free, plain `!==` hash comparison is fine (both operands are public
+  non-secret hashes), reusing `mlsGetKeyPackage` for a one-off pinned invite
+  doesn't collide with the shared KeyPackage pool or MLS generation
+  bookkeeping, no homegrown crypto / no hash confusion (server's
+  `Sha256::digest` hashes the invite *code* for the cache key; client's
+  `crypto.subtle.digest` hashes the *KeyPackage* — different purposes, not
+  conflated). Two non-blocking LOW advisories (see below).
+- **threat-model-checker: YELLOW → fixed in-cycle.** Code correctly
+  strengthens the threat model (T3 malicious-server-operator) with no new
+  metadata category (KeyPackage was already server-held public pool data;
+  the pinned copy in Redis is shorter-lived and single-region). Required
+  prd.md doc updates before commit, both applied: §3.3's metadata-honesty
+  entry (line ~179) now says the Redis value is `H(code) → (DeviceId ‖
+  KeyPackage bytes)`, not just `DeviceId`; §8.3 now documents the
+  `code.keyPackageHash` fragment format and the pin-and-verify flow, with an
+  explicit scope note that out-of-band channel tampering (malicious link
+  shortener, swapped QR) remains an unchanged, separate T2 concern — the pin
+  only defeats server-side substitution, not delivery-channel compromise.
+- **security-auditor: GREEN**, one non-blocking YELLOW (same one
+  crypto-reviewer also flagged): `key_package` has no invite-specific upper
+  size bound, only the global 512KiB axum body limit + per-IP rate limiting
+  (`api_governor`, burst=60). A KeyPackage is normally ~1-2KB; nothing stops
+  an authenticated caller from padding it toward the body-limit ceiling,
+  bloating Redis for up to 24h. Bounded (rate-limited, capped, GETDEL
+  single-use) but larger than necessary. **Next cycle candidate**: add an
+  explicit `key_package.len() > MAX_KEY_PACKAGE_BYTES` (~16KiB) guard in
+  `InviteService::create_invite`.
+- Also noted, not fixed (crypto-reviewer LOW, PQ-owner territory, out of
+  scope for this MITM fix): every "Create invite link" click mints a fresh
+  MLS leaf keypair + PQ decap key persisted to encrypted Dexie, with no
+  GC/expiry path for ones that are never redeemed — unbounded accumulation
+  over time, not a leak (encrypted at rest) but worth a cleanup story
+  eventually.
+- Full verification: backend `cargo build --workspace` clean, `cargo test
+  --workspace` all green (159 invite/application/route tests incl. new
+  `create_invite_with_empty_key_package_fails`), `cargo clippy --workspace
+  --all-targets -- -D warnings` clean, `cargo fmt --all --check` clean
+  (fixed one leftover formatting diff from the uncommitted cycle-298 work).
+  Frontend: 1265/1265 tests green (was 1256, +9 new), `tsc -b` clean (fixed
+  a `Uint8Array<ArrayBufferLike>` vs `Uint8Array<ArrayBuffer>` strict-TS
+  mismatch introduced by passing the crypto-worker's returned KeyPackage
+  straight into `crypto.subtle.digest` — copied into a fresh `Uint8Array`
+  first, same pattern `AcceptInviteModal.tsx` already used), `pnpm build`
+  (bundle budget) green (160KB gz JS / 643KB gz WASM, both under budget),
+  `biome check` clean.
+- **Lesson for future cycles inheriting an uncommitted working tree:** don't
+  assume leftover diffs are either "done, just needs a commit" or "garbage,
+  discard it" — read every touched file's actual logic (not just skim the
+  diff) before deciding. Here the diff *looked* complete (tests existed on
+  both sides, doc comments were thoughtful) but one call site
+  (`InviteModal.tsx`) was silently never wired up, which only surfaced by
+  tracing the actual data flow (does the server response have the field the
+  frontend destructures?) rather than trusting that "tests pass" on the
+  files touched so far — the create-side test file's own mocks were masking
+  the gap by mocking `createInvite`'s return value with a `key_package_hash`
+  the real backend would never send.
+
 ## Current state (2026-07-16, cycle 297 — STABILIZATION (mode-escalated from FEATURE by red CI): fix WasmModule TS interface drift, commit c2d51da)
 
 - Mode selection gave FEATURE (297 % 5 = 2), but the mandatory `gh run list`
