@@ -47,6 +47,8 @@ export interface GroupRow {
 	notificationSoundId?: string;
 	/** Per-chat background theme key. Opaque enum key, not content — not encrypted. */
 	chatTheme?: string;
+	/** Count of unread @mentions in this chat's sidebar badge. Local-only, never sent to server. Not sensitive — a count, not content. */
+	mentionCount?: number;
 }
 
 // LocalIdentity — singleton device identity record.
@@ -232,6 +234,16 @@ export class PowehiDb extends Dexie {
 		// (bounded booleans/opaque enum ids, like disappearingTtlSeconds/pinnedMessageId);
 		// no index change needed — never queried across groups, only read/written per-group.
 		this.version(12).stores({
+			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v13: added mentionCount to GroupRow — the sidebar @mention badge (previously
+		// React-state-only, same gap muted/sound/vibrate/chatTheme had before v12) now
+		// survives a reload. Not sensitive (a count, like disappearingTtlSeconds); no
+		// index change needed — never queried across groups, only read/written per-group.
+		this.version(13).stores({
 			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
 			groups: "id, lastActivity",
 			identity: "id",

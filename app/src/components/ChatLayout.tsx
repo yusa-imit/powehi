@@ -7341,6 +7341,7 @@ export function ChatLayout() {
 									(row.notificationSoundId as NotificationSoundId | undefined) ??
 									c.notificationSoundId,
 								chatTheme: row.chatTheme ?? c.chatTheme,
+								mentionCount: row.mentionCount ?? c.mentionCount,
 							};
 						}),
 					);
@@ -7469,6 +7470,28 @@ export function ChatLayout() {
 			// Trigger device vibration for the matching chat unless vibration is disabled or chat is muted.
 			// navigator.vibrate is absent on desktop — guard before calling (§7.5 progressive enhancement).
 			const incomingChat = chatsRef.current.find((c) => c.mlsGroupId === msg.groupId);
+			// Persist the recomputed mentionCount to Dexie — same "recompute from the
+			// pre-update chatsRef.current snapshot" pattern as persistReaction, since setChats
+			// is async and chatsRef.current here still reflects state from before this message.
+			if (incomingChat) {
+				const isActiveIncoming = incomingChat.id === activeIdRef.current;
+				const rawLowerIncoming = msg.text.toLowerCase();
+				const mhIncoming = useAuthStore.getState().myHandle?.toLowerCase();
+				const isMentionIncoming =
+					!isActiveIncoming &&
+					!!incomingChat.isGroup &&
+					(rawLowerIncoming.includes("@all") ||
+						rawLowerIncoming.includes("@everyone") ||
+						(!!mhIncoming && rawLowerIncoming.includes(`@${mhIncoming}`)));
+				const nextMentionCount = isActiveIncoming
+					? 0
+					: isMentionIncoming
+						? (incomingChat.mentionCount ?? 0) + 1
+						: incomingChat.mentionCount;
+				if (nextMentionCount !== incomingChat.mentionCount) {
+					db.groups.update(msg.groupId, { mentionCount: nextMentionCount }).catch(() => {});
+				}
+			}
 			if (incomingChat && !incomingChat.muted && (incomingChat.vibrate ?? true)) {
 				navigator.vibrate?.([100]);
 			}
@@ -8120,6 +8143,10 @@ export function ChatLayout() {
 						},
 			),
 		);
+		const mlsGroupId = chatsRef.current.find((c) => c.id === chatId)?.mlsGroupId;
+		if (mlsGroupId) {
+			db.groups.update(mlsGroupId, { mentionCount: 0 }).catch(() => {});
+		}
 	}, []);
 
 	/** Export a chat's messages to a downloadable file (JSON or plain text).
@@ -8187,6 +8214,9 @@ export function ChatLayout() {
 		setChats((cs) =>
 			cs.map((c) => ({ ...c, unread: 0, firstUnreadAt: undefined, mentionCount: 0 })),
 		);
+		for (const c of chatsRef.current) {
+			if (c.mlsGroupId) db.groups.update(c.mlsGroupId, { mentionCount: 0 }).catch(() => {});
+		}
 	}, []);
 
 	/**
@@ -8431,6 +8461,10 @@ export function ChatLayout() {
 				return { ...base, mentionCount: 0 };
 			}),
 		);
+		const selectedMlsGroupId = chatsRef.current.find((c) => c.id === id)?.mlsGroupId;
+		if (selectedMlsGroupId) {
+			db.groups.update(selectedMlsGroupId, { mentionCount: 0 }).catch(() => {});
+		}
 		// Flush buffered read receipts for this chat when the user opens it.
 		// Use the chat's own mlsGroupId/mlsIdentityId — never `active` — to avoid
 		// encrypting receipts into the wrong MLS group (security-auditor finding #1).
