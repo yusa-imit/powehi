@@ -17,7 +17,71 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-18, cycle 307 — STABILIZATION: CI — Frontend red-on-main fix, commit ceffd59)
+## Current state (2026-07-18, cycle 308 — FEATURE: persist unread badge + New Messages divider to Dexie, commit 36dc5b8)
+
+- `git status` clean, `gh run list --limit 5` all green (cycle 307's CI-retry fix), `gh issue
+  list --state open` empty at cycle start.
+- Picked the standing "next cycle candidate" flagged by both cycle 306 and 307: `unread`/
+  `firstUnreadAt` sidebar-badge state was React-state-only (same gap class mentionCount had
+  before v13) — a reload silently cleared the unread badge and the "New Messages" divider for
+  any background chat never re-opened since the badge last incremented.
+  `GroupRow.unread?: number` (bounded count, same tier as mentionCount) and
+  `GroupRow.firstUnreadMessageId?: string` (opaque MessageRow-id reference, same tier as
+  pinnedMessageId) added to `app/src/db/schema.ts`, bumped to `version(14)` (additive, no
+  index change).
+- Chose to persist the message **id**, not the raw `firstUnreadAt` array index (which is only
+  meaningful against a specific in-memory `c.messages` ordering) — mirrors the existing
+  `persistedPinnedMessageId` pattern exactly: a new `persistedFirstUnreadMessageId` state +
+  a second effect that resolves the id to an index via `c.messages.findIndex(...)` once
+  `rows` (Dexie-loaded messages) are merged in, re-running on `rows` to win the race against
+  the async group-row fetch. Guarded so it never clobbers an in-session `firstUnreadAt` and
+  only applies when the rehydrated `unread` count is also positive (no stale divider on a
+  zero-unread chat).
+- Write-through at all 5 relevant call sites: `handleIncoming` (increments `unread` for a
+  background/non-muted chat; sets `firstUnreadMessageId` only on the 0→1 transition, same
+  "only set once" semantics the in-memory `firstUnreadAt` index already has — verified via a
+  dedicated test that a chat starting at seed `unread: 2` does NOT get `firstUnreadMessageId`
+  written on a further increment), `handleClearMessages`/`handleMarkAllRead` (reset both to
+  0/undefined), `handleSelectChat` (mirrors the existing two-visit UX: first visit clears
+  `unread` but keeps the persisted divider marker; a second visit, already at `unread: 0`,
+  clears `firstUnreadMessageId` too), `handleNewGroup` (the `useWelcomePoller` background-join
+  path persists `unread: 1` on the new GroupRow — this is the actual background-arrival case,
+  distinct from `handleInviteAccepted`'s call to the same function, which immediately follows
+  with `handleSelectChat` and so is momentary/already covered).
+- Not crypto/MLS/architectural — `crypto-reviewer`/`threat-model-checker` not required (no
+  crypto code touched, no new server-visible metadata —100% local-only Dexie state, same as
+  the mentionCount precedent).
+- **security-auditor: GREEN, no findings.** Confirmed: (1) the Dexie write in `handleIncoming`
+  only fires when `chatsRef.current` already has a `mlsGroupId` match for the (already
+  MLS-decrypted, membership-authenticated) envelope's `groupId` — no cross-group corruption
+  surface; (2) `firstUnreadMessageId` read-back safely no-ops via `findIndex === -1` on an
+  absent/malicious id (no crash, no loop, search confined to the owning group's own
+  `messages`); (3) zero plaintext/PII in the new fields or any log statement (both fields are
+  an opaque UUID + a bounded int); (4) the `chatsRef.current`-snapshot race under rapid
+  incoming messages is the same accepted cosmetic-only drift class `mentionCount` already
+  carries, not a new divergence; (5) unencrypted storage is appropriate — same tier as the
+  existing `mentionCount`/`pinnedMessageId` fields, doesn't leak beyond what `lastActivity`
+  already exposes to a local-DB-read adversary.
+- 7 new tests: `ChatLayoutUnreadPersist.test.tsx` (new file, 5 tests — persists incremented
+  unread+firstUnreadMessageId on background arrival, firstUnreadMessageId only set on the 0→1
+  transition, rehydrates persisted unread on chat switch, clear-messages resets both,
+  mark-all-read resets both for every chat) + 2 in `ChatLayout.test.tsx`'s existing "message
+  history rehydration" describe block (divider renders from a persisted firstUnreadMessageId
+  on mount; no stale divider when persisted unread is 0) + 1 assertion added to the existing
+  Welcome-envelope GroupRow test (`row?.unread` is 1). All 101 frontend test files green (1280
+  tests, was 1273); `tsc --noEmit` clean; `biome check` clean on all 4 touched/new files.
+  Backend untouched this cycle (pure frontend/IndexedDB feature).
+- This closes out the sidebar-badge persistence series that started with mentionCount (cycle
+  306) — mute/sound/vibrate/chatTheme (v12), mentionCount (v13), and now unread/
+  firstUnreadMessageId (v14) all survive a reload. No further known gaps in this class.
+- **Next cycle candidate:** the receiver-side media opaque-handle pattern
+  (`useMediaReceive.ts:10-11`, `mediaKey` still crosses the Comlink boundary as a raw
+  `number[]` before zeroing) — heavier cycle, touches the crypto worker boundary, needs
+  `crypto-reviewer`. Also standing: PQ hybrid Phase A (blocked on openmls stable
+  `MLS_128_MLKEM768`), security-auditor's cycle-304 YELLOW #3 (bound `mls_credential`/
+  `proof.mls_credential` size).
+
+## Previous state (2026-07-18, cycle 307 — STABILIZATION: CI — Frontend red-on-main fix, commit ceffd59)
 
 - Mode selection landed on FEATURE (counter 307) but `gh run list` showed `CI — Frontend` red on
   main (run 29598016853, on cycle 306's mentionCount commit) — per the mandatory CI-first check,
