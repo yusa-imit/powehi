@@ -171,6 +171,37 @@ async fn set_add_and_set_members_round_trip() {
 
 #[tokio::test]
 #[ignore = "requires Docker (testcontainers)"]
+async fn set_remove_drops_only_the_named_member() {
+    let (_c, cache) = setup().await;
+    let key = unique_key("set-remove");
+    cache.set_add(&key, "alpha").await.expect("sadd alpha");
+    cache.set_add(&key, "beta").await.expect("sadd beta");
+    cache.set_remove(&key, "alpha").await.expect("srem alpha");
+    let members = cache.set_members(&key).await.expect("smembers");
+    assert_eq!(
+        members,
+        vec!["beta".to_string()],
+        "set_remove must drop only the named member, leaving the rest"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn set_remove_on_missing_member_is_ok() {
+    let (_c, cache) = setup().await;
+    let key = unique_key("set-remove-missing");
+    cache.set_add(&key, "alpha").await.expect("sadd alpha");
+    // Removing a member that was never added must not error (SREM is idempotent).
+    cache
+        .set_remove(&key, "never-added")
+        .await
+        .expect("srem on missing member is a safe no-op");
+    let members = cache.set_members(&key).await.expect("smembers");
+    assert_eq!(members, vec!["alpha".to_string()]);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
 async fn set_expire_applies_ttl_to_existing_key() {
     let (_c, cache) = setup().await;
     let key = unique_key("set-expire");

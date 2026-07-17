@@ -31,6 +31,12 @@ pub trait CachePort: Send + Sync {
         Ok(())
     }
 
+    /// Remove `member` from the set stored at `key`. No-op by default;
+    /// production adapters override with SREM.
+    async fn set_remove(&self, _key: &str, _member: &str) -> Result<(), DomainError> {
+        Ok(())
+    }
+
     /// Set the TTL of `key` to `ttl`. No-op by default; production adapters
     /// override with EXPIRE.
     async fn set_expire(&self, _key: &str, _ttl: Duration) -> Result<(), DomainError> {

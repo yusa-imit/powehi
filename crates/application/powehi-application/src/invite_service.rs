@@ -15,11 +15,24 @@ const INVITE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// per-request body limit. Flagged by security-auditor cycle 299 (prd.md §8.3).
 const MAX_KEY_PACKAGE_BYTES: usize = 16 * 1024;
 
+/// Caps aggregate per-device Redis footprint from invite creation, independent
+/// of the global per-IP rate limiter. Flagged as a security-auditor INFO note
+/// in cycle 300 (no quota existed on the *number* of outstanding invites a
+/// single authenticated device could hold at once).
+const MAX_OUTSTANDING_INVITES_PER_DEVICE: usize = 20;
+
 /// Store H(code) not the raw code so a Redis dump yields no usable tokens.
 fn cache_key(code: &str) -> String {
     let hash = Sha256::digest(code.as_bytes());
     let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
     format!("invite:{hex}")
+}
+
+/// Index of a device's currently-outstanding (unredeemed) invite cache keys —
+/// members are hashed invite keys (never raw codes), mirroring `cache_key`'s
+/// no-raw-token-at-rest invariant.
+fn device_invites_key(device_id: &DeviceId) -> String {
+    format!("invite:device:{}", device_id.as_uuid())
 }
 
 pub struct InviteService {
@@ -55,6 +68,14 @@ impl InviteUseCase for InviteService {
             return Err(DomainError::InvalidInput("key package too large".into()));
         }
 
+        let device_key = device_invites_key(device_id);
+        let outstanding = self.cache.set_members(&device_key).await?;
+        if outstanding.len() >= MAX_OUTSTANDING_INVITES_PER_DEVICE {
+            return Err(DomainError::InvalidInput(
+                "too many outstanding invites".into(),
+            ));
+        }
+
         // 32 lowercase hex chars (UUID v4 simple form) — 122-bit CSPRNG entropy.
         let code = Uuid::new_v4().simple().to_string();
         let key = cache_key(&code);
@@ -64,6 +85,15 @@ impl InviteUseCase for InviteService {
         value.extend_from_slice(device_id.as_uuid().as_bytes());
         value.extend_from_slice(&key_package);
         self.cache.set(&key, value, Some(INVITE_TTL)).await?;
+        // Track this invite against the device's outstanding quota. `set_expire`
+        // slides the whole index's TTL to INVITE_TTL-from-now on every create, so
+        // a member for an invite that itself already expired unredeemed keeps
+        // counting against the cap until the device goes INVITE_TTL idle (not
+        // just until that one invite's own TTL elapses) — a deliberate fail-closed
+        // choice: it can only make the limiter stricter, never let it exceed
+        // MAX_OUTSTANDING_INVITES_PER_DEVICE.
+        self.cache.set_add(&device_key, &key).await?;
+        self.cache.set_expire(&device_key, INVITE_TTL).await?;
         // Invite code itself is never logged — only the creating device.
         tracing::info!(device_id = %device_id, "invite.created");
         Ok(CreatedInvite { code })
@@ -86,6 +116,20 @@ impl InviteUseCase for InviteService {
             .try_into()
             .map_err(|_| DomainError::Internal("malformed invite payload".into()))?;
         let device_id = DeviceId::from(Uuid::from_bytes(arr));
+        // Best-effort cleanup of the per-device outstanding-invite quota index.
+        // The invite itself is already consumed above (GETDEL); a failure here
+        // only leaves a stale member that clears once the device goes INVITE_TTL
+        // idle (see the sliding-TTL note in `create_invite`), so it must not fail
+        // the redemption itself — worst case is a stricter-than-intended cap,
+        // never an exceeded one.
+        if self
+            .cache
+            .set_remove(&device_invites_key(&device_id), &key)
+            .await
+            .is_err()
+        {
+            tracing::debug!("invite.redeem.index_cleanup_failed");
+        }
         // Debug-level: logs the inviter's device_id, which combined with
         // create logs could reveal a social-graph edge. Kept below INFO to
         // limit metadata exposure in production log pipelines.
@@ -105,12 +149,14 @@ mod tests {
 
     struct FakeCache {
         store: Mutex<HashMap<String, Vec<u8>>>,
+        sets: Mutex<HashMap<String, std::collections::HashSet<String>>>,
     }
 
     impl FakeCache {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 store: Mutex::new(HashMap::new()),
+                sets: Mutex::new(HashMap::new()),
             })
         }
     }
@@ -135,6 +181,30 @@ mod tests {
         }
         async fn exists(&self, key: &str) -> Result<bool, DomainError> {
             Ok(self.store.lock().unwrap().contains_key(key))
+        }
+        async fn set_add(&self, key: &str, member: &str) -> Result<(), DomainError> {
+            self.sets
+                .lock()
+                .unwrap()
+                .entry(key.to_owned())
+                .or_default()
+                .insert(member.to_owned());
+            Ok(())
+        }
+        async fn set_remove(&self, key: &str, member: &str) -> Result<(), DomainError> {
+            if let Some(set) = self.sets.lock().unwrap().get_mut(key) {
+                set.remove(member);
+            }
+            Ok(())
+        }
+        async fn set_members(&self, key: &str) -> Result<Vec<String>, DomainError> {
+            Ok(self
+                .sets
+                .lock()
+                .unwrap()
+                .get(key)
+                .map(|s| s.iter().cloned().collect())
+                .unwrap_or_default())
         }
     }
 
@@ -242,5 +312,81 @@ mod tests {
 
         let result = svc.redeem_invite("00000000000000000000000000000000").await;
         assert!(matches!(result, Err(DomainError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn create_invite_beyond_per_device_cap_fails() {
+        let cache = FakeCache::new();
+        let svc = InviteService::new(cache);
+        let device_id = test_device_id();
+
+        for _ in 0..MAX_OUTSTANDING_INVITES_PER_DEVICE {
+            svc.create_invite(&device_id, test_key_package_bytes())
+                .await
+                .unwrap();
+        }
+        let result = svc
+            .create_invite(&device_id, test_key_package_bytes())
+            .await;
+        assert!(matches!(result, Err(DomainError::InvalidInput(_))));
+    }
+
+    #[tokio::test]
+    async fn create_invite_at_exactly_the_per_device_cap_succeeds() {
+        let cache = FakeCache::new();
+        let svc = InviteService::new(cache);
+        let device_id = test_device_id();
+
+        for _ in 0..MAX_OUTSTANDING_INVITES_PER_DEVICE {
+            let result = svc
+                .create_invite(&device_id, test_key_package_bytes())
+                .await;
+            assert!(result.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn per_device_cap_is_scoped_to_the_device_not_global() {
+        let cache = FakeCache::new();
+        let svc = InviteService::new(cache);
+        let device_a = test_device_id();
+        let device_b = DeviceId::from(Uuid::from_bytes([9u8; 16]));
+
+        for _ in 0..MAX_OUTSTANDING_INVITES_PER_DEVICE {
+            svc.create_invite(&device_a, test_key_package_bytes())
+                .await
+                .unwrap();
+        }
+        // device_a is now at cap, but device_b's quota is untouched.
+        let result = svc.create_invite(&device_b, test_key_package_bytes()).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn redeeming_an_invite_frees_up_the_device_quota() {
+        let cache = FakeCache::new();
+        let svc = InviteService::new(cache);
+        let device_id = test_device_id();
+
+        let mut codes = Vec::new();
+        for _ in 0..MAX_OUTSTANDING_INVITES_PER_DEVICE {
+            let invite = svc
+                .create_invite(&device_id, test_key_package_bytes())
+                .await
+                .unwrap();
+            codes.push(invite.code);
+        }
+        // At cap — one more must fail.
+        assert!(svc
+            .create_invite(&device_id, test_key_package_bytes())
+            .await
+            .is_err());
+
+        // Redeeming one frees a slot.
+        svc.redeem_invite(&codes[0]).await.unwrap();
+        let result = svc
+            .create_invite(&device_id, test_key_package_bytes())
+            .await;
+        assert!(result.is_ok());
     }
 }

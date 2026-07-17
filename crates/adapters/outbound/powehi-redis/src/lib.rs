@@ -106,6 +106,12 @@ impl CachePort for RedisCache {
         Ok(())
     }
 
+    async fn set_remove(&self, key: &str, member: &str) -> Result<(), DomainError> {
+        let mut conn = self.conn.clone();
+        conn.srem::<_, _, ()>(key, member).await.map_err(map_err)?;
+        Ok(())
+    }
+
     async fn set_members(&self, key: &str) -> Result<Vec<String>, DomainError> {
         let mut conn = self.conn.clone();
         let members: Vec<String> = conn.smembers(key).await.map_err(map_err)?;
