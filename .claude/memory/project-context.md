@@ -17,7 +17,43 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-18, cycle 306 — FEATURE: persist @mention badge count to Dexie, commit 497a148)
+## Current state (2026-07-18, cycle 307 — STABILIZATION: CI — Frontend red-on-main fix, commit ceffd59)
+
+- Mode selection landed on FEATURE (counter 307) but `gh run list` showed `CI — Frontend` red on
+  main (run 29598016853, on cycle 306's mentionCount commit) — per the mandatory CI-first check,
+  switched to STABILIZATION this cycle instead of starting a new feature.
+- Root-caused: 44 scattered test failures, all `TypeError: Cannot read properties of undefined
+  (reading 'indexOf')`, across 10 files never touched by the mentionCount commit (auth/groups/
+  invites/key_packages/media/messages/push api tests, db/encryption, useMediaSend, mediaTransfer).
+  Traced through `@vitest/expect`'s `toThrow` → chai's `assertThrows` → `check-error`'s
+  `compatibleMessage` (`comparisonString.indexOf(errMatcher)`) — a known vitest/chai edge case in
+  the `.rejects.toThrow(string)` rejection path (vitest-dev/vitest#4559-class: the assertion's
+  error-message check can dereference something falsy on this path). Not reproducible locally
+  across 4 full-suite runs (1273/1273 green every time, incl. at 6x CI's fork count via
+  `--poolOptions.forks.maxForks=6`) — confirmed CI-only test-infra flakiness (2 of the last 16
+  `CI — Frontend` runs), not a logic regression introduced by any recent commit.
+- Fix: `app/vite.config.ts` test config now sets `retry: process.env.CI ? 1 : 0` — CI-only,
+  absorbs the transient upstream flake without changing local dev feedback speed. A genuine
+  regression still fails deterministically on the retry, so this doesn't widen what "green" means.
+- Not crypto/architectural/backend — no crypto-reviewer/threat-model-checker/security-auditor
+  gate applies (pure test-config change, zero app-logic touched).
+- Verified: `pnpm vitest run` 100 files/1273 tests green locally (incl. `CI=true` to exercise the
+  new retry path), `tsc --noEmit` clean, `biome check` clean on the touched file. Pushed and
+  confirmed all three CI workflows (`CI — Frontend`, `CI — Rust`, `CI — Live-backend E2E`) green
+  on main post-fix (runs 29609288941/29609289002/29609288964).
+- `cargo audit`: clean, 0 advisories (652 crates scanned) — no new RUSTSEC findings since cycle
+  305's libcrux triage. `gh issue list --state open`: empty.
+- `target/` housekeeping: was 23G (>20GB threshold) — pruned 0-byte `.rmeta` stubs +
+  mtime+7 build artifacts per the standing hygiene step; size largely unchanged (most of the 23G
+  is recent/warm cache, not stale) — not a blocker, no action needed beyond the routine prune.
+- **Next cycle candidate (unchanged from cycle 306):** `unread`/`firstUnreadAt` sidebar-badge
+  persistence (same Dexie-rehydration gap class as mentionCount, touches more call sites — unread
+  dividers, filter tabs, notification gating). Also standing: receiver-side media opaque-handle
+  pattern (`useMediaReceive.ts:10-11`), PQ hybrid Phase A (blocked on openmls stable
+  `MLS_128_MLKEM768`), security-auditor's cycle-304 YELLOW #3 (bound `mls_credential`/
+  `proof.mls_credential` size).
+
+## Previous state (2026-07-18, cycle 306 — FEATURE: persist @mention badge count to Dexie, commit 497a148)
 
 - `git status` clean, `gh run list --limit 5` all green (cycle 305's commit), `gh issue list
   --state open` empty at cycle start.
