@@ -2277,6 +2277,9 @@ describe("ChatLayout", () => {
 			const row = await db.groups.get("welcome-group-1");
 			expect(row?.name).toBe("Contact peer-dev");
 			expect(row?.mlsStateB64).toBe("");
+			// A Welcome-triggered group join is the real background-arrival case (unlike
+			// handleInviteAccepted, which immediately selects the chat and clears this to 0).
+			expect(row?.unread).toBe(1);
 		});
 
 		// Regression test for a live-backend E2E failure (message.spec.ts): the
@@ -2598,6 +2601,55 @@ describe("ChatLayout", () => {
 			await act(async () => {});
 
 			expect(screen.queryByTestId("pinned-banner")).not.toBeInTheDocument();
+		});
+
+		it("restores the New Messages divider from a persisted firstUnreadMessageId on mount", async () => {
+			await db.messages.bulkPut([
+				seedRow({
+					id: "rehydrate-unread-1",
+					groupId: MAYA_GROUP,
+					receivedAt: 5000,
+					plaintextB64: textToBase64("this arrived while the chat was unread"),
+				}),
+			]);
+			await db.groups.add({
+				id: MAYA_GROUP,
+				name: "Maya Akana",
+				mlsStateB64: "",
+				lastActivity: 5000,
+				unread: 1,
+				firstUnreadMessageId: "rehydrate-unread-1",
+			});
+
+			render(<ChatLayout />);
+
+			await waitFor(() => {
+				expect(screen.getByText("New Messages")).toBeInTheDocument();
+			});
+		});
+
+		it("does not show a New Messages divider when the persisted unread count is 0", async () => {
+			await db.messages.bulkPut([
+				seedRow({
+					id: "rehydrate-read-1",
+					groupId: MAYA_GROUP,
+					receivedAt: 5000,
+					plaintextB64: textToBase64("already read before reload"),
+				}),
+			]);
+			await db.groups.add({
+				id: MAYA_GROUP,
+				name: "Maya Akana",
+				mlsStateB64: "",
+				lastActivity: 5000,
+				unread: 0,
+				firstUnreadMessageId: "rehydrate-read-1",
+			});
+
+			render(<ChatLayout />);
+			await act(async () => {});
+
+			expect(screen.queryByText("New Messages")).not.toBeInTheDocument();
 		});
 	});
 });

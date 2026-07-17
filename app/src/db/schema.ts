@@ -49,6 +49,10 @@ export interface GroupRow {
 	chatTheme?: string;
 	/** Count of unread @mentions in this chat's sidebar badge. Local-only, never sent to server. Not sensitive — a count, not content. */
 	mentionCount?: number;
+	/** Count of unread messages in this chat's sidebar badge. Local-only, never sent to server. Not sensitive — a count, not content. */
+	unread?: number;
+	/** id of the earliest unread MessageRow in this chat, used to restore the "New Messages" divider position after a reload. Not sensitive — an opaque UUID reference, not content, like pinnedMessageId. */
+	firstUnreadMessageId?: string;
 }
 
 // LocalIdentity — singleton device identity record.
@@ -244,6 +248,18 @@ export class PowehiDb extends Dexie {
 		// survives a reload. Not sensitive (a count, like disappearingTtlSeconds); no
 		// index change needed — never queried across groups, only read/written per-group.
 		this.version(13).stores({
+			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v14: added unread and firstUnreadMessageId to GroupRow — the sidebar unread badge
+		// and "New Messages" divider (previously React-state-only, same gap mentionCount had
+		// before v13) now survive a reload. unread is a bounded count, like mentionCount;
+		// firstUnreadMessageId is an opaque UUID reference, like pinnedMessageId — neither is
+		// sensitive. No index change needed — never queried across groups, only read/written
+		// per-group.
+		this.version(14).stores({
 			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
 			groups: "id, lastActivity",
 			identity: "id",

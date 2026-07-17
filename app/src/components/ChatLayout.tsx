@@ -14,6 +14,7 @@ import { extractInviteData } from "../api/invites";
 import { sendMessage as sendMessageApi } from "../api/messages";
 import { EncryptedPowehiDb } from "../db/encrypted-db";
 import { db } from "../db/schema";
+import type { GroupRow } from "../db/schema";
 import { useCryptoWorker } from "../hooks/useCryptoWorker";
 import { useDeepLink } from "../hooks/useDeepLink";
 import { useMediaSend } from "../hooks/useMediaSend";
@@ -6803,6 +6804,12 @@ export function ChatLayout() {
 	const [persistedPinnedMessageId, setPersistedPinnedMessageId] = useState<string | undefined>(
 		undefined,
 	);
+	// Persisted first-unread state loaded from GroupRow.firstUnreadMessageId — same pattern
+	// as persistedPinnedMessageId above (an id, not the in-memory `firstUnreadAt` index,
+	// since the index is only meaningful once resolved against `c.messages`).
+	const [persistedFirstUnreadMessageId, setPersistedFirstUnreadMessageId] = useState<
+		string | undefined
+	>(undefined);
 	const [msgSearch, setMsgSearch] = useState("");
 
 	// ── In-chat message search bar (above composer) ───────────────────────────
@@ -7312,6 +7319,7 @@ export function ChatLayout() {
 		if (!active?.mlsGroupId) {
 			setDisappearingTtl(undefined);
 			setPersistedPinnedMessageId(undefined);
+			setPersistedFirstUnreadMessageId(undefined);
 			return;
 		}
 		const groupId = active.mlsGroupId;
@@ -7324,7 +7332,8 @@ export function ChatLayout() {
 					TTL_OPTIONS.includes(persisted as TtlOption) ? (persisted as TtlOption) : undefined,
 				);
 				setPersistedPinnedMessageId(row?.pinnedMessageId);
-				// Rehydrate mute/sound/vibrate/theme/notification-sound prefs (previously
+				setPersistedFirstUnreadMessageId(row?.firstUnreadMessageId);
+				// Rehydrate mute/sound/vibrate/theme/notification-sound/unread prefs (previously
 				// React-state-only, same gap disappearingTtl/pinnedMessageId had before v6/v9).
 				// Only overwrite a field the row actually has a value for — undefined leaves
 				// the in-memory default alone rather than forcing it off/blank.
@@ -7342,6 +7351,7 @@ export function ChatLayout() {
 									c.notificationSoundId,
 								chatTheme: row.chatTheme ?? c.chatTheme,
 								mentionCount: row.mentionCount ?? c.mentionCount,
+								unread: row.unread ?? c.unread,
 							};
 						}),
 					);
@@ -7351,6 +7361,7 @@ export function ChatLayout() {
 				if (!cancelled) {
 					setDisappearingTtl(undefined);
 					setPersistedPinnedMessageId(undefined);
+					setPersistedFirstUnreadMessageId(undefined);
 				}
 			});
 		return () => {
@@ -7383,6 +7394,27 @@ export function ChatLayout() {
 			}),
 		);
 	}, [persistedPinnedMessageId, active?.mlsGroupId, rows]);
+
+	// Apply the persisted first-unread state (loaded above) to the active chat once its
+	// messages exist. Same race/retry rationale as the pinned-state effect above: the
+	// GroupRow fetch and the `rows`-driven message rehydration effect race each other, so
+	// re-run on `rows` until the target message lands. Only applies when `unread` was also
+	// rehydrated to a positive count — a zero-unread chat should never show a stale divider —
+	// and never clobbers an in-session `firstUnreadAt` already set by a live incoming message.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: rows isn't read in the body but is the retry trigger — see comment above
+	useEffect(() => {
+		if (!active?.mlsGroupId || !persistedFirstUnreadMessageId) return;
+		const groupId = active.mlsGroupId;
+		const firstUnreadMessageId = persistedFirstUnreadMessageId;
+		setChats((cs) =>
+			cs.map((c) => {
+				if (c.mlsGroupId !== groupId || c.firstUnreadAt !== undefined || !c.unread) return c;
+				const idx = c.messages.findIndex((m) => m.id === firstUnreadMessageId);
+				if (idx === -1) return c;
+				return { ...c, firstUnreadAt: idx };
+			}),
+		);
+	}, [persistedFirstUnreadMessageId, active?.mlsGroupId, rows]);
 
 	const handleToggleTtl = () => {
 		const next = nextTtl(disappearingTtl);
@@ -7488,8 +7520,23 @@ export function ChatLayout() {
 					: isMentionIncoming
 						? (incomingChat.mentionCount ?? 0) + 1
 						: incomingChat.mentionCount;
-				if (nextMentionCount !== incomingChat.mentionCount) {
-					db.groups.update(msg.groupId, { mentionCount: nextMentionCount }).catch(() => {});
+				// Same recompute-from-snapshot approach for unread + the first-unread marker:
+				// the marker is only ever set once (the transition from 0 unread to 1), then
+				// left alone until cleared — mirrors the in-memory firstUnreadAt index logic.
+				const wasZeroUnread = incomingChat.unread === 0;
+				const nextUnread = isActiveIncoming
+					? 0
+					: incomingChat.muted
+						? incomingChat.unread
+						: incomingChat.unread + 1;
+				const setsFirstUnread = !isActiveIncoming && !incomingChat.muted && wasZeroUnread;
+				const groupUpdate: Partial<GroupRow> = {};
+				if (nextMentionCount !== incomingChat.mentionCount)
+					groupUpdate.mentionCount = nextMentionCount;
+				if (nextUnread !== incomingChat.unread) groupUpdate.unread = nextUnread;
+				if (setsFirstUnread) groupUpdate.firstUnreadMessageId = msg.id;
+				if (Object.keys(groupUpdate).length > 0) {
+					db.groups.update(msg.groupId, groupUpdate).catch(() => {});
 				}
 			}
 			if (incomingChat && !incomingChat.muted && (incomingChat.vibrate ?? true)) {
@@ -8145,7 +8192,9 @@ export function ChatLayout() {
 		);
 		const mlsGroupId = chatsRef.current.find((c) => c.id === chatId)?.mlsGroupId;
 		if (mlsGroupId) {
-			db.groups.update(mlsGroupId, { mentionCount: 0 }).catch(() => {});
+			db.groups
+				.update(mlsGroupId, { mentionCount: 0, unread: 0, firstUnreadMessageId: undefined })
+				.catch(() => {});
 		}
 	}, []);
 
@@ -8215,7 +8264,10 @@ export function ChatLayout() {
 			cs.map((c) => ({ ...c, unread: 0, firstUnreadAt: undefined, mentionCount: 0 })),
 		);
 		for (const c of chatsRef.current) {
-			if (c.mlsGroupId) db.groups.update(c.mlsGroupId, { mentionCount: 0 }).catch(() => {});
+			if (c.mlsGroupId)
+				db.groups
+					.update(c.mlsGroupId, { mentionCount: 0, unread: 0, firstUnreadMessageId: undefined })
+					.catch(() => {});
 		}
 	}, []);
 
@@ -8461,9 +8513,15 @@ export function ChatLayout() {
 				return { ...base, mentionCount: 0 };
 			}),
 		);
-		const selectedMlsGroupId = chatsRef.current.find((c) => c.id === id)?.mlsGroupId;
-		if (selectedMlsGroupId) {
-			db.groups.update(selectedMlsGroupId, { mentionCount: 0 }).catch(() => {});
+		const selectedChat = chatsRef.current.find((c) => c.id === id);
+		if (selectedChat?.mlsGroupId) {
+			// Mirror the in-memory base/mentionCount logic above: first visit clears the
+			// unread badge but keeps the divider persisted; the next visit (unread already 0)
+			// clears the divider marker too.
+			const groupUpdate: Partial<GroupRow> =
+				selectedChat.unread > 0 ? { unread: 0 } : { firstUnreadMessageId: undefined };
+			groupUpdate.mentionCount = 0;
+			db.groups.update(selectedChat.mlsGroupId, groupUpdate).catch(() => {});
 		}
 		// Flush buffered read receipts for this chat when the user opens it.
 		// Use the chat's own mlsGroupId/mlsIdentityId — never `active` — to avoid
@@ -8518,12 +8576,17 @@ export function ChatLayout() {
 				// silent no-ops. mlsStateB64 is a placeholder ("") until a real MLS
 				// group-state export exists (crypto-adjacent, not yet implemented);
 				// nothing in the app reads it back to reconstruct crypto state today.
+				// unread: 1 mirrors the in-memory default below — this is the actual
+				// background-arrival path (via useWelcomePoller), unlike handleInviteAccepted's
+				// call to this same function, which immediately follows with handleSelectChat
+				// (and so writes unread: 0 right after — see comment there).
 				encryptedDb
 					?.putGroup({
 						id: event.groupId,
 						name: `Contact ${shortId}`,
 						mlsStateB64: "",
 						lastActivity: Date.now(),
+						unread: 1,
 					})
 					.catch(() => {});
 			}
