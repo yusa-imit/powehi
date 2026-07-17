@@ -17,7 +17,89 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-17, cycle 304 — FEATURE: finish + secure server-verified recovery-phrase account restore, prd.md §8.5, commit cabd82a)
+## Current state (2026-07-17, cycle 305 — STABILIZATION: telemetry test-race fix + libcrux RUSTSEC triage, commit 55c6b3b)
+
+- `gh run list --limit 5` green on both `CI — Rust` and `CI — Live-backend E2E`/`CI — Frontend`
+  from cycle 304's commits; `gh issue list --state open` empty; `git status` clean at start.
+- Closed the cycle-296-noted `powehi-telemetry` env-var test-race flake (was on the standing
+  next-candidate list since cycle 296, still open as of cycle 304's entry): the
+  `otlp_config_from_env_returns_none_when_endpoint_absent` test read
+  `OTEL_EXPORTER_OTLP_ENDPOINT` without holding `ENV_TEST_MUTEX`, unlike every sibling
+  env-mutating test in the module — a concurrent `cargo test` thread running
+  `otlp_config_from_env_returns_some_when_endpoint_set` (which holds the mutex while calling
+  `EnvGuard::set` on the same var) could flip the var mid-check, causing a spurious failure.
+  Fixed by acquiring `ENV_TEST_MUTEX` and using `EnvGuard::remove` instead of a bare read-check.
+  Verified stable across 15 repeated `cargo test -p powehi-telemetry -- --test-threads=16` runs
+  (previously reproducible only intermittently, so this isn't an exhaustive proof, but matches
+  the exact race shape and now follows the same locking discipline as every other test in the file).
+- `cargo audit` surfaced 5 NEW RUSTSEC advisories not present in the existing `.cargo/audit.toml`
+  waiver list: RUSTSEC-2026-0207/-0208 (libcrux-sha3 0.0.8, severity 8.2 each — incorrect
+  incremental-SHAKE output / AVX2 SHAKE-256 panic), RUSTSEC-2026-0212 (libcrux-secrets 0.0.5,
+  severity 8.2 — non-constant-time Aarch64 swap/select), RUSTSEC-2026-0209/-0211 (libcrux-aesgcm
+  0.0.7, severity 6.3 each — AAD length / non-constant-time tag check), RUSTSEC-2026-0210
+  (libcrux-aesgcm unmaintained). All transitively via `openmls_rust_crypto 0.5.1 → hpke-rs 0.6.1`
+  — none fixable by a dependency bump: `openmls_rust_crypto` 0.5.1 and `hpke-rs`'s pinned range
+  (`^0.6.0`) are both already the latest crates.io release compatible with our tree (hpke-rs 0.7.0
+  exists but is out of range; openmls_rust_crypto has no newer release).
+- Did NOT rubber-stamp a waiver — traced actual compiled-graph reachability (`cargo tree -i
+  <crate> --target all`, reading `hpke-rs-0.6.1`'s and `openmls_rust_crypto-0.5.1`'s real
+  Cargo.toml/source from the local registry cache) and sent the reasoning to `crypto-reviewer`
+  for independent verification before writing any waiver (this is a security-relevant claim —
+  "this vulnerable code is unreachable" — same rigor bar as reviewing new crypto code).
+  **crypto-reviewer: PASS**, with one required correction: don't reuse RUSTSEC-2026-0124's
+  "panic/DoS only, no leak" impact language for RUSTSEC-2026-0211/-0212, since those two are
+  timing-side-channel/confidentiality class, not availability — the waiver must describe them
+  honestly (unreachable, not "harmless if reached").
+  - **libcrux-aesgcm (0209/0210/0211): not compiled into any artifact at all.** Same root cause
+    as the pre-existing RUSTSEC-2026-0124 waiver — reachable only through `hpke-rs`'s optional
+    `"libcrux"` feature (`dep:hpke-rs-libcrux`), and `openmls_rust_crypto`'s hpke-rs dependency
+    declares `default-features = false, features = ["hazmat", "serialization"]` — `"libcrux"` is
+    never enabled. `cargo tree -i libcrux-aesgcm --target all` / `-i hpke-rs-libcrux --target all`
+    both print nothing.
+  - **libcrux-sha3/libcrux-secrets (0207/0208/0212): compiled in, but the vulnerable code is
+    structurally unreachable.** `libcrux-sha3` is a *mandatory* (non-optional) dependency of
+    `hpke-rs` (unlike the aesgcm chain), confirmed compiled via `cargo tree -i libcrux-sha3`
+    resolving to `hpke-rs → openmls_rust_crypto → powehi-crypto-wasm`. But `hpke-rs-0.6.1/src/
+    kem.rs` calls `libcrux_sha3::shake256` from exactly two call sites (lines 154, 158), both
+    inside `derive_key_pair()`'s X-Wing/ML-KEM post-quantum KEM match arms — the classical-DH arm
+    (`DhKemP256|K256|P384|P521|DhKem25519|DhKem448`, which Powehi's only supported ciphersuite
+    `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519` uses) calls `dh_kem::derive_key_pair` instead
+    and never touches `libcrux_sha3`. Stronger still: `openmls_rust_crypto-0.5.1/src/
+    provider.rs`'s `kem_mode()` maps `HpkeKemType::XWingKemDraft6 => unimplemented!()` and has no
+    ML-KEM arm at all — this provider structurally cannot construct the `KemAlgorithm` values that
+    would reach those two call sites, so it's not just "unused today," it's unreachable through
+    this provider regardless of ciphersuite config. `libcrux-secrets` has no independent entry
+    point (`cargo tree -i libcrux-secrets --target all` shows a single chain through
+    `libcrux-sha3`), so it inherits the same argument. Bonus, non-load-bearing: hpke-rs's two call
+    sites are one-shot `shake256::<32>/<64>()` calls, and the advisories' own text says 0207 needs
+    multiple incremental squeeze calls and 0208 needs output length >32-and-not-divisible-by-8 —
+    neither condition is met even if reached.
+  - Cross-checked against `cargo deny check advisories`: it flags exactly RUSTSEC-2026-0207/-0208/
+    -0212 (the compiled ones) and none of the aesgcm ones — independently confirms the
+    reachability split above via cargo-deny's own feature-aware graph resolution.
+  - Waived all 5 (well, 6 IDs — 0207/0208/0209/0210/0211/0212) in `.cargo/audit.toml` with the
+    full trace, and the 3 cargo-deny actually flags (0207/0208/0212) in `deny.toml`, each with a
+    "re-verify on any hpke-rs/openmls_rust_crypto bump" trigger and a note to crypto-lead: if
+    Powehi ever ships the PQ hybrid ciphersuite through this same `openmls_rust_crypto`/`hpke-rs`
+    provider+pins, these waivers move from unreachable to live and must be re-opened first.
+  - `cargo audit` and `cargo deny check` both clean after the waiver; `cargo deny check` (full,
+    not just advisories) also clean — licenses/bans/sources all ok.
+- Full verification: `cargo build --workspace` clean, `cargo test --workspace` all 41 test
+  binaries green (no regressions), `cargo clippy --workspace --all-targets -- -D warnings` clean,
+  `cargo fmt --all --check` clean. Frontend untouched this cycle (pure backend
+  test-race-fix + dependency-audit-triage stabilization pass, no runtime code changed).
+  (`cargo nextest` still not installed in this sandbox — fell back to `cargo test --workspace`.)
+- Target dir hygiene: 23G (over the 20G threshold) — ran the prune step (0-byte `.rmeta` stubs,
+  >7-day-old build artifacts); size unchanged (nothing qualified this pass, likely because prior
+  cycles' artifacts are all within the 7-day window). Not a commit-worthy change per the runbook.
+- **Next cycle candidate:** none urgent from this pass. Standing older candidates unchanged: PQ
+  hybrid Phase A (still blocked on openmls shipping a stable `MLS_128_MLKEM768` ciphersuite —
+  now doubly noted, since this cycle's libcrux waiver explicitly must be re-opened if/when that
+  ships); security-auditor's cycle-304 YELLOW #3 (bound `mls_credential`/`proof.mls_credential`
+  size, same style as the cycle-300 KeyPackage size bound) remains a reasonable small future
+  STABILIZATION item.
+
+## Previous state (2026-07-17, cycle 304 — FEATURE: finish + secure server-verified recovery-phrase account restore, prd.md §8.5, commit cabd82a)
 
 - Session counter file was already at 303 at start (an interrupted cycle 302/303
   had run mode-selection and started FEATURE work — the §8.5 restore feature —
