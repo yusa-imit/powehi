@@ -17,7 +17,94 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-17, cycle 301 — FEATURE: per-device outstanding-invite cap, prd.md §8.3, commit 67aefa3)
+## Current state (2026-07-17, cycle 304 — FEATURE: finish + secure server-verified recovery-phrase account restore, prd.md §8.5, commit cabd82a)
+
+- Session counter file was already at 303 at start (an interrupted cycle 302/303
+  had run mode-selection and started FEATURE work — the §8.5 restore feature —
+  but crashed before committing or writing a memory entry; no cycle-302/303
+  entry exists below, matching the cycle-299 precedent of picking up an
+  orphaned prior diff rather than discarding it). Incremented to 304 (304 % 5
+  != 0 → FEATURE) and finished the inherited work rather than starting fresh.
+- **Real gap found and fixed before commit:** the inherited diff had already
+  added a threat-model-required fix — a NEW HKDF domain
+  (`RECOVERY_AUTH_KEY_DOMAIN = b"powehi-recovery-auth-v1"`,
+  `derive_recovery_auth_keypair`) meant to keep the server-durably-stored
+  `recovery_pubkey` cryptographically independent from the MLS identity
+  signing key (`SIGNING_KEY_DOMAIN`) — but had NEVER wired that function into
+  the actual WASM entry points. `mls_init_identity_from_phrase`'s
+  `recoveryPubkey` output and `mls_sign_recovery_challenge`'s signing key were
+  both still using `derive_signing_keypair` (the MLS key), silently defeating
+  the whole point of the domain-separation fix. Fixed both call sites in
+  `wasm_exports.rs`, updated the recovery.rs/wasm_exports.rs tests that had
+  been asserting against the wrong key, and added an explicit
+  `recovery_auth_keypair_differs_from_mls_signing_keypair` independence test.
+- Feature itself (§8.5): a user with zero local devices can restore access
+  with password + 24-word recovery phrase. Client re-derives the
+  recovery-auth Ed25519 keypair from the phrase inside WASM, signs the
+  server's login nonce (`b"powehi-recovery-challenge-v1" || 0x00 ||
+  login_nonce_utf8`, domain-separated from both the MLS-key-signing domain
+  and the kem_credential signing domain), server verifies with
+  `verify_strict` against `users.recovery_pubkey` (new nullable BYTEA column,
+  migration 0009) and — only after OPAQUE login already succeeded — mints a
+  brand-new `Device` row via `AuthService::mint_recovery_device`. Every
+  failure mode (not enrolled, malformed key/sig, bad signature, device cap
+  hit) collapses to the same `Unauthorized`. Frontend: new "restore-account"
+  `Login.tsx` mode + `Login.restore.test.tsx` (4 tests).
+- **crypto-reviewer: YELLOW → fixed.** Two required findings, both addressed:
+  (1) the wiring gap above, confirmed fully closed (grep swept the whole
+  crate + app/ for any remaining `derive_signing_keypair` use on the recovery
+  path — none); (2) added the missing KAT for
+  `derive_recovery_auth_keypair` (`derive_recovery_auth_keypair_known_answer`,
+  zero-seed + abandon-phrase vectors, same bar as the sibling
+  `derive_signing_keypair_known_answer`) — the domain doc already warned a
+  silent drift here "breaks recovery-challenge verification for every
+  existing user" but nothing was pinning it. Also fixed a stale
+  `crypto.worker.ts` doc comment that said `mlsSignRecoveryChallenge` signs
+  with "the MLS identity signing key" — exactly the vulnerability just fixed.
+- **security-auditor: GREEN** (pass), 3 non-blocking YELLOW advisories: (1)
+  self-lockout — a recovery-enrolled user already at `MAX_DEVICES_PER_USER`
+  (10) has no prune path via this route, availability gap not a vuln,
+  accepted; (2) timing oracle — `mint_recovery_device`'s not-enrolled branch
+  used to `ok_or`-short-circuit before `verify_strict`, potentially leaking
+  enrollment status via timing to a caller who already passed OPAQUE. Fixed
+  anyway (cheap, in-scope): added `DUMMY_RECOVERY_PUBKEY` (a fixed, valid,
+  known-privkey-discarded Ed25519 point) so the not-enrolled path now runs
+  the identical `verify_strict` call before rejecting, plus a
+  `dummy_recovery_pubkey_is_a_valid_ed25519_point` regression test guarding
+  that the constant stays decodable; (3) `proof.mls_credential` has no
+  explicit size cap (bounded only by the 512KB body limit) — pre-existing
+  parity with `register_finish`'s `mls_credential`, left as a candidate for a
+  future cycle, not scope-creeped into this one.
+- **threat-model-checker: YELLOW → docs updated.** No control was weakened
+  (crypto sound, 2-factor gating strictly additive, no group-state/FS/PCS
+  impact — a recovery-minted device gets no group membership until an
+  existing member's MLS Commit, and an identity-key change still fires the
+  §5.6 Safety Number alert), but prd.md never documented this. Added: a new
+  `users.recovery_pubkey` bullet in §3.3 (server-inevitable metadata list,
+  explaining the domain-separation guarantee), a new "서버 검증 복원 프로토콜"
+  subsection under §8.5 documenting the challenge-response protocol and
+  2-factor gating, and **ADR-003** in §16.6 for the new pre-session
+  authentication surface.
+- Full verification: `cargo build --workspace` clean, `cargo test --workspace`
+  green across all 41 test binaries (166 in powehi-crypto-wasm incl. new KAT +
+  independence tests, 116 in powehi-application incl. 8 new §8.5 tests + the
+  dummy-pubkey regression test), `cargo clippy --workspace --all-targets -- -D
+  warnings` clean, `cargo fmt --all --check` clean. Frontend: `pnpm test`
+  green (100 files / 1270 tests, incl. the pre-existing
+  `Login.restore.test.tsx`), `biome check` clean on all touched files.
+  (`cargo nextest` still not installed in this sandbox — fell back to `cargo
+  test --workspace` per the documented runbook fallback, same as every
+  recent cycle.)
+- **Next cycle candidate:** none urgent — this closes out the inherited §8.5
+  work cleanly. Standing older candidates unchanged: `powehi-telemetry`
+  env-var-race flake (STABILIZATION-appropriate, noted since cycle 296), PQ
+  hybrid Phase A (still blocked on openmls shipping a stable
+  `MLS_128_MLKEM768` ciphersuite). Minor: security-auditor's YELLOW #3 above
+  (bound `mls_credential`/`proof.mls_credential` size) is a reasonable small
+  future STABILIZATION item, same style as the cycle-300 KeyPackage size
+  bound.
+
+## Previous state (2026-07-17, cycle 301 — FEATURE: per-device outstanding-invite cap, prd.md §8.3, commit 67aefa3)
 
 - `gh run list --limit 3` showed the last two CI runs (cycle 300's commits)
   green on both `CI — Rust` and `CI — Live-backend E2E`; `git status` was
