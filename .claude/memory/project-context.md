@@ -17,7 +17,71 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-17, cycle 300 — STABILIZATION: invite KeyPackage size guard + yanked-crate lockfile fix)
+## Current state (2026-07-17, cycle 301 — FEATURE: per-device outstanding-invite cap, prd.md §8.3, commit 67aefa3)
+
+- `gh run list --limit 3` showed the last two CI runs (cycle 300's commits)
+  green on both `CI — Rust` and `CI — Live-backend E2E`; `git status` was
+  clean at session start (no orphaned work this time, unlike cycle 299).
+- Picked the standing next-candidate from cycle 300's entry: no cap existed
+  on the *number* of outstanding (unredeemed) invites a single authenticated
+  device could hold at once — only the global per-IP rate limiter and (as of
+  cycle 300) a per-invite KeyPackage size bound. security-auditor flagged
+  this as an INFO note in cycle 300; this cycle closes it.
+- Added `CachePort::set_remove` (default no-op, mirrors the existing
+  `set_add`/`set_expire`/`set_members` pattern in
+  `crates/ports/powehi-port-outbound/src/cache.rs`) and implemented it via
+  Redis `SREM` in `crates/adapters/outbound/powehi-redis/src/lib.rs`.
+- `InviteService` (`crates/application/powehi-application/src/invite_service.rs`)
+  now tracks a per-device Redis SET (`invite:device:{uuid}`) of hashed invite
+  keys (never raw codes, same no-raw-token-at-rest invariant as the invite
+  cache entries themselves). `create_invite` rejects with
+  `DomainError::InvalidInput("too many outstanding invites")` (400, same
+  convention as the empty/oversized-KeyPackage checks in the same function)
+  once the device's set reaches `MAX_OUTSTANDING_INVITES_PER_DEVICE = 20`.
+  `redeem_invite` best-effort removes the freed slot via `set_remove` after
+  consuming the invite (GETDEL); a cleanup failure is swallowed (logged at
+  debug, no payload) and does not fail the redemption.
+- **security-auditor: GREEN**, two non-blocking YELLOW notes, both
+  fail-closed/bounded: (1) the device-set's TTL slides to 24h-from-now on
+  every `create_invite` and SET members have no individual TTL, so a member
+  for an invite that itself already expired unredeemed keeps counting
+  against the cap until the device goes a full INVITE_TTL idle, not just
+  until that one invite's own TTL elapses — reworded the in-code comments to
+  state this precisely rather than the original (slightly incorrect)
+  "TTL mirrors the invite's own" framing; (2) a TOCTOU between the
+  `set_members` length check and `set_add` lets N concurrent creates for the
+  same device all pass and overshoot the cap by up to N — bounded by the
+  existing per-IP rate limiter, same non-atomic-check-then-write pattern
+  already documented for `CachePort::get_del`'s default impl, accepted as-is
+  per auditor recommendation (not worth a Lua/`SCARD` atomic upgrade for a
+  generous cap of 20). No threat-model-checker run this cycle — no new
+  server-visible metadata category (the SET's members are hashes already
+  derivable from data the server already touches) and no architectural
+  shift, matching the cycle-300 precedent of skipping that gate for a
+  narrow-scope bound/cap addition.
+- 5 new unit tests in `invite_service.rs` (cap enforced at/over the limit,
+  succeeds exactly at the limit, cap is scoped per-device not global,
+  redeeming frees a slot) — upgraded the test `FakeCache` to actually
+  implement `set_add`/`set_remove`/`set_members` (previously silent no-ops
+  inherited from the trait defaults, which would have made the cap
+  untestable). 2 new `#[ignore]`d testcontainers tests in
+  `redis_cache_it.rs` for `set_remove` (member-scoped removal,
+  idempotent-on-missing-member), mirroring the existing `set_add`/
+  `set_members`/`set_expire` coverage style.
+- Full verification: `cargo build --workspace` clean, `cargo test
+  --workspace` all green (0 failures across every crate), `cargo clippy
+  --workspace --all-targets -- -D warnings` clean, `cargo fmt --all --check`
+  clean. `cargo test --no-run -p powehi-redis` compiles (Docker unavailable
+  in this sandbox, same as every prior cycle touching that file — the
+  `#[ignore]`d tests run for real only in CI).
+- **Next cycle candidate:** none urgent from this change — the two YELLOWs
+  above are accepted-as-is per the auditor, not open gaps. Standing older
+  candidates: the `powehi-telemetry` env-var-race test flake (STABILIZATION-
+  appropriate, noted since cycle 296) or PQ hybrid Phase A (still blocked on
+  openmls shipping a stable `MLS_128_MLKEM768` ciphersuite — do not pick
+  until confirmed available upstream, per the ADR-0003 Y-series note below).
+
+## Previous state (2026-07-17, cycle 300 — STABILIZATION: invite KeyPackage size guard + yanked-crate lockfile fix)
 
 - `gh run list` returned HTTP 503 (GitHub API transient outage, not auth) both
   on first try and after a 5s retry — CI status could not be confirmed
