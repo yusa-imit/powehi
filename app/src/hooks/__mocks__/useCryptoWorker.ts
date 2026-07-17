@@ -94,7 +94,11 @@ const mockWorker = {
 		identityId: "mock-identity-id",
 		keyPackage: new Uint8Array([1, 2, 3]),
 		pqDecapKeyHandle: "mock-pq-decap-handle-phrase-0",
+		recoveryPubkey: new Uint8Array(32),
 	}),
+	// §8.5 account restore: signs the server's login nonce with the phrase-derived
+	// Ed25519 key, proving possession of the recovery phrase.
+	mlsSignRecoveryChallenge: vi.fn().mockResolvedValue({ signature: new Uint8Array(64) }),
 	// prd.md §5.3 Phase B — extract ML-KEM encap key from a peer's KeyPackage.
 	mlsPqExtractEncapKey: async (_keyPackageBytes: Uint8Array) => ({
 		encapKey: new Uint8Array(1184),

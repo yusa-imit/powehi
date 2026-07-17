@@ -22,6 +22,12 @@ pub struct RegistrationFinishRequest {
     pub user_id: UserId,
     pub opaque_record: Vec<u8>,
     pub mls_credential: Vec<u8>,
+    /// Optional raw 32-byte Ed25519 verifying key derived from the client's BIP-39
+    /// recovery phrase (prd.md §8.5). Enrolls the account in phrase-based account
+    /// restore. `#[serde(default)]` so pre-existing JSON bodies without the field
+    /// still deserialize (clients that don't send it simply opt out of recovery).
+    #[serde(default)]
+    pub recovery_pubkey: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +46,21 @@ pub struct LoginInitResponse {
     pub login_nonce: String,
 }
 
+/// Proof of possession of the BIP-39 recovery phrase, presented during a
+/// lost-everything account restore (prd.md §8.5). The client re-derives the
+/// deterministic Ed25519 keypair from the phrase and signs the server-issued
+/// `login_nonce`; the server verifies `signature` against the `recovery_pubkey`
+/// stored at registration and, only if valid, mints a brand-new device.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryProof {
+    /// The new device's BasicCredential identity label (same role/shape as
+    /// `RegistrationFinishRequest.mls_credential`). Opaque to the server.
+    pub mls_credential: Vec<u8>,
+    /// 64-byte Ed25519 signature over
+    /// `b"powehi-recovery-challenge-v1" || 0x00 || login_nonce.as_bytes()`.
+    pub signature: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoginFinishRequest {
     pub opaque_ke3: Vec<u8>,
@@ -48,6 +69,12 @@ pub struct LoginFinishRequest {
     /// The device the user is authenticating from. Server verifies ownership before
     /// issuing a device-scoped session token.
     pub device_id: DeviceId,
+    /// Optional recovery-phrase proof. When present AND `device_id` is unknown, the
+    /// server attempts a §8.5 account restore: verify the phrase signature against
+    /// the user's stored `recovery_pubkey` and mint `device_id` as a new device.
+    /// `#[serde(default)]` so normal login bodies without the field still deserialize.
+    #[serde(default)]
+    pub recovery_proof: Option<RecoveryProof>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

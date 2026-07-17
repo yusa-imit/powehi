@@ -58,6 +58,12 @@ export async function regFinish(
 	user_id: string,
 	opaque_record: Uint8Array,
 	mls_credential: Uint8Array,
+	// §8.5 account restore: the Ed25519 verifying key derived from the user's
+	// BIP-39 recovery phrase, submitted ONCE at registration time so a future
+	// restore-account login can prove phrase possession against it server-side.
+	// Optional/omitted (never sent as an explicit `undefined` key — JSON.stringify
+	// drops it) for any caller that hasn't adopted recovery-phrase registration yet.
+	recovery_pubkey?: Uint8Array,
 ): Promise<RegFinishResp> {
 	const resp = await fetch(`${API_BASE}/auth/register/finish`, {
 		method: "POST",
@@ -66,6 +72,7 @@ export async function regFinish(
 			user_id,
 			opaque_record: toJsonArray(opaque_record),
 			mls_credential: toJsonArray(mls_credential),
+			recovery_pubkey: recovery_pubkey ? toJsonArray(recovery_pubkey) : undefined,
 		}),
 	});
 	if (!resp.ok) {
@@ -102,10 +109,21 @@ export async function loginInit(
 	return resp.json() as Promise<LoginInitResp>;
 }
 
+export interface RecoveryProof {
+	mls_credential: Uint8Array;
+	signature: Uint8Array;
+}
+
 export async function loginFinish(
 	opaque_ke3: Uint8Array,
 	login_nonce: string,
 	device_id: string,
+	// §8.5 account restore: present only for a restore-account login from a
+	// brand-new device with no local OPAQUE-linked device row yet. Proves
+	// possession of the BIP-39 recovery phrase by signing login_nonce with the
+	// phrase-derived Ed25519 key whose public half was registered once via
+	// regFinish's recovery_pubkey. Optional/omitted for ordinary logins.
+	recovery_proof?: RecoveryProof,
 ): Promise<string> {
 	const resp = await fetch(`${API_BASE}/auth/login/finish`, {
 		method: "POST",
@@ -114,6 +132,12 @@ export async function loginFinish(
 			opaque_ke3: toJsonArray(opaque_ke3),
 			login_nonce,
 			device_id,
+			recovery_proof: recovery_proof
+				? {
+						mls_credential: toJsonArray(recovery_proof.mls_credential),
+						signature: toJsonArray(recovery_proof.signature),
+					}
+				: undefined,
 		}),
 	});
 	if (!resp.ok) {

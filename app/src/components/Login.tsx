@@ -12,6 +12,7 @@ import { db } from "../db/schema";
 import { useCryptoWorker } from "../hooks/useCryptoWorker";
 import { useAuthStore } from "../store/auth";
 import { base64ToUint8Array, uint8ToBase64 } from "../utils/base64";
+import type { MlsIdentityFromPhraseResult } from "../workers/crypto.worker";
 import { Icon } from "./Icon";
 import { RecoveryPhraseModal } from "./RecoveryPhraseModal";
 
@@ -43,7 +44,7 @@ function Logo({ size = 32 }: { size?: number }) {
 }
 
 type LoginPhase = "idle" | "loading" | "recovery" | "error";
-type Mode = "sign-in" | "create-account";
+type Mode = "sign-in" | "create-account" | "restore-account";
 
 export function Login() {
 	const login = useAuthStore((s) => s.login);
@@ -63,6 +64,10 @@ export function Login() {
 	} | null>(null);
 	const [errorMsg, setErrorMsg] = useState("");
 	const [mode, setMode] = useState<Mode>("sign-in");
+	// §8.5 account restore: the 24-word BIP-39 recovery phrase, typed by a user
+	// with no local device row. Cleared immediately after every submit attempt
+	// (success or failure) — same F2-style hygiene as the password field below.
+	const [recoveryPhrase, setRecoveryPhrase] = useState("");
 
 	const handleHandleChange = (e: ChangeEvent<HTMLInputElement>) => {
 		setHandle(e.target.value);
@@ -108,12 +113,24 @@ export function Login() {
 		const phraseHash = await crypto.subtle.digest("SHA-256", phraseEncoder.encode(phrase));
 		const mlsIdentityBytes = new Uint8Array(phraseHash).slice(0, 16);
 
-		const { identityId, keyPackage, pqDecapKeyHandle } =
-			await cryptoWorker.mlsInitIdentityFromPhrase(phrase, mlsIdentityBytes);
+		const { identityId, keyPackage, pqDecapKeyHandle, recoveryPubkey } =
+			(await cryptoWorker.mlsInitIdentityFromPhrase(
+				phrase,
+				mlsIdentityBytes,
+			)) as MlsIdentityFromPhraseResult;
 		// phrase goes out of scope here; the words array is held temporarily for display only.
 
-		// Step 5: server registration finish — creates user + device
-		const finishResp = await regFinish(initResp.user_id, opaque_record, mlsIdentityBytes);
+		// Step 5: server registration finish — creates user + device.
+		// §8.5: recoveryPubkey is submitted ONCE here so a future restore-account
+		// login (doRestoreAccount below) can prove phrase possession against it.
+		// Without this, users.recovery_pubkey is never populated and restore can
+		// never succeed for this account.
+		const finishResp = await regFinish(
+			initResp.user_id,
+			opaque_record,
+			mlsIdentityBytes,
+			recoveryPubkey,
+		);
 
 		// Step 6: auto-login to get a session token
 		const { token } = await doLogin(pw, handle_hash, finishResp.device_id);
@@ -159,6 +176,76 @@ export function Login() {
 		return { token };
 	};
 
+	/**
+	 * §8.5 account restore — signs in from a brand-new device (no local
+	 * IndexedDB identity row) using password + the 24-word BIP-39 recovery
+	 * phrase. Re-derives the phrase-locked MLS identity in-browser, proves
+	 * possession of the phrase by signing the server's login nonce, and the
+	 * server mints a brand-new device for this account.
+	 */
+	const doRestoreAccount = async (
+		pw: Uint8Array,
+		handle_hash: Uint8Array,
+		phrase: string,
+	): Promise<{
+		device_id: string;
+		token: string;
+		identityId: string;
+		pqDecapKeyHandle: string;
+	}> => {
+		if (!cryptoWorker) throw new Error("crypto_unavailable");
+
+		// Steps 1–3: OPAQUE login dance, identical to doLogin's.
+		const { sessionId, message: ke1 } = await cryptoWorker.opaqueLoginStart(pw);
+		const initResp = await loginInit(handle_hash, ke1);
+		const { finalization: ke3 } = await cryptoWorker.opaqueLoginFinish(
+			sessionId,
+			pw,
+			new Uint8Array(initResp.opaque_ke2),
+		);
+
+		// Derive the same 16-byte public identity label used at original
+		// registration for this phrase — SHA-256(phrase)[0..16] (doRegister's
+		// derivation, mirrored exactly so the same device credential label
+		// results for the same phrase; the actual MLS signing key is re-derived
+		// inside WASM from the full BIP-39 seed).
+		const phraseEncoder = new TextEncoder();
+		const phraseHash = await crypto.subtle.digest("SHA-256", phraseEncoder.encode(phrase));
+		const mlsIdentityBytes = new Uint8Array(phraseHash).slice(0, 16);
+
+		const { identityId, keyPackage, pqDecapKeyHandle } =
+			await cryptoWorker.mlsInitIdentityFromPhrase(phrase, mlsIdentityBytes);
+
+		// Prove possession of the recovery phrase by signing the server's login
+		// nonce (UTF-8 bytes of the nonce string) with the phrase-derived key.
+		const { signature } = await cryptoWorker.mlsSignRecoveryChallenge(
+			phrase,
+			new TextEncoder().encode(initResp.login_nonce),
+		);
+
+		// A brand-new device is minted for this restored account.
+		const device_id = crypto.randomUUID();
+
+		const token = await loginFinish(ke3, initResp.login_nonce, device_id, {
+			mls_credential: mlsIdentityBytes,
+			signature,
+		});
+
+		// Persist the new device's identity so future logins on THIS browser can
+		// reuse it (mirrors doRegister's identity-persistence step exactly).
+		await db.identity.put({
+			id: 1,
+			deviceId: device_id,
+			mlsIdentityId: identityId,
+			mlsIdentityB64: uint8ToBase64(mlsIdentityBytes),
+		});
+
+		// Non-fatal: this device's initial KeyPackage upload.
+		uploadKeyPackage(token, device_id, keyPackage).catch(() => {});
+
+		return { device_id, token, identityId, pqDecapKeyHandle };
+	};
+
 	const handleSubmit = async (e: FormEvent) => {
 		e.preventDefault();
 		if (!handle.trim() || !password.trim()) {
@@ -174,6 +261,11 @@ export function Login() {
 		const pw = encoder.encode(password);
 		// F2: clear password from React state immediately after encoding to Uint8Array.
 		setPassword("");
+		// §8.5: capture then clear the recovery-phrase textarea's controlled state
+		// immediately after reading it — same F2 hygiene as the password field
+		// above, and unconditional (every mode/outcome), never held past this point.
+		const phrase = recoveryPhrase;
+		setRecoveryPhrase("");
 
 		try {
 			const handle_hash = await hashHandle(handle.trim());
@@ -181,6 +273,20 @@ export function Login() {
 			let device_id: string;
 			let token: string;
 			let identityId: string | null = null;
+
+			if (mode === "restore-account") {
+				const result = await doRestoreAccount(pw, handle_hash, phrase);
+				// No recovery-phrase-confirmation step here (unlike create-account) —
+				// the user already claims to possess the phrase; nothing new to show.
+				login(
+					result.device_id,
+					result.token,
+					result.identityId,
+					result.pqDecapKeyHandle,
+					handle.trim(),
+				);
+				return;
+			}
 
 			if (mode === "create-account") {
 				const result = await doRegister(pw, handle_hash);
@@ -359,13 +465,21 @@ export function Login() {
 			login(device_id, token, identityId ?? undefined, pqDecapKeyHandle, handle.trim());
 		} catch (err) {
 			setPhase("error");
-			const msg = err instanceof Error ? err.message : "unknown_error";
-			if (msg === "invalid_credentials" || msg === "unauthorized") {
-				setErrorMsg("Incorrect handle or password.");
-			} else if (msg === "crypto_unavailable") {
-				setErrorMsg("Encryption module unavailable. Please reload.");
+			if (mode === "restore-account") {
+				// Anti-oracle (§8.5): collapse EVERY restore failure — bad OPAQUE
+				// creds, server-rejected recovery proof, network error, whatever —
+				// into one generic message. Never reveal which of handle/password/
+				// phrase was wrong (same principle as invalid_credentials below).
+				setErrorMsg("Restore failed. Please check your handle, password, and recovery phrase.");
 			} else {
-				setErrorMsg("Sign in failed. Please try again.");
+				const msg = err instanceof Error ? err.message : "unknown_error";
+				if (msg === "invalid_credentials" || msg === "unauthorized") {
+					setErrorMsg("Incorrect handle or password.");
+				} else if (msg === "crypto_unavailable") {
+					setErrorMsg("Encryption module unavailable. Please reload.");
+				} else {
+					setErrorMsg("Sign in failed. Please try again.");
+				}
 			}
 		} finally {
 			// F2: zero password bytes regardless of success or failure.
@@ -477,7 +591,9 @@ export function Login() {
 				>
 					{mode === "create-account"
 						? "Create your encrypted account. Zero knowledge."
-						: "Sign in securely. We never see your messages."}
+						: mode === "restore-account"
+							? "Restore your account with your password and recovery phrase."
+							: "Sign in securely. We never see your messages."}
 				</div>
 
 				{/* Form */}
@@ -536,6 +652,44 @@ export function Login() {
 						/>
 					</div>
 
+					{/* Recovery phrase field — restore-account mode only (§8.5) */}
+					{mode === "restore-account" && (
+						<div
+							style={{
+								display: "flex",
+								flexDirection: "column",
+								marginBottom: 20,
+							}}
+						>
+							<label htmlFor="recovery-phrase" style={labelStyle}>
+								Recovery phrase
+							</label>
+							<textarea
+								id="recovery-phrase"
+								autoComplete="off"
+								spellCheck={false}
+								value={recoveryPhrase}
+								onChange={(e: ChangeEvent<HTMLTextAreaElement>) =>
+									setRecoveryPhrase(e.target.value)
+								}
+								placeholder="Enter your 24-word recovery phrase, separated by spaces"
+								style={{
+									...inputStyle,
+									resize: "vertical",
+									minHeight: 92,
+									lineHeight: 1.5,
+									fontSize: 14,
+								}}
+								onFocus={(e) => {
+									e.currentTarget.style.borderColor = "rgba(255,138,61,0.5)";
+								}}
+								onBlur={(e) => {
+									e.currentTarget.style.borderColor = "var(--border-soft)";
+								}}
+							/>
+						</div>
+					)}
+
 					{/* Error message */}
 					{phase === "error" && errorMsg && (
 						<div
@@ -585,10 +739,16 @@ export function Login() {
 						{phase === "loading" ? (
 							<>
 								<Spinner />
-								{mode === "create-account" ? "Creating account…" : "Signing in…"}
+								{mode === "create-account"
+									? "Creating account…"
+									: mode === "restore-account"
+										? "Restoring account…"
+										: "Signing in…"}
 							</>
 						) : mode === "create-account" ? (
 							"Create account"
+						) : mode === "restore-account" ? (
+							"Restore account"
 						) : (
 							"Sign in"
 						)}
@@ -618,6 +778,29 @@ export function Login() {
 							? "New to Powehi? Create account"
 							: "Already have an account? Sign in"}
 					</button>
+					{mode === "sign-in" && (
+						<button
+							type="button"
+							onClick={() => {
+								setMode("restore-account");
+								setErrorMsg("");
+								setPhase("idle");
+							}}
+							style={{
+								display: "block",
+								background: "transparent",
+								border: "none",
+								color: "var(--fg-3)",
+								fontSize: 13,
+								fontFamily: "var(--font-sans)",
+								cursor: "pointer",
+								padding: 0,
+								marginTop: 10,
+							}}
+						>
+							Lost your device? Restore with recovery phrase
+						</button>
+					)}
 				</div>
 
 				{/* Footer — lock icon always photon blue */}

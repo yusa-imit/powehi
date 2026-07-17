@@ -180,6 +180,7 @@
 - **`(group_id, device_id, joined_at_epoch)` — MLS 그룹 토폴로지** (fan-out 푸시 및 미디어 ACL 정합성에 필요): 서버는 어떤 device_id가 어떤 그룹의 멤버인지를 `group_members` 테이블에 영구 저장함. `device.user_id` FK를 통해 서버는 사용자↔디바이스↔그룹 전체 그래프를 보유. 단, MLS LeafNode 암호화 자료(공개 키, 서명 자료)는 포함되지 않으며 서버가 알지 못함. 완화: device_id는 opaque UUID이나 device ↔ user 매핑이 존재하므로 소셜 그래프 노출로 간주할 수 있음.
 - **Push subscription endpoint host** (FCM / Mozilla autopush / Apple APNs 등): RFC 8291 Web Push 운영상 불가피하게 push provider 식별자가 노출됨.
 - **`(media_id, device_id)` — 미디어 다운로드 ACK 존재 여부** (§9.4.3 미디어 GC): 어떤 device_id가 어떤 media_id의 다운로드 URL을 발급받았는지가 `media_acks` 테이블에 영구 저장됨. GC 알고리즘이 필요로 하는 것은 집합 소속 여부뿐이므로(P5 미니멀리즘) 타임스탬프 컬럼은 두지 않음. 다운로드 URL 발급 자체는 기존에도 매 요청마다 서버가 알 수밖에 없는 이벤트였으나(요청 로그), 그 사실을 **영구 저장**한다는 점이 이번에 새로 추가된 메타데이터 카테고리임. 실제 바이트 전송/복호화 성공을 확인하지 않고 URL 발급 시점에 ACK를 기록하므로, "ACK = 다운로드 URL 발급"이며 "ACK = 수신자가 실제로 열람함"이 아님 — §3.4의 정직성 원칙에 따라 명시.
+- **`users.recovery_pubkey` — 복구 인증 공개 키** (§8.5 계정 복원, cycle 303/304): 등록 시 클라이언트가 선택적으로 제출하는 32바이트 raw Ed25519 검증 키를 `users` 테이블에 영구 저장함(미제출 시 `NULL` — 해당 계정은 복원 경로를 사용할 수 없음, fail-closed). 이 값은 사용자의 BIP-39 복구 문구로부터 결정론적으로 유도되지만, **MLS identity 서명 키(§8.5 상단, `powehi-mls-signing-v1` 도메인)와는 별도의 HKDF 도메인(`powehi-recovery-auth-v1`)으로 유도되는 완전히 독립적인 키 쌍**이므로, 이 공개 키를 서버가 영구 보유하더라도 서버가 알지 못해야 하는 MLS 서명 키(§3.3 하단 "서버가 알지 못하는 것")로 연결되거나 대체될 수 없음 — HKDF 도메인 분리로 두 32바이트 출력은 동일한 시드에서 나왔음에도 계산적으로 무관함(crypto-reviewer 검증 완료, KAT 고정: `derive_recovery_auth_keypair_known_answer`). 이 공개 키는 비밀이 아니며(서명 검증에만 사용), 유출되어도 그 자체로는 계정 탈취를 허용하지 않음(개인 키는 WASM 경계를 넘지 않음). 단, 계정에 안정적으로 귀속되는 새로운 영구 식별자 카테고리이므로 본 목록에 명시함.
 
 서버가 **알지 못하는** 것:
 
@@ -1193,6 +1194,16 @@ fragment의 해시와 비교한다 — 일치하지 않으면 `mlsCreateGroup`/`
 - MLS 서명 키 유도: HKDF-SHA256(salt=None, info=b"powehi-mls-signing-v1", L=32) → Ed25519 개인 키
 - 개인 키는 WASM 경계를 절대 넘지 않음; 브라우저 JS로 노출되지 않음
 - 니모닉은 등록 시 1회만 표시되며 절대 저장되지 않음 (IndexedDB/localStorage 저장 금지)
+
+**서버 검증 복원 프로토콜 (cycle 303/304, threat-model-checker + crypto-reviewer + security-auditor 검토 완료):**
+
+디바이스를 전부 분실한 사용자(로컬 세션/디바이스 행이 전혀 없음)가 비밀번호와 복구 문구만으로 새 디바이스를 등록하는 흐름:
+
+- **별도 키 유도 (§3.3 참조):** 복구 인증에는 MLS 서명 키가 아닌, HKDF-SHA256(salt=None, info=b"powehi-recovery-auth-v1", L=32)로 유도되는 **독립된** Ed25519 키 쌍을 사용함. 공개 키(`recovery_pubkey`)만 등록 시 1회 서버로 전송되어 `users.recovery_pubkey`에 영구 저장됨(§3.3). 이 도메인 분리가 없다면 서버가 영구 저장하는 값이 MLS 서명 키와 동일해져 §3.3 "서버가 알지 못하는 것" 원칙을 위반하게 됨 — 두 키가 같은 BIP-39 시드에서 나오더라도 서로 다른 HKDF info 라벨을 쓰면 계산적으로 무관한 별개의 32바이트 값이 됨.
+- **도전-응답 서명:** 복원 로그인 시 서버가 `login_init`에서 발급한 1회용 `login_nonce`(UUID 문자열)에 대해, 클라이언트가 `powehi-recovery-auth-v1` 키로 `b"powehi-recovery-challenge-v1" ‖ 0x00 ‖ login_nonce_utf8` 메시지에 서명(도메인 분리 라벨 + NUL 구분자로 서버가 임의로 선택한 nonce에 대한 cross-protocol 서명 confusion을 방지). 서버는 `recovery_pubkey`로 `verify_strict`(RFC 8032 비-정규 인코딩 거부) 검증.
+- **2요소 게이팅 (권한 상승 없음):** 이 경로는 OPAQUE 로그인(비밀번호)이 먼저 성공한 뒤에만 도달하며(`login_finish` 내부, 미지의 `device_id` + `recovery_proof` 존재 시), 복구 문구 서명이 추가로 필요함 — 즉 기존 로그인보다 요구 조건이 하나 더 추가되는 것이지, 어떤 기존 인증 요소도 우회하지 않음.
+- **오라클 방지:** 계정 미등록(`recovery_pubkey = NULL`)·서명 malformed·서명 검증 실패·디바이스 정원 초과 등 모든 실패 모드가 동일한 `Unauthorized`로 수렴함(비인증 호출자에게 계정 상태를 구분시키지 않음). 미등록 계정도 고정된 더미 공개 키로 동일하게 `verify_strict`를 실행해 타이밍 오라클을 차단함.
+- **그룹 상태에는 영향 없음:** 복원된 디바이스는 새 MLS credential로 `devices` 테이블에만 추가되며, 어떤 그룹 멤버십도 자동으로 얻지 않음 — 기존 그룹에 재합류하려면 기존 멤버의 MLS Commit이 필요하고, identity 키 변경은 §5.6 Safety Number 경고를 발생시킴(포워드 시크러시/PCS 영향 없음).
 
 ---
 
@@ -2321,6 +2332,14 @@ gantt
 - **결정**: 3-Tier 멀티 리전 토폴로지 채택. Tier 1 (EU, KR), Tier 2 (JP, US 향후), Tier 3 (Cloudflare Edge).
 - **근거**: 리전 내 p99 <100ms 달성, 데이터 거주성 규정 준수, 리전 장애 격리.
 - **트레이드오프**: 인프라 복잡도 증가, gRPC 메시 운영 부담, 크로스 리전 일관성 관리, 비용 증가.
+
+#### ADR-003: 서버 검증 복구 문구 도전-응답 인증 경로 (§8.5)
+
+- **상태**: 승인 (cycle 304)
+- **맥락**: §8.5의 원래 설계는 클라이언트 단독의 identity 키 복원(BIP-39 → MLS 서명 키 재유도)만 다뤘고, 모든 디바이스를 분실한 사용자가 새 디바이스에서 서버에 새 `Device` 행을 어떻게 등록시키는지는 프로토콜화되어 있지 않았음. 이 세션 없는(pre-session) 디바이스 발급 흐름은 기존 "라이브 세션의 device_id 소유권 검증" 경로와 별개의, 새로운 인증 표면임.
+- **결정**: 복구 문구로부터 MLS 서명 키와 **별개의 HKDF 도메인**(`powehi-recovery-auth-v1`)으로 독립된 Ed25519 키 쌍을 유도하고, 그 공개 키(`recovery_pubkey`)만 등록 시 서버에 영구 저장. 복원 로그인은 OPAQUE(비밀번호) 성공 이후에만 도달 가능하며, 서버가 발급한 1회용 로그인 nonce에 대한 도메인 분리된 서명(`verify_strict`)으로 복구 문구 소지를 증명해야 새 `Device` 행이 발급됨.
+- **근거**: (1) 별도 HKDF 도메인이 서버가 영구 저장하는 `recovery_pubkey`를 서버가 알지 못해야 하는 MLS 서명 키로부터 암호학적으로 독립시킴(§3.3). (2) 비밀번호+문구 2요소 게이팅은 기존 어떤 인증 요소도 우회하지 않고 오히려 추가 요구사항을 얹음. (3) 모든 실패 모드(미등록/서명 오류/정원 초과)가 `Unauthorized`로 수렴하고 미등록 계정도 더미 키로 동일 연산을 수행해 오라클/타이밍 누출을 차단.
+- **트레이드오프**: `users`에 새로운 영구 컬럼(공개 키) 추가 — §3.3에 명시 필요(완료). 복구 문구를 분실하면 이 경로도 사용 불가(설계상 fail-closed, 별도 백업 채널 없음). 디바이스 정원(`MAX_DEVICES_PER_USER`)에 도달한 계정은 이 경로로도 신규 디바이스를 발급받지 못함 — 가용성 트레이드오프로 accepted(향후 사이클에서 오래된 디바이스 자동 정리 등 고려 가능).
 
 ### 16.7 변경 이력
 

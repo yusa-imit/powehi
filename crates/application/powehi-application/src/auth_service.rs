@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use ed25519_dalek::{Signature, VerifyingKey};
 use hmac::{Hmac, Mac};
 use powehi_domain::{
     device::{Device, DeviceId},
@@ -10,7 +11,7 @@ use powehi_domain::{
 };
 use powehi_port_inbound::auth::{
     AuthUseCase, DeviceInfo, DeviceRegistrationRequest, LoginFinishRequest, LoginInitRequest,
-    LoginInitResponse, RegistrationFinishRequest, RegistrationFinishResponse,
+    LoginInitResponse, RecoveryProof, RegistrationFinishRequest, RegistrationFinishResponse,
     RegistrationInitRequest, RegistrationInitResponse, SessionToken,
 };
 use powehi_port_outbound::{
@@ -31,6 +32,21 @@ const DEVICE_SESSIONS_TTL: Duration = Duration::from_secs(86_400 + 300);
 /// Maximum number of devices a single user account may register. Prevents
 /// unbounded device proliferation and limits per-user KeyPackage storage.
 const MAX_DEVICES_PER_USER: usize = 10;
+
+/// A fixed, valid Ed25519 public key with NO known corresponding private key
+/// (SHA-256("powehi-dummy-recovery-verify-key-v1-not-a-real-account") fed
+/// through `SigningKey::from_bytes(..).verifying_key()`; the private key was
+/// discarded immediately after generation and is not reconstructible from
+/// this public value alone). Used ONLY as the `verify_strict` target in
+/// `AuthService::mint_recovery_device` when the account has no enrolled
+/// `recovery_pubkey`, so an unenrolled account's §8.5 restore rejection takes
+/// the identical code path / timing profile as an enrolled account's
+/// bad-signature rejection — no real client-produced signature can ever
+/// verify against it (security-auditor finding, cycle 304).
+const DUMMY_RECOVERY_PUBKEY: [u8; 32] = [
+    33, 150, 102, 62, 33, 168, 147, 22, 120, 201, 204, 46, 173, 129, 169, 11, 255, 63, 89, 124, 54,
+    94, 148, 112, 45, 146, 223, 9, 71, 83, 41, 194,
+];
 
 pub struct AuthService {
     user_repo: Arc<dyn UserRepository>,
@@ -76,6 +92,88 @@ impl AuthService {
         id_bytes[8] = (id_bytes[8] & 0x3f) | 0x80; // RFC 4122 variant
         UserId::from(Uuid::from_bytes(id_bytes))
     }
+
+    /// §8.5 recovery-phrase device mint. Called from `login_finish` ONLY after
+    /// OPAQUE verification + nonce consumption have already authenticated the user,
+    /// and ONLY when the presented `device_id` does not yet exist. Verifies the
+    /// recovery-phrase Ed25519 signature over the login nonce against the user's
+    /// stored `recovery_pubkey`; on success mints and persists a new Device.
+    ///
+    /// Every failure mode collapses to `DomainError::Unauthorized` to avoid an
+    /// account-state oracle on this pre-session path: no distinguishable error for
+    /// "account not enrolled in recovery", "malformed key/sig", "bad signature", or
+    /// "device cap reached" — all indistinguishable to an unauthenticated caller.
+    async fn mint_recovery_device(
+        &self,
+        authenticated_user_id: &UserId,
+        req: &LoginFinishRequest,
+        proof: &RecoveryProof,
+    ) -> Result<Device, DomainError> {
+        // Load the user. Absent → fail closed (no distinguishing oracle).
+        let user = self
+            .user_repo
+            .find_by_id(authenticated_user_id)
+            .await?
+            .ok_or(DomainError::Unauthorized)?;
+        // Never enrolled / opted out → still run the SAME verify_strict call below
+        // (against a fixed dummy key that no real signature can satisfy) rather
+        // than returning early, so an unenrolled account's rejection takes the
+        // same code path / timing profile as an enrolled account's bad-signature
+        // rejection (security-auditor finding, cycle 303/304: an early return here
+        // is a timing oracle for recovery-enrollment status, observable only to a
+        // caller who already passed OPAQUE — low severity, but cheap to close).
+        let is_enrolled = user.recovery_pubkey.is_some();
+        let pubkey = user
+            .recovery_pubkey
+            .unwrap_or_else(|| DUMMY_RECOVERY_PUBKEY.to_vec());
+
+        // Reconstruct the EXACT signed message the client produced (must match the
+        // WASM crate byte-for-byte):
+        //   b"powehi-recovery-challenge-v1" || 0x00 || login_nonce.as_bytes()
+        let mut message = Vec::new();
+        message.extend_from_slice(b"powehi-recovery-challenge-v1");
+        message.push(0u8);
+        message.extend_from_slice(req.login_nonce.as_bytes());
+
+        // Collapse malformed-pubkey / malformed-signature / verify-failure all to
+        // the same Unauthorized (matches this fn's OPAQUE error convention).
+        let vk_bytes: [u8; 32] = pubkey
+            .as_slice()
+            .try_into()
+            .map_err(|_| DomainError::Unauthorized)?;
+        let verifying_key =
+            VerifyingKey::from_bytes(&vk_bytes).map_err(|_| DomainError::Unauthorized)?;
+        let sig_bytes: [u8; 64] = proof
+            .signature
+            .as_slice()
+            .try_into()
+            .map_err(|_| DomainError::Unauthorized)?;
+        let signature = Signature::from_bytes(&sig_bytes);
+        // verify_strict (not verify): rejects non-canonical/cofactored signature
+        // encodings per RFC 8032, the recommended default for a security-critical
+        // account-recovery gate (crypto-reviewer finding, cycle 303).
+        let verify_result = verifying_key.verify_strict(&message, &signature);
+        if !is_enrolled || verify_result.is_err() {
+            return Err(DomainError::Unauthorized);
+        }
+
+        // Enforce the SAME per-user device cap as register_device. Collapse an
+        // exceeded cap to Unauthorized (NOT a distinguishable device_limit_exceeded):
+        // this path is reachable pre-session, so a distinct error would leak
+        // account-state to an unauthenticated caller.
+        let existing = self.device_repo.find_by_user(authenticated_user_id).await?;
+        if existing.len() >= MAX_DEVICES_PER_USER {
+            return Err(DomainError::Unauthorized);
+        }
+
+        let device = Device::new(
+            req.device_id.clone(),
+            authenticated_user_id.clone(),
+            proof.mls_credential.clone(),
+        );
+        self.device_repo.save(&device).await?;
+        Ok(device)
+    }
 }
 
 #[async_trait]
@@ -114,7 +212,21 @@ impl AuthUseCase for AuthService {
             .await?
             .ok_or_else(|| DomainError::NotFound("registration session".into()))?;
 
-        let user = User::registered(req.user_id.clone(), handle_hash, password_file);
+        // Reject a malformed recovery_pubkey at enrollment time rather than only
+        // failing closed later at restore (security-auditor finding, cycle 303) —
+        // a raw Ed25519 verifying key is always exactly 32 bytes.
+        if let Some(pk) = &req.recovery_pubkey {
+            if pk.len() != 32 {
+                return Err(DomainError::InvalidInput(
+                    "invalid recovery_pubkey length".into(),
+                ));
+            }
+        }
+
+        let mut user = User::registered(req.user_id.clone(), handle_hash, password_file);
+        // Enroll the account in §8.5 phrase-based recovery when the client supplied a
+        // recovery_pubkey. Absent → user opts out and cannot use the restore path.
+        user.recovery_pubkey = req.recovery_pubkey.clone();
         self.user_repo.save(&user).await?;
 
         // Create the first device for this user. The client supplies its MLS
@@ -172,6 +284,9 @@ impl AuthUseCase for AuthService {
     }
 
     // device_id not logged before ownership verification — added after (Y-4).
+    // §8.5: when device_id is unknown AND req.recovery_proof is present, this fn
+    // mints a NEW device via proof-of-recovery-phrase (see mint_recovery_device)
+    // instead of rejecting — a distinct authentication path from a live session.
     #[instrument(skip(self, req))]
     async fn login_finish(&self, req: LoginFinishRequest) -> Result<SessionToken, DomainError> {
         // Collapse all OPAQUE errors to Unauthorized (no error oracle).
@@ -193,11 +308,21 @@ impl AuthUseCase for AuthService {
 
         // Verify the claimed device belongs to the authenticated user.
         // Log device_id only after this ownership check passes (Y-4).
-        let device = self
-            .device_repo
-            .find_by_id(&req.device_id)
-            .await?
-            .ok_or(DomainError::Unauthorized)?;
+        let device = match self.device_repo.find_by_id(&req.device_id).await? {
+            Some(device) => device,
+            // Unknown device_id. Normal case → reject (unknown/foreign device). §8.5
+            // exception: a lost-everything restore carries a recovery-phrase proof and
+            // has no existing device yet, so mint device_id as a brand-new device iff
+            // the phrase signature verifies. `recovery_proof: None` stays a hard reject
+            // (no regression of the existing unknown-device rejection path).
+            None => match &req.recovery_proof {
+                None => return Err(DomainError::Unauthorized),
+                Some(proof) => {
+                    self.mint_recovery_device(&authenticated_user_id, &req, proof)
+                        .await?
+                }
+            },
+        };
         if device.user_id != authenticated_user_id {
             return Err(DomainError::Unauthorized);
         }
@@ -700,12 +825,42 @@ mod tests {
             user_id: uid.clone(),
             opaque_record: vec![2u8; 32],
             mls_credential: vec![],
+            recovery_pubkey: None,
         })
         .await
         .unwrap();
         let user = user_repo.find_by_id(&uid).await.unwrap().unwrap();
         assert_eq!(user.handle_hash, handle_hash);
         assert_eq!(user.opaque_password_file, vec![2u8; 32]);
+    }
+
+    #[tokio::test]
+    async fn register_finish_rejects_wrong_length_recovery_pubkey() {
+        // A raw Ed25519 verifying key is always exactly 32 bytes — reject a
+        // malformed value at enrollment rather than only failing closed later
+        // at restore time (security-auditor finding, cycle 303).
+        let (svc, user_repo, _, _) = make_svc();
+        let handle_hash = b"sha256-of-alice".to_vec();
+        let resp = svc
+            .register_init(RegistrationInitRequest {
+                opaque_request: vec![1u8; 32],
+                handle_hash: handle_hash.clone(),
+            })
+            .await
+            .unwrap();
+        let uid = resp.user_id.clone();
+        let err = svc
+            .register_finish(RegistrationFinishRequest {
+                user_id: uid.clone(),
+                opaque_record: vec![2u8; 32],
+                mls_credential: vec![],
+                recovery_pubkey: Some(vec![0u8; 31]), // one byte short
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::InvalidInput(_)));
+        // No user must have been persisted on rejection.
+        assert!(user_repo.find_by_id(&uid).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -716,6 +871,7 @@ mod tests {
                 user_id: UserId::new(),
                 opaque_record: vec![],
                 mls_credential: vec![],
+                recovery_pubkey: None,
             })
             .await
             .unwrap_err();
@@ -787,6 +943,7 @@ mod tests {
                 opaque_ke3: vec![0u8; 32],
                 login_nonce: init.login_nonce,
                 device_id: device_id.clone(),
+                recovery_proof: None,
             })
             .await
             .unwrap();
@@ -834,6 +991,7 @@ mod tests {
                 opaque_ke3: vec![0u8; 32],
                 login_nonce: init.login_nonce,
                 device_id: other_device,
+                recovery_proof: None,
             })
             .await
             .unwrap_err();
@@ -873,6 +1031,7 @@ mod tests {
             opaque_ke3: vec![0u8; 32],
             login_nonce: nonce.clone(),
             device_id: device_id.clone(),
+            recovery_proof: None,
         })
         .await
         .unwrap();
@@ -883,6 +1042,7 @@ mod tests {
                 opaque_ke3: vec![0u8; 32],
                 login_nonce: nonce,
                 device_id: device_id.clone(),
+                recovery_proof: None,
             })
             .await
             .unwrap_err();
@@ -921,6 +1081,7 @@ mod tests {
                 opaque_ke3: vec![0u8; 32],
                 login_nonce: init.login_nonce,
                 device_id: device_id.clone(),
+                recovery_proof: None,
             })
             .await
             .unwrap();
@@ -978,6 +1139,7 @@ mod tests {
                 opaque_ke3: vec![0u8; 32],
                 login_nonce: init.login_nonce,
                 device_id: device_id.clone(),
+                recovery_proof: None,
             })
             .await
             .unwrap_err();
@@ -1037,6 +1199,7 @@ mod tests {
                 opaque_ke3: vec![0u8; 32],
                 login_nonce: init.login_nonce,
                 device_id: device_id.clone(),
+                recovery_proof: None,
             })
             .await
             .unwrap_err();
@@ -1400,5 +1563,276 @@ mod tests {
             devices[0].last_seen_at.is_none(),
             "newly registered device has no last_seen_at"
         );
+    }
+    // ── §8.5 recovery-phrase account restore ─────────────────────────────────
+
+    use ed25519_dalek::{Signer, SigningKey};
+
+    /// Reconstruct the exact domain-separated message the client signs:
+    ///   b"powehi-recovery-challenge-v1" || 0x00 || login_nonce.as_bytes()
+    fn recovery_message(login_nonce: &str) -> Vec<u8> {
+        let mut msg = Vec::new();
+        msg.extend_from_slice(b"powehi-recovery-challenge-v1");
+        msg.push(0u8);
+        msg.extend_from_slice(login_nonce.as_bytes());
+        msg
+    }
+
+    fn sign_recovery(sk: &SigningKey, login_nonce: &str) -> Vec<u8> {
+        sk.sign(&recovery_message(login_nonce)).to_bytes().to_vec()
+    }
+
+    /// Save a user enrolled in recovery (recovery_pubkey = Some(vk)) under `handle`.
+    async fn save_recovery_user(
+        user_repo: &FakeUserRepo,
+        handle: &[u8],
+        vk_bytes: [u8; 32],
+    ) -> UserId {
+        let uid = UserId::new();
+        let mut user = User::new(uid.clone(), handle.to_vec());
+        user.recovery_pubkey = Some(vk_bytes.to_vec());
+        user_repo.save(&user).await.unwrap();
+        uid
+    }
+
+    #[tokio::test]
+    async fn recovery_valid_proof_mints_device_and_issues_session() {
+        // §8.5: lost-everything restore with a valid phrase signature over the login
+        // nonce mints a brand-new device (unknown device_id) and issues a session.
+        let (svc, user_repo, device_repo, cache) = make_svc();
+        let sk = SigningKey::generate(&mut rand::thread_rng());
+        let vk = sk.verifying_key().to_bytes();
+        let uid = save_recovery_user(&user_repo, b"hash", vk).await;
+
+        let init = svc
+            .login_init(LoginInitRequest {
+                handle_hash: b"hash".to_vec(),
+                opaque_ke1: vec![0u8; 32],
+            })
+            .await
+            .unwrap();
+        assert_eq!(init.user_id, uid);
+
+        let new_device = DeviceId::new(); // never registered
+        let signature = sign_recovery(&sk, &init.login_nonce);
+        let token = svc
+            .login_finish(LoginFinishRequest {
+                opaque_ke3: vec![0u8; 32],
+                login_nonce: init.login_nonce,
+                device_id: new_device.clone(),
+                recovery_proof: Some(RecoveryProof {
+                    mls_credential: vec![7u8; 16],
+                    signature,
+                }),
+            })
+            .await
+            .unwrap();
+
+        // Device was minted and bound to the authenticated user.
+        let minted = device_repo
+            .find_by_id(&new_device)
+            .await
+            .unwrap()
+            .expect("recovery device minted");
+        assert_eq!(minted.user_id, uid);
+        assert_eq!(minted.mls_credential, vec![7u8; 16]);
+
+        // Session was issued and bound to the new device.
+        let session_key = format!("session:{}", token.0);
+        let stored = cache.get(&session_key).await.unwrap().expect("session");
+        assert_eq!(stored, new_device.as_uuid().as_bytes().to_vec());
+    }
+
+    #[tokio::test]
+    async fn recovery_none_with_unknown_device_still_unauthorized() {
+        // Regression: an unknown device_id with NO recovery_proof must stay a hard
+        // reject (must not regress the pre-existing unknown/foreign-device path).
+        let (svc, user_repo, _, _) = make_svc();
+        user_repo
+            .save(&User::new(UserId::new(), b"hash".to_vec()))
+            .await
+            .unwrap();
+        let init = svc
+            .login_init(LoginInitRequest {
+                handle_hash: b"hash".to_vec(),
+                opaque_ke1: vec![0u8; 32],
+            })
+            .await
+            .unwrap();
+        let err = svc
+            .login_finish(LoginFinishRequest {
+                opaque_ke3: vec![0u8; 32],
+                login_nonce: init.login_nonce,
+                device_id: DeviceId::new(), // unknown
+                recovery_proof: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
+    }
+
+    #[test]
+    fn dummy_recovery_pubkey_is_a_valid_ed25519_point() {
+        // The timing-parity fix (mint_recovery_device) requires DUMMY_RECOVERY_PUBKEY
+        // to decode successfully so the not-enrolled path reaches verify_strict
+        // rather than short-circuiting on the malformed-pubkey branch, which would
+        // reopen the timing gap this constant exists to close.
+        assert!(VerifyingKey::from_bytes(&DUMMY_RECOVERY_PUBKEY).is_ok());
+    }
+
+    #[tokio::test]
+    async fn recovery_proof_but_user_not_enrolled_is_unauthorized() {
+        // User has recovery_pubkey = None (never enrolled). Even a well-formed proof
+        // must fail closed to the SAME Unauthorized (no distinguishing oracle).
+        let (svc, user_repo, device_repo, _) = make_svc();
+        let uid = UserId::new();
+        user_repo
+            .save(&User::new(uid.clone(), b"hash".to_vec())) // recovery_pubkey: None
+            .await
+            .unwrap();
+        let sk = SigningKey::generate(&mut rand::thread_rng());
+
+        let init = svc
+            .login_init(LoginInitRequest {
+                handle_hash: b"hash".to_vec(),
+                opaque_ke1: vec![0u8; 32],
+            })
+            .await
+            .unwrap();
+        let new_device = DeviceId::new();
+        let signature = sign_recovery(&sk, &init.login_nonce);
+        let err = svc
+            .login_finish(LoginFinishRequest {
+                opaque_ke3: vec![0u8; 32],
+                login_nonce: init.login_nonce,
+                device_id: new_device.clone(),
+                recovery_proof: Some(RecoveryProof {
+                    mls_credential: vec![1u8; 16],
+                    signature,
+                }),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
+        // No device may be minted on the fail-closed path.
+        assert!(device_repo.find_by_id(&new_device).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn recovery_signature_for_wrong_nonce_is_unauthorized() {
+        // Signature is valid Ed25519 but over a DIFFERENT nonce → verify fails →
+        // Unauthorized. Guards against nonce-replay / challenge substitution.
+        let (svc, user_repo, device_repo, _) = make_svc();
+        let sk = SigningKey::generate(&mut rand::thread_rng());
+        let vk = sk.verifying_key().to_bytes();
+        save_recovery_user(&user_repo, b"hash", vk).await;
+
+        let init = svc
+            .login_init(LoginInitRequest {
+                handle_hash: b"hash".to_vec(),
+                opaque_ke1: vec![0u8; 32],
+            })
+            .await
+            .unwrap();
+        // Sign a nonce that is NOT the one issued.
+        let signature = sign_recovery(&sk, "some-other-nonce");
+        let new_device = DeviceId::new();
+        let err = svc
+            .login_finish(LoginFinishRequest {
+                opaque_ke3: vec![0u8; 32],
+                login_nonce: init.login_nonce,
+                device_id: new_device.clone(),
+                recovery_proof: Some(RecoveryProof {
+                    mls_credential: vec![2u8; 16],
+                    signature,
+                }),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
+        assert!(device_repo.find_by_id(&new_device).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn recovery_mint_respects_device_cap() {
+        // A recovery-minted device must NOT bypass MAX_DEVICES_PER_USER, and an
+        // exceeded cap collapses to Unauthorized (no distinguishable device_limit).
+        let (svc, user_repo, _, _) = make_svc();
+        let sk = SigningKey::generate(&mut rand::thread_rng());
+        let vk = sk.verifying_key().to_bytes();
+        let uid = save_recovery_user(&user_repo, b"hash", vk).await;
+
+        // Fill the account to the cap.
+        for _ in 0..MAX_DEVICES_PER_USER {
+            svc.register_device(
+                &uid,
+                DeviceRegistrationRequest {
+                    mls_credential: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let init = svc
+            .login_init(LoginInitRequest {
+                handle_hash: b"hash".to_vec(),
+                opaque_ke1: vec![0u8; 32],
+            })
+            .await
+            .unwrap();
+        let new_device = DeviceId::new();
+        let signature = sign_recovery(&sk, &init.login_nonce);
+        let err = svc
+            .login_finish(LoginFinishRequest {
+                opaque_ke3: vec![0u8; 32],
+                login_nonce: init.login_nonce,
+                device_id: new_device,
+                recovery_proof: Some(RecoveryProof {
+                    mls_credential: vec![3u8; 16],
+                    signature,
+                }),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
+    }
+
+    #[tokio::test]
+    async fn recovery_minted_device_is_listed_and_revocable() {
+        // A recovery-minted device needs no special-casing downstream: it appears in
+        // list_devices and can be revoked by revoke_device like any other device.
+        let (svc, user_repo, _, _) = make_svc();
+        let sk = SigningKey::generate(&mut rand::thread_rng());
+        let vk = sk.verifying_key().to_bytes();
+        let uid = save_recovery_user(&user_repo, b"hash", vk).await;
+
+        let init = svc
+            .login_init(LoginInitRequest {
+                handle_hash: b"hash".to_vec(),
+                opaque_ke1: vec![0u8; 32],
+            })
+            .await
+            .unwrap();
+        let new_device = DeviceId::new();
+        let signature = sign_recovery(&sk, &init.login_nonce);
+        svc.login_finish(LoginFinishRequest {
+            opaque_ke3: vec![0u8; 32],
+            login_nonce: init.login_nonce,
+            device_id: new_device.clone(),
+            recovery_proof: Some(RecoveryProof {
+                mls_credential: vec![4u8; 16],
+                signature,
+            }),
+        })
+        .await
+        .unwrap();
+
+        let devices = svc.list_devices(&uid).await.unwrap();
+        assert!(devices.iter().any(|d| d.device_id == new_device));
+
+        svc.revoke_device(&uid, &new_device).await.unwrap();
+        let after = svc.list_devices(&uid).await.unwrap();
+        assert!(!after.iter().any(|d| d.device_id == new_device));
     }
 }

@@ -23,6 +23,13 @@ export type MlsIdentityResult = {
 	keyPackage: Uint8Array;
 	pqDecapKeyHandle: string;
 };
+// §8.5 recovery: only the phrase-derived identity variant additionally returns
+// the 32-byte Ed25519 recovery public key (recoveryPubkey). Kept as a distinct
+// type so `mlsInitIdentity` and other MlsIdentityResult consumers are NOT
+// (incorrectly) typed as returning it.
+export type MlsIdentityFromPhraseResult = MlsIdentityResult & {
+	recoveryPubkey: Uint8Array;
+};
 export type MlsGroupResult = { groupId: string };
 export type MlsKeyPackageResult = { keyPackage: Uint8Array; pqDecapKeyHandle: string };
 // MLS full-context export/import (worker-reload persistence, wasm_exports.rs
@@ -123,7 +130,14 @@ interface WasmModule {
 	mls_import_state: (stateBytes: Uint8Array, minGeneration: number) => MlsImportStateResult;
 	// §8.5 Recovery: BIP-39 phrase generation and phrase-derived identity.
 	mls_generate_recovery_phrase: () => { words: string[] };
-	mls_init_identity_from_phrase: (phrase: string, identityBytes: Uint8Array) => MlsIdentityResult;
+	mls_init_identity_from_phrase: (
+		phrase: string,
+		identityBytes: Uint8Array,
+	) => MlsIdentityFromPhraseResult;
+	mls_sign_recovery_challenge: (
+		phrase: string,
+		loginNonce: Uint8Array,
+	) => { signature: Uint8Array };
 	// Post-quantum KEM (FIPS 203 ML-KEM-768) — ADR-0003 Phase A primitives.
 	ml_kem_768_keygen: () => { encapKey: Uint8Array; decapKey: Uint8Array };
 	ml_kem_768_encap: (encapKey: Uint8Array) => { ciphertext: Uint8Array; sharedSecret: Uint8Array };
@@ -336,9 +350,28 @@ const api = {
 	async mlsInitIdentityFromPhrase(
 		phrase: string,
 		identityBytes: Uint8Array,
-	): Promise<MlsIdentityResult> {
+	): Promise<MlsIdentityFromPhraseResult> {
 		const wasm = await getWasm();
 		return wasm.mls_init_identity_from_phrase(phrase, identityBytes);
+	},
+
+	/**
+	 * Sign the server's recovery-challenge login nonce with the phrase-derived
+	 * recovery-auth key (§8.5 account restore) — a key cryptographically distinct
+	 * from and independent of the MLS identity signing key, since its public half
+	 * (`recoveryPubkey`) is durably stored server-side and must never be linkable
+	 * to the MLS identity key the server is never supposed to learn. `loginNonce`
+	 * must be the UTF-8 bytes of the server's `login_nonce` string (new
+	 * TextEncoder().encode). Returns { signature } — the 64-byte Ed25519
+	 * signature. The signing key never leaves WASM; only the signature crosses
+	 * the boundary.
+	 */
+	async mlsSignRecoveryChallenge(
+		phrase: string,
+		loginNonce: Uint8Array,
+	): Promise<{ signature: Uint8Array }> {
+		const wasm = await getWasm();
+		return wasm.mls_sign_recovery_challenge(phrase, loginNonce);
 	},
 
 	/**

@@ -28,6 +28,44 @@ use zeroize::Zeroizing;
 /// breaks recovery for every existing user; gate any change behind crypto-reviewer.
 pub const SIGNING_KEY_DOMAIN: &[u8] = b"powehi-mls-signing-v1";
 
+/// Domain-separation label for HKDF-Expand deriving the RECOVERY-AUTHENTICATION
+/// Ed25519 keypair (§8.5).
+///
+/// DISTINCT from [`SIGNING_KEY_DOMAIN`] (which derives the MLS identity signing
+/// key) and from [`RECOVERY_CHALLENGE_DOMAIN`] (which frames the signed MESSAGE,
+/// not a key).  This label derives a SEPARATE, independent Ed25519 keypair whose
+/// public half is what the client ships to the server as `recovery_pubkey` and
+/// stores in `users.recovery_pubkey`.
+///
+/// SECURITY RATIONALE (threat-model-checker finding, cycle 303): the recovery
+/// public key is durably stored server-side keyed to the `user_id`.  It MUST NOT
+/// be the MLS identity (LeafNode/credential) signing public key — prd.md §3.3
+/// lists the MLS LeafNode 서명 키 among "서버가 알지 못하는 것", and §5.4 documents
+/// that the server never learns the MLS signing key.  Deriving `recovery_pubkey`
+/// under this distinct domain keeps the server-stored authentication key
+/// cryptographically independent of (and unlinkable to) the MLS identity key:
+/// HKDF domain separation makes the two 32-byte outputs computationally
+/// unrelated even though both descend from the same BIP-39 seed.  Versioned
+/// (`v1`) so a future rotation can mint a `v2` label; changing this constant
+/// breaks recovery-challenge verification for every existing user, so gate any
+/// change behind crypto-reviewer.
+pub const RECOVERY_AUTH_KEY_DOMAIN: &[u8] = b"powehi-recovery-auth-v1";
+
+/// Domain-separation label for the recovery login-challenge SIGNATURE (§8.5).
+///
+/// DISTINCT from [`SIGNING_KEY_DOMAIN`]: that label derives the Ed25519 KEY from
+/// the BIP-39 seed; THIS label frames the MESSAGE that key signs when proving
+/// possession of the recovery secret to the login server.  They serve different
+/// purposes and MUST NOT be merged or collide.
+///
+/// Domain separation is mandatory here: the login server chooses the nonce
+/// content, so signing the bare nonce would let a malicious/compromised server
+/// obtain a signature over attacker-chosen bytes under the user's long-term
+/// recovery-auth key (cross-protocol confusable-signature risk).  Prefixing a
+/// fixed domain label + NUL separator binds every recovery signature to this one
+/// purpose.  Versioned (`v1`) so a future rotation can mint a `v2` label.
+pub const RECOVERY_CHALLENGE_DOMAIN: &[u8] = b"powehi-recovery-challenge-v1";
+
 /// Errors surfaced by the recovery module.
 ///
 /// Variants are coarse and content-free: no plaintext, mnemonic words, or key
@@ -93,28 +131,91 @@ pub fn mnemonic_to_seed(mnemonic: &Mnemonic) -> Zeroizing<[u8; 64]> {
     result
 }
 
-/// Derive an Ed25519 signing keypair from the BIP-39 seed using HKDF-SHA256
-/// (RFC 5869) with domain label [`SIGNING_KEY_DOMAIN`] and no salt.
+/// Derive an Ed25519 keypair from the BIP-39 seed using HKDF-SHA256 (RFC 5869)
+/// under the caller-supplied `domain` label and no salt.
 ///
 /// HKDF-Extract is implicit (the seed is high-entropy already; using `None` for
 /// the salt is the RFC 5869 recommendation when the IKM is already a
-/// cryptographically uniform value).  HKDF-Expand then produces 32 bytes of
-/// output keying material; those 32 bytes become the Ed25519 secret scalar seed
-/// per RFC 8032 §5.1.5 (the algorithm clamps internally).
+/// cryptographically uniform value).  HKDF-Expand with `domain` as the `info`
+/// parameter then produces 32 bytes of output keying material; those 32 bytes
+/// become the Ed25519 secret scalar seed per RFC 8032 §5.1.5 (the algorithm
+/// clamps internally).
+///
+/// The `domain` (HKDF `info`) is what makes two derivations from the SAME seed
+/// cryptographically independent: distinct labels yield computationally
+/// unrelated 32-byte outputs.  Callers MUST pass a versioned, purpose-specific,
+/// non-prefix-colliding label — see [`SIGNING_KEY_DOMAIN`] (MLS identity signing
+/// key) and [`RECOVERY_AUTH_KEY_DOMAIN`] (server-stored recovery-auth key).
 ///
 /// Returns `(private_key_bytes_32, public_key_bytes_32)`.  The private bytes are
 /// wrapped in `Zeroizing` so the heap buffer is wiped on drop; the public bytes
 /// are not secret.
-pub fn derive_signing_keypair(
+pub fn derive_keypair(
     seed: &[u8],
+    domain: &[u8],
 ) -> Result<(Zeroizing<[u8; 32]>, [u8; 32]), RecoveryError> {
     let hkdf = Hkdf::<Sha256>::new(None, seed);
     let mut okm = Zeroizing::new([0u8; 32]);
-    hkdf.expand(SIGNING_KEY_DOMAIN, okm.as_mut())
+    hkdf.expand(domain, okm.as_mut())
         .map_err(|_| RecoveryError::Hkdf)?;
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&okm);
     let public_bytes = signing_key.verifying_key().to_bytes();
     Ok((okm, public_bytes))
+}
+
+/// Derive the MLS identity signing keypair from the BIP-39 seed under
+/// [`SIGNING_KEY_DOMAIN`].  Thin wrapper over [`derive_keypair`]; its output is
+/// KAT-locked (`derive_signing_keypair_known_answer`) and drives the MLS
+/// LeafNode/credential signing key — do NOT reroute it to a different domain.
+///
+/// Returns `(private_key_bytes_32, public_key_bytes_32)`.
+pub fn derive_signing_keypair(
+    seed: &[u8],
+) -> Result<(Zeroizing<[u8; 32]>, [u8; 32]), RecoveryError> {
+    derive_keypair(seed, SIGNING_KEY_DOMAIN)
+}
+
+/// Derive the RECOVERY-AUTHENTICATION keypair from the BIP-39 seed under
+/// [`RECOVERY_AUTH_KEY_DOMAIN`].  Thin wrapper over [`derive_keypair`].
+///
+/// This keypair is COMPLETELY DECOUPLED from the MLS identity signing key
+/// ([`derive_signing_keypair`]): its public half is the value shipped to and
+/// durably stored by the server as `recovery_pubkey`, and its private half signs
+/// the recovery login challenge.  Keeping it under a distinct HKDF domain ensures
+/// the server-stored key is cryptographically independent of the MLS identity
+/// signing key that §3.3/§5.4 say the server must never learn.
+///
+/// Returns `(private_key_bytes_32, public_key_bytes_32)`.
+pub fn derive_recovery_auth_keypair(
+    seed: &[u8],
+) -> Result<(Zeroizing<[u8; 32]>, [u8; 32]), RecoveryError> {
+    derive_keypair(seed, RECOVERY_AUTH_KEY_DOMAIN)
+}
+
+/// Build the message the recovery client signs to prove possession of the
+/// phrase-derived recovery-auth key (see [`derive_recovery_auth_keypair`]) to
+/// the login server (§8.5).  The signing key is the recovery-auth key, NOT the
+/// MLS identity signing key.
+///
+/// Format: `RECOVERY_CHALLENGE_DOMAIN || 0x00 || login_nonce`
+///
+/// Mirrors `kem_credential::signing_message`'s exact byte layout: fixed domain
+/// label, a single 0x00 NUL separator, then the data.  The NUL separator
+/// prevents the domain prefix from extending into the nonce bytes.
+///
+/// **Wire contract (load-bearing for the INDEPENDENT backend verifier, which
+/// reconstructs this layout WITHOUT importing this crate):** the signed message
+/// is `b"powehi-recovery-challenge-v1" || 0x00 || login_nonce_utf8_bytes`, where
+/// `login_nonce` is passed here already as the UTF-8 bytes of the server's
+/// `login_nonce` STRING (a UUID-formatted string) — i.e. the JS caller does
+/// `new TextEncoder().encode(login_nonce_string)`.  These are the UTF-8 bytes of
+/// the string, NOT raw/hex-decoded UUID bytes.
+pub fn recovery_challenge_message(login_nonce: &[u8]) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(RECOVERY_CHALLENGE_DOMAIN.len() + 1 + login_nonce.len());
+    msg.extend_from_slice(RECOVERY_CHALLENGE_DOMAIN);
+    msg.push(0x00);
+    msg.extend_from_slice(login_nonce);
+    msg
 }
 
 #[cfg(test)]
@@ -212,6 +313,13 @@ mod tests {
         let (priv_ab, pub_ab) = derive_signing_keypair(&*seed_abandon).unwrap();
         println!("ABANDON SEED priv: {:?}", *priv_ab);
         println!("ABANDON SEED pub:  {:?}", pub_ab);
+
+        // Recovery-auth domain (RECOVERY_AUTH_KEY_DOMAIN) KAT capture.
+        let (ra_priv_zero, ra_pub_zero) = derive_recovery_auth_keypair(&seed_zero).unwrap();
+        println!("RA ZERO SEED priv: {:?}", *ra_priv_zero);
+        println!("RA ZERO SEED pub:  {:?}", ra_pub_zero);
+        let (_ra_priv_ab, ra_pub_ab) = derive_recovery_auth_keypair(&*seed_abandon).unwrap();
+        println!("RA ABANDON SEED pub:  {:?}", ra_pub_ab);
     }
 
     /// Known-answer test: lock the derivation construction so any silent
@@ -268,6 +376,190 @@ mod tests {
         assert_eq!(
             pub_ab, KAT_ABANDON_PUB,
             "Ed25519 public key drifted from KAT (abandon phrase)"
+        );
+    }
+
+    /// Known-answer test for [`derive_recovery_auth_keypair`] — the sibling of
+    /// `derive_signing_keypair_known_answer` above, at the same bar.  The
+    /// `RECOVERY_AUTH_KEY_DOMAIN` doc explicitly states that "changing this
+    /// constant breaks recovery-challenge verification for every existing
+    /// user"; without a KAT pinning the derivation, a silent drift in the
+    /// domain label or HKDF parameters would brick every enrolled user's
+    /// restore path while still passing CI. Changing these constants requires
+    /// a crypto-reviewer pass (rule: crypto-libraries-pinned.md).
+    ///
+    /// Constants captured by running `kat_capture` (see above) against the
+    /// initial correct implementation (HKDF-SHA256, salt=None,
+    /// info=b"powehi-recovery-auth-v1", L=32).
+    #[test]
+    fn derive_recovery_auth_keypair_known_answer() {
+        // --- Vector 1: all-zero 64-byte seed ---
+        const KAT_RA_ZERO_PRIV: [u8; 32] = [
+            65, 84, 23, 151, 76, 213, 223, 115, 128, 67, 114, 187, 76, 13, 27, 161, 19, 165, 211,
+            188, 102, 143, 34, 19, 138, 36, 153, 197, 66, 50, 229, 206,
+        ];
+        const KAT_RA_ZERO_PUB: [u8; 32] = [
+            16, 212, 49, 229, 217, 173, 10, 171, 226, 58, 201, 64, 227, 211, 248, 254, 16, 70, 245,
+            81, 204, 59, 84, 98, 0, 22, 29, 214, 206, 255, 9, 203,
+        ];
+
+        let seed_zero = [0u8; 64];
+        let (priv_key, pub_key) = derive_recovery_auth_keypair(&seed_zero).unwrap();
+        assert_eq!(
+            *priv_key, KAT_RA_ZERO_PRIV,
+            "recovery-auth HKDF output drifted from KAT (zero seed)"
+        );
+        assert_eq!(
+            pub_key, KAT_RA_ZERO_PUB,
+            "recovery-auth Ed25519 public key drifted from KAT (zero seed)"
+        );
+
+        // --- Vector 2: BIP-39 `abandon × 11 + about` phrase ---
+        const KAT_RA_ABANDON_PUB: [u8; 32] = [
+            174, 246, 110, 76, 55, 80, 246, 158, 94, 124, 53, 39, 43, 16, 96, 39, 188, 98, 182,
+            189, 1, 150, 177, 189, 53, 53, 36, 209, 210, 102, 242, 118,
+        ];
+        let abandon_phrase =
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let m = parse_phrase(abandon_phrase).unwrap();
+        let seed_ab = mnemonic_to_seed(&m);
+        let (_, pub_ab) = derive_recovery_auth_keypair(&*seed_ab).unwrap();
+        assert_eq!(
+            pub_ab, KAT_RA_ABANDON_PUB,
+            "recovery-auth Ed25519 public key drifted from KAT (abandon phrase)"
+        );
+    }
+
+    // ── §8.5 recovery login-challenge signature ───────────────────────────────
+
+    /// The signed-message construction is deterministic and matches the exact
+    /// documented wire layout: DOMAIN || 0x00 || nonce.
+    #[test]
+    fn recovery_challenge_message_layout() {
+        let nonce = b"nonce-mock-0001";
+        let msg = recovery_challenge_message(nonce);
+        let mut expected = Vec::new();
+        expected.extend_from_slice(RECOVERY_CHALLENGE_DOMAIN);
+        expected.push(0x00);
+        expected.extend_from_slice(nonce);
+        assert_eq!(msg, expected);
+        assert_eq!(
+            &msg[..RECOVERY_CHALLENGE_DOMAIN.len()],
+            RECOVERY_CHALLENGE_DOMAIN
+        );
+        assert_eq!(msg[RECOVERY_CHALLENGE_DOMAIN.len()], 0x00);
+        assert_eq!(&msg[RECOVERY_CHALLENGE_DOMAIN.len() + 1..], nonce);
+    }
+
+    /// The domain labels must not collide or alias.  `RECOVERY_CHALLENGE_DOMAIN`
+    /// frames the signed MESSAGE; `SIGNING_KEY_DOMAIN` frames the KEY derivation.
+    /// It must also be non-aliasing with `kem_credential::SIGN_DOMAIN` (the other
+    /// message-framing label the SAME Ed25519 key signs under) — neither equal nor
+    /// a prefix of the other — so no server-chosen nonce can yield a recovery
+    /// message confusable with a signed kem-ek credential message.
+    #[test]
+    fn recovery_and_signing_domains_are_distinct() {
+        use crate::kem_credential::SIGN_DOMAIN;
+        assert_ne!(RECOVERY_CHALLENGE_DOMAIN, SIGNING_KEY_DOMAIN);
+        assert_ne!(RECOVERY_CHALLENGE_DOMAIN, SIGN_DOMAIN);
+        assert!(
+            !RECOVERY_CHALLENGE_DOMAIN.starts_with(SIGN_DOMAIN),
+            "recovery label must not have the kem-ek label as a prefix"
+        );
+        assert!(
+            !SIGN_DOMAIN.starts_with(RECOVERY_CHALLENGE_DOMAIN),
+            "kem-ek label must not have the recovery label as a prefix"
+        );
+    }
+
+    /// The RECOVERY-AUTH keypair MUST be cryptographically independent of the MLS
+    /// identity signing keypair, even though both descend from the same BIP-39
+    /// seed — this is the entire point of [`RECOVERY_AUTH_KEY_DOMAIN`] being a
+    /// distinct HKDF `info` label from [`SIGNING_KEY_DOMAIN`] (threat-model-checker
+    /// finding, cycle 303: the server durably stores `recovery_pubkey`, and it must
+    /// not be linkable to / substitutable for the MLS signing key the server is
+    /// never supposed to learn).
+    #[test]
+    fn recovery_auth_keypair_differs_from_mls_signing_keypair() {
+        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let m = parse_phrase(phrase).unwrap();
+        let seed = mnemonic_to_seed(&m);
+        let (mls_priv, mls_pub) = derive_signing_keypair(&*seed).unwrap();
+        let (ra_priv, ra_pub) = derive_recovery_auth_keypair(&*seed).unwrap();
+        assert_ne!(
+            *mls_priv, *ra_priv,
+            "recovery-auth private key must differ from the MLS identity signing private key"
+        );
+        assert_ne!(
+            mls_pub, ra_pub,
+            "recovery-auth public key (the value stored server-side) must differ from the \
+             MLS identity signing public key"
+        );
+    }
+
+    /// Sign/verify round-trip: sign the challenge message with the phrase-derived
+    /// RECOVERY-AUTH private key (`derive_recovery_auth_keypair`, NOT the MLS
+    /// identity signing key — see [`RECOVERY_AUTH_KEY_DOMAIN`]), verify with the
+    /// derived public key.
+    #[test]
+    fn recovery_challenge_sign_verify_round_trip() {
+        use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let m = parse_phrase(phrase).unwrap();
+        let seed = mnemonic_to_seed(&m);
+        let (priv_key, pub_key) = derive_recovery_auth_keypair(&*seed).unwrap();
+        let signing_key = SigningKey::from_bytes(&priv_key);
+        let nonce = b"550e8400-e29b-41d4-a716-446655440000";
+        let msg = recovery_challenge_message(nonce);
+        let sig: Signature = signing_key.sign(&msg);
+        let vk = VerifyingKey::from_bytes(&pub_key).unwrap();
+        assert!(
+            vk.verify_strict(&msg, &sig).is_ok(),
+            "valid recovery signature must verify (strict)"
+        );
+        assert!(
+            vk.verify(&msg, &sig).is_ok(),
+            "valid recovery signature must verify"
+        );
+    }
+
+    /// Flipping one byte of the nonce invalidates the signature.
+    #[test]
+    fn recovery_challenge_nonce_tamper_rejected() {
+        use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let m = parse_phrase(phrase).unwrap();
+        let seed = mnemonic_to_seed(&m);
+        let (priv_key, pub_key) = derive_recovery_auth_keypair(&*seed).unwrap();
+        let signing_key = SigningKey::from_bytes(&priv_key);
+        let nonce = b"nonce-mock-0001".to_vec();
+        let sig = signing_key.sign(&recovery_challenge_message(&nonce));
+        let mut tampered = nonce.clone();
+        tampered[0] ^= 0x01;
+        let vk = VerifyingKey::from_bytes(&pub_key).unwrap();
+        assert!(
+            vk.verify(&recovery_challenge_message(&tampered), &sig)
+                .is_err(),
+            "signature over a one-byte-different nonce must be rejected"
+        );
+    }
+
+    /// Domain separation actually changes the signed bytes: a signature over the
+    /// domain-separated message must NOT verify against the BARE nonce.
+    #[test]
+    fn recovery_challenge_domain_separation_changes_signed_bytes() {
+        use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let m = parse_phrase(phrase).unwrap();
+        let seed = mnemonic_to_seed(&m);
+        let (priv_key, pub_key) = derive_recovery_auth_keypair(&*seed).unwrap();
+        let signing_key = SigningKey::from_bytes(&priv_key);
+        let nonce = b"nonce-mock-0001";
+        let sig = signing_key.sign(&recovery_challenge_message(nonce));
+        let vk = VerifyingKey::from_bytes(&pub_key).unwrap();
+        assert!(
+            vk.verify(nonce, &sig).is_err(),
+            "domain-separated signature must not verify against the bare nonce"
         );
     }
 }

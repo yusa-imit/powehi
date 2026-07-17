@@ -41,6 +41,12 @@ pub struct User {
     /// OPAQUE password file (ServerRegistration serialized bytes). Empty until
     /// register_finish completes. Server MUST NOT inspect or log these bytes.
     pub opaque_password_file: Vec<u8>,
+    /// Raw 32-byte Ed25519 verifying key deterministically derived from the user's
+    /// BIP-39 recovery phrase (prd.md §8.5). Set once at registration. `None` means
+    /// the account is not enrolled in phrase-based recovery (registered before this
+    /// feature, or opted out) and therefore CANNOT restore via the recovery path —
+    /// fail-closed by design. Server never logs or inspects these bytes.
+    pub recovery_pubkey: Option<Vec<u8>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -53,6 +59,7 @@ impl User {
             id,
             handle_hash,
             opaque_password_file: vec![],
+            recovery_pubkey: None,
             created_at: now,
             updated_at: now,
         }
@@ -65,6 +72,7 @@ impl User {
             id,
             handle_hash,
             opaque_password_file,
+            recovery_pubkey: None,
             created_at: now,
             updated_at: now,
         }

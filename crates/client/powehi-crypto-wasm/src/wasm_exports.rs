@@ -449,13 +449,22 @@ pub fn mls_init_identity_from_phrase(
     phrase: &str,
     identity_bytes: &[u8],
 ) -> Result<JsValue, JsError> {
-    use crate::recovery::{derive_signing_keypair, mnemonic_to_seed, parse_phrase};
+    use crate::recovery::{
+        derive_recovery_auth_keypair, derive_signing_keypair, mnemonic_to_seed, parse_phrase,
+    };
     // Error is intentionally opaque ("invalid recovery phrase") — do not leak
     // word content, user input, or parse position back to JS (rule: no-plaintext-logging).
     let mnemonic = parse_phrase(phrase).map_err(|e| js_err(&e.to_string()))?;
     let seed = mnemonic_to_seed(&mnemonic);
     let (private_key, public_key) =
         derive_signing_keypair(&*seed).map_err(|e| js_err(&e.to_string()))?;
+    // `recovery_pubkey` is what gets shipped to and durably stored by the server —
+    // it MUST be derived under a domain distinct from the MLS identity signing key
+    // above, so the server-stored value is cryptographically independent of (and
+    // unlinkable to) the MLS signing key the server must never learn (prd.md §3.3,
+    // §5.4; threat-model-checker finding, cycle 303). See recovery::RECOVERY_AUTH_KEY_DOMAIN.
+    let (_, recovery_public_key) =
+        derive_recovery_auth_keypair(&*seed).map_err(|e| js_err(&e.to_string()))?;
     let provider = OpenMlsRustCrypto::default();
     let identity =
         generate_identity_from_keypair(identity_bytes, &private_key, &public_key, &provider)
@@ -482,7 +491,56 @@ pub fn mls_init_identity_from_phrase(
         ("identityId", JsValue::from_str(&identity_id)),
         ("keyPackage", bytes_js(&key_package)),
         ("pqDecapKeyHandle", JsValue::from_str(&pq_handle)),
+        ("recoveryPubkey", bytes_js(&recovery_public_key)),
     ])
+}
+
+/// Sign the login server's recovery challenge nonce with the phrase-derived
+/// RECOVERY-AUTH key (NOT the MLS identity signing key — see
+/// [`crate::recovery::RECOVERY_AUTH_KEY_DOMAIN`]), proving possession of the
+/// recovery secret (§8.5).
+///
+/// Returns `{ signature: Uint8Array }` — the 64-byte Ed25519 signature over
+/// `recovery_challenge_message(login_nonce)` =
+/// `b"powehi-recovery-challenge-v1" || 0x00 || login_nonce`.
+///
+/// `login_nonce` MUST be the UTF-8 bytes of the server's `login_nonce` STRING (a
+/// UUID-formatted string), i.e. `new TextEncoder().encode(login_nonce)` on the
+/// JS side — NOT hex/raw-decoded UUID bytes.  The backend verifier reconstructs
+/// the same message layout independently and checks it against `users.recovery_pubkey`
+/// (the public half of this SAME recovery-auth key, returned by
+/// `mls_init_identity_from_phrase`'s `recoveryPubkey` field at registration).
+///
+/// Security:
+/// - The signing key is re-derived from the phrase inside WASM and used only to
+///   sign; NEITHER the private key NOR the derived public key is returned or
+///   logged — only the 64-byte signature crosses the WASM-JS boundary
+///   ("private key never crosses the WASM boundary" invariant).
+/// - Domain separation (fixed label + 0x00 NUL) is mandatory: the server picks
+///   the nonce content, so signing the bare nonce would be a cross-protocol
+///   confusable-signature risk against the long-term MLS identity key.
+/// - Using a DISTINCT key from the MLS identity signing key (rather than reusing
+///   it) is mandatory: `recovery_pubkey` is durably stored server-side, and the
+///   MLS signing key must never be learnable by or linkable to anything the
+///   server persists (threat-model-checker finding, cycle 303).
+/// - Error is intentionally opaque ("invalid recovery phrase") — no phrase/word
+///   content leaks to JS (rule: no-plaintext-logging), matching
+///   `mls_init_identity_from_phrase`.
+#[wasm_bindgen]
+pub fn mls_sign_recovery_challenge(phrase: &str, login_nonce: &[u8]) -> Result<JsValue, JsError> {
+    use crate::recovery::{
+        derive_recovery_auth_keypair, mnemonic_to_seed, parse_phrase, recovery_challenge_message,
+    };
+    use ed25519_dalek::{Signer, SigningKey};
+    let mnemonic = parse_phrase(phrase).map_err(|e| js_err(&e.to_string()))?;
+    let seed = mnemonic_to_seed(&mnemonic);
+    // Discard the public key; only the private key is needed to sign here.
+    let (private_key, _public_key) =
+        derive_recovery_auth_keypair(&*seed).map_err(|e| js_err(&e.to_string()))?;
+    let signing_key = SigningKey::from_bytes(&private_key);
+    let msg = recovery_challenge_message(login_nonce);
+    let signature = signing_key.sign(&msg);
+    js_obj(&[("signature", bytes_js(&signature.to_bytes()))])
 }
 
 /// Generate a fresh KeyPackage for an existing identity.
@@ -3206,6 +3264,70 @@ mod tests {
         assert!(
             parse_phrase("not a valid bip39 phrase at all").is_err(),
             "invalid phrase must be rejected before any key material is derived"
+        );
+    }
+
+    /// `mls_sign_recovery_challenge`'s underlying signing logic yields a
+    /// deterministic 64-byte Ed25519 signature that verifies under the
+    /// phrase-derived public key over the documented message layout.
+    ///
+    /// The `#[wasm_bindgen]` export itself returns a `JsValue` that cannot be
+    /// introspected under native `cargo test` (no JS runtime), so — mirroring the
+    /// other native recovery-path tests in this module — this pins the exact
+    /// bytes the export computes/serializes via the shared helpers.
+    #[test]
+    fn test_mls_sign_recovery_challenge_verifies_and_is_deterministic() {
+        use crate::recovery::{
+            derive_recovery_auth_keypair, mnemonic_to_seed, parse_phrase,
+            recovery_challenge_message,
+        };
+        use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let nonce = b"nonce-mock-0001";
+        let m = parse_phrase(phrase).unwrap();
+        let seed = mnemonic_to_seed(&m);
+        let (priv_key, pub_key) = derive_recovery_auth_keypair(&*seed).unwrap();
+        let signing_key = SigningKey::from_bytes(&priv_key);
+        let sig1 = signing_key.sign(&recovery_challenge_message(nonce));
+        let sig2 = signing_key.sign(&recovery_challenge_message(nonce));
+        assert_eq!(
+            sig1.to_bytes(),
+            sig2.to_bytes(),
+            "recovery signature must be deterministic"
+        );
+        assert_eq!(
+            sig1.to_bytes().len(),
+            64,
+            "Ed25519 signature must be 64 bytes"
+        );
+        let vk = VerifyingKey::from_bytes(&pub_key).unwrap();
+        assert!(vk.verify(&recovery_challenge_message(nonce), &sig1).is_ok());
+    }
+
+    /// The `recoveryPubkey` field that `mls_init_identity_from_phrase` embeds is
+    /// exactly the phrase-derived recovery-auth Ed25519 public key (via
+    /// `derive_recovery_auth_keypair`, NOT `derive_signing_keypair` — they MUST be
+    /// cryptographically independent, see `RECOVERY_AUTH_KEY_DOMAIN`) and is stable
+    /// across repeated derivations for the same phrase.
+    #[test]
+    fn test_recovery_pubkey_matches_derived_public_key_and_is_stable() {
+        use crate::recovery::{
+            derive_recovery_auth_keypair, derive_signing_keypair, mnemonic_to_seed, parse_phrase,
+        };
+        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let m = parse_phrase(phrase).unwrap();
+        let seed = mnemonic_to_seed(&m);
+        let (_priv1, pub1) = derive_recovery_auth_keypair(&*seed).unwrap();
+        let (_priv2, pub2) = derive_recovery_auth_keypair(&*seed).unwrap();
+        assert_eq!(
+            pub1, pub2,
+            "recoveryPubkey must be stable for a fixed phrase"
+        );
+        assert_eq!(pub1.len(), 32, "Ed25519 public key must be 32 bytes");
+        let (_mls_priv, mls_pub) = derive_signing_keypair(&*seed).unwrap();
+        assert_ne!(
+            pub1, mls_pub,
+            "recoveryPubkey must differ from the MLS identity signing public key"
         );
     }
 

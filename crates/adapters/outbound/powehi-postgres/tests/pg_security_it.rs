@@ -420,3 +420,95 @@ async fn server_config_do_nothing_on_conflict_keeps_first_value() {
         "DO NOTHING must preserve the first writer's value"
     );
 }
+
+// ── user_repo recovery_pubkey (§8.5) integration tests ──────────────────────
+
+/// §8.5: recovery_pubkey must round-trip through save/find against real Postgres,
+/// and a `None` value must stay `None` (not be coerced to an empty Vec by the
+/// BYTEA <-> Option<Vec<u8>> mapping).
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn user_recovery_pubkey_round_trips_and_none_stays_none() {
+    let (_c, pool) = setup().await;
+    let repo = PgUserRepository::new(pool.clone());
+
+    // Enrolled user: recovery_pubkey = Some(32 raw bytes).
+    let h1 = Uuid::new_v4();
+    let h2 = Uuid::new_v4();
+    let handle = [h1.as_bytes().as_slice(), h2.as_bytes().as_slice()].concat();
+    let vk = vec![0xa5u8; 32];
+    let mut enrolled = User::new(UserId::new(), handle);
+    enrolled.recovery_pubkey = Some(vk.clone());
+    repo.save(&enrolled).await.expect("save enrolled");
+
+    let loaded = repo
+        .find_by_id(&enrolled.id)
+        .await
+        .expect("find enrolled")
+        .expect("enrolled user exists");
+    assert_eq!(
+        loaded.recovery_pubkey,
+        Some(vk),
+        "recovery_pubkey must round-trip byte-exact"
+    );
+
+    // Also reachable via find_by_handle_hash.
+    let by_handle = repo
+        .find_by_handle_hash(&enrolled.handle_hash)
+        .await
+        .expect("find by handle")
+        .expect("exists");
+    assert_eq!(by_handle.recovery_pubkey, loaded.recovery_pubkey);
+
+    // Non-enrolled user: recovery_pubkey stays None (NOT Some(empty vec)).
+    let h3 = Uuid::new_v4();
+    let h4 = Uuid::new_v4();
+    let handle2 = [h3.as_bytes().as_slice(), h4.as_bytes().as_slice()].concat();
+    let plain = User::new(UserId::new(), handle2);
+    assert!(plain.recovery_pubkey.is_none());
+    repo.save(&plain).await.expect("save plain");
+
+    let loaded_plain = repo
+        .find_by_id(&plain.id)
+        .await
+        .expect("find plain")
+        .expect("plain user exists");
+    assert!(
+        loaded_plain.recovery_pubkey.is_none(),
+        "absent recovery_pubkey must stay None, not an empty Vec"
+    );
+}
+
+/// A profile-style re-save (upsert) that carries an already-set recovery_pubkey
+/// must NOT NULL it out — the struct's current value is upserted verbatim, matching
+/// how handle_hash / opaque_password_file are handled.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn user_recovery_pubkey_survives_upsert() {
+    let (_c, pool) = setup().await;
+    let repo = PgUserRepository::new(pool.clone());
+
+    let h1 = Uuid::new_v4();
+    let h2 = Uuid::new_v4();
+    let handle = [h1.as_bytes().as_slice(), h2.as_bytes().as_slice()].concat();
+    let vk = vec![0x3cu8; 32];
+    let mut user = User::new(UserId::new(), handle);
+    user.recovery_pubkey = Some(vk.clone());
+    repo.save(&user).await.expect("initial save");
+
+    // Re-save the same struct (still carrying the key) — simulates a later update.
+    user.opaque_password_file = vec![0x11u8; 8];
+    repo.save(&user).await.expect("upsert");
+
+    let loaded = repo
+        .find_by_id(&user.id)
+        .await
+        .expect("find")
+        .expect("exists");
+    assert_eq!(
+        loaded.recovery_pubkey,
+        Some(vk),
+        "upsert must not NULL out a previously-set recovery_pubkey"
+    );
+    assert_eq!(loaded.opaque_password_file, vec![0x11u8; 8]);
+}
