@@ -17,7 +17,53 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-17, cycle 305 — STABILIZATION: telemetry test-race fix + libcrux RUSTSEC triage, commit 55c6b3b)
+## Current state (2026-07-18, cycle 306 — FEATURE: persist @mention badge count to Dexie, commit 497a148)
+
+- `git status` clean, `gh run list --limit 5` all green (cycle 305's commit), `gh issue list
+  --state open` empty at cycle start.
+- Gap found via Explore agent sweep of prd.md vs app/src for un-implemented/session-only state:
+  `GroupRow.mentionCount` was never added when the v12 wave (cycle ~272) persisted
+  `muted`/`sound`/`vibrate`/`notificationSoundId`/`chatTheme` — the sidebar @mention badge
+  (`ChatLayout.tsx` mention-badge + filter-tab-groups-mention-badge) reset to 0 on every reload
+  even for a chat never opened since the mention arrived, same reload gap those five fields had
+  before v12 / edit-delete-reactions-pin had before v7-v9.
+- `GroupRow.mentionCount?: number` added to `app/src/db/schema.ts`, bumped to `version(13)`
+  (additive, no index change — same style as v12). Rehydrated in the existing active-chat-load
+  effect (`row.mentionCount ?? c.mentionCount`) alongside muted/sound/vibrate/chatTheme.
+- Write-through at all 4 mutation sites: `handleIncoming` (increment on @all/@everyone/@<myHandle>
+  in a background group chat), `handleClearMessages`, `handleMarkAllRead` (loops every chat's
+  `mlsGroupId`), `handleSelectChat`. `handleIncoming`'s persist call had to duplicate the
+  mention-detection predicate rather than reuse the `setChats` updater's copy, since state
+  updaters must stay side-effect-free (same `chatsRef.current`-recompute pattern `persistReaction`
+  established in cycle 254) — flagged by security-auditor as an accepted drift-risk cost of that
+  convention, not fixed (see below).
+- **security-auditor: YELLOW (non-blocking), safe to merge.** (1) the duplicated mention-detection
+  logic (updater vs persist block) could drift if mention rules ever change (e.g. adding `@here`)
+  — accepted, same tax the `persistReaction` precedent already pays; (2) a narrow same-React-batch
+  race: two mentions to the same group arriving before the `chatsRef` sync effect flushes both read
+  the same stale snapshot and can under-write the persisted count by 1 relative to in-memory state
+  — bounded, self-heals the moment the chat is opened (forced to 0), accepted as cosmetic; (3)
+  unencrypted plaintext storage in the `groups` table confirmed appropriate — a bounded counter,
+  same tier as `disappearingTtlSeconds`/`pinnedMessageId`/`muted`/`chatTheme`, not content/PII.
+- Not crypto/MLS/architectural — `crypto-reviewer`/`threat-model-checker` not required (no crypto
+  code touched, no new server-visible metadata — this is 100% local-only Dexie state).
+- 3 new tests in `ChatLayoutMentions.test.tsx` (persists an incremented mentionCount to Dexie,
+  rehydrates a persisted mentionCount when switching to that chat, clearing messages resets the
+  persisted mentionCount to 0) — all follow the `ChatLayoutMute.test.tsx` persist/rehydrate
+  pattern (`db.groups.clear()` + `.add()` with a seeded `mlsGroupId`, `waitFor` the Dexie row).
+  All 100 frontend test files green (1273 tests, was 1270); `tsc --noEmit` clean; `biome check`
+  clean on all 3 touched files. Backend untouched this cycle (pure frontend/IndexedDB feature).
+- **Next cycle candidate:** the same Explore sweep flagged `unread`/`firstUnreadAt` as the sibling
+  gap (also sidebar-badge state, also session-only) — slightly riskier than mentionCount since it
+  interacts with more call sites (unread dividers, filter tabs, notification gating), good
+  candidate for its own FEATURE cycle. Also noted but NOT pursued: the receiver-side media
+  opaque-handle pattern (`useMediaReceive.ts:10-11`, `mediaKey` still crosses the Comlink boundary
+  as a raw `number[]` before zeroing) — heavier cycle, touches the crypto worker boundary, needs
+  `crypto-reviewer`. Standing older candidates unchanged: PQ hybrid Phase A (blocked on openmls
+  stable `MLS_128_MLKEM768`), security-auditor's cycle-304 YELLOW #3 (bound `mls_credential`/
+  `proof.mls_credential` size) remains a reasonable small future STABILIZATION item.
+
+## Previous state (2026-07-17, cycle 305 — STABILIZATION: telemetry test-race fix + libcrux RUSTSEC triage, commit 55c6b3b)
 
 - `gh run list --limit 5` green on both `CI — Rust` and `CI — Live-backend E2E`/`CI — Frontend`
   from cycle 304's commits; `gh issue list --state open` empty; `git status` clean at start.
