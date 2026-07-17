@@ -19,6 +19,25 @@ ignore = [
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; transitive via tonic 0.12.3; no upgrade path until tonic 0.13 drops" },
     { id = "RUSTSEC-2024-0384", reason = "instant unmaintained; transitive via fluvio-wasm-timer -> openmls 0.8.1; no fix available, no upgrade path within current openmls release" },
     { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained; compile-time-only proc-macro via hax-lib -> libcrux -> openmls_rust_crypto 0.5.1 (PQ support); not present in any built binary, no upgrade path until openmls_rust_crypto updates libcrux" },
+    # RUSTSEC-2026-0207/-0208/-0212 (libcrux-sha3, libcrux-secrets): unlike RUSTSEC-2026-0124
+    # above, these ARE resolved into powehi-crypto-wasm by cargo-deny's feature-aware graph
+    # (hpke-rs 0.6.1's dependency on libcrux-sha3 is mandatory, not gated by hpke-rs's optional
+    # "libcrux" feature) -- confirmed via `cargo deny check advisories`, which flags exactly these
+    # three and none of the aesgcm/p256/ecdh advisories, matching `cargo tree -i` output. But the
+    # only two call sites into libcrux_sha3 (hpke-rs-0.6.1/src/kem.rs:154,158) are inside the
+    # X-Wing/ML-KEM post-quantum KEM branch of derive_key_pair(), which openmls_rust_crypto
+    # 0.5.1's provider (kem_mode()) cannot even construct (unimplemented!() / no ML-KEM arm) --
+    # structurally unreachable via Powehi's only supported ciphersuite (classical DHKEMX25519).
+    # libcrux-secrets is reachable only via libcrux-sha3 (no independent entry point), so it
+    # inherits the same argument. Bonus: even if reached, hpke-rs's calls are single one-shot
+    # shake256::<32>/<64>() calls with lengths the advisories' own text says are unaffected
+    # (0207 needs multiple incremental squeeze calls; 0208 needs length >32 and not div-by-8).
+    # Verified via crypto-reviewer, cycle 305; full reasoning in .cargo/audit.toml. Re-verify (grep
+    # libcrux_sha3 call sites + kem_mode() ML-KEM arm) on any hpke-rs/openmls_rust_crypto bump, and
+    # re-open before shipping a PQ hybrid ciphersuite through this same provider.
+    { id = "RUSTSEC-2026-0207", reason = "libcrux-sha3 shake256 compiled in but only called from openmls_rust_crypto-unreachable PQ KEM branches (X-Wing/ML-KEM); see .cargo/audit.toml for full trace" },
+    { id = "RUSTSEC-2026-0208", reason = "libcrux-sha3 AVX2 shake256 compiled in but only called from openmls_rust_crypto-unreachable PQ KEM branches; hpke-rs's own call lengths (32/64) are also outside the buggy range; see .cargo/audit.toml" },
+    { id = "RUSTSEC-2026-0212", reason = "libcrux-secrets reachable only via libcrux-sha3, which is only called from openmls_rust_crypto-unreachable PQ KEM branches; see .cargo/audit.toml for full trace" },
 ]
 
 [licenses]

@@ -38,4 +38,64 @@
 # data path, so the "server never sees plaintext" invariant is unaffected.
 # No safe upgrade available (author recommends `web-time`, which openmls/fluvio-wasm-timer do
 # not use). Revisit when openmls bumps its fluvio-wasm-timer/parking_lot dependency.
-ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0124", "RUSTSEC-2025-0134", "RUSTSEC-2026-0173", "RUSTSEC-2024-0384"]
+#
+# RUSTSEC-2026-0209 / RUSTSEC-2026-0210 / RUSTSEC-2026-0211: libcrux-aesgcm 0.0.7 — AAD length
+# not enforced / unmaintained (renamed to libcrux-aes) / non-constant-time tag check.
+# Impact: NOT compiled into any Powehi artifact. Same root cause as RUSTSEC-2026-0124 above:
+# libcrux-aesgcm is reachable only through hpke-rs's optional "libcrux" feature (`hpke-rs-libcrux`),
+# and openmls_rust_crypto 0.5.1 declares its `hpke-rs` dependency with `default-features = false,
+# features = ["hazmat", "serialization"]` — "libcrux" is not in that list.
+# `cargo tree -i libcrux-aesgcm --target all` (and `-i hpke-rs-libcrux --target all`) print
+# "nothing to print" — confirmed via crypto-reviewer, cycle 305 — i.e. present in Cargo.lock's
+# full potential graph but never actually linked into the server binary or the powehi-crypto-wasm
+# artifact. No fixed upgrade exists upstream regardless (0209/0211 solutions both say "No fixed
+# upgrade is available!"). Revisit if a `cargo update` ever activates hpke-rs's "libcrux" feature
+# (re-run `cargo tree -i hpke-rs-libcrux --target all` — it must keep printing nothing).
+#
+# RUSTSEC-2026-0207 / RUSTSEC-2026-0208: libcrux-sha3 0.0.8 — incorrect output of incremental
+# SHAKE on multiple squeeze calls / potential panic in AVX2 SHAKE-256.
+# RUSTSEC-2026-0212: libcrux-secrets 0.0.5 — potentially incorrect constant-time swap/select on
+# Aarch64 (side-channel class, not availability — noted honestly here, do not reuse the "DoS
+# only" framing from the aesgcm/0124 entries above for this one).
+# Impact: unlike the aesgcm chain, `libcrux-sha3` IS compiled in — it's hpke-rs 0.6.1's mandatory,
+# non-optional dependency (`[dependencies.libcrux-sha3] version = "0.0.8"`, no `optional = true`),
+# confirmed via `cargo tree -i libcrux-sha3` resolving straight to
+# `hpke-rs → openmls_rust_crypto → powehi-crypto-wasm` with no --target flag needed.
+# libcrux-secrets is reachable in the compiled graph only via libcrux-traits → libcrux-sha3 (its
+# sole entry point — `cargo tree -i libcrux-secrets --target all` shows one chain), so it inherits
+# the same reachability argument below rather than needing an independent trace.
+# BUT: `hpke-rs-0.6.1/src/kem.rs` calls `libcrux_sha3::shake256` from exactly two call sites
+# (lines 154, 158), both inside `derive_key_pair()`'s `KemAlgorithm::XWingDraft06* | MlKem768 |
+# MlKem1024` match arms (X-Wing / ML-KEM post-quantum KEMs). The classical-DH arm
+# (`DhKemP256|K256|P384|P521|DhKem25519|DhKem448`) calls `dh_kem::derive_key_pair` instead and
+# never touches libcrux_sha3. Powehi's only currently-supported MLS ciphersuite is
+# `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519` (classical X25519 DH); PQ hybrid
+# (`MLS_128_MLKEM768`) is unimplemented, still blocked upstream (see project-context.md). More
+# than that: `openmls_rust_crypto-0.5.1/src/provider.rs`'s `kem_mode()` maps
+# `HpkeKemType::XWingKemDraft6 => unimplemented!()` and has no ML-KEM arm at all — this provider
+# cannot construct the `KemAlgorithm` values that reach kem.rs:154/158 even if a PQ ciphersuite
+# were selected, so the vulnerable branches are structurally unreachable via openmls_rust_crypto,
+# not just "unused today." (Bonus, not load-bearing: both call sites use the one-shot
+# `shake256::<N>()` API, not the incremental absorb/squeeze API RUSTSEC-2026-0207 describes, and
+# powehi-crypto-wasm compiles to wasm32-unknown-unknown where AVX2 (0208) and Aarch64 (0212) code
+# paths aren't even built — though native `cargo test`/`cargo nextest` runs on aarch64 dev
+# machines do compile the 0212 arch path, so rely on the reachability argument, not the arch one.)
+# Verified via crypto-reviewer, cycle 305. Re-verify on any `cargo update` touching hpke-rs,
+# openmls_rust_crypto, or any libcrux-* crate: re-run `grep -n libcrux_sha3 kem.rs` on the new
+# hpke-rs version and re-check `kem_mode()` on the new openmls_rust_crypto for an added ML-KEM arm.
+# If Powehi ever ships a PQ hybrid ciphersuite through this same openmls_rust_crypto/hpke-rs path,
+# these three waivers (and the aesgcm ones above, if "libcrux" activates) must be re-opened first —
+# flagged to crypto-lead for the PQ-enablement cycle.
+ignore = [
+    "RUSTSEC-2023-0071",
+    "RUSTSEC-2026-0124",
+    "RUSTSEC-2025-0134",
+    "RUSTSEC-2026-0173",
+    "RUSTSEC-2024-0384",
+    "RUSTSEC-2026-0207",
+    "RUSTSEC-2026-0208",
+    "RUSTSEC-2026-0209",
+    "RUSTSEC-2026-0210",
+    "RUSTSEC-2026-0211",
+    "RUSTSEC-2026-0212",
+]

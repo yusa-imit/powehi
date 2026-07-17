@@ -219,11 +219,13 @@ mod tests {
 
     #[test]
     fn otlp_config_from_env_returns_none_when_endpoint_absent() {
-        // Valid when OTEL_EXPORTER_OTLP_ENDPOINT is not set in the test env.
-        // If the env var happens to be set (integration environment), skip.
-        if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
-            return; // guard: external OTEL collector present — skip
-        }
+        // Must hold ENV_TEST_MUTEX like every other env-mutating test below:
+        // without it, this read-then-assert can race a sibling test's
+        // EnvGuard::set(OTEL_EXPORTER_OTLP_ENDPOINT, ...) running on another
+        // thread (cargo test runs tests in parallel by default), producing a
+        // spurious failure (cycle-296-noted flake).
+        let _lock = ENV_TEST_MUTEX.lock().unwrap();
+        let _ep = EnvGuard::remove("OTEL_EXPORTER_OTLP_ENDPOINT");
         assert!(
             OtlpConfig::from_env().is_none(),
             "from_env() must return None when OTEL_EXPORTER_OTLP_ENDPOINT is unset"
