@@ -203,9 +203,9 @@ interface WasmModule {
 	// Thumbnail key stays in WASM on the sender path (same as mediaKey).
 	media_thumbnail_encrypt: (thumbBytes: Uint8Array) => { thumbHandle: string };
 	media_thumbnail_drop: (handle: string) => boolean;
-	media_thumbnail_decrypt: (
+	media_thumbnail_decrypt_with_handle: (
+		mediaKeyHandle: string,
 		ct: Uint8Array,
-		key: Uint8Array,
 		iv: Uint8Array,
 	) => { pixels: Uint8Array<ArrayBuffer> };
 	media_message_create_with_thumbnail: (
@@ -985,17 +985,18 @@ const api = {
 	},
 
 	/**
-	 * Decrypt thumbnail bytes using raw key/IV from the MLS-decrypted payload (receiver path).
-	 * Returns `{ pixels: Uint8Array }`.
-	 * Zero `key` after this call: `key.fill(0)`.
+	 * Decrypt thumbnail bytes using an imported key handle (receiver path).
+	 * Import the raw thumbnail key via `mediaImportKey` first (and zero the raw copy
+	 * immediately) — this mirrors the main media-key receiver flow (cycle 309/311).
+	 * Returns `{ pixels: Uint8Array }`. Drop the handle via `mediaDropKey` when done.
 	 */
-	async mediaThumbnailDecrypt(
+	async mediaThumbnailDecryptWithHandle(
+		mediaKeyHandle: string,
 		ct: Uint8Array,
-		key: Uint8Array,
 		iv: Uint8Array,
 	): Promise<{ pixels: Uint8Array<ArrayBuffer> }> {
 		const wasm = await getWasm();
-		return wasm.media_thumbnail_decrypt(ct, key, iv);
+		return wasm.media_thumbnail_decrypt_with_handle(mediaKeyHandle, ct, iv);
 	},
 
 	/**

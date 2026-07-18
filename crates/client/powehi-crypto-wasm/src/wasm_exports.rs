@@ -91,8 +91,8 @@ thread_local! {
     // §9.4.1 Thumbnail encryption: stores (ciphertext, key, iv) by handle.
     // The thumbnail key never crosses the WASM-JS boundary on the sender path;
     // media_message_create_with_thumbnail reads it directly to build the JSON payload.
-    // On the receiver path the thumbnail key arrives inside the MLS-decrypted JSON
-    // and is passed back to media_thumbnail_decrypt (same exposure as mediaKey).
+    // On the receiver path the thumbnail key is imported into MEDIA_KEYS (above) via
+    // media_import_key, same as the main media key (cycle 311).
     static THUMBNAIL_HANDLES: RefCell<HashMap<String, ThumbnailEntry>> = RefCell::new(HashMap::new());
 }
 
@@ -1647,6 +1647,12 @@ pub fn media_drop_key(handle: &str) -> bool {
 }
 
 // ── §9.4.1 Thumbnail encryption ───────────────────────────────────────────────
+//
+// Sender path stores the key in THUMBNAIL_HANDLES (below), never crossing to JS.
+// Receiver path (opaque-handle, cycle 311 — closes the cycle-309 follow-up note):
+// the decrypted key is imported via the shared `media_import_key` (same MEDIA_KEYS
+// map used by the main media-key receiver path) and decrypted via
+// `media_thumbnail_decrypt_with_handle`, mirroring the main media flow exactly.
 
 /// Encrypt thumbnail bytes with a fresh AES-256-GCM key and store result in WASM (prd.md §9.4.1).
 ///
@@ -1691,31 +1697,40 @@ pub fn media_thumbnail_drop(handle: &str) -> bool {
     THUMBNAIL_HANDLES.with(|h| h.borrow_mut().remove(handle).is_some())
 }
 
-/// Decrypt thumbnail bytes using raw key/IV from the MLS-decrypted payload (receiver path).
+/// Decrypt thumbnail bytes using an imported key handle (receiver path, cycle 311 —
+/// closes the cycle-309 follow-up note).
 ///
-/// The thumbnail key arrives inside the MLS-decrypted application-data JSON (RFC 9420 §6.3.1)
-/// and is passed here directly — unlike the main media key (`media_import_key`, cycle 309), the
-/// thumbnail key has not yet been migrated to the opaque-handle pattern (small 16KB-max payload,
-/// lower priority; tracked as a follow-up). The key bytes are transiently in JS memory only for
-/// this call and must be zeroed by the caller immediately after (`key.fill(0)` on both the passed
-/// copy and the canonical `thumbnail.key` array in the React state tree).
+/// The thumbnail key arrives inside the MLS-decrypted application-data JSON (RFC 9420
+/// §6.3.1) as raw bytes, so it necessarily exists in JS memory once. The caller imports
+/// it via `media_import_key` (shared with the main media-key receiver path, cycle 309 —
+/// same 32-byte AES-256-GCM key shape, same `MEDIA_KEYS` handle map) and zeroes the raw
+/// copy immediately, then calls this function with the resulting handle. No blob-hash
+/// check here (unlike `media_decrypt_with_handle`): the thumbnail ciphertext travels
+/// inline inside the already-authenticated MLS envelope, not via an unauthenticated R2
+/// fetch, so there is no server-swap surface to defend against.
 ///
 /// Returns `{ pixels: Uint8Array }`.
 ///
 /// # Errors
-/// - `"invalid thumbnail key length"` if `key` is not 32 bytes.
+/// - `"unknown media key handle"` if `media_key_handle` is not in `MEDIA_KEYS`.
 /// - `"invalid thumbnail iv length"` if `iv` is not 12 bytes.
 /// - `"thumbnail decryption failed"` if AES-GCM tag verification fails.
+///
+/// Call `media_drop_key(media_key_handle)` once done.
 #[wasm_bindgen]
-pub fn media_thumbnail_decrypt(ct: &[u8], key: &[u8], iv: &[u8]) -> Result<JsValue, JsError> {
-    let key_arr: &[u8; 32] = key
-        .try_into()
-        .map_err(|_| js_err("invalid thumbnail key length"))?;
+pub fn media_thumbnail_decrypt_with_handle(
+    media_key_handle: &str,
+    ct: &[u8],
+    iv: &[u8],
+) -> Result<JsValue, JsError> {
+    let key = MEDIA_KEYS
+        .with(|m| m.borrow().get(media_key_handle).cloned())
+        .ok_or_else(|| js_err("unknown media key handle"))?;
     let iv_arr: &[u8; 12] = iv
         .try_into()
         .map_err(|_| js_err("invalid thumbnail iv length"))?;
     let plaintext =
-        media::decrypt(key_arr, iv_arr, ct).map_err(|_| js_err("thumbnail decryption failed"))?;
+        media::decrypt(&key, iv_arr, ct).map_err(|_| js_err("thumbnail decryption failed"))?;
     js_obj(&[("pixels", bytes_js(&plaintext))])
 }
 
@@ -3884,6 +3899,51 @@ mod tests {
         let (ct, _key, iv, _) = media::encrypt(plaintext).unwrap();
         let wrong_key = [0u8; 32];
         assert!(media::decrypt(&wrong_key, &iv, &ct).is_err());
+    }
+
+    // ── §9.4.1 media_thumbnail_decrypt_with_handle (receiver opaque-handle, cycle 311) ──
+
+    /// media_thumbnail_decrypt_with_handle's core logic: a thumbnail key imported via
+    /// the shared `media_import_key` handle (same MEDIA_KEYS map as the main media-key
+    /// receiver path) round-trips through media::decrypt exactly like the raw-key path
+    /// used to, with the key sourced from the handle map instead of a JS argument.
+    #[test]
+    fn test_thumbnail_handle_decrypt_round_trip() {
+        let plaintext = b"thumbnail pixel data via handle";
+        let (ct, key, iv, _) = media::encrypt(plaintext).unwrap();
+        let handle = next_id();
+        MEDIA_KEYS.with(|m| m.borrow_mut().insert(handle.clone(), key));
+
+        let stored = MEDIA_KEYS
+            .with(|m| m.borrow().get(&handle).cloned())
+            .expect("handle must be present after import");
+        let decrypted = media::decrypt(&stored, &iv, &ct).unwrap();
+        assert_eq!(decrypted, plaintext);
+
+        MEDIA_KEYS.with(|m| m.borrow_mut().remove(&handle));
+    }
+
+    /// Unknown handle lookup returns None (the wasm export maps this to
+    /// `"unknown media key handle"` before ever touching `media::decrypt`).
+    #[test]
+    fn test_thumbnail_handle_decrypt_unknown_handle_rejected() {
+        let result = MEDIA_KEYS.with(|m| m.borrow().get("nonexistent-thumb-handle").cloned());
+        assert!(result.is_none());
+    }
+
+    /// The 12-byte IV length validation `media_thumbnail_decrypt_with_handle` performs
+    /// (`iv.try_into::<[u8; 12]>()`) rejects any length other than exactly 12, before
+    /// `media::decrypt` is ever called (crypto-reviewer finding, cycle 311).
+    #[test]
+    fn test_thumbnail_handle_decrypt_wrong_iv_length_rejected() {
+        for bad_len in [0usize, 8, 11, 13, 16] {
+            let iv = vec![0u8; bad_len];
+            let result: Result<[u8; 12], _> = iv.as_slice().try_into();
+            assert!(
+                result.is_err(),
+                "iv of length {bad_len} must fail the 12-byte conversion"
+            );
+        }
     }
 
     /// build_media_payload_json_with_thumbnail includes both main and thumbnail fields.

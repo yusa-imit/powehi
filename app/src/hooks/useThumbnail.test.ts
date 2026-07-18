@@ -2,9 +2,10 @@
  * useThumbnail — unit tests (prd.md §9.4.1 inline thumbnail).
  *
  * Security invariants verified:
- * - thumbnail.key (number[]) is zeroed after successful decryption.
+ * - thumbnail.key (number[]) is zeroed after import (before decrypt).
+ * - The imported key handle is dropped on every path (success and failure).
  * - Object URL is revoked on unmount to prevent memory leaks.
- * - Invalid thumbnail dimensions are rejected before decryption (fail closed).
+ * - Invalid thumbnail dimensions are rejected before import (fail closed).
  * - Decryption failure is non-fatal; objectUrl stays null.
  * - cancelled flag prevents stale objectUrl after unmount.
  */
@@ -25,13 +26,23 @@ const makeThumbnail = (overrides: Partial<ThumbnailPayload> = {}): ThumbnailPayl
 	...overrides,
 });
 
+const MOCK_HANDLE = "mock-thumb-key-handle-0";
+
+const mediaImportKeyFn = vi.fn(async (_rawKey: Uint8Array) => ({
+	mediaKeyHandle: MOCK_HANDLE,
+}));
 const mediaThumbnailDecryptFn = vi.fn(
-	async (_ct: Uint8Array, _key: Uint8Array, _iv: Uint8Array) => ({
+	async (_mediaKeyHandle: string, _ct: Uint8Array, _iv: Uint8Array) => ({
 		pixels: MOCK_PIXELS,
 	}),
 );
+const mediaDropKeyFn = vi.fn(async (_handle: string) => true);
 
-const mockWorker = { mediaThumbnailDecrypt: mediaThumbnailDecryptFn };
+const mockWorker = {
+	mediaImportKey: mediaImportKeyFn,
+	mediaThumbnailDecryptWithHandle: mediaThumbnailDecryptFn,
+	mediaDropKey: mediaDropKeyFn,
+};
 
 describe("useThumbnail (prd.md §9.4.1)", () => {
 	beforeEach(() => {
@@ -40,8 +51,12 @@ describe("useThumbnail (prd.md §9.4.1)", () => {
 		);
 		globalThis.URL.createObjectURL = vi.fn().mockReturnValue(MOCK_BLOB_URL);
 		globalThis.URL.revokeObjectURL = vi.fn();
+		mediaImportKeyFn.mockClear();
+		mediaImportKeyFn.mockResolvedValue({ mediaKeyHandle: MOCK_HANDLE });
 		mediaThumbnailDecryptFn.mockClear();
 		mediaThumbnailDecryptFn.mockResolvedValue({ pixels: MOCK_PIXELS });
+		mediaDropKeyFn.mockClear();
+		mediaDropKeyFn.mockResolvedValue(true);
 	});
 
 	afterEach(() => {
@@ -51,6 +66,7 @@ describe("useThumbnail (prd.md §9.4.1)", () => {
 	it("returns null objectUrl when thumbnail is undefined", () => {
 		const { result } = renderHook(() => useThumbnail(undefined));
 		expect(result.current.objectUrl).toBeNull();
+		expect(mediaImportKeyFn).not.toHaveBeenCalled();
 		expect(mediaThumbnailDecryptFn).not.toHaveBeenCalled();
 	});
 
@@ -61,6 +77,7 @@ describe("useThumbnail (prd.md §9.4.1)", () => {
 		const { result } = renderHook(() => useThumbnail(makeThumbnail()));
 		await act(async () => {});
 		expect(result.current.objectUrl).toBeNull();
+		expect(mediaImportKeyFn).not.toHaveBeenCalled();
 		expect(mediaThumbnailDecryptFn).not.toHaveBeenCalled();
 	});
 
@@ -68,7 +85,13 @@ describe("useThumbnail (prd.md §9.4.1)", () => {
 		const thumb = makeThumbnail();
 		const { result } = renderHook(() => useThumbnail(thumb));
 		await waitFor(() => expect(result.current.objectUrl).toBe(MOCK_BLOB_URL));
-		expect(mediaThumbnailDecryptFn).toHaveBeenCalledOnce();
+		expect(mediaImportKeyFn).toHaveBeenCalledOnce();
+		expect(mediaThumbnailDecryptFn).toHaveBeenCalledWith(
+			MOCK_HANDLE,
+			expect.any(Uint8Array),
+			expect.any(Uint8Array),
+		);
+		expect(mediaDropKeyFn).toHaveBeenCalledWith(MOCK_HANDLE);
 	});
 
 	it("security: zeroes thumbnail.key (number[]) after decryption", async () => {
@@ -100,6 +123,7 @@ describe("useThumbnail (prd.md §9.4.1)", () => {
 		const { result } = renderHook(() => useThumbnail(thumb));
 		await act(async () => {});
 		expect(result.current.objectUrl).toBeNull();
+		expect(mediaImportKeyFn).not.toHaveBeenCalled();
 		expect(mediaThumbnailDecryptFn).not.toHaveBeenCalled();
 	});
 
@@ -110,6 +134,7 @@ describe("useThumbnail (prd.md §9.4.1)", () => {
 		const { result } = renderHook(() => useThumbnail(thumb));
 		await act(async () => {});
 		expect(result.current.objectUrl).toBeNull();
+		expect(mediaImportKeyFn).not.toHaveBeenCalled();
 		expect(mediaThumbnailDecryptFn).not.toHaveBeenCalled();
 	});
 
@@ -118,6 +143,7 @@ describe("useThumbnail (prd.md §9.4.1)", () => {
 		const { result } = renderHook(() => useThumbnail(thumb));
 		await act(async () => {});
 		expect(result.current.objectUrl).toBeNull();
+		expect(mediaImportKeyFn).not.toHaveBeenCalled();
 		expect(mediaThumbnailDecryptFn).not.toHaveBeenCalled();
 	});
 
@@ -128,6 +154,7 @@ describe("useThumbnail (prd.md §9.4.1)", () => {
 		const { result } = renderHook(() => useThumbnail(thumb));
 		await act(async () => {});
 		expect(result.current.objectUrl).toBeNull();
+		expect(mediaImportKeyFn).not.toHaveBeenCalled();
 		expect(mediaThumbnailDecryptFn).not.toHaveBeenCalled();
 	});
 
@@ -147,6 +174,8 @@ describe("useThumbnail (prd.md §9.4.1)", () => {
 		await act(async () => {});
 		expect(result.current.objectUrl).toBeNull();
 		expect(globalThis.URL.createObjectURL).not.toHaveBeenCalled();
+		// The handle must still be dropped on the failure path (finally block).
+		expect(mediaDropKeyFn).toHaveBeenCalledWith(MOCK_HANDLE);
 	});
 
 	it("does not call setObjectUrl after unmount (cancelled flag)", async () => {

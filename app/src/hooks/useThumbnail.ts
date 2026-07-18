@@ -2,11 +2,14 @@
  * useThumbnail — decrypt and display an inline §9.4.1 thumbnail.
  *
  * The thumbnail ciphertext + key + iv arrive inside the MLS-decrypted payload.
- * `mediaThumbnailDecrypt` runs inside the WASM worker; the raw pixels are only
- * in JS memory transiently while creating the object URL.
+ * The raw key is imported into the WASM opaque-handle map (`mediaImportKey`) and
+ * zeroed immediately; decryption then runs entirely inside the WASM worker via the
+ * handle (mirrors the main media-key receiver path, cycle 309/311). The raw pixels
+ * are only in JS memory transiently while creating the object URL.
  *
  * Security:
- * - thumbnail.key is zeroed after decryption via `.fill(0)` (same as mediaKey).
+ * - thumbnail.key (raw) is zeroed right after import, before decrypt even starts.
+ * - The key handle is dropped in a `finally` regardless of decrypt outcome.
  * - Object URL is revoked on unmount to prevent memory leaks.
  */
 
@@ -35,22 +38,31 @@ export function useThumbnail(thumbnail: ThumbnailPayload | undefined): Thumbnail
 		let url: string | null = null;
 
 		(async () => {
+			let mediaKeyHandle: string | null = null;
 			try {
 				const ct = new Uint8Array(thumbnail.ct);
 				const key = new Uint8Array(thumbnail.key);
 				const iv = new Uint8Array(thumbnail.iv);
-				const { pixels } = await cryptoWorker.mediaThumbnailDecrypt(ct, key, iv);
-				// Zero the key immediately after use (receiver-path hygiene).
+				({ mediaKeyHandle } = await cryptoWorker.mediaImportKey(key));
+				// Zero the raw key immediately after import (receiver-path hygiene) —
+				// before decrypt even starts, mirroring the main media-key flow.
 				// Also zero the canonical number[] in the MediaPayload object held in chats state
-				// so the raw key bytes don't linger in the React state tree after decryption.
+				// so the raw key bytes don't linger in the React state tree after import.
 				key.fill(0);
 				thumbnail.key.fill(0);
+				const { pixels } = await cryptoWorker.mediaThumbnailDecryptWithHandle(
+					mediaKeyHandle,
+					ct,
+					iv,
+				);
 				if (cancelled) return;
 				const blob = new Blob([pixels], { type: "image/jpeg" });
 				url = URL.createObjectURL(blob);
 				setObjectUrl(url);
 			} catch {
 				// Thumbnail decryption failure is non-fatal; full image will still load.
+			} finally {
+				if (mediaKeyHandle) await cryptoWorker.mediaDropKey(mediaKeyHandle);
 			}
 		})();
 
