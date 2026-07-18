@@ -17,7 +17,67 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-18, cycle 308 — FEATURE: persist unread badge + New Messages divider to Dexie, commit 36dc5b8)
+## Current state (2026-07-18, cycle 309 — FEATURE: receiver-side media opaque-handle pattern, commit 493f193)
+
+- `git status` clean, `gh run list --limit 5` all green at cycle start, `gh issue list
+  --state open` empty. Picked the standing "next cycle candidate" flagged since cycle
+  308: the cycle-119 YELLOW at `useMediaReceive.ts` — the receiver-path AES-256-GCM
+  media key crossed the Comlink boundary as a raw `number[]`/`Uint8Array` and lived in
+  JS scope for the full R2 download + decrypt round-trip, zeroed only in a `finally`
+  at the very end. The sender path never had this exposure (`media_encrypt` returns an
+  opaque handle, raw key never leaves WASM) — this cycle closes the asymmetry.
+- **Rust (`powehi-crypto-wasm`):** new `media_import_key(raw_key) -> {mediaKeyHandle}`
+  wasm export — validates 32 bytes, cap-checks the existing `MEDIA_KEYS` thread-local
+  handle map (`MAX_MEDIA_HANDLES=256`, shared with the sender path), stores as
+  `Zeroizing<[u8;32]>`, Y-7 pattern (build JS result before insert, no orphan handle on
+  failure). New `media_decrypt_with_handle` / `media_decrypt_chunked_with_handle` —
+  same R-2 blob-hash-before-AES-GCM-decrypt ordering as before, key sourced from the
+  handle map instead of a raw JS argument. **Removed** `media_decrypt_with_raw_key` /
+  `media_decrypt_chunked_with_raw_key` entirely (zero remaining callers after the
+  migration — confirmed via full-repo grep) so JS can no longer feed a raw key
+  directly into a decrypt call at all, not just "isn't encouraged to."
+  `media::decrypt_with_raw_key`/`decrypt_chunked` (the pure crypto primitives in
+  media.rs) are unchanged, just now only called with a handle-resolved key.
+- **Frontend:** `mediaTransfer.ts`'s `downloadAndDecryptMedia` now calls
+  `mediaImportKey` and zeroes the local key copy in `finally` **before the R2 fetch
+  even starts** (previously the zero only fired after decrypt completed) — the
+  opaque handle is used for the rest of the function and dropped via `mediaDropKey`
+  in an outer `finally` on every path (success, chunked-decrypt throw, fetch throw).
+  `crypto.worker.ts`, `__mocks__/useCryptoWorker.ts`, and all call-site tests
+  (`mediaTransfer.test.ts`, `useMediaReceive.test.ts`, `mediaEncrypt.test.ts`,
+  `ChatLayoutForwarding.test.tsx` — forwarding decrypts-then-re-encrypts, so it
+  exercises both the new import-handle and the existing encrypt-handle in the same
+  flow) updated to the new handle-based API.
+- Thumbnail decrypt (`media_thumbnail_decrypt`) intentionally **not** migrated this
+  cycle — still takes a raw key inline. Small (≤16KB) payload, lower priority;
+  doc comment added flagging it as a tracked follow-up.
+- **crypto-reviewer: GREEN**, no blockers. Verified handle lifecycle (no leaks/
+  use-after-drop), raw-key-in-JS window now closes before the network round-trip
+  (not after), R-2 ordering preserved exactly in both new handle functions, cap-check-
+  before-insert + Y-7 ordering correct, no new panic surface, zero plaintext/key
+  logging, zero stranded callers of the removed raw-key exports. Non-blocking notes
+  (deferred, not fixed): (1) the *canonical* `media.mediaKey` array inside the
+  `MediaPayload` object (as opposed to the local working copy) is still never
+  zeroed — pre-existing §9.2 behavior, not worsened by this diff, but noted as a
+  possible future symmetry fix; (2) the R-2 doc comment's NIST SP 800-38D §5.2.1.1
+  citation is imprecise (that section is IV-uniqueness, not the swap/oracle
+  argument the comment describes) — carried over from the prior comment, not
+  introduced here, flagged for a future correction pass.
+- Not architectural / no new server-visible metadata — `threat-model-checker` not
+  required (purely an internal WASM/JS boundary hardening, same wire format).
+- Rust: `cargo build --workspace` clean, `cargo test --workspace` all green (169/169
+  in powehi-crypto-wasm, 6 new tests: import round-trip, wrong-length rejection,
+  chunked round-trip), `cargo fmt --all --check` clean, `cargo clippy --workspace
+  --all-targets -- -D warnings` clean (both native and wasm32-unknown-unknown
+  targets). Frontend: `tsc --noEmit` clean, `biome check` clean, all 1286 frontend
+  tests green (101 files, was 1280, +6 net new).
+- **Next cycle candidates:** the canonical-`media.mediaKey`-not-zeroed note above (low
+  priority, cosmetic-symmetry), the NIST citation fix (trivial doc-only), migrating
+  `media_thumbnail_decrypt` to the same opaque-handle pattern, PQ hybrid Phase A
+  (still blocked on openmls stable `MLS_128_MLKEM768`), security-auditor's cycle-304
+  YELLOW #3 (bound `mls_credential`/`proof.mls_credential` size).
+
+## Previous state (2026-07-18, cycle 308 — FEATURE: persist unread badge + New Messages divider to Dexie, commit 36dc5b8)
 
 - `git status` clean, `gh run list --limit 5` all green (cycle 307's CI-retry fix), `gh issue
   list --state open` empty at cycle start.
