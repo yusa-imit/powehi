@@ -17,7 +17,77 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-19, cycle 314 — FEATURE: voice messages — record, encrypt, playback, commit e1767c1)
+## Current state (2026-07-19, cycle 316 — FEATURE: fix cycle-312 thumbnail canonical-key-zeroing regression + NIST citation fix, commit f84ed5a)
+
+- `git status` clean, `gh run list --limit 3` all green at cycle start (cycle 315's
+  CI-red + flaky-test fix had already landed and gone green). `gh issue list --state
+  open` empty. Picked the standing carried-since-cycle-309 "media.mediaKey-not-zeroed
+  cosmetic-symmetry" next-cycle candidate — but investigated it with an Explore agent
+  FIRST rather than mirroring cycle 312's thumbnail pattern onto the main media path
+  blindly, since naively "fixing the asymmetry" (zeroing `media.mediaKey` canonically
+  too, to match the thumbnail path) looked like the obvious move.
+- That investigation found the opposite of what was assumed: cycle 312's thumbnail
+  fix (zeroing the canonical `thumbnail.key` synchronously, "crypto-reviewer advisory
+  A") is itself a **real, already-shipped regression**, not a model to replicate.
+  `ChatLayout.tsx`'s message list is unvirtualized with content-derived (not chat-id-
+  derived) React keys, so switching chats away-and-back fully unmounts/remounts every
+  message's `useThumbnail`/`MediaImage`, reusing the SAME `thumbnail`/`media` object
+  reference from long-lived `chats` state (not re-fetched/re-parsed). Once the
+  canonical `thumbnail.key` was zeroed on first display, every later revisit
+  decrypted an all-zero key — the thumbnail permanently and silently vanished (caught
+  by `useThumbnail.ts`'s own non-fatal catch, "full image will still load", so no
+  error surfaced anywhere). Confirmed independently that `forwardMsg.media` in the
+  "forward message" flow is *also* the same object reference as the inline
+  `MediaImage`'s `media` prop — so the reason `downloadAndDecryptMedia` never zeroed
+  its canonical `media.mediaKey` in the first place was NOT an oversight to fix, it
+  was deliberately load-bearing (a zeroed key there would silently break forwarding
+  an already-displayed image too).
+- **Fix (reverted, not extended):** `useThumbnail.ts` no longer zeroes the canonical
+  `thumbnail.key`; only the hook's local decrypt-time `Uint8Array` copy is zeroed
+  (success path: right after WASM import, before decrypt; abort-while-queued path:
+  in the limiter-rejection `.catch`) — this now exactly matches
+  `downloadAndDecryptMedia`'s already-accepted pattern. Updated the hook's doc
+  comment and the cycle-312 test that asserted canonical-zeroing (replaced with a
+  test asserting the canonical key survives + a new regression test: render →
+  decrypt → unmount → remount with the same object reference → decrypts
+  successfully a second time).
+- **Also fixed (unrelated, doc-only):** the R-2 blob-hash-before-decrypt comments in
+  `media.rs`/`wasm_exports.rs` cited "NIST SP 800-38D §5.2.1.1" for the outer
+  application-layer SHA-256 ciphertext-hash check — that section actually covers
+  GCM's own IV construction, not this check. Corrected the citation (dropped the
+  wrong section reference, kept/clarified the substantive "application-layer check,
+  runs before decrypt to avoid an oracle" reasoning) in all 3 occurrences (2 in
+  media.rs, 1 in wasm_exports.rs). No logic change — comment-only, confirmed via
+  `git diff` review.
+- **crypto-reviewer: GREEN.** Confirmed the Rust changes are comment-only (zero
+  non-comment diff lines). Confirmed the canonical-key revert doesn't introduce a
+  *new* regression — it exactly restores the pre-cycle-312 baseline; the raw
+  thumbnail key living in `chats` state for the session lifetime is the same
+  already-accepted tradeoff the main media-key path has always had (not materially
+  worse). Confirmed local-copy-zero + opaque-handle-drop-in-finally is intact on both
+  the success and abort-while-queued paths. One **YELLOW (informational, pre-
+  existing, not a regression from this diff, not required to fix)**: the local
+  `key.fill(0)` in `useThumbnail.ts` sits inside a `try` (not a `finally`) — if
+  `mediaImportKey` itself throws, the local copy is left un-zeroed (contrast
+  `mediaTransfer.ts`'s `try {...} finally { mediaKey.fill(0) }` on the same call).
+  Low severity (a local copy of a key whose canonical original is now intentionally
+  session-resident anyway leaks nothing new) — flagged as a follow-up for crypto-lead,
+  not fixed this cycle to keep the revert minimal and reviewed-as-is.
+- Not architectural, no new server-visible metadata — `threat-model-checker` not
+  required (client-side memory-hygiene revert + doc comment only); crypto-reviewer
+  agreed with this scoping.
+- Rust: `cargo build -p powehi-crypto-wasm` clean, `cargo test -p powehi-crypto-wasm
+  --lib` 172/172 green, `cargo fmt --all --check` clean. Frontend: `tsc -b` clean,
+  `biome check` clean, full suite **1315/1315 tests green** (104 files, was 1314 —
+  net +1: replaced 1 cycle-312 test, added 2 new ones, minus 0 removed elsewhere).
+- **Next cycle candidates:** the YELLOW `key.fill(0)`-not-in-`finally` hygiene gap
+  noted above (trivial, crypto-lead), PQ hybrid Phase A (still blocked on openmls
+  stable `MLS_128_MLKEM768` — unverified this cycle whether that's still true; worth
+  a fresh check rather than continuing to assume), and the standing
+  `.claude/memory/project-context.md` file-size hygiene note (STABILIZATION-cycle
+  tooling task — file is now ~620KB+, this entry makes it larger still).
+
+## Previous state (2026-07-19, cycle 314 — FEATURE: voice messages — record, encrypt, playback, commit e1767c1)
 
 - `git status` clean, `gh run list --limit 5` all green at cycle start, `gh issue list
   --state open` empty. Investigated cycle-313's carried-forward "group-row-creation gap
