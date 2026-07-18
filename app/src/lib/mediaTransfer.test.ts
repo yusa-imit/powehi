@@ -6,10 +6,12 @@
  *   mediaMessageCreate path (never the chunked variants).
  * - Files strictly larger than MEDIA_CHUNK_THRESHOLD use mediaEncryptChunked/
  *   mediaMessageCreateChunked (never the non-chunked variants).
- * - downloadAndDecryptMedia routes to mediaDecryptChunkedWithRawKey when
- *   media.chunked === true, and to mediaDecryptWithRawKey otherwise.
+ * - downloadAndDecryptMedia routes to mediaDecryptChunkedWithHandle when
+ *   media.chunked === true, and to mediaDecryptWithHandle otherwise, after
+ *   importing the raw key via mediaImportKey.
  * - The media key is always zeroed in both success and thrown-error cases,
- *   for both the chunked and non-chunked paths.
+ *   for both the chunked and non-chunked paths, and the imported handle is
+ *   always dropped afterward.
  * - A thumbHandle passed on the chunked path is dropped, never leaked.
  */
 
@@ -72,14 +74,19 @@ const mediaMessageCreateChunkedFn = vi.fn(
 	) => ({ ciphertext: new Uint8Array(96) }),
 );
 
-const mediaDecryptWithRawKeyFn = vi.fn(
-	async (_key: Uint8Array, _iv: Uint8Array, _ciphertext: Uint8Array, _blobHash: Uint8Array) =>
+let importedKeyCounter = 0;
+const mediaImportKeyFn = vi.fn(async (_rawKey: Uint8Array) => ({
+	mediaKeyHandle: `mock-imported-handle-${importedKeyCounter++}`,
+}));
+
+const mediaDecryptWithHandleFn = vi.fn(
+	async (_handle: string, _iv: Uint8Array, _ciphertext: Uint8Array, _blobHash: Uint8Array) =>
 		new Uint8Array(10),
 );
 
-const mediaDecryptChunkedWithRawKeyFn = vi.fn(
+const mediaDecryptChunkedWithHandleFn = vi.fn(
 	async (
-		_key: Uint8Array,
+		_handle: string,
 		_iv: Uint8Array,
 		_ciphertext: Uint8Array,
 		_blobHash: Uint8Array,
@@ -95,8 +102,9 @@ const mockWorker = {
 	mediaMessageCreateWithThumbnail: vi.fn(),
 	mediaDropKey: mediaDropKeyFn,
 	mediaThumbnailDrop: mediaThumbnailDropFn,
-	mediaDecryptWithRawKey: mediaDecryptWithRawKeyFn,
-	mediaDecryptChunkedWithRawKey: mediaDecryptChunkedWithRawKeyFn,
+	mediaImportKey: mediaImportKeyFn,
+	mediaDecryptWithHandle: mediaDecryptWithHandleFn,
+	mediaDecryptChunkedWithHandle: mediaDecryptChunkedWithHandleFn,
 };
 
 describe("mediaTransfer (prd.md §9.2 + §9.4.2)", () => {
@@ -129,8 +137,9 @@ describe("mediaTransfer (prd.md §9.2 + §9.4.2)", () => {
 		mediaMessageCreateChunkedFn.mockClear();
 		mediaDropKeyFn.mockClear();
 		mediaThumbnailDropFn.mockClear();
-		mediaDecryptWithRawKeyFn.mockClear();
-		mediaDecryptChunkedWithRawKeyFn.mockClear();
+		mediaImportKeyFn.mockClear();
+		mediaDecryptWithHandleFn.mockClear();
+		mediaDecryptChunkedWithHandleFn.mockClear();
 	});
 
 	afterEach(() => {
@@ -367,20 +376,28 @@ describe("mediaTransfer (prd.md §9.2 + §9.4.2)", () => {
 			chunkSize: 16 * 1024 * 1024,
 		};
 
-		it("routes to mediaDecryptWithRawKey when media.chunked is absent", async () => {
+		it("imports the raw key via mediaImportKey before doing anything else", async () => {
 			await downloadAndDecryptMedia(nonChunkedMedia, TOKEN, mockWorker as never);
 
-			expect(mediaDecryptWithRawKeyFn).toHaveBeenCalledOnce();
-			expect(mediaDecryptChunkedWithRawKeyFn).not.toHaveBeenCalled();
+			expect(mediaImportKeyFn).toHaveBeenCalledOnce();
 		});
 
-		it("routes to mediaDecryptChunkedWithRawKey when media.chunked === true", async () => {
+		it("routes to mediaDecryptWithHandle (using the imported handle) when media.chunked is absent", async () => {
+			await downloadAndDecryptMedia(nonChunkedMedia, TOKEN, mockWorker as never);
+
+			expect(mediaDecryptWithHandleFn).toHaveBeenCalledOnce();
+			expect(mediaDecryptChunkedWithHandleFn).not.toHaveBeenCalled();
+			const [handleArg] = mediaDecryptWithHandleFn.mock.calls[0];
+			expect(handleArg).toBe((await mediaImportKeyFn.mock.results[0].value).mediaKeyHandle);
+		});
+
+		it("routes to mediaDecryptChunkedWithHandle (using the imported handle) when media.chunked === true", async () => {
 			await downloadAndDecryptMedia(chunkedMedia, TOKEN, mockWorker as never);
 
-			expect(mediaDecryptChunkedWithRawKeyFn).toHaveBeenCalledOnce();
-			expect(mediaDecryptWithRawKeyFn).not.toHaveBeenCalled();
-			expect(mediaDecryptChunkedWithRawKeyFn).toHaveBeenCalledWith(
-				expect.any(Uint8Array),
+			expect(mediaDecryptChunkedWithHandleFn).toHaveBeenCalledOnce();
+			expect(mediaDecryptWithHandleFn).not.toHaveBeenCalled();
+			expect(mediaDecryptChunkedWithHandleFn).toHaveBeenCalledWith(
+				expect.any(String),
 				expect.any(Uint8Array),
 				expect.any(Uint8Array),
 				expect.any(Uint8Array),
@@ -393,45 +410,66 @@ describe("mediaTransfer (prd.md §9.2 + §9.4.2)", () => {
 			expect(getMediaDownloadUrlSpy).toHaveBeenCalledWith(TOKEN, "blob-2");
 		});
 
-		it("zeroes the media key on success (chunked path)", async () => {
+		it("zeroes the media key immediately after import, before the download even starts", async () => {
+			let capturedKey: Uint8Array | null = null;
+			mediaImportKeyFn.mockImplementationOnce(async (rawKey: Uint8Array) => {
+				capturedKey = rawKey;
+				return { mediaKeyHandle: "mock-imported-handle-snapshot" };
+			});
 			const keyArray = [7, 7, 7];
 			const media: MediaPayload = { ...chunkedMedia, mediaKey: keyArray };
 			await downloadAndDecryptMedia(media, TOKEN, mockWorker as never);
 
-			// The zeroed buffer is the one passed into mediaDecryptChunkedWithRawKey; verify
-			// via the call args captured before the finally-block fill(0) mutates them in place.
-			const [passedKey] = mediaDecryptChunkedWithRawKeyFn.mock.calls[0];
-			expect(Array.from(passedKey)).toEqual([0, 0, 0]);
+			expect(capturedKey).not.toBeNull();
+			expect(Array.from(capturedKey ?? new Uint8Array())).toEqual([0, 0, 0]);
 		});
 
-		it("zeroes the media key even when the chunked decrypt throws — security invariant", async () => {
-			mediaDecryptChunkedWithRawKeyFn.mockRejectedValueOnce(new Error("blob_hash_mismatch"));
+		it("zeroes the media key even when mediaImportKey throws — security invariant", async () => {
+			let capturedKey: Uint8Array | null = null;
+			mediaImportKeyFn.mockImplementationOnce(async (rawKey: Uint8Array) => {
+				capturedKey = rawKey;
+				throw new Error("import_failed");
+			});
 			const keyArray = [9, 9, 9];
 			const media: MediaPayload = { ...chunkedMedia, mediaKey: keyArray };
 
 			await expect(downloadAndDecryptMedia(media, TOKEN, mockWorker as never)).rejects.toThrow(
-				"blob_hash_mismatch",
+				"import_failed",
 			);
 
-			const [passedKey] = mediaDecryptChunkedWithRawKeyFn.mock.calls[0];
-			expect(Array.from(passedKey)).toEqual([0, 0, 0]);
+			expect(capturedKey).not.toBeNull();
+			expect(Array.from(capturedKey ?? new Uint8Array())).toEqual([0, 0, 0]);
 		});
 
-		it("zeroes the media key even when the R2 fetch throws (chunked path)", async () => {
-			fetchMock.mockRejectedValueOnce(new Error("network down"));
-			const keyArray = [3, 3, 3];
-			const media: MediaPayload = { ...chunkedMedia, mediaKey: keyArray };
+		it("drops the imported handle on success", async () => {
+			await downloadAndDecryptMedia(nonChunkedMedia, TOKEN, mockWorker as never);
 
-			await expect(downloadAndDecryptMedia(media, TOKEN, mockWorker as never)).rejects.toThrow(
-				"network down",
-			);
-			// mediaDecryptChunkedWithRawKey never got called (fetch failed first) — assert the
-			// original array reference (captured before try) was zeroed via the same Uint8Array
-			// constructed inside downloadAndDecryptMedia. We can't reach into it directly, so we
-			// instead assert mediaDecryptChunkedWithRawKey was not invoked (fetch failed first)
-			// and no error escaped the security-relevant fill(0) path (implied by the throw
-			// message matching cleanly rather than a secondary key-related error).
-			expect(mediaDecryptChunkedWithRawKeyFn).not.toHaveBeenCalled();
+			expect(mediaDropKeyFn).toHaveBeenCalledOnce();
+			const importedHandle = (await mediaImportKeyFn.mock.results[0].value).mediaKeyHandle;
+			expect(mediaDropKeyFn).toHaveBeenCalledWith(importedHandle);
+		});
+
+		it("drops the imported handle even when the chunked decrypt throws — security invariant", async () => {
+			mediaDecryptChunkedWithHandleFn.mockRejectedValueOnce(new Error("blob_hash_mismatch"));
+
+			await expect(
+				downloadAndDecryptMedia(chunkedMedia, TOKEN, mockWorker as never),
+			).rejects.toThrow("blob_hash_mismatch");
+
+			expect(mediaDropKeyFn).toHaveBeenCalledOnce();
+		});
+
+		it("drops the imported handle even when the R2 fetch throws", async () => {
+			fetchMock.mockRejectedValueOnce(new Error("network down"));
+
+			await expect(
+				downloadAndDecryptMedia(chunkedMedia, TOKEN, mockWorker as never),
+			).rejects.toThrow("network down");
+
+			// mediaDecryptChunkedWithHandle never got called (fetch failed first), but the
+			// handle was already imported and must still be dropped.
+			expect(mediaDecryptChunkedWithHandleFn).not.toHaveBeenCalled();
+			expect(mediaDropKeyFn).toHaveBeenCalledOnce();
 		});
 	});
 

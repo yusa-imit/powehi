@@ -10,14 +10,16 @@
  * - The raw AES-256-GCM media key never crosses the WASM-JS boundary on send —
  *   `mediaEncrypt` returns an opaque handle, dropped in `finally` regardless of
  *   outcome.
- * - On receive, the raw key arrives inline in the MLS-decrypted payload (an
- *   accepted existing exposure, prd.md §9.2) and is always zeroed in `finally`.
+ * - On receive, the raw key necessarily arrives inline in the MLS-decrypted payload
+ *   once, but is imported into WASM (`mediaImportKey`) and zeroed immediately —
+ *   from then on only the opaque handle is used (cycle 309, receiver-side
+ *   opaque-handle pattern, mirroring the sender path).
  * - WASM verifies blobHash before AES-GCM decrypt (R-2, blob-swap detection).
  * - The R2 PUT/GET carries only ciphertext — the server never sees plaintext.
  * - No file content, key bytes, or error details are logged.
  *
  * §9.4.2: files larger than MEDIA_CHUNK_THRESHOLD use the chunked AES-256-GCM
- * path (mediaEncryptChunked / mediaDecryptChunkedWithRawKey / mediaMessageCreateChunked)
+ * path (mediaEncryptChunked / mediaDecryptChunkedWithHandle / mediaMessageCreateChunked)
  * instead of the single-shot media* calls; same key-hygiene invariants apply.
  */
 
@@ -86,10 +88,14 @@ export function sniffMimeType(bytes: Uint8Array, options?: { videoHint?: boolean
 }
 
 /**
- * Download an R2 blob and AES-256-GCM-decrypt it using the raw key embedded
- * in an MLS-decrypted media message payload (receiver path).
+ * Download an R2 blob and AES-256-GCM-decrypt it using the key embedded in an
+ * MLS-decrypted media message payload (receiver path).
  * Routes to the chunked reassembly decrypt (§9.4.2) when `media.chunked === true`.
- * Always zeroes the key bytes, even on failure.
+ *
+ * Cycle 309 (receiver-side opaque-handle pattern): the raw key bytes are imported
+ * into WASM and zeroed IMMEDIATELY — before the download even starts — so they
+ * never linger in JS memory for the lifetime of the network fetch. All decryption
+ * from that point on goes through the opaque handle, dropped in `finally`.
  */
 export async function downloadAndDecryptMedia(
 	media: MediaPayload,
@@ -97,6 +103,12 @@ export async function downloadAndDecryptMedia(
 	cryptoWorker: CryptoWorker,
 ): Promise<Uint8Array> {
 	const mediaKey = new Uint8Array(media.mediaKey);
+	let handle: string;
+	try {
+		({ mediaKeyHandle: handle } = await cryptoWorker.mediaImportKey(mediaKey));
+	} finally {
+		mediaKey.fill(0);
+	}
 	try {
 		const { downloadUrl } = await getMediaDownloadUrl(sessionToken, media.blobId);
 		// redirect: "error" prevents silent SSRF via R2 redirect (defense-in-depth).
@@ -106,22 +118,22 @@ export async function downloadAndDecryptMedia(
 		const iv = new Uint8Array(media.iv);
 		const blobHash = new Uint8Array(media.blobHash);
 		if (media.chunked === true) {
-			return (await cryptoWorker.mediaDecryptChunkedWithRawKey(
-				mediaKey,
+			return (await cryptoWorker.mediaDecryptChunkedWithHandle(
+				handle,
 				iv,
 				ciphertext,
 				blobHash,
 				media.totalSize as number,
 			)) as Uint8Array;
 		}
-		return (await cryptoWorker.mediaDecryptWithRawKey(
-			mediaKey,
+		return (await cryptoWorker.mediaDecryptWithHandle(
+			handle,
 			iv,
 			ciphertext,
 			blobHash,
 		)) as Uint8Array;
 	} finally {
-		mediaKey.fill(0);
+		await cryptoWorker.mediaDropKey(handle).catch(() => {});
 	}
 }
 

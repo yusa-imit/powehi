@@ -2,13 +2,12 @@
  * useMediaReceive — download and AES-256-GCM-decrypt an incoming §9.2 media attachment.
  *
  * Security invariants (prd.md §9.2 + no-plaintext-logging.md):
- * - `mediaKey` bytes are zeroed immediately in the `finally` block regardless of success/failure.
+ * - `mediaKey` bytes are imported into WASM and zeroed immediately (cycle 309,
+ *   receiver-side opaque-handle pattern — closes the cycle-119 YELLOW); all actual
+ *   decryption happens via the resulting opaque handle inside `downloadAndDecryptMedia`.
  * - Object URL is revoked on unmount or when `media` changes to prevent memory leaks.
  * - WASM verifies blobHash before AES-GCM decrypt (R-2 blob-swap detection).
  * - No key bytes, URL paths, or error details are logged.
- *
- * Known YELLOW (cycle 119): `media.mediaKey` arrives as a JS number[] from the
- * MLS-decrypted payload. Receiver-side opaque-handle pattern is future work.
  */
 
 import { useEffect, useRef, useState } from "react";

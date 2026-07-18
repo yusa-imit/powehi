@@ -55,22 +55,30 @@ describe("mediaDecrypt — API contract (sender re-decrypt via handle)", () => {
 	});
 });
 
-describe("mediaDecryptWithRawKey — API contract (receiver path)", () => {
-	it("returns plaintext as Uint8Array given raw key bytes", async () => {
-		const mediaKey = new Uint8Array(32);
+describe("mediaImportKey / mediaDecryptWithHandle — API contract (receiver path, cycle 309)", () => {
+	it("mediaImportKey returns mediaKeyHandle as a string (raw key never re-enters JS scope)", async () => {
+		const rawKey = new Uint8Array(32);
+		const result = await worker.mediaImportKey(rawKey);
+		expect(typeof result.mediaKeyHandle).toBe("string");
+	});
+
+	it("returns plaintext as Uint8Array given an imported key handle", async () => {
+		const rawKey = new Uint8Array(32);
+		const { mediaKeyHandle } = await worker.mediaImportKey(rawKey);
 		const iv = new Uint8Array(12);
 		const ciphertext = new Uint8Array(48); // 32 + 16-byte tag
 		const blobHash = new Uint8Array(32);
-		const result = await worker.mediaDecryptWithRawKey(mediaKey, iv, ciphertext, blobHash);
+		const result = await worker.mediaDecryptWithHandle(mediaKeyHandle, iv, ciphertext, blobHash);
 		expect(result).toBeInstanceOf(Uint8Array);
 	});
 
 	it("result does not expose the key material back to the caller", async () => {
-		const mediaKey = new Uint8Array(32);
+		const rawKey = new Uint8Array(32);
+		const { mediaKeyHandle } = await worker.mediaImportKey(rawKey);
 		const iv = new Uint8Array(12);
 		const ciphertext = new Uint8Array(48);
 		const blobHash = new Uint8Array(32);
-		const result = await worker.mediaDecryptWithRawKey(mediaKey, iv, ciphertext, blobHash);
+		const result = await worker.mediaDecryptWithHandle(mediaKeyHandle, iv, ciphertext, blobHash);
 		// The return type is Uint8Array (plaintext), not an object with a key field.
 		expect(result).toBeInstanceOf(Uint8Array);
 		// @ts-expect-error — no key field on the return value

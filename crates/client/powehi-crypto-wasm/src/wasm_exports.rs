@@ -1488,10 +1488,15 @@ pub fn ml_kem_768_verify_encap_key(
 //      returns the MLS ciphertext.  The raw media_key bytes only ever appear
 //      inside MLS ciphertext when crossing service boundaries.
 //
-// Receiver path:
+// Receiver path (opaque-handle, cycle 309 — closes the cycle-119 YELLOW):
 //   After MLS decrypt, the plaintext JSON contains { mediaKey (bytes), iv, blobId }.
-//   `media_decrypt_with_raw_key(mediaKey, iv, ciphertext)` decrypts the R2 blob.
-//   The media_key is already in JS memory (from MLS decrypt) before this call.
+//   The mediaKey necessarily exists in JS memory once for the MLS decrypt itself; the
+//   JS caller passes it to `media_import_key(mediaKey)` and zeroes it IMMEDIATELY
+//   (`mediaKey.fill(0)`), receiving back an opaque handle. From then on the raw key
+//   never re-appears in JS scope — `media_decrypt_with_handle` /
+//   `media_decrypt_chunked_with_handle` decrypt the R2 blob via the handle, and
+//   `media_drop_key(handle)` releases it when done. This mirrors the sender path,
+//   which never lets the raw key leave WASM at all.
 
 /// Encrypt media bytes with a fresh AES-256-GCM key and IV (prd.md §9.2 sender path).
 ///
@@ -1555,34 +1560,79 @@ pub fn media_decrypt(
     Ok(Uint8Array::from(plaintext.as_slice()))
 }
 
-/// Decrypt an R2 blob using raw key bytes from an MLS-decrypted message (receiver path).
+/// Import a raw 32-byte AES-256-GCM media key into the opaque handle map
+/// (receiver-side opaque-handle pattern, cycle 309 — closes the cycle-119 YELLOW).
 ///
-/// `media_key`: 32-byte AES-256-GCM key from the MLS application message payload.
-/// `iv`: 12-byte nonce from the same payload.
+/// The media key arrives inside an MLS-decrypted application message payload as a
+/// raw JS `number[]`/`Uint8Array`, so it necessarily exists in JS memory once. The
+/// caller passes those raw bytes here a single time, then immediately zeroes them
+/// (`mediaKey.fill(0)`) and holds only the returned opaque handle from then on —
+/// mirroring the sender path's `media_encrypt`, which never lets the raw key leave
+/// WASM at all. Use `media_decrypt_with_handle` / `media_decrypt_chunked_with_handle`
+/// for the actual decrypt.
+///
+/// Returns `{ mediaKeyHandle: string }`.
+///
+/// # Errors
+/// - `"media key must be 32 bytes"` if `raw_key.len() != 32`.
+/// - `"media key cap exceeded"` if `MEDIA_KEYS` is at capacity (`MAX_MEDIA_HANDLES`,
+///   shared with the sender-path handles).
+///
+/// Call `media_drop_key(mediaKeyHandle)` once decryption is done (or let
+/// `mls_clear_session` sweep it on logout).
+#[wasm_bindgen]
+pub fn media_import_key(raw_key: &[u8]) -> Result<JsValue, JsError> {
+    let key_arr: [u8; 32] = raw_key
+        .try_into()
+        .map_err(|_| js_err("media key must be 32 bytes"))?;
+
+    MEDIA_KEYS
+        .with(|m| {
+            let len = m.borrow().len();
+            if len >= MAX_MEDIA_HANDLES {
+                Err("media key cap exceeded")
+            } else {
+                Ok(())
+            }
+        })
+        .map_err(js_err)?;
+
+    let handle = next_id();
+    // Build the JS result BEFORE inserting into the map (Y-7: no orphan handle on failure).
+    let result = js_obj(&[("mediaKeyHandle", JsValue::from_str(&handle))])?;
+    MEDIA_KEYS.with(|m| m.borrow_mut().insert(handle, Zeroizing::new(key_arr)));
+    Ok(result)
+}
+
+/// Decrypt an R2 blob using an imported media key handle (receiver path).
+///
+/// `media_key_handle`: handle returned by `media_import_key`.
+/// `iv`: 12-byte nonce from the MLS-decrypted payload.
 /// `ciphertext`: encrypted blob downloaded from R2.
 /// `blob_hash`: 32-byte SHA-256 of the ciphertext embedded in the MLS message.
 ///
-/// **R-2 fix (NIST SP 800-38D §5.2.1.1):** `SHA-256(ciphertext)` is re-computed
-/// and compared to `blob_hash` (authenticated inside the MLS envelope) BEFORE
-/// AES-GCM decrypt.  A mismatch means the R2 blob was swapped by a server-side
-/// adversary; reject without decrypting to avoid any oracle.
+/// **R-2 (NIST SP 800-38D §5.2.1.1):** `SHA-256(ciphertext)` is re-computed and
+/// compared to `blob_hash` (authenticated inside the MLS envelope) BEFORE AES-GCM
+/// decrypt.  A mismatch means the R2 blob was swapped by a server-side adversary;
+/// reject without decrypting to avoid any oracle. Same ordering as the former
+/// raw-key path, just sourcing the key from the handle map instead of a JS argument.
 ///
-/// **Y-2 (crypto-reviewer):** The caller MUST zero `mediaKey` immediately after
-/// this call returns (`mediaKey.fill(0)`).
-///
-/// Returns an error if `media_key` is not 32 bytes, `iv` is not 12 bytes,
-/// `blob_hash` is not 32 bytes, the hash does not match, or the GCM tag fails.
+/// Returns an error if the handle is unknown, `blob_hash` is not 32 bytes, the hash
+/// does not match, or the GCM tag fails.
 #[wasm_bindgen]
-pub fn media_decrypt_with_raw_key(
-    media_key: &[u8],
+pub fn media_decrypt_with_handle(
+    media_key_handle: &str,
     iv: &[u8],
     ciphertext: &[u8],
     blob_hash: &[u8],
 ) -> Result<Uint8Array, JsError> {
+    let key = MEDIA_KEYS
+        .with(|m| m.borrow().get(media_key_handle).cloned())
+        .ok_or_else(|| js_err("unknown media key handle"))?;
     let blob_hash_arr: &[u8; 32] = blob_hash
         .try_into()
         .map_err(|_| js_err("blob_hash must be 32 bytes"))?;
-    let plaintext = media::decrypt_with_raw_key(media_key, iv, ciphertext, blob_hash_arr)
+    let plaintext = media::decrypt_with_raw_key(key.as_slice(), iv, ciphertext, blob_hash_arr)
         .map_err(|e| js_err(&e.to_string()))?;
     Ok(Uint8Array::from(plaintext.as_slice()))
 }
@@ -1644,10 +1694,11 @@ pub fn media_thumbnail_drop(handle: &str) -> bool {
 /// Decrypt thumbnail bytes using raw key/IV from the MLS-decrypted payload (receiver path).
 ///
 /// The thumbnail key arrives inside the MLS-decrypted application-data JSON (RFC 9420 §6.3.1)
-/// and is passed here directly.  This is the same exposure pattern as `media_decrypt_with_raw_key`
-/// for the main media key: the key bytes are transiently in JS memory only for this call and
-/// must be zeroed by the caller immediately after (`key.fill(0)` on both the passed copy and
-/// the canonical `thumbnail.key` array in the React state tree).
+/// and is passed here directly — unlike the main media key (`media_import_key`, cycle 309), the
+/// thumbnail key has not yet been migrated to the opaque-handle pattern (small 16KB-max payload,
+/// lower priority; tracked as a follow-up). The key bytes are transiently in JS memory only for
+/// this call and must be zeroed by the caller immediately after (`key.fill(0)` on both the passed
+/// copy and the canonical `thumbnail.key` array in the React state tree).
 ///
 /// Returns `{ pixels: Uint8Array }`.
 ///
@@ -1967,16 +2018,16 @@ pub fn media_encrypt_chunked(plaintext: &[u8]) -> Result<JsValue, JsError> {
     Ok(result)
 }
 
-/// Decrypt and reassemble a chunked R2 blob using raw key bytes from an MLS-decrypted
-/// message (prd.md §9.4.2 receiver path).
+/// Decrypt and reassemble a chunked R2 blob using an imported media key handle
+/// (prd.md §9.4.2 receiver path, opaque-handle variant).
 ///
-/// Mirrors `media_decrypt_with_raw_key`: `SHA-256(ciphertext)` is verified against
+/// Mirrors `media_decrypt_with_handle`: `SHA-256(ciphertext)` is verified against
 /// `blob_hash` (authenticated inside the MLS envelope) BEFORE any AES-GCM decrypt, so a
 /// server-side R2 blob swap is rejected without exposing a decryption oracle. The blob is
 /// additionally rejected if its length is not a whole number of 16 MiB + 16 chunks, or if
 /// the chunk count does not match `total_size`.
 ///
-/// `media_key`: 32-byte AES-256-GCM key from the payload.
+/// `media_key_handle`: handle returned by `media_import_key`.
 /// `iv`: 12-byte base nonce from the payload.
 /// `ciphertext`: the full chunked blob downloaded from R2.
 /// `blob_hash`: 32-byte SHA-256 of the ciphertext embedded in the MLS message.
@@ -1985,25 +2036,25 @@ pub fn media_encrypt_chunked(plaintext: &[u8]) -> Result<JsValue, JsError> {
 /// which a caller passing a `number` would fail with a `TypeError`, so this takes `f64`
 /// and validates via `f64_to_u64_checked` (same convention as `mls_export_state`).
 ///
-/// **Y-2 (crypto-reviewer):** the caller MUST zero `media_key` immediately after this
-/// call returns (`mediaKey.fill(0)`).
+/// Returns an error if the handle is unknown, `iv` is not 12 bytes, `blob_hash` is not
+/// 32 bytes, the hash does not match, or the chunk structure/GCM checks fail.
 #[wasm_bindgen]
-pub fn media_decrypt_chunked_with_raw_key(
-    media_key: &[u8],
+pub fn media_decrypt_chunked_with_handle(
+    media_key_handle: &str,
     iv: &[u8],
     ciphertext: &[u8],
     blob_hash: &[u8],
     total_size: f64,
 ) -> Result<Uint8Array, JsError> {
-    let key_arr: &[u8; 32] = media_key
-        .try_into()
-        .map_err(|_| js_err("media_key must be 32 bytes"))?;
+    let key = MEDIA_KEYS
+        .with(|m| m.borrow().get(media_key_handle).cloned())
+        .ok_or_else(|| js_err("unknown media key handle"))?;
     let iv_arr: &[u8; 12] = iv.try_into().map_err(|_| js_err("iv must be 12 bytes"))?;
     let blob_hash_arr: &[u8; 32] = blob_hash
         .try_into()
         .map_err(|_| js_err("blob_hash must be 32 bytes"))?;
     let total_size = f64_to_u64_checked(total_size).map_err(js_err)?;
-    let plaintext = media::decrypt_chunked(key_arr, iv_arr, ciphertext, total_size, blob_hash_arr)
+    let plaintext = media::decrypt_chunked(&key, iv_arr, ciphertext, total_size, blob_hash_arr)
         .map_err(|e| js_err(&e.to_string()))?;
     Ok(Uint8Array::from(plaintext.as_slice()))
 }
@@ -2069,7 +2120,7 @@ fn build_media_payload_json_chunked(
 /// Build and MLS-encrypt a chunked-media attachment application message (prd.md §9.4.2).
 ///
 /// Like `media_message_create`, but embeds `chunked: true, totalSize, chunkSize` so the
-/// receiver picks the chunked decrypt path (`media_decrypt_chunked_with_raw_key`). Reads
+/// receiver picks the chunked decrypt path (`media_decrypt_chunked_with_handle`). Reads
 /// the raw AES key from `media_key_handle` entirely inside WASM — it never crosses the
 /// WASM-JS boundary; only the MLS-encrypted envelope is returned.
 ///
@@ -2081,7 +2132,7 @@ fn build_media_payload_json_chunked(
 /// - `blob_hash`        — 32-byte SHA-256 of the concatenated ciphertext.
 /// - `iv`               — 12-byte base nonce (from `media_encrypt_chunked.iv`).
 /// - `total_size`       — exact original plaintext length (from `media_encrypt_chunked.totalSize`),
-///   as a JS `number`/`f64` — see `media_decrypt_chunked_with_raw_key`'s doc comment for why
+///   as a JS `number`/`f64` — see `media_decrypt_chunked_with_handle`'s doc comment for why
 ///   this can't be a `u64` at the wasm-bindgen boundary.
 ///
 /// # Returns
@@ -3413,6 +3464,76 @@ mod tests {
             MEDIA_KEYS.with(|m| m.borrow_mut().remove(h));
         }
         assert_eq!(MEDIA_KEYS.with(|m| m.borrow().len()), 0);
+    }
+
+    // ── §9.2 media_import_key / handle-based receiver decrypt (cycle 309) ────
+
+    /// media_import_key's core logic (32-byte validation + thread-local insert):
+    /// a raw key imported from the wire round-trips through the handle map exactly
+    /// like the sender-side media_encrypt handle does, and decrypts via
+    /// media_decrypt_with_handle's underlying call (decrypt_with_raw_key sourced
+    /// from the handle instead of a JS argument).
+    #[test]
+    fn test_media_import_key_round_trip() {
+        let plaintext = b"receiver-side opaque handle round trip";
+        let (ct, key, iv, blob_hash) = media::encrypt(plaintext).unwrap();
+        let raw_key: Vec<u8> = key.to_vec();
+
+        let key_arr: [u8; 32] = raw_key.as_slice().try_into().unwrap();
+        let handle = next_id();
+        MEDIA_KEYS.with(|m| {
+            m.borrow_mut()
+                .insert(handle.clone(), Zeroizing::new(key_arr))
+        });
+
+        let stored = MEDIA_KEYS
+            .with(|m| m.borrow().get(&handle).cloned())
+            .expect("handle must be present after import");
+        let decrypted =
+            media::decrypt_with_raw_key(stored.as_slice(), &iv, &ct, &blob_hash).unwrap();
+        assert_eq!(decrypted, plaintext);
+
+        MEDIA_KEYS.with(|m| m.borrow_mut().remove(&handle));
+    }
+
+    /// The 32-byte length validation media_import_key performs (`raw_key.try_into()`)
+    /// rejects any length other than exactly 32, before any handle is ever inserted.
+    #[test]
+    fn test_media_import_key_wrong_length_rejected() {
+        for bad_len in [0usize, 16, 31, 33, 64] {
+            let raw_key = vec![0u8; bad_len];
+            let result: Result<[u8; 32], _> = raw_key.as_slice().try_into();
+            assert!(
+                result.is_err(),
+                "key of length {bad_len} must fail the 32-byte conversion"
+            );
+        }
+    }
+
+    /// Handle-based chunked decrypt (media_decrypt_chunked_with_handle's core logic)
+    /// round-trips through media::decrypt_chunked exactly like the sender path, with
+    /// the key sourced from the handle map instead of an inline raw-key argument.
+    #[test]
+    fn test_media_import_key_chunked_round_trip() {
+        let plaintext = vec![0x5au8; 4096];
+        let res = media::encrypt_chunked(&plaintext).unwrap();
+        let handle = next_id();
+        MEDIA_KEYS.with(|m| m.borrow_mut().insert(handle.clone(), res.key.clone()));
+
+        let stored = MEDIA_KEYS
+            .with(|m| m.borrow().get(&handle).cloned())
+            .expect("handle must be present");
+        let decrypted = media::decrypt_chunked(
+            &stored,
+            &res.base_iv,
+            &res.ciphertext,
+            res.total_plaintext_len,
+            &res.blob_hash,
+        )
+        .unwrap();
+        assert_eq!(decrypted, plaintext);
+
+        MEDIA_KEYS.with(|m| m.borrow_mut().remove(&handle));
     }
 
     // ── §9.2 build_media_payload_json + media_message_create ─────────────────

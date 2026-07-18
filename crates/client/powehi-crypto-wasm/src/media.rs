@@ -17,9 +17,13 @@
 //   handle is returned to JS (same pattern as KEM keys in ADR-0003 Phase B).
 // - The receiver path: the media key bytes arrive inside an MLS-decrypted
 //   application message (already protected by MLS AEAD during transit). The JS
-//   caller extracts them from the plaintext JSON and passes them to
-//   `decrypt_with_raw_key`. This is the minimum necessary exposure; both ends
-//   must trust their own WASM worker for key-material hygiene.
+//   caller extracts them from the plaintext JSON and immediately passes them to
+//   `wasm_exports::media_import_key`, which stores them under an opaque handle and
+//   lets the caller zero its own copy right away (cycle 309 — receiver-side
+//   opaque-handle pattern). `decrypt_with_raw_key` (below) is the shared decrypt
+//   primitive both `wasm_exports::media_decrypt_with_handle` (handle-sourced key)
+//   and the chunked equivalent call into; it no longer has a directly-JS-callable
+//   wasm-bindgen export of its own.
 
 use aes_gcm::{
     aead::{Aead, KeyInit},

@@ -158,8 +158,11 @@ interface WasmModule {
 	// §9.2 Media encryption: AES-256-GCM opaque-handle API.
 	media_encrypt: (plaintext: Uint8Array) => MediaEncryptResult;
 	media_decrypt: (mediaKeyHandle: string, iv: Uint8Array, ciphertext: Uint8Array) => Uint8Array;
-	media_decrypt_with_raw_key: (
-		mediaKey: Uint8Array,
+	// Receiver-side opaque-handle pattern (cycle 309): import a raw key once, then
+	// decrypt only via the handle — the raw key never re-enters JS scope after import.
+	media_import_key: (rawKey: Uint8Array) => { mediaKeyHandle: string };
+	media_decrypt_with_handle: (
+		mediaKeyHandle: string,
 		iv: Uint8Array,
 		ciphertext: Uint8Array,
 		blobHash: Uint8Array,
@@ -179,8 +182,8 @@ interface WasmModule {
 	// prd.md §9.4.2 Chunked media encryption (large video streaming) — AES-256-GCM
 	// chunked at 16MiB with zero-padded last chunk for size-bucket leak mitigation.
 	media_encrypt_chunked: (plaintext: Uint8Array) => MediaEncryptChunkedResult;
-	media_decrypt_chunked_with_raw_key: (
-		mediaKey: Uint8Array,
+	media_decrypt_chunked_with_handle: (
+		mediaKeyHandle: string,
 		iv: Uint8Array,
 		ciphertext: Uint8Array,
 		blobHash: Uint8Array,
@@ -794,28 +797,39 @@ const api = {
 	},
 
 	/**
-	 * Decrypt an R2 blob using raw key bytes from an MLS-decrypted message (receiver path).
+	 * Import a raw 32-byte media key into the opaque handle map (receiver path,
+	 * cycle 309 — closes the cycle-119 YELLOW). The mediaKey bytes arrive inside the
+	 * MLS-decrypted application message payload; call this immediately after
+	 * mlsDecrypt, then zero the caller's own copy (`mediaKey.fill(0)`) — from then
+	 * on only the returned handle is used, mirroring the sender path's mediaEncrypt.
 	 *
-	 * The mediaKey bytes arrive inside the MLS-decrypted application message payload.
-	 * Call this after mls_decrypt to decrypt the R2 ciphertext blob.
+	 * @param rawKey  32-byte AES-256-GCM key from the MLS message payload
+	 */
+	async mediaImportKey(rawKey: Uint8Array): Promise<{ mediaKeyHandle: string }> {
+		const wasm = await getWasm();
+		return wasm.media_import_key(rawKey);
+	},
+
+	/**
+	 * Decrypt an R2 blob using an imported media key handle (receiver path).
 	 *
 	 * R-2 (crypto-reviewer, NIST SP 800-38D §5.2.1.1): blobHash is the SHA-256 of the
 	 * ciphertext embedded in the MLS message by the sender. WASM verifies it before
 	 * AES-GCM decrypt to detect a server-side R2 blob swap without exposing an oracle.
 	 *
-	 * @param mediaKey    32-byte AES-256-GCM key from the MLS message payload
-	 * @param iv          12-byte nonce from the MLS message payload
-	 * @param ciphertext  encrypted blob from R2
-	 * @param blobHash    32-byte SHA-256(ciphertext) from the MLS message payload
+	 * @param mediaKeyHandle  handle returned by mediaImportKey
+	 * @param iv              12-byte nonce from the MLS message payload
+	 * @param ciphertext      encrypted blob from R2
+	 * @param blobHash        32-byte SHA-256(ciphertext) from the MLS message payload
 	 */
-	async mediaDecryptWithRawKey(
-		mediaKey: Uint8Array,
+	async mediaDecryptWithHandle(
+		mediaKeyHandle: string,
 		iv: Uint8Array,
 		ciphertext: Uint8Array,
 		blobHash: Uint8Array,
 	): Promise<Uint8Array> {
 		const wasm = await getWasm();
-		return wasm.media_decrypt_with_raw_key(mediaKey, iv, ciphertext, blobHash);
+		return wasm.media_decrypt_with_handle(mediaKeyHandle, iv, ciphertext, blobHash);
 	},
 
 	/**
@@ -880,27 +894,33 @@ const api = {
 	},
 
 	/**
-	 * Decrypt+reassemble a chunked R2 blob using raw key bytes from an
-	 * MLS-decrypted message (receiver path, prd.md §9.4.2).
+	 * Decrypt+reassemble a chunked R2 blob using an imported media key handle
+	 * (receiver path, prd.md §9.4.2).
 	 *
 	 * WASM verifies the blob hash before any AES-GCM attempt, same as
-	 * mediaDecryptWithRawKey (R-2, blob-swap detection).
+	 * mediaDecryptWithHandle (R-2, blob-swap detection).
 	 *
-	 * @param mediaKey    32-byte AES-256-GCM key from the MLS message payload
-	 * @param iv          12-byte base nonce from the MLS message payload
-	 * @param ciphertext  encrypted blob from R2
-	 * @param blobHash    32-byte SHA-256(ciphertext) from the MLS message payload
-	 * @param totalSize   true plaintext length from the MLS message payload
+	 * @param mediaKeyHandle  handle returned by mediaImportKey
+	 * @param iv              12-byte base nonce from the MLS message payload
+	 * @param ciphertext      encrypted blob from R2
+	 * @param blobHash        32-byte SHA-256(ciphertext) from the MLS message payload
+	 * @param totalSize       true plaintext length from the MLS message payload
 	 */
-	async mediaDecryptChunkedWithRawKey(
-		mediaKey: Uint8Array,
+	async mediaDecryptChunkedWithHandle(
+		mediaKeyHandle: string,
 		iv: Uint8Array,
 		ciphertext: Uint8Array,
 		blobHash: Uint8Array,
 		totalSize: number,
 	): Promise<Uint8Array> {
 		const wasm = await getWasm();
-		return wasm.media_decrypt_chunked_with_raw_key(mediaKey, iv, ciphertext, blobHash, totalSize);
+		return wasm.media_decrypt_chunked_with_handle(
+			mediaKeyHandle,
+			iv,
+			ciphertext,
+			blobHash,
+			totalSize,
+		);
 	},
 
 	/**

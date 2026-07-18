@@ -123,8 +123,12 @@ const mockWorker = {
 	}),
 	mediaDecrypt: async (_mediaKeyHandle: string, _iv: Uint8Array, _ciphertext: Uint8Array) =>
 		new Uint8Array(32),
-	mediaDecryptWithRawKey: async (
-		_mediaKey: Uint8Array,
+	// Receiver-side opaque-handle mocks (cycle 309).
+	mediaImportKey: async (_rawKey: Uint8Array) => ({
+		mediaKeyHandle: "mock-imported-media-key-handle-0",
+	}),
+	mediaDecryptWithHandle: async (
+		_mediaKeyHandle: string,
 		_iv: Uint8Array,
 		_ciphertext: Uint8Array,
 		_blobHash: Uint8Array,
@@ -160,8 +164,8 @@ const mockWorker = {
 		_totalSize: number,
 		_mimeType?: string,
 	) => ({ ciphertext: new Uint8Array(96) }),
-	mediaDecryptChunkedWithRawKey: async (
-		_mediaKey: Uint8Array,
+	mediaDecryptChunkedWithHandle: async (
+		_mediaKeyHandle: string,
 		_iv: Uint8Array,
 		_ciphertext: Uint8Array,
 		_blobHash: Uint8Array,

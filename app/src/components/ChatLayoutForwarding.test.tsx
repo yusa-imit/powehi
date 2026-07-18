@@ -23,8 +23,10 @@ const MOCK_WORKER = {
 	mlsDecrypt: vi.fn(async () => ({ plaintext: new Uint8Array() })),
 	encryptDbField: vi.fn(async (v: string) => v),
 	decryptDbField: vi.fn(async (v: string) => v),
+	// Receiver-side opaque-handle pattern (cycle 309): import then decrypt via handle.
+	mediaImportKey: vi.fn(async () => ({ mediaKeyHandle: "mock-fwd-import-handle" })),
 	// JPEG magic bytes so sniffMimeType resolves to image/jpeg during forward re-encrypt.
-	mediaDecryptWithRawKey: vi.fn(async () => new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4])),
+	mediaDecryptWithHandle: vi.fn(async () => new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4])),
 	mediaEncrypt: vi.fn(async () => ({
 		ciphertext: new Uint8Array(48),
 		mediaKeyHandle: "mock-fwd-media-key-handle",
