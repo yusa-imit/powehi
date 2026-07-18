@@ -198,4 +198,13 @@ describe("useThumbnail (prd.md §9.4.1)", () => {
 		// createObjectURL should NOT have been called because the hook was cancelled.
 		expect(globalThis.URL.createObjectURL).not.toHaveBeenCalled();
 	});
+
+	it("aborts the queued/in-flight decrypt's signal on unmount (crypto-reviewer advisory B, cycle 312)", async () => {
+		const abortSpy = vi.spyOn(AbortController.prototype, "abort");
+		const { unmount } = renderHook(() => useThumbnail(makeThumbnail()));
+
+		unmount();
+
+		expect(abortSpy).toHaveBeenCalledOnce();
+	});
 });

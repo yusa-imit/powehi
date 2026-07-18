@@ -471,6 +471,18 @@ describe("mediaTransfer (prd.md §9.2 + §9.4.2)", () => {
 			expect(mediaDecryptChunkedWithHandleFn).not.toHaveBeenCalled();
 			expect(mediaDropKeyFn).toHaveBeenCalledOnce();
 		});
+
+		it("forwards an already-aborted signal to the shared limiter without importing a key", async () => {
+			const controller = new AbortController();
+			controller.abort();
+
+			await expect(
+				downloadAndDecryptMedia(nonChunkedMedia, TOKEN, mockWorker as never, controller.signal),
+			).rejects.toThrow(/aborted/i);
+
+			expect(mediaImportKeyFn).not.toHaveBeenCalled();
+			expect(getMediaDownloadUrlSpy).not.toHaveBeenCalled();
+		});
 	});
 
 	describe("sniffMimeType — video detection (§9.4.2)", () => {

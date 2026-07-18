@@ -112,11 +112,16 @@ export function sniffMimeType(bytes: Uint8Array, options?: { videoHint?: boolean
  * into WASM and zeroed IMMEDIATELY — before the download even starts — so they
  * never linger in JS memory for the lifetime of the network fetch. All decryption
  * from that point on goes through the opaque handle, dropped in `finally`.
+ *
+ * Pass `signal` so an unmount (chat switch away before this decrypt reached the
+ * front of `mediaHandleLimiter`'s queue) dequeues it instead of letting it run
+ * to completion for a discarded result (crypto-reviewer advisory B, cycle 312).
  */
 export async function downloadAndDecryptMedia(
 	media: MediaPayload,
 	sessionToken: string,
 	cryptoWorker: CryptoWorker,
+	signal?: AbortSignal,
 ): Promise<Uint8Array> {
 	return mediaHandleLimiter(async () => {
 		const mediaKey = new Uint8Array(media.mediaKey);
@@ -152,7 +157,7 @@ export async function downloadAndDecryptMedia(
 		} finally {
 			await cryptoWorker.mediaDropKey(handle).catch(() => {});
 		}
-	});
+	}, signal);
 }
 
 /**

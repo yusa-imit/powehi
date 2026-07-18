@@ -8,6 +8,10 @@
  * - Object URL is revoked on unmount or when `media` changes to prevent memory leaks.
  * - WASM verifies blobHash before AES-GCM decrypt (R-2 blob-swap detection).
  * - No key bytes, URL paths, or error details are logged.
+ * - A fast chat-switch (unmount before this decrypt reached the front of the
+ *   shared `mediaHandleLimiter` queue) aborts via `AbortController` so the
+ *   queued decrypt is dropped rather than running to completion for a result
+ *   that would just be discarded (crypto-reviewer advisory B, cycle 312).
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -39,11 +43,17 @@ export function useMediaReceive(media: MediaPayload | undefined): MediaReceiveSt
 		if (!media || !sessionToken || !cryptoWorker) return;
 
 		let cancelled = false;
+		const controller = new AbortController();
 
 		const run = async () => {
 			setState({ objectUrl: null, loading: true, error: false });
 			try {
-				const plaintext = await downloadAndDecryptMedia(media, sessionToken, cryptoWorker);
+				const plaintext = await downloadAndDecryptMedia(
+					media,
+					sessionToken,
+					cryptoWorker,
+					controller.signal,
+				);
 				if (cancelled) return;
 
 				// Real mimeType (cycle-296) is authoritative for the video/image hint when
@@ -68,6 +78,7 @@ export function useMediaReceive(media: MediaPayload | undefined): MediaReceiveSt
 
 		return () => {
 			cancelled = true;
+			controller.abort();
 			if (urlRef.current) {
 				URL.revokeObjectURL(urlRef.current);
 				urlRef.current = null;

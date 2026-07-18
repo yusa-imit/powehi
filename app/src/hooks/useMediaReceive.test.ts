@@ -245,6 +245,15 @@ describe("useMediaReceive (prd.md §9.2 receiver path)", () => {
 		expect(URL.revokeObjectURL).toHaveBeenCalledWith(MOCK_BLOB_URL);
 	});
 
+	it("aborts the in-flight decrypt's signal on unmount (crypto-reviewer advisory B, cycle 312)", async () => {
+		const abortSpy = vi.spyOn(AbortController.prototype, "abort");
+		const { unmount } = renderHook(() => useMediaReceive(MOCK_MEDIA));
+
+		unmount();
+
+		expect(abortSpy).toHaveBeenCalledOnce();
+	});
+
 	it("prefers the real mimeType (cycle-296) over the chunked-based videoHint when sniffing generic bytes", async () => {
 		const genericBytes = new Uint8Array([1, 2, 3, 4]); // no image/video magic bytes
 		mediaDecryptWithHandleFn.mockResolvedValueOnce(genericBytes);

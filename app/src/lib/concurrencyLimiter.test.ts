@@ -83,4 +83,65 @@ describe("createLimiter", () => {
 	it("rejects a non-positive maxConcurrent", () => {
 		expect(() => createLimiter(0)).toThrow();
 	});
+
+	it("dequeues an aborted-while-queued task without ever running it", async () => {
+		const limit = createLimiter(1);
+		const gate = deferred<void>();
+		let ran = false;
+
+		// Occupy the only slot so the next call must queue.
+		const holder = limit(async () => {
+			await gate.promise;
+		});
+
+		const controller = new AbortController();
+		const queued = limit(async () => {
+			ran = true;
+		}, controller.signal);
+
+		controller.abort();
+		await expect(queued).rejects.toThrow(/aborted/i);
+		expect(ran).toBe(false);
+
+		// Releasing the holder must not resurrect the aborted task or leave the
+		// limiter stuck — the next call should still run immediately.
+		gate.resolve();
+		await holder;
+		let ranAfter = false;
+		await limit(async () => {
+			ranAfter = true;
+		});
+		expect(ranAfter).toBe(true);
+	});
+
+	it("rejects immediately for an already-aborted signal without queueing", async () => {
+		const limit = createLimiter(1);
+		const controller = new AbortController();
+		controller.abort();
+		let ran = false;
+		await expect(
+			limit(async () => {
+				ran = true;
+			}, controller.signal),
+		).rejects.toThrow(/aborted/i);
+		expect(ran).toBe(false);
+	});
+
+	it("lets an already-running task finish even if its signal aborts mid-flight", async () => {
+		const limit = createLimiter(1);
+		const controller = new AbortController();
+		const gate = deferred<void>();
+		let completed = false;
+
+		const running = limit(async () => {
+			await gate.promise;
+			completed = true;
+		}, controller.signal);
+
+		// Task is already dequeued/running — abort now should have no effect on it.
+		controller.abort();
+		gate.resolve();
+		await running;
+		expect(completed).toBe(true);
+	});
 });

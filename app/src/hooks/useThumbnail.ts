@@ -19,6 +19,10 @@
  *   `useMediaReceive`'s `downloadAndDecryptMedia`) so an unvirtualized,
  *   media-heavy message list can't burst past the shared WASM handle cap
  *   (crypto-reviewer advisory, cycle 311).
+ * - A fast chat-switch (unmount before this decrypt reached the front of the
+ *   limiter's queue) aborts via `AbortController` so the queued decrypt is
+ *   dropped instead of burning a slot + WASM handle on a discarded result
+ *   (crypto-reviewer advisory B, cycle 312).
  */
 
 import { useEffect, useState } from "react";
@@ -45,6 +49,7 @@ export function useThumbnail(thumbnail: ThumbnailPayload | undefined): Thumbnail
 			return;
 		let cancelled = false;
 		let url: string | null = null;
+		const controller = new AbortController();
 
 		// Copy + zero the canonical raw key synchronously, before queueing on the
 		// limiter — a queued task must never keep raw key bytes live in the chats
@@ -77,10 +82,16 @@ export function useThumbnail(thumbnail: ThumbnailPayload | undefined): Thumbnail
 			} finally {
 				if (mediaKeyHandle) await cryptoWorker.mediaDropKey(mediaKeyHandle);
 			}
+		}, controller.signal).catch(() => {
+			// Queued-but-aborted (fast unmount, crypto-reviewer advisory B, cycle 312):
+			// the task body above never ran, so its local raw-key copy never reached
+			// its own zero-after-import step — zero it here for the same hygiene.
+			key.fill(0);
 		});
 
 		return () => {
 			cancelled = true;
+			controller.abort();
 			if (url) URL.revokeObjectURL(url);
 		};
 	}, [thumbnail, cryptoWorker]);
