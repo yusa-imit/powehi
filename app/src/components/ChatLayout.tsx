@@ -28,6 +28,7 @@ import {
 import { usePersistentMessages } from "../hooks/usePersistentMessages";
 import { useRegionDetect } from "../hooks/useRegionDetect";
 import { useTauriNotification } from "../hooks/useTauriNotification";
+import { useVoiceRecorder } from "../hooks/useVoiceRecorder";
 import { type NewGroupEvent, useWelcomePoller } from "../hooks/useWelcomePoller";
 import { downloadAndDecryptMedia, encryptAndSendMedia, sniffMimeType } from "../lib/mediaTransfer";
 import {
@@ -176,6 +177,13 @@ function formatTtl(s: number | undefined): string {
 	if (s < 86400) return `${s / 3600}h`;
 	if (s < 604800) return `${s / 86400}d`;
 	return "1w";
+}
+
+/** Format a recording duration as m:ss (no leading zero on minutes) for the voice-record timer. */
+function formatVoiceElapsed(totalSec: number): string {
+	const mins = Math.floor(totalSec / 60);
+	const secs = totalSec % 60;
+	return `${mins}:${String(secs).padStart(2, "0")}`;
 }
 
 // ── Chat theme helpers ─────────────────────────────────────────────────────────
@@ -3889,6 +3897,7 @@ function Composer({
 	ttl,
 	onToggleTtl,
 	onPhoto,
+	onSendVoice,
 	onTyping,
 	replyTo,
 	onCancelReply,
@@ -3911,6 +3920,8 @@ function Composer({
 	onToggleTtl: () => void;
 	/** Triggered when the user clicks the Photo button. */
 	onPhoto?: () => void;
+	/** Called with the recorded audio File once a voice-message recording is stopped/sent. */
+	onSendVoice?: (file: File) => void;
 	/** Called on each keystroke so ChatLayout can throttle-send typing_indicator messages. */
 	onTyping?: () => void;
 	/** When set, a reply preview bar is shown above the input. */
@@ -3948,6 +3959,14 @@ function Composer({
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const emojiPickerRef = useRef<HTMLDivElement>(null);
 	const schedulePickerRef = useRef<HTMLDivElement>(null);
+	const {
+		recording: voiceRecording,
+		elapsedSec: voiceElapsedSec,
+		error: voiceError,
+		startRecording: startVoiceRecording,
+		stopRecording: stopVoiceRecording,
+		cancelRecording: cancelVoiceRecording,
+	} = useVoiceRecorder();
 
 	// Restore saved draft when the active chat changes.
 	// biome-ignore lint/correctness/useExhaustiveDependencies: chatId is the trigger; initialDraft is the new chat's draft
@@ -4035,6 +4054,11 @@ function Composer({
 		}
 		setText("");
 		onDraftChange(chatId, "");
+	};
+	/** Stop the in-progress recording and hand the resulting File to the caller, if any. */
+	const handleVoiceStop = async () => {
+		const file = await stopVoiceRecording();
+		if (file) onSendVoice?.(file);
 	};
 	const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
 		if (e.key === "Enter" && !e.shiftKey) {
@@ -4179,6 +4203,20 @@ function Composer({
 					>
 						<Icon name="x" size={14} />
 					</button>
+				</div>
+			)}
+			{/* Voice-recorder error (e.g. mic permission denied) — content-free category text only */}
+			{voiceError && !voiceRecording && (
+				<div
+					data-testid="voice-error-banner"
+					style={{
+						padding: "6px 14px",
+						marginBottom: 4,
+						fontSize: 12,
+						color: "var(--flare)",
+					}}
+				>
+					{voiceError}
 				</div>
 			)}
 			<div
@@ -4358,8 +4396,61 @@ function Composer({
 							<Icon name="arrow-right" size={16} />
 						</button>
 					</div>
+				) : voiceRecording ? (
+					<div
+						data-testid="voice-recording-indicator"
+						style={{ display: "flex", alignItems: "center", gap: 6 }}
+					>
+						<span
+							aria-hidden="true"
+							style={{
+								width: 8,
+								height: 8,
+								borderRadius: "50%",
+								background: "var(--flare)",
+							}}
+						/>
+						<span
+							data-testid="voice-elapsed"
+							style={{
+								fontSize: 12,
+								color: "var(--fg-3)",
+								fontFamily: "var(--font-mono)",
+								minWidth: 28,
+							}}
+						>
+							{formatVoiceElapsed(voiceElapsedSec)}
+						</span>
+						<IconBtn
+							icon="trash"
+							label="Discard voice message"
+							size={32}
+							onClick={cancelVoiceRecording}
+						/>
+						<button
+							type="button"
+							onClick={handleVoiceStop}
+							aria-label="Send voice message"
+							style={{
+								width: 36,
+								height: 36,
+								borderRadius: "50%",
+								border: "none",
+								background: "linear-gradient(180deg, #FF9E52, #FF7A2B)",
+								color: "#2A0A00",
+								display: "flex",
+								alignItems: "center",
+								justifyContent: "center",
+								cursor: "pointer",
+								boxShadow: "0 0 0 1px rgba(255,138,61,0.35), 0 0 14px rgba(255,138,61,0.3)",
+								transition: "transform 120ms",
+							}}
+						>
+							<Icon name="square" size={14} />
+						</button>
+					</div>
 				) : (
-					<IconBtn icon="mic" label="Voice" size={36} />
+					<IconBtn icon="mic" label="Voice" size={36} onClick={startVoiceRecording} />
 				)}
 			</div>
 		</div>
@@ -7617,6 +7708,45 @@ export function ChatLayout() {
 		[activeId, sendMedia],
 	);
 
+	/**
+	 * Send a recorded voice message — same optimistic-placeholder-then-`sendMedia`
+	 * pattern as handleFileSelect above, invoked from Composer's stop/send button
+	 * instead of the hidden file input.
+	 */
+	const sendVoice = useCallback(
+		(file: File) => {
+			const placeholderText = "Voice message";
+			const now = new Date();
+			const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+			setChats((cs) =>
+				cs.map((c) => {
+					if (c.id !== activeId) return c;
+					const msgs = [...c.messages];
+					for (let i = msgs.length - 1; i >= 0; i--) {
+						if (msgs[i].from === "me" && msgs[i].last) {
+							msgs[i] = { ...msgs[i], last: false, continued: true };
+							break;
+						}
+					}
+					msgs.push({
+						from: "me",
+						text: placeholderText,
+						last: true,
+						time,
+						ts: now.getTime(),
+						read: false,
+						continued: msgs.length > 0 && msgs[msgs.length - 1].from === "me",
+					});
+					return { ...c, messages: msgs, last: placeholderText, time };
+				}),
+			);
+
+			// Async send — silent failure leaves optimistic placeholder.
+			sendMedia(file).catch(() => {});
+		},
+		[activeId, sendMedia],
+	);
+
 	/** Record the PQ group binding once the pq_init exchange completes (§5.3 Phase B). */
 	const handlePqBinding = useCallback((groupId: string, bindingHex: string) => {
 		setChats((cs) =>
@@ -9146,6 +9276,7 @@ export function ChatLayout() {
 						ttl={disappearingTtl}
 						onToggleTtl={handleToggleTtl}
 						onPhoto={() => fileInputRef.current?.click()}
+						onSendVoice={sendVoice}
 						onTyping={sendTypingIndicator}
 						replyTo={replyingTo ? { text: replyingTo.text, from: replyingTo.from } : null}
 						onCancelReply={() => setReplyingTo(null)}

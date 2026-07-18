@@ -143,6 +143,64 @@ describe("MediaImage", () => {
 		expect(screen.getByLabelText("Loading image")).toBeInTheDocument();
 	});
 
+	describe("audio (voice message) attachments", () => {
+		it("renders an <audio> element with controls when loaded", () => {
+			vi.spyOn(UseMediaReceiveModule, "useMediaReceive").mockReturnValue({
+				objectUrl: OBJECT_URL,
+				loading: false,
+				error: false,
+			});
+
+			render(<MediaImage media={makeMedia({ mimeType: "audio/webm" })} />);
+
+			const audio = screen.getByLabelText("Encrypted voice message");
+			expect(audio.tagName).toBe("AUDIO");
+			expect(audio).toHaveAttribute("src", OBJECT_URL);
+			expect(audio).toHaveAttribute("controls");
+			expect(screen.queryByRole("img")).not.toBeInTheDocument();
+			expect(screen.queryByLabelText("Encrypted video attachment")).not.toBeInTheDocument();
+		});
+
+		it("shows 'Loading voice message…' copy while loading (no thumbnail heuristic for audio)", () => {
+			vi.spyOn(UseMediaReceiveModule, "useMediaReceive").mockReturnValue({
+				objectUrl: null,
+				loading: true,
+				error: false,
+			});
+
+			render(<MediaImage media={makeMedia({ mimeType: "audio/mp4" })} />);
+
+			expect(screen.getByText("Loading voice message…")).toBeInTheDocument();
+			expect(screen.getByLabelText("Loading voice message")).toBeInTheDocument();
+		});
+
+		it("shows 'Voice message unavailable' (not 'Video'/'Image') on error", () => {
+			vi.spyOn(UseMediaReceiveModule, "useMediaReceive").mockReturnValue({
+				objectUrl: null,
+				loading: false,
+				error: true,
+			});
+
+			render(<MediaImage media={makeMedia({ mimeType: "audio/webm" })} />);
+
+			expect(screen.getByText("Voice message unavailable")).toBeInTheDocument();
+			expect(screen.queryByText("Video unavailable")).not.toBeInTheDocument();
+			expect(screen.queryByText("Image unavailable")).not.toBeInTheDocument();
+		});
+
+		it("shows 'Voice message unavailable' when loaded but objectUrl is null", () => {
+			vi.spyOn(UseMediaReceiveModule, "useMediaReceive").mockReturnValue({
+				objectUrl: null,
+				loading: false,
+				error: false,
+			});
+
+			render(<MediaImage media={makeMedia({ mimeType: "audio/webm" })} />);
+
+			expect(screen.getByText("Voice message unavailable")).toBeInTheDocument();
+		});
+	});
+
 	describe("video attachments (§9.4.2 chunked)", () => {
 		it("renders a <video> with controls when media.chunked is true and loaded", () => {
 			vi.spyOn(UseMediaReceiveModule, "useMediaReceive").mockReturnValue({

@@ -4,7 +4,8 @@ import type { MediaPayload } from "../hooks/useMessages";
 import { useThumbnail } from "../hooks/useThumbnail";
 
 /**
- * MediaImage — displays an §9.2 encrypted image or (§9.4.2) chunked video attachment.
+ * MediaImage — displays an §9.2 encrypted image, (§9.4.2) chunked video, or audio
+ * (voice message) attachment.
  *
  * §9.4.1: If the media payload includes an inline `thumbnail`, decrypts and
  * shows it immediately as a blurred placeholder while the full R2 image loads.
@@ -47,6 +48,9 @@ export function MediaImage({
 	// decoded default before an `onError` has had a chance to fire).
 	const looksLikeVideo =
 		media.mimeType != null ? media.mimeType.startsWith("video/") : media.chunked === true;
+	// Voice messages always carry a real audio/* mimeType (useVoiceRecorder sets file.type) —
+	// there is no legacy chunked-implies-audio heuristic to fall back to, unlike video above.
+	const looksLikeAudio = media.mimeType?.startsWith("audio/");
 	const isVideo = looksLikeVideo || imgFailed;
 
 	if (error || (!loading && !objectUrl)) {
@@ -60,12 +64,36 @@ export function MediaImage({
 					opacity: 0.7,
 				}}
 			>
-				{looksLikeVideo ? "Video unavailable" : "Image unavailable"}
+				{looksLikeAudio
+					? "Voice message unavailable"
+					: looksLikeVideo
+						? "Video unavailable"
+						: "Image unavailable"}
 			</div>
 		);
 	}
 
 	if (loading) {
+		if (looksLikeAudio) {
+			return (
+				<div
+					style={{
+						width: 200,
+						height: 40,
+						borderRadius: 10,
+						background: "rgba(168,200,255,0.08)",
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "center",
+						fontSize: 12,
+						color: "var(--fg-3)",
+					}}
+					aria-label="Loading voice message"
+				>
+					Loading voice message…
+				</div>
+			);
+		}
 		if (thumbUrl) {
 			return (
 				<img
@@ -101,6 +129,18 @@ export function MediaImage({
 			>
 				Loading…
 			</div>
+		);
+	}
+
+	if (looksLikeAudio) {
+		return (
+			// biome-ignore lint/a11y/useMediaCaption: live voice messages have no caption track to attach.
+			<audio
+				controls
+				src={objectUrl ?? ""}
+				aria-label="Encrypted voice message"
+				style={{ width: "100%", ...imgStyle }}
+			/>
 		);
 	}
 
