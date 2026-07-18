@@ -1611,11 +1611,14 @@ pub fn media_import_key(raw_key: &[u8]) -> Result<JsValue, JsError> {
 /// `ciphertext`: encrypted blob downloaded from R2.
 /// `blob_hash`: 32-byte SHA-256 of the ciphertext embedded in the MLS message.
 ///
-/// **R-2 (NIST SP 800-38D §5.2.1.1):** `SHA-256(ciphertext)` is re-computed and
-/// compared to `blob_hash` (authenticated inside the MLS envelope) BEFORE AES-GCM
-/// decrypt.  A mismatch means the R2 blob was swapped by a server-side adversary;
+/// **R-2 (crypto-reviewer):** `SHA-256(ciphertext)` is re-computed and compared
+/// to `blob_hash` (authenticated inside the MLS envelope) BEFORE AES-GCM
+/// decrypt. A mismatch means the R2 blob was swapped by a server-side adversary;
 /// reject without decrypting to avoid any oracle. Same ordering as the former
-/// raw-key path, just sourcing the key from the handle map instead of a JS argument.
+/// raw-key path, just sourcing the key from the handle map instead of a JS
+/// argument. This is an application-layer check, not a NIST SP 800-38D
+/// requirement — that spec covers GCM's own IV/tag construction, not this
+/// outer blob-swap check.
 ///
 /// Returns an error if the handle is unknown, `blob_hash` is not 32 bytes, the hash
 /// does not match, or the GCM tag fails.

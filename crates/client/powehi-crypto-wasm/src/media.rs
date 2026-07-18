@@ -129,11 +129,14 @@ pub fn decrypt(
 /// The media key arrives inside an MLS-decrypted application message payload.
 /// The JS caller extracts it from the JSON and passes it here.
 ///
-/// **R-2 (crypto-reviewer, NIST SP 800-38D §5.2.1.1):** `blob_hash_expected`
-/// is the SHA-256 of the ciphertext that the *sender* computed and embedded
-/// in the MLS-encrypted message.  We re-compute `SHA-256(ciphertext)` here
-/// and reject before AES-GCM decrypt if it mismatches, detecting a server-side
-/// R2 blob swap.  This check runs before decryption to avoid any oracle.
+/// **R-2 (crypto-reviewer):** `blob_hash_expected` is the SHA-256 of the
+/// ciphertext that the *sender* computed and embedded in the MLS-encrypted
+/// message. This is an application-layer integrity check on top of the AEAD,
+/// not a NIST SP 800-38D requirement (that spec governs GCM's own IV/tag
+/// construction, not this outer blob-swap check). We re-compute
+/// `SHA-256(ciphertext)` here and reject before AES-GCM decrypt if it
+/// mismatches, detecting a server-side R2 blob swap. This check runs before
+/// decryption to avoid any oracle.
 ///
 /// Returns `Err(MediaError::BlobHashMismatch)` if hashes differ.
 /// Returns `Err(MediaError::InvalidKeyLen)` if `key_bytes.len() != 32`.
@@ -329,10 +332,12 @@ pub fn decrypt_chunk(
 
 /// Decrypt and reassemble a full chunked ciphertext (receiver path, prd.md §9.4.2).
 ///
-/// **R-2 (crypto-reviewer, NIST SP 800-38D §5.2.1.1):** `SHA-256(ciphertext)` is
-/// re-computed and compared to `blob_hash_expected` (authenticated inside the MLS
-/// envelope) BEFORE any AES-GCM decrypt, so a server-side R2 blob swap is caught
-/// without exposing a decryption oracle — identical rule to `decrypt_with_raw_key`.
+/// **R-2 (crypto-reviewer):** `SHA-256(ciphertext)` is re-computed and compared
+/// to `blob_hash_expected` (authenticated inside the MLS envelope) BEFORE any
+/// AES-GCM decrypt, so a server-side R2 blob swap is caught without exposing a
+/// decryption oracle — identical rule to `decrypt_with_raw_key`. This is an
+/// application-layer check, not a NIST SP 800-38D requirement — that spec
+/// covers GCM's own IV/tag construction, not this outer blob-swap check.
 ///
 /// Then it validates structure before decrypting:
 /// - `ciphertext.len()` must be a non-zero exact multiple of `MEDIA_CHUNK_SIZE + 16`,

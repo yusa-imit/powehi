@@ -8,11 +8,21 @@
  * are only in JS memory transiently while creating the object URL.
  *
  * Security:
- * - The canonical thumbnail.key (raw, in React chats state) is copied and zeroed
- *   synchronously, BEFORE queueing on `mediaHandleLimiter` — not after import — so
- *   a burst that queues past the concurrency cap never leaves raw key bytes live
- *   in state for the queue-wait duration (crypto-reviewer advisory A, cycle 312).
- * - The local key copy is zeroed right after import, before decrypt even starts.
+ * - Only the LOCAL key copy is zeroed (right after import, before decrypt even
+ *   starts) — the canonical `thumbnail.key` in React `chats` state is left
+ *   intact. Cycle 312 briefly zeroed the canonical array too (to close a
+ *   narrow raw-key-lingers-during-queue-wait window), but that broke a much
+ *   more common path: `chats` state is long-lived and the message list is
+ *   unvirtualized with content-derived React keys, so switching away from a
+ *   chat and back fully unmounts and remounts every message's `MediaImage`/
+ *   `useThumbnail` — reusing the SAME `thumbnail` object reference. Zeroing
+ *   the canonical key on first mount left every revisit decrypting an
+ *   all-zero key, permanently and silently breaking the thumbnail (caught by
+ *   the non-fatal catch below) after its first display. Reverted in cycle
+ *   316 — same accepted tradeoff as the main media-key path (see
+ *   `downloadAndDecryptMedia`'s doc comment), which never zeroed its
+ *   canonical key for the same reason (it's also reused, by the forward-
+ *   message flow).
  * - The key handle is dropped in a `finally` regardless of decrypt outcome.
  * - Object URL is revoked on unmount to prevent memory leaks.
  * - The handle-holding window runs through `mediaHandleLimiter` (shared with
@@ -51,12 +61,11 @@ export function useThumbnail(thumbnail: ThumbnailPayload | undefined): Thumbnail
 		let url: string | null = null;
 		const controller = new AbortController();
 
-		// Copy + zero the canonical raw key synchronously, before queueing on the
-		// limiter — a queued task must never keep raw key bytes live in the chats
-		// state tree for the duration of the queue wait (crypto-reviewer advisory
-		// A, cycle 312).
+		// Copy the raw key before queueing on the limiter. The canonical
+		// `thumbnail.key` in `chats` state is intentionally left untouched — see
+		// the hook-level doc comment above (cycle 316: zeroing it here broke
+		// thumbnail redisplay on chat revisit).
 		const key = new Uint8Array(thumbnail.key);
-		thumbnail.key.fill(0);
 
 		mediaHandleLimiter(async () => {
 			let mediaKeyHandle: string | null = null;

@@ -2,7 +2,11 @@
  * useThumbnail — unit tests (prd.md §9.4.1 inline thumbnail).
  *
  * Security invariants verified:
- * - thumbnail.key (number[]) is zeroed after import (before decrypt).
+ * - The canonical thumbnail.key (number[], in React chats state) is NEVER
+ *   zeroed — only the hook's local copy is, after import and before decrypt
+ *   (cycle 316: zeroing the canonical array broke redecrypt on remount, since
+ *   `chats` state is long-lived and message components fully unmount/remount
+ *   on chat switch, reusing the same `thumbnail` object reference).
  * - The imported key handle is dropped on every path (success and failure).
  * - Object URL is revoked on unmount to prevent memory leaks.
  * - Invalid thumbnail dimensions are rejected before import (fail closed).
@@ -94,17 +98,56 @@ describe("useThumbnail (prd.md §9.4.1)", () => {
 		expect(mediaDropKeyFn).toHaveBeenCalledWith(MOCK_HANDLE);
 	});
 
-	it("security: zeroes thumbnail.key (number[]) after decryption", async () => {
+	it("security: never zeroes the canonical thumbnail.key (number[]) in chats state", async () => {
 		const thumb = makeThumbnail();
 		const originalKey = [...thumb.key];
 		expect(originalKey.every((b) => b === 0xab)).toBe(true);
 
+		// mediaImportKeyFn's default resolves synchronously with the local key
+		// copy still live in the mock-call record; the hook zeroes that SAME
+		// object right after — snapshot the bytes at call-time instead of
+		// asserting on the (later-mutated) recorded reference.
+		let seenAtCallTime: Uint8Array | null = null;
+		mediaImportKeyFn.mockImplementationOnce(async (rawKey: Uint8Array) => {
+			seenAtCallTime = new Uint8Array(rawKey);
+			return { mediaKeyHandle: MOCK_HANDLE };
+		});
+
 		const { result } = renderHook(() => useThumbnail(thumb));
 		await waitFor(() => expect(result.current.objectUrl).toBe(MOCK_BLOB_URL));
 
-		// The hook creates Uint8Array(thumbnail.key), calls key.fill(0), then thumbnail.key.fill(0).
-		// The number[] backing array must be all-zero after decryption.
-		expect(thumb.key.every((b) => b === 0)).toBe(true);
+		// mediaImportKey received the real key bytes (not an already-zeroed copy).
+		expect(seenAtCallTime).toEqual(new Uint8Array(originalKey));
+		// Only the hook's local copy is zeroed after import — the canonical
+		// number[] in chats state must survive intact so a later remount (chat
+		// revisit) can still decrypt it.
+		expect(thumb.key).toEqual(originalKey);
+	});
+
+	it("regression (cycle 316): a remount after first decrypt still decrypts successfully", async () => {
+		// Reuses the SAME thumbnail object reference across two mounts, mirroring
+		// the real app: `chats` state is long-lived and the unvirtualized message
+		// list fully unmounts/remounts each message's components on chat switch
+		// (content-derived React keys), but the underlying `ChatMessage.thumbnail`
+		// object is never re-created.
+		const thumb = makeThumbnail();
+
+		const first = renderHook(() => useThumbnail(thumb));
+		await waitFor(() => expect(first.result.current.objectUrl).toBe(MOCK_BLOB_URL));
+		first.unmount();
+
+		mediaImportKeyFn.mockClear();
+		mediaThumbnailDecryptFn.mockClear();
+		let seenOnSecondMount: Uint8Array | null = null;
+		mediaImportKeyFn.mockImplementationOnce(async (rawKey: Uint8Array) => {
+			seenOnSecondMount = new Uint8Array(rawKey);
+			return { mediaKeyHandle: MOCK_HANDLE };
+		});
+
+		const second = renderHook(() => useThumbnail(thumb));
+		await waitFor(() => expect(second.result.current.objectUrl).toBe(MOCK_BLOB_URL));
+		expect(seenOnSecondMount).toEqual(new Uint8Array(32).fill(0xab));
+		second.unmount();
 	});
 
 	it("revokes object URL on unmount", async () => {
