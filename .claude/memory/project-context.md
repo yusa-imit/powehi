@@ -17,7 +17,68 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-18, cycle 312 — FEATURE: bound concurrent receiver-path decrypt handles, commit a263b28)
+## Current state (2026-07-18, cycle 313 — FEATURE: dequeue cancelled decrypts from the media handle limiter, commit ea161f8)
+
+- `git status` clean, `gh run list --limit 5` all green at cycle start, `gh issue list
+  --state open` empty. Picked cycle-312's Advisory B carried-forward item: a task still
+  waiting in `mediaHandleLimiter`'s FIFO queue when its component unmounts (fast
+  chat-switch) previously ran to completion anyway before its `cancelled` flag check
+  fired — burning one of the 32 limiter slots and a real WASM `MEDIA_KEYS` handle-
+  import/decrypt for a result that was just going to be discarded.
+- `createLimiter` (`app/src/lib/concurrencyLimiter.ts`) now takes an optional 2nd
+  arg, `signal?: AbortSignal`. A pre-aborted signal rejects immediately without
+  queueing. A signal that aborts while the task is still in `queue` splices it out
+  and rejects with a `DOMException("Aborted","AbortError")` — `fn` is never invoked,
+  so no slot is ever consumed and no WASM call ever happens for that task. A signal
+  that aborts AFTER the task has already been dequeued (running, or past the
+  microtask boundary) is a no-op — `queue.indexOf(enter) === -1` guards this; the
+  in-flight decrypt runs to completion as before (its own `cancelled`-flag check
+  inside `fn`, unchanged, still applies for that case). Abort listeners are removed
+  via `enter()` on normal dequeue too, so a task that never aborts doesn't leak a
+  listener on the `AbortSignal`.
+- `downloadAndDecryptMedia` (`mediaTransfer.ts`) gained an optional trailing `signal`
+  param, forwarded straight into `mediaHandleLimiter(...)`. `useMediaReceive.ts` and
+  `useThumbnail.ts` each create an `AbortController` per effect run, pass
+  `controller.signal` through, and call `controller.abort()` in the effect cleanup
+  (same place `cancelled = true` was already being set).
+- Key-hygiene subtlety on the `useThumbnail.ts` path specifically: since cycle 312's
+  Advisory A fix, the raw local `key` copy is created and the canonical
+  `thumbnail.key` zeroed *before* queueing (not inside the queued closure) — so on
+  the new abort-while-queued path, `fn` never runs and therefore never reaches its
+  own post-import `key.fill(0)`. Added `.catch(() => key.fill(0))` right after the
+  `mediaHandleLimiter(...)` call to close that gap; verified it only fires on the
+  abort-while-queued path (never on a normal successful run, since `fn` swallows its
+  own errors and always resolves the outer promise). `downloadAndDecryptMedia`'s
+  `mediaKey` copy, by contrast, is created *inside* the queued closure (after
+  admission), so an abort-while-queued rejection there has nothing to zero — no
+  analogous gap on that path.
+- **crypto-reviewer: GREEN**, no findings — confirmed no unzeroed-key path across
+  immediate-admit / queued-then-run / queued-then-abort, confirmed the listener
+  cleanup and no-double-entry reasoning, confirmed this is JS-side scheduling only
+  (no wire format change, no new WASM-boundary data, same crypto primitives/calls
+  byte-for-byte).
+- Not architectural / no new server-visible metadata — `threat-model-checker` not
+  required (internal JS scheduling change only).
+- Frontend: `tsc --noEmit` clean, `biome check` clean on all touched files, all
+  102 test files / 1296 tests green (was 1290, +6 new: 3 in `concurrencyLimiter.test.ts`
+  — dequeues-aborted-while-queued-without-running, rejects-immediately-for-already-
+  aborted-signal, lets-already-running-task-finish-despite-mid-flight-abort — plus 1
+  each in `mediaTransfer.test.ts` (forwards already-aborted signal, no key import/no
+  fetch), `useMediaReceive.test.ts`, and `useThumbnail.test.ts` (both: unmount calls
+  `AbortController.prototype.abort`)). Backend untouched this cycle (pure frontend
+  change, confirmed via `git diff --name-only` before skipping Rust build/test/audit).
+- **Next cycle candidates:** the canonical `media.mediaKey`-not-zeroed cosmetic-
+  symmetry note (main media path, carried since cycle 309 — `downloadAndDecryptMedia`
+  never zeroed the canonical array, only its local copy), the NIST SP 800-38D §5.2.1.1
+  citation fix for the R-2 blob-hash-before-decrypt comments in `media.rs`/
+  `wasm_exports.rs` (trivial doc-only, carried since cycle 309), the group-row-
+  creation gap (cycle 259 — no code path calls `db.groups.add()`, so Dexie pin/theme
+  persistence is a no-op in the live app until group-row creation is wired up), PQ
+  hybrid Phase A (still blocked on openmls stable `MLS_128_MLKEM768`), and the
+  standing `.claude/memory/project-context.md` file-size hygiene note (STABILIZATION-
+  cycle tooling task, not a code change — file is now ~600KB+).
+
+## Previous state (2026-07-18, cycle 312 — FEATURE: bound concurrent receiver-path decrypt handles, commit a263b28)
 
 - `git status` clean, `gh run list --limit 5` all green at cycle start, `gh issue list
   --state open` empty. Picked the standing cycle-311 crypto-reviewer advisory: thumbnail
