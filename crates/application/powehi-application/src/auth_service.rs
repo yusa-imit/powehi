@@ -32,6 +32,13 @@ const DEVICE_SESSIONS_TTL: Duration = Duration::from_secs(86_400 + 300);
 /// Maximum number of devices a single user account may register. Prevents
 /// unbounded device proliferation and limits per-user KeyPackage storage.
 const MAX_DEVICES_PER_USER: usize = 10;
+/// A real MLS `BasicCredential` identity is a small opaque label (well under
+/// 1KB); this bounds the amount of `devices.mls_credential` bytea storage an
+/// authenticated (or, via §8.5 recovery, freshly-authenticated) caller can
+/// persist per device row — mirrors the `MAX_KEY_PACKAGE_BYTES` cap already
+/// applied to invite KeyPackages (security-auditor finding, cycle 304 YELLOW #3,
+/// prd.md §8.3/§8.5).
+const MAX_MLS_CREDENTIAL_BYTES: usize = 4 * 1024;
 
 /// A fixed, valid Ed25519 public key with NO known corresponding private key
 /// (SHA-256("powehi-dummy-recovery-verify-key-v1-not-a-real-account") fed
@@ -165,6 +172,11 @@ impl AuthService {
         if existing.len() >= MAX_DEVICES_PER_USER {
             return Err(DomainError::Unauthorized);
         }
+        // Same anti-oracle collapse as every other check in this fn: an oversized
+        // credential fails closed as Unauthorized, not a distinguishable error.
+        if proof.mls_credential.len() > MAX_MLS_CREDENTIAL_BYTES {
+            return Err(DomainError::Unauthorized);
+        }
 
         let device = Device::new(
             req.device_id.clone(),
@@ -221,6 +233,9 @@ impl AuthUseCase for AuthService {
                     "invalid recovery_pubkey length".into(),
                 ));
             }
+        }
+        if req.mls_credential.len() > MAX_MLS_CREDENTIAL_BYTES {
+            return Err(DomainError::InvalidInput("mls_credential too large".into()));
         }
 
         let mut user = User::registered(req.user_id.clone(), handle_hash, password_file);
@@ -399,6 +414,9 @@ impl AuthUseCase for AuthService {
         let existing = self.device_repo.find_by_user(user_id).await?;
         if existing.len() >= MAX_DEVICES_PER_USER {
             return Err(DomainError::InvalidInput("device_limit_exceeded".into()));
+        }
+        if req.mls_credential.len() > MAX_MLS_CREDENTIAL_BYTES {
+            return Err(DomainError::InvalidInput("mls_credential too large".into()));
         }
         let device_id = DeviceId::new();
         let device = Device::new(device_id.clone(), user_id.clone(), req.mls_credential);
@@ -864,6 +882,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_finish_rejects_oversized_mls_credential() {
+        // security-auditor finding, cycle 304 YELLOW #3: bound mls_credential size.
+        let (svc, user_repo, _, _) = make_svc();
+        let handle_hash = b"sha256-of-alice".to_vec();
+        let resp = svc
+            .register_init(RegistrationInitRequest {
+                opaque_request: vec![1u8; 32],
+                handle_hash: handle_hash.clone(),
+            })
+            .await
+            .unwrap();
+        let uid = resp.user_id.clone();
+        let err = svc
+            .register_finish(RegistrationFinishRequest {
+                user_id: uid.clone(),
+                opaque_record: vec![2u8; 32],
+                mls_credential: vec![0u8; MAX_MLS_CREDENTIAL_BYTES + 1],
+                recovery_pubkey: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::InvalidInput(_)));
+        // No user must have been persisted on rejection.
+        assert!(user_repo.find_by_id(&uid).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn register_finish_without_init_returns_not_found() {
         let (svc, _, _, _) = make_svc();
         let err = svc
@@ -1274,6 +1319,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_device_rejects_oversized_mls_credential() {
+        // security-auditor finding, cycle 304 YELLOW #3: bound mls_credential size.
+        let (svc, _, device_repo, _) = make_svc();
+        let uid = UserId::new();
+        let err = svc
+            .register_device(
+                &uid,
+                DeviceRegistrationRequest {
+                    mls_credential: vec![0u8; MAX_MLS_CREDENTIAL_BYTES + 1],
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DomainError::InvalidInput(ref s) if s.contains("mls_credential")),
+            "expected mls_credential-too-large InvalidInput, got: {err:?}"
+        );
+        assert!(device_repo.find_by_user(&uid).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn register_device_at_max_mls_credential_size_succeeds() {
+        let (svc, _, _, _) = make_svc();
+        let uid = UserId::new();
+        svc.register_device(
+            &uid,
+            DeviceRegistrationRequest {
+                mls_credential: vec![0u8; MAX_MLS_CREDENTIAL_BYTES],
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn revoke_device_rejects_wrong_owner() {
         let (svc, _, device_repo, _) = make_svc();
         let owner = UserId::new();
@@ -1641,6 +1721,43 @@ mod tests {
         let session_key = format!("session:{}", token.0);
         let stored = cache.get(&session_key).await.unwrap().expect("session");
         assert_eq!(stored, new_device.as_uuid().as_bytes().to_vec());
+    }
+
+    #[tokio::test]
+    async fn recovery_oversized_mls_credential_rejected_as_unauthorized() {
+        // security-auditor finding, cycle 304 YELLOW #3: bound proof.mls_credential
+        // size. Must collapse to Unauthorized (not a distinguishable error) like
+        // every other check in mint_recovery_device, to avoid a pre-session oracle.
+        let (svc, user_repo, device_repo, _) = make_svc();
+        let sk = SigningKey::generate(&mut rand::thread_rng());
+        let vk = sk.verifying_key().to_bytes();
+        let uid = save_recovery_user(&user_repo, b"hash", vk).await;
+
+        let init = svc
+            .login_init(LoginInitRequest {
+                handle_hash: b"hash".to_vec(),
+                opaque_ke1: vec![0u8; 32],
+            })
+            .await
+            .unwrap();
+        assert_eq!(init.user_id, uid);
+
+        let new_device = DeviceId::new();
+        let signature = sign_recovery(&sk, &init.login_nonce);
+        let err = svc
+            .login_finish(LoginFinishRequest {
+                opaque_ke3: vec![0u8; 32],
+                login_nonce: init.login_nonce,
+                device_id: new_device.clone(),
+                recovery_proof: Some(RecoveryProof {
+                    mls_credential: vec![0u8; MAX_MLS_CREDENTIAL_BYTES + 1],
+                    signature,
+                }),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
+        assert!(device_repo.find_by_id(&new_device).await.unwrap().is_none());
     }
 
     #[tokio::test]
