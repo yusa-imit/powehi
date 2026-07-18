@@ -17,7 +17,76 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-18, cycle 313 — FEATURE: dequeue cancelled decrypts from the media handle limiter, commit ea161f8)
+## Current state (2026-07-19, cycle 314 — FEATURE: voice messages — record, encrypt, playback, commit e1767c1)
+
+- `git status` clean, `gh run list --limit 5` all green at cycle start, `gh issue list
+  --state open` empty. Investigated cycle-313's carried-forward "group-row-creation gap
+  (cycle 259)" next-cycle note — it's **stale**: `db.groups.add()`/`putGroup()` was
+  already wired up in `handleNewGroup`/`handleGroupCreated` back in commit `ae67d72`
+  (cycle 262, "wire GroupRow creation into Dexie"). Dropped that note; it should not have
+  kept resurfacing since cycle 262. Picked a genuinely new gap instead: grepped for
+  `MediaRecorder` across `app/src` and found zero hits — voice messages were never
+  implemented, and there was a literal dead placeholder button
+  (`<IconBtn icon="mic" label="Voice" size={36} />`, no `onClick`) sitting in the
+  Composer at the old `ChatLayout.tsx:4362`.
+- Implemented end-to-end, reusing the existing generic encrypted-media pipeline
+  **unchanged** — `useMediaSend.ts`'s `sendMedia(file: File)` and `mediaTransfer.ts`
+  already handle any file type (thumbnailing safely no-ops for non-images), so voice
+  messages needed zero crypto/WASM/wire-format changes.
+  - New `app/src/hooks/useVoiceRecorder.ts`: `MediaRecorder` wrapper —
+    `startRecording`/`stopRecording`/`cancelRecording` + `recording`/`elapsedSec`/`error`
+    state. Picks the best supported mimeType (`audio/webm;codecs=opus` → `audio/webm` →
+    `audio/mp4` → browser default). Mic `MediaStream` tracks are always `.stop()`-ed
+    (recording stopped, cancelled, unmounted, or on any construction/permission error) —
+    this is the privacy-critical invariant (mic-in-use indicator must clear).
+    `cancelRecording` nulls `ondataavailable`/`onstop` *before* calling `.stop()` so a
+    late event can never resurrect a File after discard. Errors are content-free
+    category strings only (no-plaintext-logging.md), never raw `DOMException` detail.
+  - `Composer` (`ChatLayout.tsx`) gained `onSendVoice?: (file: File) => void`; the dead
+    mic button now starts recording, and while recording shows a red-dot + `m:ss` timer
+    (`formatVoiceElapsed` helper) with stop/send and discard buttons. New `sendVoice`
+    handler in `ChatLayout`'s body mirrors `handleFileSelect`'s optimistic-placeholder-
+    then-`sendMedia(file)` pattern ("Voice message" placeholder text).
+  - `MediaImage.tsx` gained a `looksLikeAudio` branch (`media.mimeType?.startsWith
+    ("audio/")`, checked before the video fallback) rendering `<audio controls>` for
+    playback, plus matching loading/unavailable copy.
+  - New icon `square` added to `Icon.tsx` (stop button); `trash` already existed.
+  - **security-auditor: YELLOW → fixed in-cycle.** Found: in `startRecording`,
+    `streamRef.current` was assigned *after* `new MediaRecorder(...)`, so if the
+    constructor itself threw (e.g. a real-browser `NotSupportedError` despite
+    `isTypeSupported()` returning true), the catch's `stopStream()` read a still-null
+    ref and the mic stream leaked (indicator stayed lit) — contradicted the hook's own
+    "always stopped" invariant. Fixed by assigning `streamRef.current = stream`
+    immediately after `getUserMedia` succeeds, before the construction `try`. Added the
+    missing test (constructor throws → both tracks stopped, error set). Re-reviewed:
+    GREEN, cleared to commit. Confirmed separately: zero changes to `useMediaSend.ts`/
+    `mediaTransfer.ts`, no new crypto-worker calls, no new server-visible envelope
+    fields (mimeType already existed from cycle 296) — so `crypto-reviewer`/
+    `threat-model-checker` were correctly not required.
+  - 17 new frontend tests (8 `useVoiceRecorder.test.ts` + 5
+    `ChatLayoutVoiceMessage.test.tsx` + 4 `MediaImage.test.tsx` audio-branch), all green.
+    Full suite: **1314/1314 tests, 104 files**, `tsc --noEmit` clean, `biome check`
+    clean (was 1296/102 at cycle 313 start).
+  - Noted but not fixed (unrelated, pre-existing, confirmed to reproduce identically on
+    unmodified `main` via `git stash`): `AcceptInviteModal.test.tsx`'s
+    `verification_failed` test is flaky under full-suite ordering (fails ~sometimes when
+    run with the whole file/suite, passes every time in isolation) — passed on my final
+    full-suite run (1314/1314) but is worth a STABILIZATION-cycle look at test isolation/
+    mock-state bleed in that file if it recurs.
+  - Backend: untouched this cycle (pure frontend feature, confirmed via
+    `git diff --name-only` before skipping Rust build/test/audit).
+  - Delegated implementation to `frontend-lead`, verified the diff and reran
+    tsc/biome/vitest myself before the security-auditor pass and again after the fix.
+- **Next cycle candidates:** the flaky `AcceptInviteModal.test.tsx` test noted above
+  (good STABILIZATION-cycle target), the canonical `media.mediaKey`-not-zeroed
+  cosmetic-symmetry note (main media path, carried since cycle 309), the NIST
+  SP 800-38D §5.2.1.1 citation fix for the R-2 blob-hash-before-decrypt comments in
+  `media.rs`/`wasm_exports.rs` (trivial doc-only, carried since cycle 309), PQ hybrid
+  Phase A (still blocked on openmls stable `MLS_128_MLKEM768`), and the standing
+  `.claude/memory/project-context.md` file-size hygiene note (STABILIZATION-cycle
+  tooling task, not a code change — file is now ~610KB+).
+
+## Previous state (2026-07-18, cycle 313 — FEATURE: dequeue cancelled decrypts from the media handle limiter, commit ea161f8)
 
 - `git status` clean, `gh run list --limit 5` all green at cycle start, `gh issue list
   --state open` empty. Picked cycle-312's Advisory B carried-forward item: a task still
