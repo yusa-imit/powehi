@@ -28,6 +28,7 @@ import { confirmMediaUpload, getMediaDownloadUrl, requestMediaUpload } from "../
 import { sendMessage as sendMessageApi } from "../api/messages";
 import type { MediaPayload } from "../hooks/useMessages";
 import type { CryptoWorkerApi } from "../workers/crypto.worker";
+import { createLimiter } from "./concurrencyLimiter";
 
 type CryptoWorker = Comlink.Remote<CryptoWorkerApi>;
 
@@ -38,6 +39,21 @@ type CryptoWorker = Comlink.Remote<CryptoWorkerApi>;
  * chunking). 16 MiB, matching the WASM core's fixed chunk size.
  */
 export const MEDIA_CHUNK_THRESHOLD = 16 * 1024 * 1024;
+
+/**
+ * Bounds how many receiver-path decrypts (`downloadAndDecryptMedia` here +
+ * `useThumbnail`) hold a `MEDIA_KEYS` WASM handle at once. The message list
+ * is unvirtualized (`ChatLayout.tsx`), so opening a media-heavy chat mounts
+ * every attachment's decrypt in the same tick; without a cap that burst can
+ * pressure the shared 256-slot `MAX_MEDIA_HANDLES` cap in
+ * `powehi-crypto-wasm` (crypto-reviewer advisory, cycle 311). 32 is well
+ * under 256, leaving headroom for concurrent sender-side handles, while
+ * still decrypting well ahead of scroll speed.
+ */
+export const MEDIA_HANDLE_CONCURRENCY = 32;
+
+/** Shared between `downloadAndDecryptMedia` and `useThumbnail` — see above. */
+export const mediaHandleLimiter = createLimiter(MEDIA_HANDLE_CONCURRENCY);
 
 /**
  * Detect image/video MIME type from leading magic bytes.
@@ -102,39 +118,41 @@ export async function downloadAndDecryptMedia(
 	sessionToken: string,
 	cryptoWorker: CryptoWorker,
 ): Promise<Uint8Array> {
-	const mediaKey = new Uint8Array(media.mediaKey);
-	let handle: string;
-	try {
-		({ mediaKeyHandle: handle } = await cryptoWorker.mediaImportKey(mediaKey));
-	} finally {
-		mediaKey.fill(0);
-	}
-	try {
-		const { downloadUrl } = await getMediaDownloadUrl(sessionToken, media.blobId);
-		// redirect: "error" prevents silent SSRF via R2 redirect (defense-in-depth).
-		const resp = await fetch(downloadUrl, { redirect: "error" });
-		if (!resp.ok) throw new Error("download_failed");
-		const ciphertext = new Uint8Array(await resp.arrayBuffer());
-		const iv = new Uint8Array(media.iv);
-		const blobHash = new Uint8Array(media.blobHash);
-		if (media.chunked === true) {
-			return (await cryptoWorker.mediaDecryptChunkedWithHandle(
+	return mediaHandleLimiter(async () => {
+		const mediaKey = new Uint8Array(media.mediaKey);
+		let handle: string;
+		try {
+			({ mediaKeyHandle: handle } = await cryptoWorker.mediaImportKey(mediaKey));
+		} finally {
+			mediaKey.fill(0);
+		}
+		try {
+			const { downloadUrl } = await getMediaDownloadUrl(sessionToken, media.blobId);
+			// redirect: "error" prevents silent SSRF via R2 redirect (defense-in-depth).
+			const resp = await fetch(downloadUrl, { redirect: "error" });
+			if (!resp.ok) throw new Error("download_failed");
+			const ciphertext = new Uint8Array(await resp.arrayBuffer());
+			const iv = new Uint8Array(media.iv);
+			const blobHash = new Uint8Array(media.blobHash);
+			if (media.chunked === true) {
+				return (await cryptoWorker.mediaDecryptChunkedWithHandle(
+					handle,
+					iv,
+					ciphertext,
+					blobHash,
+					media.totalSize as number,
+				)) as Uint8Array;
+			}
+			return (await cryptoWorker.mediaDecryptWithHandle(
 				handle,
 				iv,
 				ciphertext,
 				blobHash,
-				media.totalSize as number,
 			)) as Uint8Array;
+		} finally {
+			await cryptoWorker.mediaDropKey(handle).catch(() => {});
 		}
-		return (await cryptoWorker.mediaDecryptWithHandle(
-			handle,
-			iv,
-			ciphertext,
-			blobHash,
-		)) as Uint8Array;
-	} finally {
-		await cryptoWorker.mediaDropKey(handle).catch(() => {});
-	}
+	});
 }
 
 /**

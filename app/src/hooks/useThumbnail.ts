@@ -8,12 +8,21 @@
  * are only in JS memory transiently while creating the object URL.
  *
  * Security:
- * - thumbnail.key (raw) is zeroed right after import, before decrypt even starts.
+ * - The canonical thumbnail.key (raw, in React chats state) is copied and zeroed
+ *   synchronously, BEFORE queueing on `mediaHandleLimiter` — not after import — so
+ *   a burst that queues past the concurrency cap never leaves raw key bytes live
+ *   in state for the queue-wait duration (crypto-reviewer advisory A, cycle 312).
+ * - The local key copy is zeroed right after import, before decrypt even starts.
  * - The key handle is dropped in a `finally` regardless of decrypt outcome.
  * - Object URL is revoked on unmount to prevent memory leaks.
+ * - The handle-holding window runs through `mediaHandleLimiter` (shared with
+ *   `useMediaReceive`'s `downloadAndDecryptMedia`) so an unvirtualized,
+ *   media-heavy message list can't burst past the shared WASM handle cap
+ *   (crypto-reviewer advisory, cycle 311).
  */
 
 import { useEffect, useState } from "react";
+import { mediaHandleLimiter } from "../lib/mediaTransfer";
 import { useCryptoWorker } from "./useCryptoWorker";
 import type { ThumbnailPayload } from "./useMessages";
 
@@ -37,19 +46,23 @@ export function useThumbnail(thumbnail: ThumbnailPayload | undefined): Thumbnail
 		let cancelled = false;
 		let url: string | null = null;
 
-		(async () => {
+		// Copy + zero the canonical raw key synchronously, before queueing on the
+		// limiter — a queued task must never keep raw key bytes live in the chats
+		// state tree for the duration of the queue wait (crypto-reviewer advisory
+		// A, cycle 312).
+		const key = new Uint8Array(thumbnail.key);
+		thumbnail.key.fill(0);
+
+		mediaHandleLimiter(async () => {
 			let mediaKeyHandle: string | null = null;
 			try {
 				const ct = new Uint8Array(thumbnail.ct);
-				const key = new Uint8Array(thumbnail.key);
 				const iv = new Uint8Array(thumbnail.iv);
 				({ mediaKeyHandle } = await cryptoWorker.mediaImportKey(key));
-				// Zero the raw key immediately after import (receiver-path hygiene) —
-				// before decrypt even starts, mirroring the main media-key flow.
-				// Also zero the canonical number[] in the MediaPayload object held in chats state
-				// so the raw key bytes don't linger in the React state tree after import.
+				// Zero the local key copy immediately after import (receiver-path
+				// hygiene) — before decrypt even starts, mirroring the main media-key
+				// flow.
 				key.fill(0);
-				thumbnail.key.fill(0);
 				const { pixels } = await cryptoWorker.mediaThumbnailDecryptWithHandle(
 					mediaKeyHandle,
 					ct,
@@ -64,7 +77,7 @@ export function useThumbnail(thumbnail: ThumbnailPayload | undefined): Thumbnail
 			} finally {
 				if (mediaKeyHandle) await cryptoWorker.mediaDropKey(mediaKeyHandle);
 			}
-		})();
+		});
 
 		return () => {
 			cancelled = true;
