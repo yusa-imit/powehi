@@ -17,7 +17,73 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-18, cycle 311 — FEATURE: receiver-side thumbnail opaque-handle pattern, commit 74c45fb)
+## Current state (2026-07-18, cycle 312 — FEATURE: bound concurrent receiver-path decrypt handles, commit a263b28)
+
+- `git status` clean, `gh run list --limit 5` all green at cycle start, `gh issue list
+  --state open` empty. Picked the standing cycle-311 crypto-reviewer advisory: thumbnail
+  decrypt now shares the 256-slot `MAX_MEDIA_HANDLES` cap with the main media-key path,
+  and a burst of concurrent thumbnail renders could transiently pressure it — flagged
+  for crypto-lead to confirm the message list bounds concurrent thumbnail decrypts.
+- Spawned an Explore-style audit first (read-only) to answer that question precisely:
+  confirmed `ChatLayout.tsx`'s `MessageList` is **fully unvirtualized** (no
+  react-window/react-virtual/custom windowing anywhere in `app/src`) — `buildGroups`
+  renders every message unsliced inside a plain `overflowY: auto` div, so every
+  `MediaImage` (and therefore every mounted `useThumbnail`/`useMediaReceive`) in a
+  chat's full history fires its WASM handle-import/decrypt concurrently on chat open.
+  No existing safeguard (`IntersectionObserver`, lazy-loading, debounce, or a decrypt
+  queue) bounded this. This is a **real**, not theoretical, risk in media-heavy chats
+  with 500+ messages.
+- Chose the smaller, safer of the two options the audit surfaced — a client-side
+  decrypt concurrency limiter shared by both receiver paths — over the larger option
+  (virtualizing `MessageList`, a much bigger, riskier refactor better suited to its
+  own dedicated cycle(s)).
+- New `app/src/lib/concurrencyLimiter.ts`: generic `createLimiter(maxConcurrent)` →
+  async semaphore/FIFO-queue `limit(fn)`. Exported `MEDIA_HANDLE_CONCURRENCY = 32` and
+  a shared `mediaHandleLimiter` singleton from `mediaTransfer.ts` (32 is well under the
+  256-slot cap, leaving headroom for concurrent sender-side handles). Wrapped the
+  entire body of `downloadAndDecryptMedia` (import → download → decrypt → drop) and
+  `useThumbnail`'s async body (import → decrypt → drop) in the shared limiter, so at
+  most 32 receiver-path decrypts hold a `MEDIA_KEYS` handle at once regardless of how
+  many `MediaImage` components are mounted.
+- Caught my own bug before committing: my first pass wrote
+  `mediaHandleLimiter(async () => {...})();` in `useThumbnail.ts` — the trailing `()`
+  tried to call the returned *Promise* as a function (TypeError at runtime). Fixed by
+  removing it; `limiter(fn)` already invokes `fn`, no extra call needed. Caught via
+  re-reading the diff before running tests, not by the test suite itself (existing
+  mocked tests wouldn't have surfaced this since `useCryptoWorker` is stubbed).
+- **crypto-reviewer: GREEN**, 2 non-blocking findings, 1 fixed in-cycle: (A) the
+  *canonical* `thumbnail.key` raw bytes (held in React chats state) were being zeroed
+  only *after* acquiring a limiter slot — under the exact >32-concurrent burst this
+  feature targets, that meant raw key bytes could linger in state for the full
+  queue-wait instead of ~worker-import latency. **Fixed in-cycle**: hoisted the
+  canonical-key copy + `thumbnail.key.fill(0)` to run synchronously at effect entry,
+  *before* entering the limiter — only the already-zeroed-source local copy is queued.
+  (B) cancelled-but-still-queued tasks (e.g. fast chat-switch) aren't dequeued — FIFO
+  drain still guarantees no deadlock, but a stale queued decrypt burns 1 of 32 slots
+  and a real WASM handle before its `if (cancelled) return` check fires post-decrypt.
+  **Not fixed this cycle** (no correctness/security impact, optional QoS follow-up) —
+  carried to next cycle candidates.
+- Not architectural / no new server-visible metadata — `threat-model-checker` not
+  required (internal WASM/JS boundary + JS-side scheduling only, same wire format).
+- Frontend: `tsc --noEmit` clean, `biome check` clean on all 4 touched/new files, all
+  102 test files / 1290 tests green (was 1286, +4 new: `concurrencyLimiter.test.ts`,
+  covering under-cap-runs-immediately, queues-and-never-exceeds-cap, releases-slot-
+  on-throw, rejects-non-positive-maxConcurrent). Backend untouched this cycle (pure
+  frontend change, no Rust files touched — confirmed via `git diff --name-only` before
+  skipping the Rust build/test/audit steps).
+- **Next cycle candidates:** Advisory B above (queue cancellation/dequeue on unmount —
+  QoS only), the canonical `media.mediaKey`-not-zeroed cosmetic-symmetry note (main
+  media path, carried from cycle 309 — `downloadAndDecryptMedia` never zeroed the
+  canonical array, only its local copy; distinct from the thumbnail path fixed this
+  cycle), the NIST SP 800-38D §5.2.1.1 citation fix for the R-2 blob-hash-before-
+  decrypt comments in `media.rs`/`wasm_exports.rs` (trivial doc-only — the cited
+  section covers IV construction, not the oracle-avoidance property the comment
+  actually describes; carried since cycle 309), PQ hybrid Phase A (still blocked on
+  openmls stable `MLS_128_MLKEM768`), and the standing `.claude/memory/project-
+  context.md` file-size hygiene note (STABILIZATION-cycle tooling task, not a code
+  change).
+
+## Previous state (2026-07-18, cycle 311 — FEATURE: receiver-side thumbnail opaque-handle pattern, commit 74c45fb)
 
 - `git status` clean, `gh run list --limit 5` all green at cycle start, `gh issue list
   --state open` empty. Picked the standing "next cycle candidate" carried since cycle
