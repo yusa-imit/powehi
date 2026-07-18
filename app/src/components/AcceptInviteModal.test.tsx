@@ -150,6 +150,15 @@ describe("AcceptInviteModal — accept flow success", () => {
 
 		fireEvent.click(screen.getByRole("button", { name: /connect/i }));
 		expect(await screen.findByText(/establishing encrypted channel/i)).toBeInTheDocument();
+
+		// Drain the rest of the flow (the 50ms delayed redeemInvite above, plus
+		// every subsequent real crypto.subtle.digest/mocked step) before the test
+		// ends — otherwise this test's own in-flight promise chain keeps running
+		// in the background and can call createGroup/addMember against a LATER
+		// test's freshly-created spies once its 50ms timer fires mid-test there.
+		await waitFor(() => {
+			expect(screen.getByText(/encrypted channel established/i)).toBeInTheDocument();
+		});
 	});
 
 	it("shows success state after full accept flow", async () => {

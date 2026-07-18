@@ -29,7 +29,7 @@ type DataHandler = (ev: { data: Blob }) => void;
 type StopHandler = () => void;
 
 class MockMediaRecorder {
-	static isTypeSupported = vi.fn((type: string) => type === "audio/webm;codecs=opus");
+	static isTypeSupported = vi.fn((type: string): boolean => type === "audio/webm;codecs=opus");
 	static instances: MockMediaRecorder[] = [];
 	static throwOnConstruct = false;
 
@@ -93,14 +93,14 @@ describe("useVoiceRecorder", () => {
 		expect(result.current.recording).toBe(true);
 		expect(getUserMediaMock).toHaveBeenCalledWith({ audio: true });
 
-		let file: File | null = null;
+		const fileRef: { current: File | null } = { current: null };
 		await act(async () => {
-			file = await result.current.stopRecording();
+			fileRef.current = await result.current.stopRecording();
 		});
 
-		expect(file).not.toBeNull();
-		expect(file?.name).toBe("voice-message.webm");
-		expect(file?.type).toBe("audio/webm;codecs=opus");
+		expect(fileRef.current).not.toBeNull();
+		expect(fileRef.current?.name).toBe("voice-message.webm");
+		expect(fileRef.current?.type).toBe("audio/webm;codecs=opus");
 		expect(result.current.recording).toBe(false);
 	});
 
@@ -134,11 +134,11 @@ describe("useVoiceRecorder", () => {
 
 		// Calling stopRecording afterwards (no active recorder) resolves null —
 		// confirms cancel really discarded state rather than leaving it stoppable.
-		let file: File | null = null;
+		const fileRef: { current: File | null } = { current: null };
 		await act(async () => {
-			file = await result.current.stopRecording();
+			fileRef.current = await result.current.stopRecording();
 		});
-		expect(file).toBeNull();
+		expect(fileRef.current).toBeNull();
 	});
 
 	it("permission-denied getUserMedia rejection never throws and sets a content-free error", async () => {
@@ -158,11 +158,11 @@ describe("useVoiceRecorder", () => {
 
 	it("stopRecording with nothing recorded resolves null", async () => {
 		const { result } = renderHook(() => useVoiceRecorder());
-		let file: File | null = null;
+		const fileRef: { current: File | null } = { current: null };
 		await act(async () => {
-			file = await result.current.stopRecording();
+			fileRef.current = await result.current.stopRecording();
 		});
-		expect(file).toBeNull();
+		expect(fileRef.current).toBeNull();
 	});
 
 	it("unmount mid-recording stops the interval and the captured stream", async () => {
