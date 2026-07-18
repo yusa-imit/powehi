@@ -17,7 +17,57 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-18, cycle 310 — STABILIZATION: bound mls_credential size, commit 7268933)
+## Current state (2026-07-18, cycle 311 — FEATURE: receiver-side thumbnail opaque-handle pattern, commit 74c45fb)
+
+- `git status` clean, `gh run list --limit 5` all green at cycle start, `gh issue list
+  --state open` empty. Picked the standing "next cycle candidate" carried since cycle
+  309: migrate `media_thumbnail_decrypt` (receiver path) to the same opaque-handle
+  pattern used for the main media key in cycle 309 — the thumbnail key previously
+  crossed the WASM-JS boundary as a raw `&[u8]` argument for the entire decrypt call.
+- **Rust (`powehi-crypto-wasm`):** removed `media_thumbnail_decrypt(ct, key, iv)`
+  entirely (confirmed zero remaining callers via repo-wide grep before deletion). Added
+  `media_thumbnail_decrypt_with_handle(media_key_handle, ct, iv) -> {pixels}` — looks up
+  the key from the **same** `MEDIA_KEYS` map used by the main media-key receiver path
+  (deliberately reused rather than adding a second map/cap, since `media_import_key`/
+  `media_drop_key` are already generic over any 32-byte key). Unlike
+  `media_decrypt_with_handle`, this does **not** do the blob_hash/R-2 check — the
+  thumbnail ciphertext travels inline inside the already-MLS-authenticated envelope
+  (not an unauthenticated R2 fetch), so there's no server-swap oracle surface.
+  crypto-reviewer confirmed this reasoning holds.
+- **Frontend:** `useThumbnail.ts` now calls `mediaImportKey(key)` first, zeroes the raw
+  key copy immediately (before decrypt even starts, not after) plus the canonical
+  `thumbnail.key` array in React state, then `mediaThumbnailDecryptWithHandle(handle,
+  ct, iv)`, and drops the handle in a `finally` on every path (success, decrypt-throw,
+  cancelled-after-import). `crypto.worker.ts`, `__mocks__/useCryptoWorker.ts`, and
+  `useThumbnail.test.ts` updated to the handle-based API (12 tests, +3 new assertions
+  for import/drop call-through, drop-on-failure).
+- **crypto-reviewer: GREEN**, 2 non-blocking YELLOW advisories: (1) thumbnail decrypt
+  now shares the 256-slot `MAX_MEDIA_HANDLES` cap with the main media-key path (before
+  this cycle it consumed none) — a burst of concurrent thumbnail renders could
+  transiently pressure the shared cap; degrades gracefully (non-fatal catch in
+  useThumbnail.ts) but flagged for crypto-lead to confirm the message list bounds
+  concurrent thumbnail decrypts. **Not fixed this cycle** — needs a virtualization
+  audit, tracked as a follow-up. (2) new Rust tests didn't cover the 12-byte IV-length
+  validation branch — **fixed in-cycle**: added
+  `test_thumbnail_handle_decrypt_wrong_iv_length_rejected`.
+- Rust: `cargo build --workspace` / `cargo test --workspace` (172/172 in
+  powehi-crypto-wasm, +3 new: round-trip, unknown-handle, wrong-iv-length) / `cargo fmt
+  --all --check` / `cargo clippy --workspace --all-targets -- -D warnings` all clean
+  (native + wasm32-unknown-unknown). Frontend: `tsc --noEmit` clean, `biome check`
+  clean, all 1286 frontend tests green (101 files, net unchanged — replaced tests
+  1:1 plus new assertions in the same file).
+- Not architectural / no new server-visible metadata — `threat-model-checker` not
+  required (internal WASM/JS boundary hardening, same wire format as before).
+- **Next cycle candidates:** crypto-reviewer's shared-cap-contention advisory above
+  (confirm/bound concurrent thumbnail decrypts), the canonical `media.mediaKey`-not-
+  zeroed cosmetic-symmetry note (carried from cycle 309), the NIST SP 800-38D citation
+  fix (trivial doc-only, carried from cycle 309), PQ hybrid Phase A (still blocked on
+  openmls stable `MLS_128_MLKEM768`). Also noted but out of scope: `.claude/memory/
+  project-context.md` itself has grown to ~590KB / 5400+ lines (append-only history) —
+  a future STABILIZATION cycle should consider trimming/archiving older cycle entries
+  so the file stays readable, though this is tooling hygiene, not a code change.
+
+## Previous state (2026-07-18, cycle 310 — STABILIZATION: bound mls_credential size, commit 7268933)
 
 - `git status` clean, `gh run list --limit 5` all green at cycle start, `gh issue list
   --state open` empty. Full stabilization sweep: `cargo audit` clean (652 crates, 0
