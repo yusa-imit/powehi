@@ -5674,3 +5674,54 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
   - security-auditor: GREEN (6 questions all clean; authorization scoped to authenticated user, no credential leakage, rate-limited, no plaintext logging, encodeURIComponent on DELETE URL).
   - All tests: 987 frontend (81 files) + all backend tests passing.
 - Cycle 215 STABILIZATION: Added 4 security-invariant tests (KeyPackage single-use, cross-device isolation, expired-envelope suppression, TTL complement). security-auditor GREEN. 83/83 application tests. commit 6cbde19.
+- Cycle 315 STABILIZATION: Fixed CI-red on main + a flaky invite test (commit 7ce596a).
+  - `gh run list` showed cycle 314's "feat(media): voice messages" commit had a red
+    CI — Frontend run: `tsc -b && vite build` failed with 3 TS errors in
+    `useVoiceRecorder.test.ts`.
+  - Root cause 1: `MockMediaRecorder.isTypeSupported = vi.fn((type: string) =>
+    type === "audio/webm;codecs=opus")` — TS 5.5+'s control-flow-based type
+    predicate inference turned this into `(type: string) => type is
+    "audio/webm;codecs=opus"`, so a later `vi.fn(() => false)` reassignment in the
+    "falls back to browser-default..." test no longer type-checked. Fixed with an
+    explicit `: boolean` return annotation on the mock.
+  - Root cause 2 (separate, genuine TypeScript compiler limitation, confirmed via
+    minimal repro outside the file): a `let file: File | null = null` reassigned
+    only inside a nested `async () => {...}` closure passed to `act()`, then read
+    after the `await act(...)` — TS narrows `file` to `never` post-closure ONLY
+    when the *containing* function is itself `async` (sync IIFE closures don't
+    trigger it; a direct same-scope assignment doesn't either). Worked around in
+    all 3 affected tests by replacing the `let` with an object-wrapper
+    `const fileRef: { current: File | null } = { current: null }` — object-property
+    mutation isn't subject to the same buggy CFA path.
+  - Separately found (not in CI's failing job, but locally reproducible 100% of the
+    time when running the full file, 0% in isolation): `AcceptInviteModal.test.tsx`'s
+    "shows loading state while accepting" mocks `redeemInvite` behind a REAL 50ms
+    `setTimeout` (not fake timers), asserts the loading text, then returns — leaving
+    its own accept-flow promise chain (redeemInvite → real crypto.subtle.digest
+    KeyPackage-hash check → mlsCreateGroup → createGroup → ...) running in the
+    background past the test's end. `vi.restoreAllMocks()` in `afterEach` doesn't
+    cancel real pending timers, so ~50ms of real wall-clock later the timer fires
+    mid-way through whatever test is running THEN (2 tests later:
+    "verification_failed"), and the resumed chain calls `createGroup` against
+    that test's freshly-created spy — flakily failing its
+    `expect(createGroupSpy).not.toHaveBeenCalled()` assertion. Fixed by adding a
+    trailing `await waitFor(...)` on the success text so the flow fully drains
+    before the test ends (no assertion removed/loosened — this was pure test
+    isolation leakage, not a real race: `handleAccept` is single linear async,
+    the KeyPackage-hash gate unconditionally precedes `mlsCreateGroup`/`createGroup`
+    with no concurrent-invocation path in real usage).
+  - **security-auditor: GREEN.** Confirmed the AcceptInviteModal fix doesn't mask a
+    production race and doesn't weaken any assertion; confirmed the useVoiceRecorder
+    changes are behaviorally equivalent workarounds.
+  - Verified: `tsc -b` clean, `pnpm --filter app build` succeeds, `pnpm test --run`
+    104/104 files · 1314/1314 tests green (was flaky on AcceptInviteModal before this
+    fix), Biome clean, `AcceptInviteModal.test.tsx` re-run 5× standalone all green
+    (was 100% reproducing the flake pre-fix). Backend: `cargo test --workspace`
+    all green (untouched this cycle — pure frontend test fix).
+  - Target dir hygiene: 23G (over the 20G threshold) → pruned artifacts older than
+    7 days per the housekeeping step; still 23G after (nothing stale enough to
+    prune this cycle), 108,949 files in target/debug/deps — well under the past
+    291k-file pathological-growth incident, no further action needed.
+  - `gh issue list --state open` — empty, nothing else to triage this cycle.
+  - **Next cycle:** no known gaps flagged from this pass; check `gh run list` first
+    to confirm this fix went green on main before starting new FEATURE work.
