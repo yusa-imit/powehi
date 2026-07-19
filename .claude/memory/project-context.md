@@ -17,7 +17,74 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-20, cycle 322 — FEATURE: fix concurrent read-receipt readBy race, commit 331dfab)
+## Current state (2026-07-20, cycle 323 — FEATURE: persist group slow-mode delay to Dexie, commit c12e540)
+
+- `git status` clean, `gh run list --limit 3` all green at cycle start, `gh issue
+  list --state open` empty. No unchecked `- [ ]` items remain in this file's phase
+  checklist (all 6 phases complete) — used an Explore agent to survey for a
+  genuinely new, still-open gap the same way cycles 314/321 found voice messages
+  and receipt persistence: grepped dead UI affordances and React-state-only
+  settings that should be in Dexie but aren't.
+- Found: the admin "slow mode" per-chat message cooldown (InfoPanel dropdown,
+  `SLOW_MODE_OPTIONS = [0,5,30,60,300,3600]`) was fully wired end-to-end (admin
+  toggle, composer banner, send cooldown gate, countdown badge) but lived purely
+  in `const [slowModeDelay, setSlowModeDelay] = useState<Record<string,
+  SlowModeDelay>>({})` — zero `GroupRow` field, zero persist/rehydrate. Every
+  reload silently reverted every group's slow mode to Off, including for the
+  admin who set it. Same bug class as cycles 312/314/321 (a shipped feature
+  missing the Dexie write path), verified myself (not taken on the Explore
+  agent's word) by grepping `slowModeDelay` across `ChatLayout.tsx` and
+  `app/src/db/*.ts` before touching anything.
+- **Fix (self-implemented, no delegation needed — small, well-established
+  pattern):** added `GroupRow.slowModeDelay?: number` (schema v16, additive, no
+  index change — same non-sensitive tier as `disappearingTtlSeconds`/`chatTheme`,
+  confirmed via `SENSITIVE.groups` in `encrypted-db.ts` still `["mlsStateB64",
+  "name"]` only). New `handleSetSlowMode(chatId, delay)` callback mirrors
+  `handleToggleMute`/`handleSetChatTheme` exactly: `setSlowModeDelay` update +
+  `chatsRef.current.find(...)` + `db.groups.update(chat.mlsGroupId, {
+  slowModeDelay: delay }).catch(() => {})`, replacing the old inline
+  `onSetSlowMode` JSX prop. Rehydration added to the existing "load persisted
+  disappearing timer" effect (7430ish): reads `row.slowModeDelay`, validates
+  against `SLOW_MODE_OPTIONS.includes(...)` before restoring (fails safe to
+  "off" on a corrupted/stale non-numeric value — `Array.includes` uses strict
+  `===`), keyed by `activeId` (the in-memory Record's key) not `mlsGroupId`
+  (added `activeId` to that effect's dependency array since it's now read
+  directly in the body).
+- **security-auditor: GREEN, no findings.** Independently confirmed: field
+  correctly omitted from the encryption tier, allowlist-gated rehydration fails
+  safe on corrupted data (no type confusion/oracle), numeric `<select>` value
+  never touches HTML rendering or DB queries (no injection surface), missing-
+  `mlsGroupId` case guarded identically to the mute/sound/vibrate handlers this
+  pattern was cloned from.
+- Not architectural, no new server-visible metadata (purely local UI preference,
+  never sent to server, never part of any MLS payload) — `threat-model-checker`/
+  `crypto-reviewer` not required, same scoping as the chatTheme/muted/receipt
+  persistence work in cycles 312-322.
+- 4 new tests: 2 in `schema.test.ts` (stores/retrieves `slowModeDelay`, leaves
+  undefined when unset — v16 pattern), 2 in `ChatLayoutSlowMode.test.tsx`
+  (persist-on-admin-change round-trips through `db.groups.get`, rehydrate-on-
+  chat-switch restores the select value from a pre-seeded row). Had to add
+  `vi.useRealTimers()` at the top of both new tests — the file's `beforeEach`
+  sets `vi.useFakeTimers({ shouldAdvanceTime: false })` for the countdown-badge
+  tests, which silently hung RTL's `waitFor` (fake clock never advances, so its
+  internal polling never re-checks) until my own two new tests were the only
+  ones timing out; real timers don't affect Dexie's microtask-based resolution.
+  `tsc -b` clean, `biome check` clean (4 touched files, 1 format-only autofix
+  applied). Frontend `pnpm test --run`: **1338/1338 tests green** (104 files,
+  was 1334, net +4). Backend untouched this cycle (pure frontend/Dexie change,
+  confirmed via `git diff --name-only`).
+- **Next cycle candidates:** PQ hybrid Phase A (still blocked on openmls stable
+  `MLS_128_MLKEM768` as of cycle 318's last check — worth a fresh crates.io
+  check, not done this cycle); OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003
+  Phase B 95%-session threshold, not yet actionable); the still-standing
+  opaque-ke live-migration login-round-trip regression test gap (cycle 318/319,
+  no prod users yet, low urgency); `.claude/memory/project-context.md` file size
+  (~210KB / 2700+ lines after this entry, was ~205KB at cycle 322 — climbing
+  again since the cycle-320 archive; still under the 256KB Read cap but worth
+  archiving cycles ~280-310 at the next STABILIZATION cycle, 325, if it keeps
+  growing at this rate).
+
+## Previous state (2026-07-20, cycle 322 — FEATURE: fix concurrent read-receipt readBy race, commit 331dfab)
 
 - `git status` clean, `gh run list --limit 3` all green at cycle start, `gh issue
   list --state open` empty. Picked the top cycle-321 next-cycle candidate: the
