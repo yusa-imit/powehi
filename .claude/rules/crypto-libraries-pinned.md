@@ -21,6 +21,20 @@ Do NOT add:
 - `openssl` bindings (not WASM-compatible)
 - Any crate that rolls its own primitives
 
+## opaque-ke major-version migrations (stored password files)
+Before bumping opaque-ke across a major version once live user credentials exist,
+prove wire compatibility with a fixture test — do NOT rely on source inspection.
+See `powehi-opaque/src/lib.rs` `mod interop_v3` for the pattern (a 3.0.0-serialized
+blob checked under 4.0.1). Findings from that test, which apply to any future bump:
+- The per-user `ServerRegistration` password file IS byte-compatible 3.0 -> 4.0.1.
+- The server long-term `ServerSetup` (OPRF seed + AKE keypair) is NOT compatible
+  3.0 -> 4.0.1 (both 128 B; 4.0.1 rejects the 3.0 layout). Since login re-derives
+  each user's OPRF key from `ServerSetup.oprf_seed`, password-file portability is
+  necessary but NOT sufficient: a live migration also needs a portable/persisted
+  `ServerSetup` or a forced re-registration. No impact today (no prod users;
+  `ServerSetup` is regenerated on startup), but any future bump MUST carry an
+  explicit `ServerSetup` migration story, not just a password-file fixture.
+
 ## Frontend (package.json)
 - Crypto operations MUST go through the WASM crypto worker via Comlink
 - No direct crypto libraries in the frontend bundle
