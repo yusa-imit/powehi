@@ -17,7 +17,71 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-19, cycle 317 — FEATURE: zero useThumbnail local key on import-failure path, commit bd39572)
+## Current state (2026-07-19, cycle 318 — FEATURE: upgrade opaque-ke 3.0→4.0.1 stable RFC 9807, commit 548289f)
+
+- `git status` clean, `gh run list --limit 3` all green at cycle start. `gh issue
+  list --state open` empty. Skipped both cycle-317-flagged candidates (PQ hybrid
+  Phase A — re-verified via crates.io API: openmls `max_stable_version` is still
+  0.8.1 with no `ml-kem`/`ml-dsa`/PQ ciphersuite in its source or feature list, so
+  still genuinely blocked; and the project-context.md file-size hygiene item —
+  that's a STABILIZATION-only task per the loop rules, not eligible this cycle).
+  Instead checked crates.io for `opaque-ke` directly (the other standing waiver
+  in `.claude/rules/crypto-libraries-pinned.md`, "2026-05-25: pinned at 3.0
+  draft-16, only 4.1.0-pre.2 pre-release available, no production deploy until
+  resolved") and found **`max_stable_version: 4.0.1`** now published — the RFC
+  9807 stable release the waiver was waiting on.
+- Delegated the migration to `crypto-lead`: bumped `opaque-ke` 3→4.0.1 in lockstep
+  across the server adapter (`crates/adapters/outbound/powehi-opaque`) and the
+  WASM client (`crates/client/powehi-crypto-wasm/src/opaque.rs`,
+  `wasm_exports.rs`). Four compiler-surfaced API breaks fixed, no logic change:
+  (1) `CipherSuite::KeGroup` dropped, `TripleDh` is now generic —
+  `TripleDh<Ristretto255, Sha512>` reproduces 3.x's implicit SHA-512 AKE hash
+  exactly (verified against `voprf-0.5.0`'s `Hash = Sha512` for Ristretto255);
+  (2) `ristretto255-voprf` cargo feature renamed to `ristretto255`;
+  (3) `ServerLoginStartParameters` unified into `ServerLoginParameters`, now
+  passed to both `start` and `finish` (both call sites use `::default()`, so no
+  start/finish param-mismatch state-confusion risk); (4) `ClientLogin::finish`
+  gained a leading `rng: &mut R` — production caller (`wasm_exports.rs`) uses
+  `OsRng`, confirmed cryptographically secure.
+- **crypto-reviewer: GREEN.** Independently re-derived the ciphersuite-equivalence
+  proof from `opaque-ke` 3.0.0/4.0.1 and `voprf-0.5.0` source in the cargo cache
+  (not taken on the migrating agent's word). Confirmed server/client suites
+  byte-identical, RNG is `OsRng` on the only production finish call site, error
+  paths still collapse to opaque `Unauthorized`/`InvalidInput` (no oracle), no
+  start/finish param divergence, `Identifiers` idU/idS-unbound limitation (Y-4)
+  unaffected — still deferred, not newly exposed. One **non-blocking YELLOW
+  advisory** (follow-up, not fixed this cycle): no regression test proves a
+  3.0-serialized `ServerRegistration` blob round-trips under 4.0.1 — moot today
+  (no prod users, prd.md blocked deploy pending exactly this upgrade) but flagged
+  so crypto-lead adds a persisted-vector interop guard before any future
+  mid-flight version migration, and so client/server never split across major
+  opaque-ke versions in a deploy window.
+- Not architectural, no new server-visible metadata (pure library-version bump,
+  `OpaqueServerPort` trait signature unchanged) — `threat-model-checker` not
+  required, same scoping crypto-reviewer agreed with.
+- Also updated: `.claude/rules/crypto-libraries-pinned.md` (waiver retired, now
+  "opaque-ke 4.x — stable, RFC 9807"); `docs/decisions/0003-pq-migration.md`
+  (base RFC 9807 upgrade marked done; PQ-hybrid OPRF (X25519+ML-KEM-768) kept as
+  a distinct still-future Phase B item — these are two separate upgrades within
+  opaque-ke's 4.x line, not the same thing).
+- `cargo build --workspace` clean, `cargo test --workspace --lib` all green (0
+  failures across every crate incl. `powehi-opaque` 8/8, `powehi-crypto-wasm`
+  9/9 opaque-specific), `cargo clippy --workspace --all-targets -- -D warnings`
+  clean, `cargo fmt --all --check` clean (after one `cargo fmt --all` pass on the
+  two migrated files — rustfmt reformatted the newly-4-argument `finish()` calls
+  to multi-line).
+- **Next cycle candidates:** the crypto-reviewer YELLOW (persisted-vector interop
+  regression test for opaque-ke version migrations, crypto-lead), PQ hybrid Phase
+  A (still blocked, re-check crates.io periodically rather than every cycle now
+  that opaque-ke's equivalent gate just resolved), OPAQUE PQ-hybrid OPRF upgrade
+  itself (separate from what shipped this cycle, still gated on ADR-0003 Phase B
+  95%-session threshold — not yet actionable), and the **project-context.md
+  file-size hygiene item is now overdue** (flagged in cycles 316 and 317 too,
+  still not done — file was ~620KB before this entry, now larger; next
+  STABILIZATION cycle, currently cycle 320, should truncate/archive per the
+  standing note rather than deferring again).
+
+## Previous state (2026-07-19, cycle 317 — FEATURE: zero useThumbnail local key on import-failure path, commit bd39572)
 
 - `git status` clean, `gh run list --limit 3` all green at cycle start. `gh issue
   list --state open` empty. Picked the trivial cycle-316-flagged YELLOW from the
