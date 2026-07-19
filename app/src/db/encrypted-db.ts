@@ -151,13 +151,32 @@ export class EncryptedPowehiDb {
 	}
 
 	/**
-	 * Persist a "read receipt" signal: marks the row read and stores the full
-	 * post-mutation set of reader device IDs (caller passes the complete array,
-	 * not a diff — same convention as markMessageReactions). No-op if the row
-	 * does not exist locally.
+	 * Persist a "read receipt" signal: marks the row read and unions `readBy`
+	 * into the currently-persisted reader set rather than overwriting it.
+	 * Callers compute `readBy` from a possibly-stale in-memory snapshot, so two
+	 * read_receipts for the same message from different devices arriving in
+	 * quick succession could previously race and have the later write clobber
+	 * the earlier one's entry (security-auditor YELLOW, cycle 321). Reading the
+	 * persisted row and writing the merged set inside one Dexie transaction
+	 * closes that race: IndexedDB serializes readwrite transactions on the same
+	 * store, so the second transaction's read always observes the first
+	 * transaction's committed write. No-op if the row does not exist locally.
 	 */
 	async markMessageRead(id: string, readBy: string[]): Promise<void> {
-		await this.db.messages.update(id, { read: true, readByJson: JSON.stringify(readBy) });
+		await this.db.transaction("rw", this.db.messages, async () => {
+			const row = await this.db.messages.get(id);
+			if (!row) return;
+			let existing: string[] = [];
+			if (row.readByJson) {
+				try {
+					existing = JSON.parse(row.readByJson) as string[];
+				} catch {
+					existing = [];
+				}
+			}
+			const merged = Array.from(new Set([...existing, ...readBy]));
+			await this.db.messages.update(id, { read: true, readByJson: JSON.stringify(merged) });
+		});
 	}
 
 	async getMessagesByGroup(groupId: string): Promise<MessageRow[]> {

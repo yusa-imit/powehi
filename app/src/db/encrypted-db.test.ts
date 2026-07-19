@@ -302,6 +302,69 @@ describe("EncryptedPowehiDb", () => {
 		expect(retrieved).toBeUndefined();
 	});
 
+	it("markMessageRead unions readBy across sequential calls instead of overwriting", async () => {
+		await encDb.addMessage({
+			id: "msg-read-union",
+			groupId: "grp-read",
+			ciphertextB64: "dW5pb25UYXJnZXQ=",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+		});
+
+		await encDb.markMessageRead("msg-read-union", ["dev-2"]);
+		await encDb.markMessageRead("msg-read-union", ["dev-3"]);
+
+		const retrieved = await encDb.getMessage("msg-read-union");
+		expect(retrieved?.read).toBe(true);
+		expect(JSON.parse(retrieved?.readByJson ?? "[]")).toEqual(["dev-2", "dev-3"]);
+	});
+
+	it("markMessageRead deduplicates a reader id passed again", async () => {
+		await encDb.addMessage({
+			id: "msg-read-dedup",
+			groupId: "grp-read",
+			ciphertextB64: "ZGVkdXBUYXJnZXQ=",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+		});
+
+		await encDb.markMessageRead("msg-read-dedup", ["dev-2"]);
+		await encDb.markMessageRead("msg-read-dedup", ["dev-2"]);
+
+		const retrieved = await encDb.getMessage("msg-read-dedup");
+		expect(JSON.parse(retrieved?.readByJson ?? "[]")).toEqual(["dev-2"]);
+	});
+
+	// security-auditor YELLOW, cycle 321: two read_receipts for the same message
+	// from different devices arriving in quick succession previously raced —
+	// each computed `readBy` from a stale in-memory snapshot, and the later
+	// Dexie write overwrote (not merged) the earlier one's entry. Fired
+	// concurrently (no await between them) to reproduce the race; the fix reads
+	// the persisted row inside a Dexie transaction before writing the merge, so
+	// both entries must survive regardless of settle order.
+	it("markMessageRead does not lose an entry when two receipts race concurrently", async () => {
+		await encDb.addMessage({
+			id: "msg-read-race",
+			groupId: "grp-read",
+			ciphertextB64: "cmFjZVRhcmdldA==",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+		});
+
+		await Promise.all([
+			encDb.markMessageRead("msg-read-race", ["dev-2"]),
+			encDb.markMessageRead("msg-read-race", ["dev-3"]),
+		]);
+
+		const retrieved = await encDb.getMessage("msg-read-race");
+		expect(retrieved?.read).toBe(true);
+		const readBy = JSON.parse(retrieved?.readByJson ?? "[]") as string[];
+		expect(new Set(readBy)).toEqual(new Set(["dev-2", "dev-3"]));
+	});
+
 	// crypto-reviewer finding 2 (RED): the MLS provider-state generation counter
 	// must be bundled INSIDE the same authenticated ciphertext as the state blob
 	// (a single JSON envelope, encrypted once) rather than stored as an

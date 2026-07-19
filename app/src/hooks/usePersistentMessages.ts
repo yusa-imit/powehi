@@ -204,16 +204,12 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 	);
 
 	/**
-	 * security-auditor finding, cycle 321 (YELLOW, correctness not security):
-	 * `readBy` is a full-replace array computed by the caller from a snapshot
-	 * that may already be stale by the time this write lands — same latent
-	 * limitation `persistReaction` already has. Two read_receipts for the same
-	 * message from different sender devices arriving in quick succession can
-	 * race and the later Dexie write can overwrite (not merge) the earlier
-	 * one's entry, undercounting "Seen by N" after a reload. In-memory state
-	 * is unaffected (React's functional setChats update always sees the true
-	 * latest state); only the persisted copy can lag. Low severity (no leak,
-	 * no crash, no auth impact) — deferred, not fixed this cycle.
+	 * `readBy` is computed by the caller from a snapshot that may already be
+	 * stale by write time (same as `persistReaction`) — but `EncryptedPowehiDb
+	 * .markMessageRead` unions it against the currently-persisted reader set
+	 * inside a single Dexie transaction rather than overwriting, so two
+	 * concurrent read_receipts for the same message can no longer clobber each
+	 * other's entry (fixed cycle 322; was security-auditor YELLOW, cycle 321).
 	 */
 	const persistRead = useCallback(
 		(targetMessageId: string, readBy: string[]) => {
