@@ -17,7 +17,62 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-19, cycle 321 — FEATURE: persist delivery/read receipts to Dexie, commit d02ece3)
+## Current state (2026-07-20, cycle 322 — FEATURE: fix concurrent read-receipt readBy race, commit 331dfab)
+
+- `git status` clean, `gh run list --limit 3` all green at cycle start, `gh issue
+  list --state open` empty. Picked the top cycle-321 next-cycle candidate: the
+  security-auditor YELLOW that `persistRead`'s `readBy` was a full-replace
+  array computed from a possibly-stale in-memory snapshot — two `read_receipt`s
+  for the same message from different devices arriving in quick succession
+  could race, with the later Dexie write overwriting (not merging) the
+  earlier one's entry, undercounting "Seen by N" after a reload.
+- **Fix, at the persistence layer (`EncryptedPowehiDb.markMessageRead`,
+  `encrypted-db.ts`):** wrapped a read-then-write in
+  `this.db.transaction("rw", this.db.messages, async () => {...})` — reads
+  the currently-persisted row's `readByJson` (safe try/catch parse, defaults
+  to `[]` on corruption), unions it with the caller-supplied `readBy` via
+  `Array.from(new Set([...existing, ...readBy]))`, writes the merged set.
+  Relies on IndexedDB's guarantee that readwrite transactions on the same
+  object store serialize — the second transaction's read always observes the
+  first transaction's committed write, closing the race rather than just
+  narrowing it. `readByJson` confirmed still not in `SENSITIVE.messages` (raw
+  `db.messages.get()` used deliberately, not the decrypting `getMessage()` —
+  no wasted/incorrect crypto). Updated the now-stale "deferred, not fixed"
+  doc comment in `usePersistentMessages.ts`'s `persistRead` to describe the
+  fix instead. No call-site changes needed — `ChatLayout.tsx`'s
+  `handleIncomingReadReceipt`/`persistRead(m.id, readBy)` call is unchanged;
+  the caller's snapshot is now just one input to the DB-layer merge, not the
+  sole source of truth.
+- **security-auditor: GREEN, no findings.** Independently confirmed (not
+  taken on faith): `readByJson` non-sensitivity, the same-store IDB
+  transaction-serialization argument is sound and genuinely closes (not just
+  narrows) the race, no new oracle/no new plaintext logging, forged-receipt
+  durability unchanged (still gated by server-authenticated
+  `senderDeviceId`), `Set`-based dedup only collapses exact-duplicate IDs
+  (distinct IDs preserved), and the 3 new tests would fail against the old
+  blind-overwrite implementation (verified by re-running them).
+- Not architectural, no new server-visible metadata (pure client-side Dexie
+  write-path fix, same wire format, same receipt trust model) —
+  `threat-model-checker`/`crypto-reviewer` not required, same scoping as
+  cycle 321's original receipt-persistence work.
+- 3 new tests in `encrypted-db.test.ts`: sequential-calls-union,
+  duplicate-reader-id-dedup, and a concurrent `Promise.all` race test that
+  reproduces the pre-fix race and asserts both devices' entries survive.
+  `tsc -b` clean, `biome check` clean (3 touched files). Frontend
+  `pnpm test --run`: **1334/1334 tests green** (104 files, was 1331, net +3).
+  Backend untouched this cycle (pure frontend/IndexedDB fix, confirmed via
+  `git diff --name-only`).
+- **Next cycle candidates:** PQ hybrid Phase A (still blocked on openmls
+  stable `MLS_128_MLKEM768` — re-check periodically); OPAQUE PQ-hybrid OPRF
+  upgrade (gated on ADR-0003 Phase B 95%-session threshold, not yet
+  actionable); the still-standing opaque-ke live-migration login-round-trip
+  regression test gap (cycle 318/319, no prod users yet, low urgency); the
+  `.claude/memory/project-context.md` file size is climbing again (~205KB /
+  2650+ lines after this entry, cycle 320 archived it down to ~197KB at
+  cycle-320-time) — not yet urgent (well under the 256KB Read cap) but worth
+  a glance at the next STABILIZATION cycle (325) if it keeps growing.
+
+## Previous state (2026-07-19, cycle 321 — FEATURE: persist delivery/read receipts to Dexie, commit d02ece3)
 
 - `git status` clean, `gh run list --limit 5` all green at cycle start, `gh issue
   list --state open` empty. Ruled out the two survey candidates first: an
