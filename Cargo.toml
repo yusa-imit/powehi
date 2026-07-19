@@ -83,12 +83,12 @@ openmls = { version = "0.8", default-features = false }
 openmls_rust_crypto = "0.5"
 openmls_basic_credential = "0.5"
 openmls_traits = "0.5"
-opaque-ke = "3"
+opaque-ke = "4.0"
 # rand 0.8 with getrandom: explicit dep required by powehi-opaque (OsRng).
 # Without this, OsRng is only reachable via workspace-wide feature unification
 # (getrandom from powehi-crypto-wasm) — isolated builds break.
 rand = { version = "0.8", features = ["getrandom"] }
-# argon2 KSF for OPAQUE (matches opaque-ke 3.0 argon2 feature dep range)
+# argon2 KSF for OPAQUE (matches opaque-ke 4.0 argon2 feature dep range)
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 sha2 = "0.10"
 hmac = "0.12"

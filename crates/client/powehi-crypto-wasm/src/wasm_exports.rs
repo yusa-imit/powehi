@@ -248,7 +248,9 @@ pub fn opaque_login_finish(
     // when `session` goes out of scope at the end of this function.
     let state = opaque_ke::ClientLogin::<DefaultCipherSuite>::deserialize(&session.bytes)
         .map_err(|_| js_err("opaque login session corrupted"))?;
-    let result = opaque::login_finish_full(state, password, server_response)
+    // opaque-ke 4.x: ClientLogin::finish takes an rng (used for the CredentialFinalization).
+    let mut rng = OsRng;
+    let result = opaque::login_finish_full(state, password, server_response, &mut rng)
         .map_err(|e| js_err(&e.to_string()))?;
     // Zeroizing ensures the Rust-side copy is wiped from linear memory on drop.
     let export_key = Zeroizing::new(result.export_key[..EXPORT_KEY_LEN].to_vec());

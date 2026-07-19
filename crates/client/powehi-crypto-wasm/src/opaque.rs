@@ -1,10 +1,10 @@
-// OPAQUE-3DH client flows using opaque-ke 3.0 (draft-irtf-cfrg-opaque-16).
+// OPAQUE-3DH client flows using opaque-ke 4.0.1 (RFC 9807, stable release).
 //
-// NOTE: opaque-ke 3.0 implements draft-irtf-cfrg-opaque-16, which is very
-// close to but not byte-identical with the published RFC 9807. Upgrade to
-// opaque-ke 4.x (true RFC 9807) is tracked as a follow-up (see crypto-reviewer
-// finding WARNING 1). Until then all references to "RFC 9807" in this file
-// should be read as "draft-irtf-cfrg-opaque-16 as implemented by opaque-ke 3".
+// opaque-ke 4.0.1 implements the published RFC 9807 (OPAQUE). References to
+// "RFC 9807" in this file are exact. The 3.x -> 4.x bump made the AKE hash an
+// explicit ciphersuite parameter (`TripleDh<KeGroup, Hash>`) and added an rng
+// argument to `ClientLogin::finish`; neither changes the wire format for the
+// Ristretto255 + SHA-512 suite used here.
 //
 // No cryptographic primitives are implemented here. Every operation delegates
 // to the audited `opaque-ke` crate. The ciphersuite is Ristretto255 (OPRF +
@@ -27,7 +27,7 @@ use opaque_ke::{
 };
 
 /// OPAQUE ciphersuite for Powehi: Ristretto255 + TripleDH + Argon2id KSF
-/// (draft-irtf-cfrg-opaque-16 / opaque-ke 3.0).
+/// (RFC 9807 / opaque-ke 4.0.1).
 ///
 /// This must stay byte-for-byte consistent with the server-side ciphersuite,
 /// otherwise registration and login messages will not interoperate.
@@ -38,8 +38,7 @@ pub struct DefaultCipherSuite;
 
 impl CipherSuite for DefaultCipherSuite {
     type OprfCs = opaque_ke::Ristretto255;
-    type KeGroup = opaque_ke::Ristretto255;
-    type KeyExchange = opaque_ke::key_exchange::tripledh::TripleDh;
+    type KeyExchange = opaque_ke::TripleDh<opaque_ke::Ristretto255, sha2::Sha512>;
     type Ksf = Argon2<'static>;
 }
 
@@ -85,9 +84,8 @@ pub fn registration_start<R: RngCore + CryptoRng>(
 /// full result (carrying `export_key`) plus the serialized `RegistrationUpload`
 /// message to send to the server.
 ///
-/// API note: opaque-ke 3.0 requires the password again at the finish step (it
-/// re-runs the KSF), so the signature in the task spec is extended with
-/// `password`. opaque-ke <=2.x did not need this.
+/// API note: opaque-ke 4.0.1 requires the password again at the finish step
+/// (it re-runs the KSF), so this signature carries `password` and an `rng`.
 pub fn registration_finish<R: RngCore + CryptoRng>(
     client_state: ClientRegistration<DefaultCipherSuite>,
     password: &[u8],
@@ -122,15 +120,17 @@ pub fn login_start<R: RngCore + CryptoRng>(
 /// truncated to [`EXPORT_KEY_LEN`] bytes — the durable secret used to wrap local
 /// key material. A wrong password fails with [`OpaqueError::Protocol`].
 ///
-/// API note: opaque-ke 3.0 requires the password at finish; the task-spec
-/// signature is extended with `password`. Use [`login_finish_full`] when the
-/// AKE `session_key` or the `CredentialFinalization` message are also needed.
-pub fn login_finish(
+/// API note: opaque-ke 4.0.1 requires the password and an `rng` at finish
+/// (`ClientLogin::finish` gained an rng parameter in 4.x). Use
+/// [`login_finish_full`] when the AKE `session_key` or the
+/// `CredentialFinalization` message are also needed.
+pub fn login_finish<R: RngCore + CryptoRng>(
     client_login: ClientLogin<DefaultCipherSuite>,
     password: &[u8],
     server_message: &[u8],
+    rng: &mut R,
 ) -> Result<Vec<u8>, OpaqueError> {
-    let result = login_finish_full(client_login, password, server_message)?;
+    let result = login_finish_full(client_login, password, server_message, rng)?;
     // Index into the GenericArray directly (avoids the deprecated as_slice).
     Ok(result.export_key[..EXPORT_KEY_LEN].to_vec())
 }
@@ -138,14 +138,20 @@ pub fn login_finish(
 /// Step 3 of login (client), returning the full result so callers can access
 /// the `session_key`, `export_key`, and the `CredentialFinalization` message
 /// (`result.message`) that must be sent to the server to complete the AKE.
-pub fn login_finish_full(
+pub fn login_finish_full<R: RngCore + CryptoRng>(
     client_login: ClientLogin<DefaultCipherSuite>,
     password: &[u8],
     server_message: &[u8],
+    rng: &mut R,
 ) -> Result<ClientLoginFinishResult<DefaultCipherSuite>, OpaqueError> {
     let response = CredentialResponse::<DefaultCipherSuite>::deserialize(server_message)
         .map_err(|_| OpaqueError::Deserialize)?;
-    let result = client_login.finish(password, response, ClientLoginFinishParameters::default())?;
+    let result = client_login.finish(
+        rng,
+        password,
+        response,
+        ClientLoginFinishParameters::default(),
+    )?;
     Ok(result)
 }
 
@@ -155,7 +161,7 @@ mod tests {
     use opaque_ke::rand::rngs::OsRng;
     use opaque_ke::{
         CredentialFinalization, CredentialRequest, RegistrationRequest, RegistrationUpload,
-        ServerLogin, ServerLoginStartParameters, ServerRegistration, ServerSetup,
+        ServerLogin, ServerLoginParameters, ServerRegistration, ServerSetup,
     };
 
     // ---- server-side simulation (delegates entirely to opaque-ke) ----
@@ -200,7 +206,7 @@ mod tests {
             Some(password_file),
             request,
             identity,
-            ServerLoginStartParameters::default(),
+            ServerLoginParameters::default(),
         )
         .unwrap();
         let message = start.message.serialize().to_vec();
@@ -214,7 +220,11 @@ mod tests {
         let finalization =
             CredentialFinalization::<DefaultCipherSuite>::deserialize(client_finalization_bytes)
                 .unwrap();
-        state.finish(finalization).unwrap().session_key.to_vec()
+        state
+            .finish(finalization, ServerLoginParameters::default())
+            .unwrap()
+            .session_key
+            .to_vec()
     }
 
     /// Full client<->server OPAQUE round-trip. Asserts:
@@ -239,7 +249,7 @@ mod tests {
         let (login_state, login_request) = login_start(password, &mut rng).unwrap();
         let (server_login_state, login_response) =
             server_login_start(&server_setup, identity, &password_file, &login_request);
-        let login_full = login_finish_full(login_state, password, &login_response)
+        let login_full = login_finish_full(login_state, password, &login_response, &mut rng)
             .expect("login with correct password must succeed");
         let finalization = login_full.message.serialize().to_vec();
         let server_session_key = server_login_finish(server_login_state, &finalization);
@@ -285,7 +295,7 @@ mod tests {
         let (login_state, login_request) = login_start(wrong_password, &mut rng).unwrap();
         let (_server_login_state, login_response) =
             server_login_start(&server_setup, identity, &password_file, &login_request);
-        let result = login_finish(login_state, wrong_password, &login_response);
+        let result = login_finish(login_state, wrong_password, &login_response, &mut rng);
 
         assert!(
             result.is_err(),

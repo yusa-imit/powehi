@@ -1,6 +1,6 @@
 use powehi_domain::error::DomainError;
 
-/// Server-side OPAQUE operations (RFC 9807 / opaque-ke 3.x).
+/// Server-side OPAQUE operations (RFC 9807 / opaque-ke 4.x).
 ///
 /// All methods are sync: OPAQUE is pure CPU crypto with no I/O.
 ///

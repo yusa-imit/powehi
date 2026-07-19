@@ -1,4 +1,4 @@
-//! OPAQUE server-side adapter (RFC 9807 / opaque-ke 3.x).
+//! OPAQUE server-side adapter (RFC 9807 / opaque-ke 4.x).
 //!
 //! Ciphersuite: Ristretto255 OPRF + TripleDH key exchange + Argon2id KSF.
 //! This MUST stay byte-for-byte consistent with the client-side suite in
@@ -20,8 +20,11 @@
 //! - `Identifiers` are not bound in the AKE transcript (Y-4); both client and
 //!   server use `default()`. This is deferred to a joint client+server fix.
 //!
-//! NOTE: opaque-ke 3.0 implements draft-irtf-cfrg-opaque-16, not RFC 9807
-//! byte-for-byte. Upgrade to opaque-ke 4.x tracked in crypto-libraries-pinned.md.
+//! NOTE: opaque-ke 4.0.1 implements the published RFC 9807 (OPAQUE) stable
+//! release. In 4.x the AKE hash is an explicit ciphersuite parameter
+//! (`TripleDh<KeGroup, Hash>`); for the Ristretto255 suite this is SHA-512,
+//! matching the value opaque-ke 3.x derived implicitly — so the wire format
+//! is unchanged. This suite MUST match the client (powehi-crypto-wasm).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -31,7 +34,7 @@ use argon2::Argon2;
 use opaque_ke::ciphersuite::CipherSuite;
 use opaque_ke::{
     CredentialFinalization, CredentialRequest, RegistrationRequest, RegistrationUpload,
-    ServerLogin, ServerLoginStartParameters, ServerRegistration, ServerSetup,
+    ServerLogin, ServerLoginParameters, ServerRegistration, ServerSetup,
 };
 use powehi_domain::error::DomainError;
 use powehi_port_outbound::opaque::OpaqueServerPort;
@@ -42,8 +45,7 @@ pub struct DefaultCipherSuite;
 
 impl CipherSuite for DefaultCipherSuite {
     type OprfCs = opaque_ke::Ristretto255;
-    type KeGroup = opaque_ke::Ristretto255;
-    type KeyExchange = opaque_ke::key_exchange::tripledh::TripleDh;
+    type KeyExchange = opaque_ke::TripleDh<opaque_ke::Ristretto255, sha2::Sha512>;
     type Ksf = Argon2<'static>;
 }
 
@@ -126,7 +128,7 @@ impl OpaqueServerPort for OpaqueServer {
             pf,
             request,
             user_identity,
-            ServerLoginStartParameters::default(),
+            ServerLoginParameters::default(),
         )
         .map_err(|_| DomainError::Internal("opaque: login_start failed".into()))?;
 
@@ -162,7 +164,7 @@ impl OpaqueServerPort for OpaqueServer {
             .map_err(|_| DomainError::Unauthorized)?;
         let result = entry
             .state
-            .finish(finalization)
+            .finish(finalization, ServerLoginParameters::default())
             .map_err(|_| DomainError::Unauthorized)?;
         // Return (session_key, bound_user_identity) — caller uses the identity
         // as the session subject, never a client-supplied value.
@@ -234,7 +236,12 @@ mod tests {
             opaque_ke::CredentialResponse::<DefaultCipherSuite>::deserialize(&ke2).unwrap();
         let finish = login_start
             .state
-            .finish(password, ke2_msg, ClientLoginFinishParameters::default())
+            .finish(
+                &mut rng,
+                password,
+                ke2_msg,
+                ClientLoginFinishParameters::default(),
+            )
             .unwrap();
         let client_session_key: Vec<u8> = finish.session_key[..].to_vec();
         let ke3 = finish.message.serialize().to_vec();
@@ -266,6 +273,7 @@ mod tests {
         let ke2_msg =
             opaque_ke::CredentialResponse::<DefaultCipherSuite>::deserialize(&ke2).unwrap();
         let result = login_start.state.finish(
+            &mut rng,
             b"wrong-password",
             ke2_msg,
             ClientLoginFinishParameters::default(),

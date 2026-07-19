@@ -22,7 +22,7 @@ zeroize = { workspace = true }
 # Post-quantum KEM (FIPS 203 ML-KEM-768)
 ml-kem = { workspace = true }
 # OPAQUE (RFC 9807) — pure Rust, compiles on native + wasm32. No homegrown crypto.
-opaque-ke = { workspace = true, features = ["ristretto255-voprf", "argon2", "serde", "std"] }
+opaque-ke = { workspace = true, features = ["ristretto255", "argon2", "serde", "std"] }
 # Argon2 KSF type used in the OPAQUE ciphersuite definition.
 argon2 = { workspace = true }
 # AES-256-GCM for client-side media encryption (prd.md §9.2, RustCrypto — approved

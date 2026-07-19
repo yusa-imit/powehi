@@ -9,7 +9,10 @@ publish.workspace = true
 [dependencies]
 powehi-domain = { workspace = true }
 powehi-port-outbound = { workspace = true }
-opaque-ke = { workspace = true, features = ["argon2"] }
+opaque-ke = { workspace = true, features = ["ristretto255", "argon2"] }
 argon2 = { workspace = true }
+# SHA-512 for the OPAQUE AKE hash (TripleDh<Ristretto255, Sha512>) — opaque-ke 4.x
+# makes the KE hash an explicit ciphersuite parameter. Matches the client suite.
+sha2 = { workspace = true }
 rand = { workspace = true }
 tracing = { workspace = true }

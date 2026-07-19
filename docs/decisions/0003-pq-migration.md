@@ -140,7 +140,8 @@ content).
 3. **In-band notice** — send an MLS Application message of type
    `{ "type": "system_notice", "code": "pq_migration_required" }` to groups
    that still have classical-only members.
-4. **OPAQUE PQ** — upgrade `opaque-ke` to `4.x` if the PQ-hybrid OPRF is
+4. **OPAQUE PQ** — the base `opaque-ke` `4.x` (RFC 9807) upgrade already landed
+   (2026-07-19); this phase adopts its PQ-hybrid OPRF (X25519+ML-KEM-768) if
    stable by this phase.  All changes pass `crypto-reviewer` before merge.
 
 **Rollback:** revert `validate()` change; classical uploads re-accepted.
@@ -200,7 +201,8 @@ KeyPackage rotation interval may be reduced to limit store size growth.
 - [ ] **Phase B** — 95% session threshold confirmed in metrics
 - [ ] **Phase B** — classical upload deprecation (422)
 - [ ] **Phase B** — in-band migration notice messages
-- [ ] **Phase B** — `opaque-ke 4.x` PQ upgrade (if stable)
+- [x] **Base** — `opaque-ke` 3.0 → 4.0.1 RFC 9807 stable upgrade (done 2026-07-19)
+- [ ] **Phase B** — `opaque-ke 4.x` PQ-hybrid OPRF (X25519+ML-KEM-768) upgrade (if stable)
 - [ ] **Phase C** — 0.1% threshold confirmed
 - [ ] **Phase C** — hard-reject classical + DB cleanup job
 - [ ] **Phase C** — client version gate enforced
@@ -209,10 +211,17 @@ KeyPackage rotation interval may be reduced to limit store size growth.
 
 ## OPAQUE PQ path
 
-`opaque-ke 4.x` (the RFC 9807 stable release) introduces a PQ-hybrid mode using
-X25519+ML-KEM-768 for the OPRF key exchange.  Upgrade Powehi's `opaque-ke`
-dependency from `3.0` → `4.x` when it stabilises (tracking issue in
-`.claude/rules/crypto-libraries-pinned.md`).  This is a Phase B item.
+`opaque-ke 4.x` is the RFC 9807 stable release.  The base version upgrade —
+`opaque-ke` `3.0` (draft-irtf-cfrg-opaque-16) → `4.0.1` (RFC 9807 stable) — is
+**DONE** (2026-07-19): the server adapter and WASM client now run byte-for-byte
+RFC 9807 on the same Ristretto255 + TripleDH(SHA-512) + Argon2id suite.  This
+was independent of the PQ gate — it is just the RFC-stable base OPAQUE version,
+not PQ-hybrid OPAQUE.
+
+The separate, still-future upgrade is `opaque-ke` 4.x's **PQ-hybrid OPRF**
+(X25519+ML-KEM-768 for the OPRF key exchange).  Adopting the PQ-hybrid ciphersuite
+is a **Phase B item** and remains gated on the Phase B trigger; it will pass
+`crypto-reviewer` before merge.
 
 ---
 
