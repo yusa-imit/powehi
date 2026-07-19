@@ -221,6 +221,23 @@ describe("useThumbnail (prd.md §9.4.1)", () => {
 		expect(mediaDropKeyFn).toHaveBeenCalledWith(MOCK_HANDLE);
 	});
 
+	it("zeroes the local key copy even when mediaImportKey throws (crypto-reviewer YELLOW, cycle 316)", async () => {
+		let seenAtCallTime: Uint8Array | null = null;
+		mediaImportKeyFn.mockImplementationOnce(async (rawKey: Uint8Array) => {
+			seenAtCallTime = rawKey;
+			throw new Error("WASM handle table full");
+		});
+
+		const { result } = renderHook(() => useThumbnail(makeThumbnail()));
+		await act(async () => {});
+
+		expect(result.current.objectUrl).toBeNull();
+		expect(seenAtCallTime).not.toBeNull();
+		// The finally block zeroes the same Uint8Array reference the mock saw,
+		// regardless of the import throwing.
+		expect(seenAtCallTime).toEqual(new Uint8Array(32).fill(0));
+	});
+
 	it("does not call setObjectUrl after unmount (cancelled flag)", async () => {
 		// Delay decrypt so unmount happens before resolution.
 		let resolveDecrypt!: (v: { pixels: Uint8Array<ArrayBuffer> }) => void;

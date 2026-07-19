@@ -8,9 +8,10 @@
  * are only in JS memory transiently while creating the object URL.
  *
  * Security:
- * - Only the LOCAL key copy is zeroed (right after import, before decrypt even
- *   starts) — the canonical `thumbnail.key` in React `chats` state is left
- *   intact. Cycle 312 briefly zeroed the canonical array too (to close a
+ * - Only the LOCAL key copy is zeroed, in a `finally` covering the whole
+ *   import+decrypt sequence (so an import failure still zeroes it, cycle 316
+ *   YELLOW follow-up) — the canonical `thumbnail.key` in React `chats` state
+ *   is left intact. Cycle 312 briefly zeroed the canonical array too (to close a
  *   narrow raw-key-lingers-during-queue-wait window), but that broke a much
  *   more common path: `chats` state is long-lived and the message list is
  *   unvirtualized with content-derived React keys, so switching away from a
@@ -73,9 +74,11 @@ export function useThumbnail(thumbnail: ThumbnailPayload | undefined): Thumbnail
 				const ct = new Uint8Array(thumbnail.ct);
 				const iv = new Uint8Array(thumbnail.iv);
 				({ mediaKeyHandle } = await cryptoWorker.mediaImportKey(key));
-				// Zero the local key copy immediately after import (receiver-path
-				// hygiene) — before decrypt even starts, mirroring the main media-key
-				// flow.
+				// Zero the local copy immediately on the success path too (the
+				// `finally` below also zeroes it, idempotently, so an import failure
+				// is still covered) — keeps the raw-key-in-JS-memory window as tight
+				// as before the cycle-316 finally-block fix (crypto-reviewer
+				// defense-in-depth note, cycle 317).
 				key.fill(0);
 				const { pixels } = await cryptoWorker.mediaThumbnailDecryptWithHandle(
 					mediaKeyHandle,
@@ -89,6 +92,11 @@ export function useThumbnail(thumbnail: ThumbnailPayload | undefined): Thumbnail
 			} catch {
 				// Thumbnail decryption failure is non-fatal; full image will still load.
 			} finally {
+				// Zero the local key copy on every path, including a throw from
+				// `mediaImportKey` itself (crypto-reviewer YELLOW, cycle 316: the old
+				// code zeroed only after a successful import, inside the `try`, so an
+				// import failure left the local copy un-zeroed).
+				key.fill(0);
 				if (mediaKeyHandle) await cryptoWorker.mediaDropKey(mediaKeyHandle);
 			}
 		}, controller.signal).catch(() => {
