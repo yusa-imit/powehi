@@ -17,7 +17,75 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-19, cycle 320 — STABILIZATION: project-context.md archive + full sweep)
+## Current state (2026-07-19, cycle 321 — FEATURE: persist delivery/read receipts to Dexie, commit d02ece3)
+
+- `git status` clean, `gh run list --limit 5` all green at cycle start, `gh issue
+  list --state open` empty. Ruled out the two survey candidates first: an
+  Explore-agent survey confirmed "pins/mentions remain session-only" (the
+  cycle-254 next-cycle note) is now **stale** — `pinnedMessageId` was
+  persisted at schema v9 (cycle 259) and `mentionCount` at v13 (commit
+  497a148), both fully wired with rehydration; dropped that note. Instead
+  found a genuinely new, still-open gap by grepping `ChatMessage` fields
+  against `MessageRow`/`GroupRow`: `delivered`/`read`/`readBy` (delivery and
+  read receipts) had zero Dexie fields and zero persist functions — every
+  reload silently reset "seen"/"delivered" checkmarks on real receipts.
+- Delegated to `frontend-lead`: added `MessageRow.delivered?/read?/readByJson?`
+  (schema v15, additive, not sensitive — same tier as already-unencrypted
+  `senderDeviceId`/`deletedAt`, NOT added to `SENSITIVE.messages`),
+  `EncryptedPowehiDb.markMessageDelivered`/`markMessageRead`, and
+  `persistDelivered`/`persistRead` in `usePersistentMessages.ts` (exact
+  fire-and-forget + `pendingWriteIds` mirror of `persistEdit`/`persistDelete`/
+  `persistReaction`). Rehydration effect now restores `delivered`/`read`/
+  `readBy` (defensive `readByJson` parse, fails safe per-row like
+  `reactionsJson`) and the out-of-band reconciliation path now covers all
+  three fields too.
+- **Caught and fixed an agent deviation before commit:** the frontend-lead's
+  first pass called `persistRead`/`persistDelivered` **inside** the `setChats`
+  updater callback in `handleIncomingReadReceipt`/`handleIncomingDeliveryReceipt`
+  — an impure-updater side effect this file's own established convention
+  (and inline comments on `handleIncomingEdit`/`handleIncomingDelete`/
+  `handleIncomingReaction`) explicitly avoids, computing persist calls from a
+  `chatsRef.current` pre-update snapshot AFTER `setChats` instead. Rewrote
+  both handlers to match. The agent's task also silently dropped the
+  ChatLayout-level test requirement (its final message cut off mid-task) —
+  added those tests myself: 2 persistence-assertion tests in
+  `ChatLayoutReadReceipts.test.tsx` (delivery/read receipt → `db.messages.get`
+  round-trip) + 1 `readByJson`-corruption-safety rehydration test in
+  `ChatLayout.test.tsx`.
+- **security-auditor: PASS.** GREEN on encryption-tier boundary (device IDs/
+  booleans, not content), GREEN on receipt-forgery-durability (senderDeviceId
+  is server-authenticated `env.sender`, same field regular messages use;
+  `from` on rehydration is derived independently from the *original* row's
+  `senderDeviceId`, never from the receipt's sender, so a forged receipt
+  gains no more durability than it already had transiently), GREEN on
+  no-plaintext-logging, GREEN on corrupt-JSON fail-safe parsing. One **YELLOW
+  (correctness, not security, documented inline in `usePersistentMessages.ts`,
+  not fixed)**: `persistRead`'s `readBy` is a full-replace array from a
+  snapshot that can be stale by write time — two read_receipts for the same
+  message from different devices in quick succession can race and the later
+  Dexie write overwrites rather than merges the earlier one's entry,
+  undercounting "Seen by N" after a reload. In-memory state is unaffected
+  (functional `setChats` always sees true latest state); only the persisted
+  copy can lag. Same latent limitation `persistReaction` already has —
+  low severity, deferred.
+- Not architectural, no new server-visible metadata (purely local persistence
+  of receipts that were already being received over the wire) —
+  `threat-model-checker`/`crypto-reviewer` not required, consistent with how
+  cycles 252-254 scoped the identical edit/delete/reaction persistence work.
+- `tsc -b` clean, `biome check` clean (170 files). Frontend `pnpm test --run`:
+  **1331/1331 tests green** (104 files, was 1316 — net +15: 4 in
+  `encrypted-db.test.ts`, 8 in `usePersistentMessages.test.ts`, 2 in
+  `ChatLayoutReadReceipts.test.tsx`, 1 in `ChatLayout.test.tsx`). Backend
+  untouched this cycle (pure frontend/IndexedDB feature).
+- **Next cycle candidates:** the `persistRead` concurrent-readBy-overwrite
+  YELLOW noted above (low priority, cosmetic underscount only); PQ hybrid
+  Phase A (still blocked on openmls stable `MLS_128_MLKEM768` — re-check
+  periodically); OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003 Phase B
+  95%-session threshold, not yet actionable); the still-standing opaque-ke
+  live-migration login-round-trip regression test gap (cycle 318/319, no
+  prod users yet, low urgency).
+
+## Previous state (2026-07-19, cycle 320 — STABILIZATION: project-context.md archive + full sweep)
 
 - `git status` clean, `gh run list --limit 5` all green at cycle start, `gh issue
   list --state open` empty. `cargo audit` clean (653 crates, 0 advisories),
