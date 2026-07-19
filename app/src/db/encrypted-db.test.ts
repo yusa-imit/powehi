@@ -253,6 +253,55 @@ describe("EncryptedPowehiDb", () => {
 		expect(retrieved).toBeUndefined();
 	});
 
+	it("markMessageDelivered sets delivered:true on the row", async () => {
+		await encDb.addMessage({
+			id: "msg-delivered",
+			groupId: "grp-delivered",
+			ciphertextB64: "ZGVsaXZlcmVkVGFyZ2V0",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+		});
+		expect((await encDb.getMessage("msg-delivered"))?.delivered).toBeUndefined();
+
+		await encDb.markMessageDelivered("msg-delivered");
+		const retrieved = await encDb.getMessage("msg-delivered");
+		expect(retrieved?.delivered).toBe(true);
+		// Ciphertext row untouched.
+		expect(retrieved?.ciphertextB64).toBe("ZGVsaXZlcmVkVGFyZ2V0");
+	});
+
+	it("markMessageDelivered is a no-op when the target row does not exist locally", async () => {
+		await expect(encDb.markMessageDelivered("no-such-msg")).resolves.not.toThrow();
+		const retrieved = await encDb.getMessage("no-such-msg");
+		expect(retrieved).toBeUndefined();
+	});
+
+	it("markMessageRead sets read:true and stores readByJson", async () => {
+		await encDb.addMessage({
+			id: "msg-read",
+			groupId: "grp-read",
+			ciphertextB64: "cmVhZFRhcmdldA==",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+		});
+		expect((await encDb.getMessage("msg-read"))?.read).toBeUndefined();
+
+		await encDb.markMessageRead("msg-read", ["dev-2", "dev-3"]);
+		const retrieved = await encDb.getMessage("msg-read");
+		expect(retrieved?.read).toBe(true);
+		expect(retrieved?.readByJson).toBe(JSON.stringify(["dev-2", "dev-3"]));
+		// Ciphertext row untouched.
+		expect(retrieved?.ciphertextB64).toBe("cmVhZFRhcmdldA==");
+	});
+
+	it("markMessageRead is a no-op when the target row does not exist locally", async () => {
+		await expect(encDb.markMessageRead("no-such-msg", ["dev-x"])).resolves.not.toThrow();
+		const retrieved = await encDb.getMessage("no-such-msg");
+		expect(retrieved).toBeUndefined();
+	});
+
 	// crypto-reviewer finding 2 (RED): the MLS provider-state generation counter
 	// must be bundled INSIDE the same authenticated ciphertext as the state blob
 	// (a single JSON envelope, encrypted once) rather than stored as an

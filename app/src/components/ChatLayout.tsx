@@ -7285,6 +7285,8 @@ export function ChatLayout() {
 		persistEdit,
 		persistDelete,
 		persistReaction,
+		persistDelivered,
+		persistRead,
 		pendingWriteIds,
 	} = usePersistentMessages(active?.mlsGroupId);
 	const showTauriNotification = useTauriNotification();
@@ -7331,10 +7333,24 @@ export function ChatLayout() {
 					reactions = undefined;
 				}
 			}
+			// Corrupt/malformed readByJson must not abort rehydration of the whole
+			// row — fail safe by dropping just the readBy list for this one message,
+			// same defensive pattern as reactionsJson above.
+			let readBy: string[] | undefined;
+			if (row.readByJson) {
+				try {
+					readBy = JSON.parse(row.readByJson) as string[];
+				} catch {
+					readBy = undefined;
+				}
+			}
 			rehydrated.push({
 				id: row.id,
 				text: base64ToText(textB64),
 				reactions,
+				delivered: row.delivered,
+				read: row.read,
+				readBy,
 				// senderDeviceId is the authenticated-device value the server bound
 				// to the envelope at send time (AuthenticatedDevice extractor), not
 				// a client-suppliable field — but it is not an MLS-cryptographic
@@ -7381,7 +7397,10 @@ export function ChatLayout() {
 						m.text === fresh.text &&
 						!!m.edited === !!fresh.edited &&
 						!!m.deleted === !!fresh.deleted &&
-						JSON.stringify(m.reactions ?? {}) === JSON.stringify(fresh.reactions ?? {})
+						JSON.stringify(m.reactions ?? {}) === JSON.stringify(fresh.reactions ?? {}) &&
+						!!m.delivered === !!fresh.delivered &&
+						!!m.read === !!fresh.read &&
+						JSON.stringify(m.readBy ?? []) === JSON.stringify(fresh.readBy ?? [])
 					) {
 						return m;
 					}
@@ -7392,6 +7411,9 @@ export function ChatLayout() {
 						edited: fresh.edited,
 						deleted: fresh.deleted,
 						reactions: fresh.reactions,
+						delivered: fresh.delivered,
+						read: fresh.read,
+						readBy: fresh.readBy,
 					};
 				});
 				const existingIds = new Set(c.messages.map((m) => m.id).filter(Boolean));
@@ -7914,8 +7936,21 @@ export function ChatLayout() {
 					return { ...c, messages: msgs };
 				}),
 			);
+			// Recompute the same result from the pre-update snapshot to persist it —
+			// mirrors handleIncomingEdit/handleIncomingDelete/handleIncomingReaction's
+			// chatsRef.current read, since setChats is async and its updater result
+			// isn't otherwise available here (setChats updaters must stay pure — no
+			// side effects inside the .map() callback).
+			const chat = chatsRef.current.find((c) => c.mlsGroupId === gId);
+			for (const m of chat?.messages ?? []) {
+				if (!m.id || !idSet.has(m.id)) continue;
+				const readBy = m.readBy?.includes(senderDeviceId)
+					? m.readBy
+					: [...(m.readBy ?? []), senderDeviceId];
+				persistRead(m.id, readBy);
+			}
 		},
-		[],
+		[persistRead],
 	);
 
 	/**
@@ -7923,18 +7958,28 @@ export function ChatLayout() {
 	 * Sets `delivered: true` on all messages whose `id` is in `messageIds`.
 	 * Read state is not affected — a subsequent read_receipt sets `read: true`.
 	 */
-	const handleIncomingDeliveryReceipt = useCallback((gId: string, messageIds: string[]) => {
-		const idSet = new Set(messageIds);
-		setChats((cs) =>
-			cs.map((c) => {
-				if (c.mlsGroupId !== gId) return c;
-				const msgs = c.messages.map((m) =>
-					m.id && idSet.has(m.id) ? { ...m, delivered: true } : m,
-				);
-				return { ...c, messages: msgs };
-			}),
-		);
-	}, []);
+	const handleIncomingDeliveryReceipt = useCallback(
+		(gId: string, messageIds: string[]) => {
+			const idSet = new Set(messageIds);
+			setChats((cs) =>
+				cs.map((c) => {
+					if (c.mlsGroupId !== gId) return c;
+					const msgs = c.messages.map((m) =>
+						m.id && idSet.has(m.id) ? { ...m, delivered: true } : m,
+					);
+					return { ...c, messages: msgs };
+				}),
+			);
+			// Recompute from the pre-update snapshot to persist it — same convention
+			// as handleIncomingReadReceipt/handleIncomingEdit/handleIncomingDelete
+			// (setChats updaters must stay pure — no side effects inside .map()).
+			const chat = chatsRef.current.find((c) => c.mlsGroupId === gId);
+			for (const m of chat?.messages ?? []) {
+				if (m.id && idSet.has(m.id)) persistDelivered(m.id);
+			}
+		},
+		[persistDelivered],
+	);
 
 	/**
 	 * Apply an incoming edit to the target message in the matching chat.

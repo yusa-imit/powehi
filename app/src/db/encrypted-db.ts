@@ -141,6 +141,25 @@ export class EncryptedPowehiDb {
 		await this.db.messages.update(id, { reactionsJson: enc });
 	}
 
+	/**
+	 * Persist a "delivery receipt" signal: marks the row delivered so a reload
+	 * keeps showing the delivered indicator. No-op if the row does not exist
+	 * locally, same as markMessageEdited/markMessageDeleted.
+	 */
+	async markMessageDelivered(id: string): Promise<void> {
+		await this.db.messages.update(id, { delivered: true });
+	}
+
+	/**
+	 * Persist a "read receipt" signal: marks the row read and stores the full
+	 * post-mutation set of reader device IDs (caller passes the complete array,
+	 * not a diff — same convention as markMessageReactions). No-op if the row
+	 * does not exist locally.
+	 */
+	async markMessageRead(id: string, readBy: string[]): Promise<void> {
+		await this.db.messages.update(id, { read: true, readByJson: JSON.stringify(readBy) });
+	}
+
 	async getMessagesByGroup(groupId: string): Promise<MessageRow[]> {
 		const rows = await this.db.messages.where("groupId").equals(groupId).toArray();
 		const decrypted = await Promise.all(rows.map((r) => decRow(this.encryptor, r, "messages")));

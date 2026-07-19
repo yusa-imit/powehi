@@ -193,6 +193,61 @@ describe("ChatLayout — read receipt delivery UI", () => {
 		});
 	});
 
+	it("incoming delivery_receipt persists delivered:true to the Dexie row", async () => {
+		let resolveSend: (id: string) => void = () => {};
+		vi.spyOn(MessagesApiModule, "sendMessage").mockImplementation(
+			() =>
+				new Promise((resolve) => {
+					resolveSend = resolve;
+				}),
+		);
+		render(<ChatLayout />);
+		const textarea = screen.getByPlaceholderText(/Message.*—\s*encrypted/i);
+		await act(async () => {
+			fireEvent.change(textarea, { target: { value: "persist delivery test" } });
+			fireEvent.click(screen.getByRole("button", { name: /send message/i }));
+		});
+		const knownId = "env-persist-delivery-001";
+		await act(async () => {
+			resolveSend(knownId);
+		});
+		await act(async () => {
+			captureOnDeliveryReceipt?.(MAYA_GROUP_ID, [knownId], "device-peer");
+		});
+		await waitFor(async () => {
+			const row = await db.messages.get(knownId);
+			expect(row?.delivered).toBe(true);
+		});
+	});
+
+	it("incoming read_receipt persists read:true and readByJson to the Dexie row", async () => {
+		let resolveSend: (id: string) => void = () => {};
+		vi.spyOn(MessagesApiModule, "sendMessage").mockImplementation(
+			() =>
+				new Promise((resolve) => {
+					resolveSend = resolve;
+				}),
+		);
+		render(<ChatLayout />);
+		const textarea = screen.getByPlaceholderText(/Message.*—\s*encrypted/i);
+		await act(async () => {
+			fireEvent.change(textarea, { target: { value: "persist read test" } });
+			fireEvent.click(screen.getByRole("button", { name: /send message/i }));
+		});
+		const knownId = "env-persist-read-001";
+		await act(async () => {
+			resolveSend(knownId);
+		});
+		await act(async () => {
+			captureOnReadReceipt?.(MAYA_GROUP_ID, [knownId], Date.now(), "device-peer");
+		});
+		await waitFor(async () => {
+			const row = await db.messages.get(knownId);
+			expect(row?.read).toBe(true);
+			expect(row?.readByJson).toBe(JSON.stringify(["device-peer"]));
+		});
+	});
+
 	it("active+focused incoming message dispatches read receipt immediately (mlsEncrypt called twice)", async () => {
 		vi.spyOn(document, "hasFocus").mockReturnValue(true);
 		render(<ChatLayout />);

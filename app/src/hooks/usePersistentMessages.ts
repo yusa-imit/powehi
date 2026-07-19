@@ -32,6 +32,10 @@ export interface PersistedMessages {
 	persistDelete: (targetMessageId: string) => void;
 	/** Persist the current reaction map for a message so reactions survive a reload. Best-effort. */
 	persistReaction: (targetMessageId: string, reactions: Record<string, string[]>) => void;
+	/** Persist a "delivery receipt" signal so the delivered indicator survives a reload. Best-effort. */
+	persistDelivered: (targetMessageId: string) => void;
+	/** Persist a "read receipt" signal (read flag + reader device ids) so it survives a reload. Best-effort. */
+	persistRead: (targetMessageId: string, readBy: string[]) => void;
 	/**
 	 * Message ids with a persist* write currently in flight (added when a persist* call
 	 * starts, removed once its Dexie write settles). markMessageEdited/markMessageReactions
@@ -184,6 +188,49 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 		[encryptedDb],
 	);
 
+	const persistDelivered = useCallback(
+		(targetMessageId: string) => {
+			if (!encryptedDb) return;
+			setRows((prev) =>
+				prev.map((r) => (r.id === targetMessageId ? { ...r, delivered: true } : r)),
+			);
+			pendingWriteIdsRef.current.add(targetMessageId);
+			encryptedDb
+				.markMessageDelivered(targetMessageId)
+				.catch(() => setWriteErrorCount((n) => n + 1))
+				.finally(() => pendingWriteIdsRef.current.delete(targetMessageId));
+		},
+		[encryptedDb],
+	);
+
+	/**
+	 * security-auditor finding, cycle 321 (YELLOW, correctness not security):
+	 * `readBy` is a full-replace array computed by the caller from a snapshot
+	 * that may already be stale by the time this write lands — same latent
+	 * limitation `persistReaction` already has. Two read_receipts for the same
+	 * message from different sender devices arriving in quick succession can
+	 * race and the later Dexie write can overwrite (not merge) the earlier
+	 * one's entry, undercounting "Seen by N" after a reload. In-memory state
+	 * is unaffected (React's functional setChats update always sees the true
+	 * latest state); only the persisted copy can lag. Low severity (no leak,
+	 * no crash, no auth impact) — deferred, not fixed this cycle.
+	 */
+	const persistRead = useCallback(
+		(targetMessageId: string, readBy: string[]) => {
+			if (!encryptedDb) return;
+			const readByJson = JSON.stringify(readBy);
+			setRows((prev) =>
+				prev.map((r) => (r.id === targetMessageId ? { ...r, read: true, readByJson } : r)),
+			);
+			pendingWriteIdsRef.current.add(targetMessageId);
+			encryptedDb
+				.markMessageRead(targetMessageId, readBy)
+				.catch(() => setWriteErrorCount((n) => n + 1))
+				.finally(() => pendingWriteIdsRef.current.delete(targetMessageId));
+		},
+		[encryptedDb],
+	);
+
 	return {
 		rows,
 		writeErrorCount,
@@ -193,6 +240,8 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 		persistEdit,
 		persistDelete,
 		persistReaction,
+		persistDelivered,
+		persistRead,
 		pendingWriteIds: pendingWriteIdsRef.current,
 	};
 }

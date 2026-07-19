@@ -20,6 +20,12 @@ export interface MessageRow {
 	deletedAt?: number;
 	/** JSON-serialized emoji→senderDeviceId[] reaction map. Encrypted at rest like editedText. undefined = no reactions. */
 	reactionsJson?: string;
+	/** True once a peer's delivery_receipt confirmed this message reached their device. undefined = not yet delivered/unknown. */
+	delivered?: boolean;
+	/** True once a peer's read_receipt confirmed this message was read. Supersedes delivered for display. undefined = not yet read. */
+	read?: boolean;
+	/** JSON-serialized array of device IDs that have sent a read_receipt for this message (deduped). Not sensitive — opaque device ids, same tier as senderDeviceId (already unencrypted). undefined = no read_receipt yet. */
+	readByJson?: string;
 }
 
 // GroupRow — MLS group state snapshot.
@@ -260,6 +266,17 @@ export class PowehiDb extends Dexie {
 		// sensitive. No index change needed — never queried across groups, only read/written
 		// per-group.
 		this.version(14).stores({
+			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v15: added delivered, read, readByJson to MessageRow — delivery/read receipts
+		// (previously React-state-only, same gap edit/delete/reactions had before v7/v8)
+		// now survive a reload. Not sensitive (delivered/read are booleans, readByJson is
+		// a device-id list like senderDeviceId, already unencrypted) — no index change
+		// needed, never queried, only read/written per-row.
+		this.version(15).stores({
 			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
 			groups: "id, lastActivity",
 			identity: "id",

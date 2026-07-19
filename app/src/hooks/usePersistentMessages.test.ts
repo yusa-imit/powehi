@@ -411,6 +411,87 @@ describe("usePersistentMessages", () => {
 		});
 	});
 
+	it("persistDelivered marks the row delivered:true in rows state", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistIncoming(makeIncoming({ id: "delivered-target" }));
+		});
+		await act(async () => {
+			result.current.persistDelivered("delivered-target");
+		});
+
+		expect(result.current.rows[0].delivered).toBe(true);
+	});
+
+	it("persistDelivered is a no-op when the crypto worker is unavailable", async () => {
+		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(null);
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {
+			result.current.persistDelivered("delivered-target");
+		});
+		expect(result.current.rows).toHaveLength(0);
+	});
+
+	it("writeErrorCount increments when markMessageDelivered throws on persistDelivered", async () => {
+		vi.spyOn(
+			EncryptedDbModule.EncryptedPowehiDb.prototype,
+			"markMessageDelivered",
+		).mockRejectedValueOnce(new Error("db full"));
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistDelivered("delivered-target");
+		});
+
+		await waitFor(() => {
+			expect(result.current.writeErrorCount).toBe(1);
+		});
+	});
+
+	it("persistRead marks the row read:true and stores readByJson in rows state", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistIncoming(makeIncoming({ id: "read-target" }));
+		});
+		await act(async () => {
+			result.current.persistRead("read-target", ["dev-a", "dev-b"]);
+		});
+
+		expect(result.current.rows[0].read).toBe(true);
+		expect(result.current.rows[0].readByJson).toBe(JSON.stringify(["dev-a", "dev-b"]));
+	});
+
+	it("persistRead is a no-op when the crypto worker is unavailable", async () => {
+		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(null);
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {
+			result.current.persistRead("read-target", ["dev-a"]);
+		});
+		expect(result.current.rows).toHaveLength(0);
+	});
+
+	it("writeErrorCount increments when markMessageRead throws on persistRead", async () => {
+		vi.spyOn(
+			EncryptedDbModule.EncryptedPowehiDb.prototype,
+			"markMessageRead",
+		).mockRejectedValueOnce(new Error("db full"));
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistRead("read-target", ["dev-a"]);
+		});
+
+		await waitFor(() => {
+			expect(result.current.writeErrorCount).toBe(1);
+		});
+	});
+
 	it("pendingWriteIds tracks a persistEdit write in flight and clears once it settles", async () => {
 		let resolveWrite: () => void = () => {};
 		const writePromise = new Promise<void>((resolve) => {
@@ -465,6 +546,60 @@ describe("usePersistentMessages", () => {
 			await writePromise.catch(() => {});
 		});
 		expect(result.current.pendingWriteIds.has("pending-reaction-target")).toBe(false);
+		expect(result.current.writeErrorCount).toBe(1);
+	});
+
+	it("pendingWriteIds tracks a persistDelivered write in flight and clears once it settles", async () => {
+		let resolveWrite: () => void = () => {};
+		const writePromise = new Promise<void>((resolve) => {
+			resolveWrite = resolve;
+		});
+		vi.spyOn(
+			EncryptedDbModule.EncryptedPowehiDb.prototype,
+			"markMessageDelivered",
+		).mockReturnValueOnce(writePromise);
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+		await act(async () => {
+			result.current.persistIncoming(makeIncoming({ id: "pending-delivered-target" }));
+		});
+
+		act(() => {
+			result.current.persistDelivered("pending-delivered-target");
+		});
+		expect(result.current.pendingWriteIds.has("pending-delivered-target")).toBe(true);
+
+		await act(async () => {
+			resolveWrite();
+			await writePromise;
+		});
+		expect(result.current.pendingWriteIds.has("pending-delivered-target")).toBe(false);
+	});
+
+	it("pendingWriteIds clears a persistRead write even when the underlying write rejects", async () => {
+		let rejectWrite: (err: Error) => void = () => {};
+		const writePromise = new Promise<void>((_resolve, reject) => {
+			rejectWrite = reject;
+		});
+		vi.spyOn(EncryptedDbModule.EncryptedPowehiDb.prototype, "markMessageRead").mockReturnValueOnce(
+			writePromise,
+		);
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+		await act(async () => {
+			result.current.persistIncoming(makeIncoming({ id: "pending-read-target" }));
+		});
+
+		act(() => {
+			result.current.persistRead("pending-read-target", ["dev-a"]);
+		});
+		expect(result.current.pendingWriteIds.has("pending-read-target")).toBe(true);
+
+		await act(async () => {
+			rejectWrite(new Error("db full"));
+			await writePromise.catch(() => {});
+		});
+		expect(result.current.pendingWriteIds.has("pending-read-target")).toBe(false);
 		expect(result.current.writeErrorCount).toBe(1);
 	});
 

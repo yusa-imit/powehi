@@ -2552,6 +2552,27 @@ describe("ChatLayout", () => {
 			expect(screen.queryByTestId("reaction-chips")).not.toBeInTheDocument();
 		});
 
+		it("skips readByJson that fails to parse without crashing the whole row", async () => {
+			await db.messages.bulkPut([
+				seedRow({
+					id: "rehydrate-bad-readby-1",
+					groupId: MAYA_GROUP,
+					receivedAt: 1000,
+					plaintextB64: textToBase64("still renders despite bad readBy json"),
+					read: true,
+					readByJson: "{not valid json",
+				}),
+			]);
+
+			expect(() => render(<ChatLayout />)).not.toThrow();
+
+			await waitFor(() => {
+				expect(screen.getAllByText("still renders despite bad readBy json").length).toBeGreaterThan(
+					0,
+				);
+			});
+		});
+
 		it("restores a persisted pinned message on mount for the active chat", async () => {
 			await db.messages.bulkPut([
 				seedRow({
