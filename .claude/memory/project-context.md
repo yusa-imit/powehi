@@ -17,7 +17,45 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-19, cycle 316 — FEATURE: fix cycle-312 thumbnail canonical-key-zeroing regression + NIST citation fix, commit f84ed5a)
+## Current state (2026-07-19, cycle 317 — FEATURE: zero useThumbnail local key on import-failure path, commit bd39572)
+
+- `git status` clean, `gh run list --limit 3` all green at cycle start. `gh issue
+  list --state open` empty. Picked the trivial cycle-316-flagged YELLOW from the
+  "next cycle candidates" list: `useThumbnail.ts`'s local raw-key `Uint8Array` copy
+  was zeroed via `key.fill(0)` placed inside the `try` block right after a
+  successful `mediaImportKey` await — if `mediaImportKey` itself threw, that line
+  was never reached, leaving the local copy un-zeroed (low severity: the object
+  just goes out of scope for GC, and the canonical `thumbnail.key` already persists
+  in long-lived `chats` state regardless — but a real hygiene gap vs. the
+  `mediaTransfer.ts` `try {...} finally { mediaKey.fill(0) }` pattern this file's
+  own doc comment says it mirrors).
+- **Fix:** moved `key.fill(0)` into the existing `finally` block (which already
+  unconditionally drops the WASM key handle), so it now runs on every exit path —
+  success, decrypt failure, or an `mediaImportKey` throw. Kept an additional
+  idempotent `key.fill(0)` immediately after a successful import too, so the
+  success-path zeroing window stays as tight as before this change (crypto-reviewer
+  defense-in-depth suggestion, adopted).
+- **crypto-reviewer: GREEN** (one informational YELLOW noting the finally-only
+  version would slightly widen the success-path window — addressed by keeping
+  the immediate post-import zero in addition to the finally one, both idempotent).
+  Confirmed: doesn't touch/reintroduce zeroing of the canonical `thumbnail.key`
+  (cycle 316's revert stays intact); outer `mediaHandleLimiter(...).catch()`
+  abort-before-run zeroing path unaffected, no double-issue.
+- Not architectural, no new server-visible metadata — `threat-model-checker` not
+  required (same scoping as cycle 316 for this file).
+- New regression test: `mediaImportKey` rejects → asserts the same `Uint8Array`
+  reference the mock received is all-zero after the hook settles. Frontend:
+  `tsc -b` clean, `biome check` clean, full suite **1316/1316 tests green**
+  (104 files, was 1315, net +1).
+- **Next cycle candidates:** PQ hybrid Phase A (still blocked on openmls stable
+  `MLS_128_MLKEM768` — unverified for several cycles now whether that's still
+  true, worth a fresh check rather than continuing to assume) and the standing
+  `.claude/memory/project-context.md` file-size hygiene note — file was already
+  ~620KB before this entry; a STABILIZATION cycle should truncate/archive older
+  "Previous state" entries (e.g. keep last ~30 cycles inline, move the rest to a
+  dated archive file) rather than letting it grow unbounded.
+
+## Previous state (2026-07-19, cycle 316 — FEATURE: fix cycle-312 thumbnail canonical-key-zeroing regression + NIST citation fix, commit f84ed5a)
 
 - `git status` clean, `gh run list --limit 3` all green at cycle start (cycle 315's
   CI-red + flaky-test fix had already landed and gone green). `gh issue list --state
