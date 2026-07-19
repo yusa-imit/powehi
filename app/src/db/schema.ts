@@ -59,6 +59,8 @@ export interface GroupRow {
 	unread?: number;
 	/** id of the earliest unread MessageRow in this chat, used to restore the "New Messages" divider position after a reload. Not sensitive — an opaque UUID reference, not content, like pinnedMessageId. */
 	firstUnreadMessageId?: string;
+	/** Admin-configured slow-mode cooldown in seconds between messages for this group. undefined/0 = off. Not sensitive — a bounded enum-like number, like disappearingTtlSeconds. */
+	slowModeDelay?: number;
 }
 
 // LocalIdentity — singleton device identity record.
@@ -277,6 +279,16 @@ export class PowehiDb extends Dexie {
 		// a device-id list like senderDeviceId, already unencrypted) — no index change
 		// needed, never queried, only read/written per-row.
 		this.version(15).stores({
+			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v16: added slowModeDelay to GroupRow — the admin-configured per-chat slow-mode
+		// cooldown (previously React-state-only, same gap disappearingTtlSeconds/chatTheme
+		// had before v6/v12) now survives a reload. Not sensitive (a bounded number, like
+		// disappearingTtlSeconds) — no index change needed, never queried across groups.
+		this.version(16).stores({
 			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
 			groups: "id, lastActivity",
 			identity: "id",

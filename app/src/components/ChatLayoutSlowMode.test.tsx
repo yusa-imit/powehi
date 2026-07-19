@@ -3,12 +3,14 @@
  * Admins can set a per-message cooldown delay (Off / 5s / 30s / 1m / 5m / 1h).
  * While the cooldown is active, the send button is replaced with a countdown badge.
  */
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db/schema";
 import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
 import * as AuthStore from "../store/auth";
 import { ChatLayout } from "./ChatLayout";
+
+const DESIGN_TEAM_GROUP_ID = "44444444-4444-4444-4444-444444444444";
 
 const MOCK_WORKER = {
 	mlsGroupMembers: vi.fn(async () => [
@@ -173,5 +175,47 @@ describe("ChatLayout — slow mode", () => {
 		openDesignTeamInfo();
 		const sel = screen.getByTestId("slow-mode-select") as HTMLSelectElement;
 		expect(sel.value).toBe("0");
+	});
+
+	it("persists the chosen slow-mode delay to Dexie GroupRow so it survives a reload", async () => {
+		vi.useRealTimers();
+		await db.groups.clear();
+		await db.groups.add({
+			id: DESIGN_TEAM_GROUP_ID,
+			name: "Design Team",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+		});
+		vi.spyOn(AuthStore.useAuthStore, "getState").mockReturnValue({
+			myHandle: "finn",
+		} as ReturnType<typeof AuthStore.useAuthStore.getState>);
+		render(<ChatLayout />);
+		openDesignTeamInfo();
+		fireEvent.change(screen.getByTestId("slow-mode-select"), { target: { value: "60" } });
+		await waitFor(async () => {
+			const row = await db.groups.get(DESIGN_TEAM_GROUP_ID);
+			expect(row?.slowModeDelay).toBe(60);
+		});
+	});
+
+	it("rehydrates a persisted slow-mode delay from Dexie when switching to that chat", async () => {
+		vi.useRealTimers();
+		await db.groups.clear();
+		await db.groups.add({
+			id: DESIGN_TEAM_GROUP_ID,
+			name: "Design Team",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+			slowModeDelay: 300,
+		});
+		vi.spyOn(AuthStore.useAuthStore, "getState").mockReturnValue({
+			myHandle: "finn",
+		} as ReturnType<typeof AuthStore.useAuthStore.getState>);
+		render(<ChatLayout />);
+		openDesignTeamInfo();
+		await waitFor(() => {
+			const sel = screen.getByTestId("slow-mode-select") as HTMLSelectElement;
+			expect(sel.value).toBe("300");
+		});
 	});
 });

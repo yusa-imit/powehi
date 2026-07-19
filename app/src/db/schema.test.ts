@@ -113,6 +113,29 @@ describe("PowehiDb", () => {
 		expect(grp?.chatTheme).toBeUndefined();
 	});
 
+	it("stores and retrieves slowModeDelay on GroupRow (v16)", async () => {
+		await db.groups.add({
+			id: "grp-v16",
+			name: "Slow Mode Group",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+			slowModeDelay: 30,
+		});
+		const grp = await db.groups.get("grp-v16");
+		expect(grp?.slowModeDelay).toBe(30);
+	});
+
+	it("leaves slowModeDelay undefined when not set (v16)", async () => {
+		await db.groups.add({
+			id: "grp-v16-default",
+			name: "Default Group",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+		});
+		const grp = await db.groups.get("grp-v16-default");
+		expect(grp?.slowModeDelay).toBeUndefined();
+	});
+
 	it("queries messages by groupId index", async () => {
 		await db.messages.bulkAdd([
 			{

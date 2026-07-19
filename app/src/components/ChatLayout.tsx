@@ -7436,6 +7436,7 @@ export function ChatLayout() {
 			return;
 		}
 		const groupId = active.mlsGroupId;
+		const chatId = activeId;
 		db.groups
 			.get(groupId)
 			.then((row) => {
@@ -7446,6 +7447,15 @@ export function ChatLayout() {
 				);
 				setPersistedPinnedMessageId(row?.pinnedMessageId);
 				setPersistedFirstUnreadMessageId(row?.firstUnreadMessageId);
+				// Rehydrate the admin-configured slow-mode cooldown (previously React-state-only,
+				// same gap disappearingTtl/pinnedMessageId had before v6/v9) — keyed by chat id
+				// (like the in-memory slowModeDelay Record), not groupId.
+				if (
+					row?.slowModeDelay !== undefined &&
+					SLOW_MODE_OPTIONS.includes(row.slowModeDelay as SlowModeDelay)
+				) {
+					setSlowModeDelay((prev) => ({ ...prev, [chatId]: row.slowModeDelay as SlowModeDelay }));
+				}
 				// Rehydrate mute/sound/vibrate/theme/notification-sound/unread prefs (previously
 				// React-state-only, same gap disappearingTtl/pinnedMessageId had before v6/v9).
 				// Only overwrite a field the row actually has a value for — undefined leaves
@@ -7480,7 +7490,7 @@ export function ChatLayout() {
 		return () => {
 			cancelled = true;
 		};
-	}, [active?.mlsGroupId]);
+	}, [active?.mlsGroupId, activeId]);
 
 	// Apply the persisted pin state (loaded above) to the active chat once its messages
 	// exist. Deliberately a separate effect from the fetch above and re-keyed on `rows`:
@@ -8315,6 +8325,17 @@ export function ChatLayout() {
 
 	const handleUpdateGroupDescription = useCallback((chatId: string, desc: string) => {
 		setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, description: desc } : c)));
+	}, []);
+
+	/** Set the admin-configured slow-mode cooldown for a group chat. Local-only — no MLS
+	 * message sent, no server contact. Persisted to Dexie (GroupRow.slowModeDelay, schema
+	 * v16) so it survives a reload, mirroring handleSetChatTheme/handleToggleMute. */
+	const handleSetSlowMode = useCallback((chatId: string, delay: SlowModeDelay) => {
+		setSlowModeDelay((prev) => ({ ...prev, [chatId]: delay }));
+		const chat = chatsRef.current.find((c) => c.id === chatId);
+		if (chat?.mlsGroupId) {
+			db.groups.update(chat.mlsGroupId, { slowModeDelay: delay }).catch(() => {});
+		}
 	}, []);
 
 	/** Set (or clear) the per-chat background theme. Local-only — never sent to server.
@@ -9393,7 +9414,7 @@ export function ChatLayout() {
 					onOpenLightbox={handleOpenLightbox}
 					onOpenDm={handleOpenDmFromMember}
 					slowModeDelay={slowModeDelay[active.id] ?? 0}
-					onSetSlowMode={(d) => setSlowModeDelay((prev) => ({ ...prev, [active.id]: d }))}
+					onSetSlowMode={(d) => handleSetSlowMode(active.id, d)}
 					isAdmin={
 						active.members?.some(
 							(m) =>
