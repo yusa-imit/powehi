@@ -70,6 +70,9 @@ export interface GroupRow {
 	/** True when the chat is pinned to the top of the sidebar list. Local-only, never
 	 * sent to server. Not sensitive — a boolean flag, like muted/vibrate. */
 	pinnedTop?: boolean;
+	/** Group description / topic text, group chats only. SENSITIVE — real user-authored
+	 * content describing the group, same tier as name/draft, encrypted at rest. */
+	description?: string;
 }
 
 // LocalIdentity — singleton device identity record.
@@ -319,6 +322,17 @@ export class PowehiDb extends Dexie {
 		// had before v12) now survive a reload. Not sensitive (booleans, like muted/vibrate)
 		// — no index change needed, never queried across groups, only read/written per-group.
 		this.version(18).stores({
+			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v19: added description to GroupRow — the InfoPanel group topic editor (previously
+		// React-state-only, same gap draft had before v17) now survives a reload. Unlike
+		// archived/pinnedTop, this IS sensitive — real user-authored content, same tier as
+		// name/draft — so it's encrypted at rest (SENSITIVE.groups in encrypted-db.ts). No
+		// index change needed — never queried across groups.
+		this.version(19).stores({
 			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
 			groups: "id, lastActivity",
 			identity: "id",

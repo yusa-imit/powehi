@@ -34,7 +34,7 @@ import type { PowehiDb } from "./schema";
 // secret (schema.ts).
 const SENSITIVE: Record<string, readonly string[]> = {
 	messages: ["ciphertextB64", "plaintextB64", "editedText", "reactionsJson"],
-	groups: ["mlsStateB64", "name", "draft"],
+	groups: ["mlsStateB64", "name", "draft", "description"],
 	identity: ["mlsProviderStateB64"],
 	verifiedContacts: ["safetyNumber"],
 };
@@ -272,6 +272,31 @@ export class EncryptedPowehiDb {
 		const row = await this.db.groups.get(groupId);
 		if (!row?.draft) return undefined;
 		return this.encryptor.decryptDbField(row.draft);
+	}
+
+	/**
+	 * Persist the group description / topic text (encrypted at rest — real user-authored
+	 * content, same sensitivity tier as name/draft). Pass undefined to clear. Uses a
+	 * partial Dexie update so mlsStateB64/name/draft are never touched. No-op if the
+	 * group row does not exist yet.
+	 */
+	async setGroupDescription(groupId: string, description: string | undefined): Promise<void> {
+		await this.db.transaction("rw", this.db.groups, async () => {
+			const enc =
+				description === undefined
+					? undefined
+					: await Dexie.waitFor(this.encryptor.encryptDbField(description));
+			await this.db.groups.update(groupId, { description: enc });
+		});
+	}
+
+	/**
+	 * Read and decrypt the group description / topic text.
+	 */
+	async getGroupDescription(groupId: string): Promise<string | undefined> {
+		const row = await this.db.groups.get(groupId);
+		if (!row?.description) return undefined;
+		return this.encryptor.decryptDbField(row.description);
 	}
 
 	// ── Identity ───────────────────────────────────────────────────────────────

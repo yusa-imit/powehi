@@ -185,6 +185,29 @@ describe("PowehiDb", () => {
 		expect(grp?.pinnedTop).toBeUndefined();
 	});
 
+	it("stores and retrieves description on GroupRow (v19, raw store — encryption is EncryptedPowehiDb's job)", async () => {
+		await db.groups.add({
+			id: "grp-v19",
+			name: "Described Group",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+			description: "Where we plan the launch",
+		});
+		const grp = await db.groups.get("grp-v19");
+		expect(grp?.description).toBe("Where we plan the launch");
+	});
+
+	it("leaves description undefined when not set (v19)", async () => {
+		await db.groups.add({
+			id: "grp-v19-default",
+			name: "Default Group",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+		});
+		const grp = await db.groups.get("grp-v19-default");
+		expect(grp?.description).toBeUndefined();
+	});
+
 	it("queries messages by groupId index", async () => {
 		await db.messages.bulkAdd([
 			{

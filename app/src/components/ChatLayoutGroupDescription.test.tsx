@@ -146,4 +146,55 @@ describe("ChatLayout — group description", () => {
 			expect(screen.queryByTestId("group-description-text")).not.toBeInTheDocument(),
 		);
 	});
+
+	// ── Dexie persistence (schema v19, GroupRow.description — encrypted at rest) ──
+
+	const DESIGN_TEAM_GROUP_ID = "44444444-4444-4444-4444-444444444444";
+
+	it("persists a saved description to Dexie GroupRow so it survives a reload", async () => {
+		await db.groups.clear();
+		await db.groups.add({
+			id: DESIGN_TEAM_GROUP_ID,
+			name: "Design Team",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+		});
+		render(<ChatLayout />);
+		fireEvent.click(screen.getByRole("button", { name: /design team/i }));
+		await waitFor(() => expect(screen.getByTestId("group-status")).toBeInTheDocument());
+		fireEvent.click(screen.getByRole("button", { name: /info|conversation info/i }));
+		await waitFor(() => expect(screen.getByTestId("group-description-text")).toBeInTheDocument());
+
+		fireEvent.click(screen.getByTestId("group-description-edit-btn"));
+		fireEvent.change(screen.getByTestId("group-description-input"), {
+			target: { value: "Persisted topic text" },
+		});
+		fireEvent.click(screen.getByTestId("group-description-save"));
+
+		await waitFor(async () => {
+			const row = await db.groups.get(DESIGN_TEAM_GROUP_ID);
+			expect(row?.description).toBe("Persisted topic text");
+		});
+	});
+
+	it("rehydrates a persisted description from Dexie when switching to that chat", async () => {
+		await db.groups.clear();
+		await db.groups.add({
+			id: DESIGN_TEAM_GROUP_ID,
+			name: "Design Team",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+			description: "saved from before reload",
+		});
+		render(<ChatLayout />);
+		fireEvent.click(screen.getByRole("button", { name: /design team/i }));
+		await waitFor(() => expect(screen.getByTestId("group-status")).toBeInTheDocument());
+		fireEvent.click(screen.getByRole("button", { name: /info|conversation info/i }));
+
+		await waitFor(() =>
+			expect(screen.getByTestId("group-description-text")).toHaveTextContent(
+				"saved from before reload",
+			),
+		);
+	});
 });

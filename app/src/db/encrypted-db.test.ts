@@ -237,6 +237,66 @@ describe("EncryptedPowehiDb", () => {
 		expect(rawRow?.draft).toMatch(/^[A-Za-z0-9\-_]+$/);
 	});
 
+	it("getGroupDescription returns undefined for unknown group", async () => {
+		const description = await encDb.getGroupDescription("no-such-group");
+		expect(description).toBeUndefined();
+	});
+
+	it("setGroupDescription persists and getGroupDescription reads it back", async () => {
+		await encDb.addGroup({
+			id: "grp-desc",
+			name: "Description Group",
+			mlsStateB64: "c3RhdGU=",
+			lastActivity: 1000,
+		});
+		await encDb.setGroupDescription("grp-desc", "Where we plan the launch");
+		const description = await encDb.getGroupDescription("grp-desc");
+		expect(description).toBe("Where we plan the launch");
+	});
+
+	it("setGroupDescription can clear the description (undefined)", async () => {
+		await encDb.addGroup({
+			id: "grp-desc2",
+			name: "Description Group 2",
+			mlsStateB64: "c3RhdGUy",
+			lastActivity: 2000,
+		});
+		await encDb.setGroupDescription("grp-desc2", "will be cleared");
+		await encDb.setGroupDescription("grp-desc2", undefined);
+		const description = await encDb.getGroupDescription("grp-desc2");
+		expect(description).toBeUndefined();
+	});
+
+	it("setGroupDescription does not disturb encrypted mlsStateB64/name", async () => {
+		await encDb.addGroup({
+			id: "grp-desc3",
+			name: "State-Check Group",
+			mlsStateB64: "c2Vuc2l0aXZlLXN0YXRl",
+			lastActivity: 3000,
+		});
+		await encDb.setGroupDescription("grp-desc3", "description text here");
+		const group = await encDb.getGroup("grp-desc3");
+		expect(group?.mlsStateB64).toBe("c2Vuc2l0aXZlLXN0YXRl");
+		expect(group?.name).toBe("State-Check Group");
+		expect(group?.description).toBe("description text here");
+	});
+
+	it("raw DB stores an encrypted blob — not the original plaintext description", async () => {
+		await encDb.addGroup({
+			id: "grp-desc4",
+			name: "Description Group 4",
+			mlsStateB64: "c3RhdGU0",
+			lastActivity: 4000,
+		});
+		const originalDescription = "a secret group topic";
+		await encDb.setGroupDescription("grp-desc4", originalDescription);
+
+		const rawRow = await rawDb.groups.get("grp-desc4");
+		expect(rawRow?.description).toBeDefined();
+		expect(rawRow?.description).not.toBe(originalDescription);
+		expect(rawRow?.description).toMatch(/^[A-Za-z0-9\-_]+$/);
+	});
+
 	it("markMessageEdited persists the new text (encrypted at rest) and survives reload", async () => {
 		await encDb.addMessage({
 			id: "msg-edit",

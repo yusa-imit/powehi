@@ -7518,6 +7518,21 @@ export function ChatLayout() {
 						})
 						.catch(() => {});
 				}
+				// Rehydrate the group description / topic (previously React-state-only, same
+				// gap draft had before v17). Encrypted at rest like draft, so decrypted from
+				// the already-fetched `row` rather than a second db.groups.get() (same race-
+				// avoidance rationale as the draft rehydration above).
+				if (row?.description && cryptoWorker) {
+					cryptoWorker
+						.decryptDbField(row.description)
+						.then((description) => {
+							if (cancelled || !description) return;
+							setChats((cs) =>
+								cs.map((c) => (c.mlsGroupId === groupId ? { ...c, description } : c)),
+							);
+						})
+						.catch(() => {});
+				}
 			})
 			.catch(() => {
 				if (!cancelled) {
@@ -8375,9 +8390,19 @@ export function ChatLayout() {
 		}
 	}, []);
 
-	const handleUpdateGroupDescription = useCallback((chatId: string, desc: string) => {
-		setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, description: desc } : c)));
-	}, []);
+	/** Update a group's description / topic text. Local-only — no MLS message sent, no
+	 * server contact. Persisted to Dexie (GroupRow.description, schema v19), encrypted
+	 * at rest like name/draft — this is real user-authored content, not a UI preference. */
+	const handleUpdateGroupDescription = useCallback(
+		(chatId: string, desc: string) => {
+			setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, description: desc } : c)));
+			const chat = chatsRef.current.find((c) => c.id === chatId);
+			if (chat?.mlsGroupId && encryptedDb) {
+				encryptedDb.setGroupDescription(chat.mlsGroupId, desc || undefined).catch(() => {});
+			}
+		},
+		[encryptedDb],
+	);
 
 	/** Update the per-chat unsent composer draft and persist it to Dexie (GroupRow.draft,
 	 * schema v17). Unlike the mute/theme/slowMode handlers below, this is real unsent
