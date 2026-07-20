@@ -17,7 +17,106 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-20, cycle 325 — STABILIZATION: land orphaned draft-persistence work + full sweep, commit c1ab6d5)
+## Current state (2026-07-20, cycle 326 — FEATURE: persist chat archived/pinnedTop flags to Dexie, commit a42849b)
+
+- `git status` at cycle start was **not clean**: cycle 325's own memory-update
+  chore commit had never landed (its `project-context.md` edit sat uncommitted
+  while the feature commit `c1ab6d5` it documented did land) — this is the
+  same "cycle silently fails to commit" pattern flagged as a watch-item at the
+  end of cycle 325's entry. Committed it first as `782f8eb` before starting
+  this cycle's own work, so it doesn't compound a third time.
+- `gh run list --limit 3` all green at cycle start (the cycle-325 draft-
+  persistence push), `gh issue list --state open` empty. No unchecked `- [ ]`
+  items remain in the phase checklist (all 6 phases complete, confirmed via
+  grep) — same opportunistic-gap-finding mode as cycles 312-325.
+- Delegated the survey to an Explore agent (grep `useState` near the top of
+  `ChatLayout.tsx`, cross-reference against `GroupRow`/rehydration/persist
+  call sites, rule out already-fixed fields): it surfaced **six** genuine
+  candidates — `archived`, `pinnedTop`, `description`, `nickname` (all
+  `Chat`/`GroupRow`-shaped), `starred` (`MessageRow`-shaped), and
+  `customStatus` (user-global, not per-chat). Verified the top two myself
+  before touching anything (`grep archived`/`pinnedTop` across
+  `schema.ts`/`encrypted-db.ts` — zero hits, confirming no persistence
+  existed) rather than taking the agent's word.
+- **Picked `archived` + `pinnedTop` as one batch** (not all six) — same
+  scope-discipline as every prior cycle in this series, but batched these two
+  specifically because they're byte-identical-shape one-line boolean toggles
+  sitting directly adjacent to each other in the handler block (mirrors the
+  v12 precedent, which batched 5 fields — muted/sound/vibrate/
+  notificationSoundId/chatTheme — into one version bump for the same reason).
+  `description`/`nickname`/`starred`/`customStatus` are a different shape
+  (string content, message-level, and user-global respectively) — left for
+  future cycles, noted below.
+- **Fix (self-implemented, small well-established pattern, no delegation
+  needed):** added `GroupRow.archived?: boolean` and `GroupRow.pinnedTop?:
+  boolean` (schema v18, additive, not sensitive — same tier as
+  `muted`/`vibrate`, confirmed `SENSITIVE.groups` in `encrypted-db.ts` still
+  `["mlsStateB64", "name", "draft"]` only). `handleToggleArchive`/
+  `handleTogglePinTop` now call `db.groups.update(chat.mlsGroupId, {
+  archived/pinnedTop: ... }).catch(() => {})` mirroring `handleToggleMute`/
+  `handleToggleVibrate` exactly. Rehydration added to the existing "load
+  persisted disappearing timer/mute/sound/vibrate/..." effect's `setChats`
+  block, keyed by `mlsGroupId` like the sibling fields (only fires on
+  chat-switch, not a full-list rehydrate on mount — same known limitation
+  the muted/chatTheme fields already have, not a new gap introduced here).
+  Also mirrored the pre-existing in-memory "incoming message auto-unarchives"
+  rule (`archived: c.archived ? false : c.archived` at line ~7655) into the
+  persisted `groupUpdate` object at the incoming-message handler's
+  `db.groups.update(msg.groupId, groupUpdate)` call (same call that already
+  persists `mentionCount`/`unread`/`firstUnreadMessageId`) — without this the
+  persisted flag would go stale relative to the sidebar after an auto-
+  unarchive, surviving a reload as "still archived" when the UI had already
+  shown it unarchived.
+- **security-auditor: GREEN, no findings.** Independently verified (not
+  taken on the diff's own comments): both fields correctly excluded from
+  `SENSITIVE.groups`, no plaintext logging/oracle/injection surface (plain
+  booleans, only ever rendered as `?/:` conditionals), `db.groups.update`
+  partial-merge + `.catch(() => {})` cannot corrupt sibling encrypted fields
+  on write failure, the auto-unarchive-persisted-write is *safer* than the
+  mentionCount/unread precedent it rides alongside (writes only the constant
+  `false`, idempotent, monotonic toward unarchived — cannot produce an
+  inconsistent intermediate the way a counter increment could), and grep
+  confirmed `archived`/`pinnedTop` never reach any API client/WebSocket/MLS
+  payload. Agreed threat-model-checker/crypto-reviewer scoping (not required)
+  is correct — same class as the v12/v16 non-sensitive-boolean additions.
+- Not architectural, no new server-visible metadata — `threat-model-checker`/
+  `crypto-reviewer` not required, same scoping as chatTheme/muted/slowMode/
+  draft persistence work in cycles 312-325.
+- 6 new tests: 2 in `schema.test.ts` (store/retrieve both v18 fields, leave
+  undefined when unset), 2 in `ChatLayoutArchive.test.tsx` (persist-on-toggle
+  round-trips through `db.groups.get`, rehydrate-on-chat-switch restores
+  "Unarchive Chat" label from a pre-seeded row), 2 in
+  `ChatLayoutPinTop.test.tsx` (same pair for pinnedTop). Had to seed
+  `db.groups` explicitly via `db.groups.clear()` + `.add()` before each
+  persistence test — confirmed (same as the existing mute/slowMode
+  persistence tests) that `db.groups` starts empty in tests; the initial
+  sidebar list comes from the in-memory `SEED_CHATS` constant, not a Dexie
+  read, so a toggle handler's `db.groups.update()` on an unseeded row would
+  silently no-op rather than error. `tsc -b` clean, `biome check` clean (5
+  touched files). Frontend `pnpm test --run`: **1353/1353 tests green** (104
+  files, was 1347, net +6). Backend untouched this cycle (pure
+  frontend/Dexie change, confirmed via `git diff --name-only`).
+- **Next cycle candidates:** the remaining four gaps from this cycle's
+  Explore-agent survey — `description` (`Chat.description`, group topic
+  editor), `nickname` (per-DM nickname editor), `starred` (`MessageRow`-
+  shaped, star/bookmark on messages — would need a `MessageRow.starred`
+  field + rehydration in the message-loading path, not the group-rehydration
+  effect), and `customStatus` (user-global emoji+text status, would need a
+  new `LocalIdentity.customStatus` field, not `GroupRow`-shaped like the
+  other five) — all confirmed real gaps, not yet fixed, ranked in that order
+  by the survey; PQ hybrid Phase A (still blocked on openmls stable
+  `MLS_128_MLKEM768` — this environment has no network access to re-check
+  crates.io this cycle, confirmed via failed `curl`; a future cycle with
+  network access should re-check); OPAQUE PQ-hybrid OPRF upgrade (gated on
+  ADR-0003 Phase B 95%-session threshold, not yet actionable); the
+  still-standing opaque-ke live-migration login-round-trip regression test
+  gap (cycle 318/319, no prod users yet, low urgency); `.claude/memory/
+  project-context.md` file size (~222KB / 2900+ lines after this entry, was
+  216KB at cycle 325) — still under the 256KB Read cap but climbing again,
+  worth archiving older cycles at the next STABILIZATION cycle (330) if the
+  growth rate continues.
+
+## Previous state (2026-07-20, cycle 325 — STABILIZATION: land orphaned draft-persistence work + full sweep, commit c1ab6d5)
 
 - `git status` at cycle start was **not clean** — cycle 324 apparently ran an
   entire FEATURE cycle (implementing per-chat unsent-composer-draft
