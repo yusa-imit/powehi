@@ -8,6 +8,7 @@
 // the CryptoKey never crosses into the main thread (react-hooks-only.md).
 // Tests use DirectFieldEncryptor from encryption.ts for isolation.
 
+import Dexie from "dexie";
 import type { FieldEncryptor } from "./encryption";
 import type { GroupRow, LocalIdentity, MessageRow, VerifiedContact } from "./schema";
 import type { PowehiDb } from "./schema";
@@ -33,7 +34,7 @@ import type { PowehiDb } from "./schema";
 // secret (schema.ts).
 const SENSITIVE: Record<string, readonly string[]> = {
 	messages: ["ciphertextB64", "plaintextB64", "editedText", "reactionsJson"],
-	groups: ["mlsStateB64", "name"],
+	groups: ["mlsStateB64", "name", "draft"],
 	identity: ["mlsProviderStateB64"],
 	verifiedContacts: ["safetyNumber"],
 };
@@ -243,6 +244,34 @@ export class EncryptedPowehiDb {
 	 */
 	async setGroupDisappearingTtl(groupId: string, ttl: number | undefined): Promise<void> {
 		await this.db.groups.update(groupId, { disappearingTtlSeconds: ttl });
+	}
+
+	/**
+	 * Persist the per-conversation unsent composer draft (encrypted at rest — this is
+	 * real unsent message content, same sensitivity tier as name/editedText, unlike the
+	 * plain per-group preference fields above). Pass undefined to clear. Uses a partial
+	 * Dexie update so mlsStateB64/name are never touched. No-op if the group row does
+	 * not exist yet.
+	 */
+	async setGroupDraft(groupId: string, draft: string | undefined): Promise<void> {
+		// Runs inside an explicit Dexie transaction so the encrypt-then-write stays one
+		// atomic unit. Dexie.waitFor() is required around the non-Dexie encryptor await —
+		// without it, Dexie has no way to know the transaction is still "in use" while
+		// waiting on an external promise and will commit early (PrematureCommitError).
+		await this.db.transaction("rw", this.db.groups, async () => {
+			const enc =
+				draft === undefined ? undefined : await Dexie.waitFor(this.encryptor.encryptDbField(draft));
+			await this.db.groups.update(groupId, { draft: enc });
+		});
+	}
+
+	/**
+	 * Read and decrypt the per-conversation unsent composer draft.
+	 */
+	async getGroupDraft(groupId: string): Promise<string | undefined> {
+		const row = await this.db.groups.get(groupId);
+		if (!row?.draft) return undefined;
+		return this.encryptor.decryptDbField(row.draft);
 	}
 
 	// ── Identity ───────────────────────────────────────────────────────────────

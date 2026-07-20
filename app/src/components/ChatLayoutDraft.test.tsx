@@ -197,4 +197,45 @@ describe("ChatLayout — draft message saving", () => {
 			expect(screen.getByTestId("draft-preview")).toBeInTheDocument();
 		});
 	});
+
+	// ── Dexie persistence (schema v17, GroupRow.draft — encrypted at rest) ─────
+
+	const JORDAN_GROUP_ID = "33333333-3333-3333-3333-333333333333";
+
+	it("persists the typed draft to Dexie GroupRow so it survives a reload", async () => {
+		await db.groups.clear();
+		await db.groups.add({
+			id: JORDAN_GROUP_ID,
+			name: "Jordan",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+		});
+		render(<ChatLayout />);
+		fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+		fireEvent.change(screen.getByPlaceholderText(/encrypted/i), {
+			target: { value: "persisted draft text" },
+		});
+
+		await waitFor(async () => {
+			const row = await db.groups.get(JORDAN_GROUP_ID);
+			expect(row?.draft).toBe("persisted draft text");
+		});
+	});
+
+	it("rehydrates a persisted draft from Dexie when switching to that chat", async () => {
+		await db.groups.clear();
+		await db.groups.add({
+			id: JORDAN_GROUP_ID,
+			name: "Jordan",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+			draft: "saved from before reload",
+		});
+		render(<ChatLayout />);
+		fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+
+		await waitFor(() => {
+			expect(screen.getByPlaceholderText(/encrypted/i)).toHaveValue("saved from before reload");
+		});
+	});
 });

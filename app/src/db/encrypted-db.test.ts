@@ -177,6 +177,66 @@ describe("EncryptedPowehiDb", () => {
 		expect(group?.disappearingTtlSeconds).toBe(604800);
 	});
 
+	it("getGroupDraft returns undefined for unknown group", async () => {
+		const draft = await encDb.getGroupDraft("no-such-group");
+		expect(draft).toBeUndefined();
+	});
+
+	it("setGroupDraft persists and getGroupDraft reads it back", async () => {
+		await encDb.addGroup({
+			id: "grp-draft",
+			name: "Draft Group",
+			mlsStateB64: "c3RhdGU=",
+			lastActivity: 1000,
+		});
+		await encDb.setGroupDraft("grp-draft", "unsent message text");
+		const draft = await encDb.getGroupDraft("grp-draft");
+		expect(draft).toBe("unsent message text");
+	});
+
+	it("setGroupDraft can clear the draft (undefined)", async () => {
+		await encDb.addGroup({
+			id: "grp-draft2",
+			name: "Draft Group 2",
+			mlsStateB64: "c3RhdGUy",
+			lastActivity: 2000,
+		});
+		await encDb.setGroupDraft("grp-draft2", "will be cleared");
+		await encDb.setGroupDraft("grp-draft2", undefined);
+		const draft = await encDb.getGroupDraft("grp-draft2");
+		expect(draft).toBeUndefined();
+	});
+
+	it("setGroupDraft does not disturb encrypted mlsStateB64/name", async () => {
+		await encDb.addGroup({
+			id: "grp-draft3",
+			name: "State-Check Group",
+			mlsStateB64: "c2Vuc2l0aXZlLXN0YXRl",
+			lastActivity: 3000,
+		});
+		await encDb.setGroupDraft("grp-draft3", "draft text here");
+		const group = await encDb.getGroup("grp-draft3");
+		expect(group?.mlsStateB64).toBe("c2Vuc2l0aXZlLXN0YXRl");
+		expect(group?.name).toBe("State-Check Group");
+		expect(group?.draft).toBe("draft text here");
+	});
+
+	it("raw DB stores an encrypted blob — not the original plaintext draft", async () => {
+		await encDb.addGroup({
+			id: "grp-draft4",
+			name: "Draft Group 4",
+			mlsStateB64: "c3RhdGU0",
+			lastActivity: 4000,
+		});
+		const originalDraft = "a secret unsent message";
+		await encDb.setGroupDraft("grp-draft4", originalDraft);
+
+		const rawRow = await rawDb.groups.get("grp-draft4");
+		expect(rawRow?.draft).toBeDefined();
+		expect(rawRow?.draft).not.toBe(originalDraft);
+		expect(rawRow?.draft).toMatch(/^[A-Za-z0-9\-_]+$/);
+	});
+
 	it("markMessageEdited persists the new text (encrypted at rest) and survives reload", async () => {
 		await encDb.addMessage({
 			id: "msg-edit",

@@ -61,6 +61,9 @@ export interface GroupRow {
 	firstUnreadMessageId?: string;
 	/** Admin-configured slow-mode cooldown in seconds between messages for this group. undefined/0 = off. Not sensitive — a bounded enum-like number, like disappearingTtlSeconds. */
 	slowModeDelay?: number;
+	/** Unsent composer draft text for this conversation. SENSITIVE — this is real unsent
+	 * message content (not a UI preference), encrypted at rest like name/editedText. */
+	draft?: string;
 }
 
 // LocalIdentity — singleton device identity record.
@@ -289,6 +292,17 @@ export class PowehiDb extends Dexie {
 		// had before v6/v12) now survives a reload. Not sensitive (a bounded number, like
 		// disappearingTtlSeconds) — no index change needed, never queried across groups.
 		this.version(16).stores({
+			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v17: added draft to GroupRow — the per-chat unsent composer text (previously
+		// React-state-only, same gap slowModeDelay/chatTheme had before v16/v12) now
+		// survives a reload. Unlike those fields, this IS sensitive — real unsent message
+		// content — so it's encrypted at rest (SENSITIVE.groups in encrypted-db.ts), same
+		// tier as name/editedText. No index change needed — never queried across groups.
+		this.version(17).stores({
 			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
 			groups: "id, lastActivity",
 			identity: "id",

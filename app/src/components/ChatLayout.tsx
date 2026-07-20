@@ -3979,6 +3979,19 @@ function Composer({
 		}
 	}, [chatId]);
 
+	// A persisted draft can arrive from Dexie asynchronously, after the chatId-switch effect
+	// above already ran with an empty initialDraft (e.g. the very first switch to a chat right
+	// after a page reload, before the parent's rehydration read resolves). Apply it once it
+	// shows up — but only if nothing has been typed in this chat yet (text still empty) —
+	// so a late-arriving persisted draft is never lost, and an in-progress edit is never
+	// clobbered.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: only re-run when initialDraft itself changes; text/editingMessage are read at fire time, not triggers
+	useEffect(() => {
+		if (!editingMessage && initialDraft && text === "") {
+			setText(initialDraft);
+		}
+	}, [initialDraft]);
+
 	// Pre-fill textarea when entering edit mode; restore draft when exiting.
 	// biome-ignore lint/correctness/useExhaustiveDependencies: editingMessage.id is the semantic trigger; initialDraft read at fire time
 	useEffect(() => {
@@ -6849,15 +6862,6 @@ export function ChatLayout() {
 	const [infoOpen, setInfoOpen] = useState(false);
 	const [inviteOpen, setInviteOpen] = useState(false);
 	const [drafts, setDrafts] = useState<Record<string, string>>({});
-	const handleDraftChange = useCallback((id: string, draft: string) => {
-		setDrafts((prev) => {
-			if (!draft) {
-				const { [id]: _, ...rest } = prev;
-				return rest;
-			}
-			return prev[id] === draft ? prev : { ...prev, [id]: draft };
-		});
-	}, []);
 	const [createGroupOpen, setCreateGroupOpen] = useState(false);
 	const [addMemberOpen, setAddMemberOpen] = useState(false);
 	const [inviteCode, setInviteCode] = useState<string | null>(null);
@@ -7045,6 +7049,17 @@ export function ChatLayout() {
 
 	// Throttle ref for outgoing typing indicator signals (leading-edge, 3 s window).
 	const typingThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+	// Debounce timers for persisting composer drafts to Dexie, keyed by chat id — avoids
+	// a Dexie write on every keystroke. Stored in a ref so it survives re-renders without
+	// itself triggering one.
+	const draftPersistTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+	useEffect(() => {
+		const timers = draftPersistTimersRef.current;
+		return () => {
+			for (const handle of timers.values()) clearTimeout(handle);
+		};
+	}, []);
 
 	// Refs hold the latest send*Receipt and notification closures so handleIncoming
 	// (stable useCallback) can call them without taking extra deps.
@@ -7479,6 +7494,27 @@ export function ChatLayout() {
 						}),
 					);
 				}
+				// Rehydrate the unsent composer draft (previously React-state-only, same gap
+				// slowModeDelay/chatTheme had before v16/v12). draft is encrypted at rest (real
+				// message content, unlike the plain prefs above), so it's decrypted from the
+				// already-fetched `row` above rather than issuing a second db.groups.get() —
+				// a redundant concurrent read on the same store was observed to race with
+				// other in-flight group writes (e.g. from incoming-message handling) in tests.
+				// Only fill in if not already present in memory — same-session chat switches
+				// already have the freshest value from handleDraftChange, and this avoids a
+				// stale async decrypt clobbering a keystroke that landed after this fetch
+				// started.
+				if (row?.draft && cryptoWorker) {
+					cryptoWorker
+						.decryptDbField(row.draft)
+						.then((draft) => {
+							if (cancelled || !draft) return;
+							setDrafts((prev) =>
+								prev[chatId] !== undefined ? prev : { ...prev, [chatId]: draft },
+							);
+						})
+						.catch(() => {});
+				}
 			})
 			.catch(() => {
 				if (!cancelled) {
@@ -7490,7 +7526,7 @@ export function ChatLayout() {
 		return () => {
 			cancelled = true;
 		};
-	}, [active?.mlsGroupId, activeId]);
+	}, [active?.mlsGroupId, activeId, cryptoWorker]);
 
 	// Apply the persisted pin state (loaded above) to the active chat once its messages
 	// exist. Deliberately a separate effect from the fetch above and re-keyed on `rows`:
@@ -8326,6 +8362,39 @@ export function ChatLayout() {
 	const handleUpdateGroupDescription = useCallback((chatId: string, desc: string) => {
 		setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, description: desc } : c)));
 	}, []);
+
+	/** Update the per-chat unsent composer draft and persist it to Dexie (GroupRow.draft,
+	 * schema v17). Unlike the mute/theme/slowMode handlers below, this is real unsent
+	 * message content — not a UI preference — so it goes through `encryptedDb` (AES-GCM
+	 * encrypted at rest), not a raw `db.groups.update` call. Local-only — never sent to
+	 * server, never part of any MLS payload. Debounced (400ms, per chat id) rather than
+	 * writing on every keystroke — this is a real unsent-message-content write (encrypted),
+	 * not a cheap boolean flip like mute/theme, so it's worth batching. */
+	const handleDraftChange = useCallback(
+		(id: string, draft: string) => {
+			setDrafts((prev) => {
+				if (!draft) {
+					const { [id]: _, ...rest } = prev;
+					return rest;
+				}
+				return prev[id] === draft ? prev : { ...prev, [id]: draft };
+			});
+			const timers = draftPersistTimersRef.current;
+			const existing = timers.get(id);
+			if (existing) clearTimeout(existing);
+			timers.set(
+				id,
+				setTimeout(() => {
+					timers.delete(id);
+					const chat = chatsRef.current.find((c) => c.id === id);
+					if (chat?.mlsGroupId && encryptedDb) {
+						encryptedDb.setGroupDraft(chat.mlsGroupId, draft || undefined).catch(() => {});
+					}
+				}, 400),
+			);
+		},
+		[encryptedDb],
+	);
 
 	/** Set the admin-configured slow-mode cooldown for a group chat. Local-only — no MLS
 	 * message sent, no server contact. Persisted to Dexie (GroupRow.slowModeDelay, schema

@@ -41,7 +41,10 @@ describe("ChatLayout — slow mode", () => {
 		vi.useFakeTimers({ shouldAdvanceTime: false });
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
+		if (vi.isFakeTimers()) {
+			await vi.runOnlyPendingTimersAsync();
+		}
 		vi.useRealTimers();
 		cleanup();
 		vi.restoreAllMocks();

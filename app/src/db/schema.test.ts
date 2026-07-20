@@ -136,6 +136,29 @@ describe("PowehiDb", () => {
 		expect(grp?.slowModeDelay).toBeUndefined();
 	});
 
+	it("stores and retrieves draft on GroupRow (v17, raw store — encryption is EncryptedPowehiDb's job)", async () => {
+		await db.groups.add({
+			id: "grp-v17",
+			name: "Draft Group",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+			draft: "unsent message text",
+		});
+		const grp = await db.groups.get("grp-v17");
+		expect(grp?.draft).toBe("unsent message text");
+	});
+
+	it("leaves draft undefined when not set (v17)", async () => {
+		await db.groups.add({
+			id: "grp-v17-default",
+			name: "Default Group",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+		});
+		const grp = await db.groups.get("grp-v17-default");
+		expect(grp?.draft).toBeUndefined();
+	});
+
 	it("queries messages by groupId index", async () => {
 		await db.messages.bulkAdd([
 			{
