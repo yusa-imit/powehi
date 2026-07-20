@@ -5,6 +5,9 @@ import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
 import * as UseMessagesModule from "../hooks/useMessages";
 import { ChatLayout } from "./ChatLayout";
 
+// mlsGroupId from SEED_CHATS (Jordan's group)
+const JORDAN_GROUP_ID = "33333333-3333-3333-3333-333333333333";
+
 const MOCK_WORKER = {
 	mlsGroupMembers: vi.fn(async () => [
 		{ leafIndex: 0, sigKeyHex: "aa".repeat(64) },
@@ -165,6 +168,46 @@ describe("ChatLayout — pin chat to top", () => {
 		fireEvent.click(screen.getByTestId("filter-tab-all"));
 		await waitFor(() =>
 			expect(screen.queryByRole("button", { name: /^jordan$/i })).not.toBeInTheDocument(),
+		);
+	});
+
+	it("persists the pinnedTop flag to Dexie GroupRow so it survives a reload", async () => {
+		await db.groups.clear();
+		await db.groups.add({
+			id: JORDAN_GROUP_ID,
+			name: "Jordan",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+		});
+		render(<ChatLayout />);
+		fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+		fireEvent.click(screen.getByRole("button", { name: /info/i }));
+		fireEvent.click(await screen.findByRole("button", { name: /pin to top/i }));
+		await waitFor(async () => {
+			const row = await db.groups.get(JORDAN_GROUP_ID);
+			expect(row?.pinnedTop).toBe(true);
+		});
+		fireEvent.click(screen.getByRole("button", { name: /pin to top/i }));
+		await waitFor(async () => {
+			const row = await db.groups.get(JORDAN_GROUP_ID);
+			expect(row?.pinnedTop).toBe(false);
+		});
+	});
+
+	it("rehydrates a persisted pinnedTop flag from Dexie when switching to that chat", async () => {
+		await db.groups.clear();
+		await db.groups.add({
+			id: JORDAN_GROUP_ID,
+			name: "Jordan",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+			pinnedTop: true,
+		});
+		render(<ChatLayout />);
+		fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+		fireEvent.click(screen.getByRole("button", { name: /info/i }));
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: /pin to top/i })).toHaveTextContent("On"),
 		);
 	});
 

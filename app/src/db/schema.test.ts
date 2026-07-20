@@ -159,6 +159,32 @@ describe("PowehiDb", () => {
 		expect(grp?.draft).toBeUndefined();
 	});
 
+	it("stores and retrieves archived/pinnedTop on GroupRow (v18)", async () => {
+		await db.groups.add({
+			id: "grp-v18",
+			name: "Archived Pinned Group",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+			archived: true,
+			pinnedTop: true,
+		});
+		const grp = await db.groups.get("grp-v18");
+		expect(grp?.archived).toBe(true);
+		expect(grp?.pinnedTop).toBe(true);
+	});
+
+	it("leaves archived/pinnedTop undefined when not set (v18)", async () => {
+		await db.groups.add({
+			id: "grp-v18-default",
+			name: "Default Group",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+		});
+		const grp = await db.groups.get("grp-v18-default");
+		expect(grp?.archived).toBeUndefined();
+		expect(grp?.pinnedTop).toBeUndefined();
+	});
+
 	it("queries messages by groupId index", async () => {
 		await db.messages.bulkAdd([
 			{

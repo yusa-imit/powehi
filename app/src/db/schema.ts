@@ -64,6 +64,12 @@ export interface GroupRow {
 	/** Unsent composer draft text for this conversation. SENSITIVE — this is real unsent
 	 * message content (not a UI preference), encrypted at rest like name/editedText. */
 	draft?: string;
+	/** True when the chat is archived (hidden from the All/DMs/Groups tabs). Local-only,
+	 * never sent to server. Not sensitive — a boolean flag, like muted/vibrate. */
+	archived?: boolean;
+	/** True when the chat is pinned to the top of the sidebar list. Local-only, never
+	 * sent to server. Not sensitive — a boolean flag, like muted/vibrate. */
+	pinnedTop?: boolean;
 }
 
 // LocalIdentity — singleton device identity record.
@@ -303,6 +309,16 @@ export class PowehiDb extends Dexie {
 		// content — so it's encrypted at rest (SENSITIVE.groups in encrypted-db.ts), same
 		// tier as name/editedText. No index change needed — never queried across groups.
 		this.version(17).stores({
+			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v18: added archived, pinnedTop to GroupRow — the InfoPanel "Archive Chat" and
+		// "Pin to top" toggles (previously React-state-only, same gap muted/sound/vibrate
+		// had before v12) now survive a reload. Not sensitive (booleans, like muted/vibrate)
+		// — no index change needed, never queried across groups, only read/written per-group.
+		this.version(18).stores({
 			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
 			groups: "id, lastActivity",
 			identity: "id",

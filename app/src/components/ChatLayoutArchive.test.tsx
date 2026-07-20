@@ -191,6 +191,46 @@ describe("ChatLayout — chat archive", () => {
 		);
 	});
 
+	it("persists the archived flag to Dexie GroupRow so it survives a reload", async () => {
+		await db.groups.clear();
+		await db.groups.add({
+			id: JORDAN_GROUP_ID,
+			name: "Jordan",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+		});
+		render(<ChatLayout />);
+		fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+		fireEvent.click(screen.getByRole("button", { name: /info/i }));
+		fireEvent.click(screen.getByTestId("archive-button"));
+		await waitFor(async () => {
+			const row = await db.groups.get(JORDAN_GROUP_ID);
+			expect(row?.archived).toBe(true);
+		});
+		fireEvent.click(screen.getByTestId("archive-button"));
+		await waitFor(async () => {
+			const row = await db.groups.get(JORDAN_GROUP_ID);
+			expect(row?.archived).toBe(false);
+		});
+	});
+
+	it("rehydrates a persisted archived flag from Dexie when switching to that chat", async () => {
+		await db.groups.clear();
+		await db.groups.add({
+			id: JORDAN_GROUP_ID,
+			name: "Jordan",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+			archived: true,
+		});
+		render(<ChatLayout />);
+		fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+		fireEvent.click(screen.getByRole("button", { name: /info/i }));
+		await waitFor(() =>
+			expect(screen.getByTestId("archive-button")).toHaveTextContent("Unarchive Chat"),
+		);
+	});
+
 	it("Groups tab also excludes archived group", async () => {
 		render(<ChatLayout />);
 		// Archive Design Team (a group)

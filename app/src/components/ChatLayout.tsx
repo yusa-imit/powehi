@@ -7471,8 +7471,9 @@ export function ChatLayout() {
 				) {
 					setSlowModeDelay((prev) => ({ ...prev, [chatId]: row.slowModeDelay as SlowModeDelay }));
 				}
-				// Rehydrate mute/sound/vibrate/theme/notification-sound/unread prefs (previously
-				// React-state-only, same gap disappearingTtl/pinnedMessageId had before v6/v9).
+				// Rehydrate mute/sound/vibrate/theme/notification-sound/unread/archived/pinnedTop
+				// prefs (previously React-state-only, same gap disappearingTtl/pinnedMessageId
+				// had before v6/v9).
 				// Only overwrite a field the row actually has a value for — undefined leaves
 				// the in-memory default alone rather than forcing it off/blank.
 				if (row) {
@@ -7490,6 +7491,8 @@ export function ChatLayout() {
 								chatTheme: row.chatTheme ?? c.chatTheme,
 								mentionCount: row.mentionCount ?? c.mentionCount,
 								unread: row.unread ?? c.unread,
+								archived: row.archived ?? c.archived,
+								pinnedTop: row.pinnedTop ?? c.pinnedTop,
 							};
 						}),
 					);
@@ -7694,6 +7697,9 @@ export function ChatLayout() {
 					groupUpdate.mentionCount = nextMentionCount;
 				if (nextUnread !== incomingChat.unread) groupUpdate.unread = nextUnread;
 				if (setsFirstUnread) groupUpdate.firstUnreadMessageId = msg.id;
+				// Mirror the in-memory auto-unarchive-on-incoming-message rule (line ~7655) so
+				// the persisted archived flag doesn't go stale relative to the sidebar.
+				if (incomingChat.archived) groupUpdate.archived = false;
 				if (Object.keys(groupUpdate).length > 0) {
 					db.groups.update(msg.groupId, groupUpdate).catch(() => {});
 				}
@@ -8347,16 +8353,26 @@ export function ChatLayout() {
 		}
 	}, []);
 
-	/** Toggle the archived flag on a chat. Local-only — no MLS message sent, no server contact. */
+	/** Toggle the archived flag on a chat. Local-only — no MLS message sent, no server contact.
+	 * Persisted to Dexie (GroupRow.archived, schema v18) so it survives a reload. */
 	const handleToggleArchive = useCallback((chatId: string) => {
 		setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, archived: !c.archived } : c)));
 		// When archiving the active chat, stay in the chat but it's now archived.
 		// When un-archiving while on the archived tab, switch to "all" tab — done via Sidebar state.
+		const chat = chatsRef.current.find((c) => c.id === chatId);
+		if (chat?.mlsGroupId) {
+			db.groups.update(chat.mlsGroupId, { archived: !chat.archived }).catch(() => {});
+		}
 	}, []);
 
-	/** Toggle the pinnedTop flag on a chat. Local-only — no MLS message sent, no server contact. */
+	/** Toggle the pinnedTop flag on a chat. Local-only — no MLS message sent, no server contact.
+	 * Persisted to Dexie (GroupRow.pinnedTop, schema v18) so it survives a reload. */
 	const handleTogglePinTop = useCallback((chatId: string) => {
 		setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, pinnedTop: !c.pinnedTop } : c)));
+		const chat = chatsRef.current.find((c) => c.id === chatId);
+		if (chat?.mlsGroupId) {
+			db.groups.update(chat.mlsGroupId, { pinnedTop: !chat.pinnedTop }).catch(() => {});
+		}
 	}, []);
 
 	const handleUpdateGroupDescription = useCallback((chatId: string, desc: string) => {
