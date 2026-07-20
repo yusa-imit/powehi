@@ -17,7 +17,92 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-20, cycle 326 — FEATURE: persist chat archived/pinnedTop flags to Dexie, commit a42849b)
+## Current state (2026-07-20, cycle 327 — FEATURE: persist group description to Dexie, encrypted at rest, commit 3a56944)
+
+- `git status` clean, `gh run list --limit 3` all green at cycle start (cycle
+  326's push), `gh issue list --state open` empty. Picked the top cycle-326
+  next-cycle candidate: `description` (`Chat.description`/group topic editor)
+  — verified the gap was still real myself (grep `description` across
+  `schema.ts`/`encrypted-db.ts`, zero hits) before delegating an Explore agent
+  to nail down exact line numbers (`handleUpdateGroupDescription` at line
+  8378 only touched React state, no Dexie write; rehydration effect at
+  7444-7532 never read/applied it either) — agent's findings matched my own
+  spot-check exactly.
+- **Key difference from the last several cycles' persistence work (archived/
+  pinnedTop/slowModeDelay, all plain non-sensitive booleans via raw
+  `db.groups.update`):** `description` is real user-authored content
+  describing the group — same sensitivity tier as `name`/`draft`, not a UI
+  preference. Checked `SENSITIVE.groups` in `encrypted-db.ts` first to
+  confirm this distinction before writing any code, rather than defaulting
+  to the raw-write pattern out of habit.
+- **Fix (self-implemented, mirrors the existing `draft` v17 pattern
+  exactly):** `GroupRow.description?: string` (schema v19, additive, added to
+  `SENSITIVE.groups` alongside `mlsStateB64`/`name`/`draft`). New
+  `EncryptedPowehiDb.setGroupDescription`/`getGroupDescription` methods are a
+  byte-for-byte mirror of `setGroupDraft`/`getGroupDraft` (same
+  `Dexie.waitFor` + `this.db.transaction("rw", this.db.groups, ...)` pattern
+  for the encrypt-then-write, same partial `db.groups.update` so
+  `mlsStateB64`/`name`/`draft` are never touched). `handleUpdateGroupDescription`
+  now also calls `encryptedDb.setGroupDescription(...)` fire-and-forget
+  (`.catch(() => {})`) alongside its existing `setChats` update — no
+  debounce needed (explicit Save-button action, not per-keystroke, unlike
+  `handleDraftChange`). Rehydration added to the existing "load persisted
+  disappearing timer/mute/archived/pinnedTop/draft" effect: decrypts
+  `row.description` via `cryptoWorker.decryptDbField` from the
+  already-fetched `row` (same race-avoidance rationale as the adjacent
+  `draft` rehydration — no second concurrent `db.groups.get`), applies via
+  `setChats` keyed by `mlsGroupId`.
+- **security-auditor: GREEN, no findings.** Independently verified (not
+  taken on the diff's own comments): `description` correctly reaches
+  `SENSITIVE.groups` so both the dedicated methods AND the generic
+  `encRow`/`decRow` helpers (used by `addGroup`/`getGroup`) encrypt it — not
+  just the new methods; zero `console.*`/logger/telemetry references;
+  the `Dexie.waitFor` + explicit-transaction pattern (identical to the
+  already-shipped `draft` one) is safe against sibling-field corruption
+  under concurrent writes (partial merge, not a full-row overwrite); grep
+  confirmed `description` never reaches any API client/WebSocket/MLS
+  payload — purely local like `draft`; rehydration decrypt failure is
+  fail-safe (`.catch(() => {})`, ciphertext never assigned to chat state,
+  no oracle/crash).
+- Not architectural, no new server-visible metadata, reuses the existing
+  `FieldEncryptor` mechanism (no new crypto primitive) — `threat-model-checker`/
+  `crypto-reviewer` not required, same scoping rationale cycle 325 used for
+  the `draft` field (would be required only if this introduced a new
+  encryption scheme, which it doesn't).
+- 9 new tests: 2 in `schema.test.ts` (raw store round-trip + leaves-undefined,
+  v19 pattern), 5 in `encrypted-db.test.ts` (unknown-group-undefined,
+  persist-and-read-back, clear-via-undefined, sibling-fields-undisturbed,
+  raw-DB-stores-ciphertext-not-plaintext — mirrors the 5 existing `draft`
+  tests exactly), 2 in `ChatLayoutGroupDescription.test.tsx` (persist-on-save
+  round-trips through `db.groups.get` — had to pre-seed a `db.groups` row for
+  the Design Team seed chat first since `db.groups.update` silently no-ops
+  on a missing row, same gotcha every prior persistence cycle's tests hit;
+  rehydrate-on-chat-switch restores the description text from a pre-seeded
+  row). `tsc -b` clean, `biome check` clean (6 touched files). Frontend
+  `pnpm test --run`: **1362/1362 tests green** (104 files, was 1353, net +9).
+  Backend untouched this cycle (pure frontend/Dexie change, confirmed via
+  `git diff --name-only`).
+- **Next cycle candidates:** the remaining three gaps from cycle 326's
+  Explore-agent survey — `nickname` (per-DM nickname editor, likely also
+  SENSITIVE-tier like description since it's user-authored text, not a
+  boolean/enum preference), `starred` (`MessageRow`-shaped, star/bookmark on
+  messages — needs a `MessageRow.starred` field + rehydration in the
+  message-loading path, not the group-rehydration effect used by this
+  cycle's fix), and `customStatus` (user-global emoji+text status, would
+  need a new `LocalIdentity.customStatus` field, not `GroupRow`-shaped like
+  the other four) — all still real gaps, ranked in that order; PQ hybrid
+  Phase A (still blocked on openmls stable `MLS_128_MLKEM768` — this
+  environment has no network access to re-check crates.io this cycle either,
+  confirmed via failed `curl`, same as cycle 326); OPAQUE PQ-hybrid OPRF
+  upgrade (gated on ADR-0003 Phase B 95%-session threshold, not yet
+  actionable); the still-standing opaque-ke live-migration login-round-trip
+  regression test gap (cycle 318/319, no prod users yet, low urgency);
+  `.claude/memory/project-context.md` file size (~230KB after this entry,
+  was ~222KB at cycle 326) — still under the 256KB Read cap but climbing;
+  the next STABILIZATION cycle (330) should archive older cycles if the
+  growth rate continues, same standing note as cycle 326.
+
+## Previous state (2026-07-20, cycle 326 — FEATURE: persist chat archived/pinnedTop flags to Dexie, commit a42849b)
 
 - `git status` at cycle start was **not clean**: cycle 325's own memory-update
   chore commit had never landed (its `project-context.md` edit sat uncommitted
