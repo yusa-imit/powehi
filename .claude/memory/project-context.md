@@ -17,7 +17,91 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-20, cycle 323 — FEATURE: persist group slow-mode delay to Dexie, commit c12e540)
+## Current state (2026-07-20, cycle 325 — STABILIZATION: land orphaned draft-persistence work + full sweep, commit c1ab6d5)
+
+- `git status` at cycle start was **not clean** — cycle 324 apparently ran an
+  entire FEATURE cycle (implementing per-chat unsent-composer-draft
+  persistence to Dexie: schema v17 `GroupRow.draft`, `EncryptedPowehiDb.
+  setGroupDraft`/`getGroupDraft`, debounced persist + rehydrate in
+  `ChatLayout.tsx`, 4 new test files' worth of coverage) but never reached
+  its commit step — no cycle-324 entry exists in this file and `git log`
+  showed cycle 323's memory-update commit (`da4a4f1`) as HEAD. Treated as
+  recoverable dropped work per CLAUDE.md's "investigate before
+  deleting/overwriting uncommitted state" guidance, not as something to
+  discard and redo — the diff was complete, coherent, and well-commented
+  (draft is genuinely sensitive content, correctly added to
+  `SENSITIVE.groups` alongside `mlsStateB64`/`name`, unlike the plain-
+  preference fields slowMode/theme/mute use).
+- `gh run list --limit 3` all green at cycle start, `gh issue list --state
+  open` empty.
+- Validated the recovered diff before touching anything further: `tsc -b`
+  clean, `biome check` clean (170 files), frontend `pnpm test --run`
+  **1347/1347 tests green** (104 files, was 1338 — net +9: 2 in
+  `ChatLayoutDraft.test.tsx`, 4 in `encrypted-db.test.ts`, 2 in
+  `schema.test.ts`, plus a pre-existing `ChatLayoutSlowMode.test.tsx` fake-
+  timer-flush fix in `afterEach` bundled in the same uncommitted diff).
+- **security-auditor: GREEN, no findings.** Independently verified (not
+  taken on the diff's own comments): `draft` is genuinely covered by the
+  encryption tier and never read/written as plaintext through any other
+  `db.groups.update`/`.get` call site in `ChatLayout.tsx`; no plaintext
+  draft ever reaches `console.*`/telemetry (none exist in these files); the
+  per-chat-id `draftPersistTimersRef` debounce Map cannot leak a draft to
+  the wrong chat under rapid switching (each timer closes over its own
+  `id`/`draft`); `Dexie.waitFor()` around the encryptor call commits only
+  the final ciphertext, no partial/plaintext-commit window; grep confirmed
+  `draft`/`setGroupDraft`/`getGroupDraft` never touch any API client/
+  WebSocket/MLS payload construction; the late-arriving-draft effect in
+  `Composer` (`!editingMessage && text === ""` guard, plus a parent-side
+  `prev[chatId] === undefined` guard) cannot clobber in-progress typing
+  under any interleaving. One harmless note: `getGroupDraft` is unused in
+  production (rehydration decrypts inline via the crypto worker instead) —
+  exists for test coverage only, not a leak.
+- Not architectural, no new server-visible metadata (purely local
+  IndexedDB persistence of text that was already living in React state,
+  never sent to server, never part of any MLS payload) —
+  `threat-model-checker`/`crypto-reviewer` not required, same scoping as
+  the slowMode/theme/mute/receipt persistence work in cycles 312-323.
+  Reuses the existing `FieldEncryptor` mechanism — no new crypto
+  primitives, so `crypto-reviewer` wasn't needed despite `draft` being
+  genuinely sensitive content (contrast: it *would* be needed if this had
+  introduced a new encryption scheme rather than reusing the established
+  one).
+- Committed as `c1ab6d5` (frontend files only — `git add` on the 7 touched
+  paths, no `-A`), pushed, new CI runs queued at push time (not polled to
+  completion before this memory update — the pre-existing cycle-323 CI run
+  was already green, and this push only adds already-tested frontend code
+  through the same pipeline).
+- **Backend sweep (STABILIZATION full-sweep step, since backend wasn't
+  touched by the recovered diff):** `cargo build --workspace` clean,
+  `cargo test --workspace --lib` all green across all 17 crates (0
+  failures), `cargo clippy --workspace --all-targets -- -D warnings`
+  clean, `cargo audit` clean (653 crates, 0 advisories), `cargo deny
+  check` clean (advisories/bans/licenses/sources all ok). Note: this
+  shell's `$PATH` didn't include `~/.cargo/bin` by default this cycle
+  (`cargo`/`rustc` "command not found" until explicitly prepended) — worth
+  a one-line callout in case a future cycle hits the same thing and
+  wastes time on it; not fixed at the environment level since it's a
+  per-invocation shell-init quirk, not a repo config issue.
+- Target dir hygiene: 27G → pruned 0 zero-byte `.rmeta` stubs (none found)
+  → still over the 20G threshold → mtime+7 prune of `.rlib`/`.rmeta`/`.o`/
+  `.d` files and stale incremental dirs → 24G, 103,038 files in
+  `target/debug/deps` (well under the 291k pathological-growth historical
+  incident). Housekeeping only, not the cycle's mandatory commit.
+- **Next cycle candidates:** PQ hybrid Phase A (still blocked on openmls
+  stable `MLS_128_MLKEM768` — re-check crates.io periodically, not every
+  cycle); OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003 Phase B
+  95%-session threshold, not yet actionable); the still-standing opaque-ke
+  live-migration login-round-trip regression test gap (cycle 318/319, no
+  prod users yet, low urgency); a future cycle should double-check `gh run
+  list` for this cycle's queued CI runs actually landed green (queued, not
+  polled, at memory-update time); the unused `getGroupDraft` production
+  dead-code note above (trivial, cosmetic, not urgent); consider whether
+  the cron harness itself should be hardened against a cycle silently
+  failing to commit (this is now the second time — worth noting if it
+  recurs a third time) rather than relying on the next cycle to notice and
+  recover the diff.
+
+## Previous state (2026-07-20, cycle 323 — FEATURE: persist group slow-mode delay to Dexie, commit c12e540)
 
 - `git status` clean, `gh run list --limit 3` all green at cycle start, `gh issue
   list --state open` empty. No unchecked `- [ ]` items remain in this file's phase
