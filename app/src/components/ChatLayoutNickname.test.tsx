@@ -203,4 +203,46 @@ describe("ChatLayout — chat nickname", () => {
 		});
 		await waitFor(() => expect(screen.getAllByText("Display Nick").length).toBeGreaterThan(0));
 	});
+
+	// ── Dexie persistence (schema v20, GroupRow.nickname — encrypted at rest) ──
+
+	const MAYA_GROUP_ID = "11111111-1111-1111-1111-111111111111";
+
+	it("persists a saved nickname to Dexie GroupRow so it survives a reload", async () => {
+		await db.groups.clear();
+		await db.groups.add({
+			id: MAYA_GROUP_ID,
+			name: "Maya Akana",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+		});
+		await openDmInfoPanel();
+
+		fireEvent.click(screen.getByTestId("nickname-edit-btn"));
+		fireEvent.change(screen.getByTestId("nickname-input"), {
+			target: { value: "Persisted Nick" },
+		});
+		fireEvent.click(screen.getByTestId("nickname-save"));
+
+		await waitFor(async () => {
+			const row = await db.groups.get(MAYA_GROUP_ID);
+			expect(row?.nickname).toBe("Persisted Nick");
+		});
+	});
+
+	it("rehydrates a persisted nickname from Dexie when switching to that chat", async () => {
+		await db.groups.clear();
+		await db.groups.add({
+			id: MAYA_GROUP_ID,
+			name: "Maya Akana",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+			nickname: "saved from before reload",
+		});
+		await openDmInfoPanel();
+
+		await waitFor(() =>
+			expect(screen.getByTestId("nickname-display")).toHaveTextContent("saved from before reload"),
+		);
+	});
 });

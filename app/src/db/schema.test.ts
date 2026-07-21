@@ -208,6 +208,29 @@ describe("PowehiDb", () => {
 		expect(grp?.description).toBeUndefined();
 	});
 
+	it("stores and retrieves nickname on GroupRow (v20, raw store — encryption is EncryptedPowehiDb's job)", async () => {
+		await db.groups.add({
+			id: "grp-v20",
+			name: "Nicknamed Contact",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+			nickname: "Buddy",
+		});
+		const grp = await db.groups.get("grp-v20");
+		expect(grp?.nickname).toBe("Buddy");
+	});
+
+	it("leaves nickname undefined when not set (v20)", async () => {
+		await db.groups.add({
+			id: "grp-v20-default",
+			name: "Default Contact",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+		});
+		const grp = await db.groups.get("grp-v20-default");
+		expect(grp?.nickname).toBeUndefined();
+	});
+
 	it("queries messages by groupId index", async () => {
 		await db.messages.bulkAdd([
 			{

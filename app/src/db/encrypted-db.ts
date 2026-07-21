@@ -34,7 +34,7 @@ import type { PowehiDb } from "./schema";
 // secret (schema.ts).
 const SENSITIVE: Record<string, readonly string[]> = {
 	messages: ["ciphertextB64", "plaintextB64", "editedText", "reactionsJson"],
-	groups: ["mlsStateB64", "name", "draft", "description"],
+	groups: ["mlsStateB64", "name", "draft", "description", "nickname"],
 	identity: ["mlsProviderStateB64"],
 	verifiedContacts: ["safetyNumber"],
 };
@@ -297,6 +297,31 @@ export class EncryptedPowehiDb {
 		const row = await this.db.groups.get(groupId);
 		if (!row?.description) return undefined;
 		return this.encryptor.decryptDbField(row.description);
+	}
+
+	/**
+	 * Persist the custom DM contact nickname (encrypted at rest — real user-authored
+	 * content, same sensitivity tier as name/draft/description). Pass undefined to clear.
+	 * Uses a partial Dexie update so mlsStateB64/name/draft/description are never touched.
+	 * No-op if the group row does not exist yet.
+	 */
+	async setGroupNickname(groupId: string, nickname: string | undefined): Promise<void> {
+		await this.db.transaction("rw", this.db.groups, async () => {
+			const enc =
+				nickname === undefined
+					? undefined
+					: await Dexie.waitFor(this.encryptor.encryptDbField(nickname));
+			await this.db.groups.update(groupId, { nickname: enc });
+		});
+	}
+
+	/**
+	 * Read and decrypt the custom DM contact nickname.
+	 */
+	async getGroupNickname(groupId: string): Promise<string | undefined> {
+		const row = await this.db.groups.get(groupId);
+		if (!row?.nickname) return undefined;
+		return this.encryptor.decryptDbField(row.nickname);
 	}
 
 	// ── Identity ───────────────────────────────────────────────────────────────

@@ -7533,6 +7533,20 @@ export function ChatLayout() {
 						})
 						.catch(() => {});
 				}
+				// Rehydrate the DM contact nickname (previously React-state-only, same gap
+				// description had before v20). Encrypted at rest like draft/description, so
+				// decrypted from the already-fetched `row` rather than a second
+				// db.groups.get() (same race-avoidance rationale as the draft/description
+				// rehydration above).
+				if (row?.nickname && cryptoWorker) {
+					cryptoWorker
+						.decryptDbField(row.nickname)
+						.then((nickname) => {
+							if (cancelled || !nickname) return;
+							setChats((cs) => cs.map((c) => (c.mlsGroupId === groupId ? { ...c, nickname } : c)));
+						})
+						.catch(() => {});
+				}
 			})
 			.catch(() => {
 				if (!cancelled) {
@@ -8470,12 +8484,21 @@ export function ChatLayout() {
 		}
 	}, []);
 
-	/** Set (or clear) a custom display nickname for a DM contact. Local-only — never sent to server. */
-	const handleUpdateNickname = useCallback((chatId: string, nickname: string) => {
-		setChats((cs) =>
-			cs.map((c) => (c.id === chatId ? { ...c, nickname: nickname || undefined } : c)),
-		);
-	}, []);
+	/** Set (or clear) a custom display nickname for a DM contact. Local-only — never sent to
+	 * server. Persisted to Dexie (GroupRow.nickname, schema v20), encrypted at rest like
+	 * name/draft/description — this is real user-authored content, not a UI preference. */
+	const handleUpdateNickname = useCallback(
+		(chatId: string, nickname: string) => {
+			setChats((cs) =>
+				cs.map((c) => (c.id === chatId ? { ...c, nickname: nickname || undefined } : c)),
+			);
+			const chat = chatsRef.current.find((c) => c.id === chatId);
+			if (chat?.mlsGroupId && encryptedDb) {
+				encryptedDb.setGroupNickname(chat.mlsGroupId, nickname || undefined).catch(() => {});
+			}
+		},
+		[encryptedDb],
+	);
 
 	/** Erase all messages in a chat. Local-only — no MLS op, no server contact.
 	 * Resets unread count, mention count, pinned message, and last-message preview. */

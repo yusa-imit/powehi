@@ -73,6 +73,9 @@ export interface GroupRow {
 	/** Group description / topic text, group chats only. SENSITIVE — real user-authored
 	 * content describing the group, same tier as name/draft, encrypted at rest. */
 	description?: string;
+	/** Custom display nickname for a DM contact, DM chats only. SENSITIVE — real
+	 * user-authored content, same tier as name/draft/description, encrypted at rest. */
+	nickname?: string;
 }
 
 // LocalIdentity — singleton device identity record.
@@ -333,6 +336,17 @@ export class PowehiDb extends Dexie {
 		// name/draft — so it's encrypted at rest (SENSITIVE.groups in encrypted-db.ts). No
 		// index change needed — never queried across groups.
 		this.version(19).stores({
+			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v20: added nickname to GroupRow — the InfoPanel per-DM custom display name editor
+		// (previously React-state-only, same gap description had before v19) now survives a
+		// reload. Sensitive — real user-authored content, same tier as name/draft/description
+		// — so it's encrypted at rest (SENSITIVE.groups in encrypted-db.ts). No index change
+		// needed — never queried across groups.
+		this.version(20).stores({
 			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
 			groups: "id, lastActivity",
 			identity: "id",

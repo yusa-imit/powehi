@@ -297,6 +297,66 @@ describe("EncryptedPowehiDb", () => {
 		expect(rawRow?.description).toMatch(/^[A-Za-z0-9\-_]+$/);
 	});
 
+	it("getGroupNickname returns undefined for unknown group", async () => {
+		const nickname = await encDb.getGroupNickname("no-such-group");
+		expect(nickname).toBeUndefined();
+	});
+
+	it("setGroupNickname persists and getGroupNickname reads it back", async () => {
+		await encDb.addGroup({
+			id: "grp-nick",
+			name: "Nickname Contact",
+			mlsStateB64: "c3RhdGU=",
+			lastActivity: 1000,
+		});
+		await encDb.setGroupNickname("grp-nick", "Buddy");
+		const nickname = await encDb.getGroupNickname("grp-nick");
+		expect(nickname).toBe("Buddy");
+	});
+
+	it("setGroupNickname can clear the nickname (undefined)", async () => {
+		await encDb.addGroup({
+			id: "grp-nick2",
+			name: "Nickname Contact 2",
+			mlsStateB64: "c3RhdGUy",
+			lastActivity: 2000,
+		});
+		await encDb.setGroupNickname("grp-nick2", "will be cleared");
+		await encDb.setGroupNickname("grp-nick2", undefined);
+		const nickname = await encDb.getGroupNickname("grp-nick2");
+		expect(nickname).toBeUndefined();
+	});
+
+	it("setGroupNickname does not disturb encrypted mlsStateB64/name", async () => {
+		await encDb.addGroup({
+			id: "grp-nick3",
+			name: "State-Check Contact",
+			mlsStateB64: "c2Vuc2l0aXZlLXN0YXRl",
+			lastActivity: 3000,
+		});
+		await encDb.setGroupNickname("grp-nick3", "nickname text here");
+		const group = await encDb.getGroup("grp-nick3");
+		expect(group?.mlsStateB64).toBe("c2Vuc2l0aXZlLXN0YXRl");
+		expect(group?.name).toBe("State-Check Contact");
+		expect(group?.nickname).toBe("nickname text here");
+	});
+
+	it("raw DB stores an encrypted blob — not the original plaintext nickname", async () => {
+		await encDb.addGroup({
+			id: "grp-nick4",
+			name: "Nickname Contact 4",
+			mlsStateB64: "c3RhdGU0",
+			lastActivity: 4000,
+		});
+		const originalNickname = "a secret pet name";
+		await encDb.setGroupNickname("grp-nick4", originalNickname);
+
+		const rawRow = await rawDb.groups.get("grp-nick4");
+		expect(rawRow?.nickname).toBeDefined();
+		expect(rawRow?.nickname).not.toBe(originalNickname);
+		expect(rawRow?.nickname).toMatch(/^[A-Za-z0-9\-_]+$/);
+	});
+
 	it("markMessageEdited persists the new text (encrypted at rest) and survives reload", async () => {
 		await encDb.addMessage({
 			id: "msg-edit",
