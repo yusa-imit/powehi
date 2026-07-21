@@ -177,6 +177,10 @@ fn router_inner(
             "/v1/media/:id/download-url",
             get(routes::media::get_download_url),
         )
+        .route(
+            "/v1/media/:id/confirm-download",
+            post(routes::media::confirm_download),
+        )
         .route("/v1/media/:id", delete(routes::media::delete_media))
         .route(
             "/v1/push-subscriptions",
@@ -520,6 +524,13 @@ mod tests {
             _id: &MediaId,
             _device: &DeviceId,
         ) -> Result<String, DomainError> {
+            unimplemented!()
+        }
+        async fn confirm_download(
+            &self,
+            _id: &MediaId,
+            _device: &DeviceId,
+        ) -> Result<(), DomainError> {
             unimplemented!()
         }
         async fn delete(&self, _id: &MediaId, _device: &DeviceId) -> Result<(), DomainError> {
@@ -928,6 +939,13 @@ mod tests {
         ) -> Result<String, DomainError> {
             Ok("https://r2.example/presigned-get".into())
         }
+        async fn confirm_download(
+            &self,
+            _id: &MediaId,
+            _device: &DeviceId,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
         async fn delete(&self, _id: &MediaId, _device: &DeviceId) -> Result<(), DomainError> {
             Ok(())
         }
@@ -960,6 +978,13 @@ mod tests {
             _id: &MediaId,
             _device: &DeviceId,
         ) -> Result<String, DomainError> {
+            unimplemented!()
+        }
+        async fn confirm_download(
+            &self,
+            _id: &MediaId,
+            _device: &DeviceId,
+        ) -> Result<(), DomainError> {
             unimplemented!()
         }
         async fn delete(&self, _id: &MediaId, _device: &DeviceId) -> Result<(), DomainError> {
@@ -1507,6 +1532,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn confirm_download_returns_204() {
+        let device = DeviceId::new();
+        let media_id = uuid::Uuid::new_v4();
+        let resp = media_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/media/{media_id}/confirm-download"))
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
     async fn delete_media_returns_204() {
         let device = DeviceId::new();
         let media_id = uuid::Uuid::new_v4();
@@ -1530,6 +1573,7 @@ mod tests {
         for (method, uri) in &[
             ("GET", format!("/v1/media/{media_id}/download-url")),
             ("POST", format!("/v1/media/{media_id}/confirm")),
+            ("POST", format!("/v1/media/{media_id}/confirm-download")),
             ("DELETE", format!("/v1/media/{media_id}")),
         ] {
             let resp = media_router()

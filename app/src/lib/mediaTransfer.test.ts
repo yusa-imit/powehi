@@ -111,6 +111,7 @@ describe("mediaTransfer (prd.md §9.2 + §9.4.2)", () => {
 	let requestMediaUploadSpy: MockInstance<typeof mediaApi.requestMediaUpload>;
 	let confirmMediaUploadSpy: MockInstance<typeof mediaApi.confirmMediaUpload>;
 	let getMediaDownloadUrlSpy: MockInstance<typeof mediaApi.getMediaDownloadUrl>;
+	let confirmMediaDownloadSpy: MockInstance<typeof mediaApi.confirmMediaDownload>;
 	let sendMessageSpy: MockInstance<typeof messagesApi.sendMessage>;
 	const fetchMock = vi.fn();
 
@@ -122,6 +123,9 @@ describe("mediaTransfer (prd.md §9.2 + §9.4.2)", () => {
 		getMediaDownloadUrlSpy = vi
 			.spyOn(mediaApi, "getMediaDownloadUrl")
 			.mockResolvedValue({ downloadUrl: "https://r2.test/get" });
+		confirmMediaDownloadSpy = vi
+			.spyOn(mediaApi, "confirmMediaDownload")
+			.mockResolvedValue(undefined);
 		sendMessageSpy = vi.spyOn(messagesApi, "sendMessage").mockResolvedValue("envelope-id-1");
 
 		fetchMock.mockResolvedValue({
@@ -482,6 +486,39 @@ describe("mediaTransfer (prd.md §9.2 + §9.4.2)", () => {
 
 			expect(mediaImportKeyFn).not.toHaveBeenCalled();
 			expect(getMediaDownloadUrlSpy).not.toHaveBeenCalled();
+		});
+
+		// cycle-289 ack-on-grant fix: the download-confirm ack must fire only once
+		// the transfer is actually verified complete (blobHash + AES-GCM decrypt
+		// both succeeded), not merely once a download URL was granted.
+		it("confirms the download after a successful non-chunked decrypt", async () => {
+			await downloadAndDecryptMedia(nonChunkedMedia, TOKEN, mockWorker as never);
+
+			expect(confirmMediaDownloadSpy).toHaveBeenCalledExactlyOnceWith(TOKEN, "blob-1");
+		});
+
+		it("confirms the download after a successful chunked decrypt", async () => {
+			await downloadAndDecryptMedia(chunkedMedia, TOKEN, mockWorker as never);
+
+			expect(confirmMediaDownloadSpy).toHaveBeenCalledExactlyOnceWith(TOKEN, "blob-2");
+		});
+
+		it("does not confirm the download when decryption fails", async () => {
+			mediaDecryptWithHandleFn.mockRejectedValueOnce(new Error("blob_hash_mismatch"));
+
+			await expect(
+				downloadAndDecryptMedia(nonChunkedMedia, TOKEN, mockWorker as never),
+			).rejects.toThrow("blob_hash_mismatch");
+
+			expect(confirmMediaDownloadSpy).not.toHaveBeenCalled();
+		});
+
+		it("does not fail the receive when the confirm-download call itself rejects — best-effort", async () => {
+			confirmMediaDownloadSpy.mockRejectedValueOnce(new Error("http_500"));
+
+			await expect(
+				downloadAndDecryptMedia(nonChunkedMedia, TOKEN, mockWorker as never),
+			).resolves.toEqual(new Uint8Array(10));
 		});
 	});
 

@@ -218,16 +218,48 @@ impl MediaUseCase for MediaService {
         }
 
         // Group members have access when the blob was shared to an MLS group.
+        // Ack recording happens separately in `confirm_download`, once the
+        // recipient has actually verified the transfer — a granted URL alone
+        // doesn't prove the download completed.
         if let Some(gid) = &blob.group_id {
             let members = self.group_repo.list_members(gid).await?;
             if members.iter().any(|m| &m.device_id == requestor_device) {
-                let url = self.media_repo.presigned_download_url(media_id).await?;
-                // Best-effort: a download URL was already granted, so a failure
-                // here must not block the requestor — it only delays GC eligibility.
-                if let Err(e) = self.media_repo.record_ack(media_id, requestor_device).await {
+                return self.media_repo.presigned_download_url(media_id).await;
+            }
+        }
+
+        Err(DomainError::Unauthorized)
+    }
+
+    #[instrument(skip(self), fields(media_id = %media_id))]
+    async fn confirm_download(
+        &self,
+        media_id: &MediaId,
+        confirmer_device: &DeviceId,
+    ) -> Result<(), DomainError> {
+        let blob = self
+            .media_repo
+            .find_by_id(media_id)
+            .await?
+            .ok_or_else(|| DomainError::NotFound("media".into()))?;
+
+        // Uploader's own download (e.g. re-fetching their own upload) is never
+        // GC-required (`run_gc_batched` excludes the uploader from
+        // `required_ackers`) — accept but skip the no-op write.
+        if &blob.uploader_device == confirmer_device {
+            return Ok(());
+        }
+
+        if let Some(gid) = &blob.group_id {
+            let members = self.group_repo.list_members(gid).await?;
+            if members.iter().any(|m| &m.device_id == confirmer_device) {
+                // Best-effort: the caller already has the plaintext, so a
+                // failure here must not surface as an error — it only delays
+                // GC eligibility for this device.
+                if let Err(e) = self.media_repo.record_ack(media_id, confirmer_device).await {
                     tracing::warn!(error_kind = "media_ack", error = %e, "record_ack failed");
                 }
-                return Ok(url);
+                return Ok(());
             }
         }
 
@@ -736,7 +768,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_download_url_by_group_member_records_ack() {
+    async fn get_download_url_by_group_member_does_not_record_ack() {
+        // Granting a URL only proves the download was authorized, not that the
+        // transfer completed — the ack must wait for an explicit
+        // `confirm_download` call (closes the cycle-289 ack-on-grant gap).
         let repo = Arc::new(MockMediaRepo::new("u", "https://r2.example/download"));
         let uploader = DeviceId::new();
         let member = DeviceId::new();
@@ -752,7 +787,66 @@ mod tests {
             .unwrap();
         s.get_download_url(&id, &member).await.unwrap();
         let acked = repo.list_ack_device_ids(&id).await.unwrap();
+        assert!(acked.is_empty());
+    }
+
+    #[tokio::test]
+    async fn confirm_download_by_group_member_records_ack() {
+        let repo = Arc::new(MockMediaRepo::new("u", "https://r2.example/download"));
+        let uploader = DeviceId::new();
+        let member = DeviceId::new();
+        let group = GroupId::new();
+        let group_repo = FakeGroupRepo::with_members(vec![
+            (group.clone(), uploader.clone()),
+            (group.clone(), member.clone()),
+        ]);
+        let s = MediaService::new(repo.clone(), group_repo);
+        let (id, _) = s
+            .request_upload(&uploader, "image/jpeg", 512, Some(&group))
+            .await
+            .unwrap();
+        s.confirm_download(&id, &member).await.unwrap();
+        let acked = repo.list_ack_device_ids(&id).await.unwrap();
         assert_eq!(acked, vec![member]);
+    }
+
+    #[tokio::test]
+    async fn confirm_download_by_uploader_is_a_noop() {
+        let repo = Arc::new(MockMediaRepo::new("u", "d"));
+        let s = svc(repo.clone());
+        let uploader = DeviceId::new();
+        let (id, _) = s
+            .request_upload(&uploader, "image/jpeg", 512, None)
+            .await
+            .unwrap();
+        s.confirm_download(&id, &uploader).await.unwrap();
+        assert!(repo.list_ack_device_ids(&id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn confirm_download_by_non_member_returns_unauthorized() {
+        let repo = Arc::new(MockMediaRepo::new("u", "d"));
+        let uploader = DeviceId::new();
+        let non_member = DeviceId::new();
+        let group = GroupId::new();
+        let group_repo = FakeGroupRepo::with_member(group.clone(), uploader.clone());
+        let s = MediaService::new(repo.clone(), group_repo);
+        let (id, _) = s
+            .request_upload(&uploader, "image/jpeg", 512, Some(&group))
+            .await
+            .unwrap();
+        let err = s.confirm_download(&id, &non_member).await.unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
+    }
+
+    #[tokio::test]
+    async fn confirm_download_not_found_when_blob_missing() {
+        let s = svc(Arc::new(MockMediaRepo::new("u", "d")));
+        let err = s
+            .confirm_download(&MediaId::new(), &DeviceId::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::NotFound(_)));
     }
 
     #[tokio::test]

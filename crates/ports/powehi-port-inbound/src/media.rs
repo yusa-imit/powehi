@@ -21,11 +21,25 @@ pub trait MediaUseCase: Send + Sync {
 
     /// Uploader device always has access. When the blob was shared to an MLS group
     /// (`group_id` is set on the MediaBlob), any group member may also download.
+    /// Does NOT record a download ack — see `confirm_download`. Granting a URL
+    /// only proves a download was authorized, not that the transfer completed.
     async fn get_download_url(
         &self,
         media_id: &MediaId,
         requestor_device: &DeviceId,
     ) -> Result<String, DomainError>;
+
+    /// Records that `confirmer_device` actually received and verified the blob
+    /// (called after a successful decrypt, not merely after a URL was granted —
+    /// closes the "ack-on-grant" gap: a URL-grant alone doesn't prove transfer
+    /// completed, so `run_gc` must not treat it as such). Same access rule as
+    /// `get_download_url` (uploader or group member); the uploader's own ack is
+    /// a no-op since `run_gc` never requires it. Unauthorized for anyone else.
+    async fn confirm_download(
+        &self,
+        media_id: &MediaId,
+        confirmer_device: &DeviceId,
+    ) -> Result<(), DomainError>;
 
     async fn delete(
         &self,

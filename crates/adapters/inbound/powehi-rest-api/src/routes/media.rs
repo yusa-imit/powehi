@@ -3,10 +3,11 @@
 //! Security invariant: the server NEVER receives ciphertext bytes. Clients
 //! upload/download directly to/from R2 using short-lived pre-signed URLs.
 //!
-//! POST  /v1/media/upload-url        — allocate MediaId + get a pre-signed PUT URL
-//! POST  /v1/media/:id/confirm       — mark upload complete (metadata only)
-//! GET   /v1/media/:id/download-url  — get a pre-signed GET URL (uploader OR group member)
-//! DELETE /v1/media/:id              — delete (uploader device only)
+//! POST  /v1/media/upload-url          — allocate MediaId + get a pre-signed PUT URL
+//! POST  /v1/media/:id/confirm         — mark upload complete (metadata only)
+//! GET   /v1/media/:id/download-url    — get a pre-signed GET URL (uploader OR group member)
+//! POST  /v1/media/:id/confirm-download — mark download+decrypt verified complete (metadata only)
+//! DELETE /v1/media/:id                — delete (uploader device only)
 
 use axum::{
     extract::{Path, State},
@@ -94,6 +95,23 @@ pub async fn get_download_url(
         .await
         .map_err(ApiError::from)?;
     Ok(Json(DownloadUrlResponse { download_url: url }))
+}
+
+/// POST /v1/media/:id/confirm-download — the caller has actually downloaded
+/// and decrypt-verified the blob (not merely been granted a URL for it). Same
+/// access rule as `get_download_url`: uploader or group member.
+pub async fn confirm_download(
+    State(state): State<AppState>,
+    AuthenticatedDevice(device_id): AuthenticatedDevice,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let media_id = MediaId::from(id);
+    state
+        .media
+        .confirm_download(&media_id, &device_id)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn delete_media(

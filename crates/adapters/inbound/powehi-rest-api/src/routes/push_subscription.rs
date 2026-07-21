@@ -281,6 +281,9 @@ mod tests {
         async fn get_download_url(&self, _: &MediaId, _: &DeviceId) -> Result<String, DomainError> {
             unimplemented!()
         }
+        async fn confirm_download(&self, _: &MediaId, _: &DeviceId) -> Result<(), DomainError> {
+            unimplemented!()
+        }
         async fn delete(&self, _: &MediaId, _: &DeviceId) -> Result<(), DomainError> {
             unimplemented!()
         }

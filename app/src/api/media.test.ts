@@ -1,7 +1,13 @@
 import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as MediaModule from "./media";
 
-const { requestMediaUpload, confirmMediaUpload, getMediaDownloadUrl, deleteMedia } = MediaModule;
+const {
+	requestMediaUpload,
+	confirmMediaUpload,
+	getMediaDownloadUrl,
+	confirmMediaDownload,
+	deleteMedia,
+} = MediaModule;
 
 describe("media API", () => {
 	let fetchSpy: MockInstance<typeof globalThis.fetch>;
@@ -159,6 +165,36 @@ describe("media API", () => {
 			fetchSpy.mockResolvedValueOnce(new Response("{}", { status: 401 }));
 
 			await expect(getMediaDownloadUrl("bad-tok", "media-id")).rejects.toThrow("http_401");
+		});
+	});
+
+	describe("confirmMediaDownload", () => {
+		it("POSTs to /v1/media/:id/confirm-download with Bearer token", async () => {
+			fetchSpy.mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+			await confirmMediaDownload("tok", "media-id-456");
+
+			expect(fetchSpy).toHaveBeenCalledWith("/v1/media/media-id-456/confirm-download", {
+				method: "POST",
+				headers: expect.objectContaining({ Authorization: "Bearer tok" }),
+			});
+		});
+
+		it("Bearer token not in URL", async () => {
+			fetchSpy.mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+			await confirmMediaDownload("confirm-dl-tok", "media-789");
+
+			const [url] = fetchSpy.mock.calls[0] as [string, RequestInit];
+			expect(url).not.toContain("confirm-dl-tok");
+		});
+
+		it("throws on unauthorized (401)", async () => {
+			fetchSpy.mockResolvedValueOnce(
+				new Response(JSON.stringify({ code: "unauthorized" }), { status: 401 }),
+			);
+
+			await expect(confirmMediaDownload("bad-tok", "media-id")).rejects.toThrow("unauthorized");
 		});
 	});
 

@@ -92,6 +92,23 @@ export async function getMediaDownloadUrl(
 }
 
 /**
+ * POST /v1/media/:id/confirm-download — mark a download as actually received
+ * and verified (not merely granted a URL for). Call this after the blob has
+ * been fetched AND decrypted successfully — a granted URL alone doesn't prove
+ * the transfer completed, so the server's GC-retention ack must wait for this.
+ *
+ * @param token    Bearer session token
+ * @param mediaId  UUID of the blob that was just downloaded and decrypted
+ */
+export async function confirmMediaDownload(token: string, mediaId: string): Promise<void> {
+	const resp = await fetch(`${API_BASE}/media/${mediaId}/confirm-download`, {
+		method: "POST",
+		headers: authHeaders(token),
+	});
+	await throwOnError(resp);
+}
+
+/**
  * DELETE /v1/media/:id — delete a blob (uploader device only).
  *
  * @param token    Bearer session token

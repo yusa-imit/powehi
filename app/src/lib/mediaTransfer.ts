@@ -24,7 +24,12 @@
  */
 
 import type * as Comlink from "comlink";
-import { confirmMediaUpload, getMediaDownloadUrl, requestMediaUpload } from "../api/media";
+import {
+	confirmMediaDownload,
+	confirmMediaUpload,
+	getMediaDownloadUrl,
+	requestMediaUpload,
+} from "../api/media";
 import { sendMessage as sendMessageApi } from "../api/messages";
 import type { MediaPayload } from "../hooks/useMessages";
 import type { CryptoWorkerApi } from "../workers/crypto.worker";
@@ -139,21 +144,28 @@ export async function downloadAndDecryptMedia(
 			const ciphertext = new Uint8Array(await resp.arrayBuffer());
 			const iv = new Uint8Array(media.iv);
 			const blobHash = new Uint8Array(media.blobHash);
-			if (media.chunked === true) {
-				return (await cryptoWorker.mediaDecryptChunkedWithHandle(
-					handle,
-					iv,
-					ciphertext,
-					blobHash,
-					media.totalSize as number,
-				)) as Uint8Array;
-			}
-			return (await cryptoWorker.mediaDecryptWithHandle(
-				handle,
-				iv,
-				ciphertext,
-				blobHash,
-			)) as Uint8Array;
+			const plaintext =
+				media.chunked === true
+					? ((await cryptoWorker.mediaDecryptChunkedWithHandle(
+							handle,
+							iv,
+							ciphertext,
+							blobHash,
+							media.totalSize as number,
+						)) as Uint8Array)
+					: ((await cryptoWorker.mediaDecryptWithHandle(
+							handle,
+							iv,
+							ciphertext,
+							blobHash,
+						)) as Uint8Array);
+			// Fire-and-forget: only reached once blobHash verification + AES-GCM
+			// decrypt both succeeded, i.e. the transfer is actually confirmed
+			// complete (not merely granted a URL for — closes the cycle-289
+			// ack-on-grant gap). Best-effort: must not block returning plaintext
+			// to the caller or fail the receive on a transient network error.
+			void confirmMediaDownload(sessionToken, media.blobId).catch(() => {});
+			return plaintext;
 		} finally {
 			await cryptoWorker.mediaDropKey(handle).catch(() => {});
 		}

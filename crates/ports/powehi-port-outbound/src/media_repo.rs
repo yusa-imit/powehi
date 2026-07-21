@@ -18,8 +18,11 @@ pub trait MediaRepository: Send + Sync {
     ) -> Result<String, DomainError>;
     async fn presigned_download_url(&self, id: &MediaId) -> Result<String, DomainError>;
 
-    /// Record that `device_id` has obtained a download URL for `media_id` (an
-    /// opaque consumption signal — no content, no plaintext). Idempotent.
+    /// Record that `device_id` has confirmed a verified download of `media_id`
+    /// (an opaque consumption signal — no content, no plaintext). Callers must
+    /// only invoke this once the transfer is actually confirmed complete, not
+    /// merely once a download URL was granted (see `MediaUseCase::confirm_download`).
+    /// Idempotent.
     async fn record_ack(&self, media_id: &MediaId, device_id: &DeviceId)
         -> Result<(), DomainError>;
     /// Devices that have acknowledged `media_id` so far.
