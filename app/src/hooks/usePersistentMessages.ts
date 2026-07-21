@@ -36,6 +36,8 @@ export interface PersistedMessages {
 	persistDelivered: (targetMessageId: string) => void;
 	/** Persist a "read receipt" signal (read flag + reader device ids) so it survives a reload. Best-effort. */
 	persistRead: (targetMessageId: string, readBy: string[]) => void;
+	/** Persist the star/bookmark toggle for a message so it survives a reload. Best-effort. */
+	persistStarred: (targetMessageId: string, starred: boolean) => void;
 	/**
 	 * Message ids with a persist* write currently in flight (added when a persist* call
 	 * starts, removed once its Dexie write settles). markMessageEdited/markMessageReactions
@@ -227,6 +229,19 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 		[encryptedDb],
 	);
 
+	const persistStarred = useCallback(
+		(targetMessageId: string, starred: boolean) => {
+			if (!encryptedDb) return;
+			setRows((prev) => prev.map((r) => (r.id === targetMessageId ? { ...r, starred } : r)));
+			pendingWriteIdsRef.current.add(targetMessageId);
+			encryptedDb
+				.markMessageStarred(targetMessageId, starred)
+				.catch(() => setWriteErrorCount((n) => n + 1))
+				.finally(() => pendingWriteIdsRef.current.delete(targetMessageId));
+		},
+		[encryptedDb],
+	);
+
 	return {
 		rows,
 		writeErrorCount,
@@ -238,6 +253,7 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 		persistReaction,
 		persistDelivered,
 		persistRead,
+		persistStarred,
 		pendingWriteIds: pendingWriteIdsRef.current,
 	};
 }

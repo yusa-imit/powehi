@@ -2573,6 +2573,27 @@ describe("ChatLayout", () => {
 			});
 		});
 
+		it("rehydrates a persisted starred flag for the active chat on mount", async () => {
+			await db.messages.bulkPut([
+				seedRow({
+					id: "rehydrate-starred-1",
+					groupId: MAYA_GROUP,
+					receivedAt: 1000,
+					plaintextB64: textToBase64("this message was starred"),
+					starred: true,
+				}),
+			]);
+
+			render(<ChatLayout />);
+
+			await waitFor(() => {
+				expect(screen.getAllByText("this message was starred").length).toBeGreaterThan(0);
+			});
+			const bubbles = screen.getAllByTestId("message-bubble");
+			fireEvent.mouseEnter(bubbles[bubbles.length - 1]);
+			expect(screen.getByTestId("star-button")).toHaveAttribute("aria-label", "Unstar message");
+		});
+
 		it("restores a persisted pinned message on mount for the active chat", async () => {
 			await db.messages.bulkPut([
 				seedRow({

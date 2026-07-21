@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db/schema";
 import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
@@ -26,6 +26,7 @@ const MAYA_GROUP_ID = "11111111-1111-1111-1111-111111111111";
 describe("ChatLayout — starred messages", () => {
 	beforeEach(async () => {
 		await db.verifiedContacts.clear();
+		await db.messages.clear();
 		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
 			MOCK_WORKER as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
 		);
@@ -204,5 +205,72 @@ describe("ChatLayout — starred messages", () => {
 		fireEvent.click(screen.getByRole("button", { name: /starred messages/i }));
 		const items = screen.getAllByTestId("starred-item");
 		expect(items.some((el) => el.textContent?.includes("Star this incoming message"))).toBe(true);
+	});
+
+	it("starring a message with a stable id persists starred:true to the Dexie row", async () => {
+		let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_id, _gid, onMsg) => {
+			capturedOnMessage = onMsg;
+		});
+		render(<ChatLayout />);
+
+		const knownId = "star-persist-uuid-0003";
+		await act(async () => {
+			capturedOnMessage?.({
+				id: knownId,
+				senderId: "peer-device-star",
+				groupId: MAYA_GROUP_ID,
+				text: "Star and persist this message",
+				ciphertextB64: "Zg==",
+				epochSeq: 1,
+			});
+		});
+
+		const bubbles = screen.getAllByTestId("message-bubble");
+		fireEvent.mouseEnter(bubbles[bubbles.length - 1]);
+		fireEvent.click(screen.getByTestId("star-button"));
+		fireEvent.mouseLeave(bubbles[bubbles.length - 1]);
+
+		await waitFor(async () => {
+			const row = await db.messages.get(knownId);
+			expect(row?.starred).toBe(true);
+		});
+	});
+
+	it("unstarring a message with a stable id persists starred:false to the Dexie row", async () => {
+		let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_id, _gid, onMsg) => {
+			capturedOnMessage = onMsg;
+		});
+		render(<ChatLayout />);
+
+		const knownId = "star-persist-uuid-0004";
+		await act(async () => {
+			capturedOnMessage?.({
+				id: knownId,
+				senderId: "peer-device-star",
+				groupId: MAYA_GROUP_ID,
+				text: "Star then unstar this message",
+				ciphertextB64: "Zg==",
+				epochSeq: 1,
+			});
+		});
+
+		const bubbles = screen.getAllByTestId("message-bubble");
+		fireEvent.mouseEnter(bubbles[bubbles.length - 1]);
+		fireEvent.click(screen.getByTestId("star-button"));
+		fireEvent.mouseLeave(bubbles[bubbles.length - 1]);
+		await waitFor(async () => {
+			const row = await db.messages.get(knownId);
+			expect(row?.starred).toBe(true);
+		});
+
+		fireEvent.mouseEnter(bubbles[bubbles.length - 1]);
+		fireEvent.click(screen.getByTestId("star-button"));
+		fireEvent.mouseLeave(bubbles[bubbles.length - 1]);
+		await waitFor(async () => {
+			const row = await db.messages.get(knownId);
+			expect(row?.starred).toBe(false);
+		});
 	});
 });

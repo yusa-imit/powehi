@@ -180,6 +180,16 @@ export class EncryptedPowehiDb {
 		});
 	}
 
+	/**
+	 * Persist the star/bookmark toggle for a message so it survives a reload.
+	 * Unlike markMessageDelivered (one-way true), this takes an explicit value
+	 * since starring is a user-toggleable flag that can go back to false.
+	 * No-op if the row does not exist locally, same as markMessageEdited/markMessageDeleted.
+	 */
+	async markMessageStarred(id: string, starred: boolean): Promise<void> {
+		await this.db.messages.update(id, { starred });
+	}
+
 	async getMessagesByGroup(groupId: string): Promise<MessageRow[]> {
 		const rows = await this.db.messages.where("groupId").equals(groupId).toArray();
 		const decrypted = await Promise.all(rows.map((r) => decRow(this.encryptor, r, "messages")));

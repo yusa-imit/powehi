@@ -26,6 +26,8 @@ export interface MessageRow {
 	read?: boolean;
 	/** JSON-serialized array of device IDs that have sent a read_receipt for this message (deduped). Not sensitive — opaque device ids, same tier as senderDeviceId (already unencrypted). undefined = no read_receipt yet. */
 	readByJson?: string;
+	/** True when the local user has starred/bookmarked this message. Local-only, never sent to server. Not sensitive — a boolean flag, like delivered/read. undefined = not starred. */
+	starred?: boolean;
 }
 
 // GroupRow — MLS group state snapshot.
@@ -347,6 +349,16 @@ export class PowehiDb extends Dexie {
 		// — so it's encrypted at rest (SENSITIVE.groups in encrypted-db.ts). No index change
 		// needed — never queried across groups.
 		this.version(20).stores({
+			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v21: added starred to MessageRow — the message star/bookmark toggle (previously
+		// React-state-only, same gap delivered/read had before v15) now survives a reload.
+		// Not sensitive (a boolean flag, like delivered/read) — no index change needed,
+		// never queried across messages, only read/written per-row.
+		this.version(21).stores({
 			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
 			groups: "id, lastActivity",
 			identity: "id",

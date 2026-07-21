@@ -7302,6 +7302,7 @@ export function ChatLayout() {
 		persistReaction,
 		persistDelivered,
 		persistRead,
+		persistStarred,
 		pendingWriteIds,
 	} = usePersistentMessages(active?.mlsGroupId);
 	const showTauriNotification = useTauriNotification();
@@ -7366,6 +7367,7 @@ export function ChatLayout() {
 				delivered: row.delivered,
 				read: row.read,
 				readBy,
+				starred: row.starred,
 				// senderDeviceId is the authenticated-device value the server bound
 				// to the envelope at send time (AuthenticatedDevice extractor), not
 				// a client-suppliable field — but it is not an MLS-cryptographic
@@ -8333,8 +8335,19 @@ export function ChatLayout() {
 					return { ...c, messages: msgs };
 				}),
 			);
+			// Recompute the same result from the pre-update chatsRef.current snapshot to
+			// persist it — mirrors handleIncomingReaction, since setChats is async and its
+			// updater result isn't otherwise available here. Only persisted when the
+			// message has a stable id (msgId can be undefined for an optimistic message
+			// not yet backfilled with a server-confirmed id — nothing to key the Dexie
+			// write on yet).
+			const chat = chatsRef.current.find((c) => c.id === chatId);
+			const target = chat?.messages.find((m) => (msgId ? m.id === msgId : m.text === msgText));
+			if (target?.id) {
+				persistStarred(target.id, !target.starred);
+			}
 		},
-		[],
+		[persistStarred],
 	);
 
 	/** Share a message via the Web Share API / Tauri native share sheet.

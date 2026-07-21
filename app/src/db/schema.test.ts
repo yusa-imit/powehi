@@ -231,6 +231,33 @@ describe("PowehiDb", () => {
 		expect(grp?.nickname).toBeUndefined();
 	});
 
+	it("stores and retrieves starred on MessageRow (v21, raw store — encryption is EncryptedPowehiDb's job)", async () => {
+		await db.messages.add({
+			id: "msg-v21",
+			groupId: "group-uuid-v21",
+			ciphertextB64: "dGVzdA==",
+			senderDeviceId: "device-v21",
+			epochSeq: 0,
+			receivedAt: Date.now(),
+			starred: true,
+		});
+		const msg = await db.messages.get("msg-v21");
+		expect(msg?.starred).toBe(true);
+	});
+
+	it("leaves starred undefined when not set (v21)", async () => {
+		await db.messages.add({
+			id: "msg-v21-default",
+			groupId: "group-uuid-v21",
+			ciphertextB64: "dGVzdA==",
+			senderDeviceId: "device-v21",
+			epochSeq: 0,
+			receivedAt: Date.now(),
+		});
+		const msg = await db.messages.get("msg-v21-default");
+		expect(msg?.starred).toBeUndefined();
+	});
+
 	it("queries messages by groupId index", async () => {
 		await db.messages.bulkAdd([
 			{

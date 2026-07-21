@@ -482,6 +482,46 @@ describe("EncryptedPowehiDb", () => {
 		expect(retrieved).toBeUndefined();
 	});
 
+	it("markMessageStarred sets starred:true on the row", async () => {
+		await encDb.addMessage({
+			id: "msg-starred",
+			groupId: "grp-starred",
+			ciphertextB64: "c3RhcnJlZFRhcmdldA==",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+		});
+		expect((await encDb.getMessage("msg-starred"))?.starred).toBeUndefined();
+
+		await encDb.markMessageStarred("msg-starred", true);
+		const retrieved = await encDb.getMessage("msg-starred");
+		expect(retrieved?.starred).toBe(true);
+		// Ciphertext row untouched.
+		expect(retrieved?.ciphertextB64).toBe("c3RhcnJlZFRhcmdldA==");
+	});
+
+	it("markMessageStarred can toggle back to false, unlike the one-way delivered/read flags", async () => {
+		await encDb.addMessage({
+			id: "msg-unstarred",
+			groupId: "grp-starred",
+			ciphertextB64: "dW5zdGFyVGFyZ2V0",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+		});
+		await encDb.markMessageStarred("msg-unstarred", true);
+		expect((await encDb.getMessage("msg-unstarred"))?.starred).toBe(true);
+
+		await encDb.markMessageStarred("msg-unstarred", false);
+		expect((await encDb.getMessage("msg-unstarred"))?.starred).toBe(false);
+	});
+
+	it("markMessageStarred is a no-op when the target row does not exist locally", async () => {
+		await expect(encDb.markMessageStarred("no-such-msg", true)).resolves.not.toThrow();
+		const retrieved = await encDb.getMessage("no-such-msg");
+		expect(retrieved).toBeUndefined();
+	});
+
 	it("markMessageRead unions readBy across sequential calls instead of overwriting", async () => {
 		await encDb.addMessage({
 			id: "msg-read-union",
