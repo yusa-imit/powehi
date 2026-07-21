@@ -17,7 +17,93 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-20, cycle 327 — FEATURE: persist group description to Dexie, encrypted at rest, commit 3a56944)
+## Current state (2026-07-21, cycle 328 — FEATURE: persist per-DM nickname to Dexie, encrypted at rest, commit eeddf54)
+
+- `git status` clean, `gh run list --limit 3` all green at cycle start (cycle
+  327's push), `gh issue list --state open` empty. Picked the top cycle-327
+  next-cycle candidate: `nickname` (per-DM custom display name editor) —
+  verified the gap was still real myself (`grep -i nickname` across
+  `schema.ts`/`encrypted-db.ts`, zero hits) before delegating an Explore
+  agent to nail down exact state shape and line numbers.
+- **Key finding that changed the plan slightly:** cycle 327's note guessed
+  `nickname` "likely also SENSITIVE-tier like description" — confirmed true,
+  but also found it's **DM-only** (InfoPanel gate `!chat.isGroup &&
+  onUpdateNickname`, line 5246), unlike `description` which is group-only.
+  Despite that semantic difference, the persistence *mechanism* is
+  identical: DMs get a `GroupRow` in `db.groups` keyed by `mlsGroupId` just
+  like multi-member groups (MLS treats a 1:1 conversation as a 2-member
+  group), so no new table/keying scheme was needed — confirmed via
+  `SEED_CHATS`'s Maya entry (`mlsGroupId: "1111...1111"`) and the existing
+  `archived`/`pinnedTop`/`muted` fields already working identically for both
+  DMs and groups.
+- Also found `ChatLayoutNickname.test.tsx` already existed (14 UI-only
+  tests: edit/save/cancel/Escape/Enter, ConversationHeader/QuickSwitcher
+  display) but zero Dexie persistence assertions — same "feature shipped,
+  Dexie write path missing" bug class as cycles 312/314/321/323/326/327.
+- **Fix (self-implemented, byte-for-byte mirror of cycle 327's `description`
+  v19 pattern):** `GroupRow.nickname?: string` (schema v20, additive, added
+  to `SENSITIVE.groups` alongside `mlsStateB64`/`name`/`draft`/
+  `description`). New `EncryptedPowehiDb.setGroupNickname`/`getGroupNickname`
+  are an exact mirror of `setGroupDescription`/`getGroupDescription` (same
+  `Dexie.waitFor` + explicit-transaction pattern, same partial
+  `db.groups.update` so sibling fields are untouched). `handleUpdateNickname`
+  now also calls `encryptedDb.setGroupNickname(...)` fire-and-forget
+  (`.catch(() => {})`) alongside its existing `setChats` update. Rehydration
+  added to the same effect used by `draft`/`description`, decrypting
+  `row.nickname` from the already-fetched `row` and merging via `setChats`
+  keyed by `mlsGroupId`.
+- **security-auditor: GREEN.** Independently verified: `nickname` correctly
+  reaches `SENSITIVE.groups` so both the dedicated methods AND the generic
+  `encRow`/`decRow` helpers encrypt it; zero plaintext logging; the
+  `Dexie.waitFor` + explicit-transaction pattern is safe against
+  sibling-field corruption (partial merge); grep confirmed `nickname` never
+  reaches any API client/WebSocket/MLS payload; rehydration decrypt failure
+  is fail-safe. One informational note (pre-existing pattern, not introduced
+  this cycle, inherited verbatim from `description`): the rehydration
+  unconditionally overwrites `{ ...c, nickname }` rather than using `draft`'s
+  "only fill if not already present" guard — a transient same-session race
+  (in-flight decrypt clobbering a same-chat edit that landed after the fetch
+  started), not a security defect, since the DB write itself is always
+  correct. No action taken — parity with the shipped `description` behavior.
+- Not architectural, no new server-visible metadata, reuses the existing
+  `FieldEncryptor` mechanism — `threat-model-checker`/`crypto-reviewer` not
+  required, same scoping cycle 327 used for `description`.
+- 9 new tests: 2 in `schema.test.ts` (v20 raw round-trip + leaves-undefined),
+  5 in `encrypted-db.test.ts` (unknown-group-undefined, persist-and-read-back,
+  clear-via-undefined, sibling-fields-undisturbed, raw-DB-stores-ciphertext),
+  2 new persistence tests appended to the pre-existing
+  `ChatLayoutNickname.test.tsx` (persist-on-save round-trips through
+  `db.groups.get` for Maya's seed `mlsGroupId`, rehydrate-on-chat-switch
+  restores the nickname text from a pre-seeded row — same
+  `db.groups.clear()` + `.add()` pre-seed gotcha every prior persistence
+  cycle's tests hit, since `db.groups.update` silently no-ops on a missing
+  row). `tsc -b` clean, `biome check` clean across all 149 `app/src` files
+  (2 files needed `--write` auto-format on tab/wrap-style, applied). Frontend
+  `pnpm test --run`: **1371/1371 tests green** (104 files, was 1362, net +9).
+  Backend untouched this cycle (pure frontend/Dexie change, confirmed via
+  `git diff --name-only`).
+- **Next cycle candidates:** the remaining two gaps from cycle 326's
+  Explore-agent survey — `starred` (`MessageRow`-shaped, star/bookmark on
+  messages — needs a `MessageRow.starred` field + rehydration in the
+  message-loading path, not the group-rehydration effect used by this and
+  the last several cycles' fixes) and `customStatus` (user-global emoji+text
+  status, would need a new `LocalIdentity.customStatus` field, not
+  `GroupRow`-shaped like the other five fixed so far) — both still real
+  gaps, ranked in that order; the informational rehydration-race note above
+  (very low priority, cosmetic same-session-only race, affects both
+  `description` and now `nickname` — not worth a dedicated cycle unless it
+  recurs in user reports); PQ hybrid Phase A (still blocked on openmls
+  stable `MLS_128_MLKEM768` — this environment has no network access to
+  re-check crates.io this cycle either); OPAQUE PQ-hybrid OPRF upgrade
+  (gated on ADR-0003 Phase B 95%-session threshold, not yet actionable); the
+  still-standing opaque-ke live-migration login-round-trip regression test
+  gap (cycle 318/319, no prod users yet, low urgency); `.claude/memory/
+  project-context.md` file size (~237KB after this entry, was ~230KB at
+  cycle 327) — still under the 256KB Read cap but climbing; the next
+  STABILIZATION cycle (330) should archive older cycles if the growth rate
+  continues, same standing note as cycles 326/327.
+
+## Previous state (2026-07-20, cycle 327 — FEATURE: persist group description to Dexie, encrypted at rest, commit 3a56944)
 
 - `git status` clean, `gh run list --limit 3` all green at cycle start (cycle
   326's push), `gh issue list --state open` empty. Picked the top cycle-326
