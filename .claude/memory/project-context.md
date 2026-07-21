@@ -17,7 +17,105 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-21, cycle 328 — FEATURE: persist per-DM nickname to Dexie, encrypted at rest, commit eeddf54)
+## Current state (2026-07-21, cycle 329 — FEATURE: persist starred/bookmarked messages to Dexie, commit 265e9bb)
+
+- `git status` clean, `gh run list --limit 3` all green at cycle start (cycle
+  328's push), `gh issue list --state open` empty. Picked the top cycle-328
+  next-cycle candidate: `starred` (message star/bookmark toggle) — verified
+  the gap was still real myself (`grep -i starred` across `schema.ts`/
+  `encrypted-db.ts`, zero hits) before touching anything.
+- **Different shape from the last several cycles' `GroupRow` fields:**
+  `starred` is `MessageRow`-shaped (per-message, not per-chat), confirmed via
+  `ChatLayout.tsx`'s `handleStarMessage` (line 8323) which only ever did
+  `setChats` — zero Dexie write — and the message-loading rehydration effect
+  (line ~7322, the one that builds `ChatMessage`s from Dexie `MessageRow`s on
+  chat mount/switch, already restoring `delivered`/`read`/`readBy`) which
+  never read a `starred` field either. Same bug class as every previous
+  cycle in this series: a shipped, fully-wired UI feature (star button,
+  `StarredPanel`, aria-label toggle) missing only the Dexie write/read path.
+- **Fix (self-implemented, mirrors the existing `delivered`/`read` v15
+  pattern):** `MessageRow.starred?: boolean` (schema v21, additive, NOT
+  sensitive — same tier as `delivered`/`read`, confirmed `SENSITIVE.messages`
+  in `encrypted-db.ts` still `["ciphertextB64", "plaintextB64", "editedText",
+  "reactionsJson"]` only). New `EncryptedPowehiDb.markMessageStarred(id,
+  starred)` mirrors `markMessageDelivered` (raw `db.messages.update`, no
+  read-then-merge needed — unlike `markMessageRead`'s `readByJson` union,
+  `starred` has exactly one writer, no multi-device-race to close). New
+  `usePersistentMessages.persistStarred` mirrors `persistDelivered` exactly
+  (optimistic `setRows` + `pendingWriteIdsRef` + fire-and-forget). Wired
+  `handleStarMessage` to also call `persistStarred(target.id, !target.starred)`
+  computed from a pre-update `chatsRef.current` snapshot — same "recompute
+  from pre-update snapshot" pattern as `handleIncomingReaction`, since
+  `setChats` is async and its updater result isn't otherwise available here;
+  only persisted when the message has a stable id (msgId can be undefined
+  for an optimistic message not yet backfilled, same guard other message
+  actions use). Rehydration effect now also copies `starred: row.starred`
+  alongside the existing `delivered`/`read`/`readBy` fields.
+- **security-auditor: GREEN, no findings.** Independently verified (not
+  taken on the diff's own comments): `starred` correctly excluded from
+  `SENSITIVE.messages` (reveals strictly less than the already-unencrypted
+  `read` flag); zero plaintext/PII logging; grep confirmed `starred` never
+  reaches `mlsEncrypt`/`sendMessageApi`/any API client or WebSocket payload
+  (contrasted directly against `handlePinMessage`, which deliberately does
+  send a wire signal, to confirm `handleStarMessage` correctly does not);
+  the `chatsRef.current`-snapshot persist call can't produce a stale value
+  under realistic interleavings (real click events force a React flush
+  between them, refreshing `chatsRef` before the next click); raw
+  `db.messages.update` (no merge) is correct since `starred` has a single
+  writer, unlike `readByJson`'s multi-device merge case.
+- Not architectural, no new server-visible metadata, reuses the existing
+  raw-field (non-crypto) persistence mechanism — `threat-model-checker`/
+  `crypto-reviewer` not required, same scoping as the `delivered`/`read`/
+  `archived`/`pinnedTop` non-sensitive-boolean work in prior cycles.
+- **One test-authoring bug caught and fixed before commit (self-caught, not
+  agent-caused):** the first draft of the two new persistence tests in
+  `ChatLayoutStarred.test.tsx` (persist-true, then persist-false) failed
+  when run as part of the full file — but passed in isolation. Root cause:
+  unlike ~10 sibling `ChatLayoutXxx.test.tsx` files (`ChatLayoutReactions`,
+  `ChatLayoutCopy`, `ChatLayoutForwarding`, etc.), `ChatLayoutStarred.test.tsx`
+  had never had a `db.messages.clear()` in its `beforeEach` — only
+  `db.verifiedContacts.clear()`. Since Dexie/fake-indexeddb's `db` singleton
+  persists across tests within a file, earlier tests' incoming messages
+  accumulated in Maya's chat, and my new tests' `bubbles[bubbles.length - 1]`
+  lookup no longer reliably pointed at the just-added message once enough
+  prior-test messages had piled up. Added the standard `await
+  db.messages.clear()` line to this file's `beforeEach` (bringing it in line
+  with its ~10 sibling files) — fixed, full suite green afterward.
+- 8 new tests: 2 in `schema.test.ts` (v21 raw round-trip + leaves-undefined),
+  4 in `encrypted-db.test.ts` (sets starred:true, toggles back to false
+  — unlike the one-way `delivered`/`read` flags, no-op-on-missing-row), 1 in
+  `ChatLayout.test.tsx` (rehydrates a persisted starred flag on mount — the
+  message-loading-path rehydration effect, not the group-rehydration effect
+  used by the last several cycles' `GroupRow` fixes), 2 in
+  `ChatLayoutStarred.test.tsx` (persist-on-star / persist-on-unstar round-trip
+  through `db.messages.get`). `tsc -b` clean, `biome check` clean (8 touched
+  files). Frontend `pnpm test --run` (via `npx vitest run`): **1379/1379
+  tests green** (104 files, was 1371, net +8). Backend untouched this cycle
+  (pure frontend/Dexie change, confirmed via `git diff --name-only`).
+- **Next cycle candidates:** `customStatus` (user-global emoji+text status,
+  the last remaining gap from cycle 326's Explore-agent survey — would need
+  a new `LocalIdentity.customStatus` field, not `GroupRow`/`MessageRow`-
+  shaped like the six fields fixed across cycles 326-329, so likely needs a
+  fresh Explore-agent pass to confirm exact React-state shape and call
+  sites rather than reusing the same survey); the informational
+  rehydration-race note from cycles 327/328 (very low priority, cosmetic
+  same-session-only race affecting `description`/`nickname`); the
+  `db.messages.clear()`-missing-in-beforeEach class of bug this cycle just
+  hit in `ChatLayoutStarred.test.tsx` — worth a quick grep sweep at the next
+  STABILIZATION cycle (330) across all `ChatLayoutXxx.test.tsx` files for
+  any other file missing this clear that happens to not yet have a test
+  order-dependent enough to expose it; PQ hybrid Phase A (still blocked on
+  openmls stable `MLS_128_MLKEM768` — this environment has no network access
+  to re-check crates.io this cycle either); OPAQUE PQ-hybrid OPRF upgrade
+  (gated on ADR-0003 Phase B 95%-session threshold, not yet actionable); the
+  still-standing opaque-ke live-migration login-round-trip regression test
+  gap (cycle 318/319, no prod users yet, low urgency); `.claude/memory/
+  project-context.md` file size (~245KB after this entry, was ~237KB at
+  cycle 328) — still under the 256KB Read cap but climbing; the next
+  STABILIZATION cycle (330) should archive older cycles if the growth rate
+  continues, same standing note as cycles 326-328.
+
+## Previous state (2026-07-21, cycle 328 — FEATURE: persist per-DM nickname to Dexie, encrypted at rest, commit eeddf54)
 
 - `git status` clean, `gh run list --limit 3` all green at cycle start (cycle
   327's push), `gh issue list --state open` empty. Picked the top cycle-327
