@@ -17,6 +17,78 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## Current state (2026-07-21, cycle 330 — STABILIZATION: media download-ack timing fix, prd.md §9.4.3, commit 88d4a07)
+
+- `git status` clean, CI green (`gh run list --limit 5`), `gh issue list --state open` empty at
+  cycle start. `cargo audit`/`cargo deny check` both fully clean (no advisories beyond the already-
+  documented, still-valid `.cargo/audit.toml`/`deny.toml` waivers — no new dependency work needed).
+  Full backend (`cargo build/test/clippy/fmt --workspace`) and frontend (`pnpm test`/`tsc`/`biome`,
+  1379/1379) were already green before touching anything. The memory-noted `powehi-telemetry`
+  env-var-race flake candidate turned out to already be fixed (proper `ENV_TEST_MUTEX` + `EnvGuard`
+  RAII pattern already in place, verified via 3 repeated `cargo test -p powehi-telemetry` runs) —
+  do not re-pick that as a candidate, it's closed.
+- **Picked the standing cycle-289 security-auditor advisory** ("ack-on-URL-grant not confirmed-
+  transfer") instead — dispatched an Explore-style research agent first to verify the gap was still
+  real (not fixed by an intervening cycle) and confirm it fit in one stabilization cycle before
+  touching code; it was still open and exactly as described.
+- **Root cause:** `MediaService::get_download_url` (crates/application/powehi-application/src/
+  media_service.rs) recorded a recipient's GC ack (`media_repo.record_ack`) the instant a presigned
+  download URL was granted — not once the recipient actually verified receipt. A failed/aborted
+  transfer (network drop, client crash) could still count as acked; once every recipient appeared
+  acked and the 30-day retention floor elapsed, `run_gc` could delete a blob a device never actually
+  received. Bounded/non-exploitable (data-loss only, not confidentiality; the URL-fetch is re-
+  callable before the floor expires) but a real gap.
+- **Fix:** added `confirm_download` to the `MediaUseCase` port trait + `MediaService` (same
+  uploader-or-group-member authorization predicate as `get_download_url`, verified via
+  `GroupRepository::list_members` — uploader's own confirm is a no-op since `run_gc` never requires
+  it). New `POST /v1/media/:id/confirm-download` handler/route (same `AuthenticatedDevice` extractor
+  as every sibling media endpoint — no way to spoof another device's ack). `get_download_url` no
+  longer writes the ack at all. Frontend: `mediaTransfer.ts`'s `downloadAndDecryptMedia` now fires
+  `confirmMediaDownload` (new `app/src/api/media.ts` client fn) fire-and-forget (`.catch(() => {})`,
+  not awaited) ONLY after `mediaDecryptWithHandle`/`mediaDecryptChunkedWithHandle` both succeed —
+  i.e. blobHash verified + AES-GCM decrypt succeeded, the actual "transfer genuinely completed"
+  signal. Single call site (only `downloadAndDecryptMedia` calls `getMediaDownloadUrl`; thumbnails
+  are inline/no separate R2 fetch), so this stayed a single-cycle-sized fix as scoped up front.
+- **security-auditor: GREEN.** No auth bypass (device_id always comes from the server-side
+  `AuthenticatedDevice` session lookup, never client-supplied); confirmed a malicious-but-authorized
+  group member acking without downloading can only forfeit their own future access (GC requires
+  *all* non-uploader members acked, so one member's fake ack can't force deletion while any other
+  honest member is still unacked) — and this capability already existed pre-fix via plain
+  `get_download_url`, so no new griefing lever. `record_ack` is `ON CONFLICT DO NOTHING` (idempotent/
+  replay-safe). No new unwrap()/expect(). Grepped for other callers of `get_download_url`'s old ack
+  side-effect — none found (only call site was the REST handler; both frontend receive paths
+  — `useMediaReceive.ts` and `ChatLayout.tsx`'s forward flow — go through the same shared
+  `downloadAndDecryptMedia`).
+- **threat-model-checker: YELLOW → resolved in-cycle.** No new metadata category or DB column
+  (`media_acks(media_id, device_id)` unchanged) — only the *timing/meaning* of each row shifts from
+  "URL was granted" to "recipient cryptographically verified genuine, complete plaintext". This is a
+  genuine (not cosmetic) tightening of the §3.4 GC-timing read-receipt oracle: the known 404-after-
+  retention-floor inference upgrades from "all members requested a URL" to "all members actually
+  received working plaintext". Doc-corrected directly (agent has Read/Grep per its type, but the
+  edit landed in the working tree regardless — verified via `git diff` before trusting the claim,
+  per this project's memory-verification discipline): prd.md §3.3 (media_acks bullet, was line 182),
+  §3.4 (GC-timing oracle paragraph, was line 203), §9.4.3 (GC ACK definition, was line 1280) all
+  corrected from "ACK = URL 발급" to "ACK = confirm-download 호출 (blobHash+AES-GCM 검증 후)", plus a
+  §16.7 changelog entry. Also fixed a stale doc comment in `crates/ports/powehi-port-outbound/src/
+  media_repo.rs`'s `record_ack` doc and the `0008_media_acks.sql` migration header comment (both
+  said "obtained a download URL" — now say "confirmed a verified download").
+- 9 new backend tests (`media_service.rs`: `confirm_download_by_group_member_records_ack`,
+  `_by_uploader_is_a_noop`, `_by_non_member_returns_unauthorized`, `_not_found_when_blob_missing`,
+  plus the renamed `get_download_url_by_group_member_does_not_record_ack` asserting the OLD ack
+  side-effect is gone; `lib.rs`: `confirm_download_returns_204` + added to the 401-without-token
+  sweep) + 7 new frontend tests (`api/media.test.ts`: 3 for `confirmMediaDownload`;
+  `mediaTransfer.test.ts`: 4 — confirms-after-chunked/non-chunked-decrypt, does-NOT-confirm-on-
+  decrypt-failure, best-effort-doesn't-fail-receive-when-confirm-itself-rejects). Full backend
+  (build/test/clippy/fmt, 124 application-crate tests + 140 rest-api-crate tests, was 120/139) and
+  frontend (1386/1386, was 1379) green. Target dir hygiene: pruned 0-byte `.rmeta` stubs (24G→23G,
+  still over the 20GB housekeeping threshold — not urgent, no action beyond the standard prune this
+  cycle). **Next candidate:** none urgent from this change — the doc/timing gap is now fully closed.
+  Standing candidates: the Y-4 PQ hybrid epoch-key-mixing gap (still blocked on openmls upstream,
+  see ADR-0003 Phase B section below) or a fresh sweep for any newly-accumulated unwrap()/expect()
+  in library code (last full sweep this cycle found only 4 pre-existing, already-justified
+  instances — grpc client.rs:291, rest-api rate_limit.rs:72, opaque lib.rs:160, auth_service.rs:92 —
+  none needing action).
+
 ## Current state (2026-07-21, cycle 329 — FEATURE: persist starred/bookmarked messages to Dexie, commit 265e9bb)
 
 - `git status` clean, `gh run list --limit 3` all green at cycle start (cycle
