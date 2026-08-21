@@ -1916,6 +1916,121 @@ describe("ChatLayout", () => {
 
 			vi.useRealTimers();
 		});
+
+		it("persists lastSeenAt to Dexie GroupRow on an immediate offline transition (schema v22)", async () => {
+			let capturedOnPresence: ((groupId: string, status: "online" | "offline") => void) | undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(
+					_id,
+					_gid,
+					_onMsg,
+					_onPq,
+					_onTyping,
+					_onReaction,
+					_onReactionRemove,
+					_onRead,
+					_onDelivery,
+					_onEdit,
+					_onDelete,
+					_onPin,
+					onPresence,
+				) => {
+					capturedOnPresence = onPresence;
+				},
+			);
+
+			await db.groups.add({
+				id: "11111111-1111-1111-1111-111111111111",
+				name: "Maya Akana",
+				mlsStateB64: "",
+				lastActivity: Date.now(),
+			});
+			render(<ChatLayout />);
+
+			const before = Date.now();
+			await act(async () => {
+				capturedOnPresence?.("11111111-1111-1111-1111-111111111111", "online");
+			});
+			await act(async () => {
+				capturedOnPresence?.("11111111-1111-1111-1111-111111111111", "offline");
+			});
+
+			await waitFor(async () => {
+				const row = await db.groups.get("11111111-1111-1111-1111-111111111111");
+				expect(row?.lastSeenAt).toBeDefined();
+				expect(row?.lastSeenAt as number).toBeGreaterThanOrEqual(before);
+			});
+		});
+
+		it("persists lastSeenAt to Dexie GroupRow when the 90s auto-offline timer fires (schema v22)", async () => {
+			await db.groups.add({
+				id: "11111111-1111-1111-1111-111111111111",
+				name: "Maya Akana",
+				mlsStateB64: "",
+				lastActivity: Date.now(),
+			});
+			vi.useFakeTimers();
+			let capturedOnPresence: ((groupId: string, status: "online" | "offline") => void) | undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(
+				(
+					_id,
+					_gid,
+					_onMsg,
+					_onPq,
+					_onTyping,
+					_onReaction,
+					_onReactionRemove,
+					_onRead,
+					_onDelivery,
+					_onEdit,
+					_onDelete,
+					_onPin,
+					onPresence,
+				) => {
+					capturedOnPresence = onPresence;
+				},
+			);
+
+			render(<ChatLayout />);
+
+			await act(async () => {
+				capturedOnPresence?.("11111111-1111-1111-1111-111111111111", "online");
+			});
+
+			const before = Date.now();
+			await act(async () => {
+				vi.advanceTimersByTime(90_000);
+			});
+
+			vi.useRealTimers();
+
+			await waitFor(async () => {
+				const row = await db.groups.get("11111111-1111-1111-1111-111111111111");
+				expect(row?.lastSeenAt).toBeDefined();
+				expect(row?.lastSeenAt as number).toBeGreaterThanOrEqual(before);
+			});
+		});
+
+		it("rehydrates a persisted lastSeenAt as a formatted 'last seen HH:MM' label without forcing online", async () => {
+			// Jordan's seed default is online: false, lastSeen: "2h ago" — a persisted
+			// lastSeenAt should override the seed lastSeen label, and `online` must stay false
+			// (rehydration deliberately never sets online: true from a stale DB row).
+			const JORDAN_GROUP_ID = "33333333-3333-3333-3333-333333333333";
+			const persisted = new Date(2026, 0, 1, 9, 41).getTime();
+			await db.groups.add({
+				id: JORDAN_GROUP_ID,
+				name: "Jordan",
+				mlsStateB64: "",
+				lastActivity: Date.now(),
+				lastSeenAt: persisted,
+			});
+
+			render(<ChatLayout />);
+			fireEvent.click(screen.getByRole("button", { name: /jordan/i }));
+
+			await waitFor(() => expect(screen.getByText(/last seen 09:41/i)).toBeInTheDocument());
+			expect(screen.queryByText(/^online$/i)).not.toBeInTheDocument();
+		});
 	});
 
 	// ── Starred messages ──────────────────────────────────────────────────────────

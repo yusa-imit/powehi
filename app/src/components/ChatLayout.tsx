@@ -7479,6 +7479,17 @@ export function ChatLayout() {
 				// Only overwrite a field the row actually has a value for — undefined leaves
 				// the in-memory default alone rather than forcing it off/blank.
 				if (row) {
+					// Rehydrate the "last seen" presence label (previously React-state-only, same
+					// gap archived/pinnedTop had before v18). Formatted the same HH:MM way as
+					// handleIncomingPresence does. Deliberately NOT restoring `online` here — a
+					// chat should never come back as "online" from a stale DB row on reload, only
+					// the offline "last seen" label is restored.
+					const persistedLastSeen =
+						row.lastSeenAt !== undefined && Number.isFinite(row.lastSeenAt)
+							? `${String(new Date(row.lastSeenAt).getHours()).padStart(2, "0")}:${String(
+									new Date(row.lastSeenAt).getMinutes(),
+								).padStart(2, "0")}`
+							: undefined;
 					setChats((cs) =>
 						cs.map((c) => {
 							if (c.mlsGroupId !== groupId) return c;
@@ -7495,6 +7506,7 @@ export function ChatLayout() {
 								unread: row.unread ?? c.unread,
 								archived: row.archived ?? c.archived,
 								pinnedTop: row.pinnedTop ?? c.pinnedTop,
+								lastSeen: persistedLastSeen ?? c.lastSeen,
 							};
 						}),
 					);
@@ -8245,6 +8257,8 @@ export function ChatLayout() {
 	 * Handle an incoming presence heartbeat from a peer.
 	 * "online" resets the 90s offline timeout; "offline" marks them offline immediately.
 	 * lastSeen is recorded when transitioning from online→offline.
+	 * Also persisted to Dexie (GroupRow.lastSeenAt, schema v22) so it survives a reload —
+	 * fire-and-forget, same pattern as every other db.groups.update() call site in this file.
 	 */
 	const handleIncomingPresence = useCallback((gId: string, status: "online" | "offline") => {
 		const existing = presenceTimersRef.current.get(gId);
@@ -8257,6 +8271,7 @@ export function ChatLayout() {
 			setChats((cs) =>
 				cs.map((c) => (c.mlsGroupId === gId ? { ...c, online: false, lastSeen } : c)),
 			);
+			db.groups.update(gId, { lastSeenAt: now.getTime() }).catch(() => {});
 		} else {
 			// "online": mark online and schedule auto-offline after 90 s.
 			setChats((cs) => cs.map((c) => (c.mlsGroupId === gId ? { ...c, online: true } : c)));
@@ -8267,6 +8282,7 @@ export function ChatLayout() {
 				setChats((cs) =>
 					cs.map((c) => (c.mlsGroupId === gId ? { ...c, online: false, lastSeen } : c)),
 				);
+				db.groups.update(gId, { lastSeenAt: now.getTime() }).catch(() => {});
 			}, 90_000);
 			presenceTimersRef.current.set(gId, handle);
 		}

@@ -258,6 +258,30 @@ describe("PowehiDb", () => {
 		expect(msg?.starred).toBeUndefined();
 	});
 
+	it("stores and retrieves lastSeenAt on GroupRow (v22, raw store — not sensitive, never encrypted)", async () => {
+		const now = Date.now();
+		await db.groups.add({
+			id: "grp-v22",
+			name: "Presence Contact",
+			mlsStateB64: "",
+			lastActivity: now,
+			lastSeenAt: now,
+		});
+		const grp = await db.groups.get("grp-v22");
+		expect(grp?.lastSeenAt).toBe(now);
+	});
+
+	it("leaves lastSeenAt undefined when not set (v22)", async () => {
+		await db.groups.add({
+			id: "grp-v22-default",
+			name: "Default Contact",
+			mlsStateB64: "",
+			lastActivity: Date.now(),
+		});
+		const grp = await db.groups.get("grp-v22-default");
+		expect(grp?.lastSeenAt).toBeUndefined();
+	});
+
 	it("queries messages by groupId index", async () => {
 		await db.messages.bulkAdd([
 			{

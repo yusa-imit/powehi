@@ -78,6 +78,10 @@ export interface GroupRow {
 	/** Custom display nickname for a DM contact, DM chats only. SENSITIVE — real
 	 * user-authored content, same tier as name/draft/description, encrypted at rest. */
 	nickname?: string;
+	/** Unix ms timestamp of this chat's last online→offline presence transition. Local-only,
+	 * never sent to server. Not sensitive — an opaque timestamp, not content, same tier as
+	 * pinnedMessageId/unread. undefined = never gone offline / no data yet. */
+	lastSeenAt?: number;
 }
 
 // LocalIdentity — singleton device identity record.
@@ -359,6 +363,16 @@ export class PowehiDb extends Dexie {
 		// Not sensitive (a boolean flag, like delivered/read) — no index change needed,
 		// never queried across messages, only read/written per-row.
 		this.version(21).stores({
+			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v22: added lastSeenAt to GroupRow — per-chat presence "last seen" timestamp
+		// (previously React-state-only, same gap archived/pinnedTop had before v18) now
+		// survives a reload. Not sensitive (an opaque timestamp, like pinnedMessageId/unread)
+		// — no index change needed, never queried across groups, only read/written per-group.
+		this.version(22).stores({
 			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
 			groups: "id, lastActivity",
 			identity: "id",
