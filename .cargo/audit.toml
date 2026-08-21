@@ -86,6 +86,24 @@
 # If Powehi ever ships a PQ hybrid ciphersuite through this same openmls_rust_crypto/hpke-rs path,
 # these three waivers (and the aesgcm ones above, if "libcrux" activates) must be re-opened first —
 # flagged to crypto-lead for the PQ-enablement cycle.
+#
+# RUSTSEC-2026-0253: lru 0.16.4 — potential use-after-free in LruCache::pop() if a stored key's
+# Drop impl panics during pop() (requires unwinding panics + catch_unwind + a panicking key Drop).
+# Impact: `lru v0.16.4 -> aws-sdk-s3 -> powehi-r2 -> powehi-server` (`cargo tree -i lru` confirms
+# it IS compiled in, unlike the rsa/libcrux-chacha20poly1305 entries above). aws-sdk-s3 1.133.0's
+# only `LruCache` use is `s3_express.rs`'s `Mutex<LruCache<CacheKey, ExpiringCache<..>>>`, the S3
+# Express One Zone session-credentials cache, keyed by a plain `CacheKey(String)` newtype with no
+# custom Drop impl. The SDK never calls `LruCache::pop()` on it — only `get_or_insert_mut` — so the
+# advisory's panic-during-pop precondition can't even be reached through that call path, regardless
+# of key type. Additionally Powehi's R2 client (`crates/adapters/outbound/powehi-r2/src/lib.rs`)
+# uses `force_path_style` against Cloudflare R2 and never touches S3 Express One Zone buckets, so
+# this cache path is doubly unreachable. Fixed upstream in lru 0.18.2, but aws-sdk-s3 1.133.0
+# through 1.143.0 (latest checked — cycle 333) all still pin `lru = "^0.16.3"` non-optionally, so
+# no upgrade path exists without waiting for AWS to bump their lru dependency; a `[patch.crates-io]`
+# fork isn't warranted for an unreachable call path. Verified via security-auditor, cycle 333.
+# Revisit when aws-sdk-s3 releases a version depending on lru >=0.18.2, or if Powehi ever adds S3
+# Express One Zone bucket support (re-run `grep -n LruCache::pop\|get_or_insert_mut` on the new
+# aws-sdk-s3's s3_express.rs to re-confirm pop() is still unused).
 ignore = [
     "RUSTSEC-2023-0071",
     "RUSTSEC-2026-0124",
@@ -98,4 +116,5 @@ ignore = [
     "RUSTSEC-2026-0210",
     "RUSTSEC-2026-0211",
     "RUSTSEC-2026-0212",
+    "RUSTSEC-2026-0253",
 ]

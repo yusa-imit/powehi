@@ -15,6 +15,16 @@
 # they cannot fire. cargo-audit scans Cargo.lock directly without feature resolution, so it still
 # needs the explicit ignore. If cargo-deny ever starts reporting these again (e.g. a feature gets
 # activated), re-add the ignore entries here and re-verify the "not compiled" claim.
+#
+# RUSTSEC-2026-0253 (lru 0.16.4, unsound use-after-free in LruCache::pop under panicking Drop) is
+# also intentionally NOT listed here, for a different reason: `cargo deny check advisories
+# --format json` reports zero advisories for it even though `lru` IS compiled in (`cargo tree -i
+# lru` resolves via aws-sdk-s3 -> powehi-r2 -> powehi-server) — cargo-deny 0.20.2's default
+# advisory policy only errors on `vulnerability`-category entries, not `informational = "unsound"`
+# ones like this. cargo-audit has no such distinction, so it still needs the explicit ignore (see
+# .cargo/audit.toml for the full unreachability rationale). If cargo-deny's default policy for
+# unsound advisories ever changes (or `[advisories] unsound = "deny"` gets added below), mirror the
+# .cargo/audit.toml entry here too.
 ignore = [
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; transitive via tonic 0.12.3; no upgrade path until tonic 0.13 drops" },
     { id = "RUSTSEC-2024-0384", reason = "instant unmaintained; transitive via fluvio-wasm-timer -> openmls 0.8.1; no fix available, no upgrade path within current openmls release" },
