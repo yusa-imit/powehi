@@ -17,7 +17,82 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-21, cycle 330 — STABILIZATION: media download-ack timing fix, prd.md §9.4.3, commit 88d4a07)
+## Current state (2026-07-21, cycle 332 — FEATURE: persist presence "last seen" timestamp to Dexie, commit 5d81862)
+
+- `git status` at cycle start was **not clean** — a complete but uncommitted diff sat in the
+  working tree (schema v22 `GroupRow.lastSeenAt`, `ChatLayout.tsx` presence-persist/rehydrate
+  wiring, 5 new tests across `schema.test.ts`/`ChatLayout.test.tsx`), the same "cycle silently
+  fails to commit" pattern flagged after cycles 324/325/326. Per CLAUDE.md's "investigate before
+  deleting/overwriting uncommitted state" guidance, treated it as recoverable dropped work rather
+  than discarding: the diff was coherent and well-commented, so validated and landed it instead of
+  redoing it from scratch. `gh run list --limit 3` green, `gh issue list --state open` empty.
+- **What it does:** `handleIncomingPresence` (`ChatLayout.tsx`) now also writes
+  `db.groups.update(gId, { lastSeenAt: now.getTime() })` (fire-and-forget) on every online→offline
+  transition (both the immediate path and the 90s auto-offline timer path). The chat-switch
+  rehydration effect formats a persisted `row.lastSeenAt` as `HH:MM` and restores it as the
+  `lastSeen` label — deliberately never restoring `online: true` from a stale DB row. Same bug
+  class/shape as `archived`/`pinnedTop` (v18): a fully-wired UI feature whose Dexie write path was
+  missing, `GroupRow`-shaped, plain non-sensitive field (same tier as `unread`/`pinnedMessageId`).
+- **Two real bugs found and fixed before commit (self-caught during validation, not present in the
+  original diff's own tests as authored):**
+  1. Both new "persist" tests called `db.groups.update(...)` against a groupId that was never
+     seeded into `db.groups` (the seed chats are in-memory-only `SEED_CHATS`, not Dexie rows) —
+     `db.groups.update` silently no-ops on a missing row, same gotcha called out in nearly every
+     prior persistence cycle's notes (326/327/328/329). First test failed outright
+     (`lastSeenAt` stayed `undefined`). Fixed by seeding `db.groups.add({id, name, mlsStateB64,
+     lastActivity})` before render, matching the established `ChatLayoutArchive.test.tsx`/
+     `ChatLayoutPinTop.test.tsx` pattern exactly.
+  2. The fake-timer test used `await vi.advanceTimersByTimeAsync(90_000)` then read Dexie
+     immediately — this hung (5s test timeout), and because the timeout fired before the test's own
+     trailing `vi.useRealTimers()` line ever ran, fake timers stayed active for the rest of the
+     file, cascading into 34 more failures (a `beforeEach` `db.*.clear()` hook timeout, then every
+     subsequent test in the file). Fixed by switching to non-async `vi.advanceTimersByTime` +
+     `vi.useRealTimers()` immediately after (before the Dexie read, wrapped in `waitFor`) —
+     mirrors the file's own pre-existing "online status automatically reverts to offline" test at
+     line ~1879, which already uses this exact non-async pattern successfully. Full suite went from
+     36 failed / 1355 passed to 0 failed / 1391 passed after both fixes.
+- **security-auditor: GREEN, 2 low-severity non-blocking notes (fixed one, left one).** Independently
+  verified: `lastSeenAt` correctly excluded from `SENSITIVE.groups` (reveals strictly less than the
+  already-plaintext `lastActivity`; also noted `encRow`/`decRow` only encrypt `string`-typed fields,
+  so listing a `number` field there would silently no-op regardless — the exclusion is the only
+  option for this type, not just a policy choice); zero plaintext/PII logging (no `console.*`/
+  telemetry in this file at all); grep-confirmed `lastSeenAt` never reaches any API client/
+  WebSocket/MLS payload — purely local; `gId` in `handleIncomingPresence` comes from `useMessages`'
+  own local `groupId` param (server-authenticated per-connection), not envelope-controlled, and
+  presence arrives inside an MLS-decrypted, `env.group_id`-checked envelope — no cross-group-leak or
+  spoofing lever, a peer can influence *when* a transition is recorded but not the persisted value
+  (`Date.now()`, never peer-supplied). Two findings: (a) **fixed** — the `HH:MM` formatter only
+  guarded `!== undefined`, so a corrupted non-numeric IndexedDB value would render "last seen
+  NaN:NaN"; added `Number.isFinite(row.lastSeenAt)` to the guard, matching the sibling
+  `TTL_OPTIONS.includes`/`SLOW_MODE_OPTIONS.includes` allowlist-validation pattern used by adjacent
+  rehydration fields. (b) **not fixed, informational only** — a live offline event landing while the
+  chat-switch `db.groups.get` is still in flight can have the resolved (older) `persistedLastSeen`
+  clobber a fresher in-memory label; same class of same-session-only race already documented and
+  accepted for `description`/`nickname` in cycles 327/328 (stale-older only, never shows false
+  "online", not a security defect) — no action, parity with prior precedent.
+- Not architectural, no new server-visible metadata, reuses the existing raw-field (non-crypto)
+  persistence mechanism — `threat-model-checker`/`crypto-reviewer` not required, same scoping as the
+  `archived`/`pinnedTop`/`slowModeDelay`/`starred` non-sensitive-field work in cycles 323-329.
+- `tsc -b` clean, `biome check` clean (4 touched files). Frontend `pnpm test`/`npx vitest run`:
+  **1391/1391 tests green** (104 files, was 1386 at cycle 329 — net +5: 2 in `schema.test.ts` v22
+  raw round-trip + leaves-undefined, 3 in `ChatLayout.test.tsx`'s "user presence" describe block).
+  Backend untouched (pure frontend/Dexie change, confirmed via `git diff --name-only`).
+- **Next cycle candidates:** `customStatus` (user-global emoji+text status, the last remaining gap
+  from cycle 326's original Explore-agent survey — needs a new `LocalIdentity.customStatus` field,
+  not `GroupRow`/`MessageRow`-shaped like every field fixed across cycles 323-332, so likely needs a
+  fresh Explore-agent pass); the cycle-330 `db.messages.clear()`-missing-in-beforeEach sweep note
+  (still outstanding, low priority, was deferred at cycle 330 in favor of the media-ack fix); PQ
+  hybrid Phase A (still blocked on openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade
+  (gated on ADR-0003 Phase B 95%-session threshold); the still-standing opaque-ke live-migration
+  login-round-trip regression test gap (cycle 318/319, no prod users yet, low urgency); consider
+  whether the cron harness should be hardened against a cycle silently failing to commit — this is
+  now the fourth occurrence (324, 326, and now presumably a cycle between 330-332) — a future
+  STABILIZATION cycle could add a `git status --porcelain` check as literally the first action, before
+  even reading memory, so recovery happens immediately rather than whenever the next cycle happens
+  to notice; `.claude/memory/project-context.md` file size — climbing again, worth archiving older
+  cycles (below ~cycle 300) at the next STABILIZATION cycle (335) if growth continues.
+
+## Previous state (2026-07-21, cycle 330 — STABILIZATION: media download-ack timing fix, prd.md §9.4.3, commit 88d4a07)
 
 - `git status` clean, CI green (`gh run list --limit 5`), `gh issue list --state open` empty at
   cycle start. `cargo audit`/`cargo deny check` both fully clean (no advisories beyond the already-
