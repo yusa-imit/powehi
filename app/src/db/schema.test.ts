@@ -282,6 +282,31 @@ describe("PowehiDb", () => {
 		expect(grp?.lastSeenAt).toBeUndefined();
 	});
 
+	it("stores and retrieves customStatusEmoji/customStatusText on LocalIdentity (v23, raw store — encryption is EncryptedPowehiDb's concern, not the raw schema's)", async () => {
+		await db.identity.put({
+			id: 1,
+			deviceId: "dev-v23",
+			customStatusEmoji: "🎉",
+			customStatusText: "Having fun",
+		});
+		const identity = await db.identity.get(1);
+		expect(identity?.customStatusEmoji).toBe("🎉");
+		expect(identity?.customStatusText).toBe("Having fun");
+	});
+
+	it("leaves customStatusEmoji/customStatusText undefined when not set (v23)", async () => {
+		// put(), not add() — the identity singleton (id:1) row may already exist from an
+		// earlier test in this file (each `new PowehiDb()` reconnects to the same
+		// fake-indexeddb-backed store, it is not actually a fresh DB per test).
+		await db.identity.put({
+			id: 1,
+			deviceId: "dev-v23-default",
+		});
+		const identity = await db.identity.get(1);
+		expect(identity?.customStatusEmoji).toBeUndefined();
+		expect(identity?.customStatusText).toBeUndefined();
+	});
+
 	it("queries messages by groupId index", async () => {
 		await db.messages.bulkAdd([
 			{

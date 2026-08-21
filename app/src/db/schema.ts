@@ -142,6 +142,17 @@ export interface LocalIdentity {
 	 *     rolling back below state already advanced this session.
 	 */
 	mlsProviderStateB64?: string;
+	/**
+	 * User-global custom status (emoji + short text, like Slack/Discord), previously
+	 * React-state-only (ChatLayout.tsx's `customStatus`) — now survives a reload. Unlike
+	 * every GroupRow-shaped persistence fix in cycles 323-332, this lives on the singleton
+	 * identity row since it is not per-chat. Both fields are real user-authored content
+	 * (same sensitivity tier as GroupRow.nickname/description) — encrypted at rest, see
+	 * SENSITIVE.identity in db/encrypted-db.ts. Purely local — never sent to the server or
+	 * to peers over MLS (no envelope type carries it).
+	 */
+	customStatusEmoji?: string;
+	customStatusText?: string;
 }
 
 // VerifiedContact — Safety Numbers verification state.
@@ -373,6 +384,18 @@ export class PowehiDb extends Dexie {
 		// survives a reload. Not sensitive (an opaque timestamp, like pinnedMessageId/unread)
 		// — no index change needed, never queried across groups, only read/written per-group.
 		this.version(22).stores({
+			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v23: added customStatusEmoji/customStatusText to LocalIdentity — the sidebar custom
+		// status editor (previously React-state-only) now survives a reload. Unlike every
+		// prior persistence fix (323-332), this is user-global (singleton identity row), not
+		// per-group — encrypted at rest (SENSITIVE.identity in encrypted-db.ts), same tier as
+		// GroupRow.nickname/description. No index change needed — never queried, only read/
+		// written against the single id:1 row.
+		this.version(23).stores({
 			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
 			groups: "id, lastActivity",
 			identity: "id",

@@ -35,7 +35,7 @@ import type { PowehiDb } from "./schema";
 const SENSITIVE: Record<string, readonly string[]> = {
 	messages: ["ciphertextB64", "plaintextB64", "editedText", "reactionsJson"],
 	groups: ["mlsStateB64", "name", "draft", "description", "nickname"],
-	identity: ["mlsProviderStateB64"],
+	identity: ["mlsProviderStateB64", "customStatusEmoji", "customStatusText"],
 	verifiedContacts: ["safetyNumber"],
 };
 
@@ -396,6 +396,50 @@ export class EncryptedPowehiDb {
 		const decrypted = await this.encryptor.decryptDbField(raw);
 		const parsed = JSON.parse(decrypted) as { stateB64: string; generation: number };
 		return parsed;
+	}
+
+	/**
+	 * Persist the user-global custom status (emoji + text, encrypted at rest — real
+	 * user-authored content, same sensitivity tier as GroupRow.nickname/description).
+	 * Pass null to clear both fields. Uses a partial Dexie update so deviceId/
+	 * mlsIdentityId/mlsIdentityB64/mlsProviderStateB64 are never touched. No-op if the
+	 * identity row does not exist yet.
+	 */
+	async setCustomStatus(status: { emoji: string; text: string } | null): Promise<void> {
+		await this.db.transaction("rw", this.db.identity, async () => {
+			if (status === null) {
+				await this.db.identity.update(1, {
+					customStatusEmoji: undefined,
+					customStatusText: undefined,
+				});
+				return;
+			}
+			const encEmoji = status.emoji
+				? await Dexie.waitFor(this.encryptor.encryptDbField(status.emoji))
+				: undefined;
+			const encText = status.text
+				? await Dexie.waitFor(this.encryptor.encryptDbField(status.text))
+				: undefined;
+			await this.db.identity.update(1, { customStatusEmoji: encEmoji, customStatusText: encText });
+		});
+	}
+
+	/**
+	 * Read and decrypt the user-global custom status. Returns null if no identity row
+	 * exists yet, or no status is currently set (mirrors the in-memory `CustomStatus` shape
+	 * — never an empty-string placeholder).
+	 */
+	async getCustomStatus(): Promise<{ emoji: string; text: string } | null> {
+		const row = await this.db.identity.get(1);
+		if (!row) return null;
+		const emoji = row.customStatusEmoji
+			? await this.encryptor.decryptDbField(row.customStatusEmoji)
+			: "";
+		const text = row.customStatusText
+			? await this.encryptor.decryptDbField(row.customStatusText)
+			: "";
+		if (!emoji && !text) return null;
+		return { emoji, text };
 	}
 
 	// ── VerifiedContacts ───────────────────────────────────────────────────────

@@ -1,8 +1,9 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db/schema";
 import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
 import * as UseMessagesModule from "../hooks/useMessages";
+import { useAuthStore } from "../store/auth";
 import { ChatLayout } from "./ChatLayout";
 
 const MOCK_WORKER = {
@@ -17,6 +18,8 @@ const MOCK_WORKER = {
 describe("ChatLayout — custom user status", () => {
 	beforeEach(async () => {
 		await db.verifiedContacts.clear();
+		await db.identity.clear();
+		useAuthStore.setState({ deviceId: null });
 		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
 			MOCK_WORKER as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
 		);
@@ -213,5 +216,72 @@ describe("ChatLayout — custom user status", () => {
 			fireEvent.click(screen.getByTestId("user-status-edit-btn"));
 		});
 		expect(screen.getByTestId("status-clear-btn")).toBeInTheDocument();
+	});
+
+	it("persists a saved status to LocalIdentity in Dexie", async () => {
+		await db.identity.add({ id: 1, deviceId: "dev-persist-status" });
+		useAuthStore.setState({ deviceId: "dev-persist-status" });
+		render(<ChatLayout />);
+		await act(async () => {
+			fireEvent.click(screen.getByTestId("user-status-edit-btn"));
+		});
+		await act(async () => {
+			fireEvent.change(screen.getByTestId("status-emoji-input"), { target: { value: "🎉" } });
+			fireEvent.change(screen.getByTestId("status-text-input"), {
+				target: { value: "Persisted status" },
+			});
+		});
+		await act(async () => {
+			fireEvent.click(screen.getByTestId("status-save-btn"));
+		});
+		await waitFor(async () => {
+			const row = await db.identity.get(1);
+			expect(row?.customStatusEmoji).toBe("🎉");
+			expect(row?.customStatusText).toBe("Persisted status");
+		});
+	});
+
+	it("clearing a status removes it from Dexie", async () => {
+		await db.identity.add({
+			id: 1,
+			deviceId: "dev-clear-status",
+			customStatusEmoji: "🌴",
+			customStatusText: "On vacation",
+		});
+		useAuthStore.setState({ deviceId: "dev-clear-status" });
+		render(<ChatLayout />);
+		await waitFor(() => {
+			expect(screen.getByTestId("user-status-text")).toBeInTheDocument();
+		});
+		await act(async () => {
+			fireEvent.click(screen.getByTestId("user-status-edit-btn"));
+		});
+		await waitFor(() => {
+			expect(screen.getByTestId("status-clear-btn")).toBeInTheDocument();
+		});
+		await act(async () => {
+			fireEvent.click(screen.getByTestId("status-clear-btn"));
+		});
+		await waitFor(async () => {
+			const row = await db.identity.get(1);
+			expect(row?.customStatusEmoji).toBeUndefined();
+			expect(row?.customStatusText).toBeUndefined();
+		});
+	});
+
+	it("rehydrates a persisted status from Dexie on mount", async () => {
+		await db.identity.add({
+			id: 1,
+			deviceId: "dev-rehydrate-status",
+			customStatusEmoji: "🎧",
+			customStatusText: "In a meeting",
+		});
+		useAuthStore.setState({ deviceId: "dev-rehydrate-status" });
+		render(<ChatLayout />);
+		await waitFor(() => {
+			const statusEl = screen.getByTestId("user-status-text");
+			expect(statusEl.textContent).toContain("🎧");
+			expect(statusEl.textContent).toContain("In a meeting");
+		});
 	});
 });

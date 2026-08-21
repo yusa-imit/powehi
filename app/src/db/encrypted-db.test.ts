@@ -646,4 +646,71 @@ describe("EncryptedPowehiDb", () => {
 			await expect(encDb.setMlsProviderState("c3RhdGU=", 1)).resolves.not.toThrow();
 		});
 	});
+
+	describe("setCustomStatus / getCustomStatus", () => {
+		it("round-trips emoji + text through two encrypted fields", async () => {
+			await encDb.setIdentity({ id: 1, deviceId: "dev-status-1" });
+			await encDb.setCustomStatus({ emoji: "🎉", text: "Having fun" });
+
+			const status = await encDb.getCustomStatus();
+			expect(status).toEqual({ emoji: "🎉", text: "Having fun" });
+		});
+
+		it("raw row stores encrypted blobs, not the plaintext emoji/text", async () => {
+			await encDb.setIdentity({ id: 1, deviceId: "dev-status-2" });
+			await encDb.setCustomStatus({ emoji: "🏠", text: "Working from home" });
+
+			const rawRow = await rawDb.identity.get(1);
+			expect(rawRow?.customStatusEmoji).toBeDefined();
+			expect(rawRow?.customStatusEmoji).not.toBe("🏠");
+			expect(rawRow?.customStatusText).toBeDefined();
+			expect(rawRow?.customStatusText).not.toBe("Working from home");
+		});
+
+		it("does not touch deviceId/mlsIdentityId when setting a status", async () => {
+			await encDb.setIdentity({ id: 1, deviceId: "dev-status-3", mlsIdentityId: "mls-3" });
+			await encDb.setCustomStatus({ emoji: "📵", text: "Do not disturb" });
+
+			const rawRow = await rawDb.identity.get(1);
+			expect(rawRow?.deviceId).toBe("dev-status-3");
+			expect(rawRow?.mlsIdentityId).toBe("mls-3");
+		});
+
+		it("passing null clears both fields", async () => {
+			await encDb.setIdentity({ id: 1, deviceId: "dev-status-4" });
+			await encDb.setCustomStatus({ emoji: "🌴", text: "On vacation" });
+			expect(await encDb.getCustomStatus()).not.toBeNull();
+
+			await encDb.setCustomStatus(null);
+			expect(await encDb.getCustomStatus()).toBeNull();
+			const rawRow = await rawDb.identity.get(1);
+			expect(rawRow?.customStatusEmoji).toBeUndefined();
+			expect(rawRow?.customStatusText).toBeUndefined();
+		});
+
+		it("getCustomStatus returns null when no status has ever been persisted", async () => {
+			await encDb.setIdentity({ id: 1, deviceId: "dev-status-5" });
+			expect(await encDb.getCustomStatus()).toBeNull();
+		});
+
+		it("getCustomStatus returns null when the identity row does not exist yet", async () => {
+			expect(await encDb.getCustomStatus()).toBeNull();
+		});
+
+		it("setCustomStatus is a no-op (does not throw) when the identity row does not exist yet", async () => {
+			await expect(
+				encDb.setCustomStatus({ emoji: "🎧", text: "In a meeting" }),
+			).resolves.not.toThrow();
+		});
+
+		it("an emoji-only status omits the text field", async () => {
+			await encDb.setIdentity({ id: 1, deviceId: "dev-status-6" });
+			await encDb.setCustomStatus({ emoji: "🎧", text: "" });
+
+			const status = await encDb.getCustomStatus();
+			expect(status).toEqual({ emoji: "🎧", text: "" });
+			const rawRow = await rawDb.identity.get(1);
+			expect(rawRow?.customStatusText).toBeUndefined();
+		});
+	});
 });

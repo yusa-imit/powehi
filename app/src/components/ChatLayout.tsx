@@ -7292,6 +7292,32 @@ export function ChatLayout() {
 		() => (cryptoWorker ? new EncryptedPowehiDb(db, cryptoWorker) : null),
 		[cryptoWorker],
 	);
+
+	// Rehydrate the persisted custom user status (LocalIdentity.customStatusEmoji/Text) once
+	// encryptedDb becomes available. Global (singleton identity row), not per-chat — unlike
+	// the per-group rehydration effects below, this does not depend on `active`/chat switches.
+	// Gated on `deviceId` (not just `encryptedDb`) — deviceId is only set post-login
+	// (useAuthStore), so this avoids touching the `identity` table before a real device/
+	// session exists (matching the message-rehydration effect below, which is similarly
+	// scoped to a real chat's mlsGroupId rather than firing unconditionally on mount).
+	useEffect(() => {
+		if (!encryptedDb || !deviceId) return;
+		let cancelled = false;
+		encryptedDb
+			.getCustomStatus()
+			.then((status) => {
+				if (!cancelled) setCustomStatus(status);
+			})
+			.catch(() => {
+				// AEAD auth failure (e.g. a different user's ciphertext on this browser
+				// profile) or a corrupt row — fail closed rather than risk displaying
+				// stale/undecryptable state.
+				if (!cancelled) setCustomStatus(null);
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [encryptedDb, deviceId]);
 	const {
 		rows,
 		persistIncoming,
@@ -8525,6 +8551,17 @@ export function ChatLayout() {
 			if (chat?.mlsGroupId && encryptedDb) {
 				encryptedDb.setGroupNickname(chat.mlsGroupId, nickname || undefined).catch(() => {});
 			}
+		},
+		[encryptedDb],
+	);
+
+	/** Set (or clear, via null) the user-global custom status. Local-only — never sent to
+	 * server or peers. Persisted to Dexie (LocalIdentity.customStatusEmoji/Text, schema v23),
+	 * encrypted at rest like nickname/description — this is real user-authored content. */
+	const handleSaveStatus = useCallback(
+		(status: CustomStatus) => {
+			setCustomStatus(status);
+			encryptedDb?.setCustomStatus(status).catch(() => {});
 		},
 		[encryptedDb],
 	);
@@ -9892,7 +9929,7 @@ export function ChatLayout() {
 			{statusEditorOpen && (
 				<StatusEditor
 					current={customStatus}
-					onSave={setCustomStatus}
+					onSave={handleSaveStatus}
 					onClose={() => setStatusEditorOpen(false)}
 				/>
 			)}
