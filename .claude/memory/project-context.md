@@ -17,7 +17,85 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-22, cycle 333 — STABILIZATION (mode override): fix red CI on main, dependency advisories, commits de1976b + a013723)
+## Current state (2026-08-22, cycle 334 — FEATURE: persist custom user status to Dexie LocalIdentity, commit d03fb24)
+
+- `git status` clean, `gh run list --limit 5` green at cycle start. Picked the top next-cycle
+  candidate carried from cycles 326-333: `customStatus` (user-global emoji+text status, the last
+  remaining gap from cycle 326's original Explore-agent survey — every other field fixed across
+  323-332 was `GroupRow`/`MessageRow`-shaped; this one needed a fresh Explore-agent pass since it
+  lives on the singleton identity row instead).
+- Explore-agent survey confirmed: `LocalIdentity` (schema.ts, singleton `id:1` row, currently v22)
+  is the correct target — not `GroupRow`. Found a pre-existing full `StatusEditor` UI + test
+  scaffold (`ChatLayoutCustomStatus.test.tsx`, 12 tests, all passing against the React-state-only
+  implementation) — confirmed the job was exactly "persist `customStatus` from
+  `ChatLayout.tsx:6935` into `LocalIdentity`." No server API call, no MLS control-envelope type
+  carries it (purely local, unlike `presence`).
+- **What it does:** `LocalIdentity.customStatusEmoji?`/`customStatusText?` added (schema v23,
+  encrypted at rest — real user-authored content, same tier as `GroupRow.nickname`/`description`,
+  not a plain boolean preference). `EncryptedPowehiDb.setCustomStatus`/`getCustomStatus` follow the
+  exact `setGroupNickname`/`getGroupNickname` pattern (partial `db.identity.update(1, {...})` inside
+  an explicit `db.transaction("rw", ...)` with `Dexie.waitFor()` around the external encryptor
+  call; no-op if the identity row doesn't exist yet). `ChatLayout.tsx`'s `handleSaveStatus` wraps
+  the existing `setCustomStatus` React-state setter with a fire-and-forget
+  `encryptedDb.setCustomStatus(status).catch(() => {})`; a new mount-time `useEffect` rehydrates
+  via `getCustomStatus()`.
+- **Regression caught and fixed before commit (self-caught, not present in the original diff's own
+  tests as authored):** the rehydration effect's first version was gated only on `[encryptedDb]`
+  (fires on every ChatLayout mount) — this broke 2/10 tests in the *unrelated*
+  `ChatLayoutTimeGrouping.test.tsx` (off-by-one `msg-avatar` counts) purely from timing: it's the
+  first unconditional read against the `identity` Dexie table at mount, and its underlying
+  fake-indexeddb transaction interacts badly with that file's `vi.useFakeTimers()` +
+  `vi.advanceTimersByTime()` calls (confirmed by bisection: commenting out just the new effect
+  restored all 10 passes; confirmed the effect, not cross-file pollution, via running the file
+  standalone both before and after). Fixed by gating on `[encryptedDb, deviceId]` (deviceId only
+  set post-login via `useAuthStore`) — mirrors how the existing message-rehydration effect is
+  scoped to a real chat's `mlsGroupId` rather than firing unconditionally on mount, and matches
+  real app behavior (no point rehydrating identity-scoped state before a session exists). This in
+  turn required seeding `useAuthStore.setState({ deviceId: ... })` in the new persistence tests'
+  setup (moved a stray `useAuthStore.setState({ deviceId: null })` from `afterEach` to `beforeEach`
+  along the way — the afterEach placement combined with `vi.restoreAllMocks()` running first was
+  triggering a real-`useMessages`-on-a-still-mounted-component React hook-order crash, a second,
+  independently-caught bug in the test scaffolding itself).
+- **security-auditor: GREEN.** SENSITIVE classification confirmed correct (mechanically `encRow`
+  only touches string fields anyway); Dexie's `update(id, {field: undefined})` genuinely deletes
+  the property (verified against vendored Dexie source), no stale ciphertext left behind; no
+  cross-user confusion risk (dbKey is per-user-derived from the OPAQUE export key, nulled on
+  logout; a different user signing in on the same browser can't decrypt the prior user's blob —
+  AEAD auth fails and the catch handler now fails closed); no plaintext logging; fire-and-forget
+  write ordering is sound (IndexedDB serializes same-store `rw` transactions). Applied one
+  non-blocking LOW finding: the rehydration effect's catch handler now explicitly
+  `setCustomStatus(null)` on decrypt failure (fail closed) instead of leaving stale React state.
+  Three informational notes left as-is (full-`put` in `setIdentity` could silently wipe status if
+  a future caller reconstructs `LocalIdentity` from scratch — documented, not fixed; test mock's
+  passthrough `encryptDbField` can't itself catch an encryption regression, already covered by
+  `encrypted-db.test.ts`'s dedicated raw-row assertion; `presence.status` vs `customStatus` naming
+  collision is a maintenance note only).
+- Not architectural, no new server-visible metadata (purely local, same scoping as every
+  GroupRow-field persistence cycle 323-332) — `threat-model-checker`/`crypto-reviewer` not
+  required, consistent with precedent (this touches the encryption *wrapper*, not a crypto
+  primitive).
+- `tsc -b` clean, `biome check` clean (6 touched files, 1 auto-format applied to `encrypted-db.ts`).
+  Frontend `pnpm test`/`npx vitest run`: **1404/1404 tests green** (104 files, was 1391 at cycle
+  332 — net +13: 6 in `encrypted-db.test.ts`, 2 in `schema.test.ts` v23, and net +5 in
+  `ChatLayoutCustomStatus.test.tsx`, was 12). Backend untouched (pure frontend/Dexie change,
+  confirmed via `git diff --name-only`).
+- `gh issue list --state open` — empty, nothing else to triage this cycle. Target dir hygiene not
+  needed (STABILIZATION-only step, this was a FEATURE cycle).
+- **Next cycle candidates:** the cycle-330 `db.messages.clear()`-missing-in-`beforeEach` sweep note
+  (still outstanding, low priority); PQ hybrid Phase A (still blocked on openmls stable
+  `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003 Phase B 95%-session
+  threshold); opaque-ke live-migration login-round-trip regression test gap (cycle 318/319, no prod
+  users yet, low urgency); the lru RUSTSEC-2026-0253 waiver re-verification trigger from cycle 333
+  (only if `aws-sdk-s3` is ever bumped past 1.143.0 or S3 Express One Zone support is ever added to
+  `powehi-r2`); `.claude/memory/project-context.md` file size — still climbing (now ~3450 lines),
+  consider archiving cycles below ~300 at the next STABILIZATION cycle (335 or 340) if growth
+  continues; **new this cycle** — the `ChatLayoutTimeGrouping.test.tsx` fragility this cycle
+  surfaced (any future unconditional-on-mount Dexie read can silently break fake-timer-based tests
+  elsewhere in the suite) is worth a documented pattern/rule if it recurs a second time, but not
+  worth a dedicated cycle on its own yet — one occurrence, already fixed at the root (the
+  `deviceId` gate) rather than papered over.
+
+## Previous state (2026-08-22, cycle 333 — STABILIZATION (mode override): fix red CI on main, dependency advisories, commits de1976b + a013723)
 
 - Counter said FEATURE (333 % 5 = 3), but `gh run list --limit 3` showed **CI — Rust red on
   main** (cycle 332's push) — per CLAUDE.md's mode-selection override, switched to
