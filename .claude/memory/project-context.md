@@ -17,7 +17,69 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-07-21, cycle 332 — FEATURE: persist presence "last seen" timestamp to Dexie, commit 5d81862)
+## Current state (2026-08-22, cycle 333 — STABILIZATION (mode override): fix red CI on main, dependency advisories, commits de1976b + a013723)
+
+- Counter said FEATURE (333 % 5 = 3), but `gh run list --limit 3` showed **CI — Rust red on
+  main** (cycle 332's push) — per CLAUDE.md's mode-selection override, switched to
+  STABILIZATION for this cycle instead of starting new feature work.
+- Root cause: `cargo-deny`'s `advisories` check failed on **RUSTSEC-2026-0258** (h2 0.4.14,
+  unbounded empty DATA frames without limit → unbounded memory/panic; low severity, transitive
+  via `aws-smithy-http-client`/`hyper` 1.9.0). Fixed with `cargo update -p h2 --precise 0.4.16`
+  (patched upstream). Verified `cargo build --workspace`, `cargo test --workspace` (all green),
+  `cargo deny check advisories` → `advisories ok`. Committed + pushed alone first (de1976b) so
+  CI would go green as fast as possible; confirmed green via `gh run list` before continuing.
+- While in the neighborhood, ran `cargo audit` locally (not part of the failing job, but part of
+  the STABILIZATION security sweep) and found **two advisories not yet in `.cargo/audit.toml`'s
+  documented ignore list** (both `informational = "unsound"`, not `vulnerability` — this is why
+  `cargo-deny` never flagged them; it only errors on the `vulnerability` category by default,
+  confirmed via `cargo deny check advisories --format json` returning zero entries even with
+  both crates compiled in):
+  1. **RUSTSEC-2026-0221** (event-listener 5.4.1, `!Send` tag crosses thread boundary via
+     `StackSlot`, transitive via `sqlx-core`) — cleanly fixed, no waiver needed:
+     `cargo update -p event-listener --precise 5.4.2`.
+  2. **RUSTSEC-2026-0253** (lru 0.16.4, potential UAF in `LruCache::pop()` if a stored key's
+     `Drop` impl panics mid-pop) — **no upgrade path**: `aws-sdk-s3` 1.133.0 through the latest
+     1.143.0 all pin `lru = "^0.16.3"` non-optionally (verified via
+     `cargo update -p aws-sdk-s3 --precise 1.143.0`, which still resolved lru to 0.16.4; that
+     speculative aws-sdk-s3 bump was reverted via `git checkout -- Cargo.lock` + a clean re-apply
+     of just the event-listener update, to avoid unrelated dependency churn). Added a documented
+     waiver to `.cargo/audit.toml` with the reachability trace: `cargo tree -i lru` confirms it
+     IS compiled in (`lru -> aws-sdk-s3 -> powehi-r2 -> powehi-server`), but aws-sdk-s3 1.133.0's
+     only `LruCache` use is the S3 Express One Zone session-credentials cache
+     (`s3_express.rs`, keyed by a plain `CacheKey(String)` newtype, no custom `Drop`), and the SDK
+     never calls `pop()` on it — only `get_or_insert_mut` — so the advisory's panic-during-pop
+     precondition is structurally unreachable through that call path regardless of key type.
+     Doubly unreachable because Powehi's R2 client uses `force_path_style` against Cloudflare R2
+     and never touches S3 Express One Zone buckets. Also added a note to `deny.toml` explaining
+     why this waiver doesn't need a mirror entry there (cargo-deny's vulnerability-only default
+     policy). **security-auditor: reviewed the waiver draft, verdict "acceptable with two text
+     fixes"** — flagged that the first draft's rationale ("Powehi's own key types are plain
+     Strings/UUIDs") was a non-sequitur since Powehi types never enter that cache at all; the
+     real argument is that `pop()` is simply never called on it. Rewrote the waiver using the
+     agent's verified trace before committing (a013723).
+- Verified: `.cargo/audit.toml`/`deny.toml` diff, `cargo build`/`cargo test --workspace` all green,
+  `cargo audit` output empty (zero findings — both crates resolved) after this commit.
+- `gh issue list --state open` — empty, nothing to triage.
+- Target dir hygiene: was 27G (over 20G threshold) → pruned 0-byte `.rmeta` stubs + artifacts
+  older than 7 days → down to 7.4G. Did not count as the cycle's mandatory commit (housekeeping
+  only, per CLAUDE.md); the two dependency-fix commits above satisfy that requirement.
+- Confirmed both pushes went green on `gh run list` (CI — Rust) before ending the cycle; did not
+  wait for the slower CI — Live-backend E2E job (untouched dependency surface, no reason to
+  expect it's affected, and it was already green pre-cycle).
+- **Next cycle candidates (carried from cycle 332, none touched this cycle):** `customStatus`
+  (user-global emoji+text status — needs fresh `LocalIdentity.customStatus` field + Explore-agent
+  pass, not `GroupRow`/`MessageRow`-shaped like the run of fields fixed across cycles 323-332);
+  cycle-330's `db.messages.clear()`-missing-in-`beforeEach` sweep note (still outstanding, low
+  priority); PQ hybrid Phase A (still blocked on openmls stable `MLS_128_MLKEM768`); OPAQUE
+  PQ-hybrid OPRF upgrade (gated on ADR-0003 Phase B 95%-session threshold); opaque-ke
+  live-migration login-round-trip regression test gap (cycle 318/319, no prod users yet, low
+  urgency); `.claude/memory/project-context.md` file size — still climbing, consider archiving
+  cycles below ~300 at the next STABILIZATION cycle (335 or 340) if growth continues; **re-verify
+  the lru waiver** if `aws-sdk-s3` is ever bumped past 1.143.0 or if S3 Express One Zone bucket
+  support is ever added to `powehi-r2` (re-run `grep -n "LruCache::pop\|get_or_insert_mut"` on the
+  new `s3_express.rs`).
+
+## Previous state (2026-07-21, cycle 332 — FEATURE: persist presence "last seen" timestamp to Dexie, commit 5d81862)
 
 - `git status` at cycle start was **not clean** — a complete but uncommitted diff sat in the
   working tree (schema v22 `GroupRow.lastSeenAt`, `ChatLayout.tsx` presence-persist/rehydrate
