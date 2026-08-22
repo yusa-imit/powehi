@@ -17,7 +17,63 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-22, cycle 336 — FEATURE: persist group polls (question + votes) to Dexie, commit a1e16b8)
+## Current state (2026-08-22, cycle 337 — FEATURE: persist quote-reply context (replyTo) to Dexie, commit 2fc6ae5)
+
+- CI green, `gh issue list` empty at cycle start. Per cycle 336's "Next cycle candidates", closed
+  one of the two runner-up gaps flagged there: quote-reply `replyTo` metadata (`ReplyContext =
+  { messageId, excerpt }`) was React-state-only — `persistOutgoing` never received it and
+  `persistIncoming` silently dropped `msg.replyTo` even though `IncomingMessage` already carried
+  it (decoded from the same JSON-structured plaintext as `text`/media) — so a reload dropped which
+  message a reply was quoting. Scheduled messages remain the other flagged-but-not-done candidate.
+- Followed the established pattern exactly: `MessageRow.replyToJson?: string` (schema v25,
+  encrypted at rest — added to `SENSITIVE.messages`). Unlike reactionsJson/pollJson, replyTo is
+  set once at message-creation time and never mutated afterward, so no `markMessageReplyTo`
+  setter was added — `persistIncoming`/`persistOutgoing` just thread it into the row at creation
+  (`persistOutgoing` gained a new optional 5th param `replyTo?: ReplyContext`). One call-site
+  change in ChatLayout.tsx: `persistOutgoing(..., replyContext)`. Rehydration effect parses
+  `row.replyToJson` with a JSON.parse try/catch AND a shape guard (`messageId`/`excerpt` both
+  strings), modeled on the pollJson handling added cycle 336 (this app has no ErrorBoundary
+  anywhere, so a bad shape reaching PollView/reply-quote render could blank the whole UI).
+  `replyTo` is deliberately excluded from the effect's "reconcile already-in-state ids against
+  fresh Dexie rows" comparison block — it never changes post-creation, same treatment as
+  `ts`/`expiresAt`/`from`.
+- **security-auditor: GREEN**, no RED/blocking findings. One YELLOW documented inline (not code-
+  fixed): a reply excerpt (≤100 chars) is now durably persisted independent of the *quoted*
+  message's own `expiresAt` — a reply to a disappearing message can outlive the original by up
+  to 100 chars, same class as cycle 336's accepted poll/expiresAt finding. Documented on
+  `MessageRow.replyToJson`'s doc comment in schema.ts (bounded, encrypted, standard Signal/
+  WhatsApp-style quote-preview behavior, not fixed). Confirmed: encryption-at-rest complete (only
+  writers are `EncryptedPowehiDb.addMessage/putMessage`, both go through `encRow`), rehydration
+  fails closed on malformed/wrong-shape JSON, peer-controlled `messageId`/`excerpt` are already
+  wire-validated (≤36 chars / `.slice(0,100)`) in `useMessages.ts` before ever reaching Dexie, no
+  new server-visible metadata (replyTo already traveled inside the same MLS-encrypted structured
+  payload, unchanged), migration is additive (old rows get `replyToJson: undefined`). Noted
+  (not this cycle's scope, flagged as pre-existing): `persistOutgoing` never sets `expiresAt` at
+  all (sender's own copy of a disappearing message is never locally purged) — a real, separate
+  gap worth its own cycle.
+- 15 new tests: 1 in `encrypted-db.test.ts` (`putMessage` round-trips `replyToJson` encrypted at
+  rest), 4 in `usePersistentMessages.test.ts` (persistOutgoing threads/omits replyTo,
+  persistIncoming threads/omits msg.replyTo), 10 in `ChatLayout.test.tsx` (3 rehydration: renders
+  reply-quote from a persisted row, skips bad-JSON replyToJson safely, skips wrong-shape
+  replyToJson safely; 1 end-to-end send-path integration test: replying to a real incoming
+  message and sending persists the exact `{messageId, excerpt}` to Dexie). **Frontend: 1426/1426
+  tests green** (was 1417; 104 files, unchanged file count). `tsc -b` clean, `biome check` clean
+  (170 files, ran `--write` once for 4 files' formatting after the edits — no logic changes).
+  Production build: initial route 164.17 kB gzip / WASM 642.87 kB gzip (both still under the
+  prd.md §7 200KB/800KB budgets).
+- **Backend:** untouched this cycle (pure frontend Dexie-persistence feature, confirmed via
+  `git status` — no crates touched, so no crypto-reviewer/threat-model-checker needed).
+- Target dir hygiene: not checked this cycle (FEATURE mode, backend untouched).
+- `gh issue list --state open` — empty, nothing else to triage.
+- **Next cycle candidates:** scheduled-message persistence (the other cycle-336 runner-up,
+  still not done); `persistOutgoing` never threading `expiresAt` (flagged this cycle by
+  security-auditor — sender's own copy of a disappearing message is never locally purged, a
+  real gap independent of the replyTo work); the `.claude/memory/project-context.md` file-size
+  note (now ~3670+ lines, worth archiving cycles below ~300 at the next STABILIZATION cycle);
+  PQ hybrid Phase A (still blocked on openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF
+  upgrade (gated on ADR-0003 Phase B 95%-session threshold).
+
+## Previous state (2026-08-22, cycle 336 — FEATURE: persist group polls (question + votes) to Dexie, commit a1e16b8)
 
 - CI green, `gh issue list` empty at cycle start. Per cycle 335's "Next cycle" note, re-ran an
   Explore-agent survey for the next unwired-Dexie-persistence UI feature. Found: group polls
