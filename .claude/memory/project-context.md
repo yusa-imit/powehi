@@ -17,7 +17,88 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-22, cycle 335 — STABILIZATION: fix db.messages test-isolation gap + fake-timer hang, commit 294463e)
+## Current state (2026-08-22, cycle 336 — FEATURE: persist group polls (question + votes) to Dexie, commit a1e16b8)
+
+- CI green, `gh issue list` empty at cycle start. Per cycle 335's "Next cycle" note, re-ran an
+  Explore-agent survey for the next unwired-Dexie-persistence UI feature. Found: group polls
+  (`ChatMessage.poll`) were created/voted entirely in React state —
+  `handleCreatePoll`/`handleVotePoll` never called `persistOutgoing` (there is no MLS envelope
+  type for polls at all — confirmed via grep, they're genuinely local-only, never sent to
+  server/peers), so a reload silently wiped every poll and its votes. Worse than a partial-field
+  gap: the entire message row was never written, not just a poll-specific field.
+- Followed the established `reactionsJson` (v8) pattern: `MessageRow.pollJson?: string` (schema
+  v24, encrypted at rest — added to `SENSITIVE.messages`), `EncryptedPowehiDb.markMessagePoll`,
+  and two new `usePersistentMessages` helpers — `persistPollCreate` (creates the row; unlike
+  every other persist* helper this one CREATES rather than updates, since polls never go through
+  `persistOutgoing`'s MLS-send path) and `persistPollVote` (updates it, mirrors `persistReaction`).
+  Poll rows use `ciphertextB64: ""` as an explicit "not applicable, local-only" sentinel — same
+  convention as `GroupRow.mlsStateB64`. Wired into `handleCreatePoll`/`handleVotePoll` and into
+  the existing Dexie-rehydration `useEffect` (parses `pollJson` back into `ChatMessage.poll`; the
+  `if (!textB64) continue` skip guard was relaxed to `if (!textB64 && !row.pollJson) continue`
+  since a poll row legitimately has no plaintext).
+- **security-auditor: PASS, no RED, 4 YELLOW — 2 fixed, 1 fixed-differently, 1 documented/deferred:**
+  1. *(fixed)* `persistPollCreate` didn't thread `expiresAt` — a poll created in a disappearing-
+     message chat would persist forever instead of being purged like every other message
+     (retention-policy bypass). Fixed: `expiresAt` param added, `handleCreatePoll` computes it
+     from `disappearingTtl` same as `sendMessage` does; the existing generic `purgeExpired`
+     sweep and rehydration TTL-skip both already work automatically once the field is set.
+  2. *(fixed)* Rehydration's `JSON.parse(row.pollJson)` only caught syntax errors, not wrong
+     shape — a syntactically-valid-but-missing-`options` value would parse fine then throw
+     inside `PollView`'s `.reduce`/`.map` during render, and this app has **no ErrorBoundary
+     anywhere** (confirmed via grep), so one bad row would blank the entire UI. Fixed: added a
+     shape guard (`question` is a string, `options` is an array of `{text: string, voters:
+     array}`) before accepting the parsed value.
+  3. *(fixed, different approach than suggested)* `handleVotePoll`'s toggle computed the new
+     poll from `chatsRef.current` (only synced via a post-commit effect) rather than from fresh
+     state — two votes on different options in the same tick could read a stale poll and drop
+     one. Fixed by moving the toggle computation inside `setChats`'s functional updater (always
+     latest state) and capturing the result in an outer variable for persistence, instead of
+     reading a pre-update snapshot.
+  4. *(documented, not fixed)* A narrow async-ordering race: `persistPollCreate` awaits 2
+     sequential `encryptDbField` round-trips (ciphertextB64 + pollJson) before its `putMessage`
+     lands, vs `persistPollVote`'s 1 round-trip before `markMessagePoll` (update-only, no-ops on
+     a missing row) — a vote fired within roughly one round-trip of the poll's own creation could
+     have its Dexie write silently dropped (in-memory state is unaffected; self-heals on the next
+     vote). Not fixed to avoid changing markMessage*'s shared no-op-on-missing-row contract into
+     an upsert. Documented inline on `persistPollVote`.
+- Also fixed an unrelated **pre-existing test-isolation bug** in `ChatLayoutPoll.test.tsx`,
+  discovered while adding the new persistence tests: the file's `afterEach` never called RTL's
+  `cleanup()` (only `vi.restoreAllMocks()`), so previous tests' `ChatLayout` instances stayed
+  mounted across tests. Once new tests started issuing real async Dexie writes (`persistPollCreate`/
+  `persistPollVote`, gated on `deviceId` which only the new tests set), a write settling after
+  `restoreAllMocks()` had already un-mocked `useMessages` — but before the (missing) unmount —
+  hit the real hook mid-lifecycle on a still-mounted stale tree, corrupting React's hook order
+  (`TypeError: Cannot read properties of undefined (reading 'length')` in
+  `react-dom`'s `areHookInputsEqual`, surfaced as an "Unhandled Error" after the test already
+  showed passing). Root-caused via careful bisection (isolated minimal repro files, `-t` filters,
+  git-stash diffing against the pre-change baseline) since the trace pointed at `useMessages.ts`/
+  zustand `useSyncExternalStore` internals with no direct connection to polls. Fixed by adding
+  `cleanup()` to the file's `afterEach`, alongside the same `db.messages.clear()` fix cycle 335
+  applied to 11 other `ChatLayout*.test.tsx` files (this file wasn't in that list since, at the
+  time, nothing in it wrote to `db.messages` — this cycle's feature changed that).
+- 13 new tests: 2 in `encrypted-db.test.ts` (`markMessagePoll` persists/no-ops), 6 in
+  `usePersistentMessages.test.ts` (`persistPollCreate`/`persistPollVote` incl. the `expiresAt`
+  threading fix), 5 in `ChatLayoutPoll.test.tsx` (create/vote persist to Dexie, rehydrates incl.
+  votes, bad-syntax and bad-shape `pollJson` don't crash the app). **Frontend: 1417/1417 tests
+  green** (was 1404; 104 files, unchanged file count). `tsc -b` clean, `biome check` clean (170
+  files). Production build: initial route 164.07 kB gzip / WASM 642.87 kB gzip (both under the
+  prd.md §7 200KB/800KB budgets, unaffected by this diff).
+- **Backend:** untouched this cycle (pure frontend Dexie-persistence feature, confirmed via
+  `git status` — no crates touched, so no crypto-reviewer/threat-model-checker needed; polls have
+  no server-visible metadata, never leave the client).
+- Target dir hygiene: not checked this cycle (FEATURE mode, backend untouched — no build
+  artifacts changed).
+- `gh issue list --state open` — empty, nothing else to triage.
+- **Next cycle candidates:** the `.claude/memory/project-context.md` file-size note (now ~3600+
+  lines — was flagged worth archiving cycles below ~300 at a STABILIZATION cycle since cycle
+  330/334/335, genuinely worth doing soon); the accepted narrow persistPollCreate/persistPollVote
+  ordering race above if it ever proves not self-healing in practice; PQ hybrid Phase A (still
+  blocked on openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003
+  Phase B 95%-session threshold); re-run the cycle-326/336-style Explore-agent survey again for
+  any remaining unwired-Dexie-persistence UI features (scheduled messages and quote-reply
+  `replyTo` metadata were both flagged as runner-up candidates this cycle, not yet fixed).
+
+## Previous state (2026-08-22, cycle 335 — STABILIZATION: fix db.messages test-isolation gap + fake-timer hang, commit 294463e)
 
 - `git status` clean, CI green (`gh run list --limit 5`), `gh issue list --state open` empty at
   cycle start. Picked up the standing cycle-329/334 sweep candidate: a grep sweep for the
