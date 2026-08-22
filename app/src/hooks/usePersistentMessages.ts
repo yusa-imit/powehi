@@ -29,6 +29,7 @@ export interface PersistedMessages {
 		text: string,
 		ciphertextB64: string,
 		replyTo?: ReplyContext,
+		expiresAt?: number,
 	) => void;
 	/** Delete expired messages from Dexie and update local rows state. */
 	purgeExpired: () => void;
@@ -137,13 +138,24 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 	);
 
 	const persistOutgoing = useCallback(
-		(id: string, groupId: string, text: string, ciphertextB64: string, replyTo?: ReplyContext) => {
+		(
+			id: string,
+			groupId: string,
+			text: string,
+			ciphertextB64: string,
+			replyTo?: ReplyContext,
+			expiresAt?: number,
+		) => {
 			if (!encryptedDb || !deviceId) return;
 			// epochSeq: Date.now() for outgoing — mlsEncrypt does not expose the MLS
 			// sequence number. Display ordering now uses receivedAt (not epochSeq) so
 			// the outgoing large-timestamp value no longer causes sort namespace mismatch.
 			// epochSeq is retained for potential future replay-detection use at the WASM layer.
 			// plaintextB64 stores base64-encoded UTF-8 (textToBase64 safe loop).
+			// expiresAt: threaded through so the sender's own copy of a disappearing message
+			// is purged by purgeExpired/rehydration the same as the recipient's copy — before
+			// this fix, persistOutgoing never set it, so a self-sent disappearing message
+			// survived forever in the sender's Dexie (security-auditor finding, cycle 337).
 			const row: MessageRow = {
 				id,
 				groupId,
@@ -153,6 +165,7 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 				receivedAt: Date.now(),
 				plaintextB64: textToBase64(text),
 				replyToJson: replyTo ? JSON.stringify(replyTo) : undefined,
+				expiresAt,
 			};
 			setRows((prev) => {
 				if (prev.some((r) => r.id === row.id)) return prev;

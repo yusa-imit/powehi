@@ -3,6 +3,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as EncryptedDbModule from "../db/encrypted-db";
 import { DirectFieldEncryptor, deriveDbKey } from "../db/encryption";
+import { db } from "../db/schema";
 import { useAuthStore } from "../store/auth";
 import { base64ToText, textToBase64 } from "../utils/base64";
 import * as CryptoWorkerHook from "./useCryptoWorker";
@@ -186,6 +187,71 @@ describe("usePersistentMessages", () => {
 		});
 
 		expect(result.current.rows[0].replyToJson).toBeUndefined();
+	});
+
+	it("persistOutgoing threads expiresAt into the row (disappearing-message sender copy)", async () => {
+		const EXPIRES_AT = Date.now() + 60_000;
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+
+		await act(async () => {
+			result.current.persistOutgoing(
+				"out-ttl-id",
+				GROUP_ID,
+				"self-destructs",
+				btoa("ct"),
+				undefined,
+				EXPIRES_AT,
+			);
+		});
+
+		expect(result.current.rows[0].expiresAt).toBe(EXPIRES_AT);
+	});
+
+	it("persistOutgoing leaves expiresAt undefined when no TTL is given", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+
+		await act(async () => {
+			result.current.persistOutgoing("out-no-ttl-id", GROUP_ID, "permanent", btoa("ct"));
+		});
+
+		expect(result.current.rows[0].expiresAt).toBeUndefined();
+	});
+
+	it("purgeExpired removes a persisted outgoing disappearing message — durably, not just in memory", async () => {
+		let nowValue = 1_000_000;
+		const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => nowValue);
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+
+		await act(async () => {
+			result.current.persistOutgoing(
+				"out-expiring-id",
+				GROUP_ID,
+				"bye",
+				btoa("ct"),
+				undefined,
+				nowValue + 1000,
+			);
+		});
+		expect(result.current.rows).toHaveLength(1);
+		// persistOutgoing's putMessage is fire-and-forget — wait for it to actually land
+		// in Dexie before purging, otherwise the durable-deletion assertion below is racy.
+		await waitFor(async () => {
+			expect(await db.messages.get("out-expiring-id")).toBeDefined();
+		});
+
+		nowValue += 2000; // past expiresAt
+		await act(async () => {
+			result.current.purgeExpired();
+		});
+		nowSpy.mockRestore();
+
+		expect(result.current.rows).toHaveLength(0);
+		// The regression this test guards against: before the fix, persistOutgoing never
+		// set expiresAt, so the sender's own copy had no index entry and durably survived
+		// purgeExpiredMessages's `where("expiresAt").belowOrEqual(now)` sweep forever.
+		await waitFor(async () => {
+			expect(await db.messages.get("out-expiring-id")).toBeUndefined();
+		});
 	});
 
 	it("persistOutgoing is no-op when deviceId is null", async () => {

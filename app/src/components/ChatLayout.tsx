@@ -9364,7 +9364,14 @@ export function ChatLayout() {
 				// Persist the sent message to Dexie (encrypted at rest).
 				// uint8ToBase64 uses a safe byte-at-a-time loop — no spread/RangeError risk.
 				const ciphertextB64 = uint8ToBase64(ciphertext);
-				persistOutgoing(envelopeId, active.mlsGroupId, text, ciphertextB64, replyContext);
+				persistOutgoing(
+					envelopeId,
+					active.mlsGroupId,
+					text,
+					ciphertextB64,
+					replyContext,
+					expiresAt,
+				);
 			} catch {
 				// Silent failure — optimistic message stays in UI.
 				// In future: mark message as "failed" with retry affordance.
