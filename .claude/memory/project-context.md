@@ -17,7 +17,100 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-23, cycle 340 — STABILIZATION: project-context.md re-archive + full security/test sweep)
+## Current state (2026-08-23, cycle 342 — FEATURE: scheduled messages now actually send over MLS when they fire, commit 636996c)
+
+- Cycle 341 apparently ran but never committed (`git status` at cycle start showed a complete,
+  uncommitted working-tree diff across ChatLayout.tsx/encrypted-db.ts/usePersistentMessages.ts +
+  tests, plus a stray debug scratch file `ZZDebugClaim.test.ts` with console.logs — same
+  "cycle silently fails to commit" pattern as cycles 324/326/330/332). Per CLAUDE.md's
+  investigate-before-discarding guidance, validated and landed it (like cycle 332) rather than
+  redoing from scratch: deleted the scratch debug file, then built on the real diff.
+- **What it does:** closes the long-standing gap (flagged since cycles 339/340) that a fired
+  scheduled ("send later") message never actually transmitted over MLS — it only cleared the
+  local `scheduledFor` flag. `EncryptedPowehiDb.claimScheduledFire(id)` (encrypted-db.ts) reads
+  and deletes a scheduled row inside ONE Dexie `readwrite` transaction, gated on `scheduledFor`
+  still being set — IndexedDB serializes same-store rw transactions, so this is an atomic claim:
+  at most one caller (this tab's overlapping sweep ticks, or another same-origin tab) ever gets
+  a defined row back. `ChatLayout.tsx`'s `fireScheduled` sweep (10s interval) now: claims →
+  `mlsEncrypt` → `sendMessageApi` → `persistOutgoing`, the same pipeline `sendMessage` itself
+  uses, instead of the old "just flip scheduledFor in memory" no-op.
+- **crypto-reviewer: 2 rounds, both required since this diff calls `mlsEncrypt` directly.**
+  Round 1 verdict **needs-rework**, 6 required changes (the atomic-claim pattern itself was
+  GREEN from round 1 — it does correctly prevent double-encrypting the same scheduled message):
+  1. **Fixed:** added a fail-closed `if (claimed.groupId !== item.groupId) continue;` before
+     encrypting — nothing previously verified the claimed row's groupId matched the chat it was
+     scanned from before encrypting under that chat's key material.
+  2. **Fixed:** an already-expired-by-fire-time message (elapsed `expiresAt`) now `continue`s
+     (drops, matching purge semantics) instead of `Math.max(1, ...)`-clamping to a 1-second TTL
+     and sending already-past-retention content.
+  3. **Fixed:** the empty `catch` after a failed send previously justified "no retry" with an
+     incorrect claim ("would reopen a narrower version of the same TOCTOU race") — corrected to
+     state the true reason (RFC 9420 §6.3: re-encrypting the already-claimed plaintext would be
+     safe, since each `mlsEncrypt` call advances the sender ratchet; simply not implemented,
+     matching `sendMessage`'s own no-retry-UI scope, not a safety requirement).
+  4. **Fixed (doc-only):** the claim's doc comments (encrypted-db.ts + ChatLayout.tsx +
+     usePersistentMessages.ts) overclaimed that this closes the general cross-tab
+     cloned-MLS-sender-ratchet problem and called a generation collision "catastrophic" AEAD
+     reuse. Corrected: the claim only closes *this-message* double-firing (scheduled rows are
+     local-only pre-fire, so there's no separate device to race); the general cloned-ratchet
+     property is pre-existing across every send path in this app (typing/presence/sendMessage),
+     unresolved by this change; cited RFC 9420 §6.3.2's per-message `reuse_guard` (a bare
+     generation collision isn't automatically nonce reuse).
+  5. **Fixed (doc-only):** the TTL-bucket-rounding comment (server-visible retention arg snapped
+     UP to nearest `TTL_OPTIONS` member instead of sent exactly) overclaimed it eliminates the
+     "this was a scheduled send" fingerprint — corrected to "narrows, does not eliminate" and
+     enumerated the residual peer-visible signal (exact `ttl` inside the MLS-encrypted payload,
+     no preceding typing/presence traffic, no MLS `padding_size` on this path) as an accepted,
+     documented gap.
+  6. **Fixed:** `ChatLayoutScheduleSend.test.tsx`'s cross-tab-cancel-race test asserted
+     `MOCK_WORKER.mlsEncrypt.mock.calls` never contained the cancelled text — but the real
+     `fireScheduled` zeroes its plaintext buffer (`plaintext.fill(0)`) in a `finally` right after
+     `mlsEncrypt` resolves, so that assertion was reading an already-zeroed buffer and would
+     pass vacuously even if the guard it was testing regressed. Fixed: the mock now pushes a
+     manual `new Uint8Array(plaintext)` copy into a module-level `capturedPlaintexts` array
+     before returning; the test asserts against that copy instead.
+  Round 2 (fresh agent, verifying the fix diff): **GREEN**, all 6 confirmed fixed, plus 2 small
+  non-blocking residuals flagged and fixed in the same cycle anyway (cheap): (a) the sweep
+  processes claimed items serially, each a full encrypt+network round trip, so reusing the
+  sweep's single `now` for later items in the same tick could be stale — now re-reads
+  `Date.now()` immediately after each claim; (b) `Math.round` on a sub-second remaining TTL could
+  floor to `0` (falsy), silently downgrading a near-expiry disappearing message to a permanent
+  one — restored a `Math.max(1, ...)` floor, safe now that the already-expired case is a
+  `continue` guard *before* this floor (round 1's fix #2), not the same clamp that caused it.
+- Not architectural, no new server-visible metadata (same TTL-rounding/envelope shape every
+  other disappearing send already uses) — `threat-model-checker` not required. Backend untouched
+  (confirmed via `git diff --name-only`) — `security-auditor` not required either (crypto-
+  reviewer's scope covers this diff fully, it's the crypto-adjacent MLS-send path).
+- Root-caused and fixed a real test bug hit while validating the dropped cycle's tests: 3 of the
+  new "firing" tests failed under `vi.advanceTimersByTime` (sync). Root cause: `claimScheduledFire`
+  does a `get()` then `delete()` inside one Dexie transaction; fake-indexeddb settles each
+  IDBRequest via a (now-faked, since `vi.useFakeTimers()` globally replaces `setTimeout`) 0ms
+  timer — the sync advance doesn't drain newly-scheduled timers between the transaction's two
+  dependent awaits, so Dexie sees the transaction go idle after the `get()` and the `delete()`
+  then fails, silently no-opping the claim (self-healing but permanently missing the test's
+  short real-timer `waitFor` window). Fixed: switched the 4 affected `vi.advanceTimersByTime`
+  calls in `ChatLayoutScheduleSend.test.tsx` to `await vi.advanceTimersByTimeAsync(...)`, which
+  drains microtasks/newly-scheduled timers between ticks and keeps the transaction alive across
+  both awaits. Confirmed via debug instrumentation (removed before commit) that this was purely
+  a fake-timers/fake-indexeddb test-environment interaction, not a real-browser bug.
+- **Frontend: 1460/1460 tests green** (was 1451 pre-cycle-341's-drop; +9 net: 6 in
+  `usePersistentMessages.test.ts` for `claimScheduledFire`, 3 new ChatLayout-level firing/
+  cross-tab-cancel tests). `tsc -b` clean, `biome check` clean (5 touched files). Production
+  build: initial route 164.78 kB gzip / WASM 642.87 kB gzip (both under prd.md §7 budgets).
+- `gh issue list --state open` — empty at cycle start. Target dir hygiene: not checked (FEATURE
+  mode, backend untouched).
+- **Next cycle candidates:** the crypto-reviewer's 2 residual notes are now both fixed in-cycle
+  (see above, nothing deferred); the general cross-tab cloned-MLS-sender-ratchet property
+  (every open tab independently imports the group's sender ratchet; this cycle explicitly did
+  NOT resolve this, only documented it as pre-existing across every send path) is a bigger,
+  separate architectural question — not scoped for a single cycle, would need its own design
+  pass (e.g. leader-election among tabs, or a server-side single-sender lock) if ever prioritized;
+  PQ hybrid Phase A (still blocked on openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF
+  upgrade (gated on ADR-0003 Phase B 95%-session threshold); the `.claude/memory/project-
+  context.md` file-size note (archived at cycle 340, currently ~1370 lines / 108KB — fine for
+  now, re-check in a handful of cycles if it grows back toward the 256KB Read cap).
+
+## Previous state (2026-08-23, cycle 340 — STABILIZATION: project-context.md re-archive + full security/test sweep)
 
 - CI green (`gh run list --limit 3`), `gh issue list --state open` empty at cycle start.
 - **Memory hygiene (the actual fix this cycle):** `project-context.md` had grown back to 3782
