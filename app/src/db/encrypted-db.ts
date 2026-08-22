@@ -33,7 +33,7 @@ import type { PowehiDb } from "./schema";
 // remain unencrypted — mlsIdentityB64 is a documented public label, not a
 // secret (schema.ts).
 const SENSITIVE: Record<string, readonly string[]> = {
-	messages: ["ciphertextB64", "plaintextB64", "editedText", "reactionsJson"],
+	messages: ["ciphertextB64", "plaintextB64", "editedText", "reactionsJson", "pollJson"],
 	groups: ["mlsStateB64", "name", "draft", "description", "nickname"],
 	identity: ["mlsProviderStateB64", "customStatusEmoji", "customStatusText"],
 	verifiedContacts: ["safetyNumber"],
@@ -140,6 +140,17 @@ export class EncryptedPowehiDb {
 	async markMessageReactions(id: string, reactionsJson: string): Promise<void> {
 		const enc = await this.encryptor.encryptDbField(reactionsJson);
 		await this.db.messages.update(id, { reactionsJson: enc });
+	}
+
+	/**
+	 * Persist the current poll state (question + option vote lists, JSON-serialized,
+	 * encrypted at rest) so a group poll and its votes survive a reload. Takes the full
+	 * post-mutation poll, same "callers pass post-mutation state, not a diff" contract as
+	 * markMessageReactions. No-op if the row does not exist locally.
+	 */
+	async markMessagePoll(id: string, pollJson: string): Promise<void> {
+		const enc = await this.encryptor.encryptDbField(pollJson);
+		await this.db.messages.update(id, { pollJson: enc });
 	}
 
 	/**

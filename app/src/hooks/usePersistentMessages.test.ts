@@ -394,6 +394,88 @@ describe("usePersistentMessages", () => {
 		expect(result.current.rows).toHaveLength(0);
 	});
 
+	it("persistPollCreate creates a row with the serialized poll and empty ciphertextB64 sentinel", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		const poll = { question: "Lunch?", options: [{ text: "Pizza", voters: [] as string[] }] };
+		await act(async () => {
+			result.current.persistPollCreate("poll-1", GROUP_ID, poll);
+		});
+
+		expect(result.current.rows).toHaveLength(1);
+		expect(result.current.rows[0].id).toBe("poll-1");
+		expect(result.current.rows[0].pollJson).toBe(JSON.stringify(poll));
+		expect(result.current.rows[0].ciphertextB64).toBe("");
+		expect(result.current.rows[0].senderDeviceId).toBe(DEVICE_ID);
+	});
+
+	it("persistPollCreate threads expiresAt through so a poll in a disappearing chat can be purged", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		const poll = { question: "Lunch?", options: [{ text: "Pizza", voters: [] as string[] }] };
+		const expiresAt = Date.now() + 60_000;
+		await act(async () => {
+			result.current.persistPollCreate("poll-ttl-1", GROUP_ID, poll, expiresAt);
+		});
+
+		expect(result.current.rows[0].expiresAt).toBe(expiresAt);
+	});
+
+	it("persistPollCreate leaves expiresAt undefined when no TTL is given", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistPollCreate("poll-no-ttl-1", GROUP_ID, { question: "Q", options: [] });
+		});
+
+		expect(result.current.rows[0].expiresAt).toBeUndefined();
+	});
+
+	it("persistPollCreate is a no-op when the crypto worker is unavailable", async () => {
+		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(null);
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {
+			result.current.persistPollCreate("poll-1", GROUP_ID, { question: "Q", options: [] });
+		});
+		expect(result.current.rows).toHaveLength(0);
+	});
+
+	it("persistPollVote updates rows state with the serialized post-vote poll", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		const poll = { question: "Lunch?", options: [{ text: "Pizza", voters: [] as string[] }] };
+		await act(async () => {
+			result.current.persistPollCreate("poll-1", GROUP_ID, poll);
+		});
+		const voted = { question: "Lunch?", options: [{ text: "Pizza", voters: ["me"] }] };
+		await act(async () => {
+			result.current.persistPollVote("poll-1", voted);
+		});
+
+		expect(result.current.rows[0].pollJson).toBe(JSON.stringify(voted));
+	});
+
+	it("writeErrorCount increments when markMessagePoll throws on persistPollVote", async () => {
+		vi.spyOn(
+			EncryptedDbModule.EncryptedPowehiDb.prototype,
+			"markMessagePoll",
+		).mockRejectedValueOnce(new Error("db full"));
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistPollVote("poll-1", { question: "Q", options: [] });
+		});
+
+		await waitFor(() => {
+			expect(result.current.writeErrorCount).toBe(1);
+		});
+	});
+
 	it("writeErrorCount increments when markMessageReactions throws on persistReaction", async () => {
 		vi.spyOn(
 			EncryptedDbModule.EncryptedPowehiDb.prototype,

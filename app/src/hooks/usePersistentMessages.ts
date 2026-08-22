@@ -32,6 +32,22 @@ export interface PersistedMessages {
 	persistDelete: (targetMessageId: string) => void;
 	/** Persist the current reaction map for a message so reactions survive a reload. Best-effort. */
 	persistReaction: (targetMessageId: string, reactions: Record<string, string[]>) => void;
+	/**
+	 * Persist a newly-created poll message. Unlike other persist* helpers this CREATES the row
+	 * (polls never go through persistOutgoing — there is no MLS envelope type for them, so
+	 * they otherwise never reach Dexie at all). Best-effort.
+	 */
+	persistPollCreate: (
+		id: string,
+		groupId: string,
+		poll: { question: string; options: { text: string; voters: string[] }[] },
+		expiresAt?: number,
+	) => void;
+	/** Persist the current vote state for an existing poll message so votes survive a reload. Best-effort. */
+	persistPollVote: (
+		targetMessageId: string,
+		poll: { question: string; options: { text: string; voters: string[] }[] },
+	) => void;
 	/** Persist a "delivery receipt" signal so the delivered indicator survives a reload. Best-effort. */
 	persistDelivered: (targetMessageId: string) => void;
 	/** Persist a "read receipt" signal (read flag + reader device ids) so it survives a reload. Best-effort. */
@@ -190,6 +206,71 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 		[encryptedDb],
 	);
 
+	const persistPollCreate = useCallback(
+		(
+			id: string,
+			groupId: string,
+			poll: { question: string; options: { text: string; voters: string[] }[] },
+			expiresAt?: number,
+		) => {
+			if (!encryptedDb || !deviceId) return;
+			const pollJson = JSON.stringify(poll);
+			// Polls have no MLS wire representation — ciphertextB64 uses the documented ""
+			// sentinel (schema.ts), same "not applicable" convention as GroupRow.mlsStateB64.
+			// expiresAt is threaded through so a poll created in a disappearing-message chat
+			// is actually purged like every other message, instead of persisting forever
+			// (security-auditor finding, this cycle — the retention policy must apply
+			// uniformly regardless of message shape).
+			const row: MessageRow = {
+				id,
+				groupId,
+				ciphertextB64: "",
+				senderDeviceId: deviceId,
+				epochSeq: Date.now(),
+				receivedAt: Date.now(),
+				pollJson,
+				expiresAt,
+			};
+			setRows((prev) => {
+				if (prev.some((r) => r.id === row.id)) return prev;
+				return [...prev, row];
+			});
+			encryptedDb.putMessage(row).catch(() => setWriteErrorCount((n) => n + 1));
+		},
+		[encryptedDb, deviceId],
+	);
+
+	/**
+	 * KNOWN LIMITATION (security-auditor finding, accepted this cycle, not fixed): both this
+	 * function and persistPollCreate await an encryptDbField round-trip before issuing their
+	 * Dexie write, and persistPollCreate's row has two sensitive fields (ciphertextB64 "" +
+	 * pollJson) vs this function's one — so if a vote fires immediately after the poll it
+	 * targets was just created, this write's markMessagePoll (update-only, no-ops on a
+	 * missing row) can reach IndexedDB before persistPollCreate's putMessage does, silently
+	 * dropping the vote from Dexie (the in-memory `rows`/`chats` state is unaffected — both
+	 * are optimistic updates that always land in call order). Narrow window (needs a vote
+	 * within roughly one crypto-worker round-trip of the poll's own creation) and self-heals
+	 * on the next vote against the same poll; not fixed here to avoid growing persist* into
+	 * upsert-with-full-row-reconstruction, which would change its no-op-on-missing-row
+	 * contract that markMessageEdited/Deleted/Reactions/Delivered/Read/Starred all share.
+	 */
+	const persistPollVote = useCallback(
+		(
+			targetMessageId: string,
+			poll: { question: string; options: { text: string; voters: string[] }[] },
+		) => {
+			if (!encryptedDb) return;
+			const pollJson = JSON.stringify(poll);
+			setRows((prev) => prev.map((r) => (r.id === targetMessageId ? { ...r, pollJson } : r)));
+			pendingWriteIdsRef.current.add(targetMessageId);
+			encryptedDb
+				.markMessagePoll(targetMessageId, pollJson)
+				.catch(() => setWriteErrorCount((n) => n + 1))
+				.finally(() => pendingWriteIdsRef.current.delete(targetMessageId));
+		},
+		[encryptedDb],
+	);
+
 	const persistDelivered = useCallback(
 		(targetMessageId: string) => {
 			if (!encryptedDb) return;
@@ -251,6 +332,8 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 		persistEdit,
 		persistDelete,
 		persistReaction,
+		persistPollCreate,
+		persistPollVote,
 		persistDelivered,
 		persistRead,
 		persistStarred,

@@ -28,6 +28,15 @@ export interface MessageRow {
 	readByJson?: string;
 	/** True when the local user has starred/bookmarked this message. Local-only, never sent to server. Not sensitive — a boolean flag, like delivered/read. undefined = not starred. */
 	starred?: boolean;
+	/**
+	 * JSON-serialized `{ question, options: [{ text, voters }] }` for a group poll message.
+	 * SENSITIVE — real user-authored content (question/option text), encrypted at rest like
+	 * editedText/reactionsJson. Polls are local-only (never sent over MLS — no wire envelope
+	 * type exists for them), so a poll row's `ciphertextB64` is the empty-string sentinel
+	 * (same "not applicable" convention as GroupRow.mlsStateB64); never treat "" ciphertextB64
+	 * as a real (undecryptable) message on a row that carries pollJson. undefined = not a poll.
+	 */
+	pollJson?: string;
 }
 
 // GroupRow — MLS group state snapshot.
@@ -396,6 +405,16 @@ export class PowehiDb extends Dexie {
 		// GroupRow.nickname/description. No index change needed — never queried, only read/
 		// written against the single id:1 row.
 		this.version(23).stores({
+			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v24: added pollJson to MessageRow — group polls (previously React-state-only,
+		// never even reaching Dexie since poll creation never called persistOutgoing) now
+		// survive a reload. Polls are local-only (no MLS envelope type), so poll rows use
+		// the "" ciphertextB64 sentinel documented on the field above. No index change needed.
+		this.version(24).stores({
 			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
 			groups: "id, lastActivity",
 			identity: "id",

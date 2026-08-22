@@ -7326,6 +7326,8 @@ export function ChatLayout() {
 		persistEdit,
 		persistDelete,
 		persistReaction,
+		persistPollCreate,
+		persistPollVote,
 		persistDelivered,
 		persistRead,
 		persistStarred,
@@ -7357,9 +7359,11 @@ export function ChatLayout() {
 			// the newly active chat during that transition window.
 			if (row.groupId !== groupId) continue;
 			// Rows without decrypted text (neither an edit nor original plaintext)
-			// can't be rendered — skip rather than push an empty bubble.
+			// can't be rendered — skip rather than push an empty bubble. A poll row is the one
+			// exception: it legitimately has no plaintextB64 (never sent over MLS — see
+			// pollJson's schema.ts doc) but still needs to render via pollJson below.
 			const textB64 = row.editedText ?? row.plaintextB64;
-			if (!textB64) continue;
+			if (!textB64 && !row.pollJson) continue;
 			// getMessagesByGroup() does not filter by TTL — an already-expired
 			// disappearing message must not flash back on screen after a reload;
 			// the periodic purgeExpired() sweep only runs every 30s, too slow to
@@ -7386,14 +7390,39 @@ export function ChatLayout() {
 					readBy = undefined;
 				}
 			}
+			// Corrupt/malformed pollJson must not abort rehydration of the whole row —
+			// fail safe by dropping just the poll for this one message, same defensive
+			// pattern as reactionsJson/readByJson above. Unlike those two (consumed via
+			// Object.entries/spread, tolerant of odd shapes), PollView's render path calls
+			// .reduce/.map directly on poll.options — a syntactically valid but
+			// wrong-shaped JSON value (e.g. missing/non-array options) would throw during
+			// render with no ErrorBoundary in the tree, blanking the whole app. Validate
+			// the shape, not just the JSON syntax (security-auditor finding, this cycle).
+			let poll: ChatMessage["poll"];
+			if (row.pollJson) {
+				try {
+					const parsed = JSON.parse(row.pollJson) as ChatMessage["poll"];
+					if (
+						parsed &&
+						typeof parsed.question === "string" &&
+						Array.isArray(parsed.options) &&
+						parsed.options.every((o) => o && typeof o.text === "string" && Array.isArray(o.voters))
+					) {
+						poll = parsed;
+					}
+				} catch {
+					poll = undefined;
+				}
+			}
 			rehydrated.push({
 				id: row.id,
-				text: base64ToText(textB64),
+				text: textB64 ? base64ToText(textB64) : "",
 				reactions,
 				delivered: row.delivered,
 				read: row.read,
 				readBy,
 				starred: row.starred,
+				poll,
 				// senderDeviceId is the authenticated-device value the server bound
 				// to the envelope at send time (AuthenticatedDevice extractor), not
 				// a client-suppliable field — but it is not an MLS-cryptographic
@@ -7443,7 +7472,8 @@ export function ChatLayout() {
 						JSON.stringify(m.reactions ?? {}) === JSON.stringify(fresh.reactions ?? {}) &&
 						!!m.delivered === !!fresh.delivered &&
 						!!m.read === !!fresh.read &&
-						JSON.stringify(m.readBy ?? []) === JSON.stringify(fresh.readBy ?? [])
+						JSON.stringify(m.readBy ?? []) === JSON.stringify(fresh.readBy ?? []) &&
+						JSON.stringify(m.poll ?? null) === JSON.stringify(fresh.poll ?? null)
 					) {
 						return m;
 					}
@@ -7457,6 +7487,7 @@ export function ChatLayout() {
 						delivered: fresh.delivered,
 						read: fresh.read,
 						readBy: fresh.readBy,
+						poll: fresh.poll,
 					};
 				});
 				const existingIds = new Set(c.messages.map((m) => m.id).filter(Boolean));
@@ -9153,22 +9184,36 @@ export function ChatLayout() {
 		if (!activeId) return;
 		const now = new Date();
 		const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-		const pollId = `poll_${now.getTime()}`;
+		const pollId = crypto.randomUUID();
+		const poll = { question, options: options.map((text) => ({ text, voters: [] as string[] })) };
+		// A poll created in a disappearing-message chat must expire like any other
+		// message — the retention policy is per-chat, not per-message-shape.
+		const expiresAt = disappearingTtl ? Date.now() + disappearingTtl * 1000 : undefined;
 		const newMsg: ChatMessage = {
 			id: pollId,
 			from: "me",
 			text: "",
 			time,
 			last: true,
-			poll: { question, options: options.map((text) => ({ text, voters: [] })) },
+			poll,
+			expiresAt,
 		};
 		setChats((cs) =>
 			cs.map((c) => (c.id === activeId ? { ...c, messages: [...c.messages, newMsg] } : c)),
 		);
+		if (active?.mlsGroupId) persistPollCreate(pollId, active.mlsGroupId, poll, expiresAt);
 	};
 
 	const handleVotePoll = (msgId: string | undefined, optionIdx: number) => {
 		if (!activeId || !msgId) return;
+		// Compute the toggle inside the setChats functional updater (always the latest
+		// state, even across two toggles in the same tick) rather than off chatsRef —
+		// chatsRef only syncs via a post-commit effect, so reading it here could observe
+		// a stale poll under back-to-back votes and silently drop one (security-auditor
+		// finding, this cycle). Capture the computed value in this outer variable so it
+		// can also be persisted below, since setChats's updater return isn't otherwise
+		// available to the caller.
+		let updatedPoll: NonNullable<ChatMessage["poll"]> | undefined;
 		setChats((cs) =>
 			cs.map((c) => {
 				if (c.id !== activeId) return c;
@@ -9184,11 +9229,13 @@ export function ChatLayout() {
 								voters: already ? opt.voters.filter((v) => v !== "me") : [...opt.voters, "me"],
 							};
 						});
-						return { ...m, poll: { ...m.poll, options: opts } };
+						updatedPoll = { ...m.poll, options: opts };
+						return { ...m, poll: updatedPoll };
 					}),
 				};
 			}),
 		);
+		if (updatedPoll) persistPollVote(msgId, updatedPoll);
 	};
 
 	const sendMessage = async (text: string) => {

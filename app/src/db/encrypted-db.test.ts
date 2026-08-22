@@ -433,6 +433,39 @@ describe("EncryptedPowehiDb", () => {
 		expect(retrieved).toBeUndefined();
 	});
 
+	it("markMessagePoll persists the poll state (encrypted at rest) and survives reload", async () => {
+		await encDb.addMessage({
+			id: "msg-poll",
+			groupId: "grp-poll",
+			ciphertextB64: "",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+		});
+		const pollJson = JSON.stringify({
+			question: "Lunch?",
+			options: [
+				{ text: "Pizza", voters: ["dev-1"] },
+				{ text: "Sushi", voters: [] },
+			],
+		});
+		await encDb.markMessagePoll("msg-poll", pollJson);
+
+		const retrieved = await encDb.getMessage("msg-poll");
+		expect(retrieved?.pollJson).toBe(pollJson);
+		expect(retrieved?.ciphertextB64).toBe("");
+
+		// Raw stored value must not equal the plaintext JSON — it's encrypted at rest.
+		const rawRow = await rawDb.messages.get("msg-poll");
+		expect(rawRow?.pollJson).not.toBe(pollJson);
+	});
+
+	it("markMessagePoll is a no-op when the target row does not exist locally", async () => {
+		await expect(encDb.markMessagePoll("no-such-msg", JSON.stringify({}))).resolves.not.toThrow();
+		const retrieved = await encDb.getMessage("no-such-msg");
+		expect(retrieved).toBeUndefined();
+	});
+
 	it("markMessageDelivered sets delivered:true on the row", async () => {
 		await encDb.addMessage({
 			id: "msg-delivered",

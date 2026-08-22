@@ -1,8 +1,9 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db/schema";
 import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
 import * as UseMessagesModule from "../hooks/useMessages";
+import { useAuthStore } from "../store/auth";
 import { ChatLayout } from "./ChatLayout";
 
 const MOCK_WORKER = {
@@ -23,6 +24,11 @@ const MOCK_WORKER = {
 describe("ChatLayout — group poll feature", () => {
 	beforeEach(async () => {
 		await db.verifiedContacts.clear();
+		// Poll creation/voting now persists to db.messages (this file's fix) keyed by the
+		// "Design Team" seed chat's fixed mlsGroupId, reused across every test in this file —
+		// clear so a leftover poll row from an earlier test doesn't rehydrate into the next
+		// test's initial render (same bug class fixed across ChatLayout*.test.tsx, cycle 335).
+		await db.messages.clear();
 		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
 			MOCK_WORKER as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
 		);
@@ -30,7 +36,9 @@ describe("ChatLayout — group poll feature", () => {
 	});
 
 	afterEach(() => {
+		cleanup();
 		vi.restoreAllMocks();
+		useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null });
 	});
 
 	it("poll button is NOT shown in a DM chat (Maya)", () => {
@@ -310,5 +318,138 @@ describe("ChatLayout — group poll feature", () => {
 		});
 		// Creator should remain open
 		expect(screen.getByTestId("poll-creator")).toBeInTheDocument();
+	});
+
+	it("persists a created poll to Dexie (closes the poll-persistence gap)", async () => {
+		useAuthStore.setState({ phase: "app", deviceId: "my-device-poll", sessionToken: "tok-poll" });
+		render(<ChatLayout />);
+		const groupBtn = screen.getByRole("button", { name: /Design Team/i });
+		await act(async () => {
+			fireEvent.click(groupBtn);
+		});
+		await act(async () => {
+			fireEvent.click(screen.getByRole("button", { name: "Create poll" }));
+		});
+		fireEvent.change(screen.getByTestId("poll-question-input"), {
+			target: { value: "Persisted?" },
+		});
+		fireEvent.change(screen.getByTestId("poll-option-input-0"), { target: { value: "Yes" } });
+		fireEvent.change(screen.getByTestId("poll-option-input-1"), { target: { value: "No" } });
+		await act(async () => {
+			fireEvent.click(screen.getByTestId("poll-create"));
+		});
+		await waitFor(() => expect(screen.getByTestId("poll-view")).toBeInTheDocument());
+
+		const rows = await db.messages
+			.where("groupId")
+			.equals("44444444-4444-4444-4444-444444444444")
+			.toArray();
+		const pollRow = rows.find((r) => r.pollJson);
+		expect(pollRow).toBeDefined();
+		const poll = JSON.parse(pollRow?.pollJson ?? "{}");
+		expect(poll.question).toBe("Persisted?");
+		expect(poll.options.map((o: { text: string }) => o.text)).toEqual(["Yes", "No"]);
+	});
+
+	it("persists a poll vote to Dexie", async () => {
+		useAuthStore.setState({ phase: "app", deviceId: "my-device-poll", sessionToken: "tok-poll" });
+		render(<ChatLayout />);
+		const groupBtn = screen.getByRole("button", { name: /Design Team/i });
+		await act(async () => {
+			fireEvent.click(groupBtn);
+		});
+		await act(async () => {
+			fireEvent.click(screen.getByRole("button", { name: "Create poll" }));
+		});
+		fireEvent.change(screen.getByTestId("poll-question-input"), {
+			target: { value: "Vote persists?" },
+		});
+		fireEvent.change(screen.getByTestId("poll-option-input-0"), { target: { value: "A" } });
+		fireEvent.change(screen.getByTestId("poll-option-input-1"), { target: { value: "B" } });
+		await act(async () => {
+			fireEvent.click(screen.getByTestId("poll-create"));
+		});
+		await waitFor(() => expect(screen.getByTestId("poll-option-0")).toBeInTheDocument());
+		await act(async () => {
+			fireEvent.click(screen.getByTestId("poll-option-0"));
+		});
+
+		await waitFor(async () => {
+			const rows = await db.messages
+				.where("groupId")
+				.equals("44444444-4444-4444-4444-444444444444")
+				.toArray();
+			const pollRow = rows.find((r) => r.pollJson);
+			const poll = JSON.parse(pollRow?.pollJson ?? "{}");
+			expect(poll.options[0].voters).toEqual(["me"]);
+		});
+	});
+
+	it("rehydrates a persisted poll (incl. votes) from Dexie on mount", async () => {
+		// Simulate a poll + vote already persisted (e.g. from a prior session) by seeding
+		// db.messages directly, same technique as ChatLayout.test.tsx's reaction/edit/delete
+		// rehydration tests — avoids double-mounting ChatLayout in one test.
+		await db.messages.put({
+			id: "poll-seeded-1",
+			groupId: "44444444-4444-4444-4444-444444444444",
+			ciphertextB64: "",
+			senderDeviceId: "peer-device-x",
+			epochSeq: 1,
+			receivedAt: 1000,
+			pollJson: JSON.stringify({
+				question: "Survives reload?",
+				options: [
+					{ text: "Yes", voters: ["me"] },
+					{ text: "No", voters: [] },
+				],
+			}),
+		});
+
+		render(<ChatLayout />);
+		await act(async () => {
+			fireEvent.click(screen.getByRole("button", { name: /Design Team/i }));
+		});
+		await waitFor(() =>
+			expect(screen.getByTestId("poll-question")).toHaveTextContent("Survives reload?"),
+		);
+		expect(screen.getByTestId("poll-total-votes")).toHaveTextContent("1 vote");
+	});
+
+	it("skips pollJson that fails to parse (syntax error) without crashing the app", async () => {
+		await db.messages.put({
+			id: "poll-bad-syntax-1",
+			groupId: "44444444-4444-4444-4444-444444444444",
+			ciphertextB64: "",
+			senderDeviceId: "peer-device-x",
+			epochSeq: 1,
+			receivedAt: 1000,
+			pollJson: "{not valid json",
+		});
+
+		expect(() => render(<ChatLayout />)).not.toThrow();
+		await act(async () => {
+			fireEvent.click(screen.getByRole("button", { name: /Design Team/i }));
+		});
+		expect(screen.queryByTestId("poll-view")).not.toBeInTheDocument();
+	});
+
+	it("skips pollJson with a wrong shape (valid JSON, invalid poll) without crashing the app", async () => {
+		// Syntactically valid JSON but missing `options` — would throw inside PollView's
+		// poll.options.reduce/.map if not shape-validated (security-auditor finding, this cycle).
+		await db.messages.put({
+			id: "poll-bad-shape-1",
+			groupId: "44444444-4444-4444-4444-444444444444",
+			ciphertextB64: "",
+			senderDeviceId: "peer-device-x",
+			epochSeq: 1,
+			receivedAt: 1000,
+			pollJson: JSON.stringify({ question: "No options field" }),
+		});
+
+		expect(() => render(<ChatLayout />)).not.toThrow();
+		await act(async () => {
+			fireEvent.click(screen.getByRole("button", { name: /Design Team/i }));
+		});
+		expect(screen.queryByTestId("poll-view")).not.toBeInTheDocument();
 	});
 });
