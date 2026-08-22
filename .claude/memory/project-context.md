@@ -17,7 +17,51 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-22, cycle 337 — FEATURE: persist quote-reply context (replyTo) to Dexie, commit 2fc6ae5)
+## Current state (2026-08-22, cycle 338 — FEATURE: thread expiresAt into persistOutgoing, commit 32a4538)
+
+- CI green, `gh issue list` empty at cycle start. Closed one of cycle 337's flagged follow-ups:
+  `persistOutgoing` (the sender's own Dexie copy of a sent message) never set `expiresAt`, even
+  though `ChatLayout.sendMessage` already computes it (`disappearingTtl ? Date.now() +
+  disappearingTtl*1000 : undefined`) and uses it correctly for the in-memory optimistic UI
+  message. Result: a disappearing message's sender-side local copy was durably retained forever
+  — bypassing both the `purgeExpired`/`purgeExpiredMessages` sweep and the rehydration TTL-skip
+  check — while the recipient's copy (`persistIncoming`, already threaded `msg.expiresAt`
+  correctly) and the in-memory UI copy expired as designed. Confirmed via grep there is exactly
+  one `persistOutgoing` call site in the whole tree (`ChatLayout.tsx:9367`).
+- Fix: added `expiresAt?: number` as `persistOutgoing`'s 6th param (after the existing `replyTo`),
+  threaded into the constructed `MessageRow`, single call-site update passes the already-computed
+  `expiresAt` through. Minimal, additive — no schema bump needed (`expiresAt` already existed on
+  `MessageRow`, this cycle just stopped `persistOutgoing` from always leaving it `undefined`).
+- **security-auditor: GREEN.** Confirmed no new logging, no new server-visible metadata (the
+  reviewer flagged and I should record precisely: the premise "server never sees the raw TTL" is
+  actually false and pre-existing — `disappearingTtl` already travels as `ttl_seconds` in the
+  plaintext POST body / `Envelope.expires_at` for server-side envelope expiry, unrelated to and
+  unchanged by this diff; the MLS-encrypted `{type:"text",...,ttl}` payload is for the receiver's
+  *client-side* expiry only, not for hiding the duration from the server — don't cite "server
+  never sees TTL" as an invariant in future cycles). Two non-blocking informational notes: (1)
+  `expiresAt` is a Dexie plaintext index field (must be, to stay queryable for the sweep) so raw-
+  IndexedDB access without the DB key can now see that self-sent messages carry a TTL — accepted,
+  same exposure incoming/poll rows already had, and deleting content beats hiding one timestamp;
+  (2) the first draft of the `purgeExpired` regression test only asserted in-memory `rows`, not
+  the actual Dexie row — strengthened in-cycle to `await waitFor(... db.messages.get(id) ...)`
+  before AND after purge, so the test now actually fails if the durable-deletion half regresses.
+- 3 new tests in `usePersistentMessages.test.ts` (expiresAt threads through when given; stays
+  undefined when omitted; `purgeExpired` durably deletes the Dexie row once past `expiresAt`, not
+  just the in-memory copy). **Frontend: 1429/1429 tests green** (was 1426, 104 files). `tsc -b`
+  clean, `biome check` clean (149 files via `src/`, ran `--write` once for `ChatLayout.tsx`
+  formatting after the edit — no logic change). Production build: initial route 164.22 kB gzip /
+  WASM 642.87 kB gzip (both under prd.md §7 budgets).
+- **Backend:** untouched (pure frontend fix, confirmed via `git status` — no crypto-reviewer/
+  threat-model-checker needed).
+- Target dir hygiene: not checked (FEATURE mode, backend untouched).
+- `gh issue list --state open` — empty.
+- **Next cycle candidates:** scheduled-message persistence (cycle-336 runner-up, still not done);
+  the `.claude/memory/project-context.md` file-size note (now ~3700+ lines, worth archiving
+  cycles below ~300 at the next STABILIZATION cycle — flagged 4 cycles running now); PQ hybrid
+  Phase A (still blocked on openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade
+  (gated on ADR-0003 Phase B 95%-session threshold).
+
+## Previous state (2026-08-22, cycle 337 — FEATURE: persist quote-reply context (replyTo) to Dexie, commit 2fc6ae5)
 
 - CI green, `gh issue list` empty at cycle start. Per cycle 336's "Next cycle candidates", closed
   one of the two runner-up gaps flagged there: quote-reply `replyTo` metadata (`ReplyContext =
