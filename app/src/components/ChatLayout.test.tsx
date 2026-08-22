@@ -1111,6 +1111,55 @@ describe("ChatLayout", () => {
 			fireEvent.click(screen.getByTestId("cancel-reply"));
 			expect(screen.queryByTestId("reply-preview")).not.toBeInTheDocument();
 		});
+
+		it("persists the reply-to context when sending a reply (closes the replyTo-persistence gap)", async () => {
+			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+			vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_id, _gid, onMsg) => {
+				capturedOnMessage = onMsg;
+			});
+			useAuthStore.setState({
+				phase: "app",
+				deviceId: "my-device-reply-persist-1",
+				sessionToken: "tok-reply-persist-1",
+			});
+			const sendSpy = vi
+				.spyOn(MessagesApiModule, "sendMessage")
+				.mockResolvedValue("reply-persist-test-env-1");
+
+			render(<ChatLayout />);
+
+			await act(async () => {
+				capturedOnMessage?.({
+					id: "peer-quote-source-1",
+					senderId: "peer-device-y",
+					groupId: "11111111-1111-1111-1111-111111111111",
+					text: "quote me please",
+					ciphertextB64: "Zg==",
+					epochSeq: 1,
+				});
+			});
+
+			const bubbles = screen.getAllByTestId("message-bubble");
+			fireEvent.mouseEnter(bubbles[bubbles.length - 1]);
+			fireEvent.click(screen.getByTestId("reply-button"));
+
+			const textarea = screen.getByPlaceholderText(/encrypted/i);
+			fireEvent.change(textarea, { target: { value: "here is my reply" } });
+			fireEvent.click(screen.getByRole("button", { name: /send message/i }));
+
+			await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+
+			await waitFor(async () => {
+				const rows = await db.messages
+					.where("groupId")
+					.equals("11111111-1111-1111-1111-111111111111")
+					.toArray();
+				const replyRow = rows.find((r) => r.plaintextB64 === textToBase64("here is my reply"));
+				expect(replyRow?.replyToJson).toBe(
+					JSON.stringify({ messageId: "peer-quote-source-1", excerpt: "quote me please" }),
+				);
+			});
+		});
 	});
 
 	describe("message editing", () => {
@@ -2686,6 +2735,75 @@ describe("ChatLayout", () => {
 					0,
 				);
 			});
+		});
+
+		it("rehydrates a persisted reply-quote context for the active chat on mount", async () => {
+			await db.messages.bulkPut([
+				seedRow({
+					id: "rehydrate-reply-original-1",
+					groupId: MAYA_GROUP,
+					receivedAt: 1000,
+					plaintextB64: textToBase64("original quoted message"),
+				}),
+				seedRow({
+					id: "rehydrate-reply-quoting-1",
+					groupId: MAYA_GROUP,
+					receivedAt: 2000,
+					plaintextB64: textToBase64("the reply itself"),
+					replyToJson: JSON.stringify({
+						messageId: "rehydrate-reply-original-1",
+						excerpt: "original quoted message",
+					}),
+				}),
+			]);
+
+			render(<ChatLayout />);
+
+			await waitFor(() => {
+				expect(screen.getByTestId("reply-quote")).toBeInTheDocument();
+			});
+		});
+
+		it("skips replyToJson that fails to parse without crashing the whole row", async () => {
+			await db.messages.bulkPut([
+				seedRow({
+					id: "rehydrate-bad-reply-1",
+					groupId: MAYA_GROUP,
+					receivedAt: 1000,
+					plaintextB64: textToBase64("still renders despite bad reply json"),
+					replyToJson: "{not valid json",
+				}),
+			]);
+
+			expect(() => render(<ChatLayout />)).not.toThrow();
+
+			await waitFor(() => {
+				expect(screen.getAllByText("still renders despite bad reply json").length).toBeGreaterThan(
+					0,
+				);
+			});
+			expect(screen.queryByTestId("reply-quote")).not.toBeInTheDocument();
+		});
+
+		it("skips replyToJson with a wrong shape (missing excerpt) without crashing", async () => {
+			await db.messages.bulkPut([
+				seedRow({
+					id: "rehydrate-badshape-reply-1",
+					groupId: MAYA_GROUP,
+					receivedAt: 1000,
+					plaintextB64: textToBase64("still renders despite bad shape reply json"),
+					replyToJson: JSON.stringify({ messageId: "some-id" }),
+				}),
+			]);
+
+			expect(() => render(<ChatLayout />)).not.toThrow();
+
+			await waitFor(() => {
+				expect(
+					screen.getAllByText("still renders despite bad shape reply json").length,
+				).toBeGreaterThan(0);
+			});
+			expect(screen.queryByTestId("reply-quote")).not.toBeInTheDocument();
 		});
 
 		it("rehydrates a persisted starred flag for the active chat on mount", async () => {

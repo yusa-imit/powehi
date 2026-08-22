@@ -7414,6 +7414,24 @@ export function ChatLayout() {
 					poll = undefined;
 				}
 			}
+			// Corrupt/malformed replyToJson must not abort rehydration of the whole row —
+			// fail safe by dropping just the reply-quote context for this one message, same
+			// defensive pattern as pollJson (shape-validated, not just JSON-syntax-validated).
+			let replyTo: ChatMessage["replyTo"];
+			if (row.replyToJson) {
+				try {
+					const parsed = JSON.parse(row.replyToJson) as ChatMessage["replyTo"];
+					if (
+						parsed &&
+						typeof parsed.messageId === "string" &&
+						typeof parsed.excerpt === "string"
+					) {
+						replyTo = parsed;
+					}
+				} catch {
+					replyTo = undefined;
+				}
+			}
 			rehydrated.push({
 				id: row.id,
 				text: textB64 ? base64ToText(textB64) : "",
@@ -7423,6 +7441,7 @@ export function ChatLayout() {
 				readBy,
 				starred: row.starred,
 				poll,
+				replyTo,
 				// senderDeviceId is the authenticated-device value the server bound
 				// to the envelope at send time (AuthenticatedDevice extractor), not
 				// a client-suppliable field — but it is not an MLS-cryptographic
@@ -9345,7 +9364,7 @@ export function ChatLayout() {
 				// Persist the sent message to Dexie (encrypted at rest).
 				// uint8ToBase64 uses a safe byte-at-a-time loop — no spread/RangeError risk.
 				const ciphertextB64 = uint8ToBase64(ciphertext);
-				persistOutgoing(envelopeId, active.mlsGroupId, text, ciphertextB64);
+				persistOutgoing(envelopeId, active.mlsGroupId, text, ciphertextB64, replyContext);
 			} catch {
 				// Silent failure — optimistic message stays in UI.
 				// In future: mark message as "failed" with retry affordance.

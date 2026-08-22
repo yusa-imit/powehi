@@ -33,7 +33,14 @@ import type { PowehiDb } from "./schema";
 // remain unencrypted — mlsIdentityB64 is a documented public label, not a
 // secret (schema.ts).
 const SENSITIVE: Record<string, readonly string[]> = {
-	messages: ["ciphertextB64", "plaintextB64", "editedText", "reactionsJson", "pollJson"],
+	messages: [
+		"ciphertextB64",
+		"plaintextB64",
+		"editedText",
+		"reactionsJson",
+		"pollJson",
+		"replyToJson",
+	],
 	groups: ["mlsStateB64", "name", "draft", "description", "nickname"],
 	identity: ["mlsProviderStateB64", "customStatusEmoji", "customStatusText"],
 	verifiedContacts: ["safetyNumber"],

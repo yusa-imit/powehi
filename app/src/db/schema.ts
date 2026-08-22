@@ -37,6 +37,23 @@ export interface MessageRow {
 	 * as a real (undecryptable) message on a row that carries pollJson. undefined = not a poll.
 	 */
 	pollJson?: string;
+	/**
+	 * JSON-serialized `{ messageId, excerpt }` quote-reply context (see useMessages.ts's
+	 * ReplyContext), previously React-state-only (ChatMessage.replyTo) — a reload silently
+	 * dropped which message a reply was quoting, same gap edit/delete/reactions/polls had
+	 * before their respective schema versions. SENSITIVE — excerpt is up to 100 chars of
+	 * real quoted message content, encrypted at rest like editedText/pollJson. Set once at
+	 * message-creation time and never mutated afterward (unlike reactionsJson/pollJson),
+	 * so no markMessage* setter exists for it — persistIncoming/persistOutgoing thread it
+	 * straight into the row. undefined = not a reply.
+	 * RETENTION NOTE (security-auditor finding, accepted): this row's own `expiresAt`
+	 * governs purgeExpiredMessages(), independent of the quoted message's TTL — a reply
+	 * to a disappearing message can outlive the original by up to 100 chars of excerpt.
+	 * Same class as the pollJson/expiresAt threading finding (usePersistentMessages.ts,
+	 * persistPollCreate); accepted here too (bounded, encrypted, standard messenger
+	 * behavior — Signal/WhatsApp quote previews behave the same way).
+	 */
+	replyToJson?: string;
 }
 
 // GroupRow — MLS group state snapshot.
@@ -415,6 +432,17 @@ export class PowehiDb extends Dexie {
 		// survive a reload. Polls are local-only (no MLS envelope type), so poll rows use
 		// the "" ciphertextB64 sentinel documented on the field above. No index change needed.
 		this.version(24).stores({
+			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v25: added replyToJson to MessageRow — quote-reply context (previously
+		// React-state-only, same gap polls had before v24) now survives a reload. Unlike
+		// reactionsJson/pollJson it is set once at creation and never mutated, so no
+		// markMessage* update path is needed — persistIncoming/persistOutgoing write it
+		// directly. No index change needed — never queried, only read/written per-row.
+		this.version(25).stores({
 			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
 			groups: "id, lastActivity",
 			identity: "id",

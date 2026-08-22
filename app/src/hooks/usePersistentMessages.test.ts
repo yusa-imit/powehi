@@ -167,6 +167,27 @@ describe("usePersistentMessages", () => {
 		expect(base64ToText(result.current.rows[0].plaintextB64 ?? "")).toBe("sent text");
 	});
 
+	it("persistOutgoing threads a reply context into replyToJson", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		const replyTo = { messageId: "quoted-1", excerpt: "original text" };
+
+		await act(async () => {
+			result.current.persistOutgoing("out-reply-id", GROUP_ID, "my reply", btoa("ct"), replyTo);
+		});
+
+		expect(result.current.rows[0].replyToJson).toBe(JSON.stringify(replyTo));
+	});
+
+	it("persistOutgoing leaves replyToJson undefined when no reply context is given", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+
+		await act(async () => {
+			result.current.persistOutgoing("out-noreply-id", GROUP_ID, "text", btoa("ct"));
+		});
+
+		expect(result.current.rows[0].replyToJson).toBeUndefined();
+	});
+
 	it("persistOutgoing is no-op when deviceId is null", async () => {
 		useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null });
 
@@ -246,6 +267,29 @@ describe("usePersistentMessages", () => {
 
 		expect(result.current.rows).toHaveLength(1);
 		expect(result.current.rows[0].expiresAt).toBe(EXPIRES_AT);
+	});
+
+	it("persistIncoming threads msg.replyTo into replyToJson", async () => {
+		const replyTo = { messageId: "quoted-2", excerpt: "their earlier text" };
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistIncoming(makeIncoming({ replyTo }));
+		});
+
+		expect(result.current.rows[0].replyToJson).toBe(JSON.stringify(replyTo));
+	});
+
+	it("persistIncoming leaves replyToJson undefined when the message is not a reply", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistIncoming(makeIncoming());
+		});
+
+		expect(result.current.rows[0].replyToJson).toBeUndefined();
 	});
 
 	it("purgeExpired removes expired rows from local state", async () => {

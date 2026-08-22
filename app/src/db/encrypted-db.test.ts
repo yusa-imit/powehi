@@ -466,6 +466,26 @@ describe("EncryptedPowehiDb", () => {
 		expect(retrieved).toBeUndefined();
 	});
 
+	it("putMessage persists replyToJson (encrypted at rest) and survives reload", async () => {
+		const replyToJson = JSON.stringify({ messageId: "quoted-msg", excerpt: "original text" });
+		await encDb.putMessage({
+			id: "msg-reply",
+			groupId: "grp-reply",
+			ciphertextB64: "cmVwbHlDaXBoZXJ0ZXh0",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+			replyToJson,
+		});
+
+		const retrieved = await encDb.getMessage("msg-reply");
+		expect(retrieved?.replyToJson).toBe(replyToJson);
+
+		// Raw stored value must not equal the plaintext JSON — it's encrypted at rest.
+		const rawRow = await rawDb.messages.get("msg-reply");
+		expect(rawRow?.replyToJson).not.toBe(replyToJson);
+	});
+
 	it("markMessageDelivered sets delivered:true on the row", async () => {
 		await encDb.addMessage({
 			id: "msg-delivered",

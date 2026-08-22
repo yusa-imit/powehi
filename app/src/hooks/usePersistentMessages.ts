@@ -16,14 +16,20 @@ import { db } from "../db/schema";
 import { useAuthStore } from "../store/auth";
 import { textToBase64 } from "../utils/base64";
 import { useCryptoWorker } from "./useCryptoWorker";
-import type { IncomingMessage } from "./useMessages";
+import type { IncomingMessage, ReplyContext } from "./useMessages";
 
 export interface PersistedMessages {
 	rows: MessageRow[];
 	/** Count of IndexedDB write failures since mount. Never contains content — opaque counter only. */
 	writeErrorCount: number;
 	persistIncoming: (msg: IncomingMessage) => void;
-	persistOutgoing: (id: string, groupId: string, text: string, ciphertextB64: string) => void;
+	persistOutgoing: (
+		id: string,
+		groupId: string,
+		text: string,
+		ciphertextB64: string,
+		replyTo?: ReplyContext,
+	) => void;
 	/** Delete expired messages from Dexie and update local rows state. */
 	purgeExpired: () => void;
 	/** Persist an "edit message" signal so the new text survives a reload. Best-effort. */
@@ -116,6 +122,7 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 				receivedAt: Date.now(),
 				plaintextB64: textToBase64(msg.text),
 				expiresAt: msg.expiresAt,
+				replyToJson: msg.replyTo ? JSON.stringify(msg.replyTo) : undefined,
 			};
 			// Optimistically add to local state for immediate UI visibility.
 			setRows((prev) => {
@@ -130,7 +137,7 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 	);
 
 	const persistOutgoing = useCallback(
-		(id: string, groupId: string, text: string, ciphertextB64: string) => {
+		(id: string, groupId: string, text: string, ciphertextB64: string, replyTo?: ReplyContext) => {
 			if (!encryptedDb || !deviceId) return;
 			// epochSeq: Date.now() for outgoing — mlsEncrypt does not expose the MLS
 			// sequence number. Display ordering now uses receivedAt (not epochSeq) so
@@ -145,6 +152,7 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 				epochSeq: Date.now(),
 				receivedAt: Date.now(),
 				plaintextB64: textToBase64(text),
+				replyToJson: replyTo ? JSON.stringify(replyTo) : undefined,
 			};
 			setRows((prev) => {
 				if (prev.some((r) => r.id === row.id)) return prev;
