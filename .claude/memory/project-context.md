@@ -17,7 +17,71 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-22, cycle 334 — FEATURE: persist custom user status to Dexie LocalIdentity, commit d03fb24)
+## Current state (2026-08-22, cycle 335 — STABILIZATION: fix db.messages test-isolation gap + fake-timer hang, commit 294463e)
+
+- `git status` clean, CI green (`gh run list --limit 5`), `gh issue list --state open` empty at
+  cycle start. Picked up the standing cycle-329/334 sweep candidate: a grep sweep for the
+  `db.messages.clear()`-missing-in-`beforeEach` bug class across all `ChatLayout*.test.tsx` files
+  (the same bug fixed once already in `ChatLayoutStarred.test.tsx`, cycle 329).
+- Dispatched an Explore agent (read-only) to triage: of 43 files importing `db` but never calling
+  `db.messages.clear()`, most are no-ops (never drive a real `capturedOnMessage`/composer-send that
+  writes into `db.messages`, or their assertions don't depend on message count/position). The agent
+  found **11 genuinely at-risk files** — same fixed `mlsGroupId` reused across multiple tests, real
+  `persistIncoming`/`persistOutgoing` writes via `capturedOnMessage`, and count/position-based
+  assertions (`bubbles[bubbles.length - 1]`, `toHaveLength(N)`, singular `getByTestId`) that a
+  leftover row from an earlier test in the same file could silently break:
+  `ChatLayoutDateSeparator`, `ChatLayoutJumpToReply`, `ChatLayoutKeyboardShortcuts`,
+  `ChatLayoutMarkAllRead`, `ChatLayoutMediaGallery`, `ChatLayoutMentionHighlight`,
+  `ChatLayoutMentions`, `ChatLayoutMute`, `ChatLayoutThread`, `ChatLayoutTimeGrouping`,
+  `ChatLayoutGroupReadReceipts`. Added `await db.messages.clear();` to each file's `beforeEach`
+  (mirroring the existing `db.verifiedContacts.clear()` line already there).
+- **Second latent bug surfaced by the fix (not pre-existing risk, a real hang):** adding the clear
+  to `ChatLayoutTimeGrouping.test.tsx` made the full suite hang — every test after the first timed
+  out after 10s in `beforeEach`. Root cause: this file's `afterEach` called `vi.useRealTimers()`
+  without first draining pending fake-timer-scheduled continuations
+  (`vi.runOnlyPendingTimersAsync()`), so a fake-indexeddb transaction still in flight when timers
+  were force-switched left the shared `db` singleton's `messages` object store locked — the next
+  test's real-timer `db.messages.clear()` then hung forever waiting on that dead transaction. Fixed
+  by draining before switching timers, exactly matching the pre-existing pattern in
+  `ChatLayoutSlowMode.test.tsx`'s `afterEach` (same directory) — confirms and closes the
+  "documented pattern/rule if it recurs a second time" note flagged at the end of cycle 334
+  (unconditional-Dexie-read-vs-fake-timers is now a two-occurrence class; the fix pattern is
+  `if (vi.isFakeTimers()) await vi.runOnlyPendingTimersAsync(); vi.useRealTimers(); cleanup();
+  vi.restoreAllMocks();` — drain-then-real-timers-then-unmount, in that order).
+- **security-auditor: GREEN.** Reviewed as test-only, zero-assertion-change diff (verified: no
+  `expect`/`it`/`describe`/`.skip`/mock-return-value touched anywhere in the 11-file diff, only
+  `beforeEach`/`afterEach` scaffolding). Confirmed the `db.messages.clear()` additions can't mask a
+  test's own subject-under-test (none of the 11 files read `db.messages` back — they assert on
+  rendered DOM via the mocked `useMessages` hook; seed messages come from the in-memory
+  `SEED_CHATS` constant, not DB rows). Confirmed `vi.runOnlyPendingTimersAsync()` (not
+  `runAllTimers`) can't cascade or bleed a test's scheduled logic into the next test. One
+  LOW/informational finding — the auditor's first-pass ordering (drain → cleanup → restoreAllMocks
+  → useRealTimers) left `cleanup()`'s unmount effects (presence-offline send, disappearing/
+  scheduled-message sweeps) running under fake timers with no drain after — fixed in-cycle by
+  reordering to drain → useRealTimers → cleanup → restoreAllMocks, the exact `ChatLayoutSlowMode`
+  order.
+- `cargo build/test/clippy/fmt --workspace` all green (backend untouched, confirmed via
+  `git diff --name-only` — pure frontend test-scaffolding change). `cargo audit`/`cargo deny check`
+  both clean, no new advisories. Frontend: `tsc -b` clean, `biome check` clean (170 files),
+  `npx vitest run`: **1404/1404 tests green** (104 files, unchanged count — this cycle fixed
+  isolation, not test coverage). Re-ran `ChatLayoutTimeGrouping.test.tsx` standalone (391-403ms,
+  was hanging ~90s/timing out before the fix) to confirm the hang is gone, not just hidden by run
+  ordering.
+- Target dir hygiene: 11G, well under the 20G threshold — no pruning needed this cycle.
+- `gh issue list --state open` — empty, nothing else to triage.
+- **Next cycle candidates:** the `.claude/memory/project-context.md` file-size note (now ~3490+
+  lines, was flagged at cycles 330/334 as worth archiving cycles below ~300 at a STABILIZATION
+  cycle — deferred again this cycle in favor of the higher-value test-isolation fix; genuinely
+  worth doing at cycle 340 if it keeps growing) is still the top low-priority housekeeping item; PQ
+  hybrid Phase A (still blocked on openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF
+  upgrade (gated on ADR-0003 Phase B 95%-session threshold); opaque-ke live-migration
+  login-round-trip regression test gap (cycle 318/319, no prod users yet, low urgency); the lru
+  RUSTSEC-2026-0253 waiver re-verification trigger from cycle 333 (only if aws-sdk-s3 bumped past
+  1.143.0). No new feature gap surfaced this cycle — next FEATURE cycle should re-run the
+  cycle-326-style Explore-agent survey for any remaining unwired-Dexie-persistence UI features, or
+  pick from the standing PQ/OPAQUE backlog above.
+
+## Previous state (2026-08-22, cycle 334 — FEATURE: persist custom user status to Dexie LocalIdentity, commit d03fb24)
 
 - `git status` clean, `gh run list --limit 5` green at cycle start. Picked the top next-cycle
   candidate carried from cycles 326-333: `customStatus` (user-global emoji+text status, the last
