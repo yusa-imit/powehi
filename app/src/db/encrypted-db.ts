@@ -238,6 +238,59 @@ export class EncryptedPowehiDb {
 		await this.db.messages.delete(id);
 	}
 
+	/**
+	 * Atomically "claim" a scheduled message for firing: inside a single Dexie readwrite
+	 * transaction, read the row and delete it if — and only if — `scheduledFor` is still set,
+	 * returning the pre-delete, decrypted row. Returns undefined if the row is missing or was
+	 * already claimed/cancelled/fired, by this tab or any other same-origin tab. The row is
+	 * deleted (not merely updated) because a successful claim always leads to a brand-new row
+	 * being written under the server-assigned envelope id (persistOutgoing) — there is nothing
+	 * left for the local `sched_...`-keyed row to represent once claimed.
+	 *
+	 * SECURITY (crypto-reviewer finding, cycle 341): a bare "read scheduledFor, then later
+	 * encrypt+send, then delete the row" sequence is a TOCTOU — every open tab runs its own
+	 * fire sweep against its own Dexie-rehydrated snapshot, and the window between the read and
+	 * the eventual delete spans a full mlsEncrypt + network round trip (which can exceed the
+	 * sweep interval), during which this SAME scheduled message could be claimed twice (this
+	 * tab's own overlapping sweep ticks, or another same-origin tab). IndexedDB serializes
+	 * readwrite transactions on the same store, so wrapping the check-and-delete in one
+	 * transaction makes it an actual claim: at most one caller across all tabs ever observes
+	 * `scheduledFor` still set for a given id and receives a defined row back — the same
+	 * argument markMessageRead already relies on for its own cross-device race. Scheduled rows
+	 * are local-only until fired (never synced across devices, see persistScheduledCreate), so
+	 * this claim's same-origin-tab scope is the complete threat surface for double-firing THIS
+	 * message — there is no separate device with its own copy to race against. This is
+	 * narrower than (and does not by itself resolve) the general cross-tab cloned-MLS-state
+	 * concern: every open tab imports its own independent copy of the group's sender ratchet
+	 * (useCryptoWorker.ts), and that pre-existing property applies equally to every other send
+	 * path in this app (typing indicators, presence, regular sendMessage) — this claim closes
+	 * "this message sent twice," not "two tabs' independent ratchet copies diverge." Also note
+	 * RFC 9420 §6.3.2's per-message `reuse_guard` means a bare generation collision across two
+	 * independently-derived ratchet copies is not automatically nonce reuse — treat that as a
+	 * separate, pre-existing, unresolved risk class, not something introduced or fixed here.
+	 * If the subsequent encrypt/send fails after a successful claim, the row is simply gone
+	 * (no retry) — this is a UX gap (message silently never sends), not a safety requirement:
+	 * re-encrypting/retrying the already-claimed plaintext in memory would be safe (each
+	 * mlsEncrypt call advances the sender ratchet, so re-sending after a failed attempt is not
+	 * a nonce/key reuse). Not implemented, matching sendMessage's own "no failed-message retry
+	 * UI yet" scope.
+	 *
+	 * Decryption happens AFTER the transaction resolves, not inside it — the encryptor is an
+	 * async Comlink round-trip, and awaiting non-Dexie-tracked work inside a Dexie transaction
+	 * callback risks Dexie closing the transaction early ("transaction inactive"). Only the
+	 * synchronous get+delete pair (gated on `scheduledFor`, which is not in SENSITIVE.messages)
+	 * needs to be inside the atomic boundary.
+	 */
+	async claimScheduledFire(id: string): Promise<MessageRow | undefined> {
+		const claimed = await this.db.transaction("rw", this.db.messages, async () => {
+			const row = await this.db.messages.get(id);
+			if (!row || row.scheduledFor === undefined) return undefined;
+			await this.db.messages.delete(id);
+			return row;
+		});
+		return decOptional(this.encryptor, claimed, "messages");
+	}
+
 	async getMessagesByGroup(groupId: string): Promise<MessageRow[]> {
 		const rows = await this.db.messages.where("groupId").equals(groupId).toArray();
 		const decrypted = await Promise.all(rows.map((r) => decRow(this.encryptor, r, "messages")));

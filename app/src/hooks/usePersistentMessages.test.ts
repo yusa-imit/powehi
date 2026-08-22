@@ -784,6 +784,110 @@ describe("usePersistentMessages", () => {
 		});
 	});
 
+	it("claimScheduledFire returns the row's content for a not-yet-fired scheduled row", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistScheduledCreate("sched-1", GROUP_ID, "text", Date.now() + 1000);
+		});
+		await waitFor(async () => {
+			expect(await db.messages.get("sched-1")).toBeDefined();
+		});
+
+		const claimed = await result.current.claimScheduledFire("sched-1");
+		expect(claimed?.id).toBe("sched-1");
+		expect(base64ToText(claimed?.plaintextB64 ?? "")).toBe("text");
+	});
+
+	it("claimScheduledFire atomically deletes the row it claims, so a second claim of the same id fails — closes the concurrent-double-send race a plain check-then-act can't (crypto-reviewer RED finding, cycle 341)", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistScheduledCreate("sched-1", GROUP_ID, "text", Date.now() + 1000);
+		});
+		await waitFor(async () => {
+			expect(await db.messages.get("sched-1")).toBeDefined();
+		});
+
+		const firstClaim = await result.current.claimScheduledFire("sched-1");
+		expect(firstClaim).toBeDefined();
+		await expect(db.messages.get("sched-1")).resolves.toBeUndefined();
+
+		// A second claim (this tab retrying, or another tab's sweep) must not succeed —
+		// there is nothing left to claim, and critically nothing left to re-encrypt/re-send.
+		const secondClaim = await result.current.claimScheduledFire("sched-1");
+		expect(secondClaim).toBeUndefined();
+	});
+
+	it("claimScheduledFire returns undefined after the row is cancelled — closes the cross-tab race where a stale tab's fire sweep would otherwise send a message the user cancelled elsewhere", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistScheduledCreate("sched-1", GROUP_ID, "text", Date.now() + 1000);
+		});
+		await waitFor(async () => {
+			expect(await db.messages.get("sched-1")).toBeDefined();
+		});
+		await act(async () => {
+			result.current.persistCancelScheduled("sched-1");
+		});
+		await waitFor(async () => {
+			expect(await db.messages.get("sched-1")).toBeUndefined();
+		});
+
+		await expect(result.current.claimScheduledFire("sched-1")).resolves.toBeUndefined();
+	});
+
+	it("claimScheduledFire returns undefined once the row has already fired (scheduledFor cleared)", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistScheduledCreate("sched-1", GROUP_ID, "text", Date.now() + 1000);
+		});
+		await waitFor(async () => {
+			expect(await db.messages.get("sched-1")).toBeDefined();
+		});
+		await act(async () => {
+			result.current.persistScheduledFire("sched-1");
+		});
+		await waitFor(async () => {
+			const row = await db.messages.get("sched-1");
+			expect(row?.scheduledFor).toBeUndefined();
+		});
+
+		await expect(result.current.claimScheduledFire("sched-1")).resolves.toBeUndefined();
+	});
+
+	it("claimScheduledFire returns undefined for an id that was never persisted", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await expect(result.current.claimScheduledFire("never-existed")).resolves.toBeUndefined();
+	});
+
+	it("claimScheduledFire fails closed (undefined) when the crypto worker is unavailable", async () => {
+		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(null);
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await expect(result.current.claimScheduledFire("sched-1")).resolves.toBeUndefined();
+	});
+
+	it("claimScheduledFire fails closed (undefined) when the Dexie transaction throws", async () => {
+		vi.spyOn(
+			EncryptedDbModule.EncryptedPowehiDb.prototype,
+			"claimScheduledFire",
+		).mockRejectedValueOnce(new Error("AEAD failure"));
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await expect(result.current.claimScheduledFire("sched-1")).resolves.toBeUndefined();
+	});
+
 	it("persistDelivered marks the row delivered:true in rows state", async () => {
 		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
 		await act(async () => {});

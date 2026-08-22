@@ -7027,6 +7027,11 @@ export function ChatLayout() {
 		chatsRef.current = chats;
 	}, [chats]);
 
+	// Ids currently mid-flight through the scheduled-message fire pipeline (mlsEncrypt +
+	// sendMessageApi can take longer than the 10s sweep interval) — prevents a slow send
+	// from being picked up and re-fired by the next tick before its own state update lands.
+	const firingScheduledRef = useRef<Set<string>>(new Set());
+
 	// Tracks auto-clear timers for peer typing indicators, keyed by mlsGroupId.
 	// Stored in a ref so setChats callbacks can mutate it without triggering re-renders.
 	const typingTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
@@ -7332,8 +7337,8 @@ export function ChatLayout() {
 		persistRead,
 		persistStarred,
 		persistScheduledCreate,
-		persistScheduledFire,
 		persistCancelScheduled,
+		claimScheduledFire,
 		pendingWriteIds,
 	} = usePersistentMessages(active?.mlsGroupId);
 	const showTauriNotification = useTauriNotification();
@@ -7489,16 +7494,18 @@ export function ChatLayout() {
 				// removes an in-memory message whose row vanished. That's correct for every
 				// mutation above (edit/delete/reactions/polls all tombstone-or-update, never hard-
 				// delete), but persistCancelScheduled (cycle 339) hard-deletes. A cross-tab-only
-				// edge case: tab A cancels a scheduled message, tab B still shows the bubble and
-				// locally fires it before its own reload — persistScheduledFire's clearMessage-
-				// Scheduled then no-ops on the now-missing row, leaving a phantom "sent" bubble in
-				// tab B until a FULL reload (chats starts empty on reload, same self-heal cycle 253
-				// documents for its own accepted rehydration gaps). Not fixed here: making this
-				// loop remove missing ids generically would need to distinguish "row hard-deleted"
-				// from "row not yet written" (persistScheduledCreate doesn't reserve a
-				// pendingWriteIds slot the way persistEdit/Delete/etc. do), and getting that wrong
-				// would delete a message from the UI the instant it's scheduled, before its own
-				// Dexie write lands.
+				// edge case: tab A cancels a scheduled message, tab B still shows the bubble. Cycle
+				// 341's fireScheduled now atomically claims the row from Dexie (claimScheduledFire)
+				// immediately before actually sending, so tab B no longer transmits the cancelled
+				// message — worst case
+				// is a stale "scheduled, cancel-able" bubble lingering in tab B until the user cancels
+				// it there too (a safe no-op against the already-deleted row) or a full reload (chats
+				// starts empty on reload, same self-heal cycle 253 documents for its own accepted
+				// rehydration gaps). Not fixed here: making this loop remove missing ids generically
+				// would need to distinguish "row hard-deleted" from "row not yet written"
+				// (persistScheduledCreate doesn't reserve a pendingWriteIds slot the way
+				// persistEdit/Delete/etc. do), and getting that wrong would delete a message from the
+				// UI the instant it's scheduled, before its own Dexie write lands.
 				const reconciled = c.messages.map((m) => {
 					if (!m.id || pendingWriteIds.has(m.id)) return m;
 					const fresh = rehydratedById.get(m.id);
@@ -9165,39 +9172,200 @@ export function ChatLayout() {
 		return () => clearInterval(handle);
 	}, [purgeExpired]);
 
-	// Sweep scheduled messages: when scheduledFor <= now, fire them as regular sends.
+	// Sweep scheduled messages: when scheduledFor <= now, actually send them — mlsEncrypt +
+	// sendMessageApi, the same pipeline sendMessage uses. Previously this only cleared the
+	// local scheduledFor flag and called persistScheduledFire, which never touches
+	// ciphertextB64/plaintextB64 (see its doc comment: "a real MLS send-on-fire, if/when
+	// implemented, is a separate write") — so a "sent" scheduled message was never actually
+	// transmitted to the group; it just silently stopped showing the scheduled badge
+	// (correctness gap flagged as a next-cycle candidate, cycles 339/340).
 	useEffect(() => {
-		const fireScheduled = () => {
+		const fireScheduled = async () => {
 			const now = Date.now();
-			// Snapshot which ids are about to fire from the pre-update chatsRef (same
-			// "compute from the pre-update snapshot" pattern used throughout this file, e.g.
-			// handleIncomingReaction) so the Dexie persist calls below target exactly the ids
-			// this sweep actually flips, not a stale/future set.
-			const firedIds = new Set<string>();
+			// Snapshot from the pre-update chatsRef (same "compute from a pre-update snapshot"
+			// pattern used throughout this file, e.g. handleIncomingReaction) — but only as a
+			// CANDIDATE list. claimScheduledFire below re-reads the actual content from Dexie,
+			// so a stale/edited chatsRef entry here can't cause stale content to be sent (crypto-
+			// reviewer finding, cycle 341). Each item carries its own chat's mlsGroupId/
+			// mlsIdentityId — a scheduled message fires regardless of which chat is currently
+			// active/selected when its time arrives, unlike sendMessage which only ever targets
+			// `active`. Restricted to the local user's own not-deleted messages — `from`/
+			// `deleted` are rehydrated from server-supplied fields (not MLS-proven, see the
+			// rehydration effect above), so this keeps a compromised-server row from being able
+			// to steer what this sweep attempts to claim/send.
+			const toFire: {
+				oldId: string;
+				chatId: string;
+				groupId: string;
+				identityId: string;
+			}[] = [];
 			for (const c of chatsRef.current) {
+				if (!c.mlsGroupId || !c.mlsIdentityId) continue;
 				for (const m of c.messages) {
-					if (m.id && m.scheduledFor && m.scheduledFor <= now) firedIds.add(m.id);
+					if (
+						m.id &&
+						m.from === "me" &&
+						!m.deleted &&
+						m.scheduledFor &&
+						m.scheduledFor <= now &&
+						!firingScheduledRef.current.has(m.id)
+					) {
+						toFire.push({
+							oldId: m.id,
+							chatId: c.id,
+							groupId: c.mlsGroupId,
+							identityId: c.mlsIdentityId,
+						});
+					}
 				}
 			}
-			if (firedIds.size === 0) return;
-			// Flip exactly the ids captured in firedIds (not an independent re-check of
-			// scheduledFor <= now) so a message that crosses the threshold between the
-			// chatsRef snapshot above and this update can't flip in memory without a matching
-			// persistScheduledFire call — it just waits for the next tick instead (security-
-			// auditor finding, cycle 339).
-			setChats((cs) =>
-				cs.map((c) => ({
-					...c,
-					messages: c.messages.map((m) =>
-						m.id && firedIds.has(m.id) ? { ...m, scheduledFor: undefined } : m,
-					),
-				})),
-			);
-			for (const id of firedIds) persistScheduledFire(id);
+			if (toFire.length === 0) return;
+			// No session/crypto context yet — leave scheduledFor set so the next tick retries,
+			// rather than "firing" (clearing the badge on) a message that was never actually sent.
+			if (!sessionToken || !cryptoWorker) return;
+			for (const item of toFire) {
+				firingScheduledRef.current.add(item.oldId);
+				let plaintext: Uint8Array | undefined;
+				try {
+					// Atomically claim the row (see EncryptedPowehiDb.claimScheduledFire): reads
+					// AND deletes it inside one Dexie transaction, gated on scheduledFor still
+					// being set. IndexedDB serializes readwrite transactions on the same store,
+					// so at most one tab's sweep — across this tab and any other same-origin tab
+					// — ever receives a defined row for a given id, closing the cross-tab cancel
+					// race (tab A cancels, tab B's stale in-memory copy would otherwise still try
+					// to send) and this-message double-fire (this tab's own overlapping sweep
+					// ticks, or another tab's). Scheduled rows are local-only until fired (never
+					// synced across devices, see persistScheduledCreate), so there is no separate
+					// device with its own copy of the same scheduled message to race against —
+					// this claim is the only exclusivity mechanism that matters here (the
+					// firingScheduledRef in-memory set below is an optimization to skip a
+					// redundant claim attempt within this tab, not a correctness guard). This
+					// does NOT by itself close the general cross-tab cloned-MLS-sender-ratchet
+					// concern (each tab imports its own independent copy of the group's MLS
+					// state, see useCryptoWorker.ts) — that's an orthogonal, pre-existing
+					// property of every send path in this app (typing indicators, presence,
+					// read receipts, regular sendMessage), not something this change introduces
+					// or resolves; RFC 9420 §6.3.2's per-message `reuse_guard` also means a
+					// generation collision alone isn't nonce reuse, so mis-cite that as
+					// "catastrophic" only with the RFC in hand. Also gives the message's true
+					// current content/expiry, not this sweep's possibly-stale chatsRef snapshot.
+					const claimed = await claimScheduledFire(item.oldId);
+					if (!claimed) continue;
+					// Defense in depth: claimed.groupId should always equal item.groupId (the row
+					// is looked up by an id that was only ever associated with this chat), but
+					// verify before encrypting under item.groupId's key material — a compromised-
+					// server-influenced id collision or a future refactor bug here would otherwise
+					// silently encrypt/send to the wrong group.
+					if (claimed.groupId !== item.groupId) continue;
+					const text = base64ToText(claimed.editedText ?? claimed.plaintextB64 ?? "");
+					// Re-read the clock here rather than reusing the sweep's outer `now`: items
+					// are claimed and sent serially, each a full mlsEncrypt + network round trip,
+					// so by the time a later item in the same tick is claimed, `now` can be
+					// meaningfully stale — both for the already-expired check below and for how
+					// much TTL is left to report.
+					const claimNow = Date.now();
+					// Only remaining-time-to-expiry is available at fire time (the original TTL
+					// seconds aren't stored) — same "expiresAt threaded through" approximation
+					// persistPollCreate/persistOutgoing already use for disappearing messages.
+					// A message whose expiry already elapsed before it could fire (e.g. scheduled
+					// far enough out, or the sweep badly delayed) must not be sent at all — it
+					// would transmit content the retention policy says should already be gone.
+					if (claimed.expiresAt !== undefined && claimed.expiresAt <= claimNow) continue;
+					// The continue above guarantees expiresAt > claimNow when defined, so this
+					// floor only rounds a sub-second remainder up to 1s — it can never mask an
+					// already-expired message (that path already continued) — instead of
+					// silently downgrading a near-expiry disappearing message to a permanent one
+					// (Math.round could otherwise floor to 0, which is falsy, dropping the ttl
+					// field from the payload entirely).
+					const ttlSeconds = claimed.expiresAt
+						? Math.max(1, Math.round((claimed.expiresAt - claimNow) / 1000))
+						: undefined;
+					// The exact ttlSeconds only goes inside the encrypted payload — the receiver
+					// derives its own expiry from it, same as sendMessage. The value handed to
+					// sendMessageApi (server-visible retention arg) is rounded UP to the nearest
+					// TTL_OPTIONS member rather than sent exactly, as defense-in-depth against an
+					// arbitrary compose-to-fire delta being a server-visible fingerprint — this
+					// narrows but does not eliminate that fingerprint (the bucket itself can
+					// still differ from the rest of the chat's traffic), and it does nothing for
+					// the *peer* side: the exact ttlSeconds inside the MLS-encrypted payload, plus
+					// the complete absence of the typing-indicator/presence traffic that normally
+					// precedes an interactive send, plus no MLS `padding_size` on this send path,
+					// still let a group member infer this was a scheduled send and roughly when
+					// it was composed. Not fixed here — documented as a residual, accepted gap.
+					const numericTtlOptions = TTL_OPTIONS.filter(
+						(t): t is Exclude<TtlOption, undefined> => t !== undefined,
+					);
+					const serverTtlSeconds = ttlSeconds
+						? (numericTtlOptions.find((opt) => opt >= ttlSeconds) ??
+							numericTtlOptions[numericTtlOptions.length - 1])
+						: undefined;
+					const payload = ttlSeconds
+						? JSON.stringify({ type: "text", text, ttl: ttlSeconds })
+						: text;
+					const encoder = new TextEncoder();
+					plaintext = encoder.encode(payload);
+					const { ciphertext } = await cryptoWorker.mlsEncrypt(
+						item.identityId,
+						item.groupId,
+						plaintext,
+					);
+					const envelopeId = await sendMessageApi(
+						sessionToken,
+						item.groupId,
+						ciphertext,
+						serverTtlSeconds,
+					);
+					const { chatId, oldId } = item;
+					setChats((cs) =>
+						cs.map((c) =>
+							c.id !== chatId
+								? c
+								: {
+										...c,
+										messages: c.messages.map((m) =>
+											m.id === oldId ? { ...m, id: envelopeId, scheduledFor: undefined } : m,
+										),
+									},
+						),
+					);
+					// The claimed row is already gone from Dexie (claimScheduledFire deletes it
+					// atomically) — persistOutgoing creates the real row under the server-
+					// assigned envelope id with the real ciphertext, same "swap the local id for
+					// the server id" shape sendMessage itself uses for opt_ ids. Known limitation
+					// (same class already accepted for persistReaction et al.): persistOutgoing
+					// targets whichever group is currently bound to this component's
+					// usePersistentMessages(active?.mlsGroupId) instance, so if the firing chat
+					// isn't the active one, the local `rows` cache can transiently hold a row
+					// from a different group until the next chat switch reloads it fresh — Dexie
+					// itself is unaffected, keyed by row id/groupId independent of which chat is
+					// active.
+					const ciphertextB64 = uint8ToBase64(ciphertext);
+					persistOutgoing(
+						envelopeId,
+						item.groupId,
+						text,
+						ciphertextB64,
+						undefined,
+						claimed.expiresAt,
+					);
+				} catch {
+					// Silent failure, same accepted pattern as sendMessage's own catch above:
+					// the optimistic in-memory message is left as-is (still showing "scheduled")
+					// rather than surfaced as failed — this app has no "failed message" UI state
+					// anywhere yet. Note this is NOT a race-safety constraint: re-encrypting and
+					// retrying the already-claimed plaintext in memory would be safe (each
+					// mlsEncrypt call advances the sender ratchet, so re-sending the same
+					// plaintext after a failed attempt is not a nonce/key reuse — RFC 9420
+					// §6.3), it's simply not implemented, matching sendMessage's own scope.
+				} finally {
+					plaintext?.fill(0);
+					firingScheduledRef.current.delete(item.oldId);
+				}
+			}
 		};
 		const handle = setInterval(fireScheduled, 10_000);
 		return () => clearInterval(handle);
-	}, [persistScheduledFire]);
+	}, [sessionToken, cryptoWorker, claimScheduledFire, persistOutgoing]);
 
 	const sendScheduled = (text: string, at: number) => {
 		const now = new Date();

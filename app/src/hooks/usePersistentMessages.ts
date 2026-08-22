@@ -78,6 +78,12 @@ export interface PersistedMessages {
 	/** Persist cancellation of a scheduled message: deletes the row entirely. Best-effort. */
 	persistCancelScheduled: (targetMessageId: string) => void;
 	/**
+	 * Atomically claim a scheduled message for firing (clears scheduledFor iff still set,
+	 * inside one Dexie transaction) and return its live Dexie content, or undefined if it
+	 * can't be claimed (already fired/cancelled by any tab, or crypto worker unavailable).
+	 */
+	claimScheduledFire: (targetMessageId: string) => Promise<MessageRow | undefined>;
+	/**
 	 * Message ids with a persist* write currently in flight (added when a persist* call
 	 * starts, removed once its Dexie write settles). markMessageEdited/markMessageReactions
 	 * await an encryptDbField crypto-worker round-trip before the IndexedDB write lands —
@@ -434,6 +440,35 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 		[encryptedDb],
 	);
 
+	/**
+	 * Atomically claim a scheduled message for firing — see EncryptedPowehiDb.claimScheduledFire
+	 * for why this must be a single atomic Dexie transaction rather than a separate
+	 * check-then-act (crypto-reviewer finding, cycle 341: a bare read-then-send has a TOCTOU
+	 * window spanning a full mlsEncrypt + network round trip, during which another tab's sweep
+	 * — or this tab's own overlapping sweep tick — can also pass the check and double-fire this
+	 * SAME scheduled message; scheduled rows are local-only until fired, so there is no separate
+	 * device with its own copy to race against). This closes double-sending of this message, not
+	 * the broader/pre-existing fact that every open tab holds its own independently-imported copy
+	 * of the group's MLS sender ratchet (same as every other send path in this app) — see the
+	 * fuller writeup on EncryptedPowehiDb.claimScheduledFire. Call this immediately before
+	 * encrypting/sending. Returns the claimed row's live Dexie content (not the caller's possibly-
+	 * stale in-memory snapshot) so the sender transmits the current text/expiresAt, not a stale
+	 * pre-edit copy. Returns undefined — meaning "do not send" — if the row is missing, was
+	 * already claimed/cancelled/fired by any tab, or the crypto worker is unavailable/errors
+	 * (fails closed).
+	 */
+	const claimScheduledFire = useCallback(
+		async (targetMessageId: string): Promise<MessageRow | undefined> => {
+			if (!encryptedDb) return undefined;
+			try {
+				return await encryptedDb.claimScheduledFire(targetMessageId);
+			} catch {
+				return undefined;
+			}
+		},
+		[encryptedDb],
+	);
+
 	return {
 		rows,
 		writeErrorCount,
@@ -451,6 +486,7 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 		persistScheduledCreate,
 		persistScheduledFire,
 		persistCancelScheduled,
+		claimScheduledFire,
 		pendingWriteIds: pendingWriteIdsRef.current,
 	};
 }
