@@ -17,7 +17,76 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-22, cycle 338 — FEATURE: thread expiresAt into persistOutgoing, commit 32a4538)
+## Current state (2026-08-22, cycle 339 — FEATURE: persist scheduled ("send later") messages to Dexie, commit 8cc5998)
+
+- CI green, `gh issue list` empty at cycle start. Per cycle 338's "Next cycle candidates", closed
+  the scheduled-message persistence gap flagged as a runner-up for 2 cycles running: scheduling,
+  cancelling, and firing a "send later" message was entirely React-state-only — a reload silently
+  dropped any pending scheduled message. Followed the poll-persistence pattern exactly (a
+  not-yet-fired scheduled message has no MLS envelope either, same as a poll).
+- `MessageRow.scheduledFor?: number` added (schema v26), not encrypted (a timestamp, same tier as
+  expiresAt/lastSeenAt). `EncryptedPowehiDb` gained `clearMessageScheduled(id)` (fires it — clears
+  scheduledFor, no-ops on missing row) and `deleteMessage(id)` (cancels it — hard delete, the only
+  non-tombstoning delete in this class since a cancelled scheduled message never went out over MLS
+  so there's nothing to tombstone). `usePersistentMessages` gained
+  `persistScheduledCreate`/`persistScheduledFire`/`persistCancelScheduled`. Wired into ChatLayout's
+  existing `sendScheduled`/`fireScheduled` sweep/`cancelScheduled`, plus the rehydration effect
+  (both the initial push and the cross-tab reconciliation block).
+- **security-auditor: YELLOW, all 4 findings fixed in-cycle (2 more documented/deferred, not fixed):**
+  1. **MEDIUM, fixed:** `persistScheduledCreate` never threaded `expiresAt` — a scheduled message
+     composed in a disappearing-message chat would never be purged (same retention-policy gap
+     already fixed for `persistOutgoing`/`persistPollCreate`). Fixed: `sendScheduled` now computes
+     `expiresAt` from `disappearingTtl` at schedule/compose time (same clock poll creation uses) and
+     threads it through both the in-memory push and `persistScheduledCreate`.
+  2. **LOW, fixed:** `deleteMessage` was an unguarded hard delete keyed by a bare id — the only
+     thing stopping misuse against a real MLS message (or a `markMessageDeleted` tombstone) was the
+     UI-side gate on `scheduledFor` being set. Fixed: `deleteMessage` now reads the row first and
+     only deletes when `scheduledFor` is still defined — no-ops otherwise (2 new regression tests).
+  3. **LOW, fixed (correctness, not exploitability):** the fire sweep's `firedIds` snapshot (from
+     `chatsRef`) and the `setChats` mapper independently re-evaluated `scheduledFor <= now` — could
+     theoretically diverge by one message across the snapshot boundary. Fixed: the mapper now flips
+     exactly the ids captured in `firedIds`, nothing else.
+  4. **LOW, documented/deferred:** hard-deleting a cancelled scheduled message has no cross-tab
+     reconciliation path (the rehydration reconcile loop is add/update-only, matching every OTHER
+     mutation here which tombstones instead of hard-deleting) — a narrow cross-tab race (cancel in
+     tab A, tab B independently fires the same message locally first) can leave a phantom "sent"
+     bubble in tab B until a full reload. Documented inline; not fixed — a generic "remove missing
+     ids" pass would need to distinguish "hard-deleted" from "not yet written" (`persistScheduled-
+     Create` doesn't reserve a `pendingWriteIds` slot the way `persistEdit`/`persistDelete` do), and
+     getting that wrong risks deleting a just-scheduled message from the UI before its own Dexie
+     write lands.
+  5. **INFO, documented, no action:** firing a scheduled message still does not actually
+     encrypt+send it over MLS (pre-existing, separate, larger gap, unchanged by this cycle) —
+     persistence now makes that gap's *symptom* durable (a local-only "sent" record with no peer
+     delivery) instead of erasing it on reload. Tracked with the existing gap, not this one.
+  6. **INFO, accepted (same class already accepted for polls):** `persistScheduledCreate`'s Dexie
+     write is async and unawaited; firing/cancelling before it lands is a silent no-op, self-heals
+     since create's own write lands after. Requires racing a sub-second crypto write against either
+     real elapsed wall-clock time (firing) or a separate user click (cancelling) — impractical.
+- 15 new tests across `usePersistentMessages.test.ts` (creation incl. `expiresAt` threading ×2,
+  fire, cancel, durable-Dexie variants of both, no-op/error-count coverage), `encrypted-db.test.ts`
+  (`clearMessageScheduled`/`deleteMessage` incl. the new guard's 2 regression tests, encrypted-at-
+  rest), and `ChatLayoutScheduleSend.test.tsx` (create/cancel/fire persistence, rehydration with
+  badge). Also added `db.messages.clear()` and a `cleanup()` call to that file's beforeEach/
+  afterEach (was missing `cleanup()` entirely — caused 17 unhandled post-test exceptions and a
+  nonzero exit code once tests started setting a real deviceId/sessionToken; same test-isolation
+  bug class fixed across ChatLayout*.test.tsx since cycle 335, this file had just never hit it
+  before since none of its original tests left the auth store in the "app" phase).
+- **Frontend: 1451/1451 tests green** (was 1446, 104 files). `tsc -b` clean, `biome check` clean
+  (149 files). Production build: initial route 164.37 kB gzip / WASM 642.87 kB gzip (both under
+  prd.md §7 budgets).
+- **Backend:** untouched (pure frontend fix, confirmed via `git status`).
+- Target dir hygiene: not checked (FEATURE mode, backend untouched).
+- `gh issue list --state open` — empty.
+- **Next cycle candidates:** the `.claude/memory/project-context.md` file-size note (now ~3800+
+  lines, worth archiving cycles below ~320 at the next STABILIZATION cycle — flagged 5 cycles
+  running now, cycle 320's own archive-cutoff cycle is itself long past inline-window); PQ hybrid
+  Phase A (still blocked on openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade
+  (gated on ADR-0003 Phase B 95%-session threshold); the pre-existing "scheduled messages never
+  actually send over MLS when they fire" gap noted above (separate, larger, not attempted this
+  cycle).
+
+## Previous state (2026-08-22, cycle 338 — FEATURE: thread expiresAt into persistOutgoing, commit 32a4538)
 
 - CI green, `gh issue list` empty at cycle start. Closed one of cycle 337's flagged follow-ups:
   `persistOutgoing` (the sender's own Dexie copy of a sent message) never set `expiresAt`, even
