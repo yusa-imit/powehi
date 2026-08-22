@@ -7331,6 +7331,9 @@ export function ChatLayout() {
 		persistDelivered,
 		persistRead,
 		persistStarred,
+		persistScheduledCreate,
+		persistScheduledFire,
+		persistCancelScheduled,
 		pendingWriteIds,
 	} = usePersistentMessages(active?.mlsGroupId);
 	const showTauriNotification = useTauriNotification();
@@ -7442,6 +7445,7 @@ export function ChatLayout() {
 				starred: row.starred,
 				poll,
 				replyTo,
+				scheduledFor: row.scheduledFor,
 				// senderDeviceId is the authenticated-device value the server bound
 				// to the envelope at send time (AuthenticatedDevice extractor), not
 				// a client-suppliable field — but it is not an MLS-cryptographic
@@ -7480,6 +7484,21 @@ export function ChatLayout() {
 			cs.map((c) => {
 				if (c.mlsGroupId !== groupId) return c;
 				let anyReconciled = false;
+				// NOTE (security-auditor finding, cycle 339, accepted/deferred): this loop only
+				// updates ids still present in Dexie — `!fresh` returns `m` unchanged, it never
+				// removes an in-memory message whose row vanished. That's correct for every
+				// mutation above (edit/delete/reactions/polls all tombstone-or-update, never hard-
+				// delete), but persistCancelScheduled (cycle 339) hard-deletes. A cross-tab-only
+				// edge case: tab A cancels a scheduled message, tab B still shows the bubble and
+				// locally fires it before its own reload — persistScheduledFire's clearMessage-
+				// Scheduled then no-ops on the now-missing row, leaving a phantom "sent" bubble in
+				// tab B until a FULL reload (chats starts empty on reload, same self-heal cycle 253
+				// documents for its own accepted rehydration gaps). Not fixed here: making this
+				// loop remove missing ids generically would need to distinguish "row hard-deleted"
+				// from "row not yet written" (persistScheduledCreate doesn't reserve a
+				// pendingWriteIds slot the way persistEdit/Delete/etc. do), and getting that wrong
+				// would delete a message from the UI the instant it's scheduled, before its own
+				// Dexie write lands.
 				const reconciled = c.messages.map((m) => {
 					if (!m.id || pendingWriteIds.has(m.id)) return m;
 					const fresh = rehydratedById.get(m.id);
@@ -7492,7 +7511,8 @@ export function ChatLayout() {
 						!!m.delivered === !!fresh.delivered &&
 						!!m.read === !!fresh.read &&
 						JSON.stringify(m.readBy ?? []) === JSON.stringify(fresh.readBy ?? []) &&
-						JSON.stringify(m.poll ?? null) === JSON.stringify(fresh.poll ?? null)
+						JSON.stringify(m.poll ?? null) === JSON.stringify(fresh.poll ?? null) &&
+						(m.scheduledFor ?? null) === (fresh.scheduledFor ?? null)
 					) {
 						return m;
 					}
@@ -7507,6 +7527,7 @@ export function ChatLayout() {
 						read: fresh.read,
 						readBy: fresh.readBy,
 						poll: fresh.poll,
+						scheduledFor: fresh.scheduledFor,
 					};
 				});
 				const existingIds = new Set(c.messages.map((m) => m.id).filter(Boolean));
@@ -9148,23 +9169,44 @@ export function ChatLayout() {
 	useEffect(() => {
 		const fireScheduled = () => {
 			const now = Date.now();
+			// Snapshot which ids are about to fire from the pre-update chatsRef (same
+			// "compute from the pre-update snapshot" pattern used throughout this file, e.g.
+			// handleIncomingReaction) so the Dexie persist calls below target exactly the ids
+			// this sweep actually flips, not a stale/future set.
+			const firedIds = new Set<string>();
+			for (const c of chatsRef.current) {
+				for (const m of c.messages) {
+					if (m.id && m.scheduledFor && m.scheduledFor <= now) firedIds.add(m.id);
+				}
+			}
+			if (firedIds.size === 0) return;
+			// Flip exactly the ids captured in firedIds (not an independent re-check of
+			// scheduledFor <= now) so a message that crosses the threshold between the
+			// chatsRef snapshot above and this update can't flip in memory without a matching
+			// persistScheduledFire call — it just waits for the next tick instead (security-
+			// auditor finding, cycle 339).
 			setChats((cs) =>
 				cs.map((c) => ({
 					...c,
 					messages: c.messages.map((m) =>
-						m.scheduledFor && m.scheduledFor <= now ? { ...m, scheduledFor: undefined } : m,
+						m.id && firedIds.has(m.id) ? { ...m, scheduledFor: undefined } : m,
 					),
 				})),
 			);
+			for (const id of firedIds) persistScheduledFire(id);
 		};
 		const handle = setInterval(fireScheduled, 10_000);
 		return () => clearInterval(handle);
-	}, []);
+	}, [persistScheduledFire]);
 
 	const sendScheduled = (text: string, at: number) => {
 		const now = new Date();
 		const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
 		const optId = `sched_${crypto.randomUUID()}`;
+		// A scheduled message composed in a disappearing-message chat must be purged like any
+		// other message — the retention policy is per-chat, not per-message-shape (same fix
+		// already applied to poll creation; security-auditor finding, cycle 339).
+		const expiresAt = disappearingTtl ? Date.now() + disappearingTtl * 1000 : undefined;
 		setChats((cs) =>
 			cs.map((c) => {
 				if (c.id !== activeId) return c;
@@ -9184,13 +9226,16 @@ export function ChatLayout() {
 					read: false,
 					continued: msgs.length > 0 && msgs[msgs.length - 1].from === "me",
 					scheduledFor: at,
+					expiresAt,
 				});
 				return { ...c, messages: msgs };
 			}),
 		);
+		if (active?.mlsGroupId) persistScheduledCreate(optId, active.mlsGroupId, text, at, expiresAt);
 	};
 
 	const cancelScheduled = (msgId: string) => {
+		persistCancelScheduled(msgId);
 		setChats((cs) =>
 			cs.map((c) => ({
 				...c,

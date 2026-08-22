@@ -62,6 +62,22 @@ export interface PersistedMessages {
 	/** Persist the star/bookmark toggle for a message so it survives a reload. Best-effort. */
 	persistStarred: (targetMessageId: string, starred: boolean) => void;
 	/**
+	 * Persist a newly-scheduled ("send later") message. Like persistPollCreate this CREATES
+	 * the row — a scheduled message has no MLS envelope until it actually fires, so it
+	 * otherwise never reaches Dexie at all. Best-effort.
+	 */
+	persistScheduledCreate: (
+		id: string,
+		groupId: string,
+		text: string,
+		scheduledFor: number,
+		expiresAt?: number,
+	) => void;
+	/** Persist a scheduled message firing: clears scheduledFor so it survives a reload as a normal message. Best-effort. */
+	persistScheduledFire: (targetMessageId: string) => void;
+	/** Persist cancellation of a scheduled message: deletes the row entirely. Best-effort. */
+	persistCancelScheduled: (targetMessageId: string) => void;
+	/**
 	 * Message ids with a persist* write currently in flight (added when a persist* call
 	 * starts, removed once its Dexie write settles). markMessageEdited/markMessageReactions
 	 * await an encryptDbField crypto-worker round-trip before the IndexedDB write lands —
@@ -344,6 +360,80 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 		[encryptedDb],
 	);
 
+	const persistScheduledCreate = useCallback(
+		(id: string, groupId: string, text: string, scheduledFor: number, expiresAt?: number) => {
+			if (!encryptedDb || !deviceId) return;
+			// No MLS wire representation until the message actually fires — same "" ciphertextB64
+			// sentinel convention as persistPollCreate.
+			// expiresAt is threaded through so a scheduled message composed in a disappearing-
+			// message chat is actually purged like every other message shape, instead of
+			// persisting forever (security-auditor finding, cycle 339 — same retention-policy
+			// gap already fixed for persistOutgoing/persistPollCreate: "the retention policy
+			// must apply uniformly regardless of message shape"). Clock starts at schedule/
+			// compose time, same as poll creation — if the TTL is shorter than the scheduling
+			// delay the row purges before it ever fires, which is accepted (same class as
+			// polls' known edge cases), not a confidentiality regression either way.
+			const row: MessageRow = {
+				id,
+				groupId,
+				ciphertextB64: "",
+				senderDeviceId: deviceId,
+				epochSeq: Date.now(),
+				receivedAt: Date.now(),
+				plaintextB64: textToBase64(text),
+				scheduledFor,
+				expiresAt,
+			};
+			setRows((prev) => {
+				if (prev.some((r) => r.id === row.id)) return prev;
+				return [...prev, row];
+			});
+			encryptedDb.putMessage(row).catch(() => setWriteErrorCount((n) => n + 1));
+		},
+		[encryptedDb, deviceId],
+	);
+
+	/**
+	 * KNOWN LIMITATION (same class as persistPollCreate/persistPollVote, accepted there too):
+	 * persistScheduledCreate's putMessage awaits an encryptDbField round-trip before its Dexie
+	 * write lands. If this fires (or persistCancelScheduled below runs) within that window —
+	 * i.e. before the row it targets has actually reached IndexedDB — the update/delete is a
+	 * silent no-op (markMessage*-style methods never create a row), and the create's own write
+	 * lands afterward, overwriting it as if nothing happened. Firing requires the scheduled
+	 * time to elapse (seconds to hours after creation) and cancelling requires a separate user
+	 * click after seeing the badge render — both are far outside a crypto round-trip's latency
+	 * in practice, so this is not fixed here (would require the same upsert-with-full-row-
+	 * reconstruction change rejected for polls, for the same reason: it would break every other
+	 * markMessage*'s shared no-op-on-missing-row contract).
+	 */
+	const persistScheduledFire = useCallback(
+		(targetMessageId: string) => {
+			if (!encryptedDb) return;
+			setRows((prev) =>
+				prev.map((r) => (r.id === targetMessageId ? { ...r, scheduledFor: undefined } : r)),
+			);
+			pendingWriteIdsRef.current.add(targetMessageId);
+			encryptedDb
+				.clearMessageScheduled(targetMessageId)
+				.catch(() => setWriteErrorCount((n) => n + 1))
+				.finally(() => pendingWriteIdsRef.current.delete(targetMessageId));
+		},
+		[encryptedDb],
+	);
+
+	const persistCancelScheduled = useCallback(
+		(targetMessageId: string) => {
+			if (!encryptedDb) return;
+			setRows((prev) => prev.filter((r) => r.id !== targetMessageId));
+			pendingWriteIdsRef.current.add(targetMessageId);
+			encryptedDb
+				.deleteMessage(targetMessageId)
+				.catch(() => setWriteErrorCount((n) => n + 1))
+				.finally(() => pendingWriteIdsRef.current.delete(targetMessageId));
+		},
+		[encryptedDb],
+	);
+
 	return {
 		rows,
 		writeErrorCount,
@@ -358,6 +448,9 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 		persistDelivered,
 		persistRead,
 		persistStarred,
+		persistScheduledCreate,
+		persistScheduledFire,
+		persistCancelScheduled,
 		pendingWriteIds: pendingWriteIdsRef.current,
 	};
 }

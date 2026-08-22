@@ -1,8 +1,9 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db/schema";
 import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
 import * as UseMessagesModule from "../hooks/useMessages";
+import { useAuthStore } from "../store/auth";
 import { ChatLayout } from "./ChatLayout";
 
 const MOCK_WORKER = {
@@ -23,6 +24,11 @@ const MOCK_WORKER = {
 describe("ChatLayout — scheduled send", () => {
 	beforeEach(async () => {
 		await db.verifiedContacts.clear();
+		// Scheduled-message persistence (this file's fix) now writes to db.messages keyed by
+		// the default active chat's (Maya) fixed mlsGroupId — clear so a leftover row from an
+		// earlier test doesn't rehydrate into the next test's initial render, same bug class
+		// fixed across ChatLayout*.test.tsx (cycle 335).
+		await db.messages.clear();
 		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
 			MOCK_WORKER as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
 		);
@@ -32,7 +38,15 @@ describe("ChatLayout — scheduled send", () => {
 	afterEach(async () => {
 		vi.useRealTimers();
 		await act(async () => {});
+		// Unmount BEFORE restoring mocks — several new tests in this file set a real
+		// deviceId/sessionToken and exercise the fireScheduled sweep's Dexie writes, which can
+		// still have effects/timers pending at test end. Restoring useMessages to its real
+		// implementation on an already-unmounted tree (rather than a still-mounted one) avoids
+		// a stray post-restore re-render hitting the real hook with a different hook-call shape
+		// than the mocked no-op, which otherwise crashes as an unhandled exception between tests.
+		cleanup();
 		vi.restoreAllMocks();
+		useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null });
 	});
 
 	it("send-later button is hidden when composer is empty", async () => {
@@ -302,5 +316,144 @@ describe("ChatLayout — scheduled send", () => {
 		expect(screen.getByText("Second")).toBeInTheDocument();
 		const badges = screen.getAllByTestId("scheduled-badge");
 		expect(badges).toHaveLength(2);
+	});
+
+	it("scheduling a message persists a row to Dexie with scheduledFor and an empty ciphertextB64 sentinel", async () => {
+		useAuthStore.setState({ phase: "app", deviceId: "my-device-sched", sessionToken: "tok-sched" });
+		await act(async () => {
+			render(<ChatLayout />);
+		});
+		const textarea = screen.getByPlaceholderText(/Message.*encrypted/);
+		await act(async () => {
+			fireEvent.change(textarea, { target: { value: "Persist me" } });
+		});
+		fireEvent.click(screen.getByTestId("send-later-btn"));
+
+		const future = new Date(Date.now() + 3_600_000);
+		const pad = (n: number) => String(n).padStart(2, "0");
+		const dt = `${future.getFullYear()}-${pad(future.getMonth() + 1)}-${pad(future.getDate())}T${pad(future.getHours())}:${pad(future.getMinutes())}`;
+		await act(async () => {
+			fireEvent.change(screen.getByTestId("schedule-datetime-input"), { target: { value: dt } });
+		});
+		await act(async () => {
+			fireEvent.click(screen.getByTestId("schedule-confirm"));
+		});
+
+		await waitFor(async () => {
+			const rows = await db.messages
+				.where("groupId")
+				.equals("11111111-1111-1111-1111-111111111111")
+				.toArray();
+			const row = rows.find((r) => r.scheduledFor !== undefined);
+			expect(row).toBeDefined();
+			expect(row?.ciphertextB64).toBe("");
+			expect(row?.senderDeviceId).toBe("my-device-sched");
+		});
+	});
+
+	it("cancelling a scheduled message deletes its persisted Dexie row", async () => {
+		useAuthStore.setState({ phase: "app", deviceId: "my-device-sched", sessionToken: "tok-sched" });
+		await act(async () => {
+			render(<ChatLayout />);
+		});
+		const textarea = screen.getByPlaceholderText(/Message.*encrypted/);
+		await act(async () => {
+			fireEvent.change(textarea, { target: { value: "Cancel me too" } });
+		});
+		fireEvent.click(screen.getByTestId("send-later-btn"));
+
+		const future = new Date(Date.now() + 3_600_000);
+		const pad = (n: number) => String(n).padStart(2, "0");
+		const dt = `${future.getFullYear()}-${pad(future.getMonth() + 1)}-${pad(future.getDate())}T${pad(future.getHours())}:${pad(future.getMinutes())}`;
+		await act(async () => {
+			fireEvent.change(screen.getByTestId("schedule-datetime-input"), { target: { value: dt } });
+		});
+		await act(async () => {
+			fireEvent.click(screen.getByTestId("schedule-confirm"));
+		});
+
+		await waitFor(async () => {
+			const rows = await db.messages
+				.where("groupId")
+				.equals("11111111-1111-1111-1111-111111111111")
+				.toArray();
+			expect(rows.some((r) => r.scheduledFor !== undefined)).toBe(true);
+		});
+
+		await act(async () => {
+			fireEvent.click(screen.getByTestId("cancel-scheduled-btn"));
+		});
+
+		await waitFor(async () => {
+			const rows = await db.messages
+				.where("groupId")
+				.equals("11111111-1111-1111-1111-111111111111")
+				.toArray();
+			expect(rows.some((r) => r.scheduledFor !== undefined)).toBe(false);
+		});
+	});
+
+	it("firing a scheduled message clears scheduledFor in the persisted Dexie row", async () => {
+		useAuthStore.setState({ phase: "app", deviceId: "my-device-sched", sessionToken: "tok-sched" });
+		vi.useFakeTimers();
+		await act(async () => {
+			render(<ChatLayout />);
+		});
+		const textarea = screen.getByPlaceholderText(/Message.*encrypted/);
+		await act(async () => {
+			fireEvent.change(textarea, { target: { value: "Fire and persist" } });
+		});
+		fireEvent.click(screen.getByTestId("send-later-btn"));
+
+		const future = new Date(Date.now() + 120_000);
+		const pad = (n: number) => String(n).padStart(2, "0");
+		const dt = `${future.getFullYear()}-${pad(future.getMonth() + 1)}-${pad(future.getDate())}T${pad(future.getHours())}:${pad(future.getMinutes())}`;
+		await act(async () => {
+			fireEvent.change(screen.getByTestId("schedule-datetime-input"), { target: { value: dt } });
+		});
+		await act(async () => {
+			fireEvent.click(screen.getByTestId("schedule-confirm"));
+		});
+
+		await act(async () => {
+			vi.advanceTimersByTime(130_000);
+		});
+		// fake-indexeddb schedules IDBRequest success callbacks via a real setTimeout(0)
+		// internally — switch back to real timers so the pending clearMessageScheduled
+		// write (fired synchronously, not awaited, inside the sweep's interval callback)
+		// actually settles, same pattern as elsewhere in this file switching timers.
+		vi.useRealTimers();
+
+		await waitFor(async () => {
+			const rows = await db.messages
+				.where("groupId")
+				.equals("11111111-1111-1111-1111-111111111111")
+				.toArray();
+			const row = rows.find((r) => r.plaintextB64);
+			expect(row).toBeDefined();
+			expect(row?.scheduledFor).toBeUndefined();
+		});
+	});
+
+	it("rehydrates a persisted scheduled message (with its badge) from Dexie on mount", async () => {
+		useAuthStore.setState({ phase: "app", deviceId: "my-device-sched", sessionToken: "tok-sched" });
+		const scheduledFor = Date.now() + 3_600_000;
+		await db.messages.put({
+			id: "sched-seeded-1",
+			groupId: "11111111-1111-1111-1111-111111111111",
+			ciphertextB64: "",
+			senderDeviceId: "my-device-sched",
+			epochSeq: 1,
+			receivedAt: Date.now(),
+			plaintextB64: btoa("Seeded scheduled"),
+			scheduledFor,
+		});
+
+		await act(async () => {
+			render(<ChatLayout />);
+		});
+
+		expect(await screen.findByText("Seeded scheduled")).toBeInTheDocument();
+		expect(screen.getByTestId("scheduled-badge")).toBeInTheDocument();
 	});
 });

@@ -466,6 +466,103 @@ describe("EncryptedPowehiDb", () => {
 		expect(retrieved).toBeUndefined();
 	});
 
+	it("putMessage persists a scheduled message's plaintextB64 encrypted at rest and survives reload", async () => {
+		const scheduledFor = 5000;
+		await encDb.putMessage({
+			id: "msg-sched-content",
+			groupId: "grp-sched-content",
+			ciphertextB64: "",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+			plaintextB64: "bGF0ZXIgdGV4dA==",
+			scheduledFor,
+		});
+
+		const retrieved = await encDb.getMessage("msg-sched-content");
+		expect(retrieved?.plaintextB64).toBe("bGF0ZXIgdGV4dA==");
+		expect(retrieved?.scheduledFor).toBe(scheduledFor);
+
+		// Raw stored value must not equal the plaintext base64 — it's encrypted at rest,
+		// same as every other message-content field (ciphertextB64/editedText/pollJson/etc).
+		const rawRow = await rawDb.messages.get("msg-sched-content");
+		expect(rawRow?.plaintextB64).not.toBe("bGF0ZXIgdGV4dA==");
+		// scheduledFor itself is not encrypted — a timestamp, same tier as expiresAt/lastSeenAt.
+		expect(rawRow?.scheduledFor).toBe(scheduledFor);
+	});
+
+	it("clearMessageScheduled clears scheduledFor on the row", async () => {
+		await encDb.addMessage({
+			id: "msg-sched",
+			groupId: "grp-sched",
+			ciphertextB64: "",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+			scheduledFor: 5000,
+		});
+		expect((await encDb.getMessage("msg-sched"))?.scheduledFor).toBe(5000);
+
+		await encDb.clearMessageScheduled("msg-sched");
+		const retrieved = await encDb.getMessage("msg-sched");
+		expect(retrieved?.scheduledFor).toBeUndefined();
+		// Row itself remains — this fires the scheduled message, it doesn't delete it.
+		expect(retrieved).toBeDefined();
+	});
+
+	it("clearMessageScheduled is a no-op when the target row does not exist locally", async () => {
+		await expect(encDb.clearMessageScheduled("no-such-msg")).resolves.not.toThrow();
+		const retrieved = await encDb.getMessage("no-such-msg");
+		expect(retrieved).toBeUndefined();
+	});
+
+	it("deleteMessage removes the row entirely", async () => {
+		await encDb.addMessage({
+			id: "msg-cancel",
+			groupId: "grp-cancel",
+			ciphertextB64: "",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+			scheduledFor: 5000,
+		});
+		expect(await encDb.getMessage("msg-cancel")).toBeDefined();
+
+		await encDb.deleteMessage("msg-cancel");
+		expect(await encDb.getMessage("msg-cancel")).toBeUndefined();
+	});
+
+	it("deleteMessage is a no-op when the target row does not exist locally", async () => {
+		await expect(encDb.deleteMessage("no-such-msg")).resolves.not.toThrow();
+	});
+
+	it("deleteMessage refuses to delete a row that is not a scheduled message (defense-in-depth)", async () => {
+		await encDb.addMessage({
+			id: "msg-real",
+			groupId: "grp-real",
+			ciphertextB64: "cmVhbE1lc3NhZ2U=",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+		});
+		await encDb.deleteMessage("msg-real");
+		expect(await encDb.getMessage("msg-real")).toBeDefined();
+	});
+
+	it("deleteMessage refuses to delete a message that already fired (scheduledFor cleared)", async () => {
+		await encDb.addMessage({
+			id: "msg-fired",
+			groupId: "grp-fired",
+			ciphertextB64: "",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+			scheduledFor: undefined,
+		});
+		await encDb.deleteMessage("msg-fired");
+		expect(await encDb.getMessage("msg-fired")).toBeDefined();
+	});
+
 	it("putMessage persists replyToJson (encrypted at rest) and survives reload", async () => {
 		const replyToJson = JSON.stringify({ messageId: "quoted-msg", excerpt: "original text" });
 		await encDb.putMessage({

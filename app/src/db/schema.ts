@@ -54,6 +54,18 @@ export interface MessageRow {
 	 * behavior — Signal/WhatsApp quote previews behave the same way).
 	 */
 	replyToJson?: string;
+	/**
+	 * Unix ms at which a scheduled ("send later") message should fire. Previously
+	 * React-state-only (ChatLayout's `sendScheduled`/`fireScheduled`) — a reload before
+	 * the scheduled time silently dropped the pending message entirely, same gap polls
+	 * had before pollJson (v24). Like polls, a not-yet-fired scheduled message has no MLS
+	 * wire representation (it is only actually encrypted+sent — see the ChatLayout TODO on
+	 * `sendScheduled` — once fired), so its row uses the same "" ciphertextB64 sentinel.
+	 * Not sensitive itself (a timestamp, like expiresAt/lastSeenAt) — the message TEXT is
+	 * carried in plaintextB64, which is already encrypted at rest. undefined = not scheduled
+	 * (either never was, or already fired/cancelled).
+	 */
+	scheduledFor?: number;
 }
 
 // GroupRow — MLS group state snapshot.
@@ -443,6 +455,18 @@ export class PowehiDb extends Dexie {
 		// markMessage* update path is needed — persistIncoming/persistOutgoing write it
 		// directly. No index change needed — never queried, only read/written per-row.
 		this.version(25).stores({
+			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v26: added scheduledFor to MessageRow — "send later" scheduled messages
+		// (previously React-state-only, same gap polls had before v24) now survive a
+		// reload. Like pollJson, a not-yet-fired scheduled row uses the "" ciphertextB64
+		// sentinel (no MLS envelope exists until it actually fires). Not sensitive itself
+		// (a timestamp); no index change needed — never queried across messages, only
+		// read/written per-row.
+		this.version(26).stores({
 			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
 			groups: "id, lastActivity",
 			identity: "id",

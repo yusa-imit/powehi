@@ -208,6 +208,36 @@ export class EncryptedPowehiDb {
 		await this.db.messages.update(id, { starred });
 	}
 
+	/**
+	 * Persist a "fired" scheduled message: clears scheduledFor so a reload no longer shows
+	 * the scheduled badge / offers cancel. No-op if the row does not exist locally, same as
+	 * markMessageEdited/markMessageDeleted. Does not touch ciphertextB64/plaintextB64 — a
+	 * real MLS send-on-fire, if/when implemented, is a separate write.
+	 */
+	async clearMessageScheduled(id: string): Promise<void> {
+		await this.db.messages.update(id, { scheduledFor: undefined });
+	}
+
+	/**
+	 * Delete a message row outright. Used for "cancel scheduled message" — unlike
+	 * markMessageDeleted (which tombstones a sent message so peers' delete-for-everyone
+	 * stays visible), a cancelled scheduled message never had an MLS envelope and never
+	 * left this device, so there is nothing to tombstone — the row is simply removed.
+	 *
+	 * SECURITY (security-auditor finding, cycle 339): this is the only hard-delete in this
+	 * class — every other message mutation here is a tombstone/update, and cancelScheduled's
+	 * caller-side gate (only offered in the UI while `scheduledFor` is set) is the sole thing
+	 * that would otherwise stop a bare-id call from destroying a real MLS message's history.
+	 * Defense-in-depth: only actually deletes when the row is still a not-yet-fired scheduled
+	 * message (`scheduledFor` set); no-ops on any other row, same "no-op on missing/ineligible
+	 * row" contract as markMessageEdited/markMessageDeleted.
+	 */
+	async deleteMessage(id: string): Promise<void> {
+		const row = await this.db.messages.get(id);
+		if (!row || row.scheduledFor === undefined) return;
+		await this.db.messages.delete(id);
+	}
+
 	async getMessagesByGroup(groupId: string): Promise<MessageRow[]> {
 		const rows = await this.db.messages.where("groupId").equals(groupId).toArray();
 		const decrypted = await Promise.all(rows.map((r) => decRow(this.encryptor, r, "messages")));

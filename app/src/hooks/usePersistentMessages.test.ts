@@ -603,6 +603,187 @@ describe("usePersistentMessages", () => {
 		});
 	});
 
+	it("persistScheduledCreate creates a row with the encoded text, empty ciphertextB64 sentinel, and scheduledFor", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		const scheduledFor = Date.now() + 60_000;
+		await act(async () => {
+			result.current.persistScheduledCreate("sched-1", GROUP_ID, "later text", scheduledFor);
+		});
+
+		expect(result.current.rows).toHaveLength(1);
+		expect(result.current.rows[0].id).toBe("sched-1");
+		expect(result.current.rows[0].plaintextB64).toBe(textToBase64("later text"));
+		expect(result.current.rows[0].ciphertextB64).toBe("");
+		expect(result.current.rows[0].senderDeviceId).toBe(DEVICE_ID);
+		expect(result.current.rows[0].scheduledFor).toBe(scheduledFor);
+	});
+
+	it("persistScheduledCreate threads expiresAt through so a scheduled message in a disappearing chat can be purged", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		const scheduledFor = Date.now() + 60_000;
+		const expiresAt = Date.now() + 30_000;
+		await act(async () => {
+			result.current.persistScheduledCreate(
+				"sched-ttl-1",
+				GROUP_ID,
+				"later text",
+				scheduledFor,
+				expiresAt,
+			);
+		});
+
+		expect(result.current.rows[0].expiresAt).toBe(expiresAt);
+	});
+
+	it("persistScheduledCreate leaves expiresAt undefined when no TTL is given", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistScheduledCreate("sched-no-ttl-1", GROUP_ID, "text", Date.now() + 1000);
+		});
+
+		expect(result.current.rows[0].expiresAt).toBeUndefined();
+	});
+
+	it("persistScheduledCreate is a no-op when the crypto worker is unavailable", async () => {
+		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(null);
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {
+			result.current.persistScheduledCreate("sched-1", GROUP_ID, "text", Date.now() + 1000);
+		});
+		expect(result.current.rows).toHaveLength(0);
+	});
+
+	it("writeErrorCount increments when putMessage throws on persistScheduledCreate", async () => {
+		vi.spyOn(EncryptedDbModule.EncryptedPowehiDb.prototype, "putMessage").mockRejectedValueOnce(
+			new Error("db full"),
+		);
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistScheduledCreate("sched-1", GROUP_ID, "text", Date.now() + 1000);
+		});
+
+		await waitFor(() => {
+			expect(result.current.writeErrorCount).toBe(1);
+		});
+	});
+
+	it("persistScheduledFire clears scheduledFor in rows state", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistScheduledCreate("sched-1", GROUP_ID, "text", Date.now() + 1000);
+		});
+		await act(async () => {
+			result.current.persistScheduledFire("sched-1");
+		});
+
+		expect(result.current.rows[0].scheduledFor).toBeUndefined();
+	});
+
+	it("persistScheduledFire durably clears scheduledFor in Dexie, not just in-memory rows", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistScheduledCreate("sched-1", GROUP_ID, "text", Date.now() + 1000);
+		});
+		// Wait for the create's own putMessage to land before firing — same
+		// create-then-mutate race persistPollCreate/persistPollVote document (both await
+		// an encryptDbField round-trip before their Dexie write), not the thing under test.
+		await waitFor(async () => {
+			expect(await db.messages.get("sched-1")).toBeDefined();
+		});
+		await act(async () => {
+			result.current.persistScheduledFire("sched-1");
+		});
+
+		await waitFor(async () => {
+			const row = await db.messages.get("sched-1");
+			expect(row?.scheduledFor).toBeUndefined();
+		});
+	});
+
+	it("writeErrorCount increments when clearMessageScheduled throws on persistScheduledFire", async () => {
+		vi.spyOn(
+			EncryptedDbModule.EncryptedPowehiDb.prototype,
+			"clearMessageScheduled",
+		).mockRejectedValueOnce(new Error("db full"));
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistScheduledFire("sched-1");
+		});
+
+		await waitFor(() => {
+			expect(result.current.writeErrorCount).toBe(1);
+		});
+	});
+
+	it("persistCancelScheduled removes the row from rows state", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistScheduledCreate("sched-1", GROUP_ID, "text", Date.now() + 1000);
+		});
+		expect(result.current.rows).toHaveLength(1);
+
+		await act(async () => {
+			result.current.persistCancelScheduled("sched-1");
+		});
+
+		expect(result.current.rows).toHaveLength(0);
+	});
+
+	it("persistCancelScheduled durably deletes the row from Dexie, not just in-memory rows", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistScheduledCreate("sched-1", GROUP_ID, "text", Date.now() + 1000);
+		});
+		// Wait for the create's own putMessage to land before cancelling — same
+		// create-then-mutate race persistPollCreate/persistPollVote document (both await
+		// an encryptDbField round-trip before their Dexie write), not the thing under test.
+		await waitFor(async () => {
+			expect(await db.messages.get("sched-1")).toBeDefined();
+		});
+		await act(async () => {
+			result.current.persistCancelScheduled("sched-1");
+		});
+
+		await waitFor(async () => {
+			const row = await db.messages.get("sched-1");
+			expect(row).toBeUndefined();
+		});
+	});
+
+	it("writeErrorCount increments when deleteMessage throws on persistCancelScheduled", async () => {
+		vi.spyOn(EncryptedDbModule.EncryptedPowehiDb.prototype, "deleteMessage").mockRejectedValueOnce(
+			new Error("db full"),
+		);
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistCancelScheduled("sched-1");
+		});
+
+		await waitFor(() => {
+			expect(result.current.writeErrorCount).toBe(1);
+		});
+	});
+
 	it("persistDelivered marks the row delivered:true in rows state", async () => {
 		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
 		await act(async () => {});
