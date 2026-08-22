@@ -18,6 +18,7 @@ const MOCK_WORKER = {
 describe("ChatLayout — jump-to-original via reply quote click", () => {
 	beforeEach(async () => {
 		await db.verifiedContacts.clear();
+		await db.messages.clear();
 		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
 			MOCK_WORKER as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
 		);

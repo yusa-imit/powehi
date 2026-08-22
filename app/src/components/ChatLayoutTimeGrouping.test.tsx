@@ -36,16 +36,20 @@ const makeMsg = (id: string, text: string): IncomingMessage => ({
 describe("ChatLayout — time-window message grouping", () => {
 	beforeEach(async () => {
 		await db.verifiedContacts.clear();
+		await db.messages.clear();
 		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
 			MOCK_WORKER as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
 		);
 		vi.useFakeTimers({ now: Date.now() });
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
+		if (vi.isFakeTimers()) {
+			await vi.runOnlyPendingTimersAsync();
+		}
+		vi.useRealTimers();
 		cleanup();
 		vi.restoreAllMocks();
-		vi.useRealTimers();
 	});
 
 	it("first incoming message shows a msg-avatar (group start)", async () => {

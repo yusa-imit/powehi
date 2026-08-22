@@ -57,6 +57,7 @@ describe("getDayLabel", () => {
 describe("ChatLayout — date separators", () => {
 	beforeEach(async () => {
 		await db.verifiedContacts.clear();
+		await db.messages.clear();
 		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
 			MOCK_WORKER as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
 		);

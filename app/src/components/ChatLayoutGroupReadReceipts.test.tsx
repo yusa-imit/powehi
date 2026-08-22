@@ -45,6 +45,7 @@ async function createAndSelectGroup(name: string) {
 describe("ChatLayout — group read receipts (per-member 'Seen by N')", () => {
 	beforeEach(async () => {
 		await db.verifiedContacts.clear();
+		await db.messages.clear();
 		await db.groups.clear();
 		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
 			MOCK_WORKER as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,

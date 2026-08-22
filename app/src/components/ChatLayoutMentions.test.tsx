@@ -29,6 +29,7 @@ describe("ChatLayout — @mention badges in group chats", () => {
 		// Reset myHandle before each test so store state doesn't leak between tests.
 		useAuthStore.setState({ myHandle: null });
 		await db.verifiedContacts.clear();
+		await db.messages.clear();
 		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
 			MOCK_WORKER as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
 		);
