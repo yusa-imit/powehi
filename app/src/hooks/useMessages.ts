@@ -230,10 +230,61 @@ export function useMessages(
 	// Track the latest created_at we've seen to avoid re-delivering on restart.
 	const sinceRef = useRef<number | undefined>(undefined);
 
+	// Per-sender sliding window for reaction/reaction_remove envelopes. Each valid
+	// reaction triggers markMessageReactionDelta's exclusive Dexie transaction lock
+	// (2 crypto-worker round trips held under lock) — without a bound, a single
+	// flooding sender (compromised device, or a peer replaying a batch) can hold that
+	// lock often enough to head-of-line-block persistIncoming's putMessage on the same
+	// origin. Bounding here drops the *callback*, not the ack, so a flooded reaction
+	// past the budget is a real, permanent loss for THIS receiver — not deferred or
+	// retried — accepted as the cost of bounding worst-case lock contention to at most
+	// ~2 acquisitions/sec/sender; this is a deliberately different failure mode from
+	// the malformed/invalid-envelope branches nearby, which discard content that was
+	// never valid to begin with. Scope: this only bounds the exclusive-lock-acquisition
+	// rate: it does NOT bound the unconditional mlsDecrypt call every Application
+	// envelope pays before type dispatch, and it does nothing server-side (queue
+	// growth, bandwidth) — a flooding sender still costs this client N decrypt round
+	// trips regardless of this limiter. `reactionTimestampsRef` lives for the hook's
+	// whole mount (one instance per logged-in session, `groupId` just changes which
+	// chat it polls), so entries are swept in `poll()` below once their window is
+	// fully stale — otherwise every distinct sender ever seen across every group
+	// opened in this tab would linger in the map for the life of the session.
+	const reactionTimestampsRef = useRef<Map<string, number[]>>(new Map());
+
 	useEffect(() => {
 		if (!sessionToken || !identityId || !groupId || !cryptoWorker) return;
 
 		let cancelled = false;
+
+		const REACTION_RATE_WINDOW_MS = 10_000;
+		const REACTION_RATE_MAX = 20;
+
+		const withinReactionRateLimit = (senderId: string): boolean => {
+			const now = Date.now();
+			const recent = (reactionTimestampsRef.current.get(senderId) ?? []).filter(
+				(t) => now - t < REACTION_RATE_WINDOW_MS,
+			);
+			if (recent.length >= REACTION_RATE_MAX) {
+				reactionTimestampsRef.current.set(senderId, recent);
+				return false;
+			}
+			recent.push(now);
+			reactionTimestampsRef.current.set(senderId, recent);
+			return true;
+		};
+
+		// Bound reactionTimestampsRef's memory to currently-active senders: drop any
+		// entry whose timestamps have all aged out of the window. Run once per poll
+		// tick (not per envelope) — cheap, map size is bounded by recent distinct
+		// senders, not by message volume.
+		const sweepStaleReactionRateEntries = (): void => {
+			const now = Date.now();
+			for (const [senderId, timestamps] of reactionTimestampsRef.current) {
+				if (!timestamps.some((t) => now - t < REACTION_RATE_WINDOW_MS)) {
+					reactionTimestampsRef.current.delete(senderId);
+				}
+			}
+		};
 
 		const processEnvelope = async (env: Envelope): Promise<void> => {
 			if (env.message_type === "Welcome") {
@@ -351,7 +402,8 @@ export function useMessages(
 							typeof parsed.targetMessageId === "string" &&
 							(ALLOWED_REACTION_EMOJIS as readonly string[]).includes(parsed.emoji) &&
 							parsed.targetMessageId.length > 0 &&
-							parsed.targetMessageId.length <= 36
+							parsed.targetMessageId.length <= 36 &&
+							withinReactionRateLimit(env.sender)
 						) {
 							onReactionRef.current?.(groupId, parsed.targetMessageId, parsed.emoji, env.sender);
 						}
@@ -363,7 +415,8 @@ export function useMessages(
 							typeof parsed.targetMessageId === "string" &&
 							(ALLOWED_REACTION_EMOJIS as readonly string[]).includes(parsed.emoji) &&
 							parsed.targetMessageId.length > 0 &&
-							parsed.targetMessageId.length <= 36
+							parsed.targetMessageId.length <= 36 &&
+							withinReactionRateLimit(env.sender)
 						) {
 							onReactionRemoveRef.current?.(
 								groupId,
@@ -547,6 +600,7 @@ export function useMessages(
 					if (cancelled) break;
 					await processEnvelope(env);
 				}
+				sweepStaleReactionRateEntries();
 			} catch {
 				// Network failure — silently retry on next interval.
 			}

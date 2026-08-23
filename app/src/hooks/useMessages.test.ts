@@ -665,6 +665,168 @@ describe("useMessages — reaction handling", () => {
 		expect(onReaction).not.toHaveBeenCalled();
 	});
 
+	it("does not consume the rate budget for a malformed reaction (invalid emoji)", async () => {
+		// 25 malformed reactions (not in ALLOWED_REACTION_EMOJIS) followed by 20 valid
+		// ones from the same sender — the malformed ones must fail their own allowlist
+		// check WITHOUT burning the sender's budget, so all 20 valid ones still land.
+		const malformedPlaintext = {
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "reaction", emoji: "🤖", targetMessageId: TARGET_ID }),
+			),
+		};
+		for (let i = 0; i < 25; i++) {
+			mockWorker.mlsDecrypt.mockResolvedValueOnce(malformedPlaintext);
+		}
+		mockWorker.mlsDecrypt.mockResolvedValue({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "reaction", emoji: "👍", targetMessageId: TARGET_ID }),
+			),
+		});
+		const malformed = Array.from({ length: 25 }, (_, i) =>
+			makeReactionEnvelope({ id: `env-malformed-${i}` }),
+		);
+		const valid = Array.from({ length: 20 }, (_, i) =>
+			makeReactionEnvelope({ id: `env-valid-${i}` }),
+		);
+		pollSpy.mockResolvedValueOnce([...malformed, ...valid]);
+		const onReaction = vi.fn();
+
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, onReaction));
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledTimes(45));
+		expect(onReaction).toHaveBeenCalledTimes(20);
+	});
+
+	it("bounds onReaction calls to 20 per sender within a burst, but still acks every envelope", async () => {
+		mockWorker.mlsDecrypt.mockResolvedValue({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "reaction", emoji: "👍", targetMessageId: TARGET_ID }),
+			),
+		});
+		const burst = Array.from({ length: 25 }, (_, i) =>
+			makeReactionEnvelope({ id: `env-burst-${i}` }),
+		);
+		pollSpy.mockResolvedValueOnce(burst);
+		const onReaction = vi.fn();
+
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, onReaction));
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledTimes(25));
+		// Every flooded envelope is still acked (no redelivery loop) — only the
+		// callback that triggers markMessageReactionDelta's exclusive lock is dropped.
+		expect(onReaction).toHaveBeenCalledTimes(20);
+	});
+
+	it("does not throttle a different sender's reactions when one sender floods", async () => {
+		const OTHER_SENDER = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+		mockWorker.mlsDecrypt.mockResolvedValue({
+			plaintext: new TextEncoder().encode(
+				JSON.stringify({ type: "reaction", emoji: "👍", targetMessageId: TARGET_ID }),
+			),
+		});
+		const flood = Array.from({ length: 21 }, (_, i) =>
+			makeReactionEnvelope({ id: `env-flood-${i}` }),
+		);
+		pollSpy.mockResolvedValueOnce([
+			...flood,
+			makeReactionEnvelope({ id: "env-other-sender", sender: OTHER_SENDER }),
+		]);
+		const onReaction = vi.fn();
+
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, onReaction));
+
+		await waitFor(() => expect(ackSpy).toHaveBeenCalledTimes(22));
+		// 20 from the flooding sender (capped, the 21st is dropped) + 1 from the other sender.
+		expect(onReaction).toHaveBeenCalledTimes(21);
+		expect(onReaction).toHaveBeenCalledWith(GROUP_ID, TARGET_ID, "👍", OTHER_SENDER);
+	});
+
+	it("shares the rate budget between reaction and reaction_remove for the same sender", async () => {
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(0);
+			mockWorker.mlsDecrypt.mockResolvedValue({
+				plaintext: new TextEncoder().encode(
+					JSON.stringify({ type: "reaction", emoji: "👍", targetMessageId: TARGET_ID }),
+				),
+			});
+			const reactions = Array.from({ length: 20 }, (_, i) =>
+				makeReactionEnvelope({ id: `env-shared-${i}` }),
+			);
+			pollSpy.mockResolvedValueOnce(reactions);
+			const onReaction = vi.fn();
+			const onReactionRemove = vi.fn();
+
+			renderHook(() =>
+				useMessages(
+					IDENTITY_ID,
+					GROUP_ID,
+					vi.fn(),
+					undefined,
+					undefined,
+					onReaction,
+					onReactionRemove,
+				),
+			);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(0);
+			});
+			expect(onReaction).toHaveBeenCalledTimes(20);
+
+			// Same sender is now at budget (still within the window); a reaction_remove
+			// envelope on the very next poll tick must be dropped too — proves the two
+			// envelope types share one per-sender budget, not two independent ones.
+			mockWorker.mlsDecrypt.mockResolvedValueOnce({
+				plaintext: new TextEncoder().encode(
+					JSON.stringify({ type: "reaction_remove", emoji: "👍", targetMessageId: TARGET_ID }),
+				),
+			});
+			pollSpy.mockResolvedValueOnce([makeReactionEnvelope({ id: "env-remove-after-budget" })]);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(3_000);
+			});
+			expect(ackSpy).toHaveBeenCalledWith(TOKEN, "env-remove-after-budget");
+			expect(onReactionRemove).not.toHaveBeenCalled();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("resets a sender's reaction budget once the rate-limit window elapses", async () => {
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(0);
+			mockWorker.mlsDecrypt.mockResolvedValue({
+				plaintext: new TextEncoder().encode(
+					JSON.stringify({ type: "reaction", emoji: "👍", targetMessageId: TARGET_ID }),
+				),
+			});
+			const burst = Array.from({ length: 20 }, (_, i) =>
+				makeReactionEnvelope({ id: `env-window-${i}` }),
+			);
+			pollSpy.mockResolvedValueOnce(burst);
+			const onReaction = vi.fn();
+
+			renderHook(() =>
+				useMessages(IDENTITY_ID, GROUP_ID, vi.fn(), undefined, undefined, onReaction),
+			);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(0);
+			});
+			expect(onReaction).toHaveBeenCalledTimes(20);
+
+			// Jump past the 10s window, then let the next poll tick deliver one more reaction.
+			vi.setSystemTime(20_000);
+			pollSpy.mockResolvedValueOnce([makeReactionEnvelope({ id: "env-window-fresh" })]);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(3_000);
+			});
+			expect(onReaction).toHaveBeenCalledTimes(21);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("ALLOWED_REACTION_EMOJIS has exactly 6 entries and all are strings", () => {
 		expect(ALLOWED_REACTION_EMOJIS).toHaveLength(6);
 		for (const e of ALLOWED_REACTION_EMOJIS) {
