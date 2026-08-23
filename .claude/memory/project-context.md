@@ -17,7 +17,92 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-23, cycle 346 — FEATURE: bound reaction/reaction_remove callback rate per sender, commit f86d6e5)
+## Current state (2026-08-23, cycle 347 — FEATURE: real-browser Dexie.waitFor transaction-liveness test (F3), commit 2eb8ccf)
+
+- CI green (`gh run list --limit 3` all success), `gh issue list --state open` empty,
+  `git status` clean at cycle start. Picked cycle 346's top carried-forward candidate:
+  **F3** — the `Dexie.waitFor`-held `rw` transaction in `markMessageReactionDelta`
+  (encrypted-db.ts; async crypto-worker round trip *inside* an IndexedDB transaction) had
+  only ever been exercised against `fake-indexeddb` in Vitest, never a real browser
+  engine. First flagged cycle 344, deferred 3 cycles running (345, 346).
+- **Fix:** new `app/e2e/dexie-transaction-liveness.spec.ts`. Navigates to `/`, then via
+  `page.evaluate` dynamically imports `/src/db/encrypted-db.ts`/`/src/db/schema.ts`
+  directly from the Vite dev server (no bundling — dev-server-only technique, confirmed
+  by security-auditor to have zero prod exposure: prod build emits hashed bundles with
+  no `/src/*.ts` route, and the spec lives outside `tsconfig.app.json`'s `include`).
+  Constructs a real `PowehiDb` + `EncryptedPowehiDb`, injects a fake `FieldEncryptor`
+  (duck-typed against the existing port in encryption.ts) whose `encryptDbField`/
+  `decryptDbField` use a real `setTimeout`-based 40ms delay — a genuine macrotask, unlike
+  an instantly-resolved Promise — standing in for the crypto-worker's postMessage round
+  trip. Fires two concurrent `markMessageReactionDelta` calls from different senders and
+  asserts both merge (no clobber, no rejected promise) — same race
+  `encrypted-db.test.ts`'s existing fake-indexeddb test covers, but here against a real
+  engine's actual IndexedDB transaction-lifetime behavior.
+- Added a second Playwright project `webkit-dexie-liveness` (`devices["Desktop Safari"]`)
+  in `playwright.config.ts`, scoped via `testMatch` to just this one spec so the rest of
+  the suite doesn't pay a second real-browser run per spec; the pre-existing `chromium`
+  project still runs it too (plus every other spec, unchanged). `ci-frontend.yml`'s
+  `playwright` job now installs both `chromium` and `webkit` browsers (`--with-deps`).
+  Installed webkit locally (`pnpm exec playwright install webkit --with-deps`, 76.7 MiB)
+  to actually run and verify the test before committing — was not previously present in
+  this dev environment (only chromium was, matching what CI installed pre-diff).
+- **security-auditor: GREEN**, both informational notes fixed in-cycle (not blocking, but
+  cheap):
+  1. The reviewer **mutation-tested the test itself** — temporarily removed both
+     `Dexie.waitFor` wrappers from `markMessageReactionDelta`, confirmed the spec fails
+     with `TransactionInactiveError: Transaction has already completed or failed` on
+     *both* chromium and webkit, restored the file via `git checkout`, confirmed all 9
+     `Dexie.waitFor` call sites intact. **Not vacuous — catches the exact regression it
+     claims to guard**, and notably this proved chromium's real engine *also* reproduces
+     the failure, not just webkit.
+  2. *(fixed)* the test's `indexedDB.deleteDatabase("PowehiDb")` cleanup resolved on the
+     `onblocked` event instead of rejecting — safe today (traced every production
+     `new EncryptedPowehiDb(...)` call site, all are post-login, so `page.goto("/")`
+     never opens the DB pre-test) but a latent flake if the app ever gains a pre-login
+     IndexedDB read, since `schema.ts`'s module-level `db` singleton is the same module
+     record the test's dynamic import resolves to. Fixed: `onblocked` now rejects with an
+     explicit error instead of silently continuing against potentially-stale state.
+  3. *(fixed, doc-only)* both the spec's top comment and the new Playwright project's
+     comment overclaimed "WebKit is the historically stricter engine... only a real
+     browser can exercise this" as if webkit were required to catch the regression — the
+     reviewer's own mutation test (finding 1) showed chromium already catches it too.
+     Corrected both comments: webkit is engine-diversity insurance against future
+     divergence, not load-bearing for closing F3.
+  Also confirmed: no plaintext/key-material/PII leakage (fake encryptor's in-memory Map
+  holds only synthetic fixture data, dies with the browser context, never reaches
+  traces/screenshots — `ci-frontend.yml`'s `playwright` job has no `upload-artifact` step
+  regardless); no supply-chain concern from installing the webkit binary (same pinned
+  `@playwright/test` version, same Microsoft CDN chromium already uses, lockfile
+  unchanged); `deleteDatabase` can't reach real user data (ephemeral Playwright browser
+  profile, storage-partitioned from any developer's real browser profile even when
+  attached to a locally-running dev server).
+- One pre-existing, unrelated observation the reviewer flagged in passing (not fixed,
+  not in scope): `ci-frontend.yml` has no top-level or job-level `permissions:` block, so
+  `GITHUB_TOKEN` inherits repo-default permissions — cheap hardening win, worth doing
+  next time that file is touched for an unrelated reason.
+- Not architectural, no new server-visible metadata (test-only + CI browser-install
+  change, no production crypto/backend/MLS/OPAQUE code touched — confirmed via
+  `git diff --stat`: only the new spec file, `playwright.config.ts`, and
+  `ci-frontend.yml` changed) — `threat-model-checker`/`crypto-reviewer` not required;
+  ran `security-auditor` anyway since the diff touches CI infra and exercises the Dexie
+  encryption boundary via a new test harness.
+- **Frontend: 1473/1473 Vitest tests green** (unchanged — this cycle added no new Vitest
+  tests, only a new Playwright spec). **Playwright: 7/7 e2e tests green** (was 5 across 2
+  projects — `chromium` only; now 7 across `chromium` + the new `webkit-dexie-liveness`
+  project, +1 spec × 2 projects − 0, i.e. +2 total test executions net). `tsc -b` clean,
+  `biome check` clean (2 touched files). Production build/bundle budget: not re-checked
+  this cycle (no app/src/ production code touched, only e2e/ + config + CI workflow).
+- **Next cycle candidates:** the unconditional `mlsDecrypt`-cost gap (cycle 346's
+  security-auditor F4 — a flooding sender still forces N decrypt round trips regardless
+  of the reaction-callback rate limit; broader mitigation than the lock-contention fix
+  already landed, not yet scoped); the media-message-has-zero-Dexie-persistence gap
+  (flagged cycle 343, large, needs new schema + threading through send/receive paths,
+  worth scoping as its own multi-part effort); the `ci-frontend.yml` missing
+  `permissions:` block (flagged this cycle, cheap, low urgency); PQ hybrid Phase A (still
+  blocked on openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated on
+  ADR-0003 Phase B 95%-session threshold).
+
+## Previous state (2026-08-23, cycle 346 — FEATURE: bound reaction/reaction_remove callback rate per sender, commit f86d6e5)
 
 - CI green (`gh run list --limit 3` all success), `gh issue list --state open` empty, `git status`
   clean at cycle start. Picked up cycle 345's top carried-forward candidate: **F1/F7** — no
