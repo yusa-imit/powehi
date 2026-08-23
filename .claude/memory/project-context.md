@@ -17,7 +17,85 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-23, cycle 344 — FEATURE: close concurrent-reaction persistence race, commit 2b86969)
+## Current state (2026-08-23, cycle 345 — STABILIZATION: close putMessage full-row-overwrite gap (F4), commit cb65117)
+
+- CI green (`gh run list --limit 3` all success), `gh issue list --state open` empty, `git status`
+  clean at cycle start. Full sweep before picking work: `cargo audit` (652 crates, 0 advisories),
+  `cargo deny check` (advisories/bans/licenses/sources all ok), `cargo test --workspace` all green,
+  `cargo clippy --workspace --all-targets -- -D warnings` clean, frontend `pnpm test --run`
+  1465/1465 green (104 files) pre-cycle, `tsc -b`/`biome check` clean. `target/` 11G, well under
+  the 20G hygiene threshold — no pruning needed. `project-context.md` 132KB/1646 lines, under the
+  256KB Read cap — no archive needed this cycle. Note: `cargo`/`cargo-audit`/`cargo-deny` were not
+  on `$PATH` this session (`~/.cargo/bin` missing from the shell's PATH) — had to `export
+  PATH="$HOME/.cargo/bin:$PATH"` explicitly for every cargo invocation this cycle; if this recurs,
+  worth checking whether the cron job's shell profile sourcing regressed.
+- Picked cycle 344's top carried-forward candidate: **F4**, the `putMessage` full-row-overwrite
+  gap — `EncryptedPowehiDb.putMessage` (encrypted-db.ts) did a blind `.put()` with no merge, and
+  its 4 call sites (`persistIncoming`/`persistOutgoing`/`persistPollCreate`/
+  `persistScheduledCreate` in usePersistentMessages.ts) build fresh `MessageRow` object literals
+  with no dedup against an existing row. Dispatched an Explore-agent first to confirm reachability
+  before spending a cycle on it (it had been deferred 2+ cycles as "pre-existing, out of scope"):
+  confirmed **live, not stale** — `useMessages.ts`'s `onMessageRef.current(...)` (→
+  `persistIncoming`) fires before the fire-and-forget `ackMessage(...).catch(() => {})` DELETE; a
+  transient ack failure (network blip/5xx/tab-close-mid-request) leaves the envelope un-deleted
+  server-side, and the client's redelivery guard (`sinceRef`) is a plain `useRef` that resets on
+  reload — so **ack failure + reload while the envelope is still server-side ⇒ the same envelope
+  id gets redelivered and replayed through `persistIncoming`**, wiping whatever
+  reactions/read-receipts/starred/poll-votes/expiresAt had accumulated on that row since.
+- **Fix:** `putMessage` now runs the `get` + merge + `put` inside one Dexie `rw` transaction —
+  if an existing row is found, the fresh row's core fields (ciphertext/plaintext/sender/epoch/etc,
+  via the existing `encRow` helper) are kept, but `reactionsJson`/`readByJson`/`read`/`delivered`/
+  `starred`/`editedText`/`deletedAt`/`scheduledFor`/`expiresAt`/`pollJson` are carried over
+  verbatim from the existing row instead of being overwritten to `undefined`. `encRow` (the
+  multi-field crypto-worker round trip) now runs *before* the transaction opens, so the `rw` lock
+  only spans a synchronous get+put — no `Dexie.waitFor` needed here (unlike
+  `markMessageReactionDelta`/`markMessageRead`, which must decrypt-merge-reencrypt a single field
+  *inside* the transaction; `putMessage` doesn't need to inspect the existing SENSITIVE values,
+  only copy their already-ciphertext bytes across).
+- **security-auditor: YELLOW, all 4 findings fixed in-cycle:**
+  1. *(MEDIUM, fixed)* `expiresAt` wasn't in the original preserve-list — `persistIncoming`
+     recomputes `expiresAt = Date.now() + ttl*1000` at receive time, so a redelivery would have
+     silently *restarted* a disappearing message's TTL from a later "now" instead of preserving
+     the original expiry. Added to the preserve-list.
+  2. *(MEDIUM, fixed)* `pollJson` wasn't preserved either — structurally identical to
+     `reactionsJson` (locally mutated post-creation by `markMessagePoll`/`persistPollVote`), so a
+     replayed `putMessage` on a poll id would wipe accumulated votes. Added to the preserve-list.
+  3. *(LOW, fixed)* the first draft's regression test used an identical replay (same
+     ciphertext/plaintext/epoch/receivedAt on both writes) — an implementation that just
+     early-returned on `existing` found would've passed vacuously. Strengthened: the replay now
+     varies `ciphertextB64`/`expiresAt` and asserts the FRESH `ciphertextB64` wins while the
+     ORIGINAL `expiresAt` is preserved — proves both halves of the merge, not just one. Also
+     expanded coverage to `delivered`/`editedText`/`deletedAt` (previously untested) and added a
+     dedicated `pollJson`-preservation test.
+  4. *(LOW, fixed, robustness)* the first draft ran `encRow` *inside* the transaction via
+     `Dexie.waitFor`, holding the `rw` lock across N sequential crypto-worker round trips
+     (serializes all other message writes behind it, risks Dexie's transaction-timeout abort on a
+     slow worker). Moved `encRow` before `db.transaction(...)` opens — the lock now spans only the
+     synchronous get+put, matching the pattern `claimScheduledFire` already argues for.
+  Also updated `markMessageReactionDelta`'s doc comment, which had explicitly called out this
+  exact gap as "pre-existing, out of scope here" — now points at the fix instead of re-flagging a
+  closed issue in a future cycle.
+- 3 new/strengthened tests in `encrypted-db.test.ts`: the redelivery-merge test (rewritten, now
+  non-vacuous, covers 8 preserved fields + 1 fresh-field-wins assertion), a new poll-redelivery
+  test, plus the pre-existing "no existing row → plain create" test (unchanged). **Frontend:
+  1468/1468 tests green** (was 1465, 104 files unchanged). `tsc -b` clean, `biome check` clean (2
+  touched files). Production build: initial route 165.14 kB gzip / WASM 642.87 kB gzip (both under
+  prd.md §7 budgets).
+- Not architectural, no new server-visible metadata (purely local Dexie merge logic, confirmed via
+  `git diff --name-only` — only `app/src/db/encrypted-db.ts`/`.test.ts` touched, no MLS/OPAQUE/
+  crypto-library code) — `threat-model-checker`/`crypto-reviewer` not required, same scoping
+  precedent as the identical-class `persistReaction`/`persistRead` race fixes (cycles 322/344).
+- **Next cycle candidates:** F1/F7 from cycle 344 (peer-driven reaction lock-hold amplification —
+  no inbound rate limit on reactions specifically, worth a look if volume ever becomes a real
+  concern); F3 from cycle 344 (Playwright test for real-browser `Dexie.waitFor` transaction
+  liveness — WebKit is the historical risk case); the media-message-has-zero-Dexie-persistence gap
+  (flagged cycle 343, large, needs new schema + threading through send/receive paths, worth
+  scoping as its own multi-part effort); PQ hybrid Phase A (still blocked on openmls stable
+  `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003 Phase B 95%-session
+  threshold); the missing `~/.cargo/bin` on `$PATH` this session (worked around inline, may be
+  worth a cron-env fix if it recurs).
+
+## Previous state (2026-08-23, cycle 344 — FEATURE: close concurrent-reaction persistence race, commit 2b86969)
 
 - All phase 1-6 checklists were already complete going into this cycle; CI green
   (`gh run list --limit 3` all success), `gh issue list --state open` empty. Picked
