@@ -17,7 +17,77 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-24, cycle 349 — FEATURE: persist media messages (photo/video/voice) to Dexie, commit 2b05798)
+## Current state (2026-08-24, cycle 350 — STABILIZATION: fix broken access control in broadcast envelope ack, commit bd82201)
+
+- CI green, `gh issue list --state open` empty, `git status` clean at cycle start. Full
+  baseline pass before picking a target: backend `cargo build/test --workspace` green,
+  `cargo audit`/`cargo deny check` clean, `cargo clippy --workspace --all-targets -- -D
+  warnings` clean; frontend 105/105 files, 1498/1498 tests, `tsc -b`/`biome check` clean,
+  `pnpm audit --prod` clean. Dispatched `security-auditor` + `crypto-reviewer` sweeps in
+  parallel to find a concrete fix target (crypto-reviewer's sweep returned truncated/
+  inconclusive — not resumable, not pursued further since this cycle's fix ended up
+  non-crypto anyway).
+- **security-auditor found a real HIGH-severity broken-access-control bug:**
+  `ack_envelope` (`messaging_service.rs`) hard-deleted any broadcast envelope (group
+  Application messages AND MLS Commit envelopes — anything with `recipient == None`) on
+  the **first** ack from **any authenticated device**, with zero group-membership check
+  and no per-device delivery tracking. Any group member — or any authenticated device
+  that obtained/guessed an `envelope_id` — could delete a group message before other
+  members polled it (silent censorship), or delete a Commit envelope, which is worse:
+  MLS cannot self-heal from a dropped Commit, so this was a permanent group-epoch-desync
+  DoS. Two more findings from the same sweep deferred (see below).
+- **Fix:** new `envelope_acks(envelope_id, device_id)` table (migration
+  `0010_envelope_acks.sql`), same shape/precedent as `media_acks` (cycle 289).
+  `EnvelopeRepository` gained `ack_broadcast(envelope_id, device_id, group_member_ids)`;
+  `PgEnvelopeRepository`'s impl inserts an ack row then deletes the envelope in the same
+  transaction only if every id in `group_member_ids` now has an ack row (SQL
+  set-containment `NOT EXISTS` check, atomic). `MessagingService::ack_envelope` now
+  calls `check_sender_is_member` before accepting a broadcast ack (closes the actual
+  membership hole), then passes the current member list (minus the envelope's own
+  sender — see below) to `ack_broadcast`.
+- **threat-model-checker caught a RED blocking bug in the first draft:** the initial fix
+  passed *all* group members (including the sender) as the required-ack set. But a
+  sender never acks their own broadcast — `useMessages.ts` in the frontend documents
+  that a sender's own envelope fails MLS decrypt client-side and is deliberately never
+  acked, "stays server-side indefinitely." So the all-members-acked condition could
+  **never** be satisfied for an ordinary group message → GC unreachable → unbounded
+  ciphertext retention / storage DoS, directly contradicting prd.md §11.4's documented
+  `Stored_Server → Expired: TTL 도달 (기본 30일)` state. Fixed by excluding the
+  envelope's sender from the required-ack set (mirrors `media_service.rs`'s existing
+  uploader-exclusion pattern for the exact same reason). Also added the missing default
+  30-day retention floor to `delete_expired` for envelopes with `expires_at IS NULL`
+  (a backstop for members who leave a group without ever polling, so a straggler
+  membership record can't pin an envelope forever) — this path in prd.md §11.4 existed
+  in the diagram but was never actually implemented for envelopes before this cycle.
+  Re-reviewed: threat-model-checker's second listed concern (new `envelope_acks`
+  metadata category, higher-resolution than `media_acks` since it fires on every
+  message not just shared media) addressed by adding a `docs/prd.md` §3.3 bullet + a
+  §3.4 GC-timing-oracle paragraph extension, same disclosure precedent as
+  `media_acks`/cycle 289-290.
+- 3 new/updated unit tests in `messaging_service.rs` (non-member ack rejected +
+  envelope survives; multi-member ack sequencing proves GC never needs the sender's own
+  ack) — `cargo test --workspace` green (was 172 passed in `powehi-application`, still
+  172 after edits — net even: 1 test rewritten, 2 added, one pre-existing test's
+  assertion target changed from a random non-member device to the actual sole member,
+  since acking as a non-member now correctly fails). Also had to add trivial
+  `ack_broadcast` stubs to two no-op `EnvelopeRepository` test fakes in
+  `powehi-grpc/src/server.rs` (compile-only impact, not exercised). Full
+  build/test/clippy/fmt green after the fix.
+- **Two more security-auditor findings from the same sweep, deferred as next-cycle
+  candidates (documented, not blocking — both lower severity than the one fixed):**
+  1. *(MEDIUM-HIGH)* `find_pending` has no `LIMIT`/pagination and `poll_envelopes`
+     serializes the whole result into one JSON response — a sustained-send device could
+     build a backlog that OOMs the victim's next poll. No per-message size cap beyond
+     the global 512KB body limit either. Needs `LIMIT`+keyset pagination on
+     `created_at` plus an explicit `MAX_CIPHERTEXT_BYTES` check in `send_message`.
+  2. *(LOW)* `KeyPackageService::upload` caps count (50/call, 200/device) but not
+     individual KeyPackage size, inconsistent with `invite_service.rs`'s
+     `MAX_KEY_PACKAGE_BYTES = 16 KiB` and `auth_service.rs`'s
+     `MAX_MLS_CREDENTIAL_BYTES`. Cheap fix, same pattern to copy.
+- Target dir hygiene: pruned 0-byte aborted-build `.rmeta` stubs; `target/` at 11GB,
+  under the 20GB prune threshold, no further action needed.
+
+## Previous state (2026-08-24, cycle 349 — FEATURE: persist media messages (photo/video/voice) to Dexie, commit 2b05798)
 
 - CI green (`gh run list --limit 3` all success), `gh issue list --state open` empty,
   `git status` clean at cycle start. Dispatched an Explore-agent scoping pass first on
