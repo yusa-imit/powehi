@@ -17,7 +17,120 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-23, cycle 347 — FEATURE: real-browser Dexie.waitFor transaction-liveness test (F3), commit 2eb8ccf)
+## Current state (2026-08-24, cycle 349 — FEATURE: persist media messages (photo/video/voice) to Dexie, commit 2b05798)
+
+- CI green (`gh run list --limit 3` all success), `gh issue list --state open` empty,
+  `git status` clean at cycle start. Dispatched an Explore-agent scoping pass first on
+  cycle 347's largest carried-forward candidate — the media-message-has-zero-Dexie-
+  persistence gap (flagged since cycle 343) — before committing a cycle to it: confirmed
+  the R2 blob itself is durable server-side (no client-side blob cache exists), so
+  persisting only `blobId+key+iv+thumbnail+mimetype` (never raw bytes) to Dexie is
+  sufficient to re-fetch and redecrypt after reload — achievable in one focused cycle,
+  not the multi-part effort earlier cycles assumed.
+- **Fix:** `MessageRow.mediaJson?: string` (schema v27, `db/schema.ts`) — JSON-encoded
+  `MediaPayload`, added to `SENSITIVE.messages` in `encrypted-db.ts` (same transparent
+  FieldEncryptor boundary as `pollJson`/`reactionsJson`/`replyToJson`, no new crypto
+  primitives). `persistIncoming` (`usePersistentMessages.ts`) threads `msg.media` into
+  `mediaJson` on receive. `persistOutgoing` gained an optional `media` param, but the
+  actual send call sites (`useMediaSend.ts`, `ChatLayout.tsx`'s `sendForwardToSelected`)
+  only ever pass a placeholder text ("Image attachment"/"Video attachment"/"Voice
+  message") plus the real ciphertext — **documented architectural asymmetry**: the raw
+  AES-256-GCM media key never crosses the WASM→JS boundary on send
+  (`encryptAndSendMedia` in `mediaTransfer.ts` returns only an opaque-handle-backed
+  result, never key bytes), so a sender has no key to persist for their own
+  redisplayable copy. Not a regression — the live pre-reload optimistic bubble for a
+  sent attachment never rendered an inline preview either, only this same placeholder.
+  Closing the asymmetry would need a new, crypto-reviewed WASM key-export-for-storage
+  primitive — explicitly out of scope this cycle. `encryptAndSendMedia`'s signature
+  changed `Promise<void>` → `Promise<{envelopeId, ciphertextB64}>` so send call sites can
+  persist; no wire-format change, purely a local re-encoding of already-sent bytes.
+  ChatLayout's rehydration effect parses `row.mediaJson` back into `ChatMessage.media`.
+- Delegated implementation to `frontend-lead` (had to resume it once — its first pass
+  cut off mid-task with no tests written yet; the resume completed tests +
+  verification).
+- **security-auditor: YELLOW, both MEDIUM findings fixed in-cycle:**
+  1. *(fixed)* Rehydration's shape validation (`ChatLayout.tsx`) checked only
+     `blobId`/`blobHash`/`mediaKey`/`iv`, weaker than the live receive path
+     (`useMessages.ts`), which also validates `thumbnail.ct/key/iv` exact lengths
+     (≤16384/32/12) and `chunked`⇒`totalSize`/`chunkSize` validity. A malformed-but-
+     truthy `thumbnail` on a rehydrated row would crash synchronously inside
+     `useThumbnail`'s `thumbnail.key.length` check, uncaught — no ErrorBoundary in the
+     tree. Fixed: hoisted both paths' predicates into one shared, exported
+     `isValidMediaPayload()` (`useMessages.ts`), used by both the receive path (which
+     also got simpler — removed ~35 lines of duplicated inline validation) and
+     rehydration. mimeType sanitization (not part of the shared validator, since a bad
+     mimeType shouldn't invalidate an otherwise-valid attachment) kept as an explicit
+     per-branch step so it isn't silently dropped by the refactor.
+  2. *(fixed)* The new rehydration test's headline assertion (`useMediaReceive` called →
+     image renders) survived the reviewer's content-substitution mutation (swapping in a
+     wrong `blobId`/`mediaKey`/`iv` still passed both checks), since `useMediaReceive`
+     was stubbed and its call args never inspected — didn't actually prove the *right*
+     key material survived the round trip, only that *some* media object did. Fixed:
+     added `expect(useMediaReceive).toHaveBeenCalledWith(expect.objectContaining(media))`.
+  3. *(informational, fixed cheaply)* `putMessage`'s redelivery-merge preserve-list
+     doesn't carry over `mediaJson` (same as `replyToJson`) — benign since both are
+     set-once-at-creation fields, a replayed `persistIncoming` for the same id carries
+     the identical value in the fresh row anyway. Added a one-line comment explaining
+     the omission is intentional, not an oversight.
+  4. *(informational, not fixed)* one harmless redundant-narrowing nit in
+     `sendForwardToSelected` (`targetChat.mlsGroupId` re-read into a local before a
+     truthiness check inside a `.then` closure) — left as-is, TS's control-flow analysis
+     doesn't retain narrowing on an object property across a closure boundary, so it may
+     not actually be redundant.
+- 1 new test file (`ChatLayoutMediaPersistence.test.tsx`: incoming-media rehydration +
+  redisplay, corrupt-JSON safety, shape-invalid safety, outgoing-placeholder-only case)
+  plus new/updated tests in `db/schema.test.ts`, `db/encrypted-db.test.ts`,
+  `hooks/usePersistentMessages.test.ts`, `hooks/useMediaSend.test.ts`,
+  `lib/mediaTransfer.test.ts`. **Frontend: 105/105 files, 1498/1498 tests green** (was
+  104/1479). `tsc -b` clean, `biome check` clean (1 import-sort auto-fix applied
+  post-review, no logic change). Production build: initial route 165.70 kB gzip / WASM
+  642.87 kB gzip (both under prd.md §7 budgets).
+- Not architectural, no new server-visible metadata (purely local Dexie persistence of
+  data already flowing through existing send/receive paths, confirmed via `git diff
+  --stat` — no MLS/OPAQUE/wire-format changes) — `threat-model-checker`/`crypto-reviewer`
+  not required, same scoping precedent as `pollJson`/`replyToJson`/`scheduledFor`.
+- **Next cycle candidates:** closing the incoming/outgoing media-key asymmetry (would
+  need a new crypto-reviewed WASM key-export-for-local-storage primitive — bigger,
+  crypto-adjacent, worth its own cycle if ever prioritized); the harmless redundant-
+  narrowing nit in `sendForwardToSelected` (cheap, non-blocking); PQ hybrid Phase A
+  (still blocked on openmls stable `MLS_128_MLKEM768`, openmls still pinned at 0.8.1 —
+  re-checked this cycle); OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003 Phase B
+  95%-session threshold).
+
+## Previous state (2026-08-24, cycle 348 — FEATURE: mlsDecrypt cost bound + CI permissions hardening, commits a3eeee8 + 8db1748)
+
+- CI green, `gh issue list --state open` empty at cycle start. Picked up both of cycle
+  347's flagged candidates in one cycle: the CI `permissions:` hardening (cheap) and the
+  security-auditor F4 unconditional-`mlsDecrypt`-cost gap (the main feature work).
+- **CI hardening (a3eeee8):** `ci-frontend.yml`/`ci-rust.yml`/`ci-e2e-live.yml` had no
+  top-level or job-level `permissions:` block, so `GITHUB_TOKEN` inherited repo-default
+  scope. Added explicit `contents: read` to all three — none of the jobs need more.
+- **mlsDecrypt cost bound (8db1748):** every Application envelope for the active group
+  unconditionally paid a real `mlsDecrypt` WASM round trip before type dispatch,
+  including garbage/tampered ciphertext that would fail to decrypt — the cycle 346
+  reaction-rate-limiter only bounds envelopes that decrypt successfully and parse as a
+  reaction, so a flooding sender still cost N decrypt attempts regardless. Added a
+  coarser per-sender decrypt-attempt budget (100/10s) gating the `mlsDecrypt` call
+  itself, layered on top of the existing reaction limiter.
+- **security-auditor caught a silent-data-loss bug in the first draft:** dropping
+  over-budget envelopes outright would have silently swallowed real text messages behind
+  a burst of unrelated traffic (e.g. ~100 presence heartbeats over ~50 minutes with one
+  chat left open), since the server's `find_pending` query has no redelivery path other
+  than an explicit ack. Fixed: over-budget envelopes are deferred into a bounded local
+  queue (500 cap) instead, retried on later poll ticks and merged/deduped by id once the
+  sender's window frees up — no data loss, only latency. Also corrected a pre-existing
+  inaccurate comment claiming un-acked envelopes are GC'd via server-side TTL (only
+  disappearing-message `expires_at` triggers that; otherwise they're redelivered
+  indefinitely on a later since-eligible poll).
+- Not architectural, no new server-visible metadata (client-side receiver-side
+  throttling only, no wire-format change) — `threat-model-checker`/`crypto-reviewer` not
+  required, same scoping precedent as the cycle 346 reaction-rate-limit fix.
+- **Next cycle candidates carried forward:** the media-message-has-zero-Dexie-
+  persistence gap (large, flagged cycle 343 — picked up and closed this cycle, see
+  cycle 349 above); PQ hybrid Phase A (still blocked); OPAQUE PQ-hybrid OPRF upgrade
+  (gated on ADR-0003 Phase B 95%-session threshold).
+
+## Previous state (2026-08-23, cycle 347 — FEATURE: real-browser Dexie.waitFor transaction-liveness test (F3), commit 2eb8ccf)
 
 - CI green (`gh run list --limit 3` all success), `gh issue list --state open` empty,
   `git status` clean at cycle start. Picked cycle 346's top carried-forward candidate:
