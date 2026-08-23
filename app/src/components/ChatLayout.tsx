@@ -23,6 +23,7 @@ import {
 	type IncomingMessage,
 	type MediaPayload,
 	type ReplyContext,
+	isValidMediaPayload,
 	useMessages,
 } from "../hooks/useMessages";
 import { usePersistentMessages } from "../hooks/usePersistentMessages";
@@ -7346,6 +7347,7 @@ export function ChatLayout() {
 	const { sendMedia } = useMediaSend({
 		identityId: active?.mlsIdentityId,
 		groupId: active?.mlsGroupId,
+		persistOutgoing,
 	});
 
 	// Rehydrate persisted message history from Dexie into the active chat's
@@ -7440,6 +7442,28 @@ export function ChatLayout() {
 					replyTo = undefined;
 				}
 			}
+			// Corrupt/malformed mediaJson must not abort rehydration of the whole row —
+			// fail safe by dropping just the media attachment for this one message, same
+			// defensive pattern as pollJson/replyToJson. Uses the SAME isValidMediaPayload
+			// predicate the live receive path (useMessages.ts) validates against — including
+			// thumbnail ct/key/iv exact-length checks and chunked/totalSize/chunkSize bounds
+			// — so rehydration is never a weaker gate than receive on the same downstream
+			// consumers (MediaImage's useThumbnail indexes into thumbnail.key.length with no
+			// try/catch in that call chain). Only ever set on incoming rows (see
+			// MessageRow.mediaJson's ASYMMETRY note, db/schema.ts) — an outgoing media row has
+			// no mediaJson and rehydrates as its plaintextB64 placeholder text alone, same as
+			// it always has.
+			let media: ChatMessage["media"];
+			if (row.mediaJson) {
+				try {
+					const parsed = JSON.parse(row.mediaJson) as unknown;
+					if (isValidMediaPayload(parsed)) {
+						media = parsed;
+					}
+				} catch {
+					media = undefined;
+				}
+			}
 			rehydrated.push({
 				id: row.id,
 				text: textB64 ? base64ToText(textB64) : "",
@@ -7450,6 +7474,7 @@ export function ChatLayout() {
 				starred: row.starred,
 				poll,
 				replyTo,
+				media,
 				scheduledFor: row.scheduledFor,
 				// senderDeviceId is the authenticated-device value the server bound
 				// to the envelope at send time (AuthenticatedDevice extractor), not
@@ -8890,6 +8915,17 @@ export function ChatLayout() {
 	 * media key arrives inline in the MLS-decrypted payload, prd.md §9.2) and
 	 * then re-encrypted+uploaded once per target via the shared
 	 * `encryptAndSendMedia` pipeline (same one useMediaSend uses).
+	 *
+	 * Each forwarded copy is now also persisted to Dexie under its target group
+	 * (`persistOutgoing`) so it survives a reload, same gap class media send/receive
+	 * had everywhere else before this cycle. Same "no `media` payload, placeholder
+	 * text only" limitation as useMediaSend's persistOutgoing wiring — the freshly
+	 * re-encrypted per-target key is opaque-handle-only here too (`encryptAndSendMedia`
+	 * never returns raw key bytes), see MessageRow.mediaJson's ASYMMETRY note.
+	 * `persistOutgoing` targets whichever group is bound to this component's
+	 * `usePersistentMessages(active?.mlsGroupId)` instance — same cross-group binding
+	 * caveat already documented on `sendForwardToOne`'s call (Dexie itself is
+	 * unaffected, keyed by row groupId, not the hook's bound group).
 	 */
 	const sendForwardToSelected = () => {
 		if (!forwardMsg || forwardSelected.size === 0) return;
@@ -8901,8 +8937,8 @@ export function ChatLayout() {
 			// to the legacy chunked-implies-video heuristic.
 			const isVideo =
 				media.mimeType != null ? media.mimeType.startsWith("video/") : media.chunked === true;
-			for (const targetId of targets)
-				appendForwardOptimistic(targetId, isVideo ? "Video attachment" : "Image attachment");
+			const placeholderText = isVideo ? "Video attachment" : "Image attachment";
+			for (const targetId of targets) appendForwardOptimistic(targetId, placeholderText);
 			downloadAndDecryptMedia(media, sessionToken, cryptoWorker)
 				.then((bytes) => {
 					const mimeType = media.mimeType ?? sniffMimeType(bytes, { videoHint: isVideo });
@@ -8916,7 +8952,14 @@ export function ChatLayout() {
 							targetChat.mlsGroupId,
 							sessionToken,
 							cryptoWorker,
-						).catch(() => {});
+						)
+							.then(({ envelopeId, ciphertextB64 }) => {
+								const targetGroupId = targetChat.mlsGroupId;
+								if (targetGroupId) {
+									persistOutgoing(envelopeId, targetGroupId, placeholderText, ciphertextB64);
+								}
+							})
+							.catch(() => {});
 					}
 				})
 				.catch(() => {});

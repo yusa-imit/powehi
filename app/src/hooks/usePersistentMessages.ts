@@ -16,7 +16,7 @@ import { db } from "../db/schema";
 import { useAuthStore } from "../store/auth";
 import { textToBase64 } from "../utils/base64";
 import { useCryptoWorker } from "./useCryptoWorker";
-import type { IncomingMessage, ReplyContext } from "./useMessages";
+import type { IncomingMessage, MediaPayload, ReplyContext } from "./useMessages";
 
 export interface PersistedMessages {
 	rows: MessageRow[];
@@ -30,6 +30,15 @@ export interface PersistedMessages {
 		ciphertextB64: string,
 		replyTo?: ReplyContext,
 		expiresAt?: number,
+		/**
+		 * §9.2 media attachment metadata (see MessageRow.mediaJson doc comment,
+		 * db/schema.ts). Optional — text-only sends never pass this. Callers on the
+		 * outgoing/send path typically have no real `mediaKey` to pass (the raw key
+		 * never crosses the WASM→JS boundary on send — mediaTransfer.ts) and should
+		 * omit this param entirely, relying on `text` alone for a placeholder bubble;
+		 * only the receive path (persistIncoming) has a real key available to persist.
+		 */
+		media?: MediaPayload,
 	) => void;
 	/** Delete expired messages from Dexie and update local rows state. */
 	purgeExpired: () => void;
@@ -155,6 +164,12 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 				plaintextB64: textToBase64(msg.text),
 				expiresAt: msg.expiresAt,
 				replyToJson: msg.replyTo ? JSON.stringify(msg.replyTo) : undefined,
+				// §9.2 media attachment — the raw mediaKey legitimately arrives inline in the
+				// MLS-decrypted payload on receive (existing invariant, mediaTransfer.ts), so
+				// unlike persistOutgoing's media param this is captured verbatim. Closes the
+				// "every received photo/video/voice note vanishes on reload" gap — media
+				// send/receive never called any persist hook at all before this fix.
+				mediaJson: msg.media ? JSON.stringify(msg.media) : undefined,
 			};
 			// Optimistically add to local state for immediate UI visibility.
 			setRows((prev) => {
@@ -176,6 +191,7 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 			ciphertextB64: string,
 			replyTo?: ReplyContext,
 			expiresAt?: number,
+			media?: MediaPayload,
 		) => {
 			if (!encryptedDb || !deviceId) return;
 			// epochSeq: Date.now() for outgoing — mlsEncrypt does not expose the MLS
@@ -197,6 +213,7 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 				plaintextB64: textToBase64(text),
 				replyToJson: replyTo ? JSON.stringify(replyTo) : undefined,
 				expiresAt,
+				mediaJson: media ? JSON.stringify(media) : undefined,
 			};
 			setRows((prev) => {
 				if (prev.some((r) => r.id === row.id)) return prev;

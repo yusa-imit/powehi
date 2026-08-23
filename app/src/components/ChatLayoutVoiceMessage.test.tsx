@@ -92,6 +92,12 @@ let getUserMediaMock: ReturnType<typeof vi.fn>;
 describe("ChatLayout — voice messages", () => {
 	beforeEach(async () => {
 		await db.verifiedContacts.clear();
+		// This cycle's fix wires sendMedia's persistOutgoing into the real Dexie
+		// persistence path — a voice message sent in one test now durably lands in
+		// db.messages (fake-indexeddb persists across tests within this file) and
+		// would otherwise rehydrate into the next test's message list. Clear it,
+		// same as ChatLayoutMediaGallery.test.tsx/ChatLayoutPoll.test.tsx already do.
+		await db.messages.clear();
 		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
 			MOCK_WORKER as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
 		);

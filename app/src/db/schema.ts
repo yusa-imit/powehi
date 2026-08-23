@@ -66,6 +66,34 @@ export interface MessageRow {
 	 * (either never was, or already fired/cancelled).
 	 */
 	scheduledFor?: number;
+	/**
+	 * JSON-serialized `MediaPayload` (blobId, blobHash, mediaKey, iv, thumbnail, chunked,
+	 * totalSize, chunkSize, mimeType — see hooks/useMessages.ts) for an §9.2 media
+	 * attachment message. Previously React-state-only in the strongest sense: unlike
+	 * pollJson/replyToJson/scheduledFor (which at least never reached Dexie), media
+	 * send/receive never called persistOutgoing/persistIncoming AT ALL, so every photo/
+	 * video/voice note vanished from chat history on reload. SENSITIVE — mediaKey/iv are
+	 * live key material for an already-uploaded R2 blob, encrypted at rest like
+	 * ciphertextB64/plaintextB64. Only small reference metadata is ever stored here (never
+	 * raw blob/image bytes, which stay in R2 and are re-fetched + re-decrypted via blobId
+	 * on rehydration) — thumbnails are already capped 64×64 JPEG q0.6 (useMediaSend.ts).
+	 *
+	 * ASYMMETRY (architectural, not a bug): only INCOMING rows ever carry a real
+	 * `mediaKey` here. On receive, the raw key legitimately arrives once inline in the
+	 * MLS-decrypted JSON payload (existing invariant, mediaTransfer.ts) before being
+	 * imported to a WASM opaque handle — persistIncoming captures that same payload
+	 * verbatim. On SEND, the raw key never crosses the WASM→JS boundary at all
+	 * (`mediaEncrypt`/`mediaEncryptChunked` return only an opaque handle — see
+	 * mediaTransfer.ts's own security-invariant doc comment) — so a sender has no raw
+	 * key to persist for their own copy. Outgoing media rows therefore leave this field
+	 * undefined and rely on `plaintextB64` alone (the same human-readable placeholder —
+	 * "Image attachment"/"Video attachment"/"Voice message" — the live optimistic bubble
+	 * already showed pre-reload; sent media has never rendered an inline preview in this
+	 * app, only received media does). Closing this asymmetry would need a new, crypto-
+	 * reviewed WASM key-export-for-local-storage primitive — out of scope for this
+	 * (Dexie-only) cycle. undefined = not a media message (or an outgoing media message).
+	 */
+	mediaJson?: string;
 }
 
 // GroupRow — MLS group state snapshot.
@@ -467,6 +495,21 @@ export class PowehiDb extends Dexie {
 		// (a timestamp); no index change needed — never queried across messages, only
 		// read/written per-row.
 		this.version(26).stores({
+			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v27: added mediaJson to MessageRow — §9.2 media attachment messages (photo/video/
+		// voice note) now survive a reload. This was a strictly worse gap than pollJson/
+		// replyToJson/scheduledFor had before their own schema versions (v24-v26): media
+		// send/receive never called persistOutgoing/persistIncoming at all, so a reload
+		// dropped every media message from chat history outright, not just some of its
+		// mutable fields. See the mediaJson doc comment above for the incoming/outgoing
+		// key-availability asymmetry (a documented WASM crypto-boundary invariant, not an
+		// oversight). No index change needed — mediaJson is never queried, only read/
+		// written per-row, like pollJson/replyToJson.
+		this.version(27).stores({
 			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
 			groups: "id, lastActivity",
 			identity: "id",

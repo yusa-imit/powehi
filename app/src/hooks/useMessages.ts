@@ -68,6 +68,57 @@ export interface MediaPayload {
 }
 
 /**
+ * Structural validator for a MediaPayload parsed from untrusted JSON — shared
+ * between the live receive path (below) and Dexie rehydration
+ * (ChatLayout.tsx) so both reject the same malformed shapes. Checks the same
+ * invariants the receive path always has: thumbnail ct/key/iv must be
+ * present-and-correctly-sized when a thumbnail is included at all, and
+ * totalSize/chunkSize must be valid numbers when chunked === true. Without
+ * this, a row a caller wrote via persistOutgoing's optional `media` param (or
+ * a corrupted Dexie row) could pass a truthy-but-malformed `thumbnail` through
+ * to MediaImage's useThumbnail, which indexes into `thumbnail.key.length`
+ * with no try/catch in that call chain.
+ */
+export function isValidMediaPayload(value: unknown): value is MediaPayload {
+	if (value === null || typeof value !== "object") return false;
+	const v = value as Record<string, unknown>;
+	if (
+		typeof v.blobId !== "string" ||
+		!Array.isArray(v.blobHash) ||
+		!Array.isArray(v.mediaKey) ||
+		!Array.isArray(v.iv)
+	) {
+		return false;
+	}
+	if (v.thumbnail !== undefined) {
+		const t = v.thumbnail as Record<string, unknown> | null;
+		if (
+			t === null ||
+			typeof t !== "object" ||
+			!Array.isArray(t.ct) ||
+			!Array.isArray(t.key) ||
+			!Array.isArray(t.iv) ||
+			(t.ct as number[]).length > 16_384 ||
+			(t.key as number[]).length !== 32 ||
+			(t.iv as number[]).length !== 12
+		) {
+			return false;
+		}
+	}
+	if (v.chunked === true) {
+		if (
+			typeof v.totalSize !== "number" ||
+			v.totalSize < 0 ||
+			typeof v.chunkSize !== "number" ||
+			v.chunkSize <= 0
+		) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/**
  * Reply context embedded in a structured text message.
  * messageId references the envelope UUID of the quoted message.
  * excerpt is up to 100 chars of the original text, capped before send.
@@ -415,61 +466,37 @@ export function useMessages(
 				let shouldDisplayMessage = true;
 				try {
 					const parsed = JSON.parse(decoded) as Record<string, unknown>;
-					if (
-						parsed.type === "image" &&
-						typeof parsed.blobId === "string" &&
-						Array.isArray(parsed.blobHash) &&
-						Array.isArray(parsed.mediaKey) &&
-						Array.isArray(parsed.iv)
-					) {
+					if (parsed.type === "image" && isValidMediaPayload(parsed)) {
 						text = "[image]";
-						const thumbRaw = (() => {
-							const t = parsed.thumbnail;
-							if (
-								t !== null &&
-								typeof t === "object" &&
-								Array.isArray((t as Record<string, unknown>).ct) &&
-								Array.isArray((t as Record<string, unknown>).key) &&
-								Array.isArray((t as Record<string, unknown>).iv) &&
-								((t as Record<string, unknown>).ct as number[]).length <= 16_384 &&
-								((t as Record<string, unknown>).key as number[]).length === 32 &&
-								((t as Record<string, unknown>).iv as number[]).length === 12
-							) {
-								return t as ThumbnailPayload;
-							}
-							return undefined;
-						})();
+						// mimeType is a display-only hint, not validated by isValidMediaPayload —
+						// sanitize separately rather than making the whole payload's validity
+						// (and thus whether the image displays at all) depend on this one field.
+						// Built explicitly (not spread) so no stray fields (e.g. `type`) leak
+						// from the untrusted `parsed` record into the stored MediaPayload.
 						media = {
-							blobId: parsed.blobId as string,
-							blobHash: parsed.blobHash as number[],
-							mediaKey: parsed.mediaKey as number[],
-							iv: parsed.iv as number[],
-							thumbnail: thumbRaw,
+							blobId: parsed.blobId,
+							blobHash: parsed.blobHash,
+							mediaKey: parsed.mediaKey,
+							iv: parsed.iv,
+							thumbnail: parsed.thumbnail,
 							mimeType: typeof parsed.mimeType === "string" ? parsed.mimeType : undefined,
 						};
 					} else if (
 						parsed.type === "video" &&
 						parsed.chunked === true &&
-						typeof parsed.blobId === "string" &&
-						Array.isArray(parsed.blobHash) &&
-						Array.isArray(parsed.mediaKey) &&
-						Array.isArray(parsed.iv) &&
-						typeof parsed.totalSize === "number" &&
-						parsed.totalSize >= 0 &&
-						typeof parsed.chunkSize === "number" &&
-						parsed.chunkSize > 0
+						isValidMediaPayload(parsed)
 					) {
 						// §9.4.2: chunked video attachment. No inline thumbnail this cycle
 						// (§9.4.1 thumbnails are image-only) — do not invent one.
 						text = "[video]";
 						media = {
-							blobId: parsed.blobId as string,
-							blobHash: parsed.blobHash as number[],
-							mediaKey: parsed.mediaKey as number[],
-							iv: parsed.iv as number[],
+							blobId: parsed.blobId,
+							blobHash: parsed.blobHash,
+							mediaKey: parsed.mediaKey,
+							iv: parsed.iv,
 							chunked: true,
-							totalSize: parsed.totalSize as number,
-							chunkSize: parsed.chunkSize as number,
+							totalSize: parsed.totalSize,
+							chunkSize: parsed.chunkSize,
 							mimeType: typeof parsed.mimeType === "string" ? parsed.mimeType : undefined,
 						};
 					} else if (parsed.type === "typing_indicator") {

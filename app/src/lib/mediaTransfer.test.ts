@@ -320,6 +320,43 @@ describe("mediaTransfer (prd.md §9.2 + §9.4.2)", () => {
 			expect(confirmMediaUploadSpy).toHaveBeenCalledWith(TOKEN, "test-media-id");
 			expect(sendMessageSpy).toHaveBeenCalledOnce();
 		});
+
+		it("returns the envelope id and base64 MLS ciphertext on the non-chunked path (for the caller's Dexie persist)", async () => {
+			const bytes = new Uint8Array(1024);
+			sendMessageSpy.mockResolvedValueOnce("envelope-single-1");
+
+			const result = await encryptAndSendMedia(
+				bytes,
+				"image/jpeg",
+				IDENTITY_ID,
+				GROUP_ID,
+				TOKEN,
+				mockWorker as never,
+			);
+
+			expect(result.envelopeId).toBe("envelope-single-1");
+			// Mock mediaMessageCreate returns a 64-byte ciphertext — decode to verify it's the
+			// same bytes, not something media-specific (blobId/key/iv never leak into this value).
+			expect(atob(result.ciphertextB64)).toHaveLength(64);
+		});
+
+		it("returns the envelope id and base64 MLS ciphertext on the chunked path", async () => {
+			const bytes = new Uint8Array(MEDIA_CHUNK_THRESHOLD + 1);
+			sendMessageSpy.mockResolvedValueOnce("envelope-chunked-1");
+
+			const result = await encryptAndSendMedia(
+				bytes,
+				"video/mp4",
+				IDENTITY_ID,
+				GROUP_ID,
+				TOKEN,
+				mockWorker as never,
+			);
+
+			expect(result.envelopeId).toBe("envelope-chunked-1");
+			// Mock mediaMessageCreateChunked returns a 96-byte ciphertext.
+			expect(atob(result.ciphertextB64)).toHaveLength(96);
+		});
 	});
 
 	describe("encryptAndSendMedia — key hygiene (chunked path)", () => {

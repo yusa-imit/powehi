@@ -307,6 +307,39 @@ describe("PowehiDb", () => {
 		expect(identity?.customStatusText).toBeUndefined();
 	});
 
+	it("stores and retrieves mediaJson on MessageRow (v27, raw store — encryption is EncryptedPowehiDb's job)", async () => {
+		const mediaJson = JSON.stringify({
+			blobId: "blob-v27",
+			blobHash: [1, 2, 3],
+			mediaKey: [4, 5, 6],
+			iv: [7, 8, 9],
+		});
+		await db.messages.add({
+			id: "msg-v27",
+			groupId: "group-uuid-v27",
+			ciphertextB64: "ZGVhZA==",
+			senderDeviceId: "device-v27",
+			epochSeq: 0,
+			receivedAt: Date.now(),
+			mediaJson,
+		});
+		const msg = await db.messages.get("msg-v27");
+		expect(msg?.mediaJson).toBe(mediaJson);
+	});
+
+	it("leaves mediaJson undefined when not set (v27)", async () => {
+		await db.messages.add({
+			id: "msg-v27-default",
+			groupId: "group-uuid-v27",
+			ciphertextB64: "ZGVhZA==",
+			senderDeviceId: "device-v27",
+			epochSeq: 0,
+			receivedAt: Date.now(),
+		});
+		const msg = await db.messages.get("msg-v27-default");
+		expect(msg?.mediaJson).toBeUndefined();
+	});
+
 	it("queries messages by groupId index", async () => {
 		await db.messages.bulkAdd([
 			{

@@ -32,6 +32,7 @@ import {
 } from "../api/media";
 import { sendMessage as sendMessageApi } from "../api/messages";
 import type { MediaPayload } from "../hooks/useMessages";
+import { uint8ToBase64 } from "../utils/base64";
 import type { CryptoWorkerApi } from "../workers/crypto.worker";
 import { createLimiter } from "./concurrencyLimiter";
 
@@ -184,6 +185,14 @@ export async function downloadAndDecryptMedia(
  * instead. Chunked video does NOT support thumbnails this cycle — if
  * `thumbHandle` is passed on the chunked path it is dropped (never silently
  * leaked) rather than used.
+ *
+ * Returns the server-assigned envelope id and the base64-encoded MLS ciphertext
+ * so callers can persist the sender's own copy to Dexie the same way text sends
+ * do (`usePersistentMessages.persistOutgoing`) — added this cycle to close the
+ * "sent media never survives a reload" gap. Deliberately does NOT return the raw
+ * mediaKey/iv/blobId: they never leave WASM as opaque handles on this path (see
+ * MessageRow.mediaJson's ASYMMETRY note, db/schema.ts) — callers persisting this
+ * result should pass a placeholder text only, no `media` payload.
  */
 export async function encryptAndSendMedia(
 	bytes: Uint8Array,
@@ -193,7 +202,7 @@ export async function encryptAndSendMedia(
 	sessionToken: string,
 	cryptoWorker: CryptoWorker,
 	thumbHandle?: string | null,
-): Promise<void> {
+): Promise<{ envelopeId: string; ciphertextB64: string }> {
 	if (bytes.length > MEDIA_CHUNK_THRESHOLD) {
 		// §9.4.2 thumbnails are out of scope — drop any handle rather than leak it.
 		if (thumbHandle) {
@@ -231,11 +240,11 @@ export async function encryptAndSendMedia(
 				mimeType,
 			);
 
-			await sendMessageApi(sessionToken, groupId, mlsCiphertext);
+			const envelopeId = await sendMessageApi(sessionToken, groupId, mlsCiphertext);
+			return { envelopeId, ciphertextB64: uint8ToBase64(mlsCiphertext) };
 		} finally {
 			await cryptoWorker.mediaDropKey(mediaKeyHandle);
 		}
-		return;
 	}
 
 	const { ciphertext, mediaKeyHandle, iv, blobHash } = await cryptoWorker.mediaEncrypt(bytes);
@@ -278,7 +287,8 @@ export async function encryptAndSendMedia(
 					mimeType,
 				);
 
-		await sendMessageApi(sessionToken, groupId, mlsCiphertext);
+		const envelopeId = await sendMessageApi(sessionToken, groupId, mlsCiphertext);
+		return { envelopeId, ciphertextB64: uint8ToBase64(mlsCiphertext) };
 	} finally {
 		await cryptoWorker.mediaDropKey(mediaKeyHandle);
 	}

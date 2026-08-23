@@ -40,6 +40,7 @@ const SENSITIVE: Record<string, readonly string[]> = {
 		"reactionsJson",
 		"pollJson",
 		"replyToJson",
+		"mediaJson",
 	],
 	groups: ["mlsStateB64", "name", "draft", "description", "nickname"],
 	identity: ["mlsProviderStateB64", "customStatusEmoji", "customStatusText"],
@@ -140,6 +141,11 @@ export class EncryptedPowehiDb {
 			}
 			await this.db.messages.put({
 				...enc,
+				// mediaJson (like replyToJson) is intentionally NOT in this preserve list —
+				// both are set once at creation, so a replayed persistIncoming for the same
+				// id carries the identical original value in the fresh row anyway. Worst
+				// case on a genuinely different fresh value is a lost attachment reference,
+				// never wrong key material (mediaJson is per-row self-contained JSON).
 				reactionsJson: existing.reactionsJson,
 				readByJson: existing.readByJson,
 				read: existing.read,

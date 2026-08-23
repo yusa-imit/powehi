@@ -15,6 +15,7 @@ import { useCallback } from "react";
 import { encryptAndSendMedia } from "../lib/mediaTransfer";
 import { useAuthStore } from "../store/auth";
 import { useCryptoWorker } from "./useCryptoWorker";
+import type { PersistedMessages } from "./usePersistentMessages";
 
 const THUMB_MAX_DIM = 64;
 const THUMB_QUALITY = 0.6;
@@ -52,6 +53,25 @@ async function generateThumbnail(file: File): Promise<Uint8Array | null> {
 export interface MediaSendOptions {
 	identityId: string | undefined;
 	groupId: string | undefined;
+	/**
+	 * Persist the sender's own copy of a sent media message to Dexie (the same
+	 * `usePersistentMessages().persistOutgoing` text sends already use) so it survives a
+	 * reload — this cycle's fix; previously `sendMedia` never called any persist hook,
+	 * so every sent photo/video/voice note vanished from chat history on reload. Optional
+	 * so callers/tests that don't need persistence keep working unchanged.
+	 *
+	 * KNOWN LIMITATION (architectural, not an oversight — see MessageRow.mediaJson's
+	 * ASYMMETRY note, db/schema.ts): the row this creates carries a placeholder `text`
+	 * ("Image attachment"/"Video attachment"/"Voice message", matching the existing
+	 * optimistic bubble below) but NO `media` payload — the raw AES-256-GCM media key
+	 * never crosses the WASM→JS boundary on send (`encryptAndSendMedia` only ever
+	 * returns an opaque-handle-backed ciphertext), so there is no key to persist for a
+	 * redisplayable copy. This is not a regression: even the live, not-yet-reloaded
+	 * bubble for a message YOU sent has never rendered an inline preview in this app,
+	 * only this same placeholder text — a reload now correctly preserves that
+	 * placeholder instead of losing the message entirely.
+	 */
+	persistOutgoing?: PersistedMessages["persistOutgoing"];
 }
 
 export interface MediaSendHook {
@@ -59,7 +79,11 @@ export interface MediaSendHook {
 	sendMedia: (file: File) => Promise<void>;
 }
 
-export function useMediaSend({ identityId, groupId }: MediaSendOptions): MediaSendHook {
+export function useMediaSend({
+	identityId,
+	groupId,
+	persistOutgoing,
+}: MediaSendOptions): MediaSendHook {
 	const { sessionToken } = useAuthStore();
 	const cryptoWorker = useCryptoWorker();
 
@@ -83,7 +107,7 @@ export function useMediaSend({ identityId, groupId }: MediaSendOptions): MediaSe
 			}
 
 			try {
-				await encryptAndSendMedia(
+				const { envelopeId, ciphertextB64 } = await encryptAndSendMedia(
 					fileBytes,
 					file.type || "application/octet-stream",
 					identityId,
@@ -92,6 +116,15 @@ export function useMediaSend({ identityId, groupId }: MediaSendOptions): MediaSe
 					cryptoWorker,
 					thumbHandle,
 				);
+				// See MediaSendOptions.persistOutgoing's KNOWN LIMITATION doc comment — no
+				// `media` payload passed, only a placeholder text (same convention as the
+				// optimistic bubble in ChatLayout's handleFileSelect/sendVoice).
+				const placeholderText = file.type.startsWith("video/")
+					? "Video attachment"
+					: file.type.startsWith("audio/")
+						? "Voice message"
+						: "Image attachment";
+				persistOutgoing?.(envelopeId, groupId, placeholderText, ciphertextB64);
 			} finally {
 				// Always drop the thumbnail handle regardless of success or failure
 				// (the media key handle is dropped inside encryptAndSendMedia itself).
@@ -100,7 +133,7 @@ export function useMediaSend({ identityId, groupId }: MediaSendOptions): MediaSe
 				}
 			}
 		},
-		[sessionToken, identityId, groupId, cryptoWorker],
+		[sessionToken, identityId, groupId, cryptoWorker, persistOutgoing],
 	);
 
 	return { sendMedia };

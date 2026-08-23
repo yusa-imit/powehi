@@ -724,6 +724,49 @@ describe("EncryptedPowehiDb", () => {
 		expect(rawRow?.replyToJson).not.toBe(replyToJson);
 	});
 
+	it("putMessage persists mediaJson (encrypted at rest) and survives reload", async () => {
+		const mediaJson = JSON.stringify({
+			blobId: "blob-enc-1",
+			blobHash: [1, 2, 3, 4],
+			mediaKey: [5, 6, 7, 8],
+			iv: [9, 10, 11],
+		});
+		await encDb.putMessage({
+			id: "msg-media",
+			groupId: "grp-media",
+			ciphertextB64: "bWVkaWFDaXBoZXJ0ZXh0",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+			plaintextB64: "W2ltYWdlXQ==",
+			mediaJson,
+		});
+
+		const retrieved = await encDb.getMessage("msg-media");
+		expect(retrieved?.mediaJson).toBe(mediaJson);
+		expect(retrieved?.ciphertextB64).toBe("bWVkaWFDaXBoZXJ0ZXh0");
+
+		// Raw stored value must not equal the plaintext JSON — it's encrypted at rest,
+		// same as ciphertextB64/plaintextB64/pollJson/replyToJson.
+		const rawRow = await rawDb.messages.get("msg-media");
+		expect(rawRow?.mediaJson).not.toBe(mediaJson);
+	});
+
+	it("putMessage leaves mediaJson undefined for a text-only message", async () => {
+		await encDb.putMessage({
+			id: "msg-text-only",
+			groupId: "grp-media",
+			ciphertextB64: "dGV4dA==",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+			plaintextB64: "aGVsbG8=",
+		});
+
+		const retrieved = await encDb.getMessage("msg-text-only");
+		expect(retrieved?.mediaJson).toBeUndefined();
+	});
+
 	it("markMessageDelivered sets delivered:true on the row", async () => {
 		await encDb.addMessage({
 			id: "msg-delivered",

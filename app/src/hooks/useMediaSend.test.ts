@@ -216,4 +216,80 @@ describe("useMediaSend (prd.md §9.2)", () => {
 		expect(mockWorker.mediaMessageCreate).toHaveBeenCalledOnce();
 		expect(sendMessageSpy).toHaveBeenCalledOnce();
 	});
+
+	// This cycle's fix: sendMedia never called any Dexie persist hook at all, so every
+	// sent photo/video/voice note vanished from chat history on reload.
+	describe("persistOutgoing wiring (Dexie persistence — this cycle's fix)", () => {
+		it("calls persistOutgoing with the envelope id, groupId, an image placeholder text, and the base64 ciphertext — no media payload (see KNOWN LIMITATION doc comment)", async () => {
+			sendMessageSpy.mockResolvedValueOnce("envelope-img-1");
+			const persistOutgoing = vi.fn();
+
+			const { result } = renderHook(() =>
+				useMediaSend({ identityId: IDENTITY_ID, groupId: "group-1", persistOutgoing }),
+			);
+			await result.current.sendMedia(makeFile()); // makeFile() defaults to image/jpeg
+
+			expect(persistOutgoing).toHaveBeenCalledOnce();
+			const [id, groupId, text, ciphertextB64, ...rest] = persistOutgoing.mock.calls[0];
+			expect(id).toBe("envelope-img-1");
+			expect(groupId).toBe("group-1");
+			expect(text).toBe("Image attachment");
+			expect(typeof ciphertextB64).toBe("string");
+			// No media payload passed — the raw key never crosses the WASM→JS boundary on send.
+			expect(rest.every((arg) => arg === undefined)).toBe(true);
+		});
+
+		it("uses the 'Video attachment' placeholder for a video/* file", async () => {
+			const persistOutgoing = vi.fn();
+			const videoFile = new File([new Uint8Array(10)], "clip.mp4", { type: "video/mp4" });
+			Object.defineProperty(videoFile, "arrayBuffer", {
+				value: async () => new Uint8Array(10).buffer,
+				configurable: true,
+			});
+
+			const { result } = renderHook(() =>
+				useMediaSend({ identityId: IDENTITY_ID, groupId: "group-1", persistOutgoing }),
+			);
+			await result.current.sendMedia(videoFile);
+
+			expect(persistOutgoing).toHaveBeenCalledOnce();
+			expect(persistOutgoing.mock.calls[0][2]).toBe("Video attachment");
+		});
+
+		it("uses the 'Voice message' placeholder for an audio/* file", async () => {
+			const persistOutgoing = vi.fn();
+			const voiceFile = new File([new Uint8Array(10)], "voice.webm", { type: "audio/webm" });
+			Object.defineProperty(voiceFile, "arrayBuffer", {
+				value: async () => new Uint8Array(10).buffer,
+				configurable: true,
+			});
+
+			const { result } = renderHook(() =>
+				useMediaSend({ identityId: IDENTITY_ID, groupId: "group-1", persistOutgoing }),
+			);
+			await result.current.sendMedia(voiceFile);
+
+			expect(persistOutgoing).toHaveBeenCalledOnce();
+			expect(persistOutgoing.mock.calls[0][2]).toBe("Voice message");
+		});
+
+		it("does not throw when persistOutgoing is omitted (optional param, back-compat)", async () => {
+			const { result } = renderHook(() =>
+				useMediaSend({ identityId: IDENTITY_ID, groupId: "group-1" }),
+			);
+			await expect(result.current.sendMedia(makeFile())).resolves.not.toThrow();
+		});
+
+		it("does not call persistOutgoing when the send fails", async () => {
+			sendMessageSpy.mockRejectedValueOnce(new Error("network error"));
+			const persistOutgoing = vi.fn();
+
+			const { result } = renderHook(() =>
+				useMediaSend({ identityId: IDENTITY_ID, groupId: "group-1", persistOutgoing }),
+			);
+			await expect(result.current.sendMedia(makeFile())).rejects.toThrow("network error");
+
+			expect(persistOutgoing).not.toHaveBeenCalled();
+		});
+	});
 });

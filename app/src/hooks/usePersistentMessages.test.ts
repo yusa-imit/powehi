@@ -7,7 +7,7 @@ import { db } from "../db/schema";
 import { useAuthStore } from "../store/auth";
 import { base64ToText, textToBase64 } from "../utils/base64";
 import * as CryptoWorkerHook from "./useCryptoWorker";
-import type { IncomingMessage } from "./useMessages";
+import type { IncomingMessage, MediaPayload } from "./useMessages";
 import { usePersistentMessages } from "./usePersistentMessages";
 
 // The fake encryptor satisfies FieldEncryptor without needing the Comlink proxy.
@@ -189,6 +189,40 @@ describe("usePersistentMessages", () => {
 		expect(result.current.rows[0].replyToJson).toBeUndefined();
 	});
 
+	it("persistOutgoing threads a media payload into mediaJson", async () => {
+		const media: MediaPayload = {
+			blobId: "blob-out-1",
+			blobHash: [1, 2, 3],
+			mediaKey: [4, 5, 6],
+			iv: [7, 8, 9],
+		};
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+
+		await act(async () => {
+			result.current.persistOutgoing(
+				"out-media-id",
+				GROUP_ID,
+				"Image attachment",
+				btoa("ct"),
+				undefined,
+				undefined,
+				media,
+			);
+		});
+
+		expect(result.current.rows[0].mediaJson).toBe(JSON.stringify(media));
+	});
+
+	it("persistOutgoing leaves mediaJson undefined when no media is given (the normal outgoing-media case — see MessageRow.mediaJson's ASYMMETRY note)", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+
+		await act(async () => {
+			result.current.persistOutgoing("out-nomedia-id", GROUP_ID, "Image attachment", btoa("ct"));
+		});
+
+		expect(result.current.rows[0].mediaJson).toBeUndefined();
+	});
+
 	it("persistOutgoing threads expiresAt into the row (disappearing-message sender copy)", async () => {
 		const EXPIRES_AT = Date.now() + 60_000;
 		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
@@ -356,6 +390,35 @@ describe("usePersistentMessages", () => {
 		});
 
 		expect(result.current.rows[0].replyToJson).toBeUndefined();
+	});
+
+	it("persistIncoming threads msg.media (including the real mediaKey) into mediaJson", async () => {
+		const media: MediaPayload = {
+			blobId: "blob-in-1",
+			blobHash: [1, 2, 3],
+			mediaKey: [10, 20, 30],
+			iv: [4, 5, 6],
+			mimeType: "image/jpeg",
+		};
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistIncoming(makeIncoming({ media }));
+		});
+
+		expect(result.current.rows[0].mediaJson).toBe(JSON.stringify(media));
+	});
+
+	it("persistIncoming leaves mediaJson undefined when the message has no media attachment", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistIncoming(makeIncoming());
+		});
+
+		expect(result.current.rows[0].mediaJson).toBeUndefined();
 	});
 
 	it("purgeExpired removes expired rows from local state", async () => {
