@@ -17,7 +17,91 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-23, cycle 343 — FEATURE: persist sender's own copy of forwarded text messages, commit 3fab286)
+## Current state (2026-08-23, cycle 344 — FEATURE: close concurrent-reaction persistence race, commit 2b86969)
+
+- All phase 1-6 checklists were already complete going into this cycle; CI green
+  (`gh run list --limit 3` all success), `gh issue list --state open` empty. Picked
+  up the standing "next cycle candidate" note from cycle 320-343's log: `persistReaction`
+  still had the same full-replace-overwrite race that `persistRead`'s `readBy` had
+  before cycle 322's fix (concurrent reactions to the same message from different
+  devices, each computed from a possibly-stale in-memory snapshot, could have the
+  later Dexie write clobber the earlier one's entry).
+- Replaced `EncryptedPowehiDb.markMessageReactions(id, reactionsJson)` (full-replace)
+  with `markMessageReactionDelta(id, emoji, senderId, action: "add"|"remove")` —
+  reads the persisted (encrypted) reaction map, decrypts, merges the single delta,
+  re-encrypts, writes back, all inside one Dexie `rw` transaction. Unlike
+  `markMessageRead`'s readByJson (unencrypted field, synchronous merge), reactionsJson
+  is a SENSITIVE encrypted-at-rest field, so the merge needs two async crypto-worker
+  round trips inside the transaction — used `Dexie.waitFor(...)` (documented Dexie API
+  for exactly this: keep an IDB transaction alive across a non-Dexie await instead of
+  letting it auto-commit early) around both the decrypt and the encrypt calls.
+- `usePersistentMessages.ts`'s `persistReaction` signature changed from
+  `(targetMessageId, reactions: Record<string,string[]>)` to
+  `(targetMessageId, emoji, senderId, action)` — call sites in `ChatLayout.tsx`
+  (`handleIncomingReaction`/`handleRemoveReaction`) already computed exactly these
+  primitives before building the old full map, so the call sites got simpler, not
+  more complex. Optimistic `rows` update recomputes the merge from each row's latest
+  functional-update snapshot.
+- **security-auditor: YELLOW** (not FAIL — reviewed via Task before commit since this
+  touches the Dexie encryption boundary). PASS on all 4 explicitly-asked questions: no
+  plaintext/sender-id leakage into logs or thrown errors; `Dexie.waitFor` fails closed
+  (rejection/60s-timeout aborts the transaction, no partial/half-merged write can
+  land); the race is genuinely closed for reaction-vs-reaction (IDB serializes
+  overlapping-scope rw transactions); no auth/authz regression (senderId is still
+  `env.sender`, the server-attested device id — a malicious peer still can't forge
+  another device's reaction, and can now only ever filter its OWN id out on remove).
+  Findings applied this cycle: (F6) bounded reaction `targetMessageId` to `<=36` chars
+  in `useMessages.ts` (matches `read_receipt`'s existing bound; auditor's own
+  suggested cheapest mitigation for the lock-hold concern below) — done; (F8) fixed
+  two stale doc-comment references to the removed `markMessageReactions` name, and
+  clarified `markMessageReactionDelta`'s doc comment to not overclaim that the merge
+  guarantee extends to `putMessage`'s full-row overwrite path — done. Deferred to a
+  future cycle (pre-existing or narrow-impact, not regressions from this diff): (F1)
+  the transaction now holds an exclusive lock across TWO crypto round trips on a
+  peer-driven (reaction-rate) hot path, with no inbound rate limit today — could
+  head-of-line-block `persistIncoming`'s `putMessage` under a reaction burst; (F2)
+  optimistic `rows`/`chats` state isn't rolled back if the Dexie transaction aborts
+  (self-heals on reload, no capability granted); (F3) the new concurrent-merge test
+  runs against `fake-indexeddb`, not a real-browser transaction-liveness check
+  (WebKit is the historical risk case for `waitFor`-held transactions) — a Playwright
+  assertion would close this; (F4) `putMessage` (full-row upsert, encryption outside
+  any transaction) can still wipe `reactionsJson`/`readByJson`/etc. on a duplicate/
+  replayed `persistIncoming` for an id that already has reactions — pre-existing,
+  same class noted for `readByJson` previously, doc-comment overclaim now fixed but
+  the underlying gap remains; (F5) `pendingWriteIds` is a Set not a refcount, so two
+  concurrent same-id reaction writes can have the first's `.finally` clear the guard
+  while the second is still in flight (pre-existing shape, now more reachable since
+  concurrent same-id writes are the scenario this fix targets); (F7) reaction senders
+  array has no cardinality bound (pre-existing, cost of the bound now paid inside the
+  exclusive lock too — compounds F1 under a compromised-server device-id-minting
+  scenario).
+- Not architectural, no new server-visible metadata (pure local persistence/merge
+  logic for reactions that were already being received over the wire) —
+  `threat-model-checker`/`crypto-reviewer` not required, consistent with how the
+  identical `persistRead` fix (cycle 322) and the edit/delete/reaction persistence
+  work (cycles 252-254) were scoped.
+- `tsc -b` clean, `biome check` clean. Frontend `pnpm test --run`: **1465/1465 tests
+  green** (104 files) — one `ChatLayoutPoll.test.tsx` failure appeared under one
+  full-suite run (`poll.options[0].voters` assertion) but passed both standalone and
+  on a second full-suite rerun; pre-existing test-isolation flake under parallel
+  load, unrelated to this change (poll code untouched), not investigated further this
+  cycle. Test counts: `encrypted-db.test.ts` net +3 (2 new delta-merge/no-op tests
+  replacing the 2 old full-replace tests, +1 net), `usePersistentMessages.test.ts` net
+  +1 (split one full-map test into an add+merge test and a separate remove test),
+  `ChatLayout.test.tsx` unchanged count (existing reaction-persistence tests updated
+  to assert the new delta call signature instead of the old full-map argument).
+- **Next cycle candidates:** F1/F7 above (peer-driven lock-hold amplification — worth
+  a look if reaction volume ever becomes a real concern, currently no inbound
+  rate limit on reactions specifically); F3 (Playwright test for real-browser
+  `Dexie.waitFor` transaction liveness); F4 (the pre-existing `putMessage`
+  full-row-overwrite gap — same class as previously-deferred `readByJson` concern,
+  now explicitly documented rather than newly discovered); PQ hybrid Phase A (still
+  blocked on openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade
+  (gated on ADR-0003 Phase B 95%-session threshold); opaque-ke live-migration
+  login-round-trip regression test gap (cycle 318/319, no prod users yet, low
+  urgency).
+
+## Previous state (2026-08-23, cycle 343 — FEATURE: persist sender's own copy of forwarded text messages, commit 3fab286)
 
 - CI green (`gh run list --limit 3`), `gh issue list --state open` empty, `git status` clean at
   cycle start. Cycle-340's "next cycle candidates" note claiming "pins/mentions remain
