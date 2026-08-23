@@ -37,8 +37,17 @@ export interface PersistedMessages {
 	persistEdit: (targetMessageId: string, newText: string) => void;
 	/** Persist a "delete for everyone" signal so the tombstone survives a reload. Best-effort. */
 	persistDelete: (targetMessageId: string) => void;
-	/** Persist the current reaction map for a message so reactions survive a reload. Best-effort. */
-	persistReaction: (targetMessageId: string, reactions: Record<string, string[]>) => void;
+	/**
+	 * Persist one sender's add/remove of a single emoji reaction so it survives a
+	 * reload. Merged against the persisted map (not a full-replace) — see
+	 * `markMessageReactionDelta` in encrypted-db.ts. Best-effort.
+	 */
+	persistReaction: (
+		targetMessageId: string,
+		emoji: string,
+		senderId: string,
+		action: "add" | "remove",
+	) => void;
 	/**
 	 * Persist a newly-created poll message. Unlike other persist* helpers this CREATES the row
 	 * (polls never go through persistOutgoing — there is no MLS envelope type for them, so
@@ -85,7 +94,7 @@ export interface PersistedMessages {
 	claimScheduledFire: (targetMessageId: string) => Promise<MessageRow | undefined>;
 	/**
 	 * Message ids with a persist* write currently in flight (added when a persist* call
-	 * starts, removed once its Dexie write settles). markMessageEdited/markMessageReactions
+	 * starts, removed once its Dexie write settles). markMessageEdited/markMessageReactionDelta
 	 * await an encryptDbField crypto-worker round-trip before the IndexedDB write lands —
 	 * a group switch-away-and-back in that window re-reads via getMessagesByGroup and can
 	 * observe the pre-write row. Callers that reconcile in-memory state against freshly
@@ -235,14 +244,48 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 		[encryptedDb],
 	);
 
+	/**
+	 * Persists one sender's add/remove of a single emoji, merged against the
+	 * currently-persisted map by `markMessageReactionDelta` rather than overwritten
+	 * wholesale — closes the same cross-device-race class already fixed for
+	 * `persistRead`'s readBy (see that method's doc comment + markMessageReactionDelta
+	 * in encrypted-db.ts). The optimistic `rows` update below recomputes from `r`
+	 * (React's latest functional-update snapshot, not a possibly-stale closure
+	 * variable) so the in-memory mirror can't itself regress under a fast double-call,
+	 * even though only the Dexie write is racing multiple *devices*.
+	 */
 	const persistReaction = useCallback(
-		(targetMessageId: string, reactions: Record<string, string[]>) => {
+		(targetMessageId: string, emoji: string, senderId: string, action: "add" | "remove") => {
 			if (!encryptedDb) return;
-			const reactionsJson = JSON.stringify(reactions);
-			setRows((prev) => prev.map((r) => (r.id === targetMessageId ? { ...r, reactionsJson } : r)));
+			setRows((prev) =>
+				prev.map((r) => {
+					if (r.id !== targetMessageId) return r;
+					let reactions: Record<string, string[]> = {};
+					if (r.reactionsJson) {
+						try {
+							reactions = JSON.parse(r.reactionsJson) as Record<string, string[]>;
+						} catch {
+							reactions = {};
+						}
+					}
+					const senders = reactions[emoji] ?? [];
+					const alreadyIn = senders.includes(senderId);
+					if (action === "add" && alreadyIn) return r;
+					if (action === "remove" && !alreadyIn) return r;
+					const nextSenders =
+						action === "add" ? [...senders, senderId] : senders.filter((s) => s !== senderId);
+					const nextReactions = { ...reactions };
+					if (nextSenders.length === 0) {
+						delete nextReactions[emoji];
+					} else {
+						nextReactions[emoji] = nextSenders;
+					}
+					return { ...r, reactionsJson: JSON.stringify(nextReactions) };
+				}),
+			);
 			pendingWriteIdsRef.current.add(targetMessageId);
 			encryptedDb
-				.markMessageReactions(targetMessageId, reactionsJson)
+				.markMessageReactionDelta(targetMessageId, emoji, senderId, action)
 				.catch(() => setWriteErrorCount((n) => n + 1))
 				.finally(() => pendingWriteIdsRef.current.delete(targetMessageId));
 		},
@@ -331,11 +374,12 @@ export function usePersistentMessages(groupId: string | undefined): PersistedMes
 
 	/**
 	 * `readBy` is computed by the caller from a snapshot that may already be
-	 * stale by write time (same as `persistReaction`) — but `EncryptedPowehiDb
-	 * .markMessageRead` unions it against the currently-persisted reader set
-	 * inside a single Dexie transaction rather than overwriting, so two
-	 * concurrent read_receipts for the same message can no longer clobber each
-	 * other's entry (fixed cycle 322; was security-auditor YELLOW, cycle 321).
+	 * stale by write time — but `EncryptedPowehiDb.markMessageRead` unions it
+	 * against the currently-persisted reader set inside a single Dexie
+	 * transaction rather than overwriting, so two concurrent read_receipts for
+	 * the same message can no longer clobber each other's entry (fixed cycle
+	 * 322; was security-auditor YELLOW, cycle 321). `persistReaction` closes the
+	 * same class of race the same way — see `markMessageReactionDelta`.
 	 */
 	const persistRead = useCallback(
 		(targetMessageId: string, readBy: string[]) => {

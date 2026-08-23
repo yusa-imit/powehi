@@ -506,7 +506,7 @@ describe("ChatLayout", () => {
 		it("incoming reaction persists the reaction map to Dexie so it survives a reload", async () => {
 			const reactionSpy = vi.spyOn(
 				EncryptedDbModule.EncryptedPowehiDb.prototype,
-				"markMessageReactions",
+				"markMessageReactionDelta",
 			);
 			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
 			let capturedOnReaction:
@@ -537,17 +537,14 @@ describe("ChatLayout", () => {
 			});
 
 			await waitFor(() =>
-				expect(reactionSpy).toHaveBeenCalledWith(
-					MSG_ID,
-					JSON.stringify({ "👍": ["peer-device-1"] }),
-				),
+				expect(reactionSpy).toHaveBeenCalledWith(MSG_ID, "👍", "peer-device-1", "add"),
 			);
 		});
 
 		it("reaction_remove persists the updated (emoji key dropped) map to Dexie", async () => {
 			const reactionSpy = vi.spyOn(
 				EncryptedDbModule.EncryptedPowehiDb.prototype,
-				"markMessageReactions",
+				"markMessageReactionDelta",
 			);
 			let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
 			let capturedOnReaction:
@@ -580,10 +577,7 @@ describe("ChatLayout", () => {
 				capturedOnReaction?.("11111111-1111-1111-1111-111111111111", MSG_ID, "🔥", "peer-device-1");
 			});
 			await waitFor(() =>
-				expect(reactionSpy).toHaveBeenCalledWith(
-					MSG_ID,
-					JSON.stringify({ "🔥": ["peer-device-1"] }),
-				),
+				expect(reactionSpy).toHaveBeenCalledWith(MSG_ID, "🔥", "peer-device-1", "add"),
 			);
 
 			await act(async () => {
@@ -595,8 +589,10 @@ describe("ChatLayout", () => {
 				);
 			});
 
-			// Last sender for that emoji removed — the emoji key is dropped entirely.
-			await waitFor(() => expect(reactionSpy).toHaveBeenLastCalledWith(MSG_ID, JSON.stringify({})));
+			// Last sender for that emoji removed — markMessageReactionDelta drops the emoji key.
+			await waitFor(() =>
+				expect(reactionSpy).toHaveBeenLastCalledWith(MSG_ID, "🔥", "peer-device-1", "remove"),
+			);
 		});
 
 		it("incoming reaction is NOT forwarded to the message list as a new message", async () => {

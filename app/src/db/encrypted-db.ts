@@ -139,21 +139,71 @@ export class EncryptedPowehiDb {
 	}
 
 	/**
-	 * Persist the current emoji reaction state for a message (encrypted at rest)
-	 * so reactions survive a reload. Takes the full JSON-serialized senders map —
-	 * callers pass the post-mutation state, not a diff. No-op if the row does not
-	 * exist locally, same as markMessageEdited/markMessageDeleted.
+	 * Persist a single sender's add/remove of one emoji reaction, merged against the
+	 * currently-persisted reaction map rather than overwritten wholesale. Callers used
+	 * to pass the full post-mutation map computed from a possibly-stale in-memory
+	 * snapshot — two reactions to the same message from different devices in quick
+	 * succession could race and have the later write clobber the earlier one's entry
+	 * (same class of bug as markMessageRead's readBy, security-auditor YELLOW cycle
+	 * 321; deferred for reactions at the time, now closed the same way).
+	 *
+	 * reactionsJson is encrypted at rest (SENSITIVE.messages), so the merge requires
+	 * an async crypto-worker round-trip inside the transaction. `Dexie.waitFor` tells
+	 * Dexie to keep the IndexedDB transaction open across that non-Dexie await instead
+	 * of letting it auto-commit early (the risk `claimScheduledFire` above avoids by
+	 * doing its crypto work outside the transaction — not an option here since the
+	 * read-modify-write itself must happen on the decrypted value). IndexedDB still
+	 * serializes readwrite transactions on the same store, so the second caller's
+	 * `get` always observes the first caller's committed `update`. No-op if the row
+	 * does not exist locally, same as markMessageEdited/markMessageDeleted.
+	 *
+	 * NOTE (security-auditor, cycle 344): this only closes the race between concurrent
+	 * markMessageReactionDelta calls. `putMessage` is a full-row upsert (encrypted
+	 * outside any transaction) and callers build fresh rows with `reactionsJson:
+	 * undefined` — a duplicate/replayed persistIncoming for an id that already has
+	 * reactions can still wipe this field. Pre-existing, out of scope here.
 	 */
-	async markMessageReactions(id: string, reactionsJson: string): Promise<void> {
-		const enc = await this.encryptor.encryptDbField(reactionsJson);
-		await this.db.messages.update(id, { reactionsJson: enc });
+	async markMessageReactionDelta(
+		id: string,
+		emoji: string,
+		senderId: string,
+		action: "add" | "remove",
+	): Promise<void> {
+		await this.db.transaction("rw", this.db.messages, async () => {
+			const row = await this.db.messages.get(id);
+			if (!row) return;
+			let reactions: Record<string, string[]> = {};
+			if (row.reactionsJson) {
+				const plaintext = await Dexie.waitFor(this.encryptor.decryptDbField(row.reactionsJson));
+				try {
+					reactions = JSON.parse(plaintext) as Record<string, string[]>;
+				} catch {
+					reactions = {};
+				}
+			}
+			const senders = reactions[emoji] ?? [];
+			const alreadyIn = senders.includes(senderId);
+			if (action === "add" && alreadyIn) return;
+			if (action === "remove" && !alreadyIn) return;
+			const nextSenders =
+				action === "add" ? [...senders, senderId] : senders.filter((s) => s !== senderId);
+			const nextReactions = { ...reactions };
+			if (nextSenders.length === 0) {
+				delete nextReactions[emoji];
+			} else {
+				nextReactions[emoji] = nextSenders;
+			}
+			const enc = await Dexie.waitFor(this.encryptor.encryptDbField(JSON.stringify(nextReactions)));
+			await this.db.messages.update(id, { reactionsJson: enc });
+		});
 	}
 
 	/**
 	 * Persist the current poll state (question + option vote lists, JSON-serialized,
 	 * encrypted at rest) so a group poll and its votes survive a reload. Takes the full
-	 * post-mutation poll, same "callers pass post-mutation state, not a diff" contract as
-	 * markMessageReactions. No-op if the row does not exist locally.
+	 * post-mutation poll (a "callers pass post-mutation state, not a diff" contract) —
+	 * unlike markMessageReactionDelta, which merges a single add/remove against the
+	 * persisted state. No-op if the row does not exist locally.
 	 */
 	async markMessagePoll(id: string, pollJson: string): Promise<void> {
 		const enc = await this.encryptor.encryptDbField(pollJson);

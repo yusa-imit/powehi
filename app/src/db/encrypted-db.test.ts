@@ -403,7 +403,7 @@ describe("EncryptedPowehiDb", () => {
 		expect(retrieved?.ciphertextB64).toBe("dG9EZWxldGU=");
 	});
 
-	it("markMessageReactions persists the reaction map (encrypted at rest) and survives reload", async () => {
+	it("markMessageReactionDelta adds the first reaction (encrypted at rest) and survives reload", async () => {
 		await encDb.addMessage({
 			id: "msg-react",
 			groupId: "grp-react",
@@ -412,22 +412,66 @@ describe("EncryptedPowehiDb", () => {
 			epochSeq: 0,
 			receivedAt: 1000,
 		});
-		const reactionsJson = JSON.stringify({ "\u{1F44D}": ["dev-1", "dev-2"] });
-		await encDb.markMessageReactions("msg-react", reactionsJson);
+		await encDb.markMessageReactionDelta("msg-react", "\u{1F44D}", "dev-1", "add");
 
 		const retrieved = await encDb.getMessage("msg-react");
-		expect(retrieved?.reactionsJson).toBe(reactionsJson);
+		expect(JSON.parse(retrieved?.reactionsJson ?? "{}")).toEqual({ "\u{1F44D}": ["dev-1"] });
 		// Original ciphertext untouched.
 		expect(retrieved?.ciphertextB64).toBe("cmVhY3Rpb25zVGFyZ2V0");
 
 		// Raw stored value must not equal the plaintext JSON — it's encrypted at rest.
 		const rawRow = await rawDb.messages.get("msg-react");
-		expect(rawRow?.reactionsJson).not.toBe(reactionsJson);
+		expect(rawRow?.reactionsJson).not.toBe(retrieved?.reactionsJson);
 	});
 
-	it("markMessageReactions is a no-op when the target row does not exist locally", async () => {
+	it("markMessageReactionDelta merges concurrent adds from different senders instead of clobbering", async () => {
+		await encDb.addMessage({
+			id: "msg-react-concurrent",
+			groupId: "grp-react",
+			ciphertextB64: "Y29uY3VycmVudA==",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+		});
+		// Two devices react with different emoji "at the same time" — both calls are
+		// in flight before either resolves, exercising the race markMessageRead's
+		// readBy fix already closed for reactions too.
+		await Promise.all([
+			encDb.markMessageReactionDelta("msg-react-concurrent", "\u{1F44D}", "dev-1", "add"),
+			encDb.markMessageReactionDelta("msg-react-concurrent", "❤️", "dev-2", "add"),
+		]);
+
+		const retrieved = await encDb.getMessage("msg-react-concurrent");
+		expect(JSON.parse(retrieved?.reactionsJson ?? "{}")).toEqual({
+			"\u{1F44D}": ["dev-1"],
+			"❤️": ["dev-2"],
+		});
+	});
+
+	it("markMessageReactionDelta removes a sender, dropping the emoji key once empty", async () => {
+		await encDb.addMessage({
+			id: "msg-react-remove",
+			groupId: "grp-react",
+			ciphertextB64: "cmVtb3Zl",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+		});
+		await encDb.markMessageReactionDelta("msg-react-remove", "\u{1F44D}", "dev-1", "add");
+		await encDb.markMessageReactionDelta("msg-react-remove", "\u{1F44D}", "dev-2", "add");
+		await encDb.markMessageReactionDelta("msg-react-remove", "\u{1F44D}", "dev-1", "remove");
+
+		const retrieved = await encDb.getMessage("msg-react-remove");
+		expect(JSON.parse(retrieved?.reactionsJson ?? "{}")).toEqual({ "\u{1F44D}": ["dev-2"] });
+
+		await encDb.markMessageReactionDelta("msg-react-remove", "\u{1F44D}", "dev-2", "remove");
+		const final = await encDb.getMessage("msg-react-remove");
+		expect(JSON.parse(final?.reactionsJson ?? "{}")).toEqual({});
+	});
+
+	it("markMessageReactionDelta is a no-op when the target row does not exist locally", async () => {
 		await expect(
-			encDb.markMessageReactions("no-such-msg", JSON.stringify({})),
+			encDb.markMessageReactionDelta("no-such-msg", "\u{1F44D}", "dev-1", "add"),
 		).resolves.not.toThrow();
 		const retrieved = await encDb.getMessage("no-such-msg");
 		expect(retrieved).toBeUndefined();

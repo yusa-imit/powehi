@@ -350,7 +350,8 @@ export function useMessages(
 							typeof parsed.emoji === "string" &&
 							typeof parsed.targetMessageId === "string" &&
 							(ALLOWED_REACTION_EMOJIS as readonly string[]).includes(parsed.emoji) &&
-							parsed.targetMessageId.length > 0
+							parsed.targetMessageId.length > 0 &&
+							parsed.targetMessageId.length <= 36
 						) {
 							onReactionRef.current?.(groupId, parsed.targetMessageId, parsed.emoji, env.sender);
 						}
@@ -361,7 +362,8 @@ export function useMessages(
 							typeof parsed.emoji === "string" &&
 							typeof parsed.targetMessageId === "string" &&
 							(ALLOWED_REACTION_EMOJIS as readonly string[]).includes(parsed.emoji) &&
-							parsed.targetMessageId.length > 0
+							parsed.targetMessageId.length > 0 &&
+							parsed.targetMessageId.length <= 36
 						) {
 							onReactionRemoveRef.current?.(
 								groupId,

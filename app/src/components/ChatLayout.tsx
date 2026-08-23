@@ -7477,7 +7477,7 @@ export function ChatLayout() {
 		// and back without a full reload) previously left the stale in-memory bubble
 		// untouched. Dexie is trusted as authoritative here EXCEPT for ids this tab still
 		// has an in-flight persist* write for (`pendingWriteIds`) — markMessageEdited/
-		// markMessageReactions await an encryptDbField crypto-worker round-trip before
+		// markMessageReactionDelta await an encryptDbField crypto-worker round-trip before
 		// the IndexedDB write lands, so a fast switch-away-and-back can otherwise re-read
 		// Dexie before this tab's own mutation has been written, reconciling the correct
 		// in-memory bubble back to stale pre-mutation data (security-auditor finding,
@@ -8012,15 +8012,16 @@ export function ChatLayout() {
 					return { ...c, messages: msgs };
 				}),
 			);
-			// Recompute the same result from the pre-update snapshot to persist it —
+			// Recompute from the pre-update snapshot to decide whether to persist —
 			// mirrors handleIncomingEdit/handleIncomingDelete's chatsRef.current read,
 			// since setChats is async and its updater result isn't otherwise available here.
+			// The actual persisted merge happens against Dexie's own current state
+			// (markMessageReactionDelta), so this snapshot only gates the no-op check.
 			const chat = chatsRef.current.find((c) => c.mlsGroupId === gId);
 			const target = chat?.messages.find((m) => m.id === targetId);
-			const existing = target?.reactions ?? {};
-			const senders = existing[emoji] ?? [];
+			const senders = target?.reactions?.[emoji] ?? [];
 			if (!senders.includes(senderId)) {
-				persistReaction(targetId, { ...existing, [emoji]: [...senders, senderId] });
+				persistReaction(targetId, emoji, senderId, "add");
 			}
 		},
 		[persistReaction],
@@ -8050,19 +8051,13 @@ export function ChatLayout() {
 					return { ...c, messages: msgs };
 				}),
 			);
-			// See handleIncomingReaction — recompute from the pre-update snapshot to persist.
+			// See handleIncomingReaction — recompute from the pre-update snapshot to decide
+			// whether to persist; the merge itself happens against Dexie's current state.
 			const chat = chatsRef.current.find((c) => c.mlsGroupId === gId);
 			const target = chat?.messages.find((m) => m.id === targetId);
-			const existing = target?.reactions ?? {};
-			const senders = existing[emoji] ?? [];
+			const senders = target?.reactions?.[emoji] ?? [];
 			if (senders.includes(senderId)) {
-				const newSenders = senders.filter((s) => s !== senderId);
-				if (newSenders.length === 0) {
-					const { [emoji]: _removed, ...rest } = existing;
-					persistReaction(targetId, rest);
-				} else {
-					persistReaction(targetId, { ...existing, [emoji]: newSenders });
-				}
+				persistReaction(targetId, emoji, senderId, "remove");
 			}
 		},
 		[persistReaction],

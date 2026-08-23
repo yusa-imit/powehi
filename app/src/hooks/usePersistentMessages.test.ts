@@ -479,7 +479,7 @@ describe("usePersistentMessages", () => {
 		});
 	});
 
-	it("persistReaction updates rows state with the serialized reaction map", async () => {
+	it("persistReaction adds a reaction and merges a second sender's add for the same emoji", async () => {
 		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
 		await act(async () => {});
 
@@ -487,19 +487,40 @@ describe("usePersistentMessages", () => {
 			result.current.persistIncoming(makeIncoming({ id: "react-target" }));
 		});
 		await act(async () => {
-			result.current.persistReaction("react-target", { "\u{1F44D}": ["dev-a", "dev-b"] });
+			result.current.persistReaction("react-target", "\u{1F44D}", "dev-a", "add");
 		});
+		expect(result.current.rows[0].reactionsJson).toBe(JSON.stringify({ "\u{1F44D}": ["dev-a"] }));
 
+		await act(async () => {
+			result.current.persistReaction("react-target", "\u{1F44D}", "dev-b", "add");
+		});
 		expect(result.current.rows[0].reactionsJson).toBe(
 			JSON.stringify({ "\u{1F44D}": ["dev-a", "dev-b"] }),
 		);
+	});
+
+	it("persistReaction removes a sender, dropping the emoji key once its senders list is empty", async () => {
+		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
+		await act(async () => {});
+
+		await act(async () => {
+			result.current.persistIncoming(makeIncoming({ id: "react-target" }));
+		});
+		await act(async () => {
+			result.current.persistReaction("react-target", "\u{1F44D}", "dev-a", "add");
+		});
+		await act(async () => {
+			result.current.persistReaction("react-target", "\u{1F44D}", "dev-a", "remove");
+		});
+
+		expect(result.current.rows[0].reactionsJson).toBe(JSON.stringify({}));
 	});
 
 	it("persistReaction is a no-op when the crypto worker is unavailable", async () => {
 		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(null);
 		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
 		await act(async () => {
-			result.current.persistReaction("react-target", { "\u{1F44D}": ["dev-a"] });
+			result.current.persistReaction("react-target", "\u{1F44D}", "dev-a", "add");
 		});
 		expect(result.current.rows).toHaveLength(0);
 	});
@@ -586,16 +607,16 @@ describe("usePersistentMessages", () => {
 		});
 	});
 
-	it("writeErrorCount increments when markMessageReactions throws on persistReaction", async () => {
+	it("writeErrorCount increments when markMessageReactionDelta throws on persistReaction", async () => {
 		vi.spyOn(
 			EncryptedDbModule.EncryptedPowehiDb.prototype,
-			"markMessageReactions",
+			"markMessageReactionDelta",
 		).mockRejectedValueOnce(new Error("db full"));
 		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
 		await act(async () => {});
 
 		await act(async () => {
-			result.current.persistReaction("react-target", { "\u{1F44D}": ["dev-a"] });
+			result.current.persistReaction("react-target", "\u{1F44D}", "dev-a", "add");
 		});
 
 		await waitFor(() => {
@@ -1005,7 +1026,7 @@ describe("usePersistentMessages", () => {
 		});
 		vi.spyOn(
 			EncryptedDbModule.EncryptedPowehiDb.prototype,
-			"markMessageReactions",
+			"markMessageReactionDelta",
 		).mockReturnValueOnce(writePromise);
 		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
 		await act(async () => {});
@@ -1014,7 +1035,7 @@ describe("usePersistentMessages", () => {
 		});
 
 		act(() => {
-			result.current.persistReaction("pending-reaction-target", { "\u{1F44D}": ["dev-a"] });
+			result.current.persistReaction("pending-reaction-target", "\u{1F44D}", "dev-a", "add");
 		});
 		expect(result.current.pendingWriteIds.has("pending-reaction-target")).toBe(true);
 
