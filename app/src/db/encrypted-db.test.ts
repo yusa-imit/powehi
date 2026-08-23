@@ -535,6 +535,103 @@ describe("EncryptedPowehiDb", () => {
 		expect(rawRow?.scheduledFor).toBe(scheduledFor);
 	});
 
+	it("putMessage preserves locally-accumulated mutable fields when replayed for an existing id (F4 redelivery fix)", async () => {
+		await encDb.addMessage({
+			id: "msg-redelivered",
+			groupId: "grp-1",
+			ciphertextB64: "b3JpZ2luYWw=",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+			plaintextB64: "aGVsbG8=",
+			expiresAt: 5000,
+		});
+		await encDb.markMessageReactionDelta("msg-redelivered", "👍", "dev-2", "add");
+		await encDb.markMessageRead("msg-redelivered", ["dev-2"]);
+		await encDb.markMessageStarred("msg-redelivered", true);
+		await encDb.markMessageDelivered("msg-redelivered");
+		await encDb.markMessageEdited("msg-redelivered", "ZWRpdGVk");
+		await encDb.markMessageDeleted("msg-redelivered");
+
+		// Simulate a redelivered envelope (e.g. ack DELETE failed, page reloaded, server
+		// re-sends the same message id) — persistIncoming builds a fresh row with no
+		// knowledge of the reactions/read/starred/etc state accumulated locally, and
+		// recomputes a LATER expiresAt from "now" (would silently restart the TTL if
+		// not preserved). Deliberately varies ciphertextB64/expiresAt from the original
+		// so the assertions below can't pass vacuously off an early-return-on-existing.
+		await encDb.putMessage({
+			id: "msg-redelivered",
+			groupId: "grp-1",
+			ciphertextB64: "cmVwbGF5ZWQ=",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+			plaintextB64: "aGVsbG8=",
+			expiresAt: 9999,
+		});
+
+		const retrieved = await encDb.getMessage("msg-redelivered");
+		// Fresh core field actually applied — proves this isn't a vacuous early-return.
+		expect(retrieved?.ciphertextB64).toBe("cmVwbGF5ZWQ=");
+		// Locally-accumulated mutable fields preserved, not clobbered.
+		expect(retrieved?.read).toBe(true);
+		expect(retrieved?.readByJson).toBe(JSON.stringify(["dev-2"]));
+		expect(retrieved?.starred).toBe(true);
+		expect(retrieved?.delivered).toBe(true);
+		expect(retrieved?.editedText).toBe("ZWRpdGVk");
+		expect(retrieved?.deletedAt).toBeDefined();
+		expect(retrieved?.expiresAt).toBe(5000);
+		expect(JSON.parse(retrieved?.reactionsJson ?? "{}")).toEqual({ "👍": ["dev-2"] });
+	});
+
+	it("putMessage preserves an existing pollJson on replay instead of wiping accumulated votes", async () => {
+		await encDb.putMessage({
+			id: "msg-poll-redelivered",
+			groupId: "grp-1",
+			ciphertextB64: "",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+			pollJson: JSON.stringify({ question: "q", options: [{ text: "a", voters: ["dev-2"] }] }),
+		});
+		await encDb.markMessagePoll(
+			"msg-poll-redelivered",
+			JSON.stringify({ question: "q", options: [{ text: "a", voters: ["dev-2", "dev-3"] }] }),
+		);
+
+		// A second putMessage against the same poll id (e.g. a replayed create) must not
+		// wipe the votes accumulated since creation.
+		await encDb.putMessage({
+			id: "msg-poll-redelivered",
+			groupId: "grp-1",
+			ciphertextB64: "",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+		});
+
+		const retrieved = await encDb.getMessage("msg-poll-redelivered");
+		expect(JSON.parse(retrieved?.pollJson ?? "{}")).toEqual({
+			question: "q",
+			options: [{ text: "a", voters: ["dev-2", "dev-3"] }],
+		});
+	});
+
+	it("putMessage still creates a fresh row (no merge) when no existing row is found", async () => {
+		await encDb.putMessage({
+			id: "msg-fresh",
+			groupId: "grp-1",
+			ciphertextB64: "bmV3",
+			senderDeviceId: "dev-1",
+			epochSeq: 0,
+			receivedAt: 1000,
+		});
+		const retrieved = await encDb.getMessage("msg-fresh");
+		expect(retrieved?.ciphertextB64).toBe("bmV3");
+		expect(retrieved?.read).toBeUndefined();
+		expect(retrieved?.reactionsJson).toBeUndefined();
+	});
+
 	it("clearMessageScheduled clears scheduledFor on the row", async () => {
 		await encDb.addMessage({
 			id: "msg-sched",

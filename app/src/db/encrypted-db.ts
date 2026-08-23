@@ -110,9 +110,48 @@ export class EncryptedPowehiDb {
 		await this.db.messages.add(enc);
 	}
 
+	/**
+	 * Full-row upsert used by persistIncoming/persistOutgoing/persistPollCreate/
+	 * persistScheduledCreate — all genuine creates under a fresh id in the normal
+	 * flow. But `id` is the MLS envelope UUID (persistIncoming) or a server-
+	 * assigned id (the others), and none of those call sites dedup against an
+	 * existing row first — see `markMessageReactionDelta`'s doc comment (F4,
+	 * security-auditor cycle 344/345): a transient ack failure (useMessages.ts's
+	 * fire-and-forget `ackMessage`) followed by a reload can redeliver the same
+	 * envelope, re-running persistIncoming for an id that already accumulated
+	 * reactions/reads/etc. locally. If an existing row is found, this now merges
+	 * — preserving every locally-accumulated mutable field — instead of blindly
+	 * overwriting them with the fresh row's (necessarily absent, or in
+	 * `expiresAt`'s case: recomputed and WRONG) values. `encRow` runs before the
+	 * transaction opens (security-auditor finding, cycle 345 review) so the `rw`
+	 * lock on `messages` only spans the synchronous get+put, not the sequence of
+	 * async crypto-worker round trips `encRow` needs for a multi-field row —
+	 * same reasoning `claimScheduledFire` already documents. The existing row's
+	 * SENSITIVE fields are already ciphertext as stored, so they carry over
+	 * verbatim without a decrypt/re-encrypt round trip.
+	 */
 	async putMessage(row: MessageRow): Promise<void> {
 		const enc = await encRow(this.encryptor, row, "messages");
-		await this.db.messages.put(enc);
+		await this.db.transaction("rw", this.db.messages, async () => {
+			const existing = await this.db.messages.get(row.id);
+			if (!existing) {
+				await this.db.messages.put(enc);
+				return;
+			}
+			await this.db.messages.put({
+				...enc,
+				reactionsJson: existing.reactionsJson,
+				readByJson: existing.readByJson,
+				read: existing.read,
+				delivered: existing.delivered,
+				starred: existing.starred,
+				editedText: existing.editedText,
+				deletedAt: existing.deletedAt,
+				scheduledFor: existing.scheduledFor,
+				expiresAt: existing.expiresAt,
+				pollJson: existing.pollJson,
+			});
+		});
 	}
 
 	async getMessage(id: string): Promise<MessageRow | undefined> {
@@ -157,11 +196,11 @@ export class EncryptedPowehiDb {
 	 * `get` always observes the first caller's committed `update`. No-op if the row
 	 * does not exist locally, same as markMessageEdited/markMessageDeleted.
 	 *
-	 * NOTE (security-auditor, cycle 344): this only closes the race between concurrent
-	 * markMessageReactionDelta calls. `putMessage` is a full-row upsert (encrypted
-	 * outside any transaction) and callers build fresh rows with `reactionsJson:
-	 * undefined` — a duplicate/replayed persistIncoming for an id that already has
-	 * reactions can still wipe this field. Pre-existing, out of scope here.
+	 * NOTE (security-auditor, cycle 344; fixed cycle 345): this only closes the race
+	 * between concurrent markMessageReactionDelta calls. `putMessage`'s separate
+	 * duplicate/replayed persistIncoming full-row-overwrite gap (see its doc comment)
+	 * is now fixed too — putMessage merges against an existing row instead of blindly
+	 * overwriting it.
 	 */
 	async markMessageReactionDelta(
 		id: string,
