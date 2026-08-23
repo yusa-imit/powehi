@@ -8830,9 +8830,25 @@ export function ChatLayout() {
 
 	/**
 	 * Forward `forwardMsg.text` to a single target chat as a new MLS-encrypted message.
-	 * Optimistically appends to the target chat's message list, then sends via API.
+	 * Optimistically appends to the target chat's message list, sends via API, then persists
+	 * the sender's own copy to Dexie (same gap class as scheduled/poll/replyTo before their
+	 * respective fixes — a forwarded text message previously only lived in React state and
+	 * silently vanished from the sender's own history on reload).
 	 * Fire-and-forget — failure leaves the optimistic bubble in place (same as sendMessage).
-	 * Only used for text-only forwards; see `sendForwardToSelected` for media.
+	 * Only used for text-only forwards; see `sendForwardToSelected` for media (media messages
+	 * have no Dexie persistence at all yet, sent or received — a separate, larger gap, not
+	 * attempted here).
+	 * RETENTION NOTE (crypto-reviewer finding, accepted): a forward has never carried the
+	 * target chat's `disappearingTtl` on the wire — `sendMessageApi` here is called with
+	 * `ttlSeconds: undefined` and a raw (non-JSON) payload, unlike `sendMessage`'s
+	 * `{type:"text",text,ttl}` structure, so the peer has never received an expiry for a
+	 * forwarded message either. What this diff changes: the sender's own plaintext copy now
+	 * reaches encrypted-at-rest Dexie with `expiresAt` always `undefined`, so it is never
+	 * swept by `purgeExpired` — before this fix nothing was persisted at all, so there was
+	 * nothing to leave un-purged. This widens the existing "forwards ignore TTL" gap from
+	 * "peer keeps it forever" to "sender AND peer keep it forever," rather than opening a new
+	 * gap class. Not fixed here (would need the JSON `{type:"text",...,ttl}` payload shape,
+	 * a bigger change than this persistence fix); tracked as a follow-up.
 	 */
 	const sendForwardToOne = (targetId: string) => {
 		if (!forwardMsg || !sessionToken || !cryptoWorker) return;
@@ -8844,7 +8860,17 @@ export function ChatLayout() {
 		const plaintext = new TextEncoder().encode(text);
 		cryptoWorker
 			.mlsEncrypt(mlsIdentityId, mlsGroupId, plaintext)
-			.then(({ ciphertext }) => sendMessageApi(sessionToken, mlsGroupId, ciphertext, undefined))
+			.then(({ ciphertext }) =>
+				sendMessageApi(sessionToken, mlsGroupId, ciphertext, undefined).then((envelopeId) => {
+					// Persisted under the target group's id, which may not be the currently
+					// active chat — same accepted `usePersistentMessages(active?.mlsGroupId)`
+					// cross-group binding limitation already documented on fireScheduled's
+					// persistOutgoing call: Dexie itself is unaffected (putMessage keys by
+					// row.groupId, not the hook's bound group), only the local `rows` cache can
+					// transiently reflect the wrong group until the next chat switch reloads it.
+					persistOutgoing(envelopeId, mlsGroupId, text, uint8ToBase64(ciphertext));
+				}),
+			)
 			.catch(() => {})
 			.finally(() => plaintext.fill(0));
 	};

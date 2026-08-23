@@ -531,4 +531,133 @@ describe("ChatLayout — message forwarding", () => {
 		);
 		expect(screen.queryByTestId("forward-modal")).not.toBeInTheDocument();
 	});
+
+	it("persists the forwarded text message to Dexie under the target group so it survives a reload", async () => {
+		let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+		let capturedOnNewGroup:
+			| ((event: { groupId: string; senderDeviceId: string }) => void)
+			| undefined;
+		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_id, _gid, onMsg) => {
+			capturedOnMessage = onMsg;
+		});
+		vi.spyOn(WelcomePollerModule, "useWelcomePoller").mockImplementation(
+			(_identityId, onNewGroup) => {
+				capturedOnNewGroup = onNewGroup;
+			},
+		);
+		useAuthStore.setState({
+			sessionToken: "tok-fwd-persist",
+			identityId: "id-fwd-persist",
+			deviceId: "dev-fwd-persist",
+		});
+		const sendMessageSpy = vi
+			.spyOn(MessagesApi, "sendMessage")
+			.mockResolvedValue("env-fwd-persist-id");
+
+		render(<ChatLayout />);
+		await waitFor(() => expect(capturedOnNewGroup).toBeTypeOf("function"));
+
+		act(() => {
+			capturedOnNewGroup?.({
+				groupId: "fwd-persist-target",
+				senderDeviceId: "peer-device-persist",
+			});
+		});
+
+		await act(async () => {
+			capturedOnMessage?.({
+				id: "fwd-persist-uuid-0012",
+				senderId: "peer-device-fwd",
+				groupId: "11111111-1111-1111-1111-111111111111",
+				text: "Persist me",
+				ciphertextB64: "Zg==",
+				epochSeq: 1,
+			});
+		});
+
+		const bubbles = screen.getAllByTestId("message-bubble");
+		fireEvent.mouseEnter(bubbles[bubbles.length - 1]);
+		fireEvent.click(screen.getByTestId("forward-button"));
+		fireEvent.click(screen.getByTestId("forward-target-fwd-persist-target"));
+
+		await act(async () => {
+			fireEvent.click(screen.getByTestId("forward-send-button"));
+		});
+
+		await waitFor(() => expect(sendMessageSpy).toHaveBeenCalled());
+
+		await waitFor(async () => {
+			const row = await db.messages.get("env-fwd-persist-id");
+			expect(row).toBeDefined();
+			expect(row?.groupId).toBe("fwd-persist-target");
+			expect(row?.senderDeviceId).toBe("dev-fwd-persist");
+			expect(row?.plaintextB64).toBe(btoa("Persist me"));
+			// Pins the actual re-encrypted ciphertext from THIS forward's mlsEncrypt call
+			// (MOCK_WORKER.mlsEncrypt always resolves [0xde, 0xad]) — must NOT be the source
+			// message's own ciphertextB64 ("Zg=="), which would mean the wrong bytes (or the
+			// wrong group's ciphertext) got persisted.
+			expect(row?.ciphertextB64).toBe("3q0=");
+			expect(row?.ciphertextB64).not.toBe("Zg==");
+			// Forwards carry no reply context and (pre-existing, unchanged by this fix) no TTL.
+			expect(row?.expiresAt).toBeUndefined();
+			expect(row?.replyToJson).toBeUndefined();
+		});
+	});
+
+	it("does not persist a forwarded message when the send fails (optimistic bubble stays, Dexie stays empty)", async () => {
+		let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+		let capturedOnNewGroup:
+			| ((event: { groupId: string; senderDeviceId: string }) => void)
+			| undefined;
+		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_id, _gid, onMsg) => {
+			capturedOnMessage = onMsg;
+		});
+		vi.spyOn(WelcomePollerModule, "useWelcomePoller").mockImplementation(
+			(_identityId, onNewGroup) => {
+				capturedOnNewGroup = onNewGroup;
+			},
+		);
+		useAuthStore.setState({
+			sessionToken: "tok-fwd-fail",
+			identityId: "id-fwd-fail",
+			deviceId: "dev-fwd-fail",
+		});
+		const sendMessageSpy = vi
+			.spyOn(MessagesApi, "sendMessage")
+			.mockRejectedValue(new Error("network down"));
+
+		render(<ChatLayout />);
+		await waitFor(() => expect(capturedOnNewGroup).toBeTypeOf("function"));
+
+		act(() => {
+			capturedOnNewGroup?.({ groupId: "fwd-fail-target", senderDeviceId: "peer-device-fail" });
+		});
+
+		await act(async () => {
+			capturedOnMessage?.({
+				id: "fwd-fail-uuid-0013",
+				senderId: "peer-device-fwd",
+				groupId: "11111111-1111-1111-1111-111111111111",
+				text: "Never lands",
+				ciphertextB64: "Zg==",
+				epochSeq: 1,
+			});
+		});
+
+		const bubbles = screen.getAllByTestId("message-bubble");
+		fireEvent.mouseEnter(bubbles[bubbles.length - 1]);
+		fireEvent.click(screen.getByTestId("forward-button"));
+		fireEvent.click(screen.getByTestId("forward-target-fwd-fail-target"));
+
+		await act(async () => {
+			fireEvent.click(screen.getByTestId("forward-send-button"));
+		});
+
+		await waitFor(() => expect(sendMessageSpy).toHaveBeenCalled());
+		// Give the rejected promise chain a tick to settle before asserting the negative.
+		await act(async () => {
+			await Promise.resolve();
+		});
+		expect(await db.messages.where("groupId").equals("fwd-fail-target").count()).toBe(0);
+	});
 });
