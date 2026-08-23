@@ -80,7 +80,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Install Playwright browsers
-        run: pnpm --filter app exec playwright install chromium --with-deps
+        run: pnpm --filter app exec playwright install chromium webkit --with-deps
 
       - name: Run Playwright E2E
         run: pnpm --filter app e2e
