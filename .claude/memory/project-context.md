@@ -17,7 +17,77 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-23, cycle 342 — FEATURE: scheduled messages now actually send over MLS when they fire, commit 636996c)
+## Current state (2026-08-23, cycle 343 — FEATURE: persist sender's own copy of forwarded text messages, commit 3fab286)
+
+- CI green (`gh run list --limit 3`), `gh issue list --state open` empty, `git status` clean at
+  cycle start. Cycle-340's "next cycle candidates" note claiming "pins/mentions remain
+  session-only" was **stale/wrong** — verified via a fresh Explore-agent survey that both
+  `GroupRow.pinnedMessageId` (v9) and `GroupRow.mentionCount` (v13) are already fully persisted
+  and wired; corrected here so it isn't repeated. Continued searching (Draft — already persisted
+  v17; pin/mention — already persisted) and found via direct grep of `persistOutgoing` call
+  sites: **only 2 exist in the whole file** (plain `sendMessage`, and cycle-342's `fireScheduled`)
+  — `sendForwardToOne` (text-forward path, used by both the single-target and multi-select
+  forward-modal flows) never called it at all.
+- **What it does:** forwarding a text message to another chat appended an optimistic "me" bubble
+  and sent it over MLS, but never persisted the sender's own copy to Dexie — reload silently
+  dropped it from the sender's own history (recipient's `persistIncoming` was already correct and
+  unaffected). Fixed by chaining `persistOutgoing(envelopeId, mlsGroupId, text,
+  uint8ToBase64(ciphertext))` after `sendMessageApi` resolves inside `sendForwardToOne`
+  (ChatLayout.tsx). Uses the existing `persistOutgoing` helper — no schema change needed.
+  `persistOutgoing` writes to Dexie keyed by its own `groupId` param, not the hook's bound active
+  group, so writing under the *target* chat's group (which may differ from the active chat) is
+  Dexie-safe — same precedent already documented on cycle-342's `fireScheduled` call.
+- **Found and deliberately did NOT fix in this cycle (too large, separate gap):** grepped the
+  whole `MessageRow` schema and found **no media field exists at all** — `persistIncoming` only
+  ever stores `msg.text` (which is the literal string `"[image]"` for a media message, per
+  `IncomingMessage`'s own doc comment), never `msg.media` (blobId/key/iv/thumbnail). This means
+  **every media message (photo/video/voice note), sent OR received, has zero Dexie persistence
+  for redisplay after reload** — a pre-existing, much bigger architectural gap than any single
+  persistence cycle has tackled so far (would need a new encrypted `mediaJson` field, threading
+  through `useMediaSend`/`encryptAndSendMedia`/`persistIncoming`, chunked-video handling,
+  thumbnail bytes, rehydration UI). Left `sendForwardToSelected`'s media-forward path (which
+  calls `encryptAndSendMedia` directly, no persistence hook at all) untouched to avoid an
+  inconsistent half-fix — documented inline as a known limitation. **Flagging as the standing
+  large-scope candidate for a future cycle or a dedicated multi-cycle push**, not attempted here.
+- **crypto-reviewer: YELLOW, both findings fixed in-cycle:**
+  1. **Fixed (doc-only):** added a RETENTION NOTE doc comment on `sendForwardToOne` — forwards
+     have never carried the target chat's `disappearingTtl` on the wire (pre-existing,
+     `sendMessageApi` called with `ttlSeconds: undefined` and a raw non-JSON payload, unlike
+     `sendMessage`'s `{type:"text",text,ttl}` shape) — this diff widens that gap from "peer keeps
+     it forever" to "sender AND peer keep it forever" (since nothing was persisted pre-diff, there
+     was nothing to leave un-purged). Documented as an accepted widening of a known gap, not a new
+     class; not fixed (would need the JSON payload shape, bigger scope than this persistence fix).
+  2. **Fixed (test):** the reviewer mutation-tested the positive test and found it didn't pin the
+     actual ciphertext — a bug that persisted the *source* message's ciphertext under the *target*
+     group would have still passed. Strengthened: asserts `row.ciphertextB64 === "3q0="` (the
+     mocked `mlsEncrypt`'s fixed `[0xde,0xad]` output) and `!== "Zg=="` (source ciphertext), plus
+     `expiresAt`/`replyToJson` both `undefined`.
+  3. Non-blocking note left as-is (informational, matches existing `sendMessage` error-handling
+     shape): a synchronous throw inside `persistOutgoing` would be swallowed by the outer
+     `.catch(() => {})` — acceptable, `putMessage` rejections already route through the opaque
+     `writeErrorCount` counter.
+- 2 new tests in `ChatLayoutForwarding.test.tsx`: positive (forwards a text message, asserts the
+  Dexie row lands under the target group with the correct ciphertext/plaintext/sender, no
+  expiresAt/replyTo) and negative (send rejects → `db.messages` for the target group stays empty,
+  mutation-tested to confirm it's not vacuous). **Frontend: 1462/1462 tests green** (was 1460,
+  104 files unchanged). `tsc -b` clean, `biome check` clean (2 touched files). Production build:
+  initial route 164.81 kB gzip / WASM 642.87 kB gzip (both under prd.md §7 budgets).
+- Not architectural, no new server-visible metadata (server-visible bytes are byte-identical to
+  pre-diff — this only adds a local-only Dexie write) — `threat-model-checker` not required.
+  Backend untouched (confirmed via `git diff --name-only`) — `security-auditor` not required
+  either (crypto-reviewer's scope covers this diff fully, same class as cycle 342's scheduled-
+  send fix).
+- `gh issue list --state open` — empty at cycle start. Target dir hygiene: not checked (FEATURE
+  mode, backend untouched).
+- **Next cycle candidates:** the media-message-has-zero-Dexie-persistence gap surfaced this cycle
+  (large, would need new schema + threading through both send and receive paths — worth scoping
+  as its own multi-part effort rather than a single cycle); media forwards still unpersisted
+  (same root cause, fixed together with the above); the general cross-tab cloned-MLS-sender-
+  ratchet property (flagged cycle 342, still not scoped for a single cycle); PQ hybrid Phase A
+  (still blocked on openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated on
+  ADR-0003 Phase B 95%-session threshold).
+
+## Previous state (2026-08-23, cycle 342 — FEATURE: scheduled messages now actually send over MLS when they fire, commit 636996c)
 
 - Cycle 341 apparently ran but never committed (`git status` at cycle start showed a complete,
   uncommitted working-tree diff across ChatLayout.tsx/encrypted-db.ts/usePersistentMessages.ts +
