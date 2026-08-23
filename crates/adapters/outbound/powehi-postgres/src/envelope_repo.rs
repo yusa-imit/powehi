@@ -12,6 +12,10 @@ use uuid::Uuid; // used by sqlx::FromRow row structs
 
 use crate::map_err;
 
+/// Default retention ceiling (prd.md §11.4) for envelopes with no explicit
+/// disappearing-message TTL — mirrors media_service.rs's GC_RETENTION_DAYS.
+const DEFAULT_RETENTION_DAYS: i64 = 30;
+
 #[derive(sqlx::FromRow)]
 struct EnvelopeRow {
     id: Uuid,
@@ -181,13 +185,66 @@ impl EnvelopeRepository for PgEnvelopeRepository {
     }
 
     async fn delete_expired(&self) -> Result<u64, DomainError> {
+        // Two eligibility paths, matching prd.md §11.4's "Stored_Server -> Expired:
+        // TTL 도달 (기본 30일)" state:
+        //   1. Explicit disappearing-message TTL (expires_at IS NOT NULL) — deleted
+        //      once it elapses, regardless of ack state.
+        //   2. Default retention floor (DEFAULT_RETENTION_DAYS) for envelopes with
+        //      no explicit TTL — a backstop for broadcasts that can never reach the
+        //      all-current-members-acked condition in `ack_broadcast` (e.g. a
+        //      member who left the group without ever polling), so they don't
+        //      retain ciphertext indefinitely.
         let result = sqlx::query(
-            "DELETE FROM envelopes WHERE expires_at IS NOT NULL AND expires_at < NOW()",
+            "DELETE FROM envelopes
+             WHERE (expires_at IS NOT NULL AND expires_at < NOW())
+                OR (expires_at IS NULL
+                    AND created_at < NOW() - ($1::bigint * INTERVAL '1 day'))",
         )
+        .bind(DEFAULT_RETENTION_DAYS)
         .execute(&self.pool)
         .await
         .map_err(map_err)?;
         Ok(result.rows_affected())
+    }
+
+    async fn ack_broadcast(
+        &self,
+        envelope_id: &EnvelopeId,
+        device_id: &DeviceId,
+        group_member_ids: &[DeviceId],
+    ) -> Result<(), DomainError> {
+        let member_uuids: Vec<Uuid> = group_member_ids.iter().map(|d| d.as_uuid()).collect();
+        let mut tx = self.pool.begin().await.map_err(map_err)?;
+        sqlx::query(
+            "INSERT INTO envelope_acks (envelope_id, device_id) VALUES ($1, $2)
+             ON CONFLICT (envelope_id, device_id) DO NOTHING",
+        )
+        .bind(envelope_id.as_uuid())
+        .bind(device_id.as_uuid())
+        .execute(&mut *tx)
+        .await
+        .map_err(map_err)?;
+        // Delete the envelope only once every id in group_member_ids has an ack
+        // row for it — the `NOT EXISTS (member without a matching ack)` check
+        // below is a set-containment test done entirely in SQL for atomicity.
+        sqlx::query(
+            "DELETE FROM envelopes
+             WHERE id = $1
+               AND NOT EXISTS (
+                   SELECT 1 FROM unnest($2::uuid[]) AS m(device_id)
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM envelope_acks
+                       WHERE envelope_id = $1 AND device_id = m.device_id
+                   )
+               )",
+        )
+        .bind(envelope_id.as_uuid())
+        .bind(&member_uuids)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_err)?;
+        tx.commit().await.map_err(map_err)?;
+        Ok(())
     }
 }
 

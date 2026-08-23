@@ -625,6 +625,14 @@ mod tests {
         async fn delete_expired(&self) -> Result<u64, DomainError> {
             Ok(0)
         }
+        async fn ack_broadcast(
+            &self,
+            _envelope_id: &EnvelopeId,
+            _device_id: &DeviceId,
+            _group_member_ids: &[DeviceId],
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
     }
 
     struct CaptureEnvelopeRepo {
@@ -664,6 +672,14 @@ mod tests {
         }
         async fn delete_expired(&self) -> Result<u64, DomainError> {
             Ok(0)
+        }
+        async fn ack_broadcast(
+            &self,
+            _envelope_id: &EnvelopeId,
+            _device_id: &DeviceId,
+            _group_member_ids: &[DeviceId],
+        ) -> Result<(), DomainError> {
+            Ok(())
         }
     }
 

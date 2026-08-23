@@ -357,11 +357,13 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("bind {addr}"))?;
 
-    // ── Background GC: disappearing messages ────────────────────────────────
-    // Delete expired envelopes every 5 minutes. ZK invariant preserved: this
-    // task only runs `delete_expired` (a bare DELETE ... WHERE expires_at < NOW())
-    // and reads no message content. Logs carry only the deleted count — never
-    // device IDs, content, or TTL values.
+    // ── Background GC: disappearing messages + default retention floor ─────
+    // Delete expired envelopes every 5 minutes: explicit disappearing-message
+    // TTLs, plus (as of the envelope_acks fix) a default 30-day retention floor
+    // for envelopes with no TTL — a backstop for broadcasts that never reach
+    // all-current-members-acked (e.g. a member who left without polling).
+    // ZK invariant preserved: `delete_expired` reads no message content; logs
+    // carry only the deleted count — never device IDs, content, or TTL values.
     let envelope_repo_gc: Arc<dyn powehi_port_outbound::envelope_repo::EnvelopeRepository> =
         envelope_repo.clone();
     tokio::spawn(async move {

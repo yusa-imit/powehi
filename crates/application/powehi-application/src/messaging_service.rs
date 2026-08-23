@@ -266,8 +266,27 @@ impl MessagingUseCase for MessagingService {
         match self.envelope_repo.find_by_id(envelope_id).await? {
             // Envelope already gone — ack is idempotent.
             None => Ok(()),
-            // Broadcast (no recipient) — any authenticated device may ack.
-            Some(e) if e.recipient.is_none() => self.envelope_repo.delete(envelope_id).await,
+            // Broadcast (no recipient) — only a current group member may ack, and
+            // the envelope is deleted only once every current *other* member has
+            // acked it (see PgEnvelopeRepository::ack_broadcast). Deleting on a
+            // single ack let any member censor a group message — or a Commit,
+            // permanently desyncing the group's MLS epoch — before other members
+            // polled it. The sender is excluded from the required-ack set: a
+            // sender's own broadcast fails to decrypt client-side and is never
+            // acked by them (mirrors MediaService::run_gc_batched excluding the
+            // uploader), so including the sender would make GC unreachable.
+            Some(e) if e.recipient.is_none() => {
+                self.check_sender_is_member(device_id, &e.group_id).await?;
+                let members = self.group_repo.list_members(&e.group_id).await?;
+                let member_ids: Vec<DeviceId> = members
+                    .into_iter()
+                    .map(|m| m.device_id)
+                    .filter(|d| d != &e.sender)
+                    .collect();
+                self.envelope_repo
+                    .ack_broadcast(envelope_id, device_id, &member_ids)
+                    .await
+            }
             // Unicast — only the intended recipient may ack.
             Some(e) if e.recipient.as_ref() == Some(device_id) => {
                 self.envelope_repo.delete(envelope_id).await
@@ -306,12 +325,15 @@ mod tests {
         // group_id → set of member device_ids.  Mirrors the group_members table
         // join in PgEnvelopeRepository: broadcasts are only returned to members.
         memberships: Mutex<HashMap<GroupId, HashSet<DeviceId>>>,
+        // envelope_id → set of device_ids that have acked it. Mirrors envelope_acks.
+        acks: Mutex<HashMap<EnvelopeId, HashSet<DeviceId>>>,
     }
     impl FakeEnvelopeRepo {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 store: Mutex::new(HashMap::new()),
                 memberships: Mutex::new(HashMap::new()),
+                acks: Mutex::new(HashMap::new()),
             })
         }
 
@@ -370,6 +392,22 @@ mod tests {
         }
         async fn delete_expired(&self) -> Result<u64, DomainError> {
             Ok(0)
+        }
+        async fn ack_broadcast(
+            &self,
+            envelope_id: &EnvelopeId,
+            device_id: &DeviceId,
+            group_member_ids: &[DeviceId],
+        ) -> Result<(), DomainError> {
+            let mut acks = self.acks.lock().unwrap();
+            let acked = acks.entry(envelope_id.clone()).or_default();
+            acked.insert(device_id.clone());
+            let all_acked = group_member_ids.iter().all(|m| acked.contains(m));
+            if all_acked {
+                self.store.lock().unwrap().remove(envelope_id);
+                acks.remove(envelope_id);
+            }
+            Ok(())
         }
     }
 
@@ -788,14 +826,75 @@ mod tests {
         let sender = DeviceId::new();
         let group_id = GroupId::new();
         let svc = make_service_with_member(env_repo.clone(), group_id.clone(), sender.clone());
-        // send_message creates a broadcast envelope (recipient = None);
-        // any authenticated device may ack a broadcast.
+        // send_message creates a broadcast envelope (recipient = None). With a
+        // single-member group, that one member's ack is also the last ack, so the
+        // envelope is deleted.
         let id = svc
             .send_message(&sender, &group_id, Bytes::from_static(b"x"), None)
             .await
             .unwrap();
-        svc.ack_envelope(&DeviceId::new(), &id).await.unwrap();
+        svc.ack_envelope(&sender, &id).await.unwrap();
         assert!(env_repo.store.lock().unwrap().get(&id).is_none());
+    }
+
+    #[tokio::test]
+    async fn ack_broadcast_envelope_by_non_member_returns_unauthorized() {
+        let env_repo = FakeEnvelopeRepo::new();
+        let sender = DeviceId::new();
+        let outsider = DeviceId::new();
+        let group_id = GroupId::new();
+        let svc = make_service_with_member(env_repo.clone(), group_id.clone(), sender.clone());
+        let id = svc
+            .send_message(&sender, &group_id, Bytes::from_static(b"x"), None)
+            .await
+            .unwrap();
+        // A device with no membership record for this group must not be able to
+        // ack (and thereby delete) the broadcast — this was the actual bug: any
+        // authenticated device, member or not, could delete a group message.
+        let err = svc.ack_envelope(&outsider, &id).await.unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
+        assert!(
+            env_repo.store.lock().unwrap().get(&id).is_some(),
+            "envelope must survive a non-member's ack attempt"
+        );
+    }
+
+    #[tokio::test]
+    async fn ack_broadcast_envelope_requires_every_other_member_before_deletion() {
+        let env_repo = FakeEnvelopeRepo::new();
+        let sender = DeviceId::new();
+        let member_b = DeviceId::new();
+        let member_c = DeviceId::new();
+        let group_id = GroupId::new();
+        let group_repo = FakeGroupRepo::with_member_list(vec![
+            (group_id.clone(), sender.clone()),
+            (group_id.clone(), member_b.clone()),
+            (group_id.clone(), member_c.clone()),
+        ]);
+        let svc = MessagingService::new(env_repo.clone(), group_repo, Arc::new(FakeEventBus));
+        let id = svc
+            .send_message(&sender, &group_id, Bytes::from_static(b"x"), None)
+            .await
+            .unwrap();
+        // One recipient acks — another still hasn't, so the envelope (and a
+        // Commit envelope in the same shape) must survive so it can still be
+        // delivered/ratcheted by the remaining member. Note: the sender never
+        // acks its own broadcast in this test, matching real client behavior
+        // (a sender's own message fails MLS decrypt client-side) — this is the
+        // scenario that used to make GC unreachable before excluding the sender
+        // from the required-ack set.
+        svc.ack_envelope(&member_b, &id).await.unwrap();
+        assert!(
+            env_repo.store.lock().unwrap().get(&id).is_some(),
+            "envelope must survive until every other current member has acked"
+        );
+        // Last non-sender member acks — now it's fully acked and can be
+        // reclaimed, even though the sender itself never acked.
+        svc.ack_envelope(&member_c, &id).await.unwrap();
+        assert!(
+            env_repo.store.lock().unwrap().get(&id).is_none(),
+            "GC must not require the sender's own ack"
+        );
     }
 
     #[tokio::test]
