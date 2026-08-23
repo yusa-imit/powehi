@@ -7,6 +7,9 @@ name: CI — Live-backend E2E
 # the backend-less app/e2e/*.spec.ts and is unaffected by this workflow.
 # Triggers broadly (app/**, crates/**, bin/**) since this suite depends on
 # the full backend + frontend + WASM crypto stack together.
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
