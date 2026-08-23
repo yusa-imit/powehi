@@ -17,7 +17,74 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-23, cycle 345 — STABILIZATION: close putMessage full-row-overwrite gap (F4), commit cb65117)
+## Current state (2026-08-23, cycle 346 — FEATURE: bound reaction/reaction_remove callback rate per sender, commit f86d6e5)
+
+- CI green (`gh run list --limit 3` all success), `gh issue list --state open` empty, `git status`
+  clean at cycle start. Picked up cycle 345's top carried-forward candidate: **F1/F7** — no
+  inbound rate limit on reaction/reaction_remove envelopes, so a single flooding sender
+  (compromised device, or a peer replaying a batch) could force `markMessageReactionDelta`'s
+  exclusive Dexie transaction lock (held across 2 sequential crypto-worker round trips) to be
+  acquired at unbounded rate, head-of-line-blocking `persistIncoming`'s `putMessage` on the same
+  origin. First flagged cycle 344, deferred twice.
+- **Fix:** `useMessages.ts` gained a per-sender sliding-window rate limiter — `reactionTimestampsRef`
+  (a `Map<string, number[]>`) tracks up to `REACTION_RATE_MAX = 20` timestamps per `senderId`
+  within a `REACTION_RATE_WINDOW_MS = 10_000` window. `withinReactionRateLimit(senderId)` is added
+  as the last condition (after the existing emoji-allowlist/length checks, so a malformed envelope
+  never burns real budget) gating whether `onReactionRef`/`onReactionRemoveRef` fire. Both envelope
+  types share ONE budget per sender since both hit the identical costly lock path. Over-budget
+  envelopes are still acked (no redelivery loop) — the callback drop is a real, permanent loss for
+  that receiver past the ceiling, not a deferral; documented explicitly as an accepted DoS-bound
+  tradeoff (≤2 lock acquisitions/sec/sender), not equated with the nearby malformed-envelope
+  discard cases. `env.sender` is server-attested (from `Envelope.sender`, never client-supplied in
+  the decrypted payload), so the rate-limit key isn't spoofable from the wire.
+- **security-auditor: YELLOW, both findings fixed in-cycle:**
+  1. *(fixed)* `reactionTimestampsRef` lives for the hook's whole mount (one `useMessages`
+     instance per logged-in session — `groupId` just changes which chat it polls), so every
+     distinct sender ever seen across every group opened in the tab would linger in the map
+     forever, unbounded by current group membership. Fixed: added `sweepStaleReactionRateEntries()`,
+     run once per `poll()` tick (not per envelope), deleting any map entry whose timestamps have
+     all aged out of the window — bounds the map to currently-active senders.
+  2. *(fixed, doc-only)* the original comment justified the callback-drop-but-still-ack behavior by
+     analogy to malformed-envelope discarding, which overclaimed equivalence — a legitimate
+     tail-of-burst reaction (e.g. rapid-fire reacting during an active group chat) is *valid*
+     content lost purely for receiver-side resource protection, with no error/feedback to the
+     sender. Rewrote the comment to state this as a deliberate, accepted tradeoff, and to scope
+     precisely what's protected: only the exclusive-lock-acquisition rate — NOT the unconditional
+     `mlsDecrypt` every Application envelope pays before type dispatch (a flood still costs this
+     client N decrypt round trips), and nothing server-side (queue growth/bandwidth unaffected).
+  Also requested (point 5 of the review) and added: a test proving a burst of malformed
+  (invalid-emoji) reactions does NOT consume the sender's real budget, since the rate-limit check
+  is last in the validity `&&` chain — confirms the ordering the reviewer specifically asked about.
+- 4 new tests in `useMessages.test.ts`: burst-of-25-caps-at-20 (still acks all 25), per-sender
+  isolation (one sender's flood doesn't throttle another sender in the same batch), shared budget
+  across reaction/reaction_remove for the same sender (via `vi.useFakeTimers`/`advanceTimersByTimeAsync`
+  since the second envelope needs a real poll-interval tick), window-reset after 10s elapses (same
+  fake-timer technique), and the malformed-envelope-doesn't-consume-budget test added post-review.
+  **Frontend: 1473/1473 tests green** (was 1472, 104 files unchanged — net +5 across the review
+  round: +4 initial, +1 for the review's requested test, then 1 initial test's assertion was
+  corrected from a bad standalone-budget assumption to the right shared-budget-of-21 total before
+  landing). `tsc -b` clean, `biome check` clean (1 formatting auto-fix applied post-review, no
+  logic change). Production build: initial route 165.28 kB gzip / WASM 642.87 kB gzip (both under
+  prd.md §7 budgets).
+- Not architectural, no new server-visible metadata (pure client-side receiver-side throttle on an
+  existing envelope type, no wire-format or server-endpoint change) — `threat-model-checker`/
+  `crypto-reviewer` not required; consistent with how the identical-class `readByJson`/`putMessage`
+  merge fixes (cycles 322/345) and the original reaction-delta-merge fix (cycle 344, which is where
+  F1/F7 were first raised) were scoped.
+- **Next cycle candidates:** F3 from cycle 344 (Playwright test for real-browser `Dexie.waitFor`
+  transaction liveness — WebKit is the historical risk case, still not done); the general
+  unconditional-`mlsDecrypt`-cost gap surfaced by this cycle's security-auditor F4 (a flooding
+  sender still forces N decrypt round trips regardless of the reaction-callback rate limit — this
+  cycle deliberately scoped to the lock-contention vector only, decrypt-cost bounding would be a
+  separate, broader mitigation if ever prioritized); the media-message-has-zero-Dexie-persistence
+  gap (flagged cycle 343, large, needs new schema + threading through send/receive paths, worth
+  scoping as its own multi-part effort); PQ hybrid Phase A (still blocked on openmls stable
+  `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003 Phase B 95%-session
+  threshold); the missing `~/.cargo/bin` on `$PATH` noted cycle 345 (worked around inline both
+  times it's come up, may be worth a cron-env fix if it recurs a third time — this cycle was
+  frontend-only, didn't touch cargo, so not re-verified).
+
+## Previous state (2026-08-23, cycle 345 — STABILIZATION: close putMessage full-row-overwrite gap (F4), commit cb65117)
 
 - CI green (`gh run list --limit 3` all success), `gh issue list --state open` empty, `git status`
   clean at cycle start. Full sweep before picking work: `cargo audit` (652 crates, 0 advisories),
