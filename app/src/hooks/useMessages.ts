@@ -241,15 +241,54 @@ export function useMessages(
 	// ~2 acquisitions/sec/sender; this is a deliberately different failure mode from
 	// the malformed/invalid-envelope branches nearby, which discard content that was
 	// never valid to begin with. Scope: this only bounds the exclusive-lock-acquisition
-	// rate: it does NOT bound the unconditional mlsDecrypt call every Application
-	// envelope pays before type dispatch, and it does nothing server-side (queue
-	// growth, bandwidth) — a flooding sender still costs this client N decrypt round
-	// trips regardless of this limiter. `reactionTimestampsRef` lives for the hook's
-	// whole mount (one instance per logged-in session, `groupId` just changes which
-	// chat it polls), so entries are swept in `poll()` below once their window is
-	// fully stale — otherwise every distinct sender ever seen across every group
-	// opened in this tab would linger in the map for the life of the session.
+	// rate, layered on top of (not a replacement for) `decryptTimestampsRef` below,
+	// which bounds the unconditional mlsDecrypt cost every Application envelope pays.
+	// It does nothing server-side (queue growth, bandwidth). `reactionTimestampsRef`
+	// lives for the hook's whole mount (one instance per logged-in session, `groupId`
+	// just changes which chat it polls), so entries are swept in `poll()` below once
+	// their window is fully stale — otherwise every distinct sender ever seen across
+	// every group opened in this tab would linger in the map for the life of the
+	// session.
 	const reactionTimestampsRef = useRef<Map<string, number[]>>(new Map());
+
+	// Per-sender sliding window gating the mlsDecrypt call itself — every Application
+	// envelope for this group pays a real WASM AEAD decrypt attempt before type
+	// dispatch, INCLUDING envelopes that turn out to be garbage/undecryptable (the
+	// catch branch below still had to try). Without this, a flooding sender
+	// (compromised device, or a peer replaying/forging a batch of ciphertext under
+	// the group's known epoch/key material) can force this client to pay N decrypt
+	// round trips with no bound at all — the reaction-specific limiter above only
+	// covers the subset of envelopes that decrypt successfully AND parse as a
+	// reaction. Deliberately more generous than the reaction budget (10/sec vs
+	// 2/sec) since this gates ALL envelope types for a sender, including legitimate
+	// bursts of real text messages, typing indicators, and receipts — not just the
+	// cheap-to-produce, lock-contending reaction path.
+	//
+	// Over-budget envelopes are DEFERRED, not dropped — pushed onto
+	// deferredEnvelopesRef below and retried on a later poll tick once the sender's
+	// window has room again, rather than the reaction limiter's ack-but-drop
+	// tradeoff. This matters because the server's `find_pending` query is a strict
+	// `created_at > since` filter with no re-delivery mechanism other than an
+	// explicit ack: silently discarding an envelope here (as an early draft of this
+	// change did, via ack-less-but-sinceRef-still-advances) would have made it
+	// unrecoverable for the lifetime of this mount, and this budget is sized for
+	// steady-state live traffic, not backlog catch-up — a single sender who simply
+	// left a chat open for ~50 minutes accumulates ~100 presence-heartbeat envelopes
+	// alone (one every 30s), which would exhaust the budget on the very next mount's
+	// catch-up poll and silently swallow real text messages behind them. Deferral
+	// keeps the decrypt-rate ceiling for genuine floods while costing legitimate
+	// backlogs only latency (drained across subsequent poll ticks as the window
+	// slides), never data loss. Same per-mount-lifetime/sweep shape as
+	// `reactionTimestampsRef`.
+	const decryptTimestampsRef = useRef<Map<string, number[]>>(new Map());
+
+	// Envelopes deferred by withinDecryptRateLimit above, retried on the next poll
+	// tick (merged with that tick's freshly-fetched envelopes, deduped by id — see
+	// poll() below). Bounded so a sustained, sender-diverse flood can't grow this
+	// unboundedly in memory; once full, newly-deferred envelopes are dropped (this
+	// IS a real, logged loss, but only past ~5x one sender's full 10s decrypt
+	// budget of backlog, not the ordinary catch-up case above).
+	const deferredEnvelopesRef = useRef<Envelope[]>([]);
 
 	useEffect(() => {
 		if (!sessionToken || !identityId || !groupId || !cryptoWorker) return;
@@ -286,6 +325,33 @@ export function useMessages(
 			}
 		};
 
+		const DECRYPT_RATE_WINDOW_MS = 10_000;
+		const DECRYPT_RATE_MAX = 100;
+		const MAX_DEFERRED_ENVELOPES = 500;
+
+		const withinDecryptRateLimit = (senderId: string): boolean => {
+			const now = Date.now();
+			const recent = (decryptTimestampsRef.current.get(senderId) ?? []).filter(
+				(t) => now - t < DECRYPT_RATE_WINDOW_MS,
+			);
+			if (recent.length >= DECRYPT_RATE_MAX) {
+				decryptTimestampsRef.current.set(senderId, recent);
+				return false;
+			}
+			recent.push(now);
+			decryptTimestampsRef.current.set(senderId, recent);
+			return true;
+		};
+
+		const sweepStaleDecryptRateEntries = (): void => {
+			const now = Date.now();
+			for (const [senderId, timestamps] of decryptTimestampsRef.current) {
+				if (!timestamps.some((t) => now - t < DECRYPT_RATE_WINDOW_MS)) {
+					decryptTimestampsRef.current.delete(senderId);
+				}
+			}
+		};
+
 		const processEnvelope = async (env: Envelope): Promise<void> => {
 			if (env.message_type === "Welcome") {
 				// Welcome envelopes are handled by useWelcomePoller — do not ack here.
@@ -313,6 +379,22 @@ export function useMessages(
 				// Diagnostic only — env.group_id/groupId are opaque server-assigned
 				// UUIDs, never PII/content (no-plaintext-logging.md allowance).
 				console.error("message_group_mismatch", env.group_id, groupId);
+				return;
+			}
+
+			if (!withinDecryptRateLimit(env.sender)) {
+				// Over the sender's decrypt-attempt budget — defer instead of dropping
+				// (see deferredEnvelopesRef's doc comment for why: dropping here risked
+				// silently losing legitimate backlog, not just floods). Retried on a
+				// later poll tick once the sender's window has room again.
+				if (deferredEnvelopesRef.current.length < MAX_DEFERRED_ENVELOPES) {
+					deferredEnvelopesRef.current.push(env);
+				} else {
+					// Diagnostic only, no envelope content — env.sender is an opaque
+					// server-assigned device UUID (no-plaintext-logging.md allowance,
+					// same as message_group_mismatch above).
+					console.error("message_decrypt_deferred_queue_full", env.sender);
+				}
 				return;
 			}
 
@@ -567,8 +649,14 @@ export function useMessages(
 				await ackMessage(sessionToken, env.id).catch(() => {});
 			} catch (err) {
 				// Decryption failure (wrong epoch, tampered, etc.) — skip envelope.
-				// Do NOT ack: the server should GC via TTL, not by client acknowledgement
-				// of a message it couldn't read (could mask delivery bugs).
+				// Do NOT ack: acking a message this client couldn't read could mask a
+				// real delivery bug. NOTE: this does NOT mean the server GCs it via
+				// TTL — `expires_at` is only ever set for disappearing messages (every
+				// current send path posts `ttl_seconds: undefined` otherwise), so an
+				// un-acked, non-disappearing envelope stays server-side indefinitely
+				// and is redelivered on the next poll whose `since` cursor is still
+				// behind it (e.g. after a remount, since `sinceRef` resets to
+				// undefined) — it is deferred to a later attempt, not GC'd.
 				// Diagnostic only — err.name/message here is always an internal error
 				// code (a WASM/wasm-bindgen error string describing which crypto step
 				// failed), never message content, PII, or ciphertext — same allowance
@@ -596,11 +684,26 @@ export function useMessages(
 			if (cancelled) return;
 			try {
 				const envelopes = await pollMessages(sessionToken, sinceRef.current);
-				for (const env of envelopes) {
+				// Retry envelopes deferred by a prior tick's decrypt-rate limit first,
+				// merged with this tick's freshly-fetched ones. A still-deferred
+				// envelope's `created_at` never advanced sinceRef (see processEnvelope's
+				// early return), so the server may legitimately return it again here
+				// too — dedupe by id so it's only ever processed once per tick.
+				const deferred = deferredEnvelopesRef.current;
+				deferredEnvelopesRef.current = [];
+				const seenIds = new Set<string>();
+				const combined: Envelope[] = [];
+				for (const env of [...deferred, ...envelopes]) {
+					if (seenIds.has(env.id)) continue;
+					seenIds.add(env.id);
+					combined.push(env);
+				}
+				for (const env of combined) {
 					if (cancelled) break;
 					await processEnvelope(env);
 				}
 				sweepStaleReactionRateEntries();
+				sweepStaleDecryptRateEntries();
 			} catch {
 				// Network failure — silently retry on next interval.
 			}

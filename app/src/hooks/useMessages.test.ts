@@ -856,6 +856,202 @@ describe("useMessages — reaction handling", () => {
 	});
 });
 
+describe("useMessages — decrypt rate limit", () => {
+	function makeTextEnvelope(overrides: Partial<Envelope> = {}): Envelope {
+		return {
+			id: ENV_ID,
+			group_id: GROUP_ID,
+			sender: SENDER_ID,
+			recipient: null,
+			message_type: "Application",
+			ciphertext: [4, 4, 4],
+			epoch: null,
+			created_at: "2026-06-20T09:00:00Z",
+			expires_at: null,
+			...overrides,
+		};
+	}
+
+	beforeEach(() => {
+		mockWorker.mlsDecrypt.mockResolvedValue({
+			plaintext: new TextEncoder().encode(DECRYPTED_TEXT),
+		});
+	});
+
+	it("stops calling mlsDecrypt and stops acking mid-tick once a sender exceeds the decrypt budget", async () => {
+		const burst = Array.from({ length: 105 }, (_, i) =>
+			makeTextEnvelope({ id: `env-decrypt-${i}` }),
+		);
+		pollSpy.mockResolvedValueOnce(burst);
+		const onMessage = vi.fn();
+
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, onMessage));
+
+		await waitFor(() => expect(onMessage).toHaveBeenCalledTimes(100));
+		// The 5 over-budget envelopes never reach mlsDecrypt in this tick, and are
+		// not yet acked — they are deferred for retry, not dropped (see the next
+		// test for eventual delivery).
+		expect(mockWorker.mlsDecrypt).toHaveBeenCalledTimes(100);
+		expect(ackSpy).toHaveBeenCalledTimes(100);
+	});
+
+	it("drops (with a log, no content) envelopes past the bounded deferred-queue cap", async () => {
+		const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			// 100 processed immediately + 500 fill the deferred-queue cap exactly +
+			// 1 more that must be dropped once the cap is full.
+			const burst = Array.from({ length: 601 }, (_, i) => makeTextEnvelope({ id: `env-cap-${i}` }));
+			pollSpy.mockResolvedValueOnce(burst);
+			const onMessage = vi.fn();
+
+			renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, onMessage));
+
+			await waitFor(() => expect(onMessage).toHaveBeenCalledTimes(100));
+			expect(mockWorker.mlsDecrypt).toHaveBeenCalledTimes(100);
+			expect(ackSpy).toHaveBeenCalledTimes(100);
+			expect(consoleErrorSpy).toHaveBeenCalledWith(
+				"message_decrypt_deferred_queue_full",
+				SENDER_ID,
+			);
+		} finally {
+			consoleErrorSpy.mockRestore();
+		}
+	});
+
+	it("defers (does not drop) envelopes over budget, delivering them once the window frees up — no remount needed", async () => {
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(0);
+			const burst = Array.from({ length: 105 }, (_, i) =>
+				makeTextEnvelope({ id: `env-defer-${i}` }),
+			);
+			pollSpy.mockResolvedValueOnce(burst);
+			const onMessage = vi.fn();
+
+			renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, onMessage));
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(0);
+			});
+			expect(onMessage).toHaveBeenCalledTimes(100);
+			expect(ackSpy).toHaveBeenCalledTimes(100);
+
+			// Every later poll tick returns no fresh envelopes (top-level pollSpy
+			// default) — the 5 deferred envelopes must still drain on their own once
+			// the sender's 10s window ages out, entirely from the client's local
+			// deferred queue, without the server ever re-sending them.
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(15_000);
+			});
+			expect(onMessage).toHaveBeenCalledTimes(105);
+			expect(ackSpy).toHaveBeenCalledTimes(105);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("dedupes an id the server still resends against the same id already in the deferred queue, delivering it exactly once", async () => {
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(0);
+			// 100 fill the budget exactly; the 101st ("env-tail") is deferred.
+			const burst = Array.from({ length: 101 }, (_, i) =>
+				makeTextEnvelope({ id: `env-tail-fill-${i}` }),
+			);
+			burst[100] = makeTextEnvelope({ id: "env-tail" });
+			pollSpy.mockResolvedValueOnce(burst);
+			const onMessage = vi.fn();
+
+			renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, onMessage));
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(0);
+			});
+			expect(onMessage).toHaveBeenCalledTimes(100);
+
+			// Still within the 10s window (only 3s elapsed) — "env-tail" stays over
+			// budget. The server may legitimately resend it too, since sinceRef never
+			// advanced past it (see poll()'s dedup comment) — simulate that overlap:
+			// the SAME id appears in both the local deferred queue and this tick's
+			// fresh poll results at once.
+			pollSpy.mockResolvedValueOnce([makeTextEnvelope({ id: "env-tail" })]);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(3_000);
+			});
+			expect(onMessage).toHaveBeenCalledTimes(100);
+
+			// Past the window — everything still queued drains. If the deferred+fresh
+			// merge failed to dedupe by id, "env-tail" would have been queued twice
+			// over the two ticks above and would now deliver (and ack) twice.
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(12_000);
+			});
+			expect(onMessage).toHaveBeenCalledTimes(101);
+			expect(onMessage).toHaveBeenCalledWith(expect.objectContaining({ id: "env-tail" }));
+			expect(ackSpy).toHaveBeenCalledTimes(101);
+			expect(ackSpy.mock.calls.filter(([, id]) => id === "env-tail")).toHaveLength(1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("does not throttle a different sender's decrypt budget when one sender floods", async () => {
+		const OTHER_SENDER = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+		const flood = Array.from({ length: 101 }, (_, i) => makeTextEnvelope({ id: `env-flood-${i}` }));
+		pollSpy.mockResolvedValueOnce([
+			...flood,
+			makeTextEnvelope({ id: "env-other-sender", sender: OTHER_SENDER }),
+		]);
+		const onMessage = vi.fn();
+
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, onMessage));
+
+		// 100 from the flooding sender in this tick (capped, the 101st deferred,
+		// not lost) + 1 from the other sender, whose own budget is untouched.
+		await waitFor(() => expect(onMessage).toHaveBeenCalledTimes(101));
+		expect(onMessage).toHaveBeenCalledWith(
+			expect.objectContaining({ id: "env-other-sender", senderId: OTHER_SENDER }),
+		);
+	});
+
+	it("resets a sender's decrypt budget once the rate-limit window elapses", async () => {
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(0);
+			const burst = Array.from({ length: 100 }, (_, i) =>
+				makeTextEnvelope({ id: `env-window-${i}` }),
+			);
+			pollSpy.mockResolvedValueOnce(burst);
+			const onMessage = vi.fn();
+
+			renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, onMessage));
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(0);
+			});
+			expect(onMessage).toHaveBeenCalledTimes(100);
+
+			// A 101st envelope in the same tick is deferred, not delivered — confirm
+			// the budget is exhausted, then jump past the 10s window and confirm a
+			// brand-new envelope (never previously deferred) is accepted immediately.
+			pollSpy.mockResolvedValueOnce([makeTextEnvelope({ id: "env-still-over-budget" })]);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(3_000);
+			});
+			expect(onMessage).toHaveBeenCalledTimes(100);
+
+			vi.setSystemTime(20_000);
+			pollSpy.mockResolvedValueOnce([makeTextEnvelope({ id: "env-window-fresh" })]);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(3_000);
+			});
+			// Both the still-deferred "env-still-over-budget" (retried automatically
+			// from the local deferred queue) and the brand-new "env-window-fresh"
+			// land once the window frees the sender's budget.
+			expect(onMessage).toHaveBeenCalledTimes(102);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
+
 describe("useMessages — read_receipt handling", () => {
 	const MSG_ID_A = "aaaaaaaa-aaaa-aaaa-aaaa-000000000001";
 	const MSG_ID_B = "aaaaaaaa-aaaa-aaaa-aaaa-000000000002";
