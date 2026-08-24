@@ -155,8 +155,15 @@ pub async fn send_commit(
 
 #[derive(Deserialize)]
 pub struct PollQuery {
-    /// Unix timestamp (seconds). Only envelopes created after this are returned.
-    pub since: Option<i64>,
+    /// RFC3339 timestamp — pass verbatim from the last envelope's own
+    /// `created_at` this client fully processed. Must be paired with
+    /// `since_id` (that same envelope's `id`): together they form an exact
+    /// `(created_at, id)` keyset cursor. A coarsened/rounded value (e.g.
+    /// floored to the second) can silently and permanently skip envelopes
+    /// that share the exact `created_at` once results are paginated — see
+    /// `EnvelopeRepository::find_pending`'s doc comment (cycle 351 fix).
+    pub since: Option<String>,
+    pub since_id: Option<String>,
 }
 
 pub async fn poll(
@@ -165,10 +172,27 @@ pub async fn poll(
     Query(query): Query<PollQuery>,
 ) -> Result<Json<Vec<Envelope>>, ApiError> {
     let since: Option<DateTime<Utc>> = match query.since {
-        Some(ts) => Some(DateTime::<Utc>::from_timestamp(ts, 0).ok_or_else(bad_input)?),
+        Some(s) => Some(
+            DateTime::parse_from_rfc3339(&s)
+                .map(|dt| dt.with_timezone(&Utc))
+                .map_err(|_| bad_input())?,
+        ),
         None => None,
     };
-    let envelopes = state.messaging.poll_envelopes(&device_id, since).await?;
+    let since_id: Option<EnvelopeId> = match query.since_id {
+        Some(s) => Some(s.parse::<EnvelopeId>().map_err(|_| bad_input())?),
+        None => None,
+    };
+    // since_id without since is meaningless (the keyset cursor is the pair) and
+    // silently ignoring it would fail OPEN toward re-scanning the full backlog —
+    // reject instead, matching this endpoint's fail-closed posture elsewhere.
+    if since_id.is_some() && since.is_none() {
+        return Err(bad_input());
+    }
+    let envelopes = state
+        .messaging
+        .poll_envelopes(&device_id, since, since_id)
+        .await?;
     tracing::info!(
         device_id = %device_id,
         returned = envelopes.len(),

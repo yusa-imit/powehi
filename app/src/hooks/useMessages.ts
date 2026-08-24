@@ -278,8 +278,10 @@ export function useMessages(
 		onPresenceRef.current = onPresence;
 	});
 
-	// Track the latest created_at we've seen to avoid re-delivering on restart.
-	const sinceRef = useRef<number | undefined>(undefined);
+	// Track the (created_at, id) of the last envelope fully processed, to avoid
+	// re-delivering on restart. An exact keyset cursor, not a rounded timestamp
+	// — see pollMessages'/find_pending's doc comments (cycle 351).
+	const sinceRef = useRef<{ ts: string; id: string } | undefined>(undefined);
 
 	// Per-sender sliding window for reaction/reaction_remove envelopes. Each valid
 	// reaction triggers markMessageReactionDelta's exclusive Dexie transaction lock
@@ -318,19 +320,21 @@ export function useMessages(
 	// Over-budget envelopes are DEFERRED, not dropped — pushed onto
 	// deferredEnvelopesRef below and retried on a later poll tick once the sender's
 	// window has room again, rather than the reaction limiter's ack-but-drop
-	// tradeoff. This matters because the server's `find_pending` query is a strict
-	// `created_at > since` filter with no re-delivery mechanism other than an
-	// explicit ack: silently discarding an envelope here (as an early draft of this
-	// change did, via ack-less-but-sinceRef-still-advances) would have made it
-	// unrecoverable for the lifetime of this mount, and this budget is sized for
+	// tradeoff. This matters because the server's `find_pending` query has no
+	// re-delivery mechanism other than an explicit ack, and (since the cycle 352
+	// livelock fix) the fetch cursor now ALWAYS advances past every envelope in a
+	// polled page regardless of what this hook does with each one — so silently
+	// discarding an envelope here without pushing it to this local queue would make
+	// it unrecoverable for the lifetime of this mount. This budget is sized for
 	// steady-state live traffic, not backlog catch-up — a single sender who simply
 	// left a chat open for ~50 minutes accumulates ~100 presence-heartbeat envelopes
 	// alone (one every 30s), which would exhaust the budget on the very next mount's
 	// catch-up poll and silently swallow real text messages behind them. Deferral
 	// keeps the decrypt-rate ceiling for genuine floods while costing legitimate
 	// backlogs only latency (drained across subsequent poll ticks as the window
-	// slides), never data loss. Same per-mount-lifetime/sweep shape as
-	// `reactionTimestampsRef`.
+	// slides, from THIS local queue — not by the server re-sending them, see
+	// poll()'s cursor-advance comment), never data loss. Same per-mount-lifetime/
+	// sweep shape as `reactionTimestampsRef`.
 	const decryptTimestampsRef = useRef<Map<string, number[]>>(new Map());
 
 	// Envelopes deferred by withinDecryptRateLimit above, retried on the next poll
@@ -343,6 +347,20 @@ export function useMessages(
 
 	useEffect(() => {
 		if (!sessionToken || !identityId || !groupId || !cryptoWorker) return;
+
+		// This hook has exactly one instance per logged-in session — ChatLayout
+		// mounts it once, `groupId` just changes which chat it targets as the user
+		// switches chats; it is NOT remounted per group. Reset the fetch cursor and
+		// the group-scoped deferred queue on every effect run (in particular, every
+		// groupId change) so a chat switch behaves like the fresh-mount full-backlog
+		// rescan the rest of this file assumes. Without this, the cycle 352 livelock
+		// fix's unconditional cursor advance (see poll() below) permanently skips
+		// any cross-group envelope that arrived while a DIFFERENT group was active,
+		// since — contrary to this file's prior assumption — no OTHER mounted
+		// instance exists to ever re-fetch it. Confirmed and fixed cycle 353
+		// (threat-model-checker RED finding on the cycle 352 diff).
+		sinceRef.current = undefined;
+		deferredEnvelopesRef.current = [];
 
 		let cancelled = false;
 
@@ -417,16 +435,25 @@ export function useMessages(
 				// Application envelope for a group other than the one this hook
 				// instance is bound to (e.g. a background chat while a different
 				// chat is active, or the pre-selection window before a real chat
-				// is opened). Only ONE useMessages instance is mounted at a time
-				// (the active chat's), and `pollMessages` returns envelopes across
+				// is opened). Only ONE useMessages instance exists per session — its
+				// `groupId` target changes as the user switches chats, it is NOT
+				// remounted per group — and `pollMessages` returns envelopes across
 				// ALL of the identity's groups — so acking here would permanently
-				// delete a message before its own group's poller ever mounts.
+				// delete a message before its own group is ever active.
 				// root-caused in the cycle-293 message.spec.ts CI investigation:
 				// the bug this replaced acked these away unconditionally, which
 				// silently destroyed real cross-group messages, not just the E2E
 				// seed-chat artifact. Leave unacked (mirrors useWelcomePoller's
-				// existing "skip Application, don't touch it" contract) so the
-				// correct group's poller can pick it up once mounted.
+				// existing "skip Application, don't touch it" contract) so this same
+				// instance can pick it up once its target group changes — safe even
+				// though THIS poll tick's fetch cursor advances past it
+				// unconditionally (poll()'s comment) BECAUSE the effect resets
+				// `sinceRef` on every groupId change (see the effect's top-of-body
+				// comment, cycle 353 fix) — switching to this envelope's group later
+				// re-scans the whole backlog from the beginning. Without that reset,
+				// this envelope would be permanently unreachable once skipped —
+				// confirmed and fixed cycle 353 (threat-model-checker/security-auditor
+				// RED/HIGH finding on the cycle 352 diff).
 				// Diagnostic only — env.group_id/groupId are opaque server-assigned
 				// UUIDs, never PII/content (no-plaintext-logging.md allowance).
 				console.error("message_group_mismatch", env.group_id, groupId);
@@ -681,9 +708,19 @@ export function useMessages(
 				// TTL — `expires_at` is only ever set for disappearing messages (every
 				// current send path posts `ttl_seconds: undefined` otherwise), so an
 				// un-acked, non-disappearing envelope stays server-side indefinitely
-				// and is redelivered on the next poll whose `since` cursor is still
-				// behind it (e.g. after a remount, since `sinceRef` resets to
-				// undefined) — it is deferred to a later attempt, not GC'd.
+				// (subject only to the 30-day default retention floor, cycle 350).
+				// Since the cycle 352 livelock fix, THIS group's fetch cursor still
+				// advances past it (poll()'s comment) — retrying every 3s gains
+				// nothing for a genuinely-undecryptable envelope (wrong epoch/
+				// tampered, not a transient failure) — so redelivery now only happens
+				// on a full page reload, OR on switching away from and back to this
+				// chat (the cycle 353 fix resets `sinceRef` on every groupId change,
+				// since this hook is one long-lived instance whose target group
+				// changes at runtime rather than remounting per chat — see the
+				// effect's own top-of-body comment). Deferred to that later attempt,
+				// not GC'd. A rare genuinely-transient failure here (as opposed to a
+				// permanent wrong-epoch/tampered one) still has no automatic in-mount
+				// retry — accepted, not fixed this cycle (next-cycle candidate).
 				// Diagnostic only — err.name/message here is always an internal error
 				// code (a WASM/wasm-bindgen error string describing which crypto step
 				// failed), never message content, PII, or ciphertext — same allowance
@@ -699,23 +736,94 @@ export function useMessages(
 					err instanceof Error ? err.message : String(err),
 				);
 			}
-
-			// Advance the since pointer to avoid re-fetching delivered envelopes.
-			const ts = Math.floor(new Date(env.created_at).getTime() / 1000);
-			if (sinceRef.current === undefined || ts >= sinceRef.current) {
-				sinceRef.current = ts + 1;
-			}
+			// NOTE: the resume cursor is advanced by poll() below, to the fetched
+			// page's own last envelope — NOT here, per-envelope. See poll()'s
+			// comment for why (cycle 352 fix for a livelock security-auditor
+			// found in the cycle 351 pagination diff).
 		};
 
 		const poll = async () => {
 			if (cancelled) return;
 			try {
-				const envelopes = await pollMessages(sessionToken, sinceRef.current);
-				// Retry envelopes deferred by a prior tick's decrypt-rate limit first,
-				// merged with this tick's freshly-fetched ones. A still-deferred
-				// envelope's `created_at` never advanced sinceRef (see processEnvelope's
-				// early return), so the server may legitimately return it again here
-				// too — dedupe by id so it's only ever processed once per tick.
+				const envelopes = await pollMessages(
+					sessionToken,
+					sinceRef.current?.ts,
+					sinceRef.current?.id,
+				);
+				// Re-check cancelled AFTER the await: this closure's `cancelled` is
+				// captured per effect-run, but `sinceRef`/`deferredEnvelopesRef` are
+				// SHARED across runs (declared outside the effect, reset at the top of
+				// each new run — see the cycle 353 fix above). Without this guard, a
+				// poll started by the OLD run (e.g. right before a groupId switch) can
+				// resolve AFTER the new run has already reset the cursor, and
+				// unconditionally overwrite it with the old group's stale page tail —
+				// reopening the exact permanent-cross-group-message-loss bug the reset
+				// was meant to close, and for longer than before this fix (a chat
+				// switch now requests a full head-of-backlog page instead of a near-
+				// empty tail one, so the old run's in-flight request stays live
+				// longer). threat-model-checker cycle 353 (verification round).
+				if (cancelled) return;
+				// Advance the fetch cursor to this page's own last envelope,
+				// UNCONDITIONALLY — regardless of whether every envelope in it ends
+				// up acked/processed below. `find_pending` (backend) now pages the
+				// backlog (`ENVELOPE_POLL_LIMIT`, cycle 351/352), returning an exact
+				// (created_at, id)-ordered PREFIX of it, so once this page has been
+				// fetched, every envelope up to and including its last one has been
+				// SEEN — the fetch cursor's only job is "don't re-fetch what's
+				// already been looked at", independent of whatever this hook chooses
+				// to DO with each one (ack it, defer it, or leave it for a different
+				// poller instance).
+				//
+				// This closes a livelock security-auditor found in the cycle 351
+				// pagination diff, where the OLD per-envelope advance (inside
+				// processEnvelope, only reached past several early `return`s) let a
+				// page consisting entirely of envelopes this hook doesn't act on —
+				// a different group's Application messages, Welcomes (handled by
+				// useWelcomePoller's own separately-cursored instance), or
+				// decrypt-rate-deferred ones — pin the cursor forever: the next poll
+				// would re-fetch the IDENTICAL page, forever, since nothing ever
+				// advanced past it. Before `ENVELOPE_POLL_LIMIT` existed this was
+				// harmless (every poll fetched the WHOLE backlog regardless), but
+				// paging turned it into a real, even attacker-triggerable (a peer
+				// sending >`ENVELOPE_POLL_LIMIT` Welcomes to a victim's own group
+				// wedges this hook's cursor with zero decrypt required) denial of
+				// message delivery that persists across reload (`sinceRef` resets to
+				// `undefined`, but the server still returns the same wedged head-of-
+				// queue page). Safe because:
+				//   - This hook has exactly ONE instance per session — its `groupId`
+				//     target changes at runtime as the user switches chats, it does
+				//     NOT remount per group (ChatLayout.tsx mounts it once). The
+				//     effect resets `sinceRef` (and the deferred queue) on every
+				//     groupId change (see the effect's top-of-body comment, cycle 353
+				//     fix), so switching to the group this envelope belongs to
+				//     re-scans the ENTIRE backlog from the beginning. An earlier draft
+				//     of this comment incorrectly assumed a SEPARATE mounted instance
+				//     existed per group and would independently rescan on its own —
+				//     that assumption was false and caused a real cross-group
+				//     message-loss regression until the cycle 353 fix (threat-model-
+				//     checker/security-auditor RED/HIGH finding); the groupId-change
+				//     reset is what actually makes this safe now.
+				//   - `useWelcomePoller` is a wholly separate hook instance with its
+				//     own independent cursor; this hook advancing past a Welcome
+				//     doesn't stop that poller from seeing and processing it.
+				//   - Decrypt-rate-deferred envelopes are retried from the LOCAL
+				//     `deferredEnvelopesRef` queue below (self-contained, doesn't
+				//     depend on the server re-sending them past an unadvanced
+				//     cursor) — see that ref's own doc comment for why deferral,
+				//     not server redelivery, is the retry mechanism there. That queue
+				//     is also reset on groupId change (same fix), since a decrypt-rate
+				//     deferral is only ever for the group active when it was deferred.
+				if (envelopes.length > 0) {
+					const last = envelopes[envelopes.length - 1];
+					sinceRef.current = { ts: last.created_at, id: last.id };
+				}
+				// Retry envelopes deferred by a prior tick's decrypt-rate limit,
+				// merged with this tick's freshly-fetched ones. Since the cursor
+				// above already advanced past every envelope in the tick that
+				// deferred them, the server can no longer re-return the same ids —
+				// this array is now the SOLE retry path for deferred envelopes. The
+				// id-dedupe below is defensive (protects against any future change
+				// that reintroduces overlap) rather than load-bearing today.
 				const deferred = deferredEnvelopesRef.current;
 				deferredEnvelopesRef.current = [];
 				const seenIds = new Set<string>();

@@ -56,7 +56,7 @@ describe("useWelcomePoller", () => {
 		const { unmount } = renderHook(() => useWelcomePoller(IDENTITY_ID, vi.fn()));
 
 		await waitFor(() => {
-			expect(pollSpy).toHaveBeenCalledWith(TOKEN, undefined);
+			expect(pollSpy).toHaveBeenCalledWith(TOKEN, undefined, undefined);
 		});
 		await act(async () => {
 			unmount();
@@ -190,6 +190,51 @@ describe("useWelcomePoller", () => {
 		await new Promise<void>((r) => setTimeout(r, 20));
 		// Ack must NOT have been sent because callback threw before ackMessage was reached.
 		expect(ackSpy).not.toHaveBeenCalled();
+	});
+
+	it("advances the fetch cursor past a page this poller neither acks nor joins (cycle 352 livelock fix — an all-Application-plus-failed-Welcome page must not pin the cursor, or 'no new group ever arrives' forever)", async () => {
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(0);
+			mockWorker.mlsJoinGroup.mockRejectedValueOnce(new Error("stale_welcome"));
+			const page = [
+				// Left for useMessages — never acked by this hook.
+				makeEnvelope({
+					id: "skip-app",
+					message_type: "Application",
+					created_at: "2026-06-10T12:00:01Z",
+				}),
+				// Fails to join — never acked either.
+				makeEnvelope({
+					id: "skip-welcome-failed",
+					message_type: "Welcome",
+					created_at: "2026-06-10T12:00:02Z",
+				}),
+			];
+			pollSpy.mockResolvedValueOnce(page);
+
+			renderHook(() => useWelcomePoller(IDENTITY_ID, vi.fn()));
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(0);
+			});
+			expect(pollSpy).toHaveBeenNthCalledWith(1, TOKEN, undefined, undefined);
+			expect(ackSpy).not.toHaveBeenCalled();
+
+			pollSpy.mockResolvedValueOnce([]);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(3_000);
+			});
+			// Regression would re-send (TOKEN, undefined, undefined) here, identical
+			// to call 1 — pinning delivery of every future Welcome forever.
+			expect(pollSpy).toHaveBeenNthCalledWith(
+				2,
+				TOKEN,
+				"2026-06-10T12:00:02Z",
+				"skip-welcome-failed",
+			);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("does not poll when sessionToken is absent", async () => {

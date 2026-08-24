@@ -72,7 +72,7 @@ describe("useMessages", () => {
 		const { unmount } = renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn()));
 
 		await waitFor(() => {
-			expect(pollSpy).toHaveBeenCalledWith(TOKEN, undefined);
+			expect(pollSpy).toHaveBeenCalledWith(TOKEN, undefined, undefined);
 		});
 		await act(async () => {
 			unmount();
@@ -225,6 +225,135 @@ describe("useMessages", () => {
 		await new Promise<void>((r) => setTimeout(r, 10));
 		expect(ackSpy).not.toHaveBeenCalled();
 		consoleErrorSpy.mockRestore();
+	});
+
+	it("advances the fetch cursor past a page of only-skipped envelopes (cycle 352 livelock fix — a full page this poller neither acks nor decrypts must not pin the cursor, or the next poll re-fetches the identical page forever)", async () => {
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(0);
+			const OTHER_GROUP_ID = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+			// Neither envelope is ever acked by this hook: the first is for a
+			// different group (left for that group's own poller), the second is a
+			// Welcome (left for useWelcomePoller). Before the cycle 352 fix,
+			// processing a page like this would never advance sinceRef at all.
+			const page = [
+				makeEnvelope({
+					id: "skip-1",
+					group_id: OTHER_GROUP_ID,
+					created_at: "2026-06-03T12:00:01Z",
+				}),
+				makeEnvelope({
+					id: "skip-2",
+					message_type: "Welcome",
+					created_at: "2026-06-03T12:00:02Z",
+				}),
+			];
+			pollSpy.mockResolvedValueOnce(page);
+
+			renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn()));
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(0);
+			});
+			expect(pollSpy).toHaveBeenNthCalledWith(1, TOKEN, undefined, undefined);
+			expect(ackSpy).not.toHaveBeenCalled();
+
+			pollSpy.mockResolvedValueOnce([]);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(3_000);
+			});
+			// The cursor must have advanced to the LAST envelope of the first
+			// page — its own created_at/id — even though this hook acted on
+			// neither envelope in it. A regression would re-send (TOKEN,
+			// undefined, undefined) here, identical to call 1.
+			expect(pollSpy).toHaveBeenNthCalledWith(2, TOKEN, "2026-06-03T12:00:02Z", "skip-2");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("resets the fetch cursor when groupId changes (cycle 353 fix — this hook has exactly one instance per session, ChatLayout re-targets it by re-rendering with a new groupId rather than remounting; without a reset, an envelope for a group that becomes active later is permanently unreachable once the cursor has advanced past it)", async () => {
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(0);
+			const OTHER_GROUP_ID = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+			pollSpy.mockResolvedValueOnce([makeEnvelope({ id: "advance-me" })]);
+
+			const { rerender } = renderHook(({ groupId }) => useMessages(IDENTITY_ID, groupId, vi.fn()), {
+				initialProps: { groupId: GROUP_ID },
+			});
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(0);
+			});
+			expect(pollSpy).toHaveBeenNthCalledWith(1, TOKEN, undefined, undefined);
+			// Cursor advanced past this group's own envelope (ordinary processing).
+			pollSpy.mockResolvedValueOnce([]);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(3_000);
+			});
+			expect(pollSpy).toHaveBeenNthCalledWith(2, TOKEN, "2026-06-03T12:00:00Z", "advance-me");
+
+			// Switch the active chat to a different group — same hook instance,
+			// re-rendered with a new groupId prop (not unmounted/remounted).
+			pollSpy.mockResolvedValueOnce([]);
+			rerender({ groupId: OTHER_GROUP_ID });
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(0);
+			});
+			// A regression would keep sending the stale advanced cursor here —
+			// permanently hiding any envelope for OTHER_GROUP_ID that arrived
+			// while GROUP_ID was active and got skipped-but-cursor-advanced.
+			expect(pollSpy).toHaveBeenLastCalledWith(TOKEN, undefined, undefined);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("does not let a stale in-flight poll from the OLD group clobber the cursor after a groupId switch (threat-model-checker verification round — resetting sinceRef alone is defeatable by network timing: a request begun before the switch can resolve AFTER it and unconditionally overwrite the freshly-reset cursor, reopening the same permanent cross-group message loss cycle 353's first fix was meant to close)", async () => {
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(0);
+			const OTHER_GROUP_ID = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+
+			let resolveStale: ((envelopes: Envelope[]) => void) | undefined;
+			const stalePoll = new Promise<Envelope[]>((resolve) => {
+				resolveStale = resolve;
+			});
+			// Group A's initial poll never resolves until explicitly triggered below
+			// — simulates network latency spanning the switch to group B.
+			pollSpy.mockReturnValueOnce(stalePoll);
+
+			const { rerender } = renderHook(({ groupId }) => useMessages(IDENTITY_ID, groupId, vi.fn()), {
+				initialProps: { groupId: GROUP_ID },
+			});
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(0);
+			});
+			expect(pollSpy).toHaveBeenNthCalledWith(1, TOKEN, undefined, undefined);
+
+			// Switch chats WHILE group A's poll is still in flight.
+			pollSpy.mockResolvedValueOnce([]);
+			rerender({ groupId: OTHER_GROUP_ID });
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(0);
+			});
+			expect(pollSpy).toHaveBeenNthCalledWith(2, TOKEN, undefined, undefined);
+
+			// NOW the stale group-A response lands, carrying an envelope that would
+			// advance the shared cursor if the old closure were allowed to write it.
+			await act(async () => {
+				resolveStale?.([makeEnvelope({ id: "stale-from-a", created_at: "2026-06-03T12:00:00Z" })]);
+				await vi.advanceTimersByTimeAsync(0);
+			});
+
+			pollSpy.mockResolvedValueOnce([]);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(3_000);
+			});
+			// A regression would carry the stale group-A cursor here instead.
+			expect(pollSpy).toHaveBeenLastCalledWith(TOKEN, undefined, undefined);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("maps expires_at from envelope to expiresAt unix ms in IncomingMessage", async () => {

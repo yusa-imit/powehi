@@ -175,6 +175,7 @@ mod tests {
                 &self,
                 _: &DeviceId,
                 _: Option<DateTime<Utc>>,
+                _since_id: Option<EnvelopeId>,
             ) -> Result<Vec<Envelope>, DomainError> {
                 unimplemented!()
             }

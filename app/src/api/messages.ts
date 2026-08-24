@@ -105,11 +105,22 @@ export async function sendCommit(
 
 /**
  * GET /v1/messages — poll for pending envelopes.
- * @param since Unix timestamp (seconds). Only envelopes after this are returned.
+ * @param since RFC3339 timestamp — pass the `created_at` of the last envelope
+ *   this caller fully processed, verbatim (never floored/rounded — a coarsened
+ *   value can silently and permanently skip envelopes sharing that exact
+ *   timestamp once results are paginated, cycle 351).
+ * @param sinceId That same envelope's `id`. Required together with `since` to
+ *   form an exact `(created_at, id)` resume cursor — see `find_pending`'s
+ *   Rust doc comment (`powehi-port-outbound`) for why.
  */
-export async function pollMessages(token: string, since?: number): Promise<Envelope[]> {
+export async function pollMessages(
+	token: string,
+	since?: string,
+	sinceId?: string,
+): Promise<Envelope[]> {
 	const url = new URL(`${API_BASE}/messages`, window.location.origin);
-	if (since !== undefined) url.searchParams.set("since", String(since));
+	if (since !== undefined) url.searchParams.set("since", since);
+	if (sinceId !== undefined) url.searchParams.set("since_id", sinceId);
 	const resp = await fetch(url.pathname + url.search, {
 		headers: { Authorization: `Bearer ${token}` },
 	});

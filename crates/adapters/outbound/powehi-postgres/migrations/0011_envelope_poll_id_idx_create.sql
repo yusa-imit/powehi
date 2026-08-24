@@ -1,0 +1,35 @@
+-- no-transaction
+-- find_pending's cursor is now an exact (created_at, id) keyset (cycle 351,
+-- closes the pagination data-loss bug a timestamp-only cursor risked once
+-- results were paginated). ORDER BY created_at ASC, id ASC needs `id` in the
+-- index to avoid an extra in-memory sort on every poll (every device polls
+-- every ~3s) once a device has more matching rows than fit the index's
+-- leading columns can return pre-sorted. Replaces 0001's two-column index
+-- with a three-column one covering the full sort/cursor key.
+--
+-- CREATE INDEX CONCURRENTLY cannot run inside sqlx's default migration
+-- transaction (Postgres forbids CONCURRENTLY in a transaction block at
+-- all — it isn't just slower, it's a hard error), hence `-- no-transaction`
+-- above. Split into its own create-first migration (0012 drops the old
+-- index) so the table has BOTH indexes usable throughout, and the build
+-- itself doesn't hold envelopes' ACCESS EXCLUSIVE lock for the ~3s poll
+-- loop's duration — security-auditor cycle 352 flagged the original single
+-- DROP-then-CREATE-in-transaction migration as a full messaging outage for
+-- the whole index build.
+-- OPERATIONAL NOTE (security-auditor cycle 353): if this CREATE is interrupted
+-- (deploy cancelled, connection dropped, deadlock) Postgres leaves an INVALID
+-- index under this name. `IF NOT EXISTS` then no-ops on retry without
+-- rebuilding it, and the query planner permanently ignores an invalid index —
+-- 0012 would then drop the only good (two-column) index, leaving every poll to
+-- seq-scan `envelopes`. If a deploy fails partway through this migration,
+-- check `SELECT indexrelid::regclass, indisvalid FROM pg_index WHERE
+-- indexrelid = 'envelopes_recipient_created_id_idx'::regclass` before
+-- retrying; if `indisvalid` is false, run `DROP INDEX CONCURRENTLY
+-- envelopes_recipient_created_id_idx` manually first. Not automated here:
+-- `CREATE INDEX CONCURRENTLY` cannot run inside the same migration file as a
+-- conditional-drop `DO` block (`DO` requires a transaction, `CONCURRENTLY`
+-- forbids one) — an automated fix needs its own preamble migration, deferred
+-- as a next-cycle candidate rather than restructuring this migration set
+-- further in the same cycle as the pagination fix itself.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS envelopes_recipient_created_id_idx
+    ON envelopes(recipient_device_id, created_at, id);

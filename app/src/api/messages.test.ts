@@ -162,16 +162,17 @@ describe("pollMessages", () => {
 		expect(init?.headers).toMatchObject({ Authorization: `Bearer ${TOKEN}` });
 	});
 
-	it("appends since query param when provided", async () => {
+	it("appends since and since_id query params when provided", async () => {
 		fetchMock.mockResolvedValueOnce(jsonResp([]));
 
-		await pollMessages(TOKEN, 1748952000);
+		await pollMessages(TOKEN, "2026-06-03T12:00:00Z", ENV_ID);
 
 		const [url] = fetchMock.mock.calls[0];
-		expect(url as string).toContain("since=1748952000");
+		expect(url as string).toContain(`since=${encodeURIComponent("2026-06-03T12:00:00Z")}`);
+		expect(url as string).toContain(`since_id=${ENV_ID}`);
 	});
 
-	it("omits since query param when undefined", async () => {
+	it("omits since/since_id query params when undefined", async () => {
 		fetchMock.mockResolvedValueOnce(jsonResp([]));
 
 		await pollMessages(TOKEN);

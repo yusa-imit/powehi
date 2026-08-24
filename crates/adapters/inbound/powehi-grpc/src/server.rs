@@ -27,11 +27,25 @@ use powehi_proto::region::{
 
 use crate::error::domain_err_to_status;
 
-/// Maximum ciphertext / commit bytes accepted per gRPC call (RED-1 closure).
-/// Prevents memory-exhaustion via oversized payloads from compromised peers.
-/// MLS ApplicationMessage ciphertext is bounded by the plaintext budget plus
-/// roughly 80 bytes of AEAD + MLS framing overhead — 1 MiB is a generous cap.
-const MAX_CIPHERTEXT_BYTES: usize = 1024 * 1024; // 1 MiB
+/// Per-type ciphertext/commit/welcome byte caps for cross-region envelope
+/// forwarding (RED-1 closure) — duplicated from (must be kept in sync with)
+/// `MAX_CIPHERTEXT_BYTES`/`MAX_COMMIT_BYTES`/`MAX_WELCOME_BYTES` in
+/// `powehi-application`'s `messaging_service.rs`. Deliberately duplicated
+/// rather than imported: `powehi-grpc` is an inbound adapter and does not
+/// depend on `powehi-application` (hexagonal boundary — same precedent as
+/// `pg_security_it.rs`'s local `ENVELOPE_POLL_LIMIT` literal).
+///
+/// A single generic `MAX_CIPHERTEXT_BYTES = 1 MiB` cap for every message type
+/// here previously let a hostile/compromised peer region (prd.md §3.5.1, T7)
+/// forward Application/Proposal envelopes at up to 1 MiB each — 4x the REST
+/// ingress path's 96 KiB Application cap — silently invalidating
+/// `ENVELOPE_POLL_LIMIT`'s documented worst-case per-poll memory bound in
+/// `envelope_repo.rs` (64 × 256KB assumed every type capped at Welcome's
+/// ceiling; a cross-region-forwarded Application/Proposal envelope was not).
+/// threat-model-checker cycle 353.
+const MAX_APPLICATION_CIPHERTEXT_BYTES: usize = 96 * 1024; // 96 KiB
+const MAX_COMMIT_BYTES: usize = 64 * 1024; // 64 KiB
+const MAX_WELCOME_BYTES: usize = 256 * 1024; // 256 KiB
 
 /// Maximum number of device members accepted per SyncGroupMembership call (RED-1 closure).
 /// Prevents amplified DB writes from a malicious or misconfigured peer.
@@ -296,8 +310,25 @@ impl RegionService for RegionGrpcServer {
     ) -> Result<Response<ForwardEnvelopeResponse>, Status> {
         let (_metadata, request_exts, req) = request.into_parts();
 
-        // RED-1: cap ciphertext size before any allocation into owned Vec.
-        if req.ciphertext.len() > MAX_CIPHERTEXT_BYTES {
+        // RED-1: cap ciphertext size before the `req.ciphertext.to_vec()` clone
+        // below (tonic/prost has already decoded the request into `req` by this
+        // point — the real bound on pre-decode allocation is tonic's own
+        // `max_decoding_message_size`, set at the server composition root), using
+        // a per-type budget (Welcome's ratchet-tree payload legitimately dwarfs
+        // an Application message) matching the REST ingress path's caps — a
+        // single generic 1 MiB ceiling here previously let a hostile/compromised
+        // peer region forward oversized Application/Proposal envelopes, invalidating
+        // `ENVELOPE_POLL_LIMIT`'s documented worst-case poll memory bound
+        // (threat-model-checker cycle 353). message_type must be parsed first to
+        // pick the right budget; this is still before any owned-Vec allocation.
+        let message_type = proto_type_to_domain(req.envelope_type)
+            .ok_or_else(|| Status::invalid_argument("envelope_type unspecified"))?;
+        let max_ciphertext_bytes = match message_type {
+            MessageType::Welcome => MAX_WELCOME_BYTES,
+            MessageType::Commit => MAX_COMMIT_BYTES,
+            MessageType::Application | MessageType::Proposal => MAX_APPLICATION_CIPHERTEXT_BYTES,
+        };
+        if req.ciphertext.len() > max_ciphertext_bytes {
             return Err(Status::invalid_argument("ciphertext exceeds maximum size"));
         }
 
@@ -315,8 +346,6 @@ impl RegionService for RegionGrpcServer {
                     .ok_or_else(|| Status::invalid_argument("invalid recipient_device_id UUID"))?,
             )
         };
-        let message_type = proto_type_to_domain(req.envelope_type)
-            .ok_or_else(|| Status::invalid_argument("envelope_type unspecified"))?;
         // Y-14: clamp peer-supplied timestamp to ±MAX_SENT_AT_SKEW_SECS from now.
         // A compromised peer could manipulate `sent_at_unix_ms` to shift envelope
         // ordering (e.g., far-past to appear ancient, far-future to appear newer
@@ -387,8 +416,10 @@ impl RegionService for RegionGrpcServer {
     ) -> Result<Response<ForwardCommitResponse>, Status> {
         let (_metadata, request_exts, req) = request.into_parts();
 
-        // RED-1: cap commit bytes before any allocation into owned Vec.
-        if req.commit.len() > MAX_CIPHERTEXT_BYTES {
+        // RED-1: cap commit bytes before any downstream use of `req.commit`,
+        // matching the REST ingress path's MAX_COMMIT_BYTES (see the module doc
+        // comment) — same pre-decode caveat as forward_envelope's RED-1 comment.
+        if req.commit.len() > MAX_COMMIT_BYTES {
             return Err(Status::invalid_argument("commit exceeds maximum size"));
         }
 
@@ -613,6 +644,7 @@ mod tests {
             &self,
             _device_id: &DeviceId,
             _since: Option<DateTime<Utc>>,
+            _since_id: Option<EnvelopeId>,
         ) -> Result<Vec<Envelope>, DomainError> {
             Ok(vec![])
         }
@@ -661,6 +693,7 @@ mod tests {
             &self,
             _device_id: &DeviceId,
             _since: Option<DateTime<Utc>>,
+            _since_id: Option<EnvelopeId>,
         ) -> Result<Vec<Envelope>, DomainError> {
             Ok(vec![])
         }
@@ -1539,8 +1572,46 @@ mod tests {
             group_id: Uuid::new_v4().to_string(),
             sender_device_id: Uuid::new_v4().to_string(),
             recipient_device_id: String::new(),
-            ciphertext: vec![0u8; MAX_CIPHERTEXT_BYTES + 1],
+            ciphertext: vec![0u8; MAX_APPLICATION_CIPHERTEXT_BYTES + 1],
             envelope_type: EnvelopeType::Application as i32,
+            sent_at_unix_ms: 1_700_000_000_000,
+        });
+        let err = server.forward_envelope(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    // Per-type cap dispatch (threat-model-checker cycle 353 fix): a Welcome must
+    // NOT be rejected at the Application cap, since a real ratchet tree
+    // legitimately exceeds it — proves forward_envelope picks the budget by
+    // message_type rather than applying one generic ceiling to every type.
+    #[tokio::test]
+    async fn forward_envelope_welcome_between_application_and_welcome_cap_is_accepted() {
+        let group_id = GroupId::from(Uuid::new_v4());
+        let sender = DeviceId::new();
+        let server = make_server_with_group_member(group_id.clone(), sender.clone());
+        let req = Request::new(ForwardEnvelopeRequest {
+            envelope_id: Uuid::new_v4().to_string(),
+            group_id: group_id.as_uuid().to_string(),
+            sender_device_id: sender.as_uuid().to_string(),
+            recipient_device_id: Uuid::new_v4().to_string(),
+            ciphertext: vec![0u8; MAX_APPLICATION_CIPHERTEXT_BYTES + 1],
+            envelope_type: EnvelopeType::Welcome as i32,
+            sent_at_unix_ms: 1_700_000_000_000,
+        });
+        let resp = server.forward_envelope(req).await.unwrap();
+        assert_eq!(resp.into_inner().status, ForwardStatus::Accepted as i32);
+    }
+
+    #[tokio::test]
+    async fn forward_envelope_oversized_welcome_returns_invalid_argument() {
+        let server = make_server();
+        let req = Request::new(ForwardEnvelopeRequest {
+            envelope_id: Uuid::new_v4().to_string(),
+            group_id: Uuid::new_v4().to_string(),
+            sender_device_id: Uuid::new_v4().to_string(),
+            recipient_device_id: Uuid::new_v4().to_string(),
+            ciphertext: vec![0u8; MAX_WELCOME_BYTES + 1],
+            envelope_type: EnvelopeType::Welcome as i32,
             sent_at_unix_ms: 1_700_000_000_000,
         });
         let err = server.forward_envelope(req).await.unwrap_err();
@@ -1553,7 +1624,7 @@ mod tests {
         let req = Request::new(ForwardCommitRequest {
             group_id: Uuid::new_v4().to_string(),
             sender_device_id: Uuid::new_v4().to_string(),
-            commit: vec![0u8; MAX_CIPHERTEXT_BYTES + 1],
+            commit: vec![0u8; MAX_COMMIT_BYTES + 1],
             expected_epoch: 0,
         });
         let err = server.forward_commit(req).await.unwrap_err();

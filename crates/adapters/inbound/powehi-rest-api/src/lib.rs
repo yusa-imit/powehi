@@ -470,6 +470,7 @@ mod tests {
             &self,
             _device_id: &DeviceId,
             _since: Option<DateTime<Utc>>,
+            _since_id: Option<EnvelopeId>,
         ) -> Result<Vec<Envelope>, DomainError> {
             unimplemented!()
         }
@@ -756,6 +757,7 @@ mod tests {
             &self,
             _device_id: &DeviceId,
             _since: Option<DateTime<Utc>>,
+            _since_id: Option<EnvelopeId>,
         ) -> Result<Vec<Envelope>, DomainError> {
             Ok(vec![])
         }
@@ -837,6 +839,7 @@ mod tests {
             &self,
             _: &DeviceId,
             _: Option<DateTime<Utc>>,
+            _since_id: Option<EnvelopeId>,
         ) -> Result<Vec<Envelope>, DomainError> {
             unimplemented!()
         }
@@ -1214,7 +1217,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/v1/messages?since=1000000")
+                    .uri("/v1/messages?since=2026-01-01T00%3A00%3A00Z")
                     .header("authorization", bearer())
                     .body(Body::empty())
                     .unwrap(),
@@ -1222,6 +1225,83 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn poll_with_since_and_since_id_returns_200() {
+        let device = DeviceId::new();
+        let envelope_id = EnvelopeId::new();
+        let resp = messaging_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/v1/messages?since=2026-01-01T00%3A00%3A00Z&since_id={envelope_id}"
+                    ))
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn poll_with_malformed_since_returns_400() {
+        let device = DeviceId::new();
+        let resp = messaging_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/messages?since=not-a-timestamp")
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn poll_with_malformed_since_id_returns_400() {
+        let device = DeviceId::new();
+        let resp = messaging_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/messages?since=2026-01-01T00%3A00%3A00Z&since_id=not-a-uuid")
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // since_id without since is meaningless (the keyset cursor is the pair) —
+    // must be rejected, not silently ignored/fail-open to a full backlog
+    // rescan (security-auditor cycle 353, informational finding 8: this exact
+    // case had no test pinning it, so a future refactor could regress it
+    // silently).
+    #[tokio::test]
+    async fn poll_with_since_id_but_no_since_returns_400() {
+        let device = DeviceId::new();
+        let envelope_id = EnvelopeId::new();
+        let resp = messaging_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/messages?since_id={envelope_id}"))
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

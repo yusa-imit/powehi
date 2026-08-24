@@ -33,10 +33,15 @@ pub trait MessagingUseCase: Send + Sync {
         commit: Bytes,
     ) -> Result<Epoch, DomainError>;
 
+    /// `since`/`since_id` form an exact keyset cursor — see
+    /// `EnvelopeRepository::find_pending`'s doc comment for why both must be
+    /// supplied together (from the same last-processed envelope) rather than
+    /// a coarsened timestamp alone.
     async fn poll_envelopes(
         &self,
         device_id: &DeviceId,
         since: Option<DateTime<Utc>>,
+        since_id: Option<EnvelopeId>,
     ) -> Result<Vec<Envelope>, DomainError>;
 
     async fn ack_envelope(

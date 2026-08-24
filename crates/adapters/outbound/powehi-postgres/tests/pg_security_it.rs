@@ -173,7 +173,7 @@ async fn find_pending_broadcast_excluded_for_non_member() {
     repo.save(&broadcast).await.expect("save");
 
     let pending = repo
-        .find_pending(&non_member, None)
+        .find_pending(&non_member, None, None)
         .await
         .expect("find_pending");
     assert!(
@@ -210,11 +210,80 @@ async fn find_pending_broadcast_included_for_member() {
     repo.save(&broadcast).await.expect("save");
 
     let pending = repo
-        .find_pending(&member, None)
+        .find_pending(&member, None, None)
         .await
         .expect("find_pending");
     assert_eq!(pending.len(), 1, "member must receive the group broadcast");
     assert_eq!(pending[0].id, broadcast.id);
+}
+
+/// A broadcast envelope this device has already acked, but that is still
+/// present (waiting on OTHER members to ack before GC — see ack_broadcast),
+/// must NOT be re-returned by `find_pending`. Without this exclusion,
+/// pagination (`ENVELOPE_POLL_LIMIT`) turns a single perpetually-offline
+/// member into a catch-up storm: every poll re-pages through the SAME
+/// already-seen backlog before reaching any new content (security-auditor
+/// cycle 353, found reviewing the cycle 351/352 pagination diff).
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn find_pending_excludes_broadcast_already_acked_by_this_device() {
+    let (_c, pool) = setup().await;
+
+    let sender = insert_device(&pool, insert_user(&pool).await).await;
+    let member = insert_device(&pool, insert_user(&pool).await).await;
+    let other_member = insert_device(&pool, insert_user(&pool).await).await;
+    let group_id = insert_group(&pool).await;
+    join_group(&pool, group_id.clone(), sender.clone()).await;
+    join_group(&pool, group_id.clone(), member.clone()).await;
+    join_group(&pool, group_id.clone(), other_member.clone()).await;
+
+    let broadcast = Envelope {
+        id: EnvelopeId::new(),
+        group_id,
+        sender: sender.clone(),
+        recipient: None,
+        message_type: MessageType::Application,
+        ciphertext: vec![0xab; 32],
+        epoch: Some(Epoch(1)),
+        created_at: Utc::now(),
+        expires_at: None,
+    };
+    let repo = PgEnvelopeRepository::new(pool);
+    repo.save(&broadcast).await.expect("save");
+
+    // `member` acks, but `other_member` hasn't yet — the envelope survives
+    // (ack_broadcast only deletes once every id in the required set has acked).
+    repo.ack_broadcast(&broadcast.id, &member, std::slice::from_ref(&other_member))
+        .await
+        .expect("ack_broadcast");
+    assert!(
+        repo.find_by_id(&broadcast.id)
+            .await
+            .expect("find_by_id")
+            .is_some(),
+        "envelope must survive a partial ack"
+    );
+
+    let pending = repo
+        .find_pending(&member, None, None)
+        .await
+        .expect("find_pending");
+    assert!(
+        pending.is_empty(),
+        "a broadcast this device already acked must not be re-returned, \
+         even though it is still pending other members' acks"
+    );
+
+    // The OTHER member, who has not yet acked, must still see it.
+    let other_pending = repo
+        .find_pending(&other_member, None, None)
+        .await
+        .expect("find_pending");
+    assert_eq!(
+        other_pending.len(),
+        1,
+        "a member who has not yet acked must still receive the broadcast"
+    );
 }
 
 /// TTL enforcement: expired envelopes must not be returned by `find_pending`.
@@ -243,12 +312,138 @@ async fn find_pending_excludes_expired_envelopes() {
     repo.save(&env).await.expect("save");
 
     let pending = repo
-        .find_pending(&device, None)
+        .find_pending(&device, None, None)
         .await
         .expect("find_pending");
     assert!(
         pending.is_empty(),
         "expired envelope must not be returned by find_pending"
+    );
+}
+
+/// A single `find_pending` call must never return more than the page limit,
+/// even when a device has a much larger backlog — guards against an unbounded
+/// `poll_envelopes` response OOMing the polling device (security-auditor
+/// cycle 350, prd.md §11.4). The remainder must still be reachable on a
+/// follow-up poll using the last page's own `(created_at, id)` as the cursor,
+/// mirroring how the frontend pollers (`useMessages.ts`/`useWelcomePoller.ts`)
+/// advance their cursor.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn find_pending_paginates_large_backlog() {
+    let (_c, pool) = setup().await;
+    let device = insert_device(&pool, insert_user(&pool).await).await;
+    let repo = PgEnvelopeRepository::new(pool);
+
+    // Mirrors `ENVELOPE_POLL_LIMIT` in envelope_repo.rs — private to the
+    // adapter crate, so duplicated here as a literal for the test.
+    const LIMIT: usize = 64;
+    let base = Utc::now() - chrono::Duration::seconds(LIMIT as i64 + 10);
+    let mut ids = Vec::with_capacity(LIMIT + 5);
+    for i in 0..(LIMIT + 5) {
+        let env = Envelope {
+            id: EnvelopeId::new(),
+            group_id: GroupId::from(Uuid::new_v4()),
+            sender: device.clone(),
+            recipient: Some(device.clone()),
+            message_type: MessageType::Application,
+            ciphertext: vec![0x01; 8],
+            epoch: None,
+            created_at: base + chrono::Duration::milliseconds(i as i64),
+            expires_at: None,
+        };
+        ids.push(env.id.clone());
+        repo.save(&env).await.expect("save");
+    }
+
+    let first_page = repo
+        .find_pending(&device, None, None)
+        .await
+        .expect("find_pending page 1");
+    assert_eq!(
+        first_page.len(),
+        LIMIT,
+        "a single poll must never return more than the page limit"
+    );
+    for (row, expected_id) in first_page.iter().zip(ids.iter()) {
+        assert_eq!(&row.id, expected_id, "pages must be oldest-first, in order");
+    }
+
+    let last = first_page.last().unwrap();
+    let second_page = repo
+        .find_pending(&device, Some(last.created_at), Some(last.id.clone()))
+        .await
+        .expect("find_pending page 2");
+    assert_eq!(
+        second_page.len(),
+        5,
+        "the remaining backlog must be returned on the next poll"
+    );
+    assert_eq!(second_page[0].id, ids[LIMIT]);
+}
+
+/// ADVERSARIAL: many envelopes sharing the *exact same* `created_at` must
+/// never be split across a page boundary such that some are silently
+/// unreachable — a timestamp-only cursor (`created_at > since`) can drop a
+/// same-timestamp straggler forever once results are paginated, since a
+/// client resuming from that exact timestamp would exclude every row still
+/// carrying it. This is precisely the class of bug security-auditor caught
+/// in the first draft of the cycle 351 pagination fix (a sustained-send
+/// device could deliberately try to trigger it). The `(created_at, id)`
+/// keyset cursor must page through all of them, in `id` order, exactly once.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn find_pending_keyset_cursor_splits_same_timestamp_group_safely() {
+    let (_c, pool) = setup().await;
+    let device = insert_device(&pool, insert_user(&pool).await).await;
+    let repo = PgEnvelopeRepository::new(pool);
+
+    const LIMIT: usize = 64;
+    // More envelopes than one page, ALL sharing one `created_at` — the
+    // worst case for a timestamp-only cursor.
+    let same_instant = Utc::now();
+    let mut ids = Vec::with_capacity(LIMIT + 7);
+    for _ in 0..(LIMIT + 7) {
+        let env = Envelope {
+            id: EnvelopeId::new(),
+            group_id: GroupId::from(Uuid::new_v4()),
+            sender: device.clone(),
+            recipient: Some(device.clone()),
+            message_type: MessageType::Application,
+            ciphertext: vec![0x02; 8],
+            epoch: None,
+            created_at: same_instant,
+            expires_at: None,
+        };
+        ids.push(env.id.clone());
+        repo.save(&env).await.expect("save");
+    }
+    ids.sort_by_key(|id| id.as_uuid());
+
+    let mut collected = Vec::new();
+    let mut cursor: Option<(chrono::DateTime<Utc>, EnvelopeId)> = None;
+    for _ in 0..10 {
+        let page = repo
+            .find_pending(
+                &device,
+                cursor.as_ref().map(|(ts, _)| *ts),
+                cursor.as_ref().map(|(_, id)| id.clone()),
+            )
+            .await
+            .expect("find_pending page");
+        if page.is_empty() {
+            break;
+        }
+        let last = page.last().unwrap();
+        cursor = Some((last.created_at, last.id.clone()));
+        collected.extend(page.into_iter().map(|e| e.id));
+    }
+
+    collected.sort_by_key(|id| id.as_uuid());
+    assert_eq!(
+        collected, ids,
+        "every envelope sharing one timestamp must be delivered exactly once \
+         across pages, none silently dropped"
     );
 }
 
