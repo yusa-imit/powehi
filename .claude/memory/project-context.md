@@ -17,7 +17,63 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-25, cycle 357 — FEATURE: cross-crate REST/gRPC envelope size-cap sync test, commit 781348e)
+## Current state (2026-08-25, cycle 358 — FEATURE: automate pg_index.indisvalid migration guard, commit d3df0de)
+
+- CI green (`gh run list --limit 3` all success), `git status` clean at cycle start. Picked
+  cycle 355/357's carried-forward candidate: the manual runbook step in 0011's OPERATIONAL
+  NOTE (security-auditor cycle 353) — if 0011's `CREATE INDEX CONCURRENTLY` on
+  `envelopes_recipient_created_id_idx` is interrupted, Postgres leaves an INVALID index
+  under that name; `IF NOT EXISTS` then no-ops on a migration retry without rebuilding it,
+  and the old `0012` migration would unconditionally drop the only good (two-column)
+  fallback index — every poll (every device, ~3s interval) would seq-scan `envelopes`.
+- **Fix:** `git mv`'d the old `0012_envelope_poll_created_idx_drop.sql` to
+  `0013_envelope_poll_created_idx_drop.sql` (content unchanged), and inserted a new
+  `0012_envelope_poll_idx_validity_guard.sql` between 0011 (create) and 0013 (drop) — an
+  ordinary transactional migration (`DO $$ ... $$` block, since `CONCURRENTLY` forbids
+  running inside a transaction and can't share a file with a conditional check) that
+  `RAISE EXCEPTION`s and aborts the whole `sqlx::migrate!().run()` call if
+  `pg_index.indisvalid = false` for the new index. Updated 0011's comment to point at the
+  fix instead of re-flagging closed work.
+- **security-auditor: GREEN.** Verified (not rubber-stamped), including tracing the actual
+  deploy path: `run_migrations` is called on every real server boot
+  (`bin/powehi-server/src/main.rs`), but confirmed via `git tag` (empty, 667-commit history)
+  and `.github/workflows/release.yml`/`cd.yml` (both gated on a `vX.Y.Z` tag that's never
+  been pushed) that no real deployed environment has ever recorded the old migration
+  version 12 in a persisted `_sqlx_migrations` table — renumbering an unreleased migration
+  is safe today. Advisory-only, not blocking: once a real tag/release ships, this
+  renumbering pattern must not be repeated (sqlx 0.8.6 would hard-error with
+  `VersionMismatch` on a checksum mismatch for an already-applied version — fails loudly,
+  not silently, if it ever were unsafe). Also confirmed the `'...'::regclass` cast is safe
+  by construction (sqlx runs migrations strictly in order and aborts the whole run on any
+  earlier failure, so a catalog row for the index name is guaranteed to exist by the time
+  0012 runs, valid or not); no plaintext/PII logging (only index/table names in SQL
+  comments and the exception message); no wire-format/API/behavior change
+  (`threat-model-checker` correctly not required, diff scoped to `migrations/*.sql` +
+  `tests/pg_security_it.rs` only).
+- 2 new `#[ignore = "requires Docker (testcontainers)"]` tests in `pg_security_it.rs`:
+  `full_migration_run_leaves_new_envelope_index_valid_and_old_index_dropped` (happy-path,
+  full `sqlx::migrate!()` run leaves the new index valid + old index gone) and
+  `envelope_poll_idx_validity_guard_aborts_on_invalid_index` (reproduces an invalid index
+  via a `CREATE UNIQUE INDEX CONCURRENTLY` that fails on a genuine duplicate-key violation
+  — the standard reliable way to get Postgres to leave a catalogued-but-invalid index, since
+  there's no supported way to directly flip `pg_index.indisvalid` on a healthy one — then
+  runs the **actual shipped 0012 SQL** via `include_str!`, string-substituting the index
+  name, proving both directions: raises when invalid, passes silently once rebuilt valid).
+  Not run locally (no Docker in this sandbox, consistent with prior cycles — will run in
+  CI's Rust workflow, which has Docker). `cargo build --workspace` clean, `cargo test
+  --workspace` (non-ignored) all green, `cargo clippy --workspace --all-targets -- -D
+  warnings` clean, `cargo fmt --check` clean (one auto-fix applied mid-cycle for the two
+  new happy-path assertions' line length, no logic change).
+- Target dir hygiene: not checked this cycle (FEATURE mode, not due).
+- **Next cycle candidates:** closing the incoming/outgoing media-key asymmetry (cycle 349,
+  needs a new crypto-reviewed WASM key-export primitive); PQ hybrid Phase A (still blocked
+  on openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003
+  Phase B 95%-session threshold); cycle 356's YELLOW note (KeyPackage 16KiB cap margin
+  narrows under Phase A native PQ — revisit alongside that work, not standalone);
+  project-context.md archival (now 2300+ lines — worth archiving older cycle entries in a
+  future stabilization cycle, getting more pressing each cycle this is deferred).
+
+## Previous state (2026-08-25, cycle 357 — FEATURE: cross-crate REST/gRPC envelope size-cap sync test, commit 781348e)
 
 - CI green (`gh run list --limit 3` all success), `gh issue list --state open` empty,
   `git status` clean at cycle start. Picked cycle 356's top carried-forward candidate:
