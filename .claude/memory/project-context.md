@@ -17,7 +17,53 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-25, cycle 356 — FEATURE: KeyPackage upload per-item size cap, commit d0f0c8e)
+## Current state (2026-08-25, cycle 357 — FEATURE: cross-crate REST/gRPC envelope size-cap sync test, commit 781348e)
+
+- CI green (`gh run list --limit 3` all success), `gh issue list --state open` empty,
+  `git status` clean at cycle start. Picked cycle 356's top carried-forward candidate:
+  threat-model-checker's cycle 355 follow-up — no compiler/test-enforced sync between
+  `messaging_service.rs`'s (`powehi-application`, REST ingress) and
+  `powehi-grpc/server.rs`'s (cross-region forwarder) deliberately-duplicated
+  `MAX_CIPHERTEXT_BYTES`/`MAX_COMMIT_BYTES`/`MAX_WELCOME_BYTES` constants — this exact
+  pair had already drifted silently once before (RED-1, cycle 353: a stale generic 1MiB
+  gRPC cap outlived a tightened 96KiB REST cap).
+- **Fix:** widened the three constants in each crate from private `const` to `pub const`
+  (both modules were already `pub mod`, so no new module exposure) and added
+  `bin/powehi-server/tests/size_cap_consistency.rs` — the only crate in the workspace
+  that already depends on both `powehi-application` and `powehi-grpc` (the composition
+  root), so no new cross-crate dependency was introduced. The test file has both a
+  `const _: () = assert!(...)` per pair (fails `cargo build`/`cargo check` itself, added
+  post-review per the auditor's suggestion — stronger than a runtime test since it can't
+  be skipped by filtering `cargo test`) and matching `#[test]` runtime assertions with
+  descriptive failure messages.
+- **security-auditor: GREEN.** Verified (not rubber-stamped): all six constants are
+  literal `usize` byte-size values, not derived from config/env/key material — `pub`
+  grants read of a compile-time integer only, no capability; values are already
+  black-box discoverable via size probing by any client, so zero information
+  disclosure. New test file confirmed pure `assert_eq!`/`assert!` on consts, no I/O/DB/
+  testcontainers/fixtures, non-flaky by construction (ran it: 3/3 passed in 0.00s). No
+  other code in the diff besides the visibility bump + doc comments + new test file. No
+  plaintext/PII/ciphertext logging added (zero log statements in the diff).
+- Not architectural, no new server-visible metadata (pure internal visibility change +
+  test-only addition, no wire-format/behavior change) — `threat-model-checker` re-run
+  not required (it was the one that requested this fix); `crypto-reviewer` not required
+  (no crypto code touched).
+- `cargo build --workspace` clean, `cargo test --workspace` all green (no regressions,
+  new 3 tests pass), `cargo clippy --workspace --all-targets -- -D warnings` clean,
+  `cargo fmt --check` clean (one auto-fix applied mid-cycle for the const-assert
+  formatting, no logic change).
+- Target dir hygiene: not checked this cycle (FEATURE mode, not due).
+- **Next cycle candidates:** `pg_index.indisvalid` migration guard automation for
+  0011/0012 (cycle 355's other follow-up, cheap, low urgency); closing the incoming/
+  outgoing media-key asymmetry (cycle 349, needs a new crypto-reviewed WASM key-export
+  primitive); PQ hybrid Phase A (still blocked on openmls stable `MLS_128_MLKEM768`);
+  OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003 Phase B 95%-session threshold);
+  cycle 356's YELLOW note (KeyPackage 16KiB cap margin narrows under Phase A native PQ
+  — revisit alongside that work, not standalone); project-context.md archival
+  (now 2200+ lines — worth archiving older cycle entries in a future stabilization
+  cycle, getting more pressing).
+
+## Previous state (2026-08-25, cycle 356 — FEATURE: KeyPackage upload per-item size cap, commit d0f0c8e)
 
 - CI green (`gh run list --limit 3` all success), `gh issue list --state open` empty,
   `git status` clean at cycle start. Picked cycle 350's last remaining deferred LOW
