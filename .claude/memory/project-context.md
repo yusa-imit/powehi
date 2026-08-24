@@ -17,7 +17,106 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-24, cycle 350 — STABILIZATION: fix broken access control in broadcast envelope ack, commit bd82201)
+## Current state (2026-08-24, cycle 355 — STABILIZATION: envelope poll pagination + per-type size caps, commit 97c6c7c)
+
+- CI green (`gh run list --limit 5` all success/cancelled-superseded), `gh issue list
+  --state open` empty. **`git status` at cycle start was NOT clean** — found a complete,
+  passing, uncommitted working-tree diff spanning what its own doc comments described as
+  cycles 351-353 (same "cycle silently fails to commit" pattern as cycles 324/326/330/
+  332/341/342). Per CLAUDE.md's investigate-before-discarding guidance, validated rather
+  than discarded: `cargo build --workspace` clean, `cargo test --workspace` all green (no
+  regressions), `cargo clippy --workspace --all-targets -- -D warnings` clean, frontend
+  `pnpm test --run` 105/105 files / 1502/1502 green (was 1498), `tsc -b`/`biome check`
+  clean. The diff's doc comments *claimed* prior review cycles already happened but were
+  never committed — treated as unverified claims, not fact, and re-reviewed properly
+  before this commit (see below). `pg_security_it.rs`'s new pagination test needs
+  testcontainers/Docker, unavailable in this session's sandbox — not run locally, will be
+  exercised by CI's Rust workflow (which has Docker) on push.
+- **What it does:** closes both findings security-auditor deferred from cycle 350:
+  1. `find_pending` had no LIMIT/pagination — a device with a large backlog (offline for
+     a long time, or a flooded group) could force `poll_envelopes` to serialize an
+     unbounded JSON response, risking OOM on the polling device. Fixed: exact
+     `(created_at, id)` keyset cursor (`ENVELOPE_POLL_LIMIT=64` rows,
+     `ENVELOPE_POLL_MAX_BYTES=4MiB` cumulative raw bytes, at-least-one-row-always-returned
+     for a single oversized envelope), backed by a new 3-column index
+     (`envelopes_recipient_created_id_idx`, migrations 0011/0012 — `CREATE INDEX
+     CONCURRENTLY` first, `DROP INDEX CONCURRENTLY` of the old 2-column index second, so
+     the table is never unindexed or lock-held during the build; `-- no-transaction`
+     marker required since Postgres forbids `CONCURRENTLY` inside sqlx's default
+     migration transaction).
+  2. No server-side size cap on message ciphertext beyond the global 512KB body limit
+     (inconsistent with `invite_service.rs`'s `MAX_KEY_PACKAGE_BYTES`/`auth_service.rs`'s
+     `MAX_MLS_CREDENTIAL_BYTES` precedent). Fixed: per-type caps in
+     `messaging_service.rs` — `MAX_CIPHERTEXT_BYTES=96KiB` (Application),
+     `MAX_COMMIT_BYTES=64KiB`, `MAX_WELCOME_BYTES=256KiB` — checked before the membership
+     DB round-trip in `send_message`/`send_welcome`/`send_commit`. Mirrored in
+     `powehi-grpc/src/server.rs`'s cross-region `forward_envelope`/`forward_commit`,
+     replacing a single generic 1MiB cap that would have let a compromised peer region
+     forward oversized Application/Proposal envelopes and silently invalidate
+     `ENVELOPE_POLL_LIMIT`'s documented worst-case-per-poll memory bound.
+  REST `poll` endpoint's `PollQuery.since` changed from a Unix-timestamp `i64` to an
+  RFC3339 string, plus a new `since_id` field — together they're the keyset cursor pair;
+  `since_id` without `since` is rejected fail-closed. Frontend (`useMessages.ts`/
+  `useWelcomePoller.ts`) advances the cursor to the last envelope of every fetched page
+  unconditionally (even a page the hook doesn't fully act on — wrong group, undecryptable
+  Welcome, decrypt-rate-deferred), so the next poll always moves forward; a large backlog
+  drains over repeated 3s-interval ticks rather than a single in-tick loop.
+- **security-auditor: GREEN.** Verified (not rubber-stamped): the byte-trim loop's
+  at-least-one-row guarantee, the keyset cursor's injection-safety and gap/duplicate-
+  freedom (checked against the new `find_pending_keyset_cursor_splits_same_timestamp_
+  group_safely` testcontainers test — 71+ same-`created_at` envelopes paged across 10
+  rounds, zero loss), the 0011/0012 migration's `-- no-transaction` mechanism against
+  sqlx's actual vendored source, no bypass of the new size caps from any other route
+  handler (invite.rs/push_subscription.rs/region.rs/lib.rs diffs are pure trait-signature
+  plumbing for the new `since_id` param, not new call sites), no broken-access-control
+  regression from since/since_id (device-scoping WHERE clause is independent of and
+  applied before the cursor predicate), no plaintext/PII/ciphertext logging added. One
+  non-blocking follow-up: automate a `pg_index.indisvalid` guard between 0011/0012
+  instead of relying on the migration's documented manual runbook step for the rare
+  interrupted-CONCURRENTLY-build case.
+- **threat-model-checker: GREEN, no prd.md changes required.** Envelope ciphertext size
+  was already disclosed as server-visible in prd.md §3.3 — the new caps don't add a new
+  observable signal, same `MAX_KEY_PACKAGE_BYTES` precedent. Verified the pagination
+  cursor can't be used as an existence oracle (a forged `since_id` can only reposition
+  within the caller's own already-authorized row set, since the device-scoping filter is
+  independent of the cursor predicate) and can't cause a *permanent* skip (only
+  latency — draining a large/flooded backlog over multiple poll ticks, not a single-tick
+  loop, is a documented availability property, not a correctness regression). Two
+  non-blocking follow-ups noted: (a) no compiler-enforced sync between the REST-side
+  (`messaging_service.rs`) and gRPC-side (`powehi-grpc/server.rs`) size-cap constants —
+  worth a cross-crate test asserting they match, to fail CI instead of requiring a human
+  to notice future drift (closing this the same way a future cycle 352-style gap would
+  reopen it); (b) `MAX_WELCOME_BYTES=256KiB` is generous on paper but the pre-existing
+  (unchanged by this diff) global `MAX_BODY_BYTES=512KB` body limit already truncates a
+  raw Welcome to ~143KB before this check is ever reached (JSON-numeric-array ~3.57x
+  inflation on a plain `Vec<u8>` field) — a pre-existing availability constraint on
+  large-group MLS Welcomes, not introduced or worsened by this diff, flagged for a future
+  `serde_bytes`/base64 encoding fix if ever prioritized.
+- New/updated tests: `pg_security_it.rs` gained `find_pending_paginates_large_backlog`
+  and `find_pending_keyset_cursor_splits_same_timestamp_group_safely` (testcontainers,
+  not run locally this cycle — no Docker in sandbox, will run in CI); `messaging_service.rs`
+  gained 3 oversized-payload rejection tests + 1 at-limit-accepted test;
+  `powehi-grpc/server.rs` gained a per-type-cap-dispatch test (Welcome between the
+  Application and Welcome caps is accepted, not rejected at the tighter cap) + an
+  oversized-Welcome-rejected test; frontend `useMessages.test.ts`/`useWelcomePoller.test.ts`
+  gained cursor-advancement coverage. **Frontend: 105/105 files, 1502/1502 tests green**
+  (was 1498). `tsc -b` clean, `biome check` clean.
+- Target dir hygiene: pruned 0-byte `.rmeta` stubs; `target/` at 14GB, under the 20GB
+  prune threshold, no further action needed. `project-context.md` at 166KB/2059 lines,
+  under the 256KB Read cap — no archive needed yet, but getting closer; worth archiving
+  older cycle entries (300s) to a separate file in a future stabilization cycle if it
+  keeps growing.
+- **Next cycle candidates:** the two follow-ups from this cycle's reviews (cross-crate
+  size-cap-drift test; `indisvalid` migration guard automation) — both cheap, low
+  urgency; `KeyPackageService::upload`'s missing per-KeyPackage size cap (cycle 350's
+  other deferred LOW finding, still not picked up — cheap, same pattern as
+  `MAX_KEY_PACKAGE_BYTES` in invite_service.rs to copy); closing the incoming/outgoing
+  media-key asymmetry (cycle 349, would need a new crypto-reviewed WASM key-export
+  primitive); PQ hybrid Phase A (still blocked on openmls stable `MLS_128_MLKEM768`);
+  OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003 Phase B 95%-session threshold);
+  project-context.md archival (noted above, not urgent yet).
+
+## Previous state (2026-08-24, cycle 350 — STABILIZATION: fix broken access control in broadcast envelope ack, commit bd82201)
 
 - CI green, `gh issue list --state open` empty, `git status` clean at cycle start. Full
   baseline pass before picking a target: backend `cargo build/test --workspace` green,
