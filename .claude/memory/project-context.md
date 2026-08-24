@@ -17,7 +17,55 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-24, cycle 355 — STABILIZATION: envelope poll pagination + per-type size caps, commit 97c6c7c)
+## Current state (2026-08-25, cycle 356 — FEATURE: KeyPackage upload per-item size cap, commit d0f0c8e)
+
+- CI green (`gh run list --limit 3` all success), `gh issue list --state open` empty,
+  `git status` clean at cycle start. Picked cycle 350's last remaining deferred LOW
+  finding (the other two from that sweep — broadcast-ack access control, envelope
+  pagination/size caps — were closed cycles 350/355): `KeyPackageService::upload`
+  capped package *count* per call (50) and per device (200) but not individual byte
+  size, inconsistent with `invite_service.rs`'s `MAX_KEY_PACKAGE_BYTES`/
+  `auth_service.rs`'s `MAX_MLS_CREDENTIAL_BYTES` precedent.
+- **Fix:** added the same `MAX_KEY_PACKAGE_BYTES = 16 * 1024` constant to
+  `key_package_service.rs`. `upload()` now rejects the whole batch fail-closed (empty
+  or >16KiB on any item) before the per-device count check's DB round trip — no
+  partial upload, since `save()` loops individual INSERTs with no transaction.
+- **security-auditor: GREEN.** Verified (not rubber-stamped): built a temporary probe
+  in `powehi-crypto-wasm` to measure a real `openmls` KeyPackage wire size
+  (PQ-hybrid-extension-included, current Phase B interim ciphersuite) at 1,541 bytes —
+  16KiB gives ~10.6x headroom, no legitimate-KeyPackage rejection risk; reverted the
+  probe, confirmed working tree clean before commit. No bypass path (`save`'s only
+  caller is post-check; `upload`'s only production caller is the REST route; gRPC only
+  reads/consumes, never writes). Fail-closed whole-batch rejection is the only clean
+  choice given `save`'s non-transactional insert loop, consistent with the existing
+  count-cap's same all-or-nothing behavior. No plaintext/PII logging (bytes are
+  `#[instrument(skip(...))]`, error strings are static categories, `ApiError::from`
+  collapses all `InvalidInput` variants to `400 invalid_input` client-side). One
+  YELLOW informational, non-blocking: prd.md §5.3's Phase A native-PQ KeyPackage
+  estimate (~8000B) + a max-size 4KiB LeafNode credential narrows headroom to ~25% —
+  worth revisiting when `POWEHI_PQ_MLS_NATIVE_ENABLED` is ever flipped on, not now.
+- Not architectural, no new server-visible metadata (same disclosure precedent as the
+  existing `MAX_KEY_PACKAGE_BYTES`/`MAX_MLS_CREDENTIAL_BYTES` caps) —
+  `threat-model-checker`/`crypto-reviewer` not required (diff touches no crypto code).
+- 4 new tests in `key_package_service.rs` (oversized rejected, at-limit accepted,
+  empty rejected, mixed-batch rejects whole batch with zero partial-store state;
+  module total 8→12). `cargo test --workspace` all green, `cargo clippy --workspace
+  --all-targets -- -D warnings` clean, `cargo fmt` applied (2 lines reformatted, no
+  logic change).
+- Target dir hygiene: not checked this cycle (FEATURE mode, not due — last checked
+  cycle 355 at 14GB, well under the 20GB threshold).
+- **Next cycle candidates:** the two follow-ups from cycle 355 (cross-crate
+  size-cap-drift test between `messaging_service.rs`/`powehi-grpc/server.rs`;
+  `pg_index.indisvalid` migration guard automation for 0011/0012) — both cheap, low
+  urgency; closing the incoming/outgoing media-key asymmetry (cycle 349, needs a new
+  crypto-reviewed WASM key-export primitive); PQ hybrid Phase A (still blocked on
+  openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated on
+  ADR-0003 Phase B 95%-session threshold); this cycle's new YELLOW note (KeyPackage
+  16KiB cap margin narrows under Phase A native PQ — revisit alongside that work, not
+  standalone); project-context.md archival (166KB→ now larger, worth archiving older
+  cycle entries in a future stabilization cycle).
+
+## Previous state (2026-08-24, cycle 355 — STABILIZATION: envelope poll pagination + per-type size caps, commit 97c6c7c)
 
 - CI green (`gh run list --limit 5` all success/cancelled-superseded), `gh issue list
   --state open` empty. **`git status` at cycle start was NOT clean** — found a complete,
