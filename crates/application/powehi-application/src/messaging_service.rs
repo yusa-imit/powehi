@@ -41,7 +41,14 @@ const MAX_FAN_OUT_RECIPIENTS: usize = 512;
 /// ~143KB the global 512KB body limit already implies for a single `Vec<u8>`
 /// field at the same ~3.57x JSON-array encoding. Flagged by security-auditor
 /// cycle 350/351 (prd.md §11.4).
-const MAX_CIPHERTEXT_BYTES: usize = 96 * 1024;
+///
+/// `pub` (not private) solely so `bin/powehi-server`'s
+/// `tests/size_cap_consistency.rs` can assert this stays equal to
+/// `powehi_grpc::server::MAX_APPLICATION_CIPHERTEXT_BYTES` — the two are
+/// intentionally duplicated across the hexagonal boundary (see that
+/// constant's doc comment) and previously could drift silently. Not part of
+/// any intended public API otherwise.
+pub const MAX_CIPHERTEXT_BYTES: usize = 96 * 1024;
 
 /// Maximum raw `commit` size for an MLS Commit envelope — same defense-in-
 /// depth precedent as `MAX_CIPHERTEXT_BYTES`, independent of the global
@@ -51,7 +58,7 @@ const MAX_CIPHERTEXT_BYTES: usize = 96 * 1024;
 /// legitimate Commit. Flagged by security-auditor cycle 352: an uncapped
 /// Commit/Welcome amplifies `ENVELOPE_POLL_LIMIT`'s worst-case per-poll
 /// server memory (envelope_repo.rs), compounding that finding.
-const MAX_COMMIT_BYTES: usize = 64 * 1024;
+pub const MAX_COMMIT_BYTES: usize = 64 * 1024;
 
 /// Maximum raw `welcome` size for an MLS Welcome envelope. Unlike
 /// `MAX_CIPHERTEXT_BYTES`/`MAX_COMMIT_BYTES`, a Welcome's
@@ -72,7 +79,7 @@ const MAX_COMMIT_BYTES: usize = 64 * 1024;
 /// `MAX_CIPHERTEXT_BYTES`/`MAX_COMMIT_BYTES`: if `MAX_BODY_BYTES` is ever
 /// widened for an unrelated reason, this becomes the binding, type-specific
 /// bound again without anyone having to remember to add it back.
-const MAX_WELCOME_BYTES: usize = 256 * 1024;
+pub const MAX_WELCOME_BYTES: usize = 256 * 1024;
 
 pub struct MessagingService {
     envelope_repo: Arc<dyn EnvelopeRepository>,

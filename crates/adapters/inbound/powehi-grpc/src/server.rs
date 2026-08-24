@@ -43,9 +43,15 @@ use crate::error::domain_err_to_status;
 /// `envelope_repo.rs` (64 × 256KB assumed every type capped at Welcome's
 /// ceiling; a cross-region-forwarded Application/Proposal envelope was not).
 /// threat-model-checker cycle 353.
-const MAX_APPLICATION_CIPHERTEXT_BYTES: usize = 96 * 1024; // 96 KiB
-const MAX_COMMIT_BYTES: usize = 64 * 1024; // 64 KiB
-const MAX_WELCOME_BYTES: usize = 256 * 1024; // 256 KiB
+///
+/// `pub` (not private) solely so `bin/powehi-server`'s
+/// `tests/size_cap_consistency.rs` can assert these stay equal to their
+/// `powehi-application`/`messaging_service.rs` counterparts — see that
+/// module's `MAX_CIPHERTEXT_BYTES` doc comment. threat-model-checker cycle
+/// 355 follow-up: this pair had no compiler/test-enforced sync before this.
+pub const MAX_APPLICATION_CIPHERTEXT_BYTES: usize = 96 * 1024; // 96 KiB
+pub const MAX_COMMIT_BYTES: usize = 64 * 1024; // 64 KiB
+pub const MAX_WELCOME_BYTES: usize = 256 * 1024; // 256 KiB
 
 /// Maximum number of device members accepted per SyncGroupMembership call (RED-1 closure).
 /// Prevents amplified DB writes from a malicious or misconfigured peer.
