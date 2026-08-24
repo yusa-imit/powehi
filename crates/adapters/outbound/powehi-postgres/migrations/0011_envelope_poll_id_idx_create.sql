@@ -20,16 +20,10 @@
 -- (deploy cancelled, connection dropped, deadlock) Postgres leaves an INVALID
 -- index under this name. `IF NOT EXISTS` then no-ops on retry without
 -- rebuilding it, and the query planner permanently ignores an invalid index —
--- 0012 would then drop the only good (two-column) index, leaving every poll to
--- seq-scan `envelopes`. If a deploy fails partway through this migration,
--- check `SELECT indexrelid::regclass, indisvalid FROM pg_index WHERE
--- indexrelid = 'envelopes_recipient_created_id_idx'::regclass` before
--- retrying; if `indisvalid` is false, run `DROP INDEX CONCURRENTLY
--- envelopes_recipient_created_id_idx` manually first. Not automated here:
--- `CREATE INDEX CONCURRENTLY` cannot run inside the same migration file as a
--- conditional-drop `DO` block (`DO` requires a transaction, `CONCURRENTLY`
--- forbids one) — an automated fix needs its own preamble migration, deferred
--- as a next-cycle candidate rather than restructuring this migration set
--- further in the same cycle as the pagination fix itself.
+-- the next migration would then drop the only good (two-column) index,
+-- leaving every poll to seq-scan `envelopes`. Automated (cycle 358): 0012
+-- guards against exactly this — a transactional `DO` block that aborts the
+-- whole migration run if `pg_index.indisvalid` is false for this index,
+-- before 0013's `DROP INDEX CONCURRENTLY` of the fallback index can run.
 CREATE INDEX CONCURRENTLY IF NOT EXISTS envelopes_recipient_created_id_idx
     ON envelopes(recipient_device_id, created_at, id);

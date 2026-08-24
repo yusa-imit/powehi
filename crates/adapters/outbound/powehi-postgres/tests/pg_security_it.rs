@@ -707,3 +707,119 @@ async fn user_recovery_pubkey_survives_upsert() {
     );
     assert_eq!(loaded.opaque_password_file, vec![0x11u8; 8]);
 }
+
+/// Happy-path proof that the 0011 (create) -> 0012 (guard) -> 0013 (drop)
+/// migration sequence runs cleanly end to end on a fresh DB: the new
+/// three-column index is valid and serving, and the superseded two-column
+/// index is gone. `setup()` already runs the full migration set, so this
+/// mainly proves the 0012 guard added in cycle 358 doesn't false-positive on
+/// the ordinary, uninterrupted build path.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn full_migration_run_leaves_new_envelope_index_valid_and_old_index_dropped() {
+    let (_c, pool) = setup().await;
+
+    let new_idx_valid: bool = sqlx::query_scalar(
+        "SELECT indisvalid FROM pg_index WHERE indexrelid = 'envelopes_recipient_created_id_idx'::regclass",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("new index must exist after migrations");
+    assert!(
+        new_idx_valid,
+        "envelopes_recipient_created_id_idx must be valid after a clean migration run"
+    );
+
+    let old_idx_gone: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM pg_class WHERE relname = 'envelopes_recipient_created_idx'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .expect("query old index catalog entry");
+    assert!(
+        old_idx_gone.is_none(),
+        "superseded two-column index must be dropped by 0013"
+    );
+}
+
+/// 0012 (`envelope_poll_idx_validity_guard`) automates the manual runbook
+/// step documented in 0011's OPERATIONAL NOTE (cycle 353) — it guards 0013's
+/// `DROP INDEX CONCURRENTLY` of the fallback index behind a check that the
+/// new three-column index actually finished building. Postgres gives no
+/// supported way to directly flip `pg_index.indisvalid` on a healthy index
+/// outside of interrupting a real `CONCURRENTLY` build, so this test
+/// reproduces an invalid index the standard reliable way — a `CREATE UNIQUE
+/// INDEX CONCURRENTLY` whose build fails on a genuine duplicate-key
+/// violation, which Postgres leaves catalogued-but-invalid rather than
+/// rolling back (CONCURRENTLY can't run inside a transaction to roll back).
+/// It then runs the *actual shipped migration SQL* via `include_str!` (so
+/// this test can't silently drift from what production really runs)
+/// retargeted at the synthetic index.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn envelope_poll_idx_validity_guard_aborts_on_invalid_index() {
+    let (_c, pool) = setup().await;
+
+    sqlx::query("CREATE TABLE guard_probe (a int)")
+        .execute(&pool)
+        .await
+        .expect("create probe table");
+    sqlx::query("INSERT INTO guard_probe VALUES (1), (1)")
+        .execute(&pool)
+        .await
+        .expect("insert duplicate rows");
+    sqlx::query("CREATE UNIQUE INDEX CONCURRENTLY guard_probe_idx ON guard_probe(a)")
+        .execute(&pool)
+        .await
+        .expect_err("build must fail on duplicate values, leaving an invalid index");
+
+    // Confirm the setup actually reproduces the scenario this guard exists
+    // for: the index is catalogued but invalid, matching an interrupted
+    // 0011 build.
+    let invalid: bool = sqlx::query_scalar(
+        "SELECT NOT indisvalid FROM pg_index WHERE indexrelid = 'guard_probe_idx'::regclass",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("probe index catalogued despite failed build");
+    assert!(
+        invalid,
+        "guard_probe_idx must be INVALID for this test to be meaningful"
+    );
+
+    let guard_sql = include_str!("../migrations/0012_envelope_poll_idx_validity_guard.sql")
+        .replace("envelopes_recipient_created_id_idx", "guard_probe_idx");
+
+    let guard_err = sqlx::raw_sql(&guard_sql)
+        .execute(&pool)
+        .await
+        .expect_err("guard must abort when the target index is invalid");
+    assert!(
+        guard_err.to_string().contains("INVALID"),
+        "guard error must explain the failure, got: {guard_err}"
+    );
+
+    // Rebuild cleanly (dedupe + drop + recreate) and re-run the identical
+    // guard SQL — it must now pass silently, proving this isn't a permanent
+    // trap once the index is actually rebuilt.
+    sqlx::query("DROP INDEX CONCURRENTLY guard_probe_idx")
+        .execute(&pool)
+        .await
+        .expect("drop invalid index");
+    sqlx::query(
+        "DELETE FROM guard_probe a USING guard_probe b \
+         WHERE a.ctid < b.ctid AND a.a = b.a",
+    )
+    .execute(&pool)
+    .await
+    .expect("dedupe rows");
+    sqlx::query("CREATE UNIQUE INDEX CONCURRENTLY guard_probe_idx ON guard_probe(a)")
+        .execute(&pool)
+        .await
+        .expect("rebuild a valid index");
+
+    sqlx::raw_sql(&guard_sql)
+        .execute(&pool)
+        .await
+        .expect("guard must pass once the index is valid");
+}
