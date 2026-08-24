@@ -17,6 +17,13 @@ const MAX_KEY_PACKAGES_PER_CALL: usize = 50;
 /// Maximum KeyPackages stored per device at any time. Prevents unbounded
 /// per-device storage growth; ~200 packages supports months of offline usage.
 const MAX_KEY_PACKAGES_PER_DEVICE: u64 = 200;
+/// A real MLS KeyPackage is ~1-2KB; this bounds per-item storage independent of
+/// the global per-request body limit and `MAX_KEY_PACKAGES_PER_CALL`'s count cap
+/// (a small count of oversized items could still consume disproportionate
+/// storage). Same value/rationale as `invite_service.rs`'s `MAX_KEY_PACKAGE_BYTES`
+/// and `auth_service.rs`'s `MAX_MLS_CREDENTIAL_BYTES` — deferred as a LOW finding
+/// in cycle 350's security-auditor sweep, closed here.
+const MAX_KEY_PACKAGE_BYTES: usize = 16 * 1024;
 
 pub struct KeyPackageService {
     kp_repo: Arc<dyn KeyPackageRepository>,
@@ -40,6 +47,12 @@ impl KeyPackageUseCase for KeyPackageService {
             return Err(DomainError::InvalidInput(
                 "too_many_key_packages_per_call".into(),
             ));
+        }
+        if packages
+            .iter()
+            .any(|p| p.is_empty() || p.len() > MAX_KEY_PACKAGE_BYTES)
+        {
+            return Err(DomainError::InvalidInput("invalid_key_package_size".into()));
         }
         // Soft cap: count-then-insert races are possible under concurrent
         // uploads from the same device. The practical window is narrow (same
@@ -193,6 +206,65 @@ mod tests {
             matches!(err, DomainError::InvalidInput(ref s) if s.contains("too_many_key_packages_per_call")),
             "expected too_many_key_packages_per_call, got: {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_oversized_key_package() {
+        let svc = KeyPackageService::new(FakeKpRepo::new());
+        let device = DeviceId::new();
+        let oversized = vec![0u8; MAX_KEY_PACKAGE_BYTES + 1];
+        let err = svc
+            .upload(&device, vec![Bytes::from(oversized)])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DomainError::InvalidInput(ref s) if s.contains("invalid_key_package_size")),
+            "expected invalid_key_package_size, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_accepts_key_package_at_size_limit() {
+        let repo = FakeKpRepo::new();
+        let svc = KeyPackageService::new(repo.clone());
+        let device = DeviceId::new();
+        let at_limit = vec![0u8; MAX_KEY_PACKAGE_BYTES];
+        let ids = svc
+            .upload(&device, vec![Bytes::from(at_limit)])
+            .await
+            .unwrap();
+        assert_eq!(ids.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_empty_key_package() {
+        let svc = KeyPackageService::new(FakeKpRepo::new());
+        let device = DeviceId::new();
+        let err = svc.upload(&device, vec![Bytes::new()]).await.unwrap_err();
+        assert!(
+            matches!(err, DomainError::InvalidInput(ref s) if s.contains("invalid_key_package_size")),
+            "expected invalid_key_package_size, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_batch_if_any_package_oversized() {
+        // Fail-closed: one oversized item in an otherwise-valid batch rejects
+        // the whole call, matching the per-call count-limit's all-or-nothing
+        // behavior — no partial upload.
+        let repo = FakeKpRepo::new();
+        let svc = KeyPackageService::new(repo.clone());
+        let device = DeviceId::new();
+        let oversized = vec![0u8; MAX_KEY_PACKAGE_BYTES + 1];
+        let err = svc
+            .upload(
+                &device,
+                vec![Bytes::from_static(b"valid"), Bytes::from(oversized)],
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::InvalidInput(_)));
+        assert_eq!(repo.store.lock().unwrap().len(), 0, "no partial upload");
     }
 
     #[tokio::test]
