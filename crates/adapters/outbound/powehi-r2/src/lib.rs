@@ -320,6 +320,32 @@ impl MediaRepository for R2MediaAdapter {
         .map_err(map_sqlx)?;
         Ok(rows.into_iter().map(MediaBlob::from).collect())
     }
+
+    #[instrument(skip(self, since), fields(device_id = %device_id))]
+    async fn sum_bytes_uploaded_since(
+        &self,
+        device_id: &DeviceId,
+        since: DateTime<Utc>,
+    ) -> Result<u64, DomainError> {
+        // COALESCE: SUM over zero matching rows is SQL NULL, not 0. Explicit
+        // ::BIGINT cast: Postgres's SUM(bigint) returns NUMERIC (only
+        // SUM(integer) stays bigint), and this workspace's sqlx build has no
+        // NUMERIC-decoding type (no bigdecimal/rust_decimal feature) — without
+        // the cast, fetch_one would fail every call with a column-decode
+        // error (security-auditor finding, this cycle). size_bytes ≤
+        // MAX_MEDIA_BYTES (100MB) per row makes overflow past i64::MAX
+        // physically impossible regardless of row count.
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COALESCE(SUM(size_bytes), 0)::BIGINT FROM media_blobs
+             WHERE uploader_device_id = $1 AND uploaded_at >= $2",
+        )
+        .bind(device_id.as_uuid())
+        .bind(since)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.0 as u64)
+    }
 }
 
 #[cfg(test)]

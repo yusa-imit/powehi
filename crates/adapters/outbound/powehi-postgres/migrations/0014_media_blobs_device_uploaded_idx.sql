@@ -1,0 +1,24 @@
+-- no-transaction
+-- Backs the new per-device/per-day media upload byte quota (security-auditor
+-- cycle 359 residual finding): `MediaService::request_upload` now sums
+-- `size_bytes` for a device's uploads in a rolling 24h window before
+-- accepting a new one. The existing `media_blobs_uploader_idx` (single
+-- column) can't serve a range filter on `uploaded_at` without a full scan
+-- of that device's row set; this composite index makes the sum a bounded
+-- index range scan instead.
+--
+-- CREATE INDEX CONCURRENTLY cannot run inside sqlx's default migration
+-- transaction (Postgres forbids CONCURRENTLY in a transaction block
+-- outright), hence `-- no-transaction` above, matching the 0011 precedent.
+-- Unlike 0011/0012/0013, no later migration drops or depends on the old
+-- single-column index, so an interrupted build leaving this new index
+-- INVALID degrades the quota-sum query back to the pre-existing single-
+-- column-index scan (slower, not incorrect) rather than losing query
+-- coverage entirely — no companion `pg_index.indisvalid` guard needed here.
+-- OPERATIONAL NOTE (security-auditor, this cycle): if this build is
+-- interrupted, `IF NOT EXISTS` makes a migration retry no-op past the
+-- resulting INVALID index instead of rebuilding it — run
+-- `DROP INDEX CONCURRENTLY media_blobs_device_uploaded_idx` manually, then
+-- re-run migrations, to actually rebuild it.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS media_blobs_device_uploaded_idx
+    ON media_blobs(uploader_device_id, uploaded_at);

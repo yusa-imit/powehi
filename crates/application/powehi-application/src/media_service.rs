@@ -2,6 +2,29 @@ use std::sync::Arc;
 
 const MAX_MEDIA_BYTES: u64 = 100 * 1024 * 1024;
 
+/// Per-device rolling-24h upload byte cap, summed over currently-live blobs
+/// only. Closes the residual gap from cycle 359's security-auditor sweep:
+/// binding `size_bytes` into the R2 presign signature made a single upload's
+/// declared size trustworthy, but nothing bounded how many uploads a device
+/// could request per day — only the shared per-IP `api_governor` rate limit
+/// applied (~4TB/day/IP sustained-worst-case). 5GB/day comfortably covers
+/// heavy real usage (dozens of photos/videos) while bounding worst-case R2
+/// storage cost per device to a fixed ceiling.
+///
+/// Two accepted residual gaps (security-auditor sweep, this cycle), neither
+/// blocking since storage itself stays bounded:
+/// - **delete resets usage**: `upload -> confirm -> delete` in a loop lets a
+///   device churn unbounded write ops/day within the window, since the sum
+///   only counts rows still present — a real per-day cap on write ops (not
+///   just live bytes) would need an append-only usage ledger, out of scope
+///   here.
+/// - **race window**: the count-then-insert check (below) is a soft cap, not
+///   atomic — N concurrent requests from one device can all read the same
+///   `used` before any commits. Bounded by the per-IP governor's burst (60),
+///   so worst case is a one-shot ~2x-cap overshoot per window, not unbounded
+///   drift (same shape as `KeyPackageService::upload`'s existing soft cap).
+const MAX_MEDIA_BYTES_PER_DEVICE_PER_DAY: u64 = 5 * 1024 * 1024 * 1024;
+
 /// prd.md §9.4.3: blobs acknowledged by every recipient are deleted after N
 /// days. This is also the fallback retention ceiling for blobs that are
 /// never fully acknowledged (or have no recipients besides the uploader).
@@ -163,6 +186,21 @@ impl MediaUseCase for MediaService {
             if !members.iter().any(|m| &m.device_id == uploader_device) {
                 return Err(DomainError::Unauthorized);
             }
+        }
+        // Soft cap, same count-then-insert race as `KeyPackageService::upload`
+        // — see MAX_MEDIA_BYTES_PER_DEVICE_PER_DAY's doc comment for the
+        // bound (concurrency x MAX_MEDIA_BYTES, capped by the per-IP
+        // governor's burst; a one-shot ~2x-cap overshoot per window, not
+        // unbounded drift).
+        let window_start = chrono::Utc::now() - chrono::Duration::days(1);
+        let used = self
+            .media_repo
+            .sum_bytes_uploaded_since(uploader_device, window_start)
+            .await?;
+        if used.saturating_add(size_bytes) > MAX_MEDIA_BYTES_PER_DEVICE_PER_DAY {
+            return Err(DomainError::InvalidInput(
+                "media_device_daily_quota_exceeded".into(),
+            ));
         }
         let blob = MediaBlob {
             id: MediaId::new(),
@@ -396,6 +434,18 @@ mod tests {
             rows.truncate(limit as usize);
             Ok(rows)
         }
+        async fn sum_bytes_uploaded_since(
+            &self,
+            device_id: &DeviceId,
+            since: chrono::DateTime<chrono::Utc>,
+        ) -> Result<u64, DomainError> {
+            let locked = self.saved.lock().unwrap();
+            Ok(locked
+                .iter()
+                .filter(|b| &b.uploader_device == device_id && b.uploaded_at >= since)
+                .map(|b| b.size_bytes)
+                .sum())
+        }
     }
 
     struct FakeGroupRepo {
@@ -553,6 +603,107 @@ mod tests {
         assert_eq!(saved[0].id, id);
         assert_eq!(saved[0].uploader_device, device);
         assert!(saved[0].group_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn request_upload_rejects_when_device_over_daily_byte_quota() {
+        let repo = Arc::new(MockMediaRepo::new("u", "d"));
+        let s = svc(repo.clone());
+        let device = DeviceId::new();
+        // Prime the device's rolling-24h usage right up to the cap via a
+        // synthetic already-saved blob (avoids looping thousands of real
+        // MAX_MEDIA_BYTES-sized uploads just to reach 5GB).
+        let priming = MediaBlob {
+            id: MediaId::new(),
+            uploader_device: device.clone(),
+            storage_key: "media/priming".into(),
+            content_type: "image/jpeg".into(),
+            size_bytes: MAX_MEDIA_BYTES_PER_DEVICE_PER_DAY,
+            uploaded_at: chrono::Utc::now(),
+            expires_at: None,
+            group_id: None,
+        };
+        repo.save(&priming).await.unwrap();
+        let err = s
+            .request_upload(&device, "image/jpeg", 1, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DomainError::InvalidInput(ref s) if s.contains("media_device_daily_quota_exceeded")),
+            "expected media_device_daily_quota_exceeded, got: {err:?}"
+        );
+        // No new blob saved past the priming one.
+        assert_eq!(repo.saved.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn request_upload_accepts_when_at_exact_daily_quota_boundary() {
+        let repo = Arc::new(MockMediaRepo::new("u", "d"));
+        let s = svc(repo.clone());
+        let device = DeviceId::new();
+        let priming = MediaBlob {
+            id: MediaId::new(),
+            uploader_device: device.clone(),
+            storage_key: "media/priming".into(),
+            content_type: "image/jpeg".into(),
+            size_bytes: MAX_MEDIA_BYTES_PER_DEVICE_PER_DAY - 1,
+            uploaded_at: chrono::Utc::now(),
+            expires_at: None,
+            group_id: None,
+        };
+        repo.save(&priming).await.unwrap();
+        // Exactly at the cap must be accepted; only strictly over is rejected.
+        s.request_upload(&device, "image/jpeg", 1, None)
+            .await
+            .unwrap();
+        assert_eq!(repo.saved.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn request_upload_ignores_usage_outside_the_rolling_window() {
+        let repo = Arc::new(MockMediaRepo::new("u", "d"));
+        let s = svc(repo.clone());
+        let device = DeviceId::new();
+        let stale = MediaBlob {
+            id: MediaId::new(),
+            uploader_device: device.clone(),
+            storage_key: "media/stale".into(),
+            content_type: "image/jpeg".into(),
+            size_bytes: MAX_MEDIA_BYTES_PER_DEVICE_PER_DAY,
+            uploaded_at: chrono::Utc::now() - chrono::Duration::days(2),
+            expires_at: None,
+            group_id: None,
+        };
+        repo.save(&stale).await.unwrap();
+        // Stale usage from >24h ago must not count against today's quota.
+        s.request_upload(&device, "image/jpeg", 1024, None)
+            .await
+            .unwrap();
+        assert_eq!(repo.saved.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn request_upload_daily_quota_is_scoped_per_device() {
+        let repo = Arc::new(MockMediaRepo::new("u", "d"));
+        let s = svc(repo.clone());
+        let device_a = DeviceId::new();
+        let device_b = DeviceId::new();
+        let priming = MediaBlob {
+            id: MediaId::new(),
+            uploader_device: device_a.clone(),
+            storage_key: "media/a-priming".into(),
+            content_type: "image/jpeg".into(),
+            size_bytes: MAX_MEDIA_BYTES_PER_DEVICE_PER_DAY,
+            uploaded_at: chrono::Utc::now(),
+            expires_at: None,
+            group_id: None,
+        };
+        repo.save(&priming).await.unwrap();
+        // device_a is at its cap, but device_b's own quota is untouched.
+        s.request_upload(&device_b, "image/jpeg", 1024, None)
+            .await
+            .unwrap();
+        assert_eq!(repo.saved.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]

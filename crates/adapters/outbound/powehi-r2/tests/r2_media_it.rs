@@ -759,6 +759,56 @@ async fn list_gc_candidates_filters_paginates_and_keysets() {
     }
 }
 
+// ── sum_bytes_uploaded_since (per-device daily media quota) ───────────────────
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn sum_bytes_uploaded_since_sums_only_matching_device_and_window() {
+    let h = setup().await;
+    let device = insert_device(&h.pool).await;
+    let other_device = insert_device(&h.pool).await;
+    let now = Utc::now();
+    let window_start = now - chrono::Duration::days(1);
+
+    let mut in_window = media_fixture(device.clone(), None);
+    in_window.size_bytes = 1_000;
+    in_window.uploaded_at = now;
+    h.adapter.save(&in_window).await.expect("save in_window");
+
+    let mut stale = media_fixture(device.clone(), None);
+    stale.size_bytes = 999_999;
+    stale.uploaded_at = now - chrono::Duration::days(2);
+    h.adapter.save(&stale).await.expect("save stale");
+
+    let mut other = media_fixture(other_device, None);
+    other.size_bytes = 555;
+    other.uploaded_at = now;
+    h.adapter.save(&other).await.expect("save other device");
+
+    let sum = h
+        .adapter
+        .sum_bytes_uploaded_since(&device, window_start)
+        .await
+        .expect("sum_bytes_uploaded_since");
+    assert_eq!(
+        sum, 1_000,
+        "must count only this device's in-window blob, not the stale or other-device ones"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn sum_bytes_uploaded_since_returns_zero_for_device_with_no_uploads() {
+    let h = setup().await;
+    let device = insert_device(&h.pool).await;
+    let sum = h
+        .adapter
+        .sum_bytes_uploaded_since(&device, Utc::now() - chrono::Duration::days(1))
+        .await
+        .expect("sum_bytes_uploaded_since");
+    assert_eq!(sum, 0, "COALESCE must turn SQL NULL into 0, not error");
+}
+
 #[tokio::test]
 #[ignore = "requires Docker (testcontainers)"]
 async fn deleting_a_blob_cascades_its_acks() {

@@ -46,4 +46,15 @@ pub trait MediaRepository: Send + Sync {
         after_id: Option<MediaId>,
         limit: i64,
     ) -> Result<Vec<MediaBlob>, DomainError>;
+
+    /// Total `size_bytes` of `device_id`'s uploads with `uploaded_at >= since`.
+    /// Backs the per-device/per-day upload byte quota in `MediaService`
+    /// (security-auditor cycle 359 residual finding) — the same fail-closed
+    /// pattern as `KeyPackageRepository::count_available`, summing bytes
+    /// instead of counting rows.
+    async fn sum_bytes_uploaded_since(
+        &self,
+        device_id: &DeviceId,
+        since: DateTime<Utc>,
+    ) -> Result<u64, DomainError>;
 }
