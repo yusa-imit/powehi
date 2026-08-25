@@ -17,7 +17,98 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-25, cycle 364 — FEATURE: batch media_upload_ledger GC trim + supporting index, commit 641556b)
+## Current state (2026-08-26, cycle 366 — FEATURE: fix broken access control in create_group (group hijack/rejoin), commit fe6c419)
+
+- CI green (`gh run list --limit 3` all success), `git status` at cycle start was **NOT
+  clean** — same "cycle silently fails to commit" pattern as cycles 324/326/330/332/341/
+  342/355. Found a complete, passing, uncommitted diff already spanning 7 files
+  (group_service.rs, group_repo.rs port+adapter, 3 mock-repo call sites, a new Docker-gated
+  integration test), with doc-comment-style rationale in the diff itself framed exactly
+  like a security-auditor finding-and-fix. The last commit on `main` at cycle start was
+  cycle 364's memory update (b7853b9) with no cycle-365 commit anywhere in `git log` —
+  strongly suggesting this is cycle 365's (STABILIZATION, security sweep step) work that
+  was never committed, the same "cycle silently fails to commit" failure mode as cycles
+  324/326/330/332/341/342/355, just not yet confirmed since no cycle-365 project-context.md
+  entry exists to cross-reference. Per CLAUDE.md's investigate-before-discarding guidance,
+  validated rather than discarded: `cargo build --workspace` clean, `cargo test --workspace`
+  all green (no regressions), `cargo clippy --workspace --all-targets -- -D warnings`
+  clean, `cargo fmt --check` clean. Treated the diff's embedded claims as unverified and
+  re-ran both required review agents fresh before committing.
+- **What it does:** `GroupService::create_group` (`crates/application/powehi-application/src/group_service.rs`)
+  previously called `group_repo.save()` — a destructive `ON CONFLICT DO UPDATE` upsert —
+  then unconditionally added the caller as a member. Any authenticated device could POST
+  an existing/guessed group_id and (a) reset that group's `epoch`/`home_region` to
+  defaults, (b) attach itself as a member of a group it was never invited to, including a
+  device previously evicted via `remove_member` — letting it rejoin and potentially
+  re-evict everyone else. Fixed with a new `GroupRepository::create_if_absent(&Group) ->
+  Result<bool, DomainError>` port method (`INSERT ... ON CONFLICT (id) DO NOTHING`,
+  `crates/adapters/outbound/powehi-postgres/src/group_repo.rs`); `create_group` now calls
+  it instead of `save()`. If the id already existed: caller already a member ->
+  idempotent no-op `Ok(())` (genuine retry, doesn't reset epoch/home_region); caller not a
+  member -> `DomainError::AlreadyExists` (pre-existing variant, already mapped to HTTP 409
+  / gRPC ALREADY_EXISTS elsewhere). Mock `GroupRepository` impls in media_service.rs,
+  messaging_service.rs, and powehi-grpc/server.rs test modules updated to implement the
+  new trait method.
+- **security-auditor: YELLOW (ships safely), verified not rubber-stamped:** confirmed
+  `create_if_absent` is race-free (groups.id is a real UUID PK, giving `ON CONFLICT` a
+  valid arbiter index; `rows_affected() == 1` correctly detects the winner under
+  READ COMMITTED); confirmed no other production call site still uses `save()` for initial
+  creation (the only remaining `save()`/upsert paths are `send_commit`'s epoch advance,
+  member-gated, and gRPC's `upsert_members`, mTLS-region-gated and already DO NOTHING);
+  confirmed the idempotent-retry path isn't TOCTOU-abusable (caller only controls
+  group_id, `creator` comes from the authenticated-device extractor, membership is
+  server-side DB state); confirmed no PII/plaintext logged (`DeviceId`/`GroupId` Display
+  are bare UUIDs); confirmed the 409 mapping leaks no group-id-existence oracle beyond
+  theoretical (128-bit random ids, route is authenticated + rate-limited, response body is
+  code-only). Two non-blocking LOW findings, carried forward rather than fixed this cycle
+  (see below): `create_if_absent` + `add_member` are two separate statements, not one
+  transaction — if `add_member` fails after the group row lands (DB error/pod kill), the
+  group is permanently unusable (zero members, every future caller hits the
+  already-exists-and-not-a-member branch forever) since the fix removed the old
+  self-healing unconditional `add_member`; same non-atomicity also means the loser of two
+  concurrent same-creator `create_group` calls gets a spurious 409 (harmless, client can
+  retry).
+- **threat-model-checker: GREEN**, no prd.md/ADR update needed. Confirmed: no new
+  server-visible metadata (`create_if_absent` writes strictly less than the old `save()`
+  did); T7 (region jurisdiction) posture strengthened — `home_region` can no longer be
+  rewritten by an arbitrary authenticated device, closing a way to move the §3.5.4
+  commit-serialization point; access-control/membership invariants strengthened (closes
+  evicted-device rejoin, which mattered because `group_members` drives fan-out and
+  media/envelope ACLs per §3.3/§9.4.3 — a rejoined device kept receiving ciphertext/
+  presigned URLs even though MLS PCS denied it plaintext); the 409-vs-204 existence-signal
+  delta is within §3.3's already-documented `group_id` disclosure, no doc change required;
+  confirmed no other unguarded path into group creation/upsert remains.
+- 3 new tests in `group_service.rs` (non-member hijack on an existing group_id rejected
+  with `AlreadyExists` + member list unchanged; a device evicted via `remove_member`
+  cannot rejoin through this path; a genuine retry by an existing member is idempotent —
+  no duplicate member row, epoch/home_region not reset), 1 new
+  `#[ignore = "requires Docker"]` integration test in `pg_security_it.rs`
+  (`create_if_absent_does_not_overwrite_an_existing_group`, proves the real Postgres
+  `ON CONFLICT DO NOTHING` semantics directly: first call creates, second call with a
+  different home_region/reset epoch reports already-existing and leaves every column
+  including `created_at` untouched, exactly one row exists). Not run locally (no Docker in
+  sandbox), will run in CI's Rust workflow. `cargo build/test --workspace` clean (all
+  crates green, no regressions), `cargo clippy --workspace --all-targets -- -D warnings`
+  clean, `cargo fmt --check` clean.
+- Target dir hygiene: not checked this cycle (FEATURE mode; cycle 365 was the STABILIZATION
+  cycle that should have covered it — status not visible from this session, assume covered
+  unless a future cycle finds otherwise).
+- **Next cycle candidates:** the security-auditor's two LOW findings this cycle
+  (`create_if_absent`+`add_member` non-atomicity — a failed `add_member` after a fresh
+  group row lands permanently bricks that group_id; fix by wrapping both in one Postgres
+  transaction, same `pool.begin()` pattern `upsert_members` already uses, needs a new
+  combined port method since the current two-call shape can't be made atomic from the
+  application layer alone); `map_sqlx` raw-error-text server-side logging (pre-existing,
+  informational, affects every adapter method); media-key incoming/outgoing asymmetry
+  (needs a new crypto-reviewed WASM key-export/local-storage-key design, confirmed
+  genuinely multi-part cycle 359); the multi-replica-GC-early-exit gap (cycle 364,
+  `FOR UPDATE SKIP LOCKED`/advisory-lock guard, shared between the ledger trim job and
+  `run_gc`); PQ hybrid Phase A (still blocked on openmls stable `MLS_128_MLKEM768`);
+  OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003 Phase B, itself gated on Phase A);
+  project-context.md size (now ~1420 lines, comfortably under the 256KB Read cap — no
+  action needed yet).
+
+## Previous state (2026-08-25, cycle 364 — FEATURE: batch media_upload_ledger GC trim + supporting index, commit 641556b)
 
 - CI green (`gh run list --limit 3` all success), `gh issue list --state open` empty,
   `git status` clean at cycle start. Picked cycle 363's top carried-forward candidate: its own
