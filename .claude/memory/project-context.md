@@ -17,7 +17,84 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-25, cycle 358 — FEATURE: automate pg_index.indisvalid migration guard, commit d3df0de)
+## Current state (2026-08-25, cycle 359 — FEATURE: bind size_bytes into presigned R2 upload signature, commit 62541bb)
+
+- CI green (`gh run list --limit 3` all success), `git status` clean at cycle start. All of
+  cycle 358's carried-forward candidates were blocked (PQ hybrid Phase A: openmls PQ
+  ciphersuite still not stable — checked `docs/decisions/0003-pq-migration.md`, Phase A
+  checklist items all still unchecked) or too large for one safe cycle (media-key
+  incoming/outgoing asymmetry — dispatched an Explore agent to scope it first: closing it
+  needs WASM to retain a session-lived local-storage key derived from the OPAQUE
+  `export_key`, since WASM currently has no thread-local counterpart to `dbKey` at
+  `media_encrypt` time — a real new-persistent-secret design decision, correctly deferred
+  again rather than rushed). Dispatched a fresh `security-auditor` sweep instead (same
+  pattern as cycle 350 when the candidate queue ran dry), scoped to `bin/powehi-server`,
+  `application/*/src/*service*.rs`, and outbound adapters.
+- **security-auditor found a real MEDIUM bug:** `R2MediaAdapter::presigned_upload_url`
+  (`crates/adapters/outbound/powehi-r2/src/lib.rs`) never bound `Content-Length` into the
+  SigV4 signature. `size_bytes` is validated server-side (0 < size ≤ `MAX_MEDIA_BYTES` =
+  100MB, `media_service.rs::request_upload`) and persisted, but that check was purely
+  advisory — a client could declare `size_bytes: 1` then PUT an arbitrarily large body to
+  the real presigned URL (15 min TTL), since nothing checked the actual upload length.
+  Unbounded R2 storage/egress cost, and `media_blobs.size_bytes` (the only value any GC/
+  accounting logic sees) was a client-controlled lie.
+- **Fix:** added `.content_length(row.size_bytes as i64)` to the presign builder — R2 now
+  rejects (SignatureDoesNotMatch) any PUT whose actual body length differs from the row's
+  `size_bytes`. Also closed a related **pre-existing live bug** the same sweep surfaced:
+  `content_type` had ALWAYS been a signed header on this presigned URL, but both PUT call
+  sites in `app/src/lib/mediaTransfer.ts` (`encryptAndSendMedia`, chunked + non-chunked)
+  hardcoded `Content-Type: application/octet-stream` instead of the real `mimeType` param
+  — meaning every real upload against actual R2/S3 (not the local dev/test path) would
+  already fail with `SignatureDoesNotMatch`. Fixed both call sites to send the real
+  `mimeType`.
+- **security-auditor: GREEN** (2 non-blocking YELLOW notes, no required fixes — "Ship it").
+  Verified EMPIRICALLY, not by reading docs: built a temporary probe against the pinned
+  `aws-sdk-s3 1.133.0`/`aws-sigv4 1.4.4` and diffed presigned URLs with/without
+  `.content_length()` — confirmed `content-length` genuinely enters `X-Amz-SignedHeaders`
+  (not silently dropped by the presign interceptor's default-header suppression), and that
+  `content-type` was already signed pre-diff (confirming the second bug was real, not
+  theoretical). `i64`↔`u64` cast confirmed lossless (100MB ≪ `i64::MAX`, `size_bytes` is
+  `BIGINT` on disk). Confirmed no drift: `ciphertext.length` (the exact post-encryption
+  byte count) is what both `requestMediaUpload` and the PUT body use — the signed value
+  always equals the real body. Residual gap flagged as pre-existing/out-of-scope, not
+  introduced by this diff: `/v1/media/upload-url` has no per-device/per-day byte quota,
+  only the shared per-IP `api_governor` rate limit (~4TB/day/IP sustained-worst-case) —
+  the diff converts unbounded-per-URL to bounded-per-URL, which is the correct increment;
+  a byte quota is a separate MEDIUM finding for a future cycle. No plaintext/PII/ciphertext
+  leaked (error paths collapse to static categories; new test fixtures are filler bytes).
+  Not architectural, no new server-visible metadata (R2 already saw object size regardless;
+  this only makes an already-collected value load-bearing) — `threat-model-checker` not
+  required. Not crypto code (S3 request-signing infra, not a message-encryption primitive)
+  — `crypto-reviewer` not required.
+- 4 new/updated Rust tests in `r2_media_it.rs` (2 new: oversized-body-rejected,
+  undersized-body-rejected, both asserting the object never lands in S3; 2 existing tests'
+  fixtures corrected to set `blob.size_bytes = body.len()` before save, since content-length
+  is now signed and must match the real PUT body) — all `#[ignore = "requires Docker"]`,
+  not run locally (no Docker in sandbox), will run in CI's Rust workflow. 2 new Vitest tests
+  in `mediaTransfer.test.ts` proving the PUT's `Content-Type` header matches the real
+  `mimeType` on both chunked and non-chunked paths — these DID run locally and pass.
+  `cargo build/test --workspace` clean (all non-ignored green), `cargo clippy --workspace
+  --all-targets -- -D warnings` clean, `cargo fmt --check` clean (1 auto-fix applied
+  mid-cycle for the two new tests' `.expect()` line length, no logic change). Frontend:
+  105/105 files, 1504/1504 tests green (was 1502). `tsc -b`/`biome check` clean.
+- Target dir hygiene: not checked this cycle (FEATURE mode, not due — next due cycle 360,
+  STABILIZATION).
+- **Next cycle candidates:** the 2 YELLOW notes from this cycle (both optional, cheap,
+  non-blocking — signing `.content_type(&row.content_type)` instead of the caller-supplied
+  parameter for extra robustness against a future divergent caller; a `video/quicktime`
+  test fixture that isn't in `ALLOWED_CONTENT_TYPES`, cosmetic only); a per-device/per-day
+  media upload byte quota (MEDIUM, this cycle's residual finding — no `MediaRepository`
+  count method exists yet, would need one, same pattern as `MAX_KEY_PACKAGES_PER_DEVICE`/
+  `MAX_OUTSTANDING_INVITES_PER_DEVICE`); closing the incoming/outgoing media-key asymmetry
+  (needs a new crypto-reviewed WASM key-export/local-storage-key design — scoped this
+  cycle via Explore agent, confirmed genuinely multi-part, not a quick fix); PQ hybrid
+  Phase A (still blocked on openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF
+  upgrade (gated on ADR-0003 Phase B, itself gated on Phase A); project-context.md archival
+  (184KB/2308 lines, under the 256KB Read cap but flagged repeatedly across cycles 355-358
+  as increasingly pressing — cycle 360 is STABILIZATION, do it then per precedent from
+  cycles 320/340).
+
+## Previous state (2026-08-25, cycle 358 — FEATURE: automate pg_index.indisvalid migration guard, commit d3df0de)
 
 - CI green (`gh run list --limit 3` all success), `git status` clean at cycle start. Picked
   cycle 355/357's carried-forward candidate: the manual runbook step in 0011's OPERATIONAL
