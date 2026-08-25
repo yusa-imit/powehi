@@ -51,7 +51,11 @@ pub trait MediaRepository: Send + Sync {
     /// Backs the per-device/per-day upload byte quota in `MediaService`
     /// (security-auditor cycle 359 residual finding) — the same fail-closed
     /// pattern as `KeyPackageRepository::count_available`, summing bytes
-    /// instead of counting rows.
+    /// instead of counting rows. Sums an append-only record of accepted
+    /// upload requests, NOT currently-live blobs — deleting an upload must
+    /// not reduce a device's counted usage within the window (cycle 362
+    /// fix), otherwise `upload -> confirm -> delete` in a loop lets
+    /// write-op churn bypass the cap.
     async fn sum_bytes_uploaded_since(
         &self,
         device_id: &DeviceId,

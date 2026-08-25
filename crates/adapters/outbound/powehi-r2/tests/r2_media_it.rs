@@ -811,6 +811,46 @@ async fn sum_bytes_uploaded_since_returns_zero_for_device_with_no_uploads() {
 
 #[tokio::test]
 #[ignore = "requires Docker (testcontainers)"]
+async fn sum_bytes_uploaded_since_survives_delete_against_real_postgres() {
+    // Cycle 362 fix: `sum_bytes_uploaded_since` must sum the append-only
+    // `media_upload_ledger`, not live `media_blobs` — deleting an upload
+    // must not reduce counted usage within the window. Proven against a
+    // real Postgres instance (unlike the in-memory mock in
+    // `media_service.rs`, this exercises the actual `save()` transaction
+    // that writes both tables and the actual `DELETE FROM media_blobs`
+    // that must NOT touch `media_upload_ledger`).
+    let h = setup().await;
+    let device = insert_device(&h.pool).await;
+    let now = Utc::now();
+    let window_start = now - chrono::Duration::days(1);
+
+    let mut blob = media_fixture(device.clone(), None);
+    blob.size_bytes = 12_345;
+    blob.uploaded_at = now;
+    h.adapter.save(&blob).await.expect("save");
+    h.adapter.delete(&blob.id).await.expect("delete");
+
+    assert!(
+        h.adapter
+            .find_by_id(&blob.id)
+            .await
+            .expect("find_by_id")
+            .is_none(),
+        "blob must actually be gone from media_blobs"
+    );
+    let sum = h
+        .adapter
+        .sum_bytes_uploaded_since(&device, window_start)
+        .await
+        .expect("sum_bytes_uploaded_since");
+    assert_eq!(
+        sum, 12_345,
+        "deleting the blob must not reduce the device's counted ledger usage"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
 async fn deleting_a_blob_cascades_its_acks() {
     let h = setup().await;
     let uploader = insert_device(&h.pool).await;

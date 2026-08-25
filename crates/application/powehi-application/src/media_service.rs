@@ -11,18 +11,19 @@ const MAX_MEDIA_BYTES: u64 = 100 * 1024 * 1024;
 /// heavy real usage (dozens of photos/videos) while bounding worst-case R2
 /// storage cost per device to a fixed ceiling.
 ///
-/// Two accepted residual gaps (security-auditor sweep, this cycle), neither
+/// One accepted residual gap (security-auditor sweep, cycle 361), not
 /// blocking since storage itself stays bounded:
-/// - **delete resets usage**: `upload -> confirm -> delete` in a loop lets a
-///   device churn unbounded write ops/day within the window, since the sum
-///   only counts rows still present — a real per-day cap on write ops (not
-///   just live bytes) would need an append-only usage ledger, out of scope
-///   here.
 /// - **race window**: the count-then-insert check (below) is a soft cap, not
 ///   atomic — N concurrent requests from one device can all read the same
 ///   `used` before any commits. Bounded by the per-IP governor's burst (60),
 ///   so worst case is a one-shot ~2x-cap overshoot per window, not unbounded
 ///   drift (same shape as `KeyPackageService::upload`'s existing soft cap).
+///
+/// The other cycle-361 residual gap — `upload -> confirm -> delete` in a
+/// loop resetting counted usage — was closed in cycle 362:
+/// `sum_bytes_uploaded_since` now sums an append-only upload ledger instead
+/// of currently-live blobs, so a device's counted usage is monotonic within
+/// the rolling window regardless of deletes.
 const MAX_MEDIA_BYTES_PER_DEVICE_PER_DAY: u64 = 5 * 1024 * 1024 * 1024;
 
 /// prd.md §9.4.3: blobs acknowledged by every recipient are deleted after N
@@ -340,6 +341,11 @@ mod tests {
     struct MockMediaRepo {
         saved: Mutex<Vec<MediaBlob>>,
         acks: Mutex<Vec<(MediaId, DeviceId)>>,
+        // Mirrors `media_upload_ledger`: append-only, populated by `save()`,
+        // NEVER pruned by `delete()` — models the real Postgres-backed
+        // adapter's cycle-362 fix so in-memory unit tests can actually catch
+        // a regression back to summing live `saved` rows.
+        ledger: Mutex<Vec<(DeviceId, u64, chrono::DateTime<chrono::Utc>)>>,
         upload_url: String,
         download_url: String,
     }
@@ -349,6 +355,7 @@ mod tests {
             Self {
                 saved: Mutex::new(vec![]),
                 acks: Mutex::new(vec![]),
+                ledger: Mutex::new(vec![]),
                 upload_url: upload_url.into(),
                 download_url: download_url.into(),
             }
@@ -359,6 +366,11 @@ mod tests {
     impl MediaRepository for MockMediaRepo {
         async fn save(&self, blob: &MediaBlob) -> Result<(), DomainError> {
             self.saved.lock().unwrap().push(blob.clone());
+            self.ledger.lock().unwrap().push((
+                blob.uploader_device.clone(),
+                blob.size_bytes,
+                blob.uploaded_at,
+            ));
             Ok(())
         }
         async fn find_by_id(&self, id: &MediaId) -> Result<Option<MediaBlob>, DomainError> {
@@ -439,11 +451,11 @@ mod tests {
             device_id: &DeviceId,
             since: chrono::DateTime<chrono::Utc>,
         ) -> Result<u64, DomainError> {
-            let locked = self.saved.lock().unwrap();
+            let locked = self.ledger.lock().unwrap();
             Ok(locked
                 .iter()
-                .filter(|b| &b.uploader_device == device_id && b.uploaded_at >= since)
-                .map(|b| b.size_bytes)
+                .filter(|(d, _, at)| d == device_id && *at >= since)
+                .map(|(_, bytes, _)| bytes)
                 .sum())
         }
     }
@@ -680,6 +692,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(repo.saved.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn request_upload_quota_survives_delete_upload_churn() {
+        // Cycle 361's accepted residual gap, closed cycle 362: repeatedly
+        // uploading then deleting must NOT reset counted usage, otherwise a
+        // device could churn unbounded write ops/day while storage stays at
+        // zero. Primes 3 synthetic uploads at 40% of the daily cap each
+        // (single-request MAX_MEDIA_BYTES caps a real `request_upload` call
+        // at 100MB, far below the 5GB daily cap, so priming via direct
+        // `save`+`delete` — same technique the other daily-quota tests use
+        // for the boundary case — is required to reach it), deleting each
+        // one immediately after. The ledger must still show ~120% usage.
+        let repo = Arc::new(MockMediaRepo::new("u", "d"));
+        let s = svc(repo.clone());
+        let device = DeviceId::new();
+        let chunk = MAX_MEDIA_BYTES_PER_DEVICE_PER_DAY * 2 / 5;
+        for _ in 0..3 {
+            let blob = MediaBlob {
+                id: MediaId::new(),
+                uploader_device: device.clone(),
+                storage_key: "media/churn".into(),
+                content_type: "image/jpeg".into(),
+                size_bytes: chunk,
+                uploaded_at: chrono::Utc::now(),
+                expires_at: None,
+                group_id: None,
+            };
+            repo.save(&blob).await.unwrap();
+            repo.delete(&blob.id).await.unwrap();
+        }
+        // No live blobs remain (all deleted), but the ledger has counted all
+        // 3 uploads (~120% of the cap) — a real request_upload call must be
+        // rejected despite live usage reading zero.
+        assert!(repo.saved.lock().unwrap().is_empty());
+        let err = s
+            .request_upload(&device, "image/jpeg", 1, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DomainError::InvalidInput(ref s) if s.contains("media_device_daily_quota_exceeded")),
+            "expected media_device_daily_quota_exceeded, got: {err:?}"
+        );
     }
 
     #[tokio::test]

@@ -149,6 +149,12 @@ fn map_r2(e: R2Error) -> DomainError {
 impl MediaRepository for R2MediaAdapter {
     #[instrument(skip(self, blob), fields(media_id = %blob.id))]
     async fn save(&self, blob: &MediaBlob) -> Result<(), DomainError> {
+        // Both inserts happen in one transaction: the ledger row must never
+        // exist without a corresponding blob row (or vice versa), even
+        // though the ledger deliberately outlives `delete()`. `id` reuses
+        // `blob.id` 1:1 so the ledger insert is idempotent under retry via
+        // the same `ON CONFLICT (id) DO NOTHING` pattern as `media_blobs`.
+        let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
         sqlx::query(
             "INSERT INTO media_blobs
              (id, uploader_device_id, storage_key, content_type, size_bytes, uploaded_at, expires_at, group_id)
@@ -163,9 +169,22 @@ impl MediaRepository for R2MediaAdapter {
         .bind(blob.uploaded_at)
         .bind(blob.expires_at)
         .bind(blob.group_id.as_ref().map(|g| g.as_uuid()))
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(map_sqlx)?;
+        sqlx::query(
+            "INSERT INTO media_upload_ledger (id, device_id, size_bytes, uploaded_at)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(blob.id.as_uuid())
+        .bind(blob.uploader_device.as_uuid())
+        .bind(blob.size_bytes as i64)
+        .bind(blob.uploaded_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+        tx.commit().await.map_err(map_sqlx)?;
         Ok(())
     }
 
@@ -327,17 +346,23 @@ impl MediaRepository for R2MediaAdapter {
         device_id: &DeviceId,
         since: DateTime<Utc>,
     ) -> Result<u64, DomainError> {
+        // Sums the append-only `media_upload_ledger`, NOT live `media_blobs`
+        // (cycle 362 fix): a device's daily quota usage must be monotonic
+        // within the rolling window even if it deletes uploads in between,
+        // otherwise `upload -> confirm -> delete` in a loop lets write-op
+        // churn bypass the cap entirely while storage stays at zero.
+        //
         // COALESCE: SUM over zero matching rows is SQL NULL, not 0. Explicit
         // ::BIGINT cast: Postgres's SUM(bigint) returns NUMERIC (only
         // SUM(integer) stays bigint), and this workspace's sqlx build has no
         // NUMERIC-decoding type (no bigdecimal/rust_decimal feature) — without
         // the cast, fetch_one would fail every call with a column-decode
-        // error (security-auditor finding, this cycle). size_bytes ≤
+        // error (security-auditor finding, cycle 361). size_bytes ≤
         // MAX_MEDIA_BYTES (100MB) per row makes overflow past i64::MAX
         // physically impossible regardless of row count.
         let row: (i64,) = sqlx::query_as(
-            "SELECT COALESCE(SUM(size_bytes), 0)::BIGINT FROM media_blobs
-             WHERE uploader_device_id = $1 AND uploaded_at >= $2",
+            "SELECT COALESCE(SUM(size_bytes), 0)::BIGINT FROM media_upload_ledger
+             WHERE device_id = $1 AND uploaded_at >= $2",
         )
         .bind(device_id.as_uuid())
         .bind(since)
