@@ -17,7 +17,68 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-25, cycle 359 — FEATURE: bind size_bytes into presigned R2 upload signature, commit 62541bb)
+## Current state (2026-08-25, cycle 361 — FEATURE: per-device/per-day media upload byte quota, commit e093ee8)
+
+- CI green (`gh run list --limit 3` all success), `git status` clean at cycle start. Picked
+  cycle 359's residual finding (carried forward through cycle 360's stabilization pass): no
+  per-device/per-day byte quota existed for media uploads, only the shared per-IP
+  `api_governor` rate limit (~4TB/day/IP sustained-worst-case).
+- **What it does:** `MediaRepository::sum_bytes_uploaded_since(device_id, since)` (new port
+  method) sums a device's live `media_blobs.size_bytes` since a given timestamp;
+  `R2MediaAdapter` implements it as `SELECT COALESCE(SUM(size_bytes),0) FROM media_blobs WHERE
+  uploader_device_id=$1 AND uploaded_at>=$2`. `MediaService::request_upload` now computes a
+  rolling 24h window (`now - 1 day`, recomputed per call) and rejects with
+  `InvalidInput("media_device_daily_quota_exceeded")` if `used + size_bytes >
+  MAX_MEDIA_BYTES_PER_DEVICE_PER_DAY` (5GB), same count-then-insert soft-cap pattern as
+  `KeyPackageService::upload`. New migration `0014_media_blobs_device_uploaded_idx.sql`
+  (`CREATE INDEX CONCURRENTLY IF NOT EXISTS` on `(uploader_device_id, uploaded_at)`, `--
+  no-transaction`, additive-only — no old index dropped, so no `pg_index.indisvalid` guard
+  needed unlike 0011-0013's precedent) makes the sum a bounded range scan instead of a full
+  per-device table scan.
+- **security-auditor: 1 round, needs-rework → fixed same cycle.** Required fix: the SUM query
+  decoded as sqlx `i64`, but Postgres's `SUM(bigint)` returns `NUMERIC` (only `SUM(integer)`
+  stays `bigint`), and this workspace's sqlx build has no `bigdecimal`/`rust_decimal` feature
+  to decode `NUMERIC` — every call would have failed with a column-decode error, 500ing every
+  media upload request (not a quota-bypass, but a full feature outage). The in-memory
+  `MockMediaRepo` test double couldn't catch this since it never touches real SQL types, and
+  Docker wasn't available locally to run the real-Postgres integration test before commit —
+  fixed with an explicit `::BIGINT` cast (safe: `size_bytes` is capped at `MAX_MEDIA_BYTES`
+  100MB per row, overflow past `i64::MAX` is physically impossible). 2 non-blocking
+  recommendations, both applied: (a) tightened the race-window doc comment — concurrent
+  same-device requests can overshoot by at most ~2x the cap in one shot, bounded by the
+  per-IP governor's burst=60, not unbounded drift; (b) documented an accepted residual gap —
+  `upload → confirm → delete` in a loop resets the live-bytes sum, so the quota bounds
+  *storage* (correctly) but not *write-op churn* per day (an append-only usage ledger would
+  close this, out of scope this cycle). Confirmed scoping: not crypto (S3 presign params +
+  Postgres aggregate + application arithmetic, no MLS/OPAQUE/KDF/AEAD touched) —
+  `crypto-reviewer` not required; not architectural, no new server-visible metadata
+  (`uploader_device_id`/`uploaded_at`/`size_bytes` were already server-visible columns since
+  the original `0003_media_blobs.sql`, this only adds a new read pattern over them) —
+  `threat-model-checker` not required. No plaintext/PII logged (`#[instrument]` on the new
+  adapter method only fields `device_id`, an opaque UUID).
+- 8 new Rust tests: 4 unit (`media_service.rs`, in-memory mock) covering over-quota rejection,
+  exact-boundary acceptance, stale (>24h) usage not counting, and per-device isolation; 2 new
+  `#[ignore = "requires Docker"]` integration tests in `r2_media_it.rs` (sum scoped to device
+  + window, zero-for-no-uploads via `COALESCE`) that will run in CI's Rust workflow (no Docker
+  in this sandbox to run them locally, consistent with every other `r2_media_it.rs` test).
+  `cargo build/test --workspace` clean (146 `powehi-application` + 7 `powehi-r2` unit tests
+  green, 21 `r2_media_it.rs` tests correctly `ignored`), `cargo clippy --workspace
+  --all-targets -- -D warnings` clean, `cargo fmt --check` clean.
+- Target dir hygiene: not checked this cycle (FEATURE mode, not due — next due cycle 365,
+  STABILIZATION).
+- **Next cycle candidates:** the 2 accepted-residual gaps from this cycle's security-auditor
+  pass (both documented in `MAX_MEDIA_BYTES_PER_DEVICE_PER_DAY`'s doc comment, neither
+  blocking): an append-only usage ledger to close the delete-resets-usage write-op-churn gap;
+  the migration's `IF NOT EXISTS`-silently-no-ops-past-an-INVALID-index operational risk (now
+  has a runbook note in the migration file itself, same as 0011's, not automated like 0012's
+  since nothing here drops an old index); media-key incoming/outgoing asymmetry (still needs
+  a new crypto-reviewed WASM key-export/local-storage-key design, scoped via Explore agent
+  cycle 359, confirmed genuinely multi-part); PQ hybrid Phase A (still blocked on openmls
+  stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003 Phase B, itself
+  gated on Phase A); project-context.md size (now ~1180 lines / ~96KB after cycle 360's
+  archive, comfortably under the 256KB cap — no action needed yet).
+
+## Previous state (2026-08-25, cycle 359 — FEATURE: bind size_bytes into presigned R2 upload signature, commit 62541bb)
 
 - CI green (`gh run list --limit 3` all success), `git status` clean at cycle start. All of
   cycle 358's carried-forward candidates were blocked (PQ hybrid Phase A: openmls PQ
