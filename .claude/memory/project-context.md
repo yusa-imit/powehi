@@ -17,7 +17,60 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-25, cycle 363 — FEATURE: daily GC trim job for media_upload_ledger, commit b578778)
+## Current state (2026-08-25, cycle 364 — FEATURE: batch media_upload_ledger GC trim + supporting index, commit 641556b)
+
+- CI green (`gh run list --limit 3` all success), `gh issue list --state open` empty,
+  `git status` clean at cycle start. Picked cycle 363's top carried-forward candidate: its own
+  non-blocking security-auditor note that `trim_upload_ledger_older_than` was a single unbatched
+  `DELETE ... WHERE uploaded_at < $1` with no supporting index (the table's only index led with
+  `device_id`), so the daily sweep was a full-table scan in one unbatched statement.
+- **What it does:** new migration `0016_media_upload_ledger_uploaded_idx.sql` — `CREATE INDEX
+  CONCURRENTLY IF NOT EXISTS media_upload_ledger_uploaded_at_idx ON
+  media_upload_ledger(uploaded_at)`, `-- no-transaction` marker (0011/0014 precedent — sqlx
+  can't run CONCURRENTLY inside its migration transaction). `R2MediaAdapter::
+  trim_upload_ledger_older_than` (`crates/adapters/outbound/powehi-r2/src/lib.rs`) now loops,
+  deleting via `WHERE id IN (SELECT id ... WHERE uploaded_at < $1 ORDER BY uploaded_at LIMIT
+  5_000)` per batch (`TRIM_LEDGER_BATCH_SIZE`), summing `rows_affected()`, exiting when a batch
+  returns fewer than the cap — bounds both scan cost (index range scan per batch, not a full
+  scan) and lock hold time (no single statement touches the whole stale range). Port trait
+  signature (`media_repo.rs`) unchanged — pure adapter-internal change, `main.rs`'s daily
+  `tokio::spawn` caller untouched.
+- **security-auditor: GREEN**, no blocking findings; verified (not rubber-stamped): fully
+  parameterized (no injection surface), batching loop provably terminates (cutoff is fixed for
+  the whole call; only production insert path sets `uploaded_at = Utc::now()` server-side, so no
+  concurrent insert can land below a 30-day-old cutoff — livelock unreachable), off-by-one exit
+  condition correct (PK-keyed `IN` subquery yields distinct ids, exact-multiple case just costs
+  one harmless extra zero-row statement), no PII/content logged. Two non-blocking findings, both
+  applied/documented in-cycle rather than deferred (unlike cycle 363's picks, both were cheap):
+  (a) switched the new index from a plain `CREATE INDEX` to `CONCURRENTLY` — auditor pointed out
+  this table (unlike 0015's genuinely-empty-at-creation case) has been insert-heavy since cycle
+  362, so a plain build's lock would block concurrent uploads for its duration; (b) documented
+  in-code (not fixed — architectural, out of single-cycle scope) that multiple server replicas
+  each running this daily sweep independently with no leader election/advisory lock (same
+  pre-existing gap as `run_gc`) can make one replica's batch undercount and exit early if another
+  replica deletes rows concurrently — bounded/self-healing (leftovers are still >29 days past the
+  24h quota window, swept next run), not a correctness or quota-bypass risk.
+- 1 new integration test in `r2_media_it.rs`
+  (`trim_upload_ledger_older_than_drains_multiple_batches`): bulk-inserts 12,001 stale rows via
+  raw SQL + `generate_series` (bypassing `save()`'s per-row S3+Postgres overhead — no FK on
+  `device_id` in this table, confirmed safe) spanning 2 full batches + 1 partial, asserts all
+  12,001 are deleted and a control fresh row survives — proves the loop fully drains a multi-batch
+  range without needing thousands of slow round-trips. `#[ignore = "requires Docker"]`, not run
+  locally (no Docker in sandbox), runs in CI's Rust workflow. `cargo build/test --workspace`
+  clean, `cargo clippy --workspace --all-targets -- -D warnings` clean, `cargo fmt --check` clean.
+  No `Cargo.lock` diff (no dependency changes) — `cargo audit`/`cargo deny check` not re-run.
+- Target dir hygiene: not checked this cycle (FEATURE mode, next due cycle 365, STABILIZATION).
+- **Next cycle candidates:** the multi-replica-GC-early-exit gap documented (not fixed) this
+  cycle — would need a `FOR UPDATE SKIP LOCKED` subquery or `pg_try_advisory_lock` guard, shared
+  with `run_gc`'s identical pre-existing gap, worth doing both together if ever prioritized;
+  `map_sqlx` raw-error-text server-side logging (pre-existing, informational, affects every
+  adapter method, cycle 363 carryover); media-key incoming/outgoing asymmetry (needs a new
+  crypto-reviewed WASM key-export/local-storage-key design, confirmed genuinely multi-part cycle
+  359); PQ hybrid Phase A (still blocked on openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid
+  OPRF upgrade (gated on ADR-0003 Phase B, itself gated on Phase A); project-context.md size (now
+  ~1340 lines, comfortably under the 256KB Read cap — no action needed yet).
+
+## Previous state (2026-08-25, cycle 363 — FEATURE: daily GC trim job for media_upload_ledger, commit b578778)
 
 - CI green (`gh run list --limit 3` all success), `gh issue list --state open` empty,
   `git status` clean at cycle start. Picked cycle 362's top carried-forward candidate: the
