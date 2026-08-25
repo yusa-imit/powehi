@@ -61,4 +61,17 @@ pub trait MediaRepository: Send + Sync {
         device_id: &DeviceId,
         since: DateTime<Utc>,
     ) -> Result<u64, DomainError>;
+
+    /// Delete `media_upload_ledger` rows with `uploaded_at < cutoff`. The
+    /// ledger is deliberately append-only for quota correctness (see
+    /// `sum_bytes_uploaded_since`'s doc comment — deleting a row here must
+    /// never happen inside the rolling 24h quota window a live quota check
+    /// could still read), so callers must pass a `cutoff` with a large
+    /// safety margin past that window. Closes the unbounded-growth gap
+    /// flagged by security-auditor in cycle 362 (`0015_media_upload_ledger.sql`).
+    /// Returns the number of rows deleted.
+    async fn trim_upload_ledger_older_than(
+        &self,
+        cutoff: DateTime<Utc>,
+    ) -> Result<u64, DomainError>;
 }

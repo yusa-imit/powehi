@@ -849,6 +849,84 @@ async fn sum_bytes_uploaded_since_survives_delete_against_real_postgres() {
     );
 }
 
+// ── trim_upload_ledger_older_than (cycle 363: closes cycle 362's unbounded ──
+// ── ledger growth gap) ──────────────────────────────────────────────────────
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn trim_upload_ledger_older_than_deletes_only_rows_past_cutoff() {
+    let h = setup().await;
+    let device = insert_device(&h.pool).await;
+    let now = Utc::now();
+
+    let mut stale = media_fixture(device.clone(), None);
+    stale.size_bytes = 1_000;
+    stale.uploaded_at = now - chrono::Duration::days(31);
+    h.adapter.save(&stale).await.expect("save stale");
+
+    let mut fresh = media_fixture(device.clone(), None);
+    fresh.size_bytes = 2_000;
+    fresh.uploaded_at = now;
+    h.adapter.save(&fresh).await.expect("save fresh");
+
+    let cutoff = now - chrono::Duration::days(30);
+    let trimmed = h
+        .adapter
+        .trim_upload_ledger_older_than(cutoff)
+        .await
+        .expect("trim_upload_ledger_older_than");
+    assert_eq!(trimmed, 1, "only the stale row is past the cutoff");
+
+    // The fresh row must still count toward a live quota check.
+    let sum = h
+        .adapter
+        .sum_bytes_uploaded_since(&device, now - chrono::Duration::days(1))
+        .await
+        .expect("sum_bytes_uploaded_since");
+    assert_eq!(sum, 2_000);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn trim_upload_ledger_older_than_does_not_touch_media_blobs() {
+    // The ledger and `media_blobs` are deliberately independent tables (no
+    // FK) — trimming the ledger must never delete a still-live blob.
+    let h = setup().await;
+    let blob = media_fixture(insert_device(&h.pool).await, None);
+    h.adapter.save(&blob).await.expect("save");
+
+    let far_future_cutoff = Utc::now() + chrono::Duration::days(365);
+    h.adapter
+        .trim_upload_ledger_older_than(far_future_cutoff)
+        .await
+        .expect("trim_upload_ledger_older_than");
+
+    assert!(
+        h.adapter
+            .find_by_id(&blob.id)
+            .await
+            .expect("find_by_id")
+            .is_some(),
+        "trimming the ledger must not delete the corresponding media_blobs row"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn trim_upload_ledger_older_than_returns_zero_when_nothing_stale() {
+    let h = setup().await;
+    let blob = media_fixture(insert_device(&h.pool).await, None);
+    h.adapter.save(&blob).await.expect("save");
+
+    let cutoff = Utc::now() - chrono::Duration::days(30);
+    let trimmed = h
+        .adapter
+        .trim_upload_ledger_older_than(cutoff)
+        .await
+        .expect("trim_upload_ledger_older_than");
+    assert_eq!(trimmed, 0);
+}
+
 #[tokio::test]
 #[ignore = "requires Docker (testcontainers)"]
 async fn deleting_a_blob_cascades_its_acks() {

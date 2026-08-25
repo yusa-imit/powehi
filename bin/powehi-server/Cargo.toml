@@ -29,6 +29,7 @@ powehi-proto = { workspace = true }
 axum = { workspace = true }
 tonic = { workspace = true }
 tokio = { workspace = true }
+chrono = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 sha2 = { workspace = true }

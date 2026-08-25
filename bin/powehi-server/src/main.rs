@@ -209,6 +209,8 @@ async fn main() -> Result<()> {
         cfg.r2_presign_upload_ttl_secs,
         cfg.r2_presign_download_ttl_secs,
     ));
+    let media_repo_gc: Arc<dyn powehi_port_outbound::media_repo::MediaRepository> =
+        media_r2.clone();
     let media: Arc<dyn powehi_port_inbound::media::MediaUseCase> =
         Arc::new(MediaService::new(media_r2, group_repo_media));
     let media_gc = Arc::clone(&media);
@@ -404,6 +406,32 @@ async fn main() -> Result<()> {
                 Ok(n) if n > 0 => tracing::info!(deleted = n, "gc.media_expired"),
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error_kind = "gc", error = %e, "gc.media_run_failed"),
+            }
+        }
+    });
+
+    // ── Background GC: media upload ledger (cycle 362 residual gap) ────────
+    // `media_upload_ledger` is deliberately append-only for quota correctness
+    // (`MediaService::request_upload`'s rolling 24h window reads it, never
+    // deletes from it) but must not grow forever. Trim rows once a day, with
+    // a cutoff reusing `GC_RETENTION_DAYS` (30, prd.md §11.4) — the same
+    // constant media blob GC uses, so the two windows can't silently drift
+    // apart — a large safety margin past the 24h window any live quota
+    // check could still be reading. ZK invariant preserved: only opaque
+    // UUIDs/timestamps/byte counts are touched; logs carry only a deleted-
+    // row count.
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
+        loop {
+            interval.tick().await;
+            let cutoff = chrono::Utc::now()
+                - chrono::Duration::days(powehi_application::media_service::GC_RETENTION_DAYS);
+            match media_repo_gc.trim_upload_ledger_older_than(cutoff).await {
+                Ok(n) if n > 0 => tracing::info!(deleted = n, "gc.media_upload_ledger_trimmed"),
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(error_kind = "gc", error = %e, "gc.media_upload_ledger_trim_failed")
+                }
             }
         }
     });

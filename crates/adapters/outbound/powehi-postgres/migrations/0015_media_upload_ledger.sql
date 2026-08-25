@@ -18,14 +18,13 @@
 -- `media_blobs`'s own insert. It is intentionally NOT a foreign key to
 -- `media_blobs(id)`, since the ledger must outlive the blob being deleted.
 --
--- KNOWN NON-BLOCKING GAP (security-auditor, cycle 362): unlike
--- `media_blobs`, this table has no GC/TTL sweep, so it grows unboundedly
--- forever — one small fixed-width row per accepted upload, across all
--- devices, indefinitely. The rolling-24h quota query only reads recent rows
--- via the index below, so this does not affect quota correctness or query
--- performance, only slow permanent storage/index growth. Worth a future
--- periodic trim job (e.g. delete rows older than N days, well past the 24h
--- quota window) — out of scope this cycle.
+-- GC (closed cycle 363): a daily background sweep in bin/powehi-server/src/
+-- main.rs calls `MediaRepository::trim_upload_ledger_older_than(now - 30
+-- days)`, deleting rows well past the 24h quota window any live check could
+-- still be reading — a large safety margin, same 30-day constant as media
+-- blob GC (prd.md §11.4). Rows are still never touched by anything else
+-- (no delete on confirm/blob-delete), so the quota's monotonic-within-window
+-- guarantee is unaffected.
 CREATE TABLE IF NOT EXISTS media_upload_ledger (
     id          UUID NOT NULL PRIMARY KEY,
     device_id   UUID NOT NULL,

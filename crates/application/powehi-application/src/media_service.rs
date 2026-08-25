@@ -29,7 +29,12 @@ const MAX_MEDIA_BYTES_PER_DEVICE_PER_DAY: u64 = 5 * 1024 * 1024 * 1024;
 /// prd.md §9.4.3: blobs acknowledged by every recipient are deleted after N
 /// days. This is also the fallback retention ceiling for blobs that are
 /// never fully acknowledged (or have no recipients besides the uploader).
-const GC_RETENTION_DAYS: i64 = 30;
+///
+/// `pub` so `bin/powehi-server/src/main.rs`'s daily `media_upload_ledger`
+/// trim job can reuse the same retention window instead of a duplicated
+/// literal that could silently drift from this one (security-auditor,
+/// cycle 363).
+pub const GC_RETENTION_DAYS: i64 = 30;
 
 /// Max GC candidates fetched per `list_gc_candidates` call. The hourly sweep
 /// pages through candidates in keyset-paginated batches of this size so a large
@@ -457,6 +462,15 @@ mod tests {
                 .filter(|(d, _, at)| d == device_id && *at >= since)
                 .map(|(_, bytes, _)| bytes)
                 .sum())
+        }
+        async fn trim_upload_ledger_older_than(
+            &self,
+            cutoff: chrono::DateTime<chrono::Utc>,
+        ) -> Result<u64, DomainError> {
+            let mut locked = self.ledger.lock().unwrap();
+            let before = locked.len();
+            locked.retain(|(_, _, at)| *at >= cutoff);
+            Ok((before - locked.len()) as u64)
         }
     }
 
@@ -1168,6 +1182,62 @@ mod tests {
         let deleted = s.run_gc_batched(2).await.unwrap();
         assert_eq!(deleted, 5);
         assert!(repo.saved.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn trim_upload_ledger_older_than_deletes_only_stale_rows() {
+        let repo = Arc::new(MockMediaRepo::new("u", "d"));
+        let device = DeviceId::new();
+        let stale = MediaBlob {
+            id: MediaId::new(),
+            uploader_device: device.clone(),
+            storage_key: "media/stale".into(),
+            content_type: "image/jpeg".into(),
+            size_bytes: 1024,
+            uploaded_at: chrono::Utc::now() - chrono::Duration::days(31),
+            expires_at: None,
+            group_id: None,
+        };
+        let fresh = MediaBlob {
+            id: MediaId::new(),
+            uploader_device: device.clone(),
+            storage_key: "media/fresh".into(),
+            content_type: "image/jpeg".into(),
+            size_bytes: 1024,
+            uploaded_at: chrono::Utc::now(),
+            expires_at: None,
+            group_id: None,
+        };
+        repo.save(&stale).await.unwrap();
+        repo.save(&fresh).await.unwrap();
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+        let trimmed = repo.trim_upload_ledger_older_than(cutoff).await.unwrap();
+        assert_eq!(trimmed, 1);
+        // The fresh row's usage must still be counted by a live quota check.
+        let used = repo
+            .sum_bytes_uploaded_since(&device, chrono::Utc::now() - chrono::Duration::days(1))
+            .await
+            .unwrap();
+        assert_eq!(used, 1024);
+    }
+
+    #[tokio::test]
+    async fn trim_upload_ledger_older_than_returns_zero_when_nothing_stale() {
+        let repo = Arc::new(MockMediaRepo::new("u", "d"));
+        let device = DeviceId::new();
+        let fresh = MediaBlob {
+            id: MediaId::new(),
+            uploader_device: device,
+            storage_key: "media/fresh".into(),
+            content_type: "image/jpeg".into(),
+            size_bytes: 512,
+            uploaded_at: chrono::Utc::now(),
+            expires_at: None,
+            group_id: None,
+        };
+        repo.save(&fresh).await.unwrap();
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+        assert_eq!(repo.trim_upload_ledger_older_than(cutoff).await.unwrap(), 0);
     }
 
     #[tokio::test]

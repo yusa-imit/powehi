@@ -371,6 +371,27 @@ impl MediaRepository for R2MediaAdapter {
         .map_err(map_sqlx)?;
         Ok(row.0 as u64)
     }
+
+    // security-auditor cycle 363, non-blocking: the table's only index is
+    // `(device_id, uploaded_at)` — a leading-column mismatch with this
+    // query's `WHERE uploaded_at < $1`, so each daily sweep is a full table
+    // scan in one unbatched transaction (same unbatched shape as
+    // `EnvelopeRepository::delete_expired`). Acceptable at today's row
+    // volume; revisit with a `uploaded_at`-leading index or `run_gc_batched`-
+    // style keyset batching if this table grows large enough for scan time
+    // or lock hold to matter.
+    #[instrument(skip(self))]
+    async fn trim_upload_ledger_older_than(
+        &self,
+        cutoff: DateTime<Utc>,
+    ) -> Result<u64, DomainError> {
+        let result = sqlx::query("DELETE FROM media_upload_ledger WHERE uploaded_at < $1")
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        Ok(result.rows_affected())
+    }
 }
 
 #[cfg(test)]
