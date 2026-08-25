@@ -837,6 +837,15 @@ mod tests {
                 .insert(group.id.clone(), group.clone());
             Ok(())
         }
+        async fn create_if_absent(&self, group: &Group) -> Result<bool, DomainError> {
+            // Mirrors ON CONFLICT (id) DO NOTHING: an existing row is left intact.
+            let mut groups = self.groups.lock().unwrap();
+            if groups.contains_key(&group.id) {
+                return Ok(false);
+            }
+            groups.insert(group.id.clone(), group.clone());
+            Ok(true)
+        }
         async fn find_by_id(&self, id: &GroupId) -> Result<Option<Group>, DomainError> {
             Ok(self.groups.lock().unwrap().get(id).cloned())
         }

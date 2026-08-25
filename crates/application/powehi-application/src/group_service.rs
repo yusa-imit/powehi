@@ -30,7 +30,27 @@ impl GroupUseCase for GroupService {
     #[instrument(skip(self), fields(creator = %creator, group_id = %group_id))]
     async fn create_group(&self, creator: &DeviceId, group_id: GroupId) -> Result<(), DomainError> {
         let group = Group::new(group_id.clone(), self.local_region.clone());
-        self.group_repo.save(&group).await?;
+        // create_if_absent, never save(): save() is a destructive upsert that
+        // would reset an existing group's epoch/home_region, so a client-supplied
+        // group_id colliding with a live group would hijack it.
+        if !self.group_repo.create_if_absent(&group).await? {
+            // The id already exists. Do NOT fall through to add_member: that is
+            // how a non-member (including a device previously evicted via
+            // remove_member) could rejoin an arbitrary group just by knowing its
+            // id. Only a device that is already a member may reach this path, and
+            // for it the call is an idempotent retry.
+            let already_member = self
+                .group_repo
+                .list_members(&group_id)
+                .await?
+                .iter()
+                .any(|m| &m.device_id == creator);
+            if already_member {
+                return Ok(());
+            }
+            tracing::warn!(caller = %creator, group_id = %group_id, "create_group: group id already exists and caller is not a member");
+            return Err(DomainError::AlreadyExists(group_id.to_string()));
+        }
         let member = GroupMember {
             group_id,
             device_id: creator.clone(),
@@ -123,6 +143,15 @@ mod tests {
                 .unwrap()
                 .insert(group.id.clone(), group.clone());
             Ok(())
+        }
+        async fn create_if_absent(&self, group: &Group) -> Result<bool, DomainError> {
+            // Mirrors ON CONFLICT (id) DO NOTHING: an existing row is left intact.
+            let mut groups = self.groups.lock().unwrap();
+            if groups.contains_key(&group.id) {
+                return Ok(false);
+            }
+            groups.insert(group.id.clone(), group.clone());
+            Ok(true)
         }
         async fn find_by_id(&self, id: &GroupId) -> Result<Option<Group>, DomainError> {
             Ok(self.groups.lock().unwrap().get(id).cloned())
@@ -275,6 +304,104 @@ mod tests {
             "device_b must be gone"
         );
         assert_eq!(members.len(), 1);
+    }
+
+    /// Broken-access-control regression (security-auditor HIGH): a device that
+    /// is not a member must not be able to attach itself to an existing group by
+    /// POSTing that group's id to create_group. Previously `save()`'s destructive
+    /// upsert reset the group and `add_member` ran unconditionally, which let an
+    /// evicted device rejoin and then evict everyone else.
+    #[tokio::test]
+    async fn create_group_with_existing_id_by_non_member_returns_already_exists() {
+        let repo = FakeGroupRepo::new();
+        let svc = make_svc(repo.clone());
+        let owner = DeviceId::new();
+        let attacker = DeviceId::new();
+        let group_id = GroupId::new();
+
+        svc.create_group(&owner, group_id.clone()).await.unwrap();
+
+        let err = svc
+            .create_group(&attacker, group_id.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DomainError::AlreadyExists(ref id) if id == &group_id.to_string()),
+            "expected AlreadyExists, got {err:?}"
+        );
+
+        let members = repo.list_members(&group_id).await.unwrap();
+        assert_eq!(members.len(), 1, "member list must be unchanged");
+        assert_eq!(members[0].device_id, owner);
+        assert!(
+            !members.iter().any(|m| m.device_id == attacker),
+            "attacker must not have been added to the group"
+        );
+    }
+
+    /// Same attack, but by a device that was previously removed from the group:
+    /// removal must be permanent through this path.
+    #[tokio::test]
+    async fn create_group_cannot_be_used_to_rejoin_after_removal() {
+        let repo = FakeGroupRepo::new();
+        let svc = make_svc(repo.clone());
+        let owner = DeviceId::new();
+        let evicted = DeviceId::new();
+        let group_id = GroupId::new();
+
+        svc.create_group(&owner, group_id.clone()).await.unwrap();
+        svc.add_member(&owner, &group_id, &evicted, Epoch(1))
+            .await
+            .unwrap();
+        svc.remove_member(&owner, &group_id, &evicted, Epoch(2))
+            .await
+            .unwrap();
+
+        let err = svc
+            .create_group(&evicted, group_id.clone())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::AlreadyExists(_)));
+
+        let members = repo.list_members(&group_id).await.unwrap();
+        assert!(
+            !members.iter().any(|m| m.device_id == evicted),
+            "an evicted device must not regain membership via create_group"
+        );
+    }
+
+    /// A genuine client retry (same creator, same group_id) is an idempotent
+    /// no-op: no duplicate member row, and the stored group is not reset.
+    #[tokio::test]
+    async fn create_group_retry_by_existing_member_is_idempotent() {
+        let repo = FakeGroupRepo::new();
+        let svc = make_svc(repo.clone());
+        let creator = DeviceId::new();
+        let group_id = GroupId::new();
+
+        svc.create_group(&creator, group_id.clone()).await.unwrap();
+
+        // Advance the group the way send_commit would, then retry the create.
+        let mut advanced = repo.find_by_id(&group_id).await.unwrap().unwrap();
+        advanced.epoch = Epoch(7);
+        advanced.home_region = RegionId::new("ap-northeast");
+        repo.save(&advanced).await.unwrap();
+
+        svc.create_group(&creator, group_id.clone())
+            .await
+            .expect("retry by an existing member must succeed as a no-op");
+
+        let members = repo.list_members(&group_id).await.unwrap();
+        assert_eq!(members.len(), 1, "retry must not duplicate the member row");
+        assert_eq!(members[0].device_id, creator);
+
+        let group = repo.find_by_id(&group_id).await.unwrap().unwrap();
+        assert_eq!(group.epoch, Epoch(7), "epoch must not be reset by a retry");
+        assert_eq!(
+            group.home_region.as_str(),
+            "ap-northeast",
+            "home_region must not be reset by a retry"
+        );
     }
 
     #[tokio::test]

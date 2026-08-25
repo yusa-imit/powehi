@@ -78,6 +78,26 @@ impl GroupRepository for PgGroupRepository {
         Ok(())
     }
 
+    async fn create_if_absent(&self, group: &Group) -> Result<bool, DomainError> {
+        // DO NOTHING, not DO UPDATE: an id that already exists must keep its
+        // epoch, home_region and created_at untouched, so a client-supplied
+        // group_id colliding with an existing group cannot reset it. Same shape
+        // as the group-stub insert in `upsert_members`.
+        let res = sqlx::query(
+            "INSERT INTO groups (id, home_region, epoch, created_at)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(group.id.as_uuid())
+        .bind(group.home_region.as_str())
+        .bind(group.epoch.0 as i64)
+        .bind(group.created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(map_err)?;
+        Ok(res.rows_affected() == 1)
+    }
+
     async fn find_by_id(&self, id: &GroupId) -> Result<Option<Group>, DomainError> {
         let row = sqlx::query_as::<_, GroupRow>(
             "SELECT id, home_region, epoch, created_at FROM groups WHERE id = $1",

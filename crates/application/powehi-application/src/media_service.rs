@@ -476,21 +476,27 @@ mod tests {
 
     struct FakeGroupRepo {
         members: Mutex<Vec<(GroupId, DeviceId)>>,
+        /// Group ids known to exist, so `create_if_absent` can mirror the real
+        /// adapter's ON CONFLICT (id) DO NOTHING semantics.
+        groups: Mutex<Vec<GroupId>>,
     }
 
     impl FakeGroupRepo {
         fn empty() -> Arc<Self> {
             Arc::new(Self {
                 members: Mutex::new(vec![]),
+                groups: Mutex::new(vec![]),
             })
         }
         fn with_member(group_id: GroupId, device_id: DeviceId) -> Arc<Self> {
             Arc::new(Self {
+                groups: Mutex::new(vec![group_id.clone()]),
                 members: Mutex::new(vec![(group_id, device_id)]),
             })
         }
         fn with_members(pairs: Vec<(GroupId, DeviceId)>) -> Arc<Self> {
             Arc::new(Self {
+                groups: Mutex::new(pairs.iter().map(|(gid, _)| gid.clone()).collect()),
                 members: Mutex::new(pairs),
             })
         }
@@ -500,6 +506,15 @@ mod tests {
     impl GroupRepository for FakeGroupRepo {
         async fn save(&self, _group: &Group) -> Result<(), DomainError> {
             Ok(())
+        }
+        async fn create_if_absent(&self, group: &Group) -> Result<bool, DomainError> {
+            // Mirrors ON CONFLICT (id) DO NOTHING: an existing id is left intact.
+            let mut groups = self.groups.lock().unwrap();
+            if groups.contains(&group.id) {
+                return Ok(false);
+            }
+            groups.push(group.id.clone());
+            Ok(true)
         }
         async fn find_by_id(&self, _id: &GroupId) -> Result<Option<Group>, DomainError> {
             Ok(None)

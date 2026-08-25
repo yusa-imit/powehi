@@ -8,6 +8,7 @@
 //!   - `mark_consumed` double-consume prevention (CAS gRPC ConsumeKeyPackage).
 //!   - TTL enforcement: expired envelopes are filtered at the DB layer.
 //!   - `add_member` ON CONFLICT DO NOTHING idempotency.
+//!   - `create_if_absent` never overwrites an existing group row.
 //!   - `server_config` round-trip and first-boot race convergence (DO NOTHING).
 //!
 //! Tests are `#[ignore]` because they require Docker (testcontainers).
@@ -822,4 +823,87 @@ async fn envelope_poll_idx_validity_guard_aborts_on_invalid_index() {
         .execute(&pool)
         .await
         .expect("guard must pass once the index is valid");
+}
+
+/// Broken-access-control regression (security-auditor HIGH), proven against
+/// real Postgres rather than an in-memory fake: `create_if_absent` must use
+/// ON CONFLICT (id) DO NOTHING, so a second call with a colliding client-supplied
+/// group_id reports "already existed" and leaves every column of the existing
+/// row untouched. The old `save()` upsert (ON CONFLICT DO UPDATE) reset
+/// `epoch` to 0 and rewrote `home_region`, which let any authenticated device
+/// hijack an arbitrary group by id.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn create_if_absent_does_not_overwrite_an_existing_group() {
+    let (_c, pool) = setup().await;
+    let repo = PgGroupRepository::new(pool.clone());
+
+    let group_id = GroupId::from(Uuid::new_v4());
+    let created_at = Utc::now();
+    let original = Group {
+        id: group_id.clone(),
+        home_region: RegionId::new("eu-central-1"),
+        epoch: Epoch(9),
+        created_at,
+    };
+
+    // First call: row does not exist yet -> created.
+    assert!(
+        repo.create_if_absent(&original)
+            .await
+            .expect("first create_if_absent"),
+        "first call must report the group as newly created"
+    );
+    let stored = repo
+        .find_by_id(&group_id)
+        .await
+        .expect("find_by_id")
+        .expect("group row must exist after the first call");
+    assert_eq!(stored.home_region.as_str(), "eu-central-1");
+    assert_eq!(stored.epoch, Epoch(9));
+
+    // Second call with a *different* home_region and a reset epoch — exactly
+    // the attacker-controlled payload of `POST /v1/groups {"group_id": <victim>}`.
+    let attacker_view = Group {
+        id: group_id.clone(),
+        home_region: RegionId::new("us-east-1"),
+        epoch: Epoch(0),
+        created_at: Utc::now(),
+    };
+    assert!(
+        !repo
+            .create_if_absent(&attacker_view)
+            .await
+            .expect("second create_if_absent"),
+        "second call must report the group as already existing"
+    );
+
+    let after = repo
+        .find_by_id(&group_id)
+        .await
+        .expect("find_by_id")
+        .expect("group row must still exist");
+    assert_eq!(
+        after.home_region.as_str(),
+        "eu-central-1",
+        "home_region must not be overwritten by a colliding create"
+    );
+    assert_eq!(
+        after.epoch,
+        Epoch(9),
+        "epoch must not be reset by a colliding create"
+    );
+    assert_eq!(
+        after.created_at.timestamp_micros(),
+        created_at.timestamp_micros(),
+        "created_at must not be rewritten by a colliding create"
+    );
+
+    // Exactly one row: DO NOTHING must not have inserted a duplicate.
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM groups WHERE id = $1")
+        .bind(group_id.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .expect("count group rows");
+    assert_eq!(count, 1, "exactly one group row must exist");
 }
