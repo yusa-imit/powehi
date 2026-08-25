@@ -17,7 +17,72 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-25, cycle 361 — FEATURE: per-device/per-day media upload byte quota, commit e093ee8)
+## Current state (2026-08-25, cycle 362 — FEATURE: append-only media upload ledger closes delete-churn quota bypass, commit f30e9e0)
+
+- CI green (`gh run list --limit 3` all success), `git status` clean at cycle start. Picked
+  cycle 361's top carried-forward candidate: the accepted residual gap in
+  `MAX_MEDIA_BYTES_PER_DEVICE_PER_DAY`'s doc comment — `sum_bytes_uploaded_since` summed
+  currently-live `media_blobs` rows only, so `upload -> confirm -> delete` in a loop let a
+  device churn unbounded write ops/day within the 24h window while counted usage always
+  read back near zero (storage stayed bounded, but write-op churn didn't).
+- **What it does:** new migration `0015_media_upload_ledger.sql` — `media_upload_ledger(id
+  UUID PK, device_id UUID, size_bytes BIGINT CHECK > 0, uploaded_at TIMESTAMPTZ)` +
+  `(device_id, uploaded_at)` index, no FK to `media_blobs` (deliberate — must outlive the
+  blob's deletion), regular (non-`CONCURRENTLY`) DDL since the table is new/empty at
+  migration time. `R2MediaAdapter::save()` (`powehi-r2/src/lib.rs`) now opens a
+  `PgPool::begin()` transaction and inserts into both `media_blobs` and
+  `media_upload_ledger` (same `id` reused for both, both `ON CONFLICT (id) DO NOTHING`)
+  before committing; `delete()` is unchanged — only touches `media_blobs`/R2, never the
+  ledger. `sum_bytes_uploaded_since()` now queries the ledger instead of `media_blobs`, so
+  a device's counted daily usage is monotonic within the rolling window regardless of
+  deletes. Port trait signature unchanged (`media_repo.rs`), doc comments updated on both
+  the port and `media_service.rs`'s `MAX_MEDIA_BYTES_PER_DEVICE_PER_DAY` (removed the now-
+  closed caveat, left the still-accepted count-then-insert race-window note).
+- **security-auditor: GREEN**, no blocking findings. Verified (not rubber-stamped):
+  confirmed `R2MediaAdapter::save()` is the sole write path into `media_blobs` (no other
+  `MediaRepository` impl, no bulk-import path) — no bypass route; the transaction means any
+  partial failure aborts before `commit()` and an uncommitted `sqlx::Transaction` rolls back
+  on drop, so the two tables can't diverge; all queries parameterized, no injection surface;
+  `size_bytes BIGINT CHECK > 0` at the DB layer plus the existing `MAX_MEDIA_BYTES` (100MB)
+  app-layer cap keeps the no-overflow reasoning valid; missing FK confirmed safe/intentional;
+  non-`CONCURRENTLY` DDL confirmed correct (new table, same migration, no pre-existing-row
+  contention unlike 0011/0014). One **non-blocking residual gap** flagged and documented in
+  the migration file: the new ledger table has no GC/TTL sweep, so it grows unboundedly
+  forever (small fixed-width rows, one per accepted upload, across all devices) — doesn't
+  affect quota correctness or query performance (the rolling-24h sum only reads recent rows
+  via the index), only slow permanent storage/index growth. Worth a future periodic trim job
+  (delete rows older than N days, well past the 24h window). Confirmed scoping: not crypto
+  (Postgres transaction + aggregate query, no MLS/OPAQUE/KDF/AEAD touched) —
+  `crypto-reviewer` not required; not architectural, no new server-visible metadata (ledger
+  columns mirror data already stored in `media_blobs`) — `threat-model-checker` not
+  required. No plaintext/PII logged (`map_sqlx`/`map_r2` log only `error_kind`).
+- 3 new/updated Rust tests: 1 new unit test (`media_service.rs`,
+  `request_upload_quota_survives_delete_upload_churn` — primes 3 synthetic upload+delete
+  cycles via direct `repo.save`/`repo.delete` at 40% of the daily cap each since a single
+  real `request_upload` call is capped at `MAX_MEDIA_BYTES`=100MB, far below the 5GB daily
+  cap; asserts a 4th real `request_upload` is still rejected despite zero live blobs), plus
+  the in-memory `MockMediaRepo` test double reworked to model an immutable ledger separate
+  from the mutable `saved` list (so this exact regression is now unit-test-catchable, not
+  just integration-test-catchable); 1 new `#[ignore = "requires Docker"]` integration test
+  in `r2_media_it.rs` (`sum_bytes_uploaded_since_survives_delete_against_real_postgres`)
+  proving the same fix against real Postgres (no Docker in this sandbox, will run in CI's
+  Rust workflow). `cargo build/test --workspace` clean (139 `powehi-application` unit tests
+  green, was 138), `cargo clippy --workspace --all-targets -- -D warnings` clean, `cargo
+  fmt --check` clean (no reformatting needed).
+- Target dir hygiene: not checked this cycle (FEATURE mode, not due — next due cycle 365,
+  STABILIZATION).
+- **Next cycle candidates:** a periodic trim/TTL job for `media_upload_ledger` (this
+  cycle's non-blocking residual gap — unbounded row growth, not urgent, cheap when picked
+  up); the migration's `IF NOT EXISTS`-silently-no-ops-past-an-INVALID-index operational
+  risk pattern (documented runbook note precedent from 0011/0014, not automated for 0014
+  since nothing there drops an old index; N/A to 0015 since it doesn't use `CONCURRENTLY`);
+  media-key incoming/outgoing asymmetry (still needs a new crypto-reviewed WASM key-export/
+  local-storage-key design, confirmed genuinely multi-part cycle 359); PQ hybrid Phase A
+  (still blocked on openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade
+  (gated on ADR-0003 Phase B, itself gated on Phase A); project-context.md size (now
+  ~1240 lines, comfortably under the 256KB Read cap — no action needed yet).
+
+## Previous state (2026-08-25, cycle 361 — FEATURE: per-device/per-day media upload byte quota, commit e093ee8)
 
 - CI green (`gh run list --limit 3` all success), `git status` clean at cycle start. Picked
   cycle 359's residual finding (carried forward through cycle 360's stabilization pass): no
