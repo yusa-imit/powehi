@@ -290,6 +290,44 @@ describe("mediaTransfer (prd.md §9.2 + §9.4.2)", () => {
 			);
 		});
 
+		it("PUTs with a Content-Type matching the real mimeType, not a hardcoded value (chunked path) — R2 signs content-type into the presigned URL, so a mismatch fails the upload", async () => {
+			const bytes = new Uint8Array(MEDIA_CHUNK_THRESHOLD + 1);
+			await encryptAndSendMedia(
+				bytes,
+				"video/quicktime",
+				IDENTITY_ID,
+				GROUP_ID,
+				TOKEN,
+				mockWorker as never,
+			);
+
+			expect(fetchMock).toHaveBeenCalledWith(
+				"https://r2.test/put",
+				expect.objectContaining({
+					headers: { "Content-Type": "video/quicktime" },
+				}),
+			);
+		});
+
+		it("PUTs with a Content-Type matching the real mimeType, not a hardcoded value (non-chunked path)", async () => {
+			const bytes = new Uint8Array(1024);
+			await encryptAndSendMedia(
+				bytes,
+				"image/webp",
+				IDENTITY_ID,
+				GROUP_ID,
+				TOKEN,
+				mockWorker as never,
+			);
+
+			expect(fetchMock).toHaveBeenCalledWith(
+				"https://r2.test/put",
+				expect.objectContaining({
+					headers: { "Content-Type": "image/webp" },
+				}),
+			);
+		});
+
 		it("drops a thumbHandle instead of using it on the chunked path", async () => {
 			const bytes = new Uint8Array(MEDIA_CHUNK_THRESHOLD + 1);
 			await encryptAndSendMedia(

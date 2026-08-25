@@ -223,6 +223,11 @@ impl MediaRepository for R2MediaAdapter {
             .bucket(&self.bucket)
             .key(&row.storage_key)
             .content_type(content_type)
+            // Binds the size the client declared at request_upload time into the
+            // SigV4 signature: R2 rejects a PUT whose actual body length differs
+            // from this value, closing an unbounded-upload-size hole (the
+            // `size_bytes` DB column was otherwise purely advisory).
+            .content_length(row.size_bytes as i64)
             .presigned(presign_cfg)
             .await
             .map_err(|e| map_r2(R2Error::S3(e.to_string())))?;

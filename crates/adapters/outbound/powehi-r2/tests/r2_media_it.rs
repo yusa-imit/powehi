@@ -330,6 +330,87 @@ async fn presigned_upload_url_returns_url_for_allowed_type() {
 
 #[tokio::test]
 #[ignore = "requires Docker (testcontainers)"]
+async fn presigned_upload_url_rejects_body_larger_than_declared_size_bytes() {
+    // Regression test: `size_bytes` used to be purely advisory (never reached the
+    // SigV4 signature), so a client could declare a tiny size then PUT an
+    // arbitrarily large body to the same URL — unbounded R2 storage/egress cost
+    // regardless of the server-side MAX_MEDIA_BYTES check on request_upload.
+    // `presigned_upload_url` now signs `content-length`, so R2 must reject any
+    // PUT whose actual body length differs from the declared `size_bytes`.
+    let h = setup().await;
+    let device = insert_device(&h.pool).await;
+    let mut blob = media_fixture(device, None);
+    blob.size_bytes = 8; // declare a tiny upload
+    h.adapter.save(&blob).await.expect("save");
+
+    let upload_url = h
+        .adapter
+        .presigned_upload_url(&blob.id, &blob.content_type)
+        .await
+        .expect("presigned_upload_url");
+
+    // Attempt to PUT far more than the signed 8 bytes.
+    let oversized_body = vec![0xABu8; 4096];
+    let client = reqwest::Client::new();
+    let resp = client
+        .put(&upload_url)
+        .header("content-type", &blob.content_type)
+        .body(oversized_body)
+        .send()
+        .await
+        .expect(
+            "PUT request must complete (rejection is an HTTP error status, not a transport error)",
+        );
+
+    assert!(
+        !resp.status().is_success(),
+        "a PUT body larger than the signed content-length must be rejected, got {}",
+        resp.status()
+    );
+    assert!(
+        list_keys(&h.s3, &blob.storage_key).await.is_empty(),
+        "a rejected oversized upload must not leave an object in S3"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn presigned_upload_url_rejects_body_smaller_than_declared_size_bytes() {
+    // Same signature-binding mechanism, opposite direction: an undersized body
+    // must also be rejected (content-length is exact-match, not a ceiling).
+    let h = setup().await;
+    let device = insert_device(&h.pool).await;
+    let mut blob = media_fixture(device, None);
+    blob.size_bytes = 4096;
+    h.adapter.save(&blob).await.expect("save");
+
+    let upload_url = h
+        .adapter
+        .presigned_upload_url(&blob.id, &blob.content_type)
+        .await
+        .expect("presigned_upload_url");
+
+    let undersized_body = vec![0xCDu8; 8];
+    let client = reqwest::Client::new();
+    let resp = client
+        .put(&upload_url)
+        .header("content-type", &blob.content_type)
+        .body(undersized_body)
+        .send()
+        .await
+        .expect(
+            "PUT request must complete (rejection is an HTTP error status, not a transport error)",
+        );
+
+    assert!(
+        !resp.status().is_success(),
+        "a PUT body smaller than the signed content-length must be rejected, got {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
 async fn presigned_upload_url_rejects_disallowed_content_type() {
     let h = setup().await;
     let device = insert_device(&h.pool).await;
@@ -408,7 +489,11 @@ async fn presigned_download_url_contains_bucket_and_key() {
 async fn delete_removes_s3_object_and_row() {
     let h = setup().await;
     let device = insert_device(&h.pool).await;
-    let blob = media_fixture(device, None);
+    let body = b"opaque-ciphertext-bytes".to_vec();
+    let mut blob = media_fixture(device, None);
+    // size_bytes is now bound into the presigned URL's signature (content-length) —
+    // it must equal the actual PUT body length or the upload is rejected.
+    blob.size_bytes = body.len() as u64;
     h.adapter.save(&blob).await.expect("save");
 
     // Put a real object at the key via the pre-signed upload URL so we can
@@ -422,7 +507,7 @@ async fn delete_removes_s3_object_and_row() {
     let resp = client
         .put(&upload_url)
         .header("content-type", &blob.content_type)
-        .body(b"opaque-ciphertext-bytes".to_vec())
+        .body(body)
         .send()
         .await
         .expect("PUT to presigned url");
@@ -468,11 +553,14 @@ async fn delete_nonexistent_id_is_a_noop() {
 async fn presigned_upload_then_download_round_trips_bytes() {
     let h = setup().await;
     let device = insert_device(&h.pool).await;
-    let blob = media_fixture(device, None);
-    h.adapter.save(&blob).await.expect("save");
-
     // Opaque, test-authored bytes — stands in for client-side E2EE ciphertext.
     let payload = b"\x00\x01\x02opaque-e2ee-ciphertext\xfe\xff".to_vec();
+    let mut blob = media_fixture(device, None);
+    // size_bytes is now bound into the presigned URL's signature (content-length) —
+    // it must equal the actual PUT body length or the upload is rejected.
+    blob.size_bytes = payload.len() as u64;
+    h.adapter.save(&blob).await.expect("save");
+
     let client = reqwest::Client::new();
 
     let upload_url = h

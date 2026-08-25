@@ -221,10 +221,13 @@ export async function encryptAndSendMedia(
 
 			// .slice(0) copies into a fresh ArrayBuffer so the BodyInit type is
 			// unambiguous across DOM and Bun TypeScript environments.
+			// Content-Type must match `mimeType` exactly — it's part of the
+			// presigned URL's SigV4 signature (`content_type(...)` in the R2
+			// adapter); a mismatched header fails the PUT with SignatureDoesNotMatch.
 			await fetch(uploadUrl, {
 				method: "PUT",
 				body: ciphertext.slice(0),
-				headers: { "Content-Type": "application/octet-stream" },
+				headers: { "Content-Type": mimeType },
 			});
 
 			await confirmMediaUpload(sessionToken, mediaId);
@@ -258,10 +261,12 @@ export async function encryptAndSendMedia(
 
 		// .slice(0) copies into a fresh ArrayBuffer so the BodyInit type is
 		// unambiguous across DOM and Bun TypeScript environments.
+		// Content-Type must match `mimeType` exactly — see the chunked-path
+		// comment above for why.
 		await fetch(uploadUrl, {
 			method: "PUT",
 			body: ciphertext.slice(0),
-			headers: { "Content-Type": "application/octet-stream" },
+			headers: { "Content-Type": mimeType },
 		});
 
 		await confirmMediaUpload(sessionToken, mediaId);
