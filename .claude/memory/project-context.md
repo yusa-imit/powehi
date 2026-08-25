@@ -17,7 +17,77 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-25, cycle 362 — FEATURE: append-only media upload ledger closes delete-churn quota bypass, commit f30e9e0)
+## Current state (2026-08-25, cycle 363 — FEATURE: daily GC trim job for media_upload_ledger, commit b578778)
+
+- CI green (`gh run list --limit 3` all success), `gh issue list --state open` empty,
+  `git status` clean at cycle start. Picked cycle 362's top carried-forward candidate: the
+  accepted non-blocking gap in `media_upload_ledger` (the append-only table backing the
+  per-device/per-day media upload byte quota) — no GC/TTL sweep existed, so it grew by one
+  small fixed-width row per accepted upload, forever, across all devices.
+- Dispatched an Explore-style scoping agent first (background) to locate the existing GC
+  pattern before writing code: confirmed `bin/powehi-server/src/main.rs` already runs two
+  `tokio::spawn` interval-loop background jobs (envelope GC every 300s via
+  `EnvelopeRepository::delete_expired`, media blob GC every 3600s via `MediaService::run_gc`)
+  — no cron/k8s CronJob/admin endpoint involved, everything in-process — and that
+  `MediaService`'s existing `GC_RETENTION_DAYS = 30` (media_service.rs:32) + prd.md §11.4's
+  documented 30-day default retention were the right precedent to reuse for this table's
+  cutoff too (large margin over the 1-day quota-read window; no existing precedent for a
+  tighter window).
+- **What it does:** new `MediaRepository::trim_upload_ledger_older_than(cutoff) ->
+  Result<u64, DomainError>` port method (`crates/ports/powehi-port-outbound/src/media_repo.rs`);
+  `R2MediaAdapter` impl is a single parameterized `DELETE FROM media_upload_ledger WHERE
+  uploaded_at < $1` returning `rows_affected()`. New daily (`interval(86400s)`)
+  `tokio::spawn` loop in `main.rs`, same shape as the two existing GC loops, calling
+  `trim_upload_ledger_older_than(now - GC_RETENTION_DAYS)` — reuses the constant (now `pub`)
+  from `media_service.rs` rather than a duplicated literal, so the two retention windows
+  can't silently drift apart. Required adding `chrono` as a direct dependency of
+  `bin/powehi-server/Cargo.toml` (workspace-pinned, no new transitive dep — main.rs
+  previously never called `chrono::` directly). Migration `0015`'s comment block updated
+  from "known gap" to "closed cycle 363, see main.rs".
+- **security-auditor: GREEN**, no blocking findings. Verified (not rubber-stamped): the
+  30-day cutoff has a 29-day safety margin over the 24h rolling quota-read window with no
+  code path (concurrent request, retry, clock skew) where an in-window row could be
+  deleted — the two predicates (`>= now-1d` read vs `< now-30d` delete) are provably
+  disjoint; the DELETE is fully parameterized with exactly one non-test call site (the
+  background job itself — unreachable from any HTTP/gRPC/admin route since it lives on the
+  outbound `MediaRepository` port, not the inbound `MediaUseCase` the handlers hold); no
+  plaintext/PII/content logged (count-only `tracing::info!`); `rows_affected()` is a
+  lossless `u64`, no cast; confirmed `threat-model-checker` genuinely not required — trims
+  an internal-only table with no client-facing read path, net *decreases* server-retained
+  metadata, no threat-model-negative delta. `cargo audit`/`cargo deny check` clean (1-line
+  Cargo.lock diff: existing workspace-pinned `chrony` promoted to a direct dep, zero new
+  transitive dependencies). Two low-severity non-blocking findings fixed same cycle: (a)
+  the retention constant was a duplicated literal `30` in main.rs vs `GC_RETENTION_DAYS` in
+  media_service.rs — fixed by making the constant `pub` and importing it; (b) the table's
+  only index (`device_id, uploaded_at`) doesn't lead with `uploaded_at`, so each daily sweep
+  is an unbatched full-table-scan DELETE — documented in place as an accepted low-severity
+  gap (same unbatched shape as the pre-existing `EnvelopeRepository::delete_expired`,
+  revisit if row volume ever makes scan time/lock hold matter). One informational-only,
+  pre-existing, not-this-diff's-fault note left as-is: `map_sqlx` logs raw sqlx error text
+  server-side only (no client exposure), same pattern as every other adapter method.
+- 5 new/updated Rust tests: 2 new unit tests in `media_service.rs`'s `MockMediaRepo`
+  (deletes-only-stale-rows, returns-zero-when-nothing-stale — mock's `trim_upload_ledger_older_than`
+  now implemented too, required since it's a new trait method on `MediaRepository`, the only
+  two implementors are `MockMediaRepo` and `R2MediaAdapter`); 3 new `#[ignore = "requires
+  Docker"]` integration tests in `r2_media_it.rs` (deletes-only-rows-past-cutoff,
+  does-not-touch-media_blobs — pins the no-FK invariant explicitly, returns-zero-when-
+  nothing-stale) — not run locally (no Docker in sandbox), will run in CI's Rust workflow.
+  `cargo build/test --workspace` clean (144 `powehi-application` unit tests green, +2 from
+  cycle 362's 142 baseline count reported same-crate), `cargo clippy --workspace
+  --all-targets -- -D warnings` clean, `cargo fmt --check` clean (no reformatting needed).
+- Target dir hygiene: not checked this cycle (FEATURE mode, not due — next due cycle 365,
+  STABILIZATION).
+- **Next cycle candidates:** the two low-severity non-blocking notes this cycle chose to
+  document rather than fix (unbatched full-scan DELETE on the ledger trim — revisit if row
+  volume grows; `map_sqlx` raw-error-text server-side logging — pre-existing, informational,
+  affects every adapter method, not specific to this diff); media-key incoming/outgoing
+  asymmetry (still needs a new crypto-reviewed WASM key-export/local-storage-key design,
+  confirmed genuinely multi-part cycle 359); PQ hybrid Phase A (still blocked on openmls
+  stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003 Phase B,
+  itself gated on Phase A); project-context.md size (now ~1290 lines, comfortably under the
+  256KB Read cap — no action needed yet).
+
+## Previous state (2026-08-25, cycle 362 — FEATURE: append-only media upload ledger closes delete-churn quota bypass, commit f30e9e0)
 
 - CI green (`gh run list --limit 3` all success), `git status` clean at cycle start. Picked
   cycle 361's top carried-forward candidate: the accepted residual gap in
