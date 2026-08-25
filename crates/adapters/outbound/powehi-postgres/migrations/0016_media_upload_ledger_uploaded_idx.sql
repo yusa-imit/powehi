@@ -1,0 +1,28 @@
+-- no-transaction
+-- Closes the low-severity gap security-auditor flagged (non-blocking) in
+-- cycle 363's `0015_media_upload_ledger.sql`: the table's only index,
+-- `media_upload_ledger_device_uploaded_idx(device_id, uploaded_at)`, leads
+-- with `device_id`, so the daily GC trim's `WHERE uploaded_at < $1` (which
+-- scans across ALL devices, not one) could not use it and fell back to a
+-- full-table scan. This index leads with `uploaded_at` alone so the trim's
+-- keyset-batched scan (see `R2MediaAdapter::trim_upload_ledger_older_than`,
+-- cycle 364) can seek directly to the stale range instead of scanning live
+-- rows. The existing `(device_id, uploaded_at)` index is unaffected and
+-- still serves `sum_bytes_uploaded_since`'s per-device quota read.
+--
+-- CONCURRENTLY, not a plain build: unlike 0015 (which created this table
+-- fresh and empty in the same migration), `media_upload_ledger` has been
+-- live and insert-heavy since cycle 362 — one row per accepted upload,
+-- across all devices. security-auditor (cycle 364) flagged that a plain
+-- `CREATE INDEX` here would take a lock blocking concurrent `INSERT`s for
+-- the build's duration, unlike 0015's genuinely-empty-table case. Matches
+-- the 0011/0014 precedent: `CREATE INDEX CONCURRENTLY` cannot run inside
+-- sqlx's default migration transaction (Postgres forbids CONCURRENTLY in a
+-- transaction block outright), hence `-- no-transaction` above. No later
+-- migration drops or depends on an older index this one replaces (there
+-- isn't one to replace — this is a net-new index), so an interrupted build
+-- leaving this one INVALID only means the trim sweep falls back to its
+-- pre-cycle-364 full-scan behavior (slower, still correct) — no companion
+-- `pg_index.indisvalid` guard needed, same reasoning as 0014.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS media_upload_ledger_uploaded_at_idx
+    ON media_upload_ledger(uploaded_at);

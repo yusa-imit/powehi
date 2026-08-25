@@ -49,6 +49,11 @@ const ALLOWED_CONTENT_TYPES: &[&str] = &[
 /// Maximum single-blob size the server will issue a presigned URL for: 100 MB.
 pub const MAX_MEDIA_BYTES: u64 = 100 * 1024 * 1024;
 
+/// Row count per `DELETE` statement in `trim_upload_ledger_older_than`'s
+/// keyset-batched sweep (cycle 364) — bounds lock hold time per statement
+/// regardless of how many rows are past the cutoff.
+const TRIM_LEDGER_BATCH_SIZE: i64 = 5_000;
+
 /// Outbound adapter: Cloudflare R2 for pre-signed URL generation + Postgres for metadata.
 pub struct R2MediaAdapter {
     pool: PgPool,
@@ -372,25 +377,51 @@ impl MediaRepository for R2MediaAdapter {
         Ok(row.0 as u64)
     }
 
-    // security-auditor cycle 363, non-blocking: the table's only index is
-    // `(device_id, uploaded_at)` — a leading-column mismatch with this
-    // query's `WHERE uploaded_at < $1`, so each daily sweep is a full table
-    // scan in one unbatched transaction (same unbatched shape as
-    // `EnvelopeRepository::delete_expired`). Acceptable at today's row
-    // volume; revisit with a `uploaded_at`-leading index or `run_gc_batched`-
-    // style keyset batching if this table grows large enough for scan time
-    // or lock hold to matter.
+    // Closed cycle 364 (security-auditor cycle 363 non-blocking finding):
+    // batched via `media_upload_ledger_uploaded_at_idx` (migration 0016,
+    // leads with `uploaded_at`) so each batch is an index range scan, not a
+    // full table scan, and no single statement holds a lock over the whole
+    // stale range — same keyset-batching intent as `list_gc_candidates`,
+    // adapted to a delete-in-place loop since this method (unlike
+    // `run_gc`'s repeated interval-tick calls) is invoked once per day and
+    // must fully drain the stale range before returning.
+    //
+    // security-auditor cycle 364, non-blocking: with multiple server
+    // replicas each running this daily sweep independently (no leader
+    // election / advisory lock — same pre-existing gap as `run_gc`), a
+    // concurrent sweep on another replica can delete rows out from under
+    // this loop's next batch selection, making `affected` undercount and
+    // exit early with stale rows left over. Bounded and self-healing: any
+    // leftovers are still >29 days past the 24h quota-read window (no
+    // quota-correctness impact) and get swept on the next daily run.
     #[instrument(skip(self))]
     async fn trim_upload_ledger_older_than(
         &self,
         cutoff: DateTime<Utc>,
     ) -> Result<u64, DomainError> {
-        let result = sqlx::query("DELETE FROM media_upload_ledger WHERE uploaded_at < $1")
+        let mut total: u64 = 0;
+        loop {
+            let result = sqlx::query(
+                "DELETE FROM media_upload_ledger
+                 WHERE id IN (
+                     SELECT id FROM media_upload_ledger
+                     WHERE uploaded_at < $1
+                     ORDER BY uploaded_at
+                     LIMIT $2
+                 )",
+            )
             .bind(cutoff)
+            .bind(TRIM_LEDGER_BATCH_SIZE)
             .execute(&self.pool)
             .await
             .map_err(map_sqlx)?;
-        Ok(result.rows_affected())
+            let affected = result.rows_affected();
+            total += affected;
+            if affected < TRIM_LEDGER_BATCH_SIZE as u64 {
+                break;
+            }
+        }
+        Ok(total)
     }
 }
 

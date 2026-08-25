@@ -913,6 +913,61 @@ async fn trim_upload_ledger_older_than_does_not_touch_media_blobs() {
 
 #[tokio::test]
 #[ignore = "requires Docker (testcontainers)"]
+async fn trim_upload_ledger_older_than_drains_multiple_batches() {
+    // Cycle 364: `trim_upload_ledger_older_than` deletes in fixed-size
+    // batches (`TRIM_LEDGER_BATCH_SIZE` = 5,000) via a keyset-paginated loop
+    // rather than one unbatched statement (closes the cycle-363 non-blocking
+    // finding). Bulk-insert straight to Postgres — no FK on `device_id` in
+    // this table (migration 0015) — to prove the loop fully drains a stale
+    // range spanning multiple batches (12,001 rows = 2 full batches + 1
+    // partial) without needing 12k slow `save()` round-trips.
+    let h = setup().await;
+    let now = Utc::now();
+    let stale_at = now - chrono::Duration::days(31);
+    let device = Uuid::new_v4();
+
+    sqlx::query(
+        "INSERT INTO media_upload_ledger (id, device_id, size_bytes, uploaded_at)
+         SELECT gen_random_uuid(), $1, 1, $2
+         FROM generate_series(1, 12001)",
+    )
+    .bind(device)
+    .bind(stale_at)
+    .execute(&h.pool)
+    .await
+    .expect("bulk insert stale ledger rows");
+
+    // One fresh row that must survive the trim.
+    sqlx::query(
+        "INSERT INTO media_upload_ledger (id, device_id, size_bytes, uploaded_at)
+         VALUES (gen_random_uuid(), $1, 1, $2)",
+    )
+    .bind(device)
+    .bind(now)
+    .execute(&h.pool)
+    .await
+    .expect("insert fresh ledger row");
+
+    let cutoff = now - chrono::Duration::days(30);
+    let trimmed = h
+        .adapter
+        .trim_upload_ledger_older_than(cutoff)
+        .await
+        .expect("trim_upload_ledger_older_than");
+    assert_eq!(
+        trimmed, 12_001,
+        "all stale rows across every batch must be deleted"
+    );
+
+    let (remaining,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM media_upload_ledger")
+        .fetch_one(&h.pool)
+        .await
+        .expect("count remaining");
+    assert_eq!(remaining, 1, "only the fresh row must survive");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
 async fn trim_upload_ledger_older_than_returns_zero_when_nothing_stale() {
     let h = setup().await;
     let blob = media_fixture(insert_device(&h.pool).await, None);
