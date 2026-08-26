@@ -65,6 +65,8 @@ const MINIO_SECRET: &str = "minioadmin";
 const TEST_BUCKET: &str = "powehi-media-test";
 const UPLOAD_TTL_SECS: u64 = 900;
 const DOWNLOAD_TTL_SECS: u64 = 300;
+/// Bounds each R2 operation (and each individual attempt) issued by the adapter.
+const REQUEST_TIMEOUT_SECS: u64 = 30;
 
 // ── Container setup ───────────────────────────────────────────────────────────
 
@@ -137,6 +139,7 @@ async fn setup() -> Harness {
         MINIO_SECRET,
         UPLOAD_TTL_SECS,
         DOWNLOAD_TTL_SECS,
+        REQUEST_TIMEOUT_SECS,
     );
 
     Harness {

@@ -7,6 +7,12 @@
 //! Pre-signed URL TTLs:
 //!   - Upload:   configurable, default 900 s (15 min) — covers slow connections.
 //!   - Download: configurable, default 300 s (5 min) — minimises link sharing window.
+//!
+//! The S3 client's own request timeout is separately configurable and distinct
+//! from the presign TTLs above: presign TTL is the client-facing upload/download
+//! window, while the request timeout bounds server-to-R2 call latency — currently
+//! only `delete()` (used by the hourly media-blob GC job) makes a real R2 network
+//! call; the daily ledger-trim job is Postgres-only and never touches R2.
 
 pub mod error;
 
@@ -15,7 +21,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::{
-    config::{Builder as S3ConfigBuilder, Region},
+    config::{timeout::TimeoutConfig, Builder as S3ConfigBuilder, Region},
     presigning::PresigningConfig,
     Client as S3Client,
 };
@@ -63,6 +69,41 @@ pub struct R2MediaAdapter {
     download_ttl: Duration,
 }
 
+/// Builds the S3-compatible client config used to talk to R2, including its
+/// request-timeout policy. Pulled out of `R2MediaAdapter::new` so the timeout
+/// wiring is unit-testable without needing a `PgPool`.
+fn build_s3_config(
+    endpoint: &str,
+    access_key_id: &str,
+    secret_access_key: &str,
+    request_timeout_secs: u64,
+) -> aws_sdk_s3::Config {
+    let creds = Credentials::new(
+        access_key_id,
+        secret_access_key,
+        None,
+        None,
+        "powehi-r2-static",
+    );
+    // A stalled single attempt must not consume the whole operation budget, or
+    // the SDK's standard retry policy never gets a chance to try again — so the
+    // attempt timeout is a third of the operation timeout (floored at 1s),
+    // leaving room for the SDK's default 3-attempt retry budget.
+    let attempt_timeout_secs = (request_timeout_secs / 3).max(1);
+    S3ConfigBuilder::new()
+        .region(Region::new("auto"))
+        .endpoint_url(endpoint)
+        .credentials_provider(creds)
+        .force_path_style(true)
+        .timeout_config(
+            TimeoutConfig::builder()
+                .operation_timeout(Duration::from_secs(request_timeout_secs))
+                .operation_attempt_timeout(Duration::from_secs(attempt_timeout_secs))
+                .build(),
+        )
+        .build()
+}
+
 impl R2MediaAdapter {
     /// Construct a new adapter.
     ///
@@ -72,6 +113,16 @@ impl R2MediaAdapter {
     /// `secret_access_key`  — R2 API token secret
     /// `upload_ttl_secs`    — pre-signed upload URL TTL
     /// `download_ttl_secs`  — pre-signed download URL TTL
+    /// `request_timeout_secs` — bounds each R2 operation (whole retry loop) and,
+    ///   at a third of that budget, each individual attempt within it — so a
+    ///   stalled single attempt still leaves room for the SDK's standard retry
+    ///   policy to try again, and a stalled R2 call can't hang the media-blob GC
+    ///   job (or, transitively, the advisory lock guarding it) indefinitely
+    // 8 plain construction params, each independently meaningful (creds,
+    // endpoint/bucket, and three orthogonal TTL/timeout knobs) — a builder
+    // would be more ceremony than value for a single-call adapter
+    // constructor with no optional fields.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: PgPool,
         endpoint: &str,
@@ -80,20 +131,14 @@ impl R2MediaAdapter {
         secret_access_key: &str,
         upload_ttl_secs: u64,
         download_ttl_secs: u64,
+        request_timeout_secs: u64,
     ) -> Self {
-        let creds = Credentials::new(
+        let s3_cfg = build_s3_config(
+            endpoint,
             access_key_id,
             secret_access_key,
-            None,
-            None,
-            "powehi-r2-static",
+            request_timeout_secs,
         );
-        let s3_cfg = S3ConfigBuilder::new()
-            .region(Region::new("auto"))
-            .endpoint_url(endpoint)
-            .credentials_provider(creds)
-            .force_path_style(true)
-            .build();
         let s3 = S3Client::from_conf(s3_cfg);
         Self {
             pool,
@@ -550,6 +595,51 @@ mod tests {
     #[test]
     fn max_media_bytes_is_100mb() {
         assert_eq!(MAX_MEDIA_BYTES, 100 * 1024 * 1024);
+    }
+
+    #[test]
+    fn build_s3_config_attaches_operation_and_attempt_timeouts() {
+        let cfg = build_s3_config(
+            "https://example.r2.cloudflarestorage.com",
+            "key",
+            "secret",
+            30,
+        );
+        let timeout_config = cfg
+            .timeout_config()
+            .expect("timeout_config must be attached to the built S3 client config");
+        assert_eq!(
+            timeout_config.operation_timeout(),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            timeout_config.operation_attempt_timeout(),
+            Some(Duration::from_secs(10)),
+            "attempt timeout must be a fraction of the operation timeout so a stalled \
+             attempt doesn't consume the whole retry budget"
+        );
+    }
+
+    #[test]
+    fn build_s3_config_floors_attempt_timeout_at_one_second() {
+        let cfg = build_s3_config(
+            "https://example.r2.cloudflarestorage.com",
+            "key",
+            "secret",
+            1,
+        );
+        let timeout_config = cfg
+            .timeout_config()
+            .expect("timeout_config must be attached");
+        assert_eq!(
+            timeout_config.operation_timeout(),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(
+            timeout_config.operation_attempt_timeout(),
+            Some(Duration::from_secs(1)),
+            "1/3 of 1s rounds to 0 — must floor at 1s, not disable the attempt timeout"
+        );
     }
 
     #[test]

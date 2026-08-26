@@ -14,12 +14,26 @@ pub enum ConfigError {
          every request handler for the acquire-timeout duration if both jobs overlap)"
     )]
     DatabaseMaxConnectionsTooLow(u32),
+    #[error(
+        "r2_request_timeout_secs={0} is below the minimum safe value ({MIN_R2_REQUEST_TIMEOUT_SECS}): \
+         the AWS SDK's own default connect timeout is ~3.1s, so anything at or below that fails \
+         every R2 call before a fresh connection can even complete, silently breaking media \
+         presigning and the hourly media-blob GC background job"
+    )]
+    R2RequestTimeoutTooLow(u64),
 }
 
 /// Below this, a GC/ledger-trim job's dedicated advisory-lock connection plus its own query
 /// connection can exhaust the pool and self-deadlock (see `powehi_r2::try_gc_lock`); two
 /// concurrent jobs need one pair each, so 3 is the floor, not sqlx's per-connection minimum of 1.
 const MIN_DATABASE_MAX_CONNECTIONS: u32 = 3;
+
+/// The AWS SDK's own default connect timeout is ~3.1s (see
+/// `aws-smithy-runtime`'s `DEFAULT_CONNECT_TIMEOUT`); a configured operation
+/// timeout at or below that fails every R2 call before a fresh connection can
+/// even complete, which clears naive "just reject zero" validation while still
+/// being a silent total outage. 5 gives headroom above that floor.
+const MIN_R2_REQUEST_TIMEOUT_SECS: u64 = 5;
 
 #[derive(Deserialize)]
 pub struct AppConfig {
@@ -46,6 +60,17 @@ pub struct AppConfig {
     /// Pre-signed download URL TTL in seconds (default 300 = 5 min).
     #[serde(default = "default_presign_download_ttl")]
     pub r2_presign_download_ttl_secs: u64,
+    /// Bounds each server-to-R2 S3 operation in `R2MediaAdapter`'s S3 client (each
+    /// individual retry attempt is bounded at a third of this, so a stalled attempt
+    /// still leaves room for a retry). Without it the SDK has no request timeout, so
+    /// a hung R2 request hangs the hourly media-blob GC background task indefinitely
+    /// — and since that job is guarded by a Postgres advisory lock, a hang on one
+    /// replica blocks the job cluster-wide. The daily ledger-trim job is Postgres-only
+    /// and unaffected (it never calls R2). NOT the same thing as the pre-signed URL
+    /// TTLs above (those are client-facing upload/download windows; this is
+    /// server-to-R2 call latency). Default 30 (seconds).
+    #[serde(default = "default_r2_request_timeout_secs")]
+    pub r2_request_timeout_secs: u64,
     /// Internal admin port for Prometheus metrics scraping.
     /// Bound to 127.0.0.1 only — MUST NOT be exposed via the public ingress.
     /// Prometheus scrapes from within the cluster (k8s pod-to-pod).
@@ -93,6 +118,9 @@ fn default_presign_upload_ttl() -> u64 {
 }
 fn default_presign_download_ttl() -> u64 {
     300
+}
+fn default_r2_request_timeout_secs() -> u64 {
+    30
 }
 fn default_admin_port() -> u16 {
     9090
@@ -152,6 +180,7 @@ impl std::fmt::Debug for AppConfig {
                 "r2_presign_download_ttl_secs",
                 &self.r2_presign_download_ttl_secs,
             )
+            .field("r2_request_timeout_secs", &self.r2_request_timeout_secs)
             .field("admin_port", &self.admin_port)
             .field("grpc_port", &self.grpc_port)
             .field("grpc_peers", &self.grpc_peers)
@@ -177,6 +206,7 @@ pub fn load() -> Result<AppConfig, ConfigError> {
         .set_default("admin_port", 9090)?
         .set_default("grpc_port", 50051)?
         .set_default("database_max_connections", 20)?
+        .set_default("r2_request_timeout_secs", 30)?
         // No defaults for credentials — POWEHI__R2_ACCESS_KEY_ID and
         // POWEHI__R2_SECRET_ACCESS_KEY must be injected by the operator.
         .set_default("r2_access_key_id", "")?
@@ -191,6 +221,11 @@ fn validate(app: &AppConfig) -> Result<(), ConfigError> {
     if app.database_max_connections < MIN_DATABASE_MAX_CONNECTIONS {
         return Err(ConfigError::DatabaseMaxConnectionsTooLow(
             app.database_max_connections,
+        ));
+    }
+    if app.r2_request_timeout_secs < MIN_R2_REQUEST_TIMEOUT_SECS {
+        return Err(ConfigError::R2RequestTimeoutTooLow(
+            app.r2_request_timeout_secs,
         ));
     }
     Ok(())
@@ -216,6 +251,7 @@ mod tests {
             r2_secret_access_key: "dev-test-secret".into(),
             r2_presign_upload_ttl_secs: 900,
             r2_presign_download_ttl_secs: 300,
+            r2_request_timeout_secs: 30,
             admin_port: 9090,
             grpc_port: 50051,
             grpc_peers: String::new(),
@@ -283,6 +319,44 @@ mod tests {
             assert!(
                 validate(&cfg).is_ok(),
                 "database_max_connections={ok} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn r2_request_timeout_default_is_30() {
+        assert_eq!(default_r2_request_timeout_secs(), 30);
+        assert_eq!(default_config().r2_request_timeout_secs, 30);
+    }
+
+    #[test]
+    fn r2_request_timeout_below_floor_is_rejected() {
+        for bad in [0, MIN_R2_REQUEST_TIMEOUT_SECS - 1] {
+            let cfg = AppConfig {
+                r2_request_timeout_secs: bad,
+                ..default_config()
+            };
+            let err = validate(&cfg)
+                .expect_err(&format!("r2_request_timeout_secs={bad} must be rejected"));
+            assert!(matches!(err, ConfigError::R2RequestTimeoutTooLow(v) if v == bad));
+        }
+    }
+
+    #[test]
+    fn r2_request_timeout_at_or_above_floor_is_accepted() {
+        for ok in [
+            MIN_R2_REQUEST_TIMEOUT_SECS,
+            MIN_R2_REQUEST_TIMEOUT_SECS + 1,
+            30,
+            120,
+        ] {
+            let cfg = AppConfig {
+                r2_request_timeout_secs: ok,
+                ..default_config()
+            };
+            assert!(
+                validate(&cfg).is_ok(),
+                "r2_request_timeout_secs={ok} must be accepted"
             );
         }
     }
@@ -415,6 +489,7 @@ mod tests {
         assert_eq!(app.r2_bucket, "powehi-media");
         assert_eq!(app.r2_presign_upload_ttl_secs, 900);
         assert_eq!(app.r2_presign_download_ttl_secs, 300);
+        assert_eq!(app.r2_request_timeout_secs, 30);
         assert!(
             app.r2_access_key_id.is_empty(),
             "credentials must be injected by operator"

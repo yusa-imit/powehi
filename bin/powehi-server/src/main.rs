@@ -208,6 +208,7 @@ async fn main() -> Result<()> {
         &cfg.r2_secret_access_key,
         cfg.r2_presign_upload_ttl_secs,
         cfg.r2_presign_download_ttl_secs,
+        cfg.r2_request_timeout_secs,
     ));
     let media_repo_gc: Arc<dyn powehi_port_outbound::media_repo::MediaRepository> =
         media_r2.clone();
