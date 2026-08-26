@@ -17,7 +17,69 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-26, cycle 368 — FEATURE: Postgres advisory lock guards GC/ledger-trim jobs, commit 20aa601)
+## Current state (2026-08-26, cycle 369 — FEATURE: explicit Postgres pool size + floor validation, commit 87ae758)
+
+- CI green (`gh run list --limit 5` all success), `gh issue list --state open` empty,
+  `git status` clean at cycle start.
+- Picked cycle 368's first deferred candidate: `powehi_postgres::connect()` inherited
+  sqlx's undocumented `max_connections = 10` default, which cycle 368's GC advisory-lock
+  fix (`try_gc_lock`) made load-bearing — two background jobs (hourly media-blob GC, daily
+  ledger trim) each now pin one dedicated session-scoped connection for
+  `pg_try_advisory_lock` on top of normal request-handler traffic.
+- **What it does:** `connect(url, max_connections: u32)` now builds via
+  `PgPoolOptions::new().max_connections(...)` instead of the bare `PgPool::connect(url)`.
+  `AppConfig` gained `database_max_connections: u32` (serde default 20,
+  `POWEHI__DATABASE_MAX_CONNECTIONS`), threaded through `main.rs`'s `pg_connect` call.
+  `powehi_config::load()` now rejects `database_max_connections < 3` via a new
+  `ConfigError::DatabaseMaxConnectionsTooLow` — below 3, a single GC/ledger-trim job's
+  lock connection plus its own query connection self-deadlocks the pool, and if both
+  jobs overlap every request handler starves too.
+- **security-auditor: GREEN** (fully independent verification against sqlx 0.8.6 source,
+  not just the diff — confirmed `acquire_timeout` fail-fast on `max_connections=0`, config-rs
+  string-coercion fail-fast on non-numeric/negative values, confirmed only the two
+  `GcLockGuard`s are long-lived connection holders so 20 leaves 18 free for handlers vs.
+  10's 8). 4 non-blocking findings, 2 fixed same-cycle: (1) missing floor validation — now
+  fixed via the `< 3` reject above, extracted into a small pure `validate()` fn so it's
+  unit-testable without mutating process env; (3) `GcLockGuard`'s `Drop`-safety doc
+  depending on `min_connections == 0` didn't warn the new `PgPoolOptions` builder site not
+  to add `.min_connections(_)` — added that warning to `connect()`'s doc comment. 2
+  deferred as genuinely bigger-scope: (2) `maxReplicas × 20` roughly doubles the
+  cluster-wide connection ceiling (300 in prod-eu, 200 in prod-ap) with no documented
+  Postgres-side `max_connections` or managed-DB resource anywhere in `infra/` to check it
+  against — needs an infra-lead pass wiring the value through Helm `values.yaml` derived
+  from actual DB capacity, not a config-crate fix; (4) `POWEHI__DATABASE_MAX_CONNECTIONS`
+  isn't wired into the Helm ConfigMap yet, so every environment runs the compiled default
+  of 20 regardless — same follow-up as (2). Also noted (informational, no fix needed): two
+  `#[ignore]`d testcontainers files (`pg_security_it.rs`, `r2_media_it.rs`) still call bare
+  `PgPool::connect` bypassing the crate's `connect()`, so `try_gc_lock`'s own test suite
+  runs against a differently-sized pool than production — harmless at 10 (above the new
+  floor), align next time those files are touched. Not architectural (pool sizing is
+  server-internal only, no new server-visible metadata) — `threat-model-checker` correctly
+  not required; not crypto — `crypto-reviewer` correctly not required.
+- 2 new unit tests (`database_max_connections_below_floor_is_rejected`,
+  `database_max_connections_at_or_above_floor_is_accepted`), `powehi-config` now 13/13.
+  Full `cargo build/test --workspace` green (no regressions), `cargo clippy --workspace
+  --all-targets -- -D warnings` clean, `cargo fmt --check` clean. `cargo deny check`
+  advisories/bans/licenses all ok (security-auditor ran it; no `Cargo.lock` diff from this
+  change so not independently re-run).
+- Target dir hygiene: not checked this cycle (FEATURE mode; next due cycle 370,
+  STABILIZATION).
+- **Next cycle candidates:** the two findings deferred this cycle above — (2)/(4) really
+  are one task: derive/document a Postgres-side connection budget and wire
+  `database_max_connections` through Helm `values.yaml` per environment instead of the
+  baked-in 20, needs infra-lead + a real number for the managed Postgres's own
+  `max_connections` (not currently provisioned via Terraform — check where/how the DB is
+  actually hosted before picking this, may be a bigger infra task than one cycle); cycle
+  368's other deferred item, a lease/TTL or R2 `S3Client` request timeout so a hung GC/trim
+  task can't block that job cluster-wide indefinitely; the hexagonal-layering nit
+  (`try_gc_lock` living on the R2/S3-named adapter instead of a `LeaderLock` port on
+  `powehi-postgres`); media-key incoming/outgoing asymmetry (confirmed genuinely
+  multi-part, cycle 359); PQ hybrid Phase A (still blocked on openmls stable
+  `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003 Phase B, itself
+  gated on Phase A); project-context.md size (now ~1660 lines, comfortably under the 256KB
+  Read cap — no action needed yet).
+
+## Previous state (2026-08-26, cycle 368 — FEATURE: Postgres advisory lock guards GC/ledger-trim jobs, commit 20aa601)
 
 - CI green (`gh run list --limit 3` all success), `gh issue list --state open` empty,
   `git status` clean at cycle start. PATH quirk hit again this cycle (recurring across
