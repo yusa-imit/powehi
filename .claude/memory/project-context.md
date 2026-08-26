@@ -17,7 +17,132 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-26, cycle 367 — FEATURE: make create_group's group+member creation atomic, commit 9d1ba00)
+## Current state (2026-08-26, cycle 368 — FEATURE: Postgres advisory lock guards GC/ledger-trim jobs, commit 20aa601)
+
+- CI green (`gh run list --limit 3` all success), `gh issue list --state open` empty,
+  `git status` clean at cycle start. PATH quirk hit again this cycle (recurring across
+  many past cycles per the duplicate lines already in `~/.zshrc`): the sandbox's Bash
+  tool does not source `~/.zshrc` (zsh only sources `.zshrc` for interactive shells;
+  this harness runs non-interactive), so `cargo` was `command not found` until each
+  command explicitly ran `source "$HOME/.cargo/env"` first. Appended one more line to
+  `~/.zshenv` (sourced for *all* shell types, unlike `.zshrc`) attempting a real fix,
+  but confirmed via a fresh Bash call that it *still* doesn't take effect — the
+  per-command `source "$HOME/.cargo/env"` workaround remains necessary; do not assume a
+  future cycle can skip it just because `.zshenv` looks correct.
+- Picked cycle 364/367's carried-forward candidate: the multi-replica-GC-early-exit gap
+  (security-auditor cycles 364 and 367, non-blocking both times) — `MediaService::run_gc`
+  (hourly) and `R2MediaAdapter::trim_upload_ledger_older_than` (daily) each ran
+  independently on every server replica with no leader election/advisory lock, so a
+  concurrent sweep on another replica could delete rows out from under a replica's
+  in-progress keyset page, making its batch undercount and exit early (self-healing —
+  leftovers just wait for the next tick — but wasteful, and explicitly flagged twice as
+  worth closing).
+- **What it does:** new `R2MediaAdapter::try_gc_lock(key: i64) -> Result<Option<GcLockGuard>,
+  DomainError>` (`crates/adapters/outbound/powehi-r2/src/lib.rs`) acquires a non-blocking
+  session-scoped Postgres advisory lock (`pg_try_advisory_lock`) via a *dedicated held*
+  `PoolConnection` — advisory locks are tied to the connection/session, not the query, so
+  the guard can't borrow one per-query from the shared pool the way every other method in
+  this adapter does. `GcLockGuard::release()` explicitly unlocks and returns the
+  connection to the pool (falling back to detach-and-drop if the unlock query itself
+  errors, so a failed release still can't leave a lock-holding connection back in the
+  pool). If `release()` is never called (early return/panic), `Drop for GcLockGuard`
+  instead calls `PoolConnection::detach()` and drops the resulting raw `PgConnection` —
+  ending the session server-side is what actually frees a session-scoped lock; an
+  explicit unlock issued later from a *different* pooled connection would not find it.
+  `#[must_use]` on `GcLockGuard` so a future caller can't silently drop-and-release by
+  accident. Two lock-key constants (`GC_LOCK_MEDIA_BLOBS`, `GC_LOCK_MEDIA_LEDGER`) so the
+  two jobs never block each other, only concurrent replicas racing the *same* job.
+  `bin/powehi-server/src/main.rs`'s two background job loops now wrap their bodies with
+  `try_gc_lock`/`release`; `Ok(None)` (lock held elsewhere) skips that tick at `debug`
+  level, relying on the next scheduled tick. Kept a concrete `Arc<R2MediaAdapter>` clone
+  (`media_r2_lock`) alongside the existing `MediaRepository` trait-object clones since the
+  lock helpers are Postgres-specific, not part of the port trait — main.rs already
+  concedes this kind of concrete-type escape hatch elsewhere in the same function.
+- **security-auditor: GREEN**, no blocking findings; verified genuinely, not rubber-
+  stamped — read sqlx 0.8.6 source directly rather than trusting the diff's doc comments:
+  confirmed `PoolConnection::detach()` decrements the pool's size permit which the pool
+  immediately backfills (no permanent capacity loss); confirmed sqlx-postgres 0.8.6 has no
+  `Drop for PgConnection`, so dropping the detached raw connection is just an fd close →
+  Postgres backend hits EOF and releases session-scoped locks; found and had me document a
+  bonus reason detach-then-drop is the *correct* choice beyond what the original comment
+  claimed — `PoolConnection`'s own `Drop` spawns an async task to return itself to the
+  pool, which panics if invoked while Tokio is shutting down, so a plain `drop(conn)`
+  inside `Drop for GcLockGuard` would have been a latent runtime-teardown panic; detach()
+  sidesteps that entirely (now documented in-code, contingent on `min_connections == 0`,
+  which is what `powehi-postgres::connect()` uses today — also now documented as a
+  caveat). Confirmed no advisory-lock key collision: grepped the whole repo, the only
+  other advisory-lock user is sqlx's own migrator (`generate_lock_id`, CRC32-based, max
+  ~4.41e18), and both `GC_LOCK_*` constants exceed that range, so collision is
+  arithmetically impossible, not just unlikely. Confirmed no plaintext/PII logging (new
+  `debug!`s are bare strings, new `warn!`s carry only `error_kind`+opaque error text).
+  Confirmed not architectural / no new server-visible metadata (three files, no proto, no
+  migration, no new DB column/HTTP/gRPC/WS surface, `pg_locks` state is server-internal
+  only) — `threat-model-checker` correctly not required; not crypto — `crypto-reviewer`
+  correctly not required. No `Cargo.lock` diff (zero new dependencies) — `cargo audit`/
+  `cargo deny check` not re-run. Non-blocking findings, all fixed same-cycle rather than
+  deferred (all cheap): `#[must_use]` on `GcLockGuard`; `release()`'s unlock-query error
+  was silently swallowed via `let _ = ...` — now logged at `warn` plus falls back to the
+  detach path so a failed unlock still can't leave a lock-holding connection in the pool;
+  added the `min_connections == 0` dependency and the "no transaction-pooling proxy
+  deployed" invariant to the doc comments (a PgBouncer/RDS-Proxy in transaction mode would
+  silently break session-scoped advisory locks with zero compile-time signal — none exists
+  in `infra/` today, confirmed by grep); added a comment on the GC job in main.rs
+  acknowledging the one real behavior change auditor flagged — average expired-blob
+  deletion latency moves from ~hourly/N-replicas to ~hourly cluster-wide, still far inside
+  the retention-ceiling contract (no data-minimization regression) but worth being
+  explicit about since deletion latency is privacy-adjacent even when policy-compliant.
+  Two findings explicitly deferred (broader scope than a single-cycle fix, both
+  documented as next-cycle candidates below): `powehi-postgres::connect()` has no explicit
+  `PgPoolOptions` (inherits sqlx's default `max_connections = 10`, invisible and now
+  load-bearing for this new code path — a large GC backlog can pin ~20% of the shared pool
+  for the sweep's duration since `R2MediaAdapter::delete` does a synchronous R2 network
+  round-trip per blob); a hung GC/trim task now blocks that job cluster-wide for as long as
+  the hang lasts (previously only hurt the one replica) since there's no lease/TTL/
+  `statement_timeout` and k8s's liveness probe only checks the axum HTTP server, not this
+  `tokio::spawn`ed background task — bounded severity (GC is best-effort against a 30-day
+  ceiling) but a real new failure mode worth a follow-up (lease TTL, or an explicit
+  `Client::config()` request timeout on the R2 `S3Client` to bound the likeliest hang
+  source).
+- 4 new `#[ignore = "requires Docker (testcontainers)"]` integration tests in
+  `r2_media_it.rs` (`try_gc_lock_returns_none_when_already_held`,
+  `try_gc_lock_distinct_keys_do_not_block_each_other`,
+  `try_gc_lock_dropped_without_release_still_frees_the_lock` — the last one specifically
+  verifies the `Drop` safety net, not just the happy `release()` path, via a bounded poll
+  loop since TCP teardown after `detach()` is async). Session-scoped advisory-lock
+  behavior can't be exercised by any mock (the whole point is real per-connection session
+  state at the OS/Postgres level), so this is testcontainers-only coverage by necessity —
+  not run locally (no Docker in sandbox), will run in CI's Rust workflow. `cargo build/test
+  --workspace` clean (all non-ignored green, no regressions), `cargo clippy --workspace
+  --all-targets -- -D warnings` clean, `cargo fmt --check` clean.
+- Target dir hygiene: not checked this cycle (FEATURE mode; next due cycle 370,
+  STABILIZATION).
+- **Next cycle candidates:** the two findings deferred this cycle (explicit
+  `PgPoolOptions::max_connections` for `powehi-postgres::connect()` instead of inheriting
+  sqlx's invisible default of 10; a lease/TTL or explicit R2 `S3Client` request timeout so
+  a hung GC/trim task can't block that job cluster-wide indefinitely, now a real if
+  bounded-severity new failure mode introduced by this cycle's own fix); the hexagonal-
+  layering nit auditor raised but didn't block on (`try_gc_lock` is a Postgres primitive
+  living on the R2/S3-named adapter, reached from main.rs via a concrete-type escape hatch
+  around the `MediaRepository` port — a cleaner home would be a small `LeaderLock` outbound
+  port on `powehi-postgres`, which already owns the pool; deferred as a design nit, not a
+  correctness issue); the two findings deferred cycle 367 (`messaging_service.rs`'s mock's
+  unreachable-in-real-Postgres members-without-groups construction, informational only;
+  gRPC `sync_group_membership` missing a `member_device_ids.is_empty()` reject — re-
+  evaluated this cycle and now believe this one is lower-priority than previously listed:
+  `sync_group_membership` is the cross-region *sync* path (mTLS-gated peer-to-peer, not
+  reachable by end users), and unlike `create_group`'s hijack bug, an empty-member group
+  created here isn't permanently stuck — a later sync call with real members for the same
+  group_id still succeeds via `upsert_members`'s `ON CONFLICT DO NOTHING`, and the existing
+  test `sync_group_membership_zero_members_creates_group_stub` documents this as
+  intentional. Only revisit if a concrete abuse scenario for the mTLS-gated path surfaces);
+  `map_sqlx` raw-error-text server-side logging (pre-existing, informational, affects every
+  adapter method); media-key incoming/outgoing asymmetry (needs a new crypto-reviewed WASM
+  key-export/local-storage-key design, confirmed genuinely multi-part cycle 359); PQ hybrid
+  Phase A (still blocked on openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF
+  upgrade (gated on ADR-0003 Phase B, itself gated on Phase A); project-context.md size
+  (now ~1610 lines, comfortably under the 256KB Read cap — no action needed yet).
+
+## Previous state (2026-08-26, cycle 367 — FEATURE: make create_group's group+member creation atomic, commit 9d1ba00)
 
 - CI green (`gh run list --limit 3` all success), `gh issue list --state open` empty,
   `git status` clean at cycle start. Picked cycle 366's top carried-forward candidate:
