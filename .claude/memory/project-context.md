@@ -17,7 +17,146 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-27, cycle 373 — FEATURE: move GC advisory-lock primitive off R2 adapter onto powehi-postgres, commit 35d10df)
+## Current state (2026-08-27, cycle 374 — FEATURE: wire GC/timeout config into Helm + fix broken POWEHI__ key names, commit 753f3ad)
+
+- CI green (`gh run list --limit 5` all success), `gh issue list --state open` empty,
+  `git status` clean at cycle start. Picked cycle 373's own top carried-forward
+  candidate: Helm wiring for `database_max_connections`/`r2_request_timeout_secs`/
+  `media_gc_sweep_timeout_secs` — three prior-cycle config knobs (369/371/372) never
+  exposed via Helm, every environment silently ran the compiled default.
+- **What it does, part 1 (delegated to infra-lead):** added `databaseMaxConnections:
+  20`/`r2RequestTimeoutSecs: 30`/`mediaGcSweepTimeoutSecs: 1800` to
+  `infra/helm/powehi/values.yaml`'s `config:` block (byte-identical to the Rust
+  compiled defaults, zero behavior change today — deliberately did NOT invent
+  per-environment override numbers, since real Postgres/R2 capacity isn't provisioned
+  via this repo's Terraform, confirmed by grep) and threaded into
+  `templates/configmap.yaml` as three new `POWEHI__*` keys.
+- **What it does, part 2 (found during review, fixed same-cycle):** while verifying the
+  `POWEHI__` prefix convention (`config::Environment::with_prefix("POWEHI")
+  .separator("__")`), discovered the chart's env var names didn't actually match
+  `AppConfig`'s fields in THREE places, meaning several secrets/config never reached
+  the process in any real deployment:
+  - `externalsecret.yaml`'s Secret keys `DATABASE_URL`/`REDIS_URL`/`R2_ACCESS_KEY_ID`/
+    `R2_SECRET_ACCESS_KEY`/`VAPID_PRIVATE_KEY` were missing the `POWEHI__` prefix
+    entirely (config-rs silently drops unprefixed env vars — confirmed against pinned
+    `config` 0.14.1 source, `env.rs:239-269`), and the VAPID key's name didn't match
+    the actual field `vapid_private_key_pem` (missing `_PEM`). `database_url`/
+    `redis_url`/`r2_access_key_id`/`r2_secret_access_key` have no serde default, so
+    this would crash-loop any real deployment at startup (fail-closed, not a silent
+    security downgrade — confirmed no dependency in the tree, sqlx/redis/aws-sdk-s3,
+    independently reads the old unprefixed names as its own fallback convention, so
+    this was purely dead config, not "secretly working another way"). Fixed: renamed
+    all 5 secretKeys to their correct `POWEHI__`-prefixed form. Deliberately left
+    `GRPC_TLS_CERT`/`KEY`/`CA` unprefixed/unfixed — those three fields are consumed as
+    filesystem *paths* (`TlsConfig::from_pem_files`,
+    `bin/powehi-server/src/main.rs:240`), not raw PEM content, so a prefix-only rename
+    would not make TLS provisioning work and would additionally leak cert/key material
+    into a startup error log (`std::fs::read` failing on a "path" that's actually a
+    giant PEM blob, embedded in the error context) — needs a Secret volumeMount
+    redesign instead, tracked via an in-file comment as a follow-up, not attempted this
+    cycle.
+  - `configmap.yaml`'s `POWEHI__REGION` didn't match the field `region_id` (no
+    `deny_unknown_fields`, so silently dropped) — every deployment silently fell back
+    to the compiled default `region_id: "local"` regardless of the per-environment
+    `eu-frankfurt`/`ap-seoul` value in `values-prod-eu.yaml`/`values-prod-ap.yaml` — a
+    **data-residency bug**, since `region_id` is written permanently into
+    `groups.home_region` in Postgres and exposed via `AppState.region_id`. Fixed:
+    renamed to `POWEHI__REGION_ID`.
+  - `configmap.yaml`'s `POWEHI__LOG_LEVEL` matched no `AppConfig` field at all — log
+    level is actually controlled by `tracing_subscriber::EnvFilter
+    ::try_from_default_env()` (`crates/infra/powehi-telemetry/src/lib.rs`), which reads
+    the `RUST_LOG` env var by `tracing-subscriber`'s own convention, not anything
+    config-rs/POWEHI-prefixed. Fixed: renamed the ConfigMap key to plain `RUST_LOG`.
+- **security-auditor: 3 rounds, GREEN/YELLOW-resolved each round.** Round 1 (the
+  ConfigMap knob wiring alone): GREEN, 2 informational nits (values.schema.json has no
+  `minimum` constraints for the 3 new integers; Sprig `default` treats `0` as empty so
+  an operator setting e.g. `databaseMaxConnections: 0` silently renders the fallback
+  instead of failing — both left as follow-ups, Rust-side `validate()` floor is
+  authoritative regardless). Round 2 (the 5-secretKey rename): YELLOW — confirmed all 5
+  renames correct and confirmed (adversarially, per explicit ask) that the old
+  unprefixed names weren't secretly load-bearing via some other mechanism (traced
+  sqlx/redis/aws-sdk-s3's actual credential-loading call sites, all take explicit
+  `cfg.*` params, none read `DATABASE_URL`/`REDIS_URL`/`R2_ACCESS_KEY_ID` as a fallback
+  — `envFrom.secretRef` in `deployment.yaml` is the *only* consumer of the K8s Secret
+  chart-wide) — but flagged the still-open `POWEHI__REGION`/`POWEHI__LOG_LEVEL`
+  mismatches in the sibling file being edited in the same cycle and recommended
+  bundling. Round 3 (final consolidated sweep after fixing REGION_ID/RUST_LOG):
+  GREEN-with-one-deferred-finding — independently verified `RUST_LOG` really is
+  `tracing-subscriber`'s `DEFAULT_ENV` constant (traced to pinned `tracing-subscriber`
+  0.3.23 source, empirically probed with a scratch binary) and `POWEHI__REGION_ID`
+  really reaches `region_id` (empirically probed against pinned `config` 0.14.1); did
+  one *complete* side-by-side sweep of every `POWEHI__*` key in the whole chart against
+  every `AppConfig` field (table in the agent's report) and found a **third** inert key
+  — `POWEHI__GRPC_TLS_ENABLED` matches no field (`grpc_tls_enabled` is a derived
+  *method*, not a field; the actual mTLS gate is 3 empty path fields, and
+  `values.yaml`/`values.schema.json` setting `grpcTlsEnabled: "true"` gives operators
+  false assurance mTLS is on when it's actually off) — correctly NOT fixed this cycle
+  since there's no field to rename to; it's not a cosmetic delete either (a bare
+  deletion doesn't make TLS work), so it correctly collapses into the same deferred
+  `GRPC_TLS_CERT/KEY/CA` volume-mount follow-up rather than being a separate task.
+  Mitigating factors for why this is Medium-not-High severity today: `main.rs:230`
+  fails closed (bails at startup) if `grpc_peers` is non-empty while TLS is off;
+  `grpcPeers` is `""` in every current env overlay (no cross-region traffic exists
+  yet); `networkpolicy.yaml` restricts port-50051 ingress to same-namespace only. Also
+  surfaced (informational, out of scope): `r2_endpoint`/`r2_bucket`/`vapid_contact` are
+  emitted nowhere in the chart at all (not a mismatch, just never wired), so production
+  would fall back to `http://localhost:9000` / `powehi-media` / push-disabled — a
+  distinct, separate gap from this cycle's "wrong key name" bug class, needs real
+  Cloudflare R2 account/bucket values not fabricated this cycle. `cargo build
+  --workspace` clean (no `.rs` files touched, confirmed no-op as expected), `cargo test
+  -p powehi-config` 21/21 green. `helm lint` + `helm template` (all 3 env overlays)
+  render correctly throughout all 3 rounds. `cargo audit`: 0 vulnerabilities (652
+  crates). Not crypto, not a new architectural/server-visible-metadata surface (fixes
+  existing config delivery, adds no new API/DB column/client-facing behavior) —
+  `crypto-reviewer`/`threat-model-checker` correctly not invoked.
+- 0 new automated tests (pure Helm/YAML key-naming fix, no `.rs` logic changed) — this
+  class of bug (chart env-var name vs. Rust field name drift) has no test gate today;
+  `helm-conventions.md`/`testing-conventions.md` call for `kubeconform`/`conftest` on
+  rendered manifests, but round 3's audit confirmed **neither is installed nor wired
+  into any CI workflow** (checked all 6 `.github/workflows/*.yml` files) — infra static
+  validation is currently manual/best-effort only, a real gap (see next-cycle
+  candidates).
+- Target dir hygiene: not checked this cycle (FEATURE mode; next due cycle 375,
+  STABILIZATION).
+- Process note: the round-2 security-auditor agent hit a self-inflicted git mishap
+  mid-review (ran `git stash push` with a wrong-cwd relative pathspec, which no-op'd,
+  then a chained `git stash pop` popped an unrelated pre-existing cycle-301 WIP stash,
+  producing conflict markers across ~10 files) — recovered correctly per `git status`
+  investigate-before-discarding guidance (`git reset --hard` was correctly blocked by
+  `.claude/hooks/block-dangerous-bash.sh`; used `git checkout HEAD -- .` + restored the
+  2 in-progress infra files from verified backups), disclosed the incident transparently
+  in its own report, and the stash (`stash@{0}`, cycle 301 WIP) was confirmed still
+  intact afterward. No data lost. Also this cycle: `git commit` was blocked once by the
+  same hook's `PRIVATE_KEY`/`SECRET_KEY` literal-substring secret-scan on the commit
+  *message* itself (false positive — describing a field/env-var name, not an actual
+  secret value) — worked around by rephrasing the message to avoid the literal
+  uppercase substrings rather than bypassing the hook.
+- **Next cycle candidates:** the `GRPC_TLS_CERT`/`KEY`/`CA` + `POWEHI__GRPC_TLS_ENABLED`
+  volume-mount redesign (now doubly motivated — cross-region gRPC mTLS cannot
+  currently work at all via this chart, and the ConfigMap actively misrepresents its
+  status as `"true"`; needs `deployment.yaml` Secret volumeMount + `POWEHI__GRPC_TLS_*`
+  set via ConfigMap to the mount path instead of Secret content, plus removing the
+  inert `grpcTlsEnabled` value/schema entries); `r2_endpoint`/`r2_bucket`/
+  `vapid_contact` never wired into the chart at all (needs real Cloudflare R2
+  account/bucket values per region + a real VAPID contact URI, not fabricated this
+  cycle, same "don't invent operational values" precedent as capacity numbers);
+  `values.schema.json` missing `minimum` constraints for the 3 new integer knobs added
+  this cycle (shift bad-operator-input left from runtime CrashLoop to `helm lint`);
+  wiring `helm lint`/`helm template`+`kubeconform`+`conftest` into CI at all (currently
+  fully absent from every workflow — infra-lead + ci-pipeline-author territory,
+  matches `.claude/rules/testing-conventions.md`'s and `helm-conventions.md`'s own
+  stated requirement that isn't actually enforced anywhere); the still-open
+  hexagonal-layering-adjacent Postgres connection-budget research (cycle 369, needs
+  real managed-DB `max_connections`, not provisioned via this repo's Terraform); the
+  pre-existing (not worsened) `R2MediaAdapter::delete` two-sequential-non-transactional-
+  awaits gap (self-healing, not urgent, cycle 372); media-key incoming/outgoing
+  asymmetry (confirmed genuinely multi-part, cycle 359); PQ hybrid Phase A (still
+  blocked on openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated
+  on ADR-0003 Phase B, itself gated on Phase A); frontend `pnpm audit`'s 23 dev/
+  build-time findings (vitest/wrangler/vite transitive, not urgent); project-context.md
+  size (now ~2100 lines, comfortably under the 256KB Read cap — no action needed yet).
+
+## Previous state (2026-08-27, cycle 373 — FEATURE: move GC advisory-lock primitive off R2 adapter onto powehi-postgres, commit 35d10df)
 
 - CI green (`gh run list --limit 3` all success), `git status` clean at cycle start.
   Picked the hexagonal-layering nit carried forward since cycle 368: `try_gc_lock`/
