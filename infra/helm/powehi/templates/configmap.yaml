@@ -6,13 +6,24 @@ metadata:
   labels:
     {{- include "powehi.labels" . | nindent 4 }}
 data:
-  POWEHI__REGION: {{ required "values.region is required (eu-frankfurt|ap-seoul)" .Values.region | quote }}
+  # AppConfig's field is `region_id` (crates/infra/powehi-config/src/lib.rs), not
+  # `region` — POWEHI__REGION silently misses it (config-rs has no
+  # deny_unknown_fields) and every deployment falls back to the compiled
+  # default "local", regardless of this chart's per-environment region value.
+  POWEHI__REGION_ID: {{ required "values.region is required (eu-frankfurt|ap-seoul)" .Values.region | quote }}
   POWEHI__TIER: {{ .Values.tier | default "Tier1" | quote }}
-  POWEHI__LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  # Log level is controlled by tracing_subscriber::EnvFilter::try_from_default_env()
+  # (crates/infra/powehi-telemetry/src/lib.rs), which reads RUST_LOG — not
+  # POWEHI__LOG_LEVEL (AppConfig has no log_level field at all, so that key was
+  # silently inert regardless of prefix).
+  RUST_LOG: {{ .Values.config.logLevel | quote }}
   POWEHI__ADMIN_PORT: {{ .Values.config.adminPort | quote }}
   POWEHI__GRPC_PORT: {{ .Values.config.grpcPort | quote }}
   POWEHI__GRPC_PEERS: {{ .Values.config.grpcPeers | quote }}
   POWEHI__GRPC_TLS_ENABLED: {{ .Values.config.grpcTlsEnabled | quote }}
+  POWEHI__DATABASE_MAX_CONNECTIONS: {{ .Values.config.databaseMaxConnections | default 20 | quote }}
+  POWEHI__R2_REQUEST_TIMEOUT_SECS: {{ .Values.config.r2RequestTimeoutSecs | default 30 | quote }}
+  POWEHI__MEDIA_GC_SWEEP_TIMEOUT_SECS: {{ .Values.config.mediaGcSweepTimeoutSecs | default 1800 | quote }}
   {{- if .Values.otlp.endpoint }}
   # OTLP/gRPC collector endpoint for distributed trace export (prd.md §13.3).
   # Absent when otlp.endpoint is empty — app falls back to Prometheus-only mode.
