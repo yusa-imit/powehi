@@ -116,7 +116,7 @@ async fn upsert_replaces_on_conflict() {
 async fn pg_upsert_fetch_delete_and_rollback() {
     let url = std::env::var("TEST_DATABASE_URL")
         .expect("TEST_DATABASE_URL must be set for ignored integration test");
-    let pool = powehi_postgres::connect(&url).await.expect("connect");
+    let pool = powehi_postgres::connect(&url, 5).await.expect("connect");
     powehi_postgres::run_migrations(&pool)
         .await
         .expect("forward migrations apply (incl. 0004)");

@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
 
     // ── Outbound infrastructure ─────────────────────────────────────────────
 
-    let pool = pg_connect(&cfg.database_url)
+    let pool = pg_connect(&cfg.database_url, cfg.database_max_connections)
         .await
         .context("connect postgres")?;
     run_migrations(&pool).await.context("run db migrations")?;

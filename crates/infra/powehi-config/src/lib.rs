@@ -6,13 +6,32 @@ use thiserror::Error;
 pub enum ConfigError {
     #[error("config load failed: {0}")]
     Load(#[from] config::ConfigError),
+    #[error(
+        "database_max_connections={0} is below the minimum safe value ({MIN_DATABASE_MAX_CONNECTIONS}): \
+         the media GC and ledger-trim background jobs each pin one dedicated connection for an \
+         advisory lock while the job's own query needs a second connection from the same pool, so \
+         fewer than {MIN_DATABASE_MAX_CONNECTIONS} connections can self-deadlock the job (and starve \
+         every request handler for the acquire-timeout duration if both jobs overlap)"
+    )]
+    DatabaseMaxConnectionsTooLow(u32),
 }
+
+/// Below this, a GC/ledger-trim job's dedicated advisory-lock connection plus its own query
+/// connection can exhaust the pool and self-deadlock (see `powehi_r2::try_gc_lock`); two
+/// concurrent jobs need one pair each, so 3 is the floor, not sqlx's per-connection minimum of 1.
+const MIN_DATABASE_MAX_CONNECTIONS: u32 = 3;
 
 #[derive(Deserialize)]
 pub struct AppConfig {
     pub region_id: String,
     pub tier: Tier,
     pub database_url: String,
+    /// Explicit Postgres pool size (`POWEHI__DATABASE_MAX_CONNECTIONS`). sqlx's
+    /// undocumented default is 10 — too small once background GC/ledger-trim jobs
+    /// each pin a dedicated session-scoped connection for advisory locks alongside
+    /// normal request-handler traffic. Default 20; tune per-deployment DB capacity.
+    #[serde(default = "default_database_max_connections")]
+    pub database_max_connections: u32,
     pub redis_url: String,
     pub host: String,
     pub port: u16,
@@ -66,6 +85,9 @@ pub struct AppConfig {
     pub handle_oracle_secret_token: String,
 }
 
+fn default_database_max_connections() -> u32 {
+    20
+}
 fn default_presign_upload_ttl() -> u64 {
     900
 }
@@ -114,6 +136,7 @@ impl std::fmt::Debug for AppConfig {
             .field("region_id", &self.region_id)
             .field("tier", &self.tier)
             .field("database_url", &"<redacted>")
+            .field("database_max_connections", &self.database_max_connections)
             .field("redis_url", &"<redacted>")
             .field("host", &self.host)
             .field("port", &self.port)
@@ -153,12 +176,24 @@ pub fn load() -> Result<AppConfig, ConfigError> {
         .set_default("r2_bucket", "powehi-media")?
         .set_default("admin_port", 9090)?
         .set_default("grpc_port", 50051)?
+        .set_default("database_max_connections", 20)?
         // No defaults for credentials — POWEHI__R2_ACCESS_KEY_ID and
         // POWEHI__R2_SECRET_ACCESS_KEY must be injected by the operator.
         .set_default("r2_access_key_id", "")?
         .set_default("r2_secret_access_key", "")?
         .build()?;
-    Ok(cfg.try_deserialize()?)
+    let app: AppConfig = cfg.try_deserialize()?;
+    validate(&app)?;
+    Ok(app)
+}
+
+fn validate(app: &AppConfig) -> Result<(), ConfigError> {
+    if app.database_max_connections < MIN_DATABASE_MAX_CONNECTIONS {
+        return Err(ConfigError::DatabaseMaxConnectionsTooLow(
+            app.database_max_connections,
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -171,6 +206,7 @@ mod tests {
             region_id: "eu-central-1".into(),
             tier: Tier::Tier1,
             database_url: "postgres://localhost/test".into(),
+            database_max_connections: 20,
             redis_url: "redis://localhost".into(),
             host: "0.0.0.0".into(),
             port: 8080,
@@ -211,6 +247,44 @@ mod tests {
     fn presign_ttl_defaults_are_correct() {
         assert_eq!(default_presign_upload_ttl(), 900);
         assert_eq!(default_presign_download_ttl(), 300);
+    }
+
+    #[test]
+    fn database_max_connections_default_is_20() {
+        assert_eq!(default_database_max_connections(), 20);
+        assert_eq!(default_config().database_max_connections, 20);
+    }
+
+    #[test]
+    fn database_max_connections_below_floor_is_rejected() {
+        for too_low in [0u32, 1, 2] {
+            let cfg = AppConfig {
+                database_max_connections: too_low,
+                ..default_config()
+            };
+            let err = validate(&cfg).expect_err(&format!(
+                "database_max_connections={too_low} must be rejected"
+            ));
+            assert!(matches!(err, ConfigError::DatabaseMaxConnectionsTooLow(v) if v == too_low));
+        }
+    }
+
+    #[test]
+    fn database_max_connections_at_or_above_floor_is_accepted() {
+        for ok in [
+            MIN_DATABASE_MAX_CONNECTIONS,
+            MIN_DATABASE_MAX_CONNECTIONS + 1,
+            20,
+        ] {
+            let cfg = AppConfig {
+                database_max_connections: ok,
+                ..default_config()
+            };
+            assert!(
+                validate(&cfg).is_ok(),
+                "database_max_connections={ok} must be accepted"
+            );
+        }
     }
 
     #[test]

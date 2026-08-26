@@ -20,10 +20,26 @@ pub use server_config_repo::PgServerConfigRepository;
 pub use user_repo::PgUserRepository;
 
 use powehi_domain::error::DomainError;
-use sqlx::postgres::PgPool;
+use sqlx::postgres::{PgPool, PgPoolOptions};
 
-pub async fn connect(url: &str) -> Result<PgPool, sqlx::Error> {
-    PgPool::connect(url).await
+/// Connects with an explicit pool size instead of sqlx's undocumented default
+/// (currently 10). The pool is shared cluster-wide by request handlers and the
+/// background GC/ledger-trim jobs (which each hold a dedicated session-scoped
+/// connection for `pg_try_advisory_lock` — see `powehi_r2::try_gc_lock`), so an
+/// invisible default is load-bearing capacity, not a cosmetic knob. `max_connections`
+/// must leave headroom for those dedicated connections; `powehi_config` enforces a
+/// floor before this is ever called.
+///
+/// Deliberately leaves `min_connections` at its default of 0: `GcLockGuard`'s `Drop`
+/// (`powehi_r2::try_gc_lock`) relies on `min_connections == 0` to safely `detach()` a
+/// connection during runtime teardown instead of going through `PoolConnection`'s own
+/// `Drop`, which spawns a task and panics if Tokio is already shutting down. Do not add
+/// `.min_connections(_)` here without re-checking that safety net.
+pub async fn connect(url: &str, max_connections: u32) -> Result<PgPool, sqlx::Error> {
+    PgPoolOptions::new()
+        .max_connections(max_connections)
+        .connect(url)
+        .await
 }
 
 pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
