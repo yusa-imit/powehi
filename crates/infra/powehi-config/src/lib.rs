@@ -38,8 +38,9 @@ pub enum ConfigError {
 }
 
 /// Below this, a GC/ledger-trim job's dedicated advisory-lock connection plus its own query
-/// connection can exhaust the pool and self-deadlock (see `powehi_r2::try_gc_lock`); two
-/// concurrent jobs need one pair each, so 3 is the floor, not sqlx's per-connection minimum of 1.
+/// connection can exhaust the pool and self-deadlock (see
+/// `powehi_postgres::leader_lock::PgLeaderLock::try_lock`); two concurrent jobs need one pair
+/// each, so 3 is the floor, not sqlx's per-connection minimum of 1.
 const MIN_DATABASE_MAX_CONNECTIONS: u32 = 3;
 
 /// The AWS SDK's own default connect timeout is ~3.1s (see

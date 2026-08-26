@@ -26,11 +26,11 @@ use powehi_grpc::{RegionGrpcServer, TlsConfig};
 use powehi_opaque::OpaqueServer;
 use powehi_postgres::{
     connect as pg_connect, run_migrations, PgDeviceRepository, PgEnvelopeRepository,
-    PgGroupRepository, PgKeyPackageRepository, PgPushSubscriptionRepository,
-    PgServerConfigRepository, PgUserRepository,
+    PgGroupRepository, PgKeyPackageRepository, PgLeaderLock, PgPushSubscriptionRepository,
+    PgServerConfigRepository, PgUserRepository, GC_LOCK_MEDIA_BLOBS, GC_LOCK_MEDIA_LEDGER,
 };
 use powehi_proto::region::region_service_server::RegionServiceServer;
-use powehi_r2::{R2MediaAdapter, GC_LOCK_MEDIA_BLOBS, GC_LOCK_MEDIA_LEDGER};
+use powehi_r2::R2MediaAdapter;
 use powehi_redis::{RedisCache, RedisEventBus};
 use powehi_rest_api::AppState;
 use powehi_webpush::{VapidConfig, VapidWebPushAdapter};
@@ -212,10 +212,10 @@ async fn main() -> Result<()> {
     ));
     let media_repo_gc: Arc<dyn powehi_port_outbound::media_repo::MediaRepository> =
         media_r2.clone();
-    // Kept as the concrete adapter type (not the trait object above) so the
-    // background GC jobs below can reach the Postgres-specific advisory-lock
-    // helpers, which aren't part of the `MediaRepository` port.
-    let media_r2_lock = media_r2.clone();
+    // Postgres advisory-lock leader-election helper for the background GC
+    // jobs below — a pure Postgres primitive (moved off the R2 adapter cycle
+    // 373), shares the same pool as everything else, cheap to construct.
+    let leader_lock = Arc::new(PgLeaderLock::new(pool.clone()));
     let media: Arc<dyn powehi_port_inbound::media::MediaUseCase> =
         Arc::new(MediaService::new(media_r2, group_repo_media));
     let media_gc = Arc::clone(&media);
@@ -418,7 +418,7 @@ async fn main() -> Result<()> {
     // are far inside the retention-ceiling contract this job enforces (no
     // data-minimization regression), but worth being explicit about since a
     // deletion-latency change is privacy-adjacent even when policy-compliant.
-    let media_r2_lock_blobs = media_r2_lock.clone();
+    let leader_lock_blobs = leader_lock.clone();
     // Bounds the whole sweep, not just one R2 call (see `media_gc_sweep_timeout_secs`
     // doc comment) — N slow-but-not-hung deletes could otherwise hold
     // `GC_LOCK_MEDIA_BLOBS` past the next hourly tick, delaying every other replica.
@@ -427,7 +427,7 @@ async fn main() -> Result<()> {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
         loop {
             interval.tick().await;
-            match media_r2_lock_blobs.try_gc_lock(GC_LOCK_MEDIA_BLOBS).await {
+            match leader_lock_blobs.try_lock(GC_LOCK_MEDIA_BLOBS).await {
                 Ok(Some(guard)) => {
                     match tokio::time::timeout(media_gc_sweep_timeout, media_gc.run_gc()).await {
                         Ok(Ok(n)) if n > 0 => tracing::info!(deleted = n, "gc.media_expired"),
@@ -468,7 +468,7 @@ async fn main() -> Result<()> {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
         loop {
             interval.tick().await;
-            match media_r2_lock.try_gc_lock(GC_LOCK_MEDIA_LEDGER).await {
+            match leader_lock.try_lock(GC_LOCK_MEDIA_LEDGER).await {
                 Ok(Some(guard)) => {
                     let cutoff = chrono::Utc::now()
                         - chrono::Duration::days(

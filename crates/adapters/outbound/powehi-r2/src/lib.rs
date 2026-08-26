@@ -439,11 +439,13 @@ impl MediaRepository for R2MediaAdapter {
     // leftovers are still >29 days past the 24h quota-read window (no
     // quota-correctness impact) and get swept on the next daily run.
     // Closed cycle 368: the background-job callers in main.rs now wrap this
-    // (and `run_gc`) in an `R2MediaAdapter::try_gc_lock` Postgres advisory
-    // lock, so only one replica actually executes the sweep per tick —
-    // this doc comment's race can now only happen during the narrow window
-    // of a rolling deploy where an old and new replica briefly overlap
-    // without both yet running the locked code path.
+    // (and `run_gc`) in a `powehi_postgres::leader_lock::PgLeaderLock`
+    // Postgres advisory lock (moved off this adapter cycle 373 — it's a pure
+    // Postgres primitive with no R2 dependency), so only one replica actually
+    // executes the sweep per tick — this doc comment's race can now only
+    // happen during the narrow window of a rolling deploy where an old and
+    // new replica briefly overlap without both yet running the locked code
+    // path.
     #[instrument(skip(self))]
     async fn trim_upload_ledger_older_than(
         &self,
@@ -472,110 +474,6 @@ impl MediaRepository for R2MediaAdapter {
             }
         }
         Ok(total)
-    }
-}
-
-/// Postgres advisory-lock keys guarding GC/trim background jobs (cycle 368) —
-/// see `R2MediaAdapter::try_gc_lock` for why this exists and the locking
-/// pattern it must follow. One key per job so the two jobs never block each
-/// other, only concurrent runs of the *same* job across server replicas.
-pub const GC_LOCK_MEDIA_BLOBS: i64 = 0x706f_7765_6869_0001;
-pub const GC_LOCK_MEDIA_LEDGER: i64 = 0x706f_7765_6869_0002;
-
-/// Holds a session-scoped Postgres advisory lock acquired via
-/// `R2MediaAdapter::try_gc_lock`. `pg_advisory_lock`/`pg_advisory_unlock` are
-/// tied to the underlying connection (session), not the query, so this guard
-/// keeps a dedicated `PoolConnection` alive for its whole lifetime instead of
-/// borrowing one per-query from the shared pool — returning it to the pool
-/// between acquire and unlock would let some other caller's query run on
-/// that same session and would leave the unlock call (issued from a
-/// different pooled connection) unable to find the lock at all.
-///
-/// Deployment invariant: this only works against a real Postgres session —
-/// a transaction-pooling proxy in front of the DB (PgBouncer/RDS Proxy in
-/// transaction mode) would silently multiplex queries from this guard's
-/// "session" across different real backends, breaking the lock with no
-/// compile-time signal. None is deployed today (checked `infra/`); if one
-/// is ever introduced, `try_gc_lock` needs a session-mode exception or a
-/// different locking primitive (e.g. a plain row lock table).
-#[must_use = "the advisory lock is released as soon as this guard is dropped — hold it for the job's duration, or call release() explicitly"]
-pub struct GcLockGuard {
-    conn: Option<sqlx::pool::PoolConnection<sqlx::Postgres>>,
-    key: i64,
-}
-
-impl GcLockGuard {
-    /// Unlock and return the connection to the pool. Prefer this over
-    /// letting the guard drop on the happy path.
-    pub async fn release(mut self) {
-        if let Some(mut conn) = self.conn.take() {
-            match sqlx::query("SELECT pg_advisory_unlock($1)")
-                .bind(self.key)
-                .execute(&mut *conn)
-                .await
-            {
-                Ok(_) => {}
-                Err(e) => {
-                    // Don't return a connection to the pool that might still
-                    // hold the lock — fall back to the same detach-and-drop
-                    // path Drop uses, which is guaranteed to release it.
-                    tracing::warn!(error_kind = "gc_lock", error = %e, "gc.advisory_unlock_failed");
-                    let _ = conn.detach();
-                }
-            }
-        }
-    }
-}
-
-impl Drop for GcLockGuard {
-    fn drop(&mut self) {
-        // release() wasn't called (early return / panic in the guarded job):
-        // detach and drop the raw connection instead of returning it to the
-        // pool. Ending the session server-side is what actually releases a
-        // session-scoped advisory lock — an explicit unlock query issued
-        // later from a *different* pooled connection would not find it.
-        //
-        // detach() (not a plain `drop(conn)`) is also what makes this safe
-        // to call from a sync Drop impl at all: PoolConnection's own Drop
-        // spawns an async task to return itself to the pool, which panics
-        // if invoked while the Tokio runtime is shutting down. detach()
-        // takes the connection out of pool bookkeeping first (decrementing
-        // the pool's size permit, which the pool immediately backfills), so
-        // the raw connection's drop that follows is just an fd close — no
-        // spawn, runtime-agnostic. This relies on the pool's
-        // `min_connections` being 0 (the default, and what `connect()` uses
-        // today) — a nonzero `min_connections` would make even the
-        // post-detach empty `PoolConnection` guard spawn on drop again.
-        if let Some(conn) = self.conn.take() {
-            let _ = conn.detach();
-        }
-    }
-}
-
-impl R2MediaAdapter {
-    /// Attempt to acquire advisory lock `key` (one of the `GC_LOCK_*`
-    /// constants) without blocking, guarding a GC/trim background job
-    /// against multiple server replicas racing the same job concurrently —
-    /// a benign but wasteful race documented on `run_gc` and
-    /// `trim_upload_ledger_older_than` above (early exit can undercount and
-    /// leave stale rows for the next scheduled tick, self-healing but
-    /// avoidable). `Ok(None)` means another session already holds it —
-    /// caller should skip this run.
-    pub async fn try_gc_lock(&self, key: i64) -> Result<Option<GcLockGuard>, DomainError> {
-        let mut conn = self.pool.acquire().await.map_err(map_sqlx)?;
-        let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
-            .bind(key)
-            .fetch_one(&mut *conn)
-            .await
-            .map_err(map_sqlx)?;
-        Ok(if acquired {
-            Some(GcLockGuard {
-                conn: Some(conn),
-                key,
-            })
-        } else {
-            None
-        })
     }
 }
 

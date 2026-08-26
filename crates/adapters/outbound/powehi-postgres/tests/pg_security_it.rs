@@ -10,6 +10,8 @@
 //!   - `add_member` ON CONFLICT DO NOTHING idempotency.
 //!   - `create_if_absent` never overwrites an existing group row.
 //!   - `server_config` round-trip and first-boot race convergence (DO NOTHING).
+//!   - `PgLeaderLock` advisory-lock mutual exclusion, distinct-key independence,
+//!     and Drop-without-release still frees the lock (moved from powehi-r2 cycle 373).
 //!
 //! Tests are `#[ignore]` because they require Docker (testcontainers).
 //! Run them in CI via: `cargo nextest run -p powehi-postgres --run-ignored all
@@ -31,7 +33,7 @@ use powehi_port_outbound::{
 };
 use powehi_postgres::{
     PgDeviceRepository, PgEnvelopeRepository, PgGroupRepository, PgKeyPackageRepository,
-    PgServerConfigRepository, PgUserRepository,
+    PgLeaderLock, PgServerConfigRepository, PgUserRepository,
 };
 use sqlx::PgPool;
 use testcontainers::{runners::AsyncRunner, ImageExt};
@@ -1032,4 +1034,93 @@ async fn create_with_creator_rolls_back_group_row_when_member_insert_fails() {
             .is_none(),
         "the group row must not survive a rolled-back transaction"
     );
+}
+
+// ── GC advisory lock (cycle 368; moved here from powehi-r2 cycle 373 — pure
+// Postgres primitive, no R2/MinIO dependency) ───────────────────────────────
+// `PgLeaderLock::try_lock` guards the background GC/trim jobs against
+// multiple server replicas racing the same job. Session-scoped Postgres
+// advisory locks can't be exercised by any mock (the whole point is real
+// per-connection session state), so this is testcontainers-only coverage.
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn try_gc_lock_returns_none_when_already_held() {
+    let (_c, pool) = setup().await;
+    let lock = PgLeaderLock::new(pool);
+    let key = 0x7000_0000_0000_0001i64;
+
+    let guard1 = lock
+        .try_lock(key)
+        .await
+        .expect("try_lock first")
+        .expect("lock must be free on first attempt");
+
+    let second = lock.try_lock(key).await.expect("try_lock second");
+    assert!(
+        second.is_none(),
+        "a second session must not acquire a lock already held by the first"
+    );
+
+    guard1.release().await;
+
+    let third = lock
+        .try_lock(key)
+        .await
+        .expect("try_lock third")
+        .expect("lock must be free again after release()");
+    third.release().await;
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn try_gc_lock_distinct_keys_do_not_block_each_other() {
+    let (_c, pool) = setup().await;
+    let lock = PgLeaderLock::new(pool);
+
+    let guard_a = lock
+        .try_lock(0x7000_0000_0000_0002)
+        .await
+        .expect("try_lock a")
+        .expect("lock a must be free");
+    let guard_b = lock
+        .try_lock(0x7000_0000_0000_0003)
+        .await
+        .expect("try_lock b")
+        .expect("a different key must not be blocked by lock a");
+
+    guard_a.release().await;
+    guard_b.release().await;
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn try_gc_lock_dropped_without_release_still_frees_the_lock() {
+    let (_c, pool) = setup().await;
+    let lock = PgLeaderLock::new(pool);
+    let key = 0x7000_0000_0000_0004i64;
+
+    let guard = lock
+        .try_lock(key)
+        .await
+        .expect("try_lock first")
+        .expect("lock must be free on first attempt");
+    drop(guard); // simulates an early return / panic in the guarded job — no explicit release()
+
+    // GcLockGuard's Drop impl detaches and closes the raw connection instead
+    // of returning it to the pool — that's what actually releases a
+    // session-scoped advisory lock server-side — but TCP teardown is async,
+    // so poll briefly instead of asserting the very next instant.
+    let mut reacquired = None;
+    for _ in 0..20 {
+        if let Some(g) = lock.try_lock(key).await.expect("try_lock poll") {
+            reacquired = Some(g);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    reacquired
+        .expect("dropping the guard without release() must eventually free the lock")
+        .release()
+        .await;
 }

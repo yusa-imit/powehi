@@ -7,6 +7,7 @@ pub mod device_repo;
 pub mod envelope_repo;
 pub mod group_repo;
 pub mod key_package_repo;
+pub mod leader_lock;
 pub mod push_subscription_repo;
 pub mod server_config_repo;
 pub mod user_repo;
@@ -15,6 +16,7 @@ pub use device_repo::PgDeviceRepository;
 pub use envelope_repo::PgEnvelopeRepository;
 pub use group_repo::PgGroupRepository;
 pub use key_package_repo::PgKeyPackageRepository;
+pub use leader_lock::{GcLockGuard, PgLeaderLock, GC_LOCK_MEDIA_BLOBS, GC_LOCK_MEDIA_LEDGER};
 pub use push_subscription_repo::PgPushSubscriptionRepository;
 pub use server_config_repo::PgServerConfigRepository;
 pub use user_repo::PgUserRepository;
@@ -25,13 +27,13 @@ use sqlx::postgres::{PgPool, PgPoolOptions};
 /// Connects with an explicit pool size instead of sqlx's undocumented default
 /// (currently 10). The pool is shared cluster-wide by request handlers and the
 /// background GC/ledger-trim jobs (which each hold a dedicated session-scoped
-/// connection for `pg_try_advisory_lock` — see `powehi_r2::try_gc_lock`), so an
+/// connection for `pg_try_advisory_lock` — see `leader_lock::PgLeaderLock`), so an
 /// invisible default is load-bearing capacity, not a cosmetic knob. `max_connections`
 /// must leave headroom for those dedicated connections; `powehi_config` enforces a
 /// floor before this is ever called.
 ///
 /// Deliberately leaves `min_connections` at its default of 0: `GcLockGuard`'s `Drop`
-/// (`powehi_r2::try_gc_lock`) relies on `min_connections == 0` to safely `detach()` a
+/// (`leader_lock::PgLeaderLock`) relies on `min_connections == 0` to safely `detach()` a
 /// connection during runtime teardown instead of going through `PoolConnection`'s own
 /// `Drop`, which spawns a task and panics if Tokio is already shutting down. Do not add
 /// `.min_connections(_)` here without re-checking that safety net.
