@@ -103,7 +103,9 @@ async fn setup() -> Harness {
         .expect("Postgres container started");
     let pg_port = pg.get_host_port_ipv4(5432).await.expect("pg host port");
     let db_url = format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres");
-    let pool = PgPool::connect(&db_url).await.expect("connect pg");
+    let pool = powehi_postgres::connect(&db_url, 10)
+        .await
+        .expect("connect pg");
     powehi_postgres::run_migrations(&pool)
         .await
         .expect("migrations");

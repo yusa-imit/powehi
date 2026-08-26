@@ -53,7 +53,7 @@ async fn setup() -> (testcontainers::ContainerAsync<Postgres>, PgPool) {
         .expect("Postgres container started");
     let port = container.get_host_port_ipv4(5432).await.expect("host port");
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-    let pool = PgPool::connect(&url).await.expect("connect");
+    let pool = powehi_postgres::connect(&url, 10).await.expect("connect");
     powehi_postgres::run_migrations(&pool)
         .await
         .expect("migrations");
