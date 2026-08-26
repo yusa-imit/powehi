@@ -17,7 +17,71 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-26, cycle 371 — FEATURE: bound R2 S3 client request timeout, commit e5779db)
+## Current state (2026-08-27, cycle 372 — FEATURE: bound aggregate media-GC sweep duration, commit f179b0a)
+
+- CI green (`gh run list --limit 5` all success), `gh issue list --state open` empty,
+  `git status` clean at cycle start. Picked cycle 371's own documented-not-fixed residual:
+  the R2 per-call timeout added that cycle bounds one S3 operation, but the *whole* hourly
+  media-blob GC sweep (`MediaService::run_gc_batched`, potentially many pages of many
+  per-blob deletes) had no aggregate bound — N slow-but-not-hung deletes at ~10s
+  attempt-timeout each could still sum past the next hourly tick while holding the
+  cross-replica Postgres advisory lock (`GC_LOCK_MEDIA_BLOBS`, cycle 368), delaying every
+  other replica's attempt indefinitely (not just locally).
+- **What it does:** new `AppConfig.media_gc_sweep_timeout_secs`
+  (`crates/infra/powehi-config/src/lib.rs`, default 1800s = 30 min, same
+  set_default/validate/ConfigError/Debug-field pattern as cycle 369's
+  `database_max_connections` / cycle 371's `r2_request_timeout_secs`) wraps the
+  `media_gc.run_gc()` call in `bin/powehi-server/src/main.rs`'s hourly-interval task with
+  `tokio::time::timeout(media_gc_sweep_timeout, media_gc.run_gc()).await`. The advisory
+  lock's `guard.release().await` runs unconditionally after the `match` on all three
+  outcomes (success / `DomainError` / timeout `Elapsed`), so a timeout can't leak the lock.
+  On timeout, logs `gc.media_run_timed_out` with only `error_kind` (no IDs/sizes — ZK
+  invariant preserved). `media_gc_sweep_timeout` (a `Duration`, `Copy`) is computed once
+  from `cfg` before `tokio::spawn` and reused every tick, avoiding any lifetime issue with
+  `cfg` itself.
+- Floor `MIN_MEDIA_GC_SWEEP_TIMEOUT_SECS = 30` (a single GC page can legitimately take
+  several seconds). **security-auditor round 1: GREEN with one optional suggestion**
+  (verified mid-sweep-cancellation safety directly against `run_gc_batched`'s code — the
+  keyset cursor `after_id` is a local recomputed from `None` every call, so a
+  timeout-cancelled sweep just re-lists candidates fresh next tick, no leaked pagination
+  state; confirmed the lock-release-in-all-outcomes claim by reading the match arms;
+  confirmed logging hygiene; flagged one pre-existing non-worsened gap in
+  `R2MediaAdapter::delete`'s two-sequential-non-transactional-awaits, out of scope) — the
+  one suggestion was a cross-field check that `media_gc_sweep_timeout_secs` be
+  meaningfully larger than `r2_request_timeout_secs`, since at the shipped defaults (1800
+  vs 30) nothing bites, but an operator could otherwise tighten the sweep timeout down
+  near its own 30s floor while leaving `r2_request_timeout_secs` at a normal value, letting
+  a single slow-but-healthy R2 call consume the entire sweep budget and time out every
+  tick with zero net progress. **Applied in-cycle** (cheap, not deferred): new
+  `MEDIA_GC_SWEEP_TIMEOUT_MIN_MULTIPLE_OF_R2 = 2` constant + a `MediaGcSweepTimeoutTooCloseToR2Timeout`
+  `ConfigError` variant + a `validate()` arm requiring `media_gc_sweep_timeout_secs >= 2 *
+  r2_request_timeout_secs`. Not architectural (pure timeout knob, no new API surface, DB
+  column, or server-visible metadata) and not crypto — `threat-model-checker`/
+  `crypto-reviewer` correctly not required, matching cycle 371's precedent.
+- 5 new `powehi-config` tests (default/below-floor/at-or-above-floor for the new field,
+  plus 2 for the cross-field 2x check: rejected-at-59-vs-30, accepted-at-exactly-60-vs-30)
+  — updated the pre-existing `media_gc_sweep_timeout_at_or_above_floor_is_accepted` test to
+  pin `r2_request_timeout_secs` at its own floor (5) so its existing assertions (checking
+  only the standalone floor) still clear the new cross-field check too. `cargo
+  build/test --workspace` clean (0 failures across all crates), `cargo clippy --workspace
+  --all-targets -- -D warnings` clean, `cargo fmt --check` clean. No `Cargo.lock` diff.
+- Target dir hygiene: not checked this cycle (FEATURE mode; next due cycle 375,
+  STABILIZATION).
+- **Next cycle candidates:** Helm wiring for both `r2_request_timeout_secs` (cycle 371) and
+  now `media_gc_sweep_timeout_secs` — bundle with cycle 369's still-open
+  `database_max_connections` Helm gap, needs infra-lead + real DB/R2 capacity numbers not
+  yet researched; the hexagonal-layering nit (`try_gc_lock` living on the R2/S3-named
+  adapter instead of a `LeaderLock` port on `powehi-postgres`, cycle 368); the
+  pre-existing (not worsened) `R2MediaAdapter::delete` two-sequential-non-transactional-
+  awaits gap flagged by this cycle's security-auditor pass (self-heals via idempotent R2
+  `DELETE` on a missing key, existed since before this cycle for crash/restart-during-GC,
+  not urgent); media-key incoming/outgoing asymmetry (confirmed genuinely multi-part,
+  cycle 359); PQ hybrid Phase A (still blocked on openmls stable `MLS_128_MLKEM768`);
+  OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003 Phase B, itself gated on Phase A);
+  project-context.md size (now ~1930 lines, comfortably under the 256KB Read cap — no
+  action needed yet).
+
+## Previous state (2026-08-26, cycle 371 — FEATURE: bound R2 S3 client request timeout, commit e5779db)
 
 - CI green (`gh run list --limit 3` all success), `gh issue list --state open` empty,
   `git status` clean at cycle start. Picked cycle 368's own deferred candidate (still
