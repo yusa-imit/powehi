@@ -17,7 +17,101 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-26, cycle 370 — STABILIZATION: align testcontainers pools with powehi_postgres::connect, commit de324a3)
+## Current state (2026-08-26, cycle 371 — FEATURE: bound R2 S3 client request timeout, commit e5779db)
+
+- CI green (`gh run list --limit 3` all success), `gh issue list --state open` empty,
+  `git status` clean at cycle start. Picked cycle 368's own deferred candidate (still
+  open as of cycle 370's next-cycle list): the R2 `S3Client` had no configured request
+  timeout, so a hung R2 network call from the hourly media-blob GC job's `delete()`
+  could hang that background task indefinitely — and since cycle 368 added a Postgres
+  advisory lock (`try_gc_lock`) guarding it across replicas, a hang on one replica now
+  blocks the job **cluster-wide**, not just locally.
+- **What it does:** new `R2MediaAdapter::new(..., request_timeout_secs: u64)` param
+  (`crates/adapters/outbound/powehi-r2/src/lib.rs`), wired into a new
+  `build_s3_config()` free fn (extracted from `new()` so the timeout wiring is
+  unit-testable without a `PgPool`) via `S3ConfigBuilder::timeout_config(TimeoutConfig
+  ::builder().operation_timeout(request_timeout_secs).operation_attempt_timeout
+  (request_timeout_secs / 3, floored at 1s).build())` — operation timeout bounds the
+  whole retry loop, attempt timeout bounds one attempt; deliberately NOT set equal
+  (see security-auditor finding below) so a single stalled attempt doesn't consume the
+  whole retry budget and starve the SDK's standard 3-attempt retry policy. New
+  `AppConfig::r2_request_timeout_secs` (default 30, `crates/infra/powehi-config/src/lib.rs`,
+  same floor-validation pattern as cycle 369's `database_max_connections` —
+  `MIN_R2_REQUEST_TIMEOUT_SECS`, `ConfigError::R2RequestTimeoutTooLow`), threaded
+  through `main.rs`'s `R2MediaAdapter::new` call site and the testcontainers
+  integration test's `setup()`. No new dependency: `TimeoutConfig` is a clean
+  re-export at `aws_sdk_s3::config::timeout::TimeoutConfig` (verified against the
+  vendored `aws-sdk-s3` 1.133.0 source — it's literally `pub use
+  ::aws_smithy_types::timeout::{TimeoutConfig, TimeoutConfigBuilder};`), so
+  `Cargo.toml`/`Cargo.lock` are untouched.
+- **security-auditor: 1 round, YELLOW → fixed in-cycle, effectively GREEN.** Verified
+  (not rubber-stamped) against the actual vendored `aws-smithy-runtime`/`aws-smithy-types`
+  source rather than trusting the implementing agent's claims: confirmed the timeout
+  genuinely takes effect on a client built via `S3Client::from_conf` (not just
+  `aws_config::load_from_env()`) — `from_conf` installs the identical
+  `default_plugins()` set including the sleep-impl plugin, which resolves via
+  `default_async_sleep()` only under the `rt-tokio` feature (enabled workspace-wide);
+  confirmed the SDK's own default `connect_timeout` (~3.1s) survives layering under
+  user config rather than being clobbered (`MergeTimeoutConfig` takes missing fields
+  from defaults, doesn't replace wholesale). 4 findings, all fixed same-cycle rather
+  than deferred (all cheap): (1) **BLOCKING-adjacent** — original diff set
+  `operation_timeout == operation_attempt_timeout`, which meant a stalled first
+  attempt would consume the *entire* operation budget, so the SDK's retry policy
+  never got a second chance — fixed by deriving `operation_attempt_timeout` as
+  `request_timeout_secs / 3` (floored at 1s) in the new `build_s3_config()`, with 2
+  new unit tests (`build_s3_config_attaches_operation_and_attempt_timeouts`,
+  `build_s3_config_floors_attempt_timeout_at_one_second`) pinning both the ratio and
+  the floor directly against `aws_sdk_s3::Config::timeout_config()` — zero I/O, no
+  Docker needed, exactly the "is `TimeoutConfig` silently ignored" risk the auditor
+  flagged as untested; (2) the floor `MIN_R2_REQUEST_TIMEOUT_SECS` was originally 1
+  (just "reject zero") — auditor pointed out 1s itself passes validation but is
+  **guaranteed broken** since it's below the SDK's own ~3.1s default connect timeout,
+  a silent total media-GC outage that clears naive validation — raised to 5, doc
+  comment on the const explains why; (3) doc/error-message overclaim — the original
+  diff's rationale text (config field doc, `ConfigError` message, adapter module doc)
+  claimed a hung R2 call could hang "the GC/ledger-trim background jobs" plural, but
+  the daily ledger-trim job (`trim_upload_ledger_older_than`) is 100% Postgres/sqlx,
+  never calls R2 — corrected all three sites to name only the hourly media-blob GC
+  job, since a future reader would otherwise misjudge the advisory-lock blast radius;
+  (4) test coverage gap closed via the two new unit tests above rather than a
+  Docker-dependent hang-simulation test (auditor agreed the latter is a poor harness
+  fit). Confirmed not crypto (no MLS/OPAQUE/KDF/AEAD touched) — `crypto-reviewer`
+  correctly not required; confirmed not architectural (no new API surface, DB column,
+  or server-visible metadata — pure network-timeout knob, availability not
+  confidentiality/integrity) — `threat-model-checker` correctly not required.
+  Documented-not-fixed residual (correctly out of this cycle's scope, matches
+  precedent): `POWEHI__R2_REQUEST_TIMEOUT_SECS` isn't in the Helm ConfigMap, same gap
+  as `database_max_connections` since cycle 369 — both need one combined infra-lead
+  pass; aggregate GC-sweep duration is still unbounded (N slow-but-not-hung deletes at
+  ~10s attempt-timeout each can still hold the advisory lock past the next hourly
+  tick) — the fix bounds *per-call* hang, not total sweep wall-clock, follow-up would
+  be wrapping the guarded job body in `tokio::time::timeout`.
+- 4 new/updated Rust tests: 2 new unit tests in `powehi-r2` (`build_s3_config_*`,
+  above), `powehi-config`'s 3 new `r2_request_timeout_*` tests
+  (`_default_is_30`, `_below_floor_is_rejected` — now checks both 0 and
+  `MIN_R2_REQUEST_TIMEOUT_SECS - 1`, not just 0, per the auditor's point that only
+  testing zero wouldn't have caught a too-low-but-nonzero floor bug —
+  `_at_or_above_floor_is_accepted`), 1 line added to the existing
+  `load_uses_defaults_when_no_env_vars_set`. `cargo build/test --workspace` clean (all
+  suites green, 0 failed — 726+ tests across the workspace, exact count not
+  re-tallied), `cargo clippy --workspace --all-targets -- -D warnings` clean, `cargo
+  fmt --check` clean. No `Cargo.lock` diff — `cargo audit`/`cargo deny check` (run by
+  the security-auditor pass) both clean, 652 crates scanned, 0 vulnerabilities.
+- Target dir hygiene: not checked this cycle (FEATURE mode; next due cycle 375,
+  STABILIZATION).
+- **Next cycle candidates:** the two residuals documented-not-fixed above (Helm
+  wiring for `r2_request_timeout_secs` — bundle with cycle 369's still-open
+  `database_max_connections` Helm gap, needs infra-lead + real DB/R2 capacity numbers
+  not yet researched; `tokio::time::timeout` around the whole guarded GC-job body to
+  bound aggregate sweep duration, not just per-call latency); the hexagonal-layering
+  nit (`try_gc_lock` living on the R2/S3-named adapter instead of a `LeaderLock` port
+  on `powehi-postgres`, cycle 368); media-key incoming/outgoing asymmetry (confirmed
+  genuinely multi-part, cycle 359); PQ hybrid Phase A (still blocked on openmls stable
+  `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003 Phase B,
+  itself gated on Phase A); project-context.md size (now ~1870 lines, comfortably
+  under the 256KB Read cap — no action needed yet).
+
+## Previous state (2026-08-26, cycle 370 — STABILIZATION: align testcontainers pools with powehi_postgres::connect, commit de324a3)
 
 - CI green (`gh run list --limit 5` all success), `gh issue list --state open` empty,
   `git status` clean at cycle start.
