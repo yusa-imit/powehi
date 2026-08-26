@@ -17,7 +17,94 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-26, cycle 366 — FEATURE: fix broken access control in create_group (group hijack/rejoin), commit fe6c419)
+## Current state (2026-08-26, cycle 367 — FEATURE: make create_group's group+member creation atomic, commit 9d1ba00)
+
+- CI green (`gh run list --limit 3` all success), `gh issue list --state open` empty,
+  `git status` clean at cycle start. Picked cycle 366's top carried-forward candidate:
+  its own non-blocking LOW finding — `create_if_absent` + `add_member` in
+  `create_group` were two separate, non-transactional calls, so a failure between them
+  (DB error, pod kill) could leave a committed group row with zero members, which was
+  then permanently stuck (every future `create_group` retry for that id hits the
+  already-exists-and-not-a-member branch forever, since nothing may add a first member
+  once the id is known to exist).
+- **What it does:** new `GroupRepository::create_with_creator(&Group, &GroupMember) ->
+  Result<bool, DomainError>` port method
+  (`crates/ports/powehi-port-outbound/src/group_repo.rs`); Postgres impl
+  (`crates/adapters/outbound/powehi-postgres/src/group_repo.rs`) wraps the group-row
+  insert (`ON CONFLICT (id) DO NOTHING`) and the creator's membership-row insert in one
+  `pool.begin()`/`commit()` transaction, same pattern as the existing `upsert_members`.
+  Returns `true` if newly created, `false` if the id already existed (transaction
+  dropped/rolled back untouched). `GroupService::create_group` now calls this instead of
+  `create_if_absent` + `add_member`. The membership insert binds `group.id` (not
+  `creator.group_id`) — closes an undocumented precondition the first security-auditor
+  pass flagged as a latent footgun if the two args ever diverged; port trait doc now
+  states this normatively. `create_if_absent` itself is left in the trait (still tested
+  directly, still the primitive doc-comment example) but confirmed dead in production —
+  its only former caller was `create_group`.
+- **security-auditor: 2 rounds, RED → GREEN.** First pass found ONE BLOCKING issue: the
+  new Postgres integration test's `creator_device` was a bare `DeviceId::from(Uuid::new_v4())`
+  never inserted into `devices`, so the membership insert's non-deferrable FK
+  (`group_members.device_id REFERENCES devices(id)`) would reject it and the test would
+  panic on `.expect(...)` instead of testing anything — the sole verification of this
+  cycle's atomicity claim had zero real passing coverage, and CI (which does have Docker)
+  would have gone red. Fixed: seeded via the file's existing
+  `insert_device(&pool, insert_user(&pool).await).await` helper, same pattern as every
+  other member-inserting test in that file. Also added the actually-missing coverage for
+  the rollback branch itself (`create_with_creator_rolls_back_group_row_when_member_insert_fails`
+  — unregistered device triggers the FK, asserts `Err` + `find_by_id` still `None`,
+  provably fails under the original two-call regression since that would have already
+  committed the group row). Two non-blocking hardening items from round 1 also fixed
+  same-cycle rather than deferred (both cheap, both in code this cycle wrote): the
+  `group.id`-vs-`creator.group_id` binding above, mirrored into all four
+  `GroupRepository` mock mocks (`group_service.rs`, `media_service.rs`,
+  `messaging_service.rs`, `powehi-grpc/src/server.rs`) so no test double's behavior can
+  diverge from the production adapter on this axis. Second pass (fresh instance, no
+  memory of round 1) independently re-verified all three fixes by tracing SQL/FK/sqlx-tx
+  semantics (no Docker in either sandbox) plus re-ran `cargo build/test/clippy/fmt` —
+  **GREEN**. Round 1 also confirmed (not rubber-stamped): the new transaction is
+  genuinely atomic (nothing visible to other sessions pre-commit); no new race (READ
+  COMMITTED, no isolation override anywhere in the workspace — `ON CONFLICT DO NOTHING`
+  against an in-flight duplicate blocks then reports 0 rows, never raises
+  `unique_violation`, so the loser gets a clean `Ok(false)`); rollback-on-drop verified
+  against the actually-pinned `sqlx 0.8.6` source (`Drop for Transaction` queues
+  `ROLLBACK`), not assumed; no plaintext/PII/new server-visible metadata. `cargo audit`/
+  `cargo deny check` clean (0 vulnerabilities, no Cargo.lock diff). Two residual LOW/
+  informational findings explicitly deferred to a future cycle per the auditor's own
+  recommendation (separate call sites, out of this cycle's diff scope): gRPC
+  `sync_group_membership` has no minimum on `member_device_ids`, so an empty list from a
+  trusted mTLS peer can still create a zero-member group via `upsert_members` (mTLS-gated
+  insider path, not end-user reachable); `messaging_service.rs`'s `FakeGroupRepo` mock
+  can be constructed in a members-without-groups state real Postgres's FK can't reach
+  (inert today, mock never actually exercises `create_with_creator`).
+- **threat-model-checker: not re-run**, consistent with cycle 364's precedent for a
+  similarly-scoped internal atomicity fix — no new server-visible metadata, no
+  wire-format/API change, net effect is strictly less exposure to the same failure mode
+  cycle 366's `threat-model-checker` GREEN already covered (access-control/membership
+  invariants of `create_group`), not a new architectural surface.
+- 2 new `#[ignore = "requires Docker"]` integration tests in `pg_security_it.rs`
+  (`create_with_creator_inserts_group_and_member_together`,
+  `create_with_creator_rolls_back_group_row_when_member_insert_fails`) — not run locally
+  (no Docker in sandbox), will run in CI's Rust workflow (21 tests total in that file now,
+  confirmed compiling/counted correctly via `cargo test` locally even though ignored).
+  `cargo build/test --workspace` clean (~600 tests green, 0 failed, 58 Docker-gated
+  ignored across the workspace), `cargo clippy --workspace --all-targets -- -D warnings`
+  clean, `cargo fmt --check` clean (1 auto-fix applied mid-cycle, no logic change).
+- Target dir hygiene: not checked this cycle (FEATURE mode; next due cycle 370,
+  STABILIZATION).
+- **Next cycle candidates:** the two findings deferred this cycle (gRPC
+  `sync_group_membership` missing a `member_device_ids.is_empty()` reject alongside its
+  existing `MAX_SYNC_MEMBERS` cap; `messaging_service.rs`'s mock's unreachable-in-
+  -real-Postgres members-without-groups construction, informational only); `map_sqlx`
+  raw-error-text server-side logging (pre-existing, informational, affects every adapter
+  method); media-key incoming/outgoing asymmetry (needs a new crypto-reviewed WASM
+  key-export/local-storage-key design, confirmed genuinely multi-part cycle 359); the
+  multi-replica-GC-early-exit gap (cycle 364, `FOR UPDATE SKIP LOCKED`/advisory-lock
+  guard, shared between the ledger trim job and `run_gc`); PQ hybrid Phase A (still
+  blocked on openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated on
+  ADR-0003 Phase B, itself gated on Phase A); project-context.md size (now ~1520 lines,
+  comfortably under the 256KB Read cap — no action needed yet).
+
+## Previous state (2026-08-26, cycle 366 — FEATURE: fix broken access control in create_group (group hijack/rejoin), commit fe6c419)
 
 - CI green (`gh run list --limit 3` all success), `git status` at cycle start was **NOT
   clean** — same "cycle silently fails to commit" pattern as cycles 324/326/330/332/341/
