@@ -516,6 +516,22 @@ mod tests {
             groups.push(group.id.clone());
             Ok(true)
         }
+        async fn create_with_creator(
+            &self,
+            group: &Group,
+            creator: &GroupMember,
+        ) -> Result<bool, DomainError> {
+            let mut groups = self.groups.lock().unwrap();
+            if groups.contains(&group.id) {
+                return Ok(false);
+            }
+            groups.push(group.id.clone());
+            self.members
+                .lock()
+                .unwrap()
+                .push((group.id.clone(), creator.device_id.clone()));
+            Ok(true)
+        }
         async fn find_by_id(&self, _id: &GroupId) -> Result<Option<Group>, DomainError> {
             Ok(None)
         }

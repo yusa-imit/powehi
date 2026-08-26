@@ -19,6 +19,30 @@ pub trait GroupRepository: Send + Sync {
     /// `epoch`, `home_region` or `created_at`, so a caller that supplies another
     /// group's id cannot downgrade or hijack it.
     async fn create_if_absent(&self, group: &Group) -> Result<bool, DomainError>;
+    /// Atomically create a group and add `creator` as its sole initial member
+    /// in a single transaction.
+    ///
+    /// Returns `true` when a new group row was created, `false` when
+    /// `group.id` already existed — in which case neither the group row nor
+    /// `creator`'s membership row is touched. Unlike calling
+    /// [`GroupRepository::create_if_absent`] followed by
+    /// [`GroupRepository::add_member`] as two separate calls, a failure
+    /// between the two (DB error, pod kill) can never leave a group row with
+    /// zero members, which would otherwise be permanently unusable — every
+    /// future `create_group` retry would hit the already-exists-and-not-a-
+    /// member branch forever since nothing may add the first member once the
+    /// group is known to exist.
+    ///
+    /// Implementors must bind the membership row's `group_id` to `group.id`
+    /// (not to `creator.group_id`, which callers are expected but not
+    /// enforced to keep equal) — this makes a caller-side mismatch between
+    /// the two arguments inert instead of granting membership in whichever
+    /// group `creator.group_id` happens to name.
+    async fn create_with_creator(
+        &self,
+        group: &Group,
+        creator: &GroupMember,
+    ) -> Result<bool, DomainError>;
     async fn find_by_id(&self, id: &GroupId) -> Result<Option<Group>, DomainError>;
     async fn add_member(&self, member: &GroupMember) -> Result<(), DomainError>;
     async fn remove_member(

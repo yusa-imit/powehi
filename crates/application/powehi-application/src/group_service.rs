@@ -30,15 +30,24 @@ impl GroupUseCase for GroupService {
     #[instrument(skip(self), fields(creator = %creator, group_id = %group_id))]
     async fn create_group(&self, creator: &DeviceId, group_id: GroupId) -> Result<(), DomainError> {
         let group = Group::new(group_id.clone(), self.local_region.clone());
-        // create_if_absent, never save(): save() is a destructive upsert that
-        // would reset an existing group's epoch/home_region, so a client-supplied
-        // group_id colliding with a live group would hijack it.
-        if !self.group_repo.create_if_absent(&group).await? {
-            // The id already exists. Do NOT fall through to add_member: that is
-            // how a non-member (including a device previously evicted via
-            // remove_member) could rejoin an arbitrary group just by knowing its
-            // id. Only a device that is already a member may reach this path, and
-            // for it the call is an idempotent retry.
+        let member = GroupMember {
+            group_id: group_id.clone(),
+            device_id: creator.clone(),
+            joined_at_epoch: Epoch(0),
+        };
+        // create_with_creator, never save(): save() is a destructive upsert
+        // that would reset an existing group's epoch/home_region, so a
+        // client-supplied group_id colliding with a live group would hijack
+        // it. The group row and the creator's membership row are created in
+        // one transaction so a mid-write failure can never leave a group with
+        // zero members (which would otherwise be permanently stuck: nothing
+        // may add a first member once the id is known to exist).
+        if !self.group_repo.create_with_creator(&group, &member).await? {
+            // The id already exists. Do NOT fall through to adding a member:
+            // that is how a non-member (including a device previously evicted
+            // via remove_member) could rejoin an arbitrary group just by
+            // knowing its id. Only a device that is already a member may
+            // reach this path, and for it the call is an idempotent retry.
             let already_member = self
                 .group_repo
                 .list_members(&group_id)
@@ -51,12 +60,7 @@ impl GroupUseCase for GroupService {
             tracing::warn!(caller = %creator, group_id = %group_id, "create_group: group id already exists and caller is not a member");
             return Err(DomainError::AlreadyExists(group_id.to_string()));
         }
-        let member = GroupMember {
-            group_id,
-            device_id: creator.clone(),
-            joined_at_epoch: Epoch(0),
-        };
-        self.group_repo.add_member(&member).await
+        Ok(())
     }
 
     #[instrument(skip(self), fields(caller = %caller, group_id = %group_id, device_id = %device_id))]
@@ -151,6 +155,27 @@ mod tests {
                 return Ok(false);
             }
             groups.insert(group.id.clone(), group.clone());
+            Ok(true)
+        }
+        async fn create_with_creator(
+            &self,
+            group: &Group,
+            creator: &GroupMember,
+        ) -> Result<bool, DomainError> {
+            // Mirrors the real adapter's single-transaction semantics: both
+            // the group lock and the members lock are updated before either
+            // is released back to another caller, so no interleaved reader
+            // can observe a group with zero members.
+            let mut groups = self.groups.lock().unwrap();
+            if groups.contains_key(&group.id) {
+                return Ok(false);
+            }
+            groups.insert(group.id.clone(), group.clone());
+            self.members.lock().unwrap().push(GroupMember {
+                group_id: group.id.clone(),
+                device_id: creator.device_id.clone(),
+                joined_at_epoch: creator.joined_at_epoch,
+            });
             Ok(true)
         }
         async fn find_by_id(&self, id: &GroupId) -> Result<Option<Group>, DomainError> {

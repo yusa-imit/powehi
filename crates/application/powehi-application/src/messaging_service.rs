@@ -558,6 +558,26 @@ mod tests {
             groups.insert(group.id.clone(), group.clone());
             Ok(true)
         }
+        async fn create_with_creator(
+            &self,
+            group: &Group,
+            creator: &powehi_domain::group::GroupMember,
+        ) -> Result<bool, DomainError> {
+            let mut groups = self.groups.lock().unwrap();
+            if groups.contains_key(&group.id) {
+                return Ok(false);
+            }
+            groups.insert(group.id.clone(), group.clone());
+            self.members
+                .lock()
+                .unwrap()
+                .push(powehi_domain::group::GroupMember {
+                    group_id: group.id.clone(),
+                    device_id: creator.device_id.clone(),
+                    joined_at_epoch: creator.joined_at_epoch,
+                });
+            Ok(true)
+        }
         async fn find_by_id(&self, id: &GroupId) -> Result<Option<Group>, DomainError> {
             Ok(self.groups.lock().unwrap().get(id).cloned())
         }

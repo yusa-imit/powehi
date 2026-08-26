@@ -907,3 +907,129 @@ async fn create_if_absent_does_not_overwrite_an_existing_group() {
         .expect("count group rows");
     assert_eq!(count, 1, "exactly one group row must exist");
 }
+
+/// `create_with_creator` must create the group row and the creator's
+/// membership row atomically: a fresh id gets both in one commit, and a
+/// colliding id leaves both untouched (no orphan group with zero members, and
+/// no membership grant on a group it didn't just create).
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn create_with_creator_inserts_group_and_member_together() {
+    let (_c, pool) = setup().await;
+    let repo = PgGroupRepository::new(pool.clone());
+
+    let group_id = GroupId::from(Uuid::new_v4());
+    let creator_device = insert_device(&pool, insert_user(&pool).await).await;
+    let created_at = Utc::now();
+    let group = Group {
+        id: group_id.clone(),
+        home_region: RegionId::new("eu-central-1"),
+        epoch: Epoch(0),
+        created_at,
+    };
+    let creator = GroupMember {
+        group_id: group_id.clone(),
+        device_id: creator_device.clone(),
+        joined_at_epoch: Epoch(0),
+    };
+
+    assert!(
+        repo.create_with_creator(&group, &creator)
+            .await
+            .expect("first create_with_creator"),
+        "first call must report the group as newly created"
+    );
+    assert!(
+        repo.find_by_id(&group_id)
+            .await
+            .expect("find_by_id")
+            .is_some(),
+        "group row must exist after the first call"
+    );
+    let members = repo.list_members(&group_id).await.expect("list_members");
+    assert_eq!(members.len(), 1, "creator must be the sole member");
+    assert_eq!(members[0].device_id, creator_device);
+
+    // Colliding id, different (attacker-controlled) creator: neither the
+    // group row nor membership may change.
+    let attacker_device = DeviceId::from(Uuid::new_v4());
+    let attacker_group = Group {
+        id: group_id.clone(),
+        home_region: RegionId::new("us-east-1"),
+        epoch: Epoch(9),
+        created_at: Utc::now(),
+    };
+    let attacker_member = GroupMember {
+        group_id: group_id.clone(),
+        device_id: attacker_device.clone(),
+        joined_at_epoch: Epoch(0),
+    };
+    assert!(
+        !repo
+            .create_with_creator(&attacker_group, &attacker_member)
+            .await
+            .expect("second create_with_creator"),
+        "second call must report the group as already existing"
+    );
+
+    let after = repo
+        .find_by_id(&group_id)
+        .await
+        .expect("find_by_id")
+        .expect("group row must still exist");
+    assert_eq!(after.home_region.as_str(), "eu-central-1");
+    assert_eq!(after.epoch, Epoch(0));
+
+    let members_after = repo.list_members(&group_id).await.expect("list_members");
+    assert_eq!(
+        members_after.len(),
+        1,
+        "member list must be unchanged by a colliding create"
+    );
+    assert_eq!(members_after[0].device_id, creator_device);
+    assert!(
+        !members_after.iter().any(|m| m.device_id == attacker_device),
+        "attacker's device must not have been added as a member"
+    );
+}
+
+/// The regression this cycle fixes: if the membership insert inside
+/// `create_with_creator` fails, the whole transaction must roll back rather
+/// than leaving a committed, permanently-unusable zero-member group row.
+/// Forced here via `creator.device_id` referencing no row in `devices` — the
+/// `group_members.device_id` FK rejects it, which must abort the transaction
+/// before the group insert (issued on the same, still-open transaction) is
+/// ever committed.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn create_with_creator_rolls_back_group_row_when_member_insert_fails() {
+    let (_c, pool) = setup().await;
+    let repo = PgGroupRepository::new(pool.clone());
+
+    let group_id = GroupId::from(Uuid::new_v4());
+    let group = Group {
+        id: group_id.clone(),
+        home_region: RegionId::new("eu-central-1"),
+        epoch: Epoch(0),
+        created_at: Utc::now(),
+    };
+    // Never inserted into `devices` — group_members.device_id's FK must reject it.
+    let unregistered_device = DeviceId::from(Uuid::new_v4());
+    let creator = GroupMember {
+        group_id: group_id.clone(),
+        device_id: unregistered_device,
+        joined_at_epoch: Epoch(0),
+    };
+
+    repo.create_with_creator(&group, &creator)
+        .await
+        .expect_err("membership insert must fail its device_id FK");
+
+    assert!(
+        repo.find_by_id(&group_id)
+            .await
+            .expect("find_by_id")
+            .is_none(),
+        "the group row must not survive a rolled-back transaction"
+    );
+}

@@ -98,6 +98,55 @@ impl GroupRepository for PgGroupRepository {
         Ok(res.rows_affected() == 1)
     }
 
+    async fn create_with_creator(
+        &self,
+        group: &Group,
+        creator: &GroupMember,
+    ) -> Result<bool, DomainError> {
+        let mut tx = self.pool.begin().await.map_err(map_err)?;
+
+        let res = sqlx::query(
+            "INSERT INTO groups (id, home_region, epoch, created_at)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(group.id.as_uuid())
+        .bind(group.home_region.as_str())
+        .bind(group.epoch.0 as i64)
+        .bind(group.created_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_err)?;
+
+        if res.rows_affected() == 0 {
+            // The id already existed. Drop the transaction (rolls back on
+            // drop) without touching membership — the caller decides whether
+            // this is a legitimate retry or a hijack attempt.
+            return Ok(false);
+        }
+
+        // Bind group.id here, not creator.group_id: the two are supposed to
+        // always match, but binding the value this method already verified
+        // the group row for (rather than trusting the caller's copy on
+        // `creator`) makes it impossible for a caller-side mismatch to grant
+        // membership in a different, unrelated group than the one just
+        // created.
+        sqlx::query(
+            "INSERT INTO group_members (group_id, device_id, joined_at_epoch)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (group_id, device_id) DO NOTHING",
+        )
+        .bind(group.id.as_uuid())
+        .bind(creator.device_id.as_uuid())
+        .bind(creator.joined_at_epoch.0 as i64)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_err)?;
+
+        tx.commit().await.map_err(map_err)?;
+        Ok(true)
+    }
+
     async fn find_by_id(&self, id: &GroupId) -> Result<Option<Group>, DomainError> {
         let row = sqlx::query_as::<_, GroupRow>(
             "SELECT id, home_region, epoch, created_at FROM groups WHERE id = $1",
