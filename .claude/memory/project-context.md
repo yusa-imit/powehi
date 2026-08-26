@@ -17,7 +17,86 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-27, cycle 372 — FEATURE: bound aggregate media-GC sweep duration, commit f179b0a)
+## Current state (2026-08-27, cycle 373 — FEATURE: move GC advisory-lock primitive off R2 adapter onto powehi-postgres, commit 35d10df)
+
+- CI green (`gh run list --limit 3` all success), `git status` clean at cycle start.
+  Picked the hexagonal-layering nit carried forward since cycle 368: `try_gc_lock`/
+  `GcLockGuard`/`GC_LOCK_MEDIA_BLOBS`/`GC_LOCK_MEDIA_LEDGER` — a pure Postgres
+  session-advisory-lock primitive with zero R2/S3 dependency — lived on
+  `R2MediaAdapter` in the `powehi-r2` crate, reached from `main.rs` only via a
+  concrete-type escape hatch (`media_r2_lock` clone) around the `MediaRepository`
+  port, purely so the two background GC jobs could reach Postgres-specific helpers
+  that weren't part of any port.
+- **What it does:** new `crates/adapters/outbound/powehi-postgres/src/leader_lock.rs`
+  module — `PgLeaderLock::new(pool)` + `try_lock(key) -> Result<Option<GcLockGuard>,
+  DomainError>`, `GcLockGuard`, `GC_LOCK_MEDIA_BLOBS`/`GC_LOCK_MEDIA_LEDGER` — moved
+  verbatim (same SQL, same detach-on-Drop safety reasoning, same `#[must_use]`, same
+  bit-identical lock-key constants so a rolling deploy mixing old/new replicas still
+  shares the same advisory-lock namespace). `main.rs` now builds
+  `Arc<PgLeaderLock>` directly from the shared `pool.clone()` instead of cloning the
+  concrete `R2MediaAdapter` just to reach lock helpers; both background job closures
+  (hourly media-blob GC, daily ledger trim) call `.try_lock(GC_LOCK_MEDIA_*)` /
+  `.release().await` exactly as before, just through the new type. `powehi-r2`'s
+  `lib.rs` shrinks by ~115 lines (pure deletion, no remaining references). 3
+  testcontainers advisory-lock tests moved from `powehi-r2/tests/r2_media_it.rs`
+  (which needed the file's two-container Postgres+MinIO harness just to reach them)
+  to `powehi-postgres/tests/pg_security_it.rs` (Postgres-only `setup()`, already
+  existed), constructing `PgLeaderLock::new(pool)` directly instead of routing
+  through `R2MediaAdapter`.
+- **security-auditor: GREEN.** Verified genuinely, not rubber-stamped: mechanically
+  diffed the removed `powehi-r2` block against the new `leader_lock.rs` (post
+  comment-normalization) and confirmed the only differences are the new struct/impl
+  wrapper — all SQL, Drop/detach logic, and doc-comment safety reasoning are
+  byte-identical; independently confirmed the `GC_LOCK_*` constants are bit-identical
+  (`0x706f_7765_6869_0001`/`_0002`) so no rolling-deploy lock-namespace mismatch;
+  confirmed `main.rs`'s two call sites still use the correct (non-swapped) key per
+  job; confirmed the 3 moved tests are not vacuous — traced exactly which regression
+  each would catch (e.g. a guard that returns its connection to the pool instead of
+  holding it would make the "already held" test's second `try_lock` reuse the same
+  session and wrongly succeed, since advisory locks are re-entrant within a session);
+  confirmed zero dangling references to the old `powehi_r2::try_gc_lock` symbol
+  repo-wide via grep, `cargo audit`/`cargo deny check` clean, no `Cargo.lock`/schema/
+  proto/infra file touched anywhere in the diff — correctly not architectural, not
+  crypto (`threat-model-checker`/`crypto-reviewer` correctly skipped). One doc-nit
+  finding fixed in-cycle: a stale `(see \`powehi_r2::try_gc_lock\`)` cross-reference
+  in `powehi-config`'s `MIN_DATABASE_MAX_CONNECTIONS` floor-rationale comment (missed
+  by this cycle's initial diff, since `powehi-postgres/src/lib.rs`'s own 2 references
+  were already updated) — corrected to
+  `powehi_postgres::leader_lock::PgLeaderLock::try_lock`. Second nit (added the new
+  advisory-lock test coverage to `pg_security_it.rs`'s module-doc invariant list, which
+  had drifted out of sync) also applied in-cycle. Noted informational, no fix needed:
+  `try_lock(key: i64)` takes a bare `i64` rather than a closed enum, unchanged from
+  the pre-move design, only 2 hardcoded callers exist and no user input reaches it;
+  `PgLeaderLock` is a concrete inherent-method type rather than a full port trait —
+  judged reasonable since Postgres advisory locks aren't a swappable-backend
+  abstraction (the documented PgBouncer-transaction-mode deployment invariant is
+  exactly why) and the only consumer is the composition root in `main.rs`.
+  Pre-existing frontend `pnpm audit` findings (23, dev/build-time-only —
+  vitest/wrangler/vite transitive) noted as out-of-scope, unrelated to this diff.
+- 0 new tests (pure move, not new logic) — the 3 moved advisory-lock tests are
+  unchanged in assertions, just relocated + retargeted at `PgLeaderLock` directly.
+  `cargo build/test --workspace` clean (all green, 0 failed, same ~50 Docker-gated
+  ignored count as before, just redistributed 3 from `powehi-r2` to
+  `powehi-postgres`), `cargo clippy --workspace --all-targets -- -D warnings` clean,
+  `cargo fmt --check` clean. `cargo audit`: 0 vulnerabilities. `cargo deny check`:
+  advisories/bans/licenses/sources all ok. No `Cargo.lock` diff (zero dependency
+  change, pure code move).
+- Target dir hygiene: not checked this cycle (FEATURE mode; next due cycle 375,
+  STABILIZATION).
+- **Next cycle candidates:** Helm wiring for `database_max_connections` (cycle 369),
+  `r2_request_timeout_secs` (cycle 371), and `media_gc_sweep_timeout_secs`
+  (cycle 372) — all three need one combined infra-lead pass with real DB/R2 capacity
+  numbers not yet researched; the pre-existing (not worsened) `R2MediaAdapter::delete`
+  two-sequential-non-transactional-awaits gap (self-healing via idempotent R2
+  `DELETE` on a missing key, not urgent, cycle 372); media-key incoming/outgoing
+  asymmetry (confirmed genuinely multi-part, cycle 359); PQ hybrid Phase A (still
+  blocked on openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade
+  (gated on ADR-0003 Phase B, itself gated on Phase A); frontend `pnpm audit`'s 23
+  dev/build-time findings (vitest/wrangler/vite transitive, no production runtime
+  impact — a version-bump cycle, not urgent); project-context.md size (now ~2000
+  lines, comfortably under the 256KB Read cap — no action needed yet).
+
+## Previous state (2026-08-27, cycle 372 — FEATURE: bound aggregate media-GC sweep duration, commit f179b0a)
 
 - CI green (`gh run list --limit 5` all success), `gh issue list --state open` empty,
   `git status` clean at cycle start. Picked cycle 371's own documented-not-fixed residual:
