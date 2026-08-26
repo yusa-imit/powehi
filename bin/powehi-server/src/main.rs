@@ -30,7 +30,7 @@ use powehi_postgres::{
     PgServerConfigRepository, PgUserRepository,
 };
 use powehi_proto::region::region_service_server::RegionServiceServer;
-use powehi_r2::R2MediaAdapter;
+use powehi_r2::{R2MediaAdapter, GC_LOCK_MEDIA_BLOBS, GC_LOCK_MEDIA_LEDGER};
 use powehi_redis::{RedisCache, RedisEventBus};
 use powehi_rest_api::AppState;
 use powehi_webpush::{VapidConfig, VapidWebPushAdapter};
@@ -211,6 +211,10 @@ async fn main() -> Result<()> {
     ));
     let media_repo_gc: Arc<dyn powehi_port_outbound::media_repo::MediaRepository> =
         media_r2.clone();
+    // Kept as the concrete adapter type (not the trait object above) so the
+    // background GC jobs below can reach the Postgres-specific advisory-lock
+    // helpers, which aren't part of the `MediaRepository` port.
+    let media_r2_lock = media_r2.clone();
     let media: Arc<dyn powehi_port_inbound::media::MediaUseCase> =
         Arc::new(MediaService::new(media_r2, group_repo_media));
     let media_gc = Arc::clone(&media);
@@ -398,14 +402,43 @@ async fn main() -> Result<()> {
     // the retention ceiling alone has elapsed). ZK invariant preserved: this
     // task only reads/writes opaque UUIDs (media_id, device_id, timestamps) —
     // never content, filenames, or plaintext. Logs carry only a count.
+    // Advisory-lock-guarded (cycle 368): multiple server replicas each run
+    // this same interval loop independently. Without a lock, two replicas
+    // racing the same tick could each page through `list_gc_candidates`
+    // concurrently, one replica's page coming up short (not because the
+    // candidate set is exhausted, but because the other replica already
+    // deleted those rows), causing an early exit that leaves real leftover
+    // candidates until the next tick. Self-healing either way, but the
+    // advisory lock makes only one replica actually run per tick instead of
+    // relying on that self-healing. Conscious trade-off: with N replicas
+    // each independently ticking hourly on staggered pod-start offsets,
+    // expired-blob deletion latency was effectively ~hourly/N on average;
+    // serializing to one runner per tick makes it ~hourly cluster-wide. Both
+    // are far inside the retention-ceiling contract this job enforces (no
+    // data-minimization regression), but worth being explicit about since a
+    // deletion-latency change is privacy-adjacent even when policy-compliant.
+    let media_r2_lock_blobs = media_r2_lock.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
         loop {
             interval.tick().await;
-            match media_gc.run_gc().await {
-                Ok(n) if n > 0 => tracing::info!(deleted = n, "gc.media_expired"),
-                Ok(_) => {}
-                Err(e) => tracing::warn!(error_kind = "gc", error = %e, "gc.media_run_failed"),
+            match media_r2_lock_blobs.try_gc_lock(GC_LOCK_MEDIA_BLOBS).await {
+                Ok(Some(guard)) => {
+                    match media_gc.run_gc().await {
+                        Ok(n) if n > 0 => tracing::info!(deleted = n, "gc.media_expired"),
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(error_kind = "gc", error = %e, "gc.media_run_failed")
+                        }
+                    }
+                    guard.release().await;
+                }
+                Ok(None) => tracing::debug!("gc.media_blobs_lock_held_elsewhere_skipping"),
+                Err(e) => tracing::warn!(
+                    error_kind = "gc_lock",
+                    error = %e,
+                    "gc.media_blobs_lock_acquire_failed"
+                ),
             }
         }
     });
@@ -420,18 +453,38 @@ async fn main() -> Result<()> {
     // check could still be reading. ZK invariant preserved: only opaque
     // UUIDs/timestamps/byte counts are touched; logs carry only a deleted-
     // row count.
+    // Advisory-lock-guarded (cycle 368) for the same reason as the media
+    // blob GC job above — a distinct lock key, so the two jobs never block
+    // each other, only concurrent replicas racing this same job.
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
         loop {
             interval.tick().await;
-            let cutoff = chrono::Utc::now()
-                - chrono::Duration::days(powehi_application::media_service::GC_RETENTION_DAYS);
-            match media_repo_gc.trim_upload_ledger_older_than(cutoff).await {
-                Ok(n) if n > 0 => tracing::info!(deleted = n, "gc.media_upload_ledger_trimmed"),
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(error_kind = "gc", error = %e, "gc.media_upload_ledger_trim_failed")
+            match media_r2_lock.try_gc_lock(GC_LOCK_MEDIA_LEDGER).await {
+                Ok(Some(guard)) => {
+                    let cutoff = chrono::Utc::now()
+                        - chrono::Duration::days(
+                            powehi_application::media_service::GC_RETENTION_DAYS,
+                        );
+                    match media_repo_gc.trim_upload_ledger_older_than(cutoff).await {
+                        Ok(n) if n > 0 => {
+                            tracing::info!(deleted = n, "gc.media_upload_ledger_trimmed")
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!(
+                            error_kind = "gc",
+                            error = %e,
+                            "gc.media_upload_ledger_trim_failed"
+                        ),
+                    }
+                    guard.release().await;
                 }
+                Ok(None) => tracing::debug!("gc.media_ledger_lock_held_elsewhere_skipping"),
+                Err(e) => tracing::warn!(
+                    error_kind = "gc_lock",
+                    error = %e,
+                    "gc.media_ledger_lock_acquire_failed"
+                ),
             }
         }
     });

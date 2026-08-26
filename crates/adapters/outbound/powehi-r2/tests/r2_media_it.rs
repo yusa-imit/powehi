@@ -1007,3 +1007,97 @@ async fn deleting_a_blob_cascades_its_acks() {
         "ON DELETE CASCADE must remove orphaned acks"
     );
 }
+
+// ── GC advisory lock (cycle 368) ────────────────────────────────────────────
+// `try_gc_lock` guards the background GC/trim jobs against multiple server
+// replicas racing the same job. Session-scoped Postgres advisory locks can't
+// be exercised by any mock (the whole point is real per-connection session
+// state), so this is testcontainers-only coverage.
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn try_gc_lock_returns_none_when_already_held() {
+    let h = setup().await;
+    let key = 0x7000_0000_0000_0001i64;
+
+    let guard1 = h
+        .adapter
+        .try_gc_lock(key)
+        .await
+        .expect("try_gc_lock first")
+        .expect("lock must be free on first attempt");
+
+    let second = h
+        .adapter
+        .try_gc_lock(key)
+        .await
+        .expect("try_gc_lock second");
+    assert!(
+        second.is_none(),
+        "a second session must not acquire a lock already held by the first"
+    );
+
+    guard1.release().await;
+
+    let third = h
+        .adapter
+        .try_gc_lock(key)
+        .await
+        .expect("try_gc_lock third")
+        .expect("lock must be free again after release()");
+    third.release().await;
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn try_gc_lock_distinct_keys_do_not_block_each_other() {
+    let h = setup().await;
+
+    let guard_a = h
+        .adapter
+        .try_gc_lock(0x7000_0000_0000_0002)
+        .await
+        .expect("try_gc_lock a")
+        .expect("lock a must be free");
+    let guard_b = h
+        .adapter
+        .try_gc_lock(0x7000_0000_0000_0003)
+        .await
+        .expect("try_gc_lock b")
+        .expect("a different key must not be blocked by lock a");
+
+    guard_a.release().await;
+    guard_b.release().await;
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn try_gc_lock_dropped_without_release_still_frees_the_lock() {
+    let h = setup().await;
+    let key = 0x7000_0000_0000_0004i64;
+
+    let guard = h
+        .adapter
+        .try_gc_lock(key)
+        .await
+        .expect("try_gc_lock first")
+        .expect("lock must be free on first attempt");
+    drop(guard); // simulates an early return / panic in the guarded job — no explicit release()
+
+    // GcLockGuard's Drop impl detaches and closes the raw connection instead
+    // of returning it to the pool — that's what actually releases a
+    // session-scoped advisory lock server-side — but TCP teardown is async,
+    // so poll briefly instead of asserting the very next instant.
+    let mut reacquired = None;
+    for _ in 0..20 {
+        if let Some(g) = h.adapter.try_gc_lock(key).await.expect("try_gc_lock poll") {
+            reacquired = Some(g);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    reacquired
+        .expect("dropping the guard without release() must eventually free the lock")
+        .release()
+        .await;
+}
