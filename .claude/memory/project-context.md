@@ -17,7 +17,61 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-26, cycle 369 — FEATURE: explicit Postgres pool size + floor validation, commit 87ae758)
+## Current state (2026-08-26, cycle 370 — STABILIZATION: align testcontainers pools with powehi_postgres::connect, commit de324a3)
+
+- CI green (`gh run list --limit 5` all success), `gh issue list --state open` empty,
+  `git status` clean at cycle start.
+- Picked cycle 369's own carried-forward informational note: `pg_security_it.rs` and
+  `r2_media_it.rs` (both `#[ignore]`d testcontainers integration suites) built their test
+  Postgres pool via a bare `sqlx::PgPool::connect(&url)`, bypassing the crate's own
+  `powehi_postgres::connect(url, max_connections)` helper that production code (`main.rs`'s
+  `pg_connect`) has used since cycle 369's explicit-pool-size fix. Harmless at the time
+  (sqlx's implicit default of 10 happened to sit above cycle 369's new floor of 3), but
+  meant `try_gc_lock`'s own test suite (and every other adapter test in these two files)
+  exercised a differently-configured pool than production, and would silently drift further
+  if the production default (currently 20) ever changed without these files being touched.
+- **What it does:** both `setup()` helpers now call `powehi_postgres::connect(&url, 10)`
+  instead of `PgPool::connect(&url)` — kept the cap at 10 (matching the old implicit sqlx
+  default, ample for these fixtures' concurrency) rather than production's 20, since test
+  pools don't need to match production capacity, only go through the same construction path.
+  `sqlx::PgPool` import stays used elsewhere in both files (struct fields / helper fn
+  signatures) so no unused-import warning.
+- **security-auditor: GREEN.** Confirmed `powehi_postgres::connect()` is a thin
+  `PgPoolOptions::new().max_connections(n).connect(url)` wrapper with no extra validation,
+  no `min_connections` override, no logging — so the swap is behaviorally identical besides
+  the explicit cap; confirmed no plaintext/secret logging (the two `.expect(...)` messages
+  are static strings, and the connection URL itself is just a local testcontainers
+  `postgres://postgres:postgres@127.0.0.1:<port>/postgres`, not a real secret); confirmed
+  `max_connections=10` is sane for a single ephemeral-container-per-test fixture. Not
+  architectural (test-only, no production/schema/dependency change) — `threat-model-checker`
+  correctly not required; not crypto — `crypto-reviewer` correctly not required.
+- `cargo build --workspace` and `cargo build --workspace --tests` both clean (confirms the
+  `#[ignore]`d Docker-gated tests in both files still compile). `cargo test --workspace`:
+  42/42 test binaries `test result: ok`, 0 failures (no Docker in sandbox so the
+  testcontainers tests themselves stay `ignored`, same as every prior cycle — will run for
+  real in CI's Rust workflow). `cargo clippy --workspace --all-targets -- -D warnings` clean,
+  `cargo fmt --check` clean. `cargo audit`: 0 vulnerabilities (652 crates scanned, exit 0).
+  `cargo deny check`: advisories ok, bans ok, licenses ok, sources ok. No `Cargo.lock` diff
+  (test-only change, zero dependency impact).
+- Target dir hygiene: `target/` was 25G (> the 20G threshold). Ran the 0-byte `.rmeta` prune
+  (no-op, none found) and the `mtime +7` prune of `target/debug/deps`/`incremental` — also a
+  no-op, every artifact in the tree is younger than 7 days (an actively-building project, not
+  stale bloat). Left at 25G; not a failure, just nothing eligible to prune this cycle. Worth
+  revisiting if growth continues without natural turnover.
+- **Next cycle candidates (unchanged from cycle 369, still open):** derive/document a
+  Postgres-side connection budget and wire `database_max_connections` through Helm
+  `values.yaml` per environment instead of the baked-in default of 20 (needs infra-lead + a
+  real number for the managed Postgres's own `max_connections`, not currently provisioned via
+  Terraform — check where/how the DB is actually hosted before picking this); a lease/TTL or
+  R2 `S3Client` request timeout so a hung GC/ledger-trim task can't block that job
+  cluster-wide indefinitely (cycle 368); the hexagonal-layering nit (`try_gc_lock` living on
+  the R2/S3-named adapter instead of a `LeaderLock` port on `powehi-postgres`); media-key
+  incoming/outgoing asymmetry (confirmed genuinely multi-part, cycle 359); PQ hybrid Phase A
+  (still blocked on openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated
+  on ADR-0003 Phase B, itself gated on Phase A); project-context.md size (now ~1760 lines,
+  comfortably under the 256KB Read cap — no action needed yet).
+
+## Previous state (2026-08-26, cycle 369 — FEATURE: explicit Postgres pool size + floor validation, commit 87ae758)
 
 - CI green (`gh run list --limit 5` all success), `gh issue list --state open` empty,
   `git status` clean at cycle start.
