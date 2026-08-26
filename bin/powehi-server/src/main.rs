@@ -419,17 +419,24 @@ async fn main() -> Result<()> {
     // data-minimization regression), but worth being explicit about since a
     // deletion-latency change is privacy-adjacent even when policy-compliant.
     let media_r2_lock_blobs = media_r2_lock.clone();
+    // Bounds the whole sweep, not just one R2 call (see `media_gc_sweep_timeout_secs`
+    // doc comment) — N slow-but-not-hung deletes could otherwise hold
+    // `GC_LOCK_MEDIA_BLOBS` past the next hourly tick, delaying every other replica.
+    let media_gc_sweep_timeout = std::time::Duration::from_secs(cfg.media_gc_sweep_timeout_secs);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
         loop {
             interval.tick().await;
             match media_r2_lock_blobs.try_gc_lock(GC_LOCK_MEDIA_BLOBS).await {
                 Ok(Some(guard)) => {
-                    match media_gc.run_gc().await {
-                        Ok(n) if n > 0 => tracing::info!(deleted = n, "gc.media_expired"),
-                        Ok(_) => {}
-                        Err(e) => {
+                    match tokio::time::timeout(media_gc_sweep_timeout, media_gc.run_gc()).await {
+                        Ok(Ok(n)) if n > 0 => tracing::info!(deleted = n, "gc.media_expired"),
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => {
                             tracing::warn!(error_kind = "gc", error = %e, "gc.media_run_failed")
+                        }
+                        Err(_) => {
+                            tracing::warn!(error_kind = "gc_timeout", "gc.media_run_timed_out")
                         }
                     }
                     guard.release().await;

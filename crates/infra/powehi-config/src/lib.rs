@@ -21,6 +21,20 @@ pub enum ConfigError {
          presigning and the hourly media-blob GC background job"
     )]
     R2RequestTimeoutTooLow(u64),
+    #[error(
+        "media_gc_sweep_timeout_secs={0} is below the minimum safe value \
+         ({MIN_MEDIA_GC_SWEEP_TIMEOUT_SECS}): a single `list_gc_candidates` page can legitimately \
+         take several seconds against a large table, so anything below the floor would abort a \
+         healthy sweep before it can make progress"
+    )]
+    MediaGcSweepTimeoutTooLow(u64),
+    #[error(
+        "media_gc_sweep_timeout_secs={0} is less than {MEDIA_GC_SWEEP_TIMEOUT_MIN_MULTIPLE_OF_R2}x \
+         r2_request_timeout_secs={1}: a single slow-but-healthy R2 call could then consume the \
+         entire sweep budget, timing out the GC job on every tick with zero net progress on any \
+         batch with non-trivial R2 latency"
+    )]
+    MediaGcSweepTimeoutTooCloseToR2Timeout(u64, u64),
 }
 
 /// Below this, a GC/ledger-trim job's dedicated advisory-lock connection plus its own query
@@ -34,6 +48,18 @@ const MIN_DATABASE_MAX_CONNECTIONS: u32 = 3;
 /// even complete, which clears naive "just reject zero" validation while still
 /// being a silent total outage. 5 gives headroom above that floor.
 const MIN_R2_REQUEST_TIMEOUT_SECS: u64 = 5;
+
+/// A single `list_gc_candidates` page plus its per-blob R2 deletes can take a
+/// few seconds even when healthy; anything below this would risk aborting a
+/// normal-speed sweep on its first page.
+const MIN_MEDIA_GC_SWEEP_TIMEOUT_SECS: u64 = 30;
+
+/// The sweep timeout must leave room for at least this many full-length R2 calls so a single
+/// slow-but-healthy operation can't consume the entire sweep budget and starve the job of net
+/// forward progress every tick. Shipped defaults (1800 / 30) clear this by 60x; this only bites
+/// an operator who tightens `media_gc_sweep_timeout_secs` down near its own floor while leaving
+/// `r2_request_timeout_secs` at a normal value.
+const MEDIA_GC_SWEEP_TIMEOUT_MIN_MULTIPLE_OF_R2: u64 = 2;
 
 #[derive(Deserialize)]
 pub struct AppConfig {
@@ -71,6 +97,15 @@ pub struct AppConfig {
     /// server-to-R2 call latency). Default 30 (seconds).
     #[serde(default = "default_r2_request_timeout_secs")]
     pub r2_request_timeout_secs: u64,
+    /// Bounds the *whole* hourly media-blob GC sweep (`MediaService::run_gc`), not just a
+    /// single R2 call (`r2_request_timeout_secs` above already bounds that). Without this,
+    /// N slow-but-not-hung per-blob deletes can each individually succeed under the R2 call
+    /// timeout while their sum still holds the cross-replica Postgres advisory lock
+    /// (`GC_LOCK_MEDIA_BLOBS`) past the next hourly tick, delaying every other replica's
+    /// attempt indefinitely. Default 1800 (30 min) — comfortably under the hourly interval so
+    /// the lock is always released before the job would run again anyway.
+    #[serde(default = "default_media_gc_sweep_timeout_secs")]
+    pub media_gc_sweep_timeout_secs: u64,
     /// Internal admin port for Prometheus metrics scraping.
     /// Bound to 127.0.0.1 only — MUST NOT be exposed via the public ingress.
     /// Prometheus scrapes from within the cluster (k8s pod-to-pod).
@@ -121,6 +156,9 @@ fn default_presign_download_ttl() -> u64 {
 }
 fn default_r2_request_timeout_secs() -> u64 {
     30
+}
+fn default_media_gc_sweep_timeout_secs() -> u64 {
+    1800
 }
 fn default_admin_port() -> u16 {
     9090
@@ -181,6 +219,10 @@ impl std::fmt::Debug for AppConfig {
                 &self.r2_presign_download_ttl_secs,
             )
             .field("r2_request_timeout_secs", &self.r2_request_timeout_secs)
+            .field(
+                "media_gc_sweep_timeout_secs",
+                &self.media_gc_sweep_timeout_secs,
+            )
             .field("admin_port", &self.admin_port)
             .field("grpc_port", &self.grpc_port)
             .field("grpc_peers", &self.grpc_peers)
@@ -207,6 +249,7 @@ pub fn load() -> Result<AppConfig, ConfigError> {
         .set_default("grpc_port", 50051)?
         .set_default("database_max_connections", 20)?
         .set_default("r2_request_timeout_secs", 30)?
+        .set_default("media_gc_sweep_timeout_secs", 1800)?
         // No defaults for credentials — POWEHI__R2_ACCESS_KEY_ID and
         // POWEHI__R2_SECRET_ACCESS_KEY must be injected by the operator.
         .set_default("r2_access_key_id", "")?
@@ -225,6 +268,21 @@ fn validate(app: &AppConfig) -> Result<(), ConfigError> {
     }
     if app.r2_request_timeout_secs < MIN_R2_REQUEST_TIMEOUT_SECS {
         return Err(ConfigError::R2RequestTimeoutTooLow(
+            app.r2_request_timeout_secs,
+        ));
+    }
+    if app.media_gc_sweep_timeout_secs < MIN_MEDIA_GC_SWEEP_TIMEOUT_SECS {
+        return Err(ConfigError::MediaGcSweepTimeoutTooLow(
+            app.media_gc_sweep_timeout_secs,
+        ));
+    }
+    if app.media_gc_sweep_timeout_secs
+        < app
+            .r2_request_timeout_secs
+            .saturating_mul(MEDIA_GC_SWEEP_TIMEOUT_MIN_MULTIPLE_OF_R2)
+    {
+        return Err(ConfigError::MediaGcSweepTimeoutTooCloseToR2Timeout(
+            app.media_gc_sweep_timeout_secs,
             app.r2_request_timeout_secs,
         ));
     }
@@ -252,6 +310,7 @@ mod tests {
             r2_presign_upload_ttl_secs: 900,
             r2_presign_download_ttl_secs: 300,
             r2_request_timeout_secs: 30,
+            media_gc_sweep_timeout_secs: 1800,
             admin_port: 9090,
             grpc_port: 50051,
             grpc_peers: String::new(),
@@ -359,6 +418,76 @@ mod tests {
                 "r2_request_timeout_secs={ok} must be accepted"
             );
         }
+    }
+
+    #[test]
+    fn media_gc_sweep_timeout_default_is_1800() {
+        assert_eq!(default_media_gc_sweep_timeout_secs(), 1800);
+        assert_eq!(default_config().media_gc_sweep_timeout_secs, 1800);
+    }
+
+    #[test]
+    fn media_gc_sweep_timeout_below_floor_is_rejected() {
+        for bad in [0, MIN_MEDIA_GC_SWEEP_TIMEOUT_SECS - 1] {
+            let cfg = AppConfig {
+                media_gc_sweep_timeout_secs: bad,
+                ..default_config()
+            };
+            let err = validate(&cfg).expect_err(&format!(
+                "media_gc_sweep_timeout_secs={bad} must be rejected"
+            ));
+            assert!(matches!(err, ConfigError::MediaGcSweepTimeoutTooLow(v) if v == bad));
+        }
+    }
+
+    #[test]
+    fn media_gc_sweep_timeout_at_or_above_floor_is_accepted() {
+        for ok in [
+            MIN_MEDIA_GC_SWEEP_TIMEOUT_SECS,
+            MIN_MEDIA_GC_SWEEP_TIMEOUT_SECS + 1,
+            1800,
+            3600,
+        ] {
+            let cfg = AppConfig {
+                media_gc_sweep_timeout_secs: ok,
+                // Pinned at its own floor so every `ok` value above (which is itself
+                // >= MIN_MEDIA_GC_SWEEP_TIMEOUT_SECS = 30) clears the separate
+                // 2x-r2_request_timeout_secs cross-field check too (30 >= 2*5).
+                r2_request_timeout_secs: MIN_R2_REQUEST_TIMEOUT_SECS,
+                ..default_config()
+            };
+            assert!(
+                validate(&cfg).is_ok(),
+                "media_gc_sweep_timeout_secs={ok} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn media_gc_sweep_timeout_too_close_to_r2_timeout_is_rejected() {
+        let cfg = AppConfig {
+            r2_request_timeout_secs: 30,
+            media_gc_sweep_timeout_secs: 59,
+            ..default_config()
+        };
+        let err = validate(&cfg).expect_err("sweep timeout under 2x r2 timeout must be rejected");
+        assert!(matches!(
+            err,
+            ConfigError::MediaGcSweepTimeoutTooCloseToR2Timeout(59, 30)
+        ));
+    }
+
+    #[test]
+    fn media_gc_sweep_timeout_at_exactly_2x_r2_timeout_is_accepted() {
+        let cfg = AppConfig {
+            r2_request_timeout_secs: 30,
+            media_gc_sweep_timeout_secs: 60,
+            ..default_config()
+        };
+        assert!(
+            validate(&cfg).is_ok(),
+            "sweep timeout at exactly 2x r2 timeout must be accepted"
+        );
     }
 
     #[test]
@@ -490,6 +619,7 @@ mod tests {
         assert_eq!(app.r2_presign_upload_ttl_secs, 900);
         assert_eq!(app.r2_presign_download_ttl_secs, 300);
         assert_eq!(app.r2_request_timeout_secs, 30);
+        assert_eq!(app.media_gc_sweep_timeout_secs, 1800);
         assert!(
             app.r2_access_key_id.is_empty(),
             "credentials must be injected by operator"
