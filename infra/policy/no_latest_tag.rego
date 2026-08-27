@@ -15,20 +15,13 @@ import rego.v1
 
 deny contains msg if {
 	some resource in all_resources
-	some container in tagged_image_containers(resource)
+	is_workload_like(resource)
+	some container in containers_of(resource)
 	is_latest_or_untagged(container.image)
 	msg := sprintf(
 		"%s/%s: container %q image %q must not use the ':latest' tag (or no tag at all, which Kubernetes implicitly treats as latest) — pin an explicit version",
 		[resource.kind, resource.metadata.name, container.name, container.image],
 	)
-}
-
-tagged_image_containers(resource) := containers_of(resource) if {
-	is_workload(resource)
-}
-
-tagged_image_containers(resource) := containers_of(resource) if {
-	resource.kind == "Pod"
 }
 
 is_latest_or_untagged(image) if {

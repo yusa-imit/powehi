@@ -8,7 +8,7 @@ import rego.v1
 
 deny contains msg if {
 	some resource in all_resources
-	is_workload(resource)
+	is_workload_like(resource)
 	not run_as_nonroot_satisfied(resource)
 	msg := sprintf(
 		"%s/%s: securityContext.runAsNonRoot must be true at the pod level and/or on every container",

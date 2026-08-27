@@ -1,7 +1,7 @@
 # Check (a): resource limits present.
 #
 # Every container (regular + init) in every Deployment/StatefulSet/
-# DaemonSet/ReplicaSet/Pod must declare all four of
+# DaemonSet/ReplicaSet/Job/CronJob/Pod must declare all four of
 # resources.limits.{cpu,memory} and resources.requests.{cpu,memory}.
 # No unbounded pods (helm-conventions.md: "Resource limits required for
 # every container").
@@ -11,20 +11,13 @@ import rego.v1
 
 deny contains msg if {
 	some resource in all_resources
-	some container in workload_containers(resource)
+	is_workload_like(resource)
+	some container in containers_of(resource)
 	not has_resource_limits(container)
 	msg := sprintf(
 		"%s/%s: container %q must set resources.limits.{cpu,memory} and resources.requests.{cpu,memory}",
 		[resource.kind, resource.metadata.name, container.name],
 	)
-}
-
-workload_containers(resource) := containers_of(resource) if {
-	is_workload(resource)
-}
-
-workload_containers(resource) := containers_of(resource) if {
-	resource.kind == "Pod"
 }
 
 has_resource_limits(container) if {

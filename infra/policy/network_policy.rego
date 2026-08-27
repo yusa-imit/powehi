@@ -14,7 +14,7 @@ import rego.v1
 
 deny contains msg if {
 	some resource in all_resources
-	is_workload(resource)
+	is_workload_like(resource)
 	not has_deny_all_baseline(resource)
 	msg := sprintf(
 		"%s/%s: no deny-all baseline NetworkPolicy found — a NetworkPolicy matching this workload's pod labels must set policyTypes [Ingress, Egress] with no ingress/egress rule blocks",
