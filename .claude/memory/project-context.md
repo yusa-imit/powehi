@@ -17,7 +17,70 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-28, cycle 381 — FEATURE: extend no_literal_secrets.rego to inspect container env[].value, commit 7019046)
+## Current state (2026-08-28, cycle 382 — FEATURE: SHA-pin GitHub Actions in ci-infra/ci-frontend/ci-rust/ci-e2e-live workflows, commit pending)
+
+- CI green (`gh run list --limit 3` all success), `git status` clean at cycle
+  start. Picked cycle 378's own carried-forward F8: `ci-infra.yml`/
+  `ci-frontend.yml`/`ci-rust.yml`/`ci-e2e-live.yml` still referenced GitHub
+  Actions by mutable version tag (`actions/checkout@v4`, etc.), while
+  `release.yml`/`load-test.yml` already established a SHA-pin-with-version-
+  comment precedent (`owner/action@<sha>  # vX`) elsewhere in this repo —
+  closing the gap between the two conventions.
+- **Fix (delegated to ci-pipeline-author):** resolved every mutable tag to
+  its current commit SHA via `git ls-remote`/`gh api` and rewrote each
+  `uses:` line to `owner/action@<sha>  # vX` across all 4 files
+  (`actions/checkout`, `actions/setup-node`, `actions/upload-artifact`,
+  `dtolnay/rust-toolchain@stable`, `Swatinem/rust-cache`,
+  `pnpm/action-setup`, `azure/setup-helm`, `hashicorp/setup-terraform`,
+  `EmbarkStudios/cargo-deny-action`). Deliberately did NOT reuse the older
+  SHAs already pinned in `release.yml` (e.g. `actions/checkout`'s pin there
+  predates today's `v4` head) — resolved to what each tag points to *right
+  now*, which is the point of a pinning pass. `release.yml`/`load-test.yml`
+  untouched.
+- **Judgment call: `taiki-e/install-action@nextest` left un-pinned,
+  deliberately.** This is not a normal version tag — it's a tool-name tag
+  the action's maintainer repoints on every release to track the latest
+  nextest-compatible build. Its own README explicitly says SHA-pinning
+  `@<tool_name>` tags is "strongly discouraged" since the tag moves and a
+  hash pin can end up referencing an "impostor commit" once the old tag
+  target is no longer reachable. Left both occurrences (`ci-rust.yml`) on
+  `@nextest` with an inline comment citing this rationale, rather than
+  blindly SHA-pinning everything for uniformity.
+- Independently re-verified before commit (not just trusting the
+  implementing agent): re-resolved `actions/checkout@v4`,
+  `dtolnay/rust-toolchain@stable`, `azure/setup-helm@v5.0.1`,
+  `EmbarkStudios/cargo-deny-action@v2` myself via `git ls-remote` and
+  confirmed all 4 SHAs match what was committed; reviewed the full `git
+  diff` for all 4 files and confirmed every changed line is either a
+  `uses:` ref swap or one of the two new explanatory comment blocks — no
+  `with:`/`run:`/job-logic changes; confirmed all 4 files still parse as
+  valid YAML via `python3 -c "import yaml..."`.
+- Pure CI-config change (no `.rs`/chart/policy files touched) — not
+  architectural, not crypto: `threat-model-checker`/`crypto-reviewer`/
+  `security-auditor` correctly not invoked, matching precedent for sibling
+  CI-only gates (cycles 377-381). `cargo build`/`helm lint`/`conftest`
+  correctly not re-run (no-op expected).
+- Target dir hygiene: not checked this cycle (FEATURE mode; next due cycle
+  385, STABILIZATION).
+- **Next cycle candidates (carried forward, unchanged unless noted):**
+  cycle 379's YELLOW-1 (the `--skip-tests`/`podSelector` labels-required-on-
+  future-Job gotcha in `ci-infra.yml` — still a one-line-comment nit, still
+  not urgent); cargo-nextest install consideration (low priority, cosmetic);
+  the long-carried ops/blocked items: provision the 3 environments'
+  `grpc-tls-{cert,key,ca}` secret-store keys (ops task, not code);
+  activating `grpcPeers` for real cross-region mesh traffic (needs its own
+  threat-model check); `r2_endpoint`/`r2_bucket`/`vapid_contact` never wired
+  into the chart (needs real Cloudflare account values, not fabricated);
+  media-key incoming/outgoing asymmetry (multi-part, cycle 359); PQ hybrid
+  Phase A (blocked on openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid
+  OPRF upgrade (gated on ADR-0003 Phase B); consider periodically re-running
+  this cycle's SHA-pin pass (pins go stale as upstream actions release new
+  versions — no automated Dependabot/renovate config exists yet for
+  `.github/workflows/`, worth considering as a future infra item);
+  project-context.md size (now ~2790 lines, comfortably under the 256KB
+  Read cap — no action needed yet).
+
+## Previous state (2026-08-28, cycle 381 — FEATURE: extend no_literal_secrets.rego to inspect container env[].value, commit 7019046)
 
 - CI green (`gh run list --limit 3` all success), `git status` clean at cycle
   start, no phase checklist items remain unchecked (phases 1-6 all `[x]`;
