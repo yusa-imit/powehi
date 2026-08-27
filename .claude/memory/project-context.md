@@ -17,7 +17,128 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-27, cycle 376 — FEATURE: add minLength validation for externalSecrets.remoteRefs, commit 5211f5c)
+## Current state (2026-08-27, cycle 378 — FEATURE: wire conftest OPA policy gate into CI, commit 957a901)
+
+- CI green (`gh run list --limit 5` all success), `git status` clean at cycle
+  start. **Note: cycle 377's memory update was skipped** (process gap, not a
+  content gap) — backfilled below from `git log`/CI history before this
+  cycle's own entry, since it directly motivates this cycle's work.
+- Picked cycle 376's carried-forward candidate #4, now half-closed by cycle
+  377: `.claude/rules/testing-conventions.md` line 33 requires the Helm/K8s
+  static-validation gate to be `helm lint`, `helm template` → `kubeconform`
+  **+ `conftest`** (resource limits, deny-all NetworkPolicy, no literal
+  secrets, no `:latest`, runAsNonRoot). Cycle 377 wired `helm lint` +
+  `kubeconform` into `.github/workflows/ci-infra.yml` (commits 09a35bf,
+  e5720b1) but not `conftest` — confirmed via `find . -iname '*.rego'` /
+  `-iname 'conftest*'` returning nothing repo-wide before starting.
+- **Fix (delegated to infra-lead):** new `infra/policy/` — 6 Rego files
+  (`helpers.rego` shared `all_resources`/`is_workload`/`containers_of`
+  unwrap under conftest's `--combine` per-document envelope shape, then one
+  file per check: `resource_limits.rego`, `network_policy.rego`,
+  `no_latest_tag.rego`, `no_literal_secrets.rego`, `run_as_nonroot.rego`),
+  covering exactly the 5 checks named in testing-conventions.md — no scope
+  creep beyond that list. Wired a SHA-verified `conftest` v0.69.0 install
+  step (same curl+checksums.txt+`sha256sum --check` pattern as the existing
+  kubeconform step) plus `helm template ... | conftest test - -p
+  ../../policy --combine` per overlay (prod-eu, prod-ap, staging), right
+  after the existing kubeconform step in the same loop. No base-chart-alone
+  conftest step: `helm template` with no overlay hard-fails on a
+  pre-existing unrelated `values.region is required` guard in
+  `configmap.yaml` (rendering failure, not a policy failure) — `helm lint`
+  already covers base-chart-alone at the lint level, so this was a
+  deliberate scope decision, not a chart fix; no `values.yaml`/overlay files
+  touched.
+- Verified before delegating review: all 3 overlays render clean today (5/5
+  conftest checks pass) — the chart was already compliant with all 5 checks,
+  a new gate should not fail on existing good config. One negative control
+  per rule (`--set image.tag=latest`, `--set networkPolicy.enabled=false`,
+  synthetic missing-`resources` Deployment, synthetic `runAsNonRoot: false`,
+  synthetic literal-`stringData` Secret) each independently confirmed to
+  fire — not tautologies. All scratch files/dirs deleted after use.
+- **security-auditor: YELLOW, fixed in-cycle.** Re-ran every rule
+  independently (own local OPA/Helm, not trusting the implementing agent's
+  claims) plus 9 synthetic controls, confirmed conftest's `--combine`
+  actually flattens multi-doc stdin into one envelope per document (probed
+  the real `input` shape: `array` of `{contents, path}`), matching
+  `helpers.rego`'s unwrap — the top vacuous-pass risk was clean. Findings:
+  **F1 (MEDIUM, fixed)** — the workflow's `paths:` trigger filter (both
+  `push`/`pull_request`) listed `infra/helm/**`/`infra/terraform/**`/the
+  workflow file itself but NOT `infra/policy/**` — a PR that guts or deletes
+  a `.rego` file wouldn't have triggered this workflow at all, silently
+  bypassing the gate it just added. Fixed: added `infra/policy/**` to both
+  trigger blocks. **F3/F4 (LOW, fixed)** — two Rego comments made claims the
+  auditor's own empirical probing disproved: `network_policy.rego` claimed
+  an empty `podSelector` would NOT be miscounted as covering a workload
+  (verified behavior is the opposite — and that's *correct* K8s
+  NetworkPolicy semantics, just a wrong comment); `no_latest_tag.rego`
+  implied the CI gate blocks an operator's `--set image.tag=latest` at
+  actual deploy time, which it cannot (render-time-only check; real deploy-
+  time enforcement needs an admission controller). Both comments corrected
+  to state what the rule actually does/doesn't guarantee. Re-verified all 3
+  overlays still 5/5 pass after both fixes, workflow YAML re-parsed clean.
+  Deferred (real gaps, not urgent): **F2** `no_literal_secrets.rego` only
+  inspects `kind: Secret` objects (this chart renders none — everything
+  goes through `ExternalSecret` — so it's vacuous today, a future-regression
+  guard only) and doesn't yet inspect container `env[].value` for
+  credential-looking literals (the auditor's synthetic
+  `DATABASE_URL=postgres://u:pw123@db/x` env var passed 5/5); **F5**
+  `helpers.rego`'s `workload_kinds` omits `Job`/`CronJob` (chart renders
+  neither today, `run_as_nonroot.rego` additionally skips bare `Pod`
+  inconsistently with the other two rules that do handle it); **F7** the
+  Rego policies themselves have no test gate (`conftest verify` +
+  `*_test.rego` fixtures — the negative controls above exist only in agent
+  transcripts, not as regression tests); **F8 (pre-existing, not this
+  diff)** — `actions/checkout@v4`/`azure/setup-helm@v5.0.1`/
+  `hashicorp/setup-terraform@v4.0.1` are tag- not SHA-pinned, and neither
+  the kubeconform nor conftest install verifies a release signature
+  (cosign/SLSA), only a checksums file from the same origin as the artifact.
+  Not architectural (pure additive CI static-analysis gate, zero chart-
+  rendered-output change, no new API surface/DB column/server-visible
+  metadata) and not crypto — `threat-model-checker`/`crypto-reviewer`
+  correctly not invoked, matching cycle 377's own precedent for the sibling
+  kubeconform gate.
+- No `.rs`/`values.yaml`/overlay files touched — `cargo build --workspace`
+  correctly not re-run (no-op expected, Helm/CI-only cycle). Real push to
+  `main` confirmed `CI — Infra` green with the new conftest step actually
+  executing (not just local verification).
+- Target dir hygiene: not checked this cycle (FEATURE mode; next due cycle
+  380, STABILIZATION).
+- **Next cycle candidates:** F2/F5/F7 above (extend `no_literal_secrets` to
+  container `env[].value`; add `Job`/`CronJob` to `workload_kinds` +
+  `run_as_nonroot`'s `Pod` handling; add a `conftest verify` test gate for
+  the Rego itself) — all real, non-urgent, well-scoped for a future infra
+  cycle; F8's SHA-pinning-vs-signature-verification nit (pre-existing
+  pattern, low urgency); the still-open items carried from cycle 376:
+  provision the 3 environments' `grpc-tls-{cert,key,ca}` secret-store keys
+  (ops task, not code); activating `grpcPeers` for real cross-region mesh
+  traffic (needs its own threat-model check); `r2_endpoint`/`r2_bucket`/
+  `vapid_contact` never wired into the chart (needs real Cloudflare account
+  values, not fabricated); media-key incoming/outgoing asymmetry (multi-
+  part, cycle 359); PQ hybrid Phase A (blocked on openmls stable
+  `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003
+  Phase B); project-context.md size (now ~2380 lines, comfortably under the
+  256KB Read cap — no action needed yet).
+
+## Previous state (2026-08-27, cycle 377 — FEATURE: helm lint/template + kubeconform + terraform validate CI gate, commits 09a35bf/e5720b1 — backfilled retroactively in cycle 378, memory update was skipped that cycle)
+
+- Added `.github/workflows/ci-infra.yml`: `helm-validate` job (`helm lint`
+  base chart + per-overlay `helm lint`/`helm template | kubeconform` for
+  prod-eu/prod-ap/staging) and `terraform-validate` job (`terraform fmt
+  -check -recursive` + `init -backend=false && validate` for dev/prod-eu/
+  prod-ap-seoul). Closed cycle 374's long-open candidate: infra static
+  validation had been fully absent from CI since the chart/Terraform were
+  introduced.
+- First real run on `main` caught 2 genuine pre-existing issues (commit
+  e5720b1, same cycle): `kubeconform` errored on `ExternalSecret`/
+  `ServiceMonitor` CRDs with "could not find schema" (not in its built-in
+  core/standard set) — fixed by adding the `datreeio/CRDs-catalog`
+  `-schema-location`; `terraform fmt -check` found genuine pre-existing
+  alignment drift in `modules/hetzner-k3s/main.tf` — fixed via `tofu fmt
+  -recursive` (whitespace only).
+- Left `conftest` (the other half of testing-conventions.md's stated
+  requirement) unwired — closed by cycle 378 above.
+
+## Previous state (2026-08-27, cycle 376 — FEATURE: add minLength validation for externalSecrets.remoteRefs, commit 5211f5c)
 
 - CI green (`gh run list --limit 5` all success), `gh issue list --state open` empty,
   `git status` clean at cycle start. Picked cycle 375's own documented informational
