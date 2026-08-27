@@ -77,6 +77,33 @@
           "required": ["cpu", "memory"]
         }
       }
+    },
+    "externalSecrets": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "refreshInterval": { "type": "string" },
+        "secretStoreRef": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "kind": { "type": "string", "minLength": 1 }
+          }
+        },
+        "remoteRefs": {
+          "type": "object",
+          "properties": {
+            "databaseUrl": { "type": "string", "minLength": 1 },
+            "redisUrl": { "type": "string", "minLength": 1 },
+            "r2AccessKeyId": { "type": "string", "minLength": 1 },
+            "r2SecretAccessKey": { "type": "string", "minLength": 1 },
+            "vapidPrivateKey": { "type": "string", "minLength": 1 },
+            "grpcTlsCert": { "type": "string", "minLength": 1 },
+            "grpcTlsKey": { "type": "string", "minLength": 1 },
+            "grpcTlsCa": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
     }
   }
 }
