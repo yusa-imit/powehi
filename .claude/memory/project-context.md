@@ -17,7 +17,105 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-27, cycle 378 — FEATURE: wire conftest OPA policy gate into CI, commit 957a901)
+## Current state (2026-08-27, cycle 379 — FEATURE: cover Job/CronJob/bare-Pod in conftest policy gate, commit da1aa63)
+
+- CI green (`gh run list --limit 3` all success), `git status` clean at cycle
+  start. Picked cycle 378's own F5 candidate: `helpers.rego`'s
+  `workload_kinds` omitted `Job`/`CronJob` entirely, and 2 of the 4
+  workload-scoped checks (`network_policy.rego`, `run_as_nonroot.rego`)
+  gated their `deny` rule directly on `is_workload(resource)`, silently
+  skipping bare `Pod` — inconsistent with the other 2 checks
+  (`resource_limits.rego`, `no_latest_tag.rego`), which handled Pod via
+  local `workload_containers`/`tagged_image_containers` wrappers. Confirmed
+  via grep before starting: chart renders no `Job`/`CronJob` today (pure
+  future-regression guard, chart 100% compliant regardless).
+- **Fix (delegated to infra-lead):** added `"Job"` to `workload_kinds`
+  (PodTemplateSpec at `.spec.template.*`, shape-identical to Deployment —
+  safe to fold in directly). Deliberately did NOT add `"CronJob"` to
+  `workload_kinds` — its PodTemplateSpec is nested one level deeper at
+  `.spec.jobTemplate.spec.template.*`, so naively including it would make
+  `pod_spec`/`workload_pod_labels` look in the wrong place. Instead added a
+  canonical `is_workload_like(resource)` predicate (`is_workload` OR
+  `kind == "CronJob"` OR `kind == "Pod"`) plus CronJob-specific
+  `pod_spec`/`workload_pod_labels` rule bodies, and switched all 4
+  workload-scoped checks to gate on `is_workload_like`. Collapsed
+  `containers_of`'s duplicate rule bodies into one (now that `pod_spec`
+  resolves correctly for every `is_workload_like` kind), and deleted the
+  now-redundant `workload_containers`/`tagged_image_containers` wrappers
+  from `resource_limits.rego`/`no_latest_tag.rego`, calling `containers_of`
+  directly instead — a net simplification, not just an addition.
+- **security-auditor: GREEN, 2 YELLOW advisories (informational, deferred).**
+  Independently verified (own conftest runs, not trusting the implementing
+  agent): confirmed `is_workload_like`/`pod_spec`/`workload_pod_labels`'s
+  rule bodies are provably mutually exclusive on `resource.kind` (no Rego
+  complete-rule conflict), confirmed the CronJob path
+  (`jobTemplate.spec.template.spec`) matches the real K8s
+  `CronJobSpec→JobTemplateSpec→JobSpec→PodTemplateSpec→PodSpec` schema
+  nesting, ran synthetic Job/CronJob/Pod controls (Job missing limits →
+  now fails `resource_limits`; CronJob missing `runAsNonRoot` → now fails
+  `run_as_nonroot` *and* `resource_limits`, proving the deep path actually
+  resolves rather than yielding an empty container list; bare Pod with no
+  covering NetworkPolicy → now fails `network_policy`; re-ran the same 3
+  against the pre-change policy via `git show HEAD:` and confirmed all 3
+  passed vacuously before — the gap was real, not a tautology), re-verified
+  all 3 overlays still 5/5 pass. **YELLOW-1 (deferred, real):**
+  `ci-infra.yml` runs `helm template` without `--skip-tests`, so a future
+  `templates/tests/*.yaml` Helm test Pod or a pre-install migration Job
+  would newly be subject to `network_policy`/`run_as_nonroot` — and
+  `networkpolicy.yaml`'s selector uses `powehi.selectorLabels`, not an
+  empty `podSelector: {}`, so any future Job/CronJob/Pod must carry those
+  labels or it fails `network_policy` — flagged for whoever adds the first
+  Job, not a defect today. **YELLOW-2 (cosmetic, deferred):**
+  `network_policy.rego`'s comment says "workload's pod labels" which for a
+  bare Pod actually means `.metadata.labels`, not a pod template; the new
+  `is_workload_like` guard in `resource_limits.rego`/`no_latest_tag.rego`
+  is technically redundant with `containers_of`'s own internal gate
+  (harmless, not a bug). Not architectural (pure policy-as-code addition,
+  zero chart-rendered-output change for any resource this chart actually
+  renders) and not crypto — `threat-model-checker`/`crypto-reviewer`
+  correctly not invoked, matching cycle 378's own precedent.
+- Process note: the security-auditor agent hit a self-inflicted `git stash`
+  mishap mid-review (a `git stash push -- infra/policy/ -q` mis-parsed `-q`
+  as a pathspec and no-op'd, then the follow-on `git stash pop` applied an
+  unrelated pre-existing `stash@{0}` (cycle 301 WIP), producing conflicts
+  across `app/`/`crates/`) — recovered immediately via `git reset` +
+  `git checkout -- app crates`, disclosed transparently, confirmed
+  afterward (independently, by me) that `git status --short` showed only
+  the 5 intended `infra/policy/*.rego` files and `stash@{0}` (cycle 301)
+  was still intact and unconsumed. No data lost. Same failure class as
+  cycle 374's round-2 auditor incident — worth remembering agents
+  shouldn't `git stash` scoped-by-pathspec without care for `-q`/flag
+  ordering, but not worth a process change for a 2nd occurrence in ~180
+  cycles.
+- No `.rs`/`values.yaml`/overlay/workflow files touched (confirmed via
+  `git status --short` before commit: only the 5 `infra/policy/*.rego`
+  files) — `cargo build --workspace` correctly not re-run (no-op expected).
+  Real push to `main` confirmed; CI run not yet observed to complete as of
+  this memory write (will show in next cycle's `gh run list`).
+- Target dir hygiene: not checked this cycle (FEATURE mode; next due cycle
+  380, STABILIZATION).
+- **Next cycle candidates:** cycle 378's remaining F2/F7 (extend
+  `no_literal_secrets.rego` to inspect container `env[].value` for
+  credential-looking literals; add a `conftest verify` + `*_test.rego`
+  fixture test gate for the Rego policies themselves, since today's
+  negative controls exist only in agent transcripts); this cycle's own
+  YELLOW-1 (the `--skip-tests` / `podSelector` labels-required-on-future-
+  Job gotcha — worth a one-line comment in `ci-infra.yml` or
+  `network_policy.rego` next time someone touches either, not urgent
+  enough alone); F8 from cycle 378 (SHA-pinning-vs-signature-verification
+  nit on `actions/checkout`/`setup-helm`/`setup-terraform`, pre-existing
+  pattern, low urgency); the long-carried items: provision the 3
+  environments' `grpc-tls-{cert,key,ca}` secret-store keys (ops task, not
+  code); activating `grpcPeers` for real cross-region mesh traffic (needs
+  its own threat-model check); `r2_endpoint`/`r2_bucket`/`vapid_contact`
+  never wired into the chart (needs real Cloudflare account values, not
+  fabricated); media-key incoming/outgoing asymmetry (multi-part, cycle
+  359); PQ hybrid Phase A (blocked on openmls stable `MLS_128_MLKEM768`);
+  OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003 Phase B); project-
+  context.md size (now ~2490 lines, comfortably under the 256KB Read cap
+  — no action needed yet).
+
+## Previous state (2026-08-27, cycle 378 — FEATURE: wire conftest OPA policy gate into CI, commit 957a901)
 
 - CI green (`gh run list --limit 5` all success), `git status` clean at cycle
   start. **Note: cycle 377's memory update was skipped** (process gap, not a
