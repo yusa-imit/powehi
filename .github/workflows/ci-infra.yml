@@ -9,12 +9,14 @@ on:
     paths:
       - 'infra/helm/**'
       - 'infra/terraform/**'
+      - 'infra/policy/**'
       - '.github/workflows/ci-infra.yml'
   pull_request:
     branches: [main]
     paths:
       - 'infra/helm/**'
       - 'infra/terraform/**'
+      - 'infra/policy/**'
       - '.github/workflows/ci-infra.yml'
 
 concurrency:
@@ -47,6 +49,21 @@ jobs:
           chmod +x kubeconform
           sudo mv kubeconform /usr/local/bin/kubeconform
 
+      - name: Install conftest (SHA-verified)
+        env:
+          CONFTEST_VERSION: "0.69.0"
+        run: |
+          set -euo pipefail
+          curl -sSfL -o conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz \
+            "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz"
+          curl -sSfL -o checksums.txt \
+            "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/checksums.txt"
+          grep " conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz\$" checksums.txt > conftest.sha256
+          sha256sum --check conftest.sha256
+          tar -xzf conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz conftest
+          chmod +x conftest
+          sudo mv conftest /usr/local/bin/conftest
+
       - name: helm lint — base chart
         working-directory: infra/helm/powehi
         run: helm lint .
@@ -74,6 +91,14 @@ jobs:
               | kubeconform -strict -summary -output json \
                   -schema-location default \
                   -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+            echo "::endgroup::"
+
+            echo "::group::helm template -f ${overlay} | conftest test"
+            # --combine: network_policy.rego reasons over all rendered
+            # documents from this overlay together (e.g. Deployment +
+            # NetworkPolicy cross-references), not each doc in isolation.
+            helm template . -f "${overlay}" \
+              | conftest test - -p ../../policy --combine
             echo "::endgroup::"
           done
 
