@@ -17,7 +17,101 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-27, cycle 374 — FEATURE: wire GC/timeout config into Helm + fix broken POWEHI__ key names, commit 753f3ad)
+## Current state (2026-08-27, cycle 375 — STABILIZATION: wire GRPC mTLS material into Helm via Secret volume mount, commit a1c8ab1)
+
+- CI green (`gh run list --limit 5` all success), `gh issue list --state open` empty,
+  `git status` clean at cycle start. Full sweep first, everything green, nothing to
+  fix from it: `cargo build/test --workspace` (all crates 0 failures), `cargo clippy
+  --workspace --all-targets -- -D warnings` clean, `cargo fmt --check` clean, `cargo
+  audit` 0 advisories (652 crates), `cargo deny check` clean, frontend `pnpm test
+  --run` 1504/1504 green (105 files), `tsc -b`/`biome check` clean (172 files).
+  Target dir was 27G (over the 20G prune threshold) — pruned 0-byte `.rmeta` stubs
+  and ran the `-mtime +7` artifact prune, size unchanged (27G → 27G, nothing was
+  actually >7 days stale) — housekeeping only, doesn't count as the cycle's commit.
+- Since the sweep found nothing to fix, picked cycle 374's own documented follow-up
+  (a real gap, not a hypothetical): that cycle deliberately left `GRPC_TLS_CERT`/
+  `KEY`/`CA` unwired because those `AppConfig` fields (`grpc_tls_cert/key/ca`, plain
+  `String`) are consumed as filesystem *paths* via `TlsConfig::from_pem_files`
+  (`std::fs::read`), not raw PEM content — env-var injection can't work for them
+  regardless of naming. Scoped it first via an Explore agent before committing to the
+  fix: confirmed `values-prod-eu.yaml`/`values-prod-ap.yaml`/`values-staging.yaml`
+  all already declared `grpcTlsEnabled: "true"` (operator intent for mTLS), but the
+  value was **100% dead** — it rendered into `POWEHI__GRPC_TLS_ENABLED`, which
+  matches no `AppConfig` field (config-rs has no `deny_unknown_fields`, silently
+  dropped) — so `grpc_tls_enabled()` (the real derived gate: all three path fields
+  non-empty) was always `false` everywhere. `grpcPeers` is `""` in every environment
+  today, so this was latent, not actively exploited — but the gRPC 50051 listener ran
+  **plaintext in every environment regardless**, contradicting prd.md §4A.4's
+  mTLS-for-all-inter-region-gRPC requirement and the values files' own stated intent.
+- **Fix (delegated to infra-lead):** repurposed `config.grpcTlsEnabled` from a dead
+  quoted-string enum into a real Helm boolean gating: a new Secret volume mounted at
+  `/etc/powehi/tls` in `deployment.yaml`, and `POWEHI__GRPC_TLS_CERT/KEY/CA` in
+  `configmap.yaml` pointing at the mounted paths (static in-container path strings,
+  safe in a ConfigMap — only the mounted file *contents* are secret). Split the TLS
+  material into its own `ExternalSecret`/Secret (`<fullname>-grpc-tls`), consumed
+  *only* via volume mount — deliberately removed from the main `powehi-secret`'s
+  `envFrom`-injected data list, since `TlsConfig::from_pem_files` needs paths, not
+  env content, and per security-auditor this closes a real pre-existing exposure
+  (raw `GRPC_TLS_KEY` PEM bytes were being dumped into every pod's env via
+  `envFrom.secretRef`, readable via `/proc/*/environ`, `kubectl exec -- env`, or a
+  crash-log env dump — not new to this cycle, just now fixed as a side effect).
+  Added a `fail()` guard in `deployment.yaml`: `grpcTlsEnabled=true` +
+  `externalSecrets.enabled=false` refuses to render (verified via `helm template
+  --set config.grpcTlsEnabled=true --set externalSecrets.enabled=false` → exit 1).
+  Default (`values.yaml`) stays `false` (dev/single-region, zero behavior change);
+  prod-eu/prod-ap/staging flip their existing `"true"` string to a real `true` bool,
+  making their long-stated intent finally functional. **`grpcPeers` deliberately left
+  `""` everywhere** — turning on the actual cross-region mesh is out of scope, a
+  separate future change. Also closed cycle 374's own left INFO nit while touching
+  `values.schema.json` anyway: added `"minimum": 1` to the three integer config
+  knobs (`databaseMaxConnections`/`r2RequestTimeoutSecs`/`mediaGcSweepTimeoutSecs`)
+  wired in that cycle, closing the Sprig-`default`-treats-`0`-as-empty footgun at the
+  schema layer instead of relying solely on the Rust-side `validate()` floor.
+- **threat-model-checker: GREEN.** Confirmed this is a non-architectural bug fix
+  restoring an already-declared prd.md §4A.4 requirement, not a new decision — no
+  prd.md/ADR update needed. Full T1–T7 impact matrix: strictly hardens T1 (passive
+  eavesdropper: plaintext h2c → TLS 1.3) and T2 (active MITM: peer-cert verification
+  goes from inert to real); marginally hardens T3/T7 (closes a same-namespace
+  unauthenticated-RPC window the checker found the briefing had *understated* — pre-
+  change, the gRPC listener ran with `tls_required: false` regardless of peer config,
+  so `verify_peer_region()` never actually gated anything); T4/T5/T6 unchanged (T6
+  correctly noted as out of scope — this is classical TLS 1.3 for the ops/inter-
+  region transport layer, unrelated to ADR-0003's PQ-hybrid work on the MLS/E2EE
+  plane). No tier weakened, no new server-visible metadata.
+- **security-auditor: GREEN.** Verified via `helm lint` + `helm template` across all
+  3 real environments plus edge cases (missing-Secret and invalid-remoteRef paths
+  both fail closed — pod mount block or process-startup bail, never silent plaintext
+  degrade; repo-wide grep found zero other consumers of the removed unprefixed
+  `GRPC_TLS_CERT/KEY/CA` keys). One non-blocking **operational** precondition, not a
+  code issue: the 3 environments' `grpc-tls-{cert,key,ca}` secret-store entries must
+  actually be populated before merge lands on a GitOps-automated environment, or
+  ExternalSecret sync failure stalls (doesn't crash) the next rollout — staging
+  auto-syncs (`selfHeal: true`), prod-eu/ap are manual-sync gated. Both reviewers
+  independently flagged the same low-severity nit — fixed in-cycle: the
+  `checksum/grpc-tls-secret` pod-annotation comment claimed rotation triggers a
+  rollout, but it hashes the ExternalSecret *template text* (remoteRef path
+  strings), not the actual fetched cert bytes Helm can never see — corrected the
+  comment to say so honestly instead of implying working rotation-triggered
+  rollout. Declined the auditor's own flagged optional `defaultMode: 0400` hardening
+  idea per its own caution: would make `tls.key` unreadable by `runAsUser: 1000`
+  without a matching `fsGroup`, breaking startup — not worth the risk for a
+  world-readable-but-single-process-container nit.
+- Full `helm lint`/`helm template` (3 envs + fail-guard edge case) re-verified after
+  the comment fix; `cargo build --workspace` re-verified clean (confirmed zero `.rs`
+  files touched — this is Helm/YAML-only). No frontend files touched.
+- **Next cycle candidates:** the security-auditor's flagged operational precondition
+  above (provision the 3 environments' grpc-tls secret-store keys before this lands
+  on staging's auto-sync — an ops task, not a code change, flagging here so it isn't
+  missed); the checker's noted future gate — **activating `grpcPeers` for real
+  cross-region mesh traffic needs its own separate threat-model check** (that's when
+  §3.5.2's inter-region traffic-analysis mitigations actually matter, not this
+  cycle's plumbing-only change); the values.schema.json gap the auditor noted
+  (`externalSecrets.remoteRefs.*` has no `minLength: 1`, so an explicit empty
+  override renders `key: null` — caught by ESO's apiserver validation, fail-closed,
+  but not by Helm — informational, not urgent); media-key incoming/outgoing
+  asymmetry (multi-part, cycle 359); PQ hybrid Phase A (blocked on openmls).
+
+## Previous state (2026-08-27, cycle 374 — FEATURE: wire GC/timeout config into Helm + fix broken POWEHI__ key names, commit 753f3ad)
 
 - CI green (`gh run list --limit 5` all success), `gh issue list --state open` empty,
   `git status` clean at cycle start. Picked cycle 373's own top carried-forward
