@@ -51,9 +51,9 @@ resource "hcloud_server" "control_plane" {
   labels = merge(local.base_labels, { role = "control-plane" })
 
   user_data = templatefile("${path.module}/templates/control-plane-init.sh.tpl", {
-    index      = count.index
-    token      = local.k3s_token
-    cluster    = var.cluster_name
+    index       = count.index
+    token       = local.k3s_token
+    cluster     = var.cluster_name
     version_env = local.k3s_version_line
   })
 }

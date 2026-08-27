@@ -65,8 +65,15 @@ jobs:
             echo "::endgroup::"
 
             echo "::group::helm template -f ${overlay} | kubeconform"
+            # -schema-location default covers core/built-in kinds; the second
+            # -schema-location adds the community CRD catalog so ExternalSecret
+            # (external-secrets.io) and ServiceMonitor (monitoring.coreos.com)
+            # — both rendered by this chart — have schemas to validate against
+            # instead of erroring as "could not find schema for <kind>".
             helm template . -f "${overlay}" \
-              | kubeconform -strict -summary -output json
+              | kubeconform -strict -summary -output json \
+                  -schema-location default \
+                  -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
             echo "::endgroup::"
           done
 
