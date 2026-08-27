@@ -1,9 +1,10 @@
 # Golden-path integration test: a manifest that satisfies all 5 checks
-# together must render zero denials. This is the regression test for the
-# thing agents have so far only verified manually against the real Helm
-# overlays each cycle (see .claude/memory/project-context.md) — a future
-# change that breaks the "should pass" path for a fully compliant workload
-# now fails `conftest verify`, not just a human's memory of a manual check.
+# (no_literal_secrets.rego's env[].value sub-check included) together must
+# render zero denials. This is the regression test for the thing agents
+# have so far only verified manually against the real Helm overlays each
+# cycle (see .claude/memory/project-context.md) — a future change that
+# breaks the "should pass" path for a fully compliant workload now fails
+# `conftest verify`, not just a human's memory of a manual check.
 package main
 
 import rego.v1
@@ -27,6 +28,10 @@ compliant_manifest := [
 						"limits": {"cpu": "500m", "memory": "256Mi"},
 						"requests": {"cpu": "250m", "memory": "128Mi"},
 					},
+					"env": [{
+						"name": "DATABASE_URL",
+						"valueFrom": {"secretKeyRef": {"name": "api-secret", "key": "DATABASE_URL"}},
+					}],
 				}],
 			},
 		}},
