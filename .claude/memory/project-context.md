@@ -17,7 +17,117 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-27, cycle 379 — FEATURE: cover Job/CronJob/bare-Pod in conftest policy gate, commit da1aa63)
+## Current state (2026-08-28, cycle 380 — STABILIZATION: conftest verify regression test gate, commit a72177a)
+
+- CI green (`gh run list --limit 3` all success), `git status` clean at cycle
+  start, no open `gh issue list --state open` items. Followed the
+  STABILIZATION playbook's test-gap step and picked up cycle 378's own F7
+  candidate (reinforced by cycle 379's memory notes as the top remaining
+  item): the 5-check conftest/OPA policy gate (`infra/policy/*.rego`) had
+  **zero regression coverage of its own** — every negative control from
+  cycles 378/379 (missing resource limits, `:latest` tag, literal secret,
+  `runAsNonRoot: false`, no deny-all NetworkPolicy, the CronJob deep-nesting
+  path) existed only in agent transcripts, never as a re-runnable test. A
+  future refactor of a helper (`pod_spec`/`containers_of`/
+  `workload_pod_labels`) or a `deny` condition could silently reintroduce a
+  vacuous-pass gap — exactly the class of bug fixed in cycle 379 (da1aa63)
+  — with nothing in CI to catch it.
+- **Fix:** added 7 new `infra/policy/*_test.rego` files (44 `test_*` OPA
+  unit-test rules total, same `package main` as the production rules they
+  test): `helpers_test.rego` (kind-dispatch correctness, explicit CronJob
+  deep-nesting + Job/Pod/CronJob `is_workload_like` coverage — the highest-
+  value regression target given cycle 379's fix), one `_test.rego` per
+  check file (`resource_limits_test.rego`, `network_policy_test.rego`,
+  `no_latest_tag_test.rego`, `no_literal_secrets_test.rego`,
+  `run_as_nonroot_test.rego` — each with direct predicate-level unit tests
+  plus one end-to-end `deny`-firing test using `contains(msg, "...")` to
+  avoid false cross-contamination from the other 4 checks' denies sharing
+  the same unioned `deny` partial-set rule), and
+  `compliant_manifest_test.rego` (one golden fully-compliant-manifest
+  integration fixture asserting `count(deny) == 0` — every field in it is
+  load-bearing, i.e. removing any single one flips it to a denial). Wired
+  `conftest verify -p infra/policy` into `.github/workflows/ci-infra.yml`
+  right after the "Install conftest" step, before the per-overlay
+  `helm template | conftest test --combine` loop (fail-fast: a broken
+  policy package now fails at the cheap unit-test step, not a confusing
+  downstream overlay failure). No production `.rego` file was modified —
+  additive test-only change plus one CI step.
+- Verified non-vacuous via mutation testing before delegating to review:
+  ran `conftest verify -p infra/policy` clean (44/44), then temporarily
+  flipped `resource_limits.rego`'s `not has_resource_limits(container)` →
+  `has_resource_limits(container)`, confirmed exactly the 3 expected tests
+  went red (`test_deny_fires_for_container_missing_limits`,
+  `test_deny_fires_for_cronjob_container_missing_limits`,
+  `test_fully_compliant_manifest_has_zero_denials`), restored the file and
+  reconfirmed all green. Also re-ran `conftest test` against all 3 real
+  overlays (prod-eu, prod-ap, staging) — still 5/5 pass, confirming the new
+  test suite didn't require any change to the chart itself.
+- **security-auditor: GREEN, no findings.** Independently re-read all 7 new
+  test files + all 6 production `.rego` files + the CI diff (not trusting
+  my own summary), confirmed fixture shapes accurately mirror real rendered
+  K8s YAML for every kind exercised (Deployment/CronJob/Pod/NetworkPolicy/
+  Secret), traced every `count(deny) == 0` test to confirm none is
+  vacuously true (each depends on a real absence-of-violation condition,
+  not an input shape that could never trigger any deny rule), grepped to
+  confirm no rule anywhere reads `input[i].path` (so fixtures omitting the
+  `path` key conftest's real `--combine` envelope includes are safe —
+  `all_resources` only ever projects `.contents`), manually recounted all
+  44 `test_*` rules across the 7 files to confirm the reported "44 tests,
+  44 passed" wasn't silently skipping anything, independently verified my
+  mutation-testing methodology and result were sound without re-running it,
+  confirmed conftest v0.69.0 (already pinned in this workflow) supports
+  `verify -p <dir>` as a stable flag and auto-discovers `*_test.rego` by
+  suffix (no risk of a silently-empty glob), confirmed the new CI step has
+  no `if:`/`continue-on-error` and runs unconditionally, and confirmed the
+  two intentionally-fake credential-shaped test fixtures
+  (`postgres://u:pw123@db/x`, base64 `hunter2`) are obviously synthetic
+  placeholder data, not a real-secret-in-repo concern. Not architectural
+  (test-only addition, zero production Rego/chart-output change, no new API
+  surface/DB column/server-visible metadata) and not crypto —
+  `threat-model-checker`/`crypto-reviewer` correctly not invoked, matching
+  precedent from cycles 377/378/379 for sibling infra-CI-only gates.
+- Also ran the rest of the STABILIZATION security sweep: `cargo audit`
+  clean (0 advisories across 652 crate dependencies), `cargo deny check`
+  clean (`advisories ok, bans ok, licenses ok, sources ok` — only
+  pre-existing duplicate-dependency-version warnings from the normal
+  ecosystem-transition dependency graph, e.g. `rand`/`getrandom`/`hashbrown`
+  each pulled in at 2-5 versions transitively; not a new regression, no
+  Cargo.toml/Cargo.lock touched this cycle), `cargo build --workspace`
+  clean, `cargo test --workspace` clean (nextest not installed locally on
+  this runner — used the documented fallback; 0 failures across every
+  crate, only pre-existing `#[ignore]`d testcontainers-gated integration
+  tests skipped as expected without Docker).
+- Target dir hygiene: `target/` is 27GB (over the 20GB prune threshold),
+  ran the 0-byte `.rmeta` sweep (nothing to remove) and the `mtime +7`
+  prune pass — found nothing old enough to prune (all artifacts recent from
+  active cycles), so size is unchanged at 27GB. Not urgent enough to force-
+  delete recent incremental-cache artifacts; will re-check next
+  STABILIZATION cycle (385).
+- Real push to `main` confirmed (commit a72177a, 8 files changed, all
+  additive). No `.rs`/`values.yaml`/overlay files touched.
+- **Next cycle candidates (carried forward, unchanged from cycle 379 unless
+  noted):** this cycle's own YELLOW-1 from cycle 379 (the `--skip-tests` /
+  `podSelector` labels-required-on-future-Job gotcha in `ci-infra.yml` —
+  still worth a one-line comment, still not urgent); cycle 378's F2
+  (extend `no_literal_secrets.rego` to inspect container `env[].value` for
+  credential-looking literals) — now itself testable immediately via the
+  new `no_literal_secrets_test.rego` once implemented; F8 (SHA-pinning-vs-
+  signature-verification nit on `actions/checkout`/`setup-helm`/
+  `setup-terraform`, pre-existing, low urgency); the long-carried items:
+  provision the 3 environments' `grpc-tls-{cert,key,ca}` secret-store keys
+  (ops task, not code); activating `grpcPeers` for real cross-region mesh
+  traffic (needs its own threat-model check); `r2_endpoint`/`r2_bucket`/
+  `vapid_contact` never wired into the chart (needs real Cloudflare account
+  values, not fabricated); media-key incoming/outgoing asymmetry
+  (multi-part, cycle 359); PQ hybrid Phase A (blocked on openmls stable
+  `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003
+  Phase B); project-context.md size (now comfortably under the 256KB Read
+  cap — no action needed yet). New this cycle: consider installing
+  `cargo-nextest` on this runner (fell back to `cargo test` this cycle,
+  works fine but nextest gives per-test timing/retries the plain runner
+  doesn't — low priority, not a gate failure).
+
+## Previous state (2026-08-27, cycle 379 — FEATURE: cover Job/CronJob/bare-Pod in conftest policy gate, commit da1aa63)
 
 - CI green (`gh run list --limit 3` all success), `git status` clean at cycle
   start. Picked cycle 378's own F5 candidate: `helpers.rego`'s
