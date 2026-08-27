@@ -17,7 +17,67 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-27, cycle 375 — STABILIZATION: wire GRPC mTLS material into Helm via Secret volume mount, commit a1c8ab1)
+## Current state (2026-08-27, cycle 376 — FEATURE: add minLength validation for externalSecrets.remoteRefs, commit 5211f5c)
+
+- CI green (`gh run list --limit 5` all success), `gh issue list --state open` empty,
+  `git status` clean at cycle start. Picked cycle 375's own documented informational
+  gap: `values.schema.json` had **zero** `externalSecrets` schema coverage at all
+  (confirmed via grep before starting — not partial, total). `templates/
+  externalsecret.yaml` interpolates every `externalSecrets.remoteRefs.*` value
+  directly into an ExternalSecret's `remoteRef.key` with no Helm-side check — an
+  operator setting one to `""` would previously render `key: ""` silently, only
+  caught by External Secrets Operator's own apiserver validation at apply time
+  (fail-closed, but late — not at `helm lint`/schema time).
+- **Fix (delegated to infra-lead):** added an `externalSecrets` object to
+  `infra/helm/powehi/values.schema.json` (draft-07, matching the file's existing
+  style) — `enabled` (boolean), `refreshInterval` (string), `secretStoreRef.
+  {name,kind}` (string, `minLength: 1`), and the actual fix: `remoteRefs.
+  {databaseUrl,redisUrl,r2AccessKeyId,r2SecretAccessKey,vapidPrivateKey,
+  grpcTlsCert,grpcTlsKey,grpcTlsCa}` each `{"type":"string","minLength":1}`. Purely
+  additive (+27/-0 lines) — deliberately did not touch `values.yaml`/any
+  `values-{prod-eu,prod-ap,staging}.yaml` overlay/any template, since all 4 already
+  populate all 8 keys with non-empty Vault-path strings (verified by grep before
+  delegating, independently re-verified by both the implementing agent and the
+  security-auditor pass). No `required` array added anywhere in the new blocks, so
+  overlays that legitimately omit `externalSecrets.enabled` (all 3 do, inheriting
+  `true` from base `values.yaml` via Helm's value-merge) are unaffected.
+- Negative-control verification (both by the implementing agent and independently
+  by me before commit): `helm template ... --set
+  externalSecrets.remoteRefs.databaseUrl=""` now fails with `minLength: got 0, want
+  1` (exit 1), confirming the schema actually catches the bug it targets; the same
+  command without the override still renders successfully. `helm lint` green for
+  base `values.yaml` alone and all 3 overlays layered on top.
+- **security-auditor: GREEN.** Independently confirmed (not rubber-stamped): `git
+  diff --stat` shows the change is purely additive (0 deletions) so no pre-existing
+  schema key was clobbered or restructured; only Vault-style path strings (e.g.
+  `"powehi/database-url"`, `"powehi/prod-eu/grpc-tls-cert"`) appear anywhere in the
+  schema/diff/values files, never actual secret material; re-ran `helm lint` for
+  all 4 value-file combinations independently. Not architectural (pure client-
+  side/lint-time Helm value validation, zero runtime behavior change, no new API
+  surface or server-visible metadata) and not crypto — `threat-model-checker`/
+  `crypto-reviewer` correctly not required, matching cycle 375's precedent for the
+  same file's `minimum` schema additions.
+- No `.rs` files touched — `cargo build --workspace` unaffected (not re-run, no-op
+  expected and consistent with precedent for Helm/YAML-only cycles e.g. 375/373).
+  No frontend files touched.
+- Target dir hygiene: not checked this cycle (FEATURE mode; next due cycle 380,
+  STABILIZATION).
+- **Next cycle candidates (unchanged from cycle 375, still open):** the security-
+  auditor's flagged operational precondition from cycle 375 — provision the 3
+  environments' `grpc-tls-{cert,key,ca}` secret-store keys before that cycle's
+  change lands on staging's auto-sync (an ops task, not code, still worth flagging);
+  activating `grpcPeers` for real cross-region mesh traffic needs its own separate
+  threat-model check (that's when §3.5.2's inter-region traffic-analysis mitigations
+  actually matter); `r2_endpoint`/`r2_bucket`/`vapid_contact` never wired into the
+  chart at all (needs real Cloudflare R2 account/bucket values per region, not
+  fabricated); wiring `helm lint`/`helm template`+`kubeconform`+`conftest` into CI
+  (still fully absent from every workflow per cycle 374's audit); media-key
+  incoming/outgoing asymmetry (multi-part, cycle 359); PQ hybrid Phase A (blocked on
+  openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated on
+  ADR-0003 Phase B); project-context.md size (now ~2270 lines, comfortably under the
+  256KB Read cap — no action needed yet).
+
+## Previous state (2026-08-27, cycle 375 — STABILIZATION: wire GRPC mTLS material into Helm via Secret volume mount, commit a1c8ab1)
 
 - CI green (`gh run list --limit 5` all success), `gh issue list --state open` empty,
   `git status` clean at cycle start. Full sweep first, everything green, nothing to
