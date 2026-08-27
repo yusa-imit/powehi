@@ -1,0 +1,109 @@
+name: CI — Infra
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'infra/helm/**'
+      - 'infra/terraform/**'
+      - '.github/workflows/ci-infra.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'infra/helm/**'
+      - 'infra/terraform/**'
+      - '.github/workflows/ci-infra.yml'
+
+concurrency:
+  group: ci-infra-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  helm-validate:
+    name: Helm lint + kubeconform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v5.0.1
+        with:
+          version: "v4.2.4"
+
+      - name: Install kubeconform (SHA-verified)
+        env:
+          KUBECONFORM_VERSION: "v0.8.0"
+        run: |
+          set -euo pipefail
+          curl -sSfL -o kubeconform-linux-amd64.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          curl -sSfL -o CHECKSUMS \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/CHECKSUMS"
+          grep " kubeconform-linux-amd64.tar.gz\$" CHECKSUMS > kubeconform.sha256
+          sha256sum --check kubeconform.sha256
+          tar -xzf kubeconform-linux-amd64.tar.gz kubeconform
+          chmod +x kubeconform
+          sudo mv kubeconform /usr/local/bin/kubeconform
+
+      - name: helm lint — base chart
+        working-directory: infra/helm/powehi
+        run: helm lint .
+
+      - name: helm lint + kubeconform — overlays (prod-eu, prod-ap, staging)
+        working-directory: infra/helm/powehi
+        # No -kubernetes-version pin: every env's k3s_version is left empty
+        # ("latest") in infra/terraform, so there is no real pinned target
+        # version to assert here — validate against kubeconform's default
+        # (master) schema set instead of fabricating a version.
+        run: |
+          set -euo pipefail
+          for overlay in values-prod-eu.yaml values-prod-ap.yaml values-staging.yaml; do
+            echo "::group::helm lint -f ${overlay}"
+            helm lint . -f "${overlay}"
+            echo "::endgroup::"
+
+            echo "::group::helm template -f ${overlay} | kubeconform"
+            helm template . -f "${overlay}" \
+              | kubeconform -strict -summary -output json
+            echo "::endgroup::"
+          done
+
+  terraform-validate:
+    name: Terraform validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v4.0.1
+        with:
+          # Kept in sync with infra/terraform/.terraform-version and the
+          # `required_version = ">= 1.6"` constraint declared in every env's
+          # versions.tf (dev, prod-eu, prod-ap-seoul) and the hetzner-k3s module.
+          terraform_version: "1.6.2"
+          terraform_wrapper: false
+
+      - name: terraform fmt (check)
+        working-directory: infra/terraform
+        run: terraform fmt -check -recursive
+
+      - name: terraform init + validate — dev
+        working-directory: infra/terraform/envs/dev
+        # -backend=false: syntax/schema validation only, no cloud credentials
+        # or remote state access available (or wanted) in this CI job.
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+      - name: terraform init + validate — prod-eu
+        working-directory: infra/terraform/envs/prod-eu
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+      - name: terraform init + validate — prod-ap-seoul
+        working-directory: infra/terraform/envs/prod-ap-seoul
+        run: |
+          terraform init -backend=false
+          terraform validate
