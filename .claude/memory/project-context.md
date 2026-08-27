@@ -17,7 +17,109 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-28, cycle 380 — STABILIZATION: conftest verify regression test gate, commit a72177a)
+## Current state (2026-08-28, cycle 381 — FEATURE: extend no_literal_secrets.rego to inspect container env[].value, commit 7019046)
+
+- CI green (`gh run list --limit 3` all success), `git status` clean at cycle
+  start, no phase checklist items remain unchecked (phases 1-6 all `[x]`;
+  this cycle picked from the carried-forward candidate list, same pattern as
+  cycles 373-380). Picked cycle 378's F2 (reinforced by cycle 380's own
+  notes as "now itself testable immediately"): `no_literal_secrets.rego`
+  only ever inspected `kind: Secret` objects' `data`/`stringData` fields —
+  an operator pasting a real credential straight into a Deployment's
+  `env: - value:` (bypassing ExternalSecret/`envFrom.secretRef` entirely)
+  would sail through all 5 conftest checks undetected. Cycle 378's own
+  synthetic control (`DATABASE_URL=postgres://u:pw123@db/x` as an env var)
+  had already demonstrated this gap.
+- **Fix:** added a second `deny` rule to `infra/policy/no_literal_secrets.rego`
+  that inspects `containers_of(resource)` (reusing `helpers.rego`'s
+  `is_workload_like`/`containers_of`, so Job/CronJob/Pod are covered
+  identically to the other 4 checks) for `env[].value` entries (as opposed
+  to `env[].valueFrom`) that look like literal credentials: either the env
+  var's own name matches a credential-shaped pattern
+  (password/passwd/secret/token/api-key/private-key/access-key,
+  case-insensitive) with any non-empty value, or the value itself matches a
+  credential shape regardless of name (`scheme://user:pass@host` connection
+  string, AWS `AKIA[0-9A-Z]{16}` access-key-id, or any `-----BEGIN...` PEM
+  block) — the second branch is what catches the DATABASE_URL example,
+  where the var name alone gives no signal. Added 15 new tests to
+  `no_literal_secrets_test.rego` (predicate-level for
+  `credential_name_pattern`/`credential_value_pattern`/
+  `is_credential_looking_env`, plus end-to-end deny-firing/deny-absent
+  integration tests on synthetic Deployment fixtures) — 44 → 59 total
+  `test_*` rules. Also added a compliant `env: valueFrom: secretKeyRef`
+  entry to `compliant_manifest_test.rego`'s golden fixture so the new
+  sub-rule is passively exercised by the "fully compliant → zero denials"
+  integration test too, not just its own dedicated tests.
+- Verified non-vacuous via mutation testing before delegating to review:
+  `conftest verify -p infra/policy` 59/59 clean, then temporarily replaced
+  `credential_name_pattern`/`credential_value_pattern`'s first two rule
+  bodies with `false`, confirmed exactly 6 tests went red (the ones directly
+  exercising those two rules and their positive callers), restored and
+  reconfirmed 59/59 green. Re-ran all 3 real overlays (prod-eu, prod-ap,
+  staging) through `helm template | conftest test --combine` — still 6/6
+  pass (test-group count went 5→6 since the check now has its own group;
+  confirmed via grep that the real chart renders zero `env[].value` entries
+  today, only `envFrom` — pure future-regression guard on production,
+  matching the same "vacuous-today, real-guard" status as check (c)'s
+  original Secret-object rule and several sibling checks).
+- **security-auditor: YELLOW, both findings fixed in-cycle.** Independently
+  verified (own reading, not trusting my summary): confirmed
+  `is_credential_looking_env` safely no-ops on non-string/missing `value`
+  and on `valueFrom`-only entries (guarded by `is_string(object.get(env,
+  "value", null))` before any pattern call) — no crash, no false-negative
+  surprise; confirmed the RE2 regexes are correctly escaped/unanchored;
+  confirmed the `any_credential_deny`-scoped "absent" tests genuinely test
+  *this* rule's silence (its message contains the unique substring "literal
+  credential", no collision with the original rule's "literal secret
+  value") rather than accidentally passing because the whole `deny` set
+  happened to be empty for an unrelated reason. **F1 (fixed):** the
+  `-----BEGIN` value-pattern's doc comment said "PEM private key block" but
+  the code matches any PEM header (cert, CSR, public key too) — corrected
+  the comment to state the actual (deliberately broad) behavior and why
+  erring toward false positives is the right trade-off for a secret-leak
+  gate. **F2 (fixed):** `compliant_manifest_test.rego`'s docstring/golden
+  fixture didn't reference or passively exercise the new sub-check — added
+  the `valueFrom` env entry (above) and updated the docstring to mention it.
+  Noted-but-accepted as intentional (not fixed, matches this cycle's own
+  stated design): bare name-substring matching (`password`/`token`/`secret`)
+  means a future non-secret config name like `TOKEN_EXPIRY_SECONDS` would
+  also trip the gate if ever added as a literal `env[].value` — confirmed
+  via repo-wide grep this doesn't false-positive on anything today (only
+  `externalSecrets.remoteRefs.*`/`secretStoreRef.name`-shaped config exists,
+  neither of which is ever env-injected), and matches the stated "err
+  toward false positive over silent credential leak" philosophy for a
+  security-gate rule, consistent with how `no_literal_secrets.rego`'s
+  original Secret-object check already treats ANY non-empty string as
+  suspect with zero allowlist. Not architectural (pure additive Rego-only
+  change, zero chart-rendered-output change, no new API surface/DB column/
+  server-visible metadata) and not crypto — `threat-model-checker`/
+  `crypto-reviewer` correctly not invoked, matching precedent from cycles
+  377-380 for sibling infra-CI-only policy gates.
+- No `.rs`/`values.yaml`/overlay/workflow files touched (confirmed via
+  `git status --short`: only the 3 `infra/policy/*.rego` files) —
+  `cargo build --workspace`/`pnpm test` correctly not re-run (no-op
+  expected, pure Rego-only cycle).
+- Target dir hygiene: not checked this cycle (FEATURE mode; next due cycle
+  385, STABILIZATION).
+- **Next cycle candidates (carried forward, unchanged unless noted):**
+  cycle 379's YELLOW-1 (the `--skip-tests`/`podSelector` labels-required-on-
+  future-Job gotcha in `ci-infra.yml` — still a one-line-comment nit, still
+  not urgent); F8 (SHA-pinning-vs-signature-verification nit on
+  `actions/checkout`/`setup-helm`/`setup-terraform`, pre-existing, low
+  urgency); cargo-nextest install consideration (low priority, cosmetic);
+  the long-carried ops/blocked items: provision the 3 environments'
+  `grpc-tls-{cert,key,ca}` secret-store keys (ops task, not code);
+  activating `grpcPeers` for real cross-region mesh traffic (needs its own
+  threat-model check); `r2_endpoint`/`r2_bucket`/`vapid_contact` never wired
+  into the chart (needs real Cloudflare account values, not fabricated);
+  media-key incoming/outgoing asymmetry (multi-part, cycle 359); PQ hybrid
+  Phase A (blocked on openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid
+  OPRF upgrade (gated on ADR-0003 Phase B); project-context.md size (now
+  ~2740 lines, comfortably under the 256KB Read cap — no action needed yet,
+  though it's grown steadily and a future cycle should consider trimming
+  the oldest "Previous state" entries once it starts approaching the cap).
+
+## Previous state (2026-08-28, cycle 380 — STABILIZATION: conftest verify regression test gate, commit a72177a)
 
 - CI green (`gh run list --limit 3` all success), `git status` clean at cycle
   start, no open `gh issue list --state open` items. Followed the
