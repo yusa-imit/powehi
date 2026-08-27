@@ -64,6 +64,16 @@ jobs:
           chmod +x conftest
           sudo mv conftest /usr/local/bin/conftest
 
+      - name: conftest verify — Rego policy unit tests
+        # Regression gate for infra/policy/*.rego itself (the rules the
+        # per-overlay `conftest test` step below relies on): runs the
+        # `test_*` rules in infra/policy/*_test.rego so a change to a
+        # helper (e.g. pod_spec/containers_of) or a check's deny condition
+        # that breaks intended behavior fails here, not silently — before
+        # this, the only regression coverage was agent-transcript manual
+        # negative controls, never re-run automatically.
+        run: conftest verify -p infra/policy
+
       - name: helm lint — base chart
         working-directory: infra/helm/powehi
         run: helm lint .
