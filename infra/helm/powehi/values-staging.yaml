@@ -21,7 +21,7 @@ tier: "Tier1"
 
 config:
   logLevel: "info"
-  grpcTlsEnabled: "true"
+  grpcTlsEnabled: true
 
 monitoring:
   serviceMonitor:

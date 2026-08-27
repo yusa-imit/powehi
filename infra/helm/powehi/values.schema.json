@@ -35,8 +35,19 @@
           "enum": ["error", "warn", "info", "debug", "trace"]
         },
         "grpcTlsEnabled": {
-          "type": "string",
-          "enum": ["true", "false"]
+          "type": "boolean"
+        },
+        "databaseMaxConnections": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "r2RequestTimeoutSecs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "mediaGcSweepTimeoutSecs": {
+          "type": "integer",
+          "minimum": 1
         }
       }
     },

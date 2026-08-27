@@ -40,7 +40,13 @@ config:
   adminPort: "9090"
   grpcPort: "50051"
   grpcPeers: ""         # CSV: https://peer1:50051,https://peer2:50051
-  grpcTlsEnabled: "true"
+  # Gates whether the grpc-tls Secret is mounted (deployment.yaml) and whether
+  # POWEHI__GRPC_TLS_CERT/KEY/CA point at the mounted paths (configmap.yaml).
+  # Default false preserves current effective behavior (TLS has never actually
+  # been wired anywhere). Must be true before config.grpcPeers is populated for
+  # real cross-region mesh traffic — main.rs's fail-closed check refuses to
+  # start if grpcPeers is set but grpc_tls_enabled() is false.
+  grpcTlsEnabled: false
   # Postgres pool size. Matches Rust compiled default (POWEHI__DATABASE_MAX_CONNECTIONS).
   databaseMaxConnections: 20
   # Per-call R2 S3 operation timeout, seconds. Matches Rust compiled default (POWEHI__R2_REQUEST_TIMEOUT_SECS).

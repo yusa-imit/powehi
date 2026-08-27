@@ -6,6 +6,9 @@ metadata:
   labels:
     {{- include "powehi.labels" . | nindent 4 }}
 spec:
+  {{- if and .Values.config.grpcTlsEnabled (not .Values.externalSecrets.enabled) }}
+  {{ fail "config.grpcTlsEnabled requires externalSecrets.enabled=true (the grpc-tls Secret must exist)" }}
+  {{- end }}
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
   {{- end }}
@@ -19,6 +22,17 @@ spec:
       annotations:
         # Force rollout on ConfigMap change.
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.config.grpcTlsEnabled }}
+        # NOTE: hashes this rendered template's text (remoteRef key paths), NOT the
+        # actual cert/key/ca bytes ESO fetches from the secret store — Helm has no
+        # way to see those values. A cert rotated in the store does NOT change this
+        # hash, so it does NOT trigger a rollout; from_pem_files() only reads the
+        # mounted files once at process startup, so a rotated cert needs a manual
+        # restart until this is wired to something that reads live Secret content
+        # (e.g. Reloader). Harmless today since grpcPeers is empty everywhere (no
+        # live mesh traffic depends on picking up a rotated cert without a restart).
+        checksum/grpc-tls-secret: {{ include (print $.Template.BasePath "/externalsecret.yaml") . | sha256sum }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "powehi.fullname" . }}
       securityContext:
@@ -74,6 +88,16 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.config.grpcTlsEnabled }}
+            - name: grpc-tls
+              mountPath: /etc/powehi/tls
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if .Values.config.grpcTlsEnabled }}
+        - name: grpc-tls
+          secret:
+            secretName: {{ include "powehi.fullname" . }}-grpc-tls
+        {{- end }}

@@ -20,10 +20,18 @@ data:
   POWEHI__ADMIN_PORT: {{ .Values.config.adminPort | quote }}
   POWEHI__GRPC_PORT: {{ .Values.config.grpcPort | quote }}
   POWEHI__GRPC_PEERS: {{ .Values.config.grpcPeers | quote }}
-  POWEHI__GRPC_TLS_ENABLED: {{ .Values.config.grpcTlsEnabled | quote }}
   POWEHI__DATABASE_MAX_CONNECTIONS: {{ .Values.config.databaseMaxConnections | default 20 | quote }}
   POWEHI__R2_REQUEST_TIMEOUT_SECS: {{ .Values.config.r2RequestTimeoutSecs | default 30 | quote }}
   POWEHI__MEDIA_GC_SWEEP_TIMEOUT_SECS: {{ .Values.config.mediaGcSweepTimeoutSecs | default 1800 | quote }}
+  {{- if .Values.config.grpcTlsEnabled }}
+  # Static in-container paths where deployment.yaml mounts the grpc-tls Secret
+  # (see externalsecret.yaml's grpc-tls ExternalSecret). Safe to put in a
+  # ConfigMap: these are file paths, not secret material — only the mounted
+  # Secret's file contents are secret.
+  POWEHI__GRPC_TLS_CERT: "/etc/powehi/tls/tls.crt"
+  POWEHI__GRPC_TLS_KEY: "/etc/powehi/tls/tls.key"
+  POWEHI__GRPC_TLS_CA: "/etc/powehi/tls/ca.crt"
+  {{- end }}
   {{- if .Values.otlp.endpoint }}
   # OTLP/gRPC collector endpoint for distributed trace export (prd.md §13.3).
   # Absent when otlp.endpoint is empty — app falls back to Prometheus-only mode.
