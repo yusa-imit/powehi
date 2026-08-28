@@ -17,7 +17,102 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-28, cycle 383 — FEATURE: wire r2_endpoint/r2_bucket/vapid_contact into Helm chart, commit 84e9b71)
+## Current state (2026-08-28, cycle 384 — FEATURE: fail-closed r2_endpoint dev-default guard in powehi-config, commit 3a29aa9)
+
+- CI green (`gh run list --limit 5` all success), `gh issue list --state open`
+  empty, `git status` clean at cycle start. Picked cycle 383's own advisory
+  #1 (deferred, not fixed that cycle): no fail-closed guard stopped the
+  compiled `r2_endpoint` dev default (`http://localhost:9000`, set via
+  `config::Config::builder().set_default(...)` in
+  `crates/infra/powehi-config/src/lib.rs`'s `load()`) from silently being
+  used in a non-local `region_id` — an environment shipping with
+  `r2Endpoint` still blank (or the Helm wiring itself not yet rolled out to
+  that environment) gets working-but-wrong pre-signed media URLs pointed at
+  the server's own loopback instead of a loud startup crash.
+- **Fix (implemented directly, single small Rust file, no delegation
+  needed):** named the literal as `const DEV_R2_ENDPOINT_DEFAULT: &str =
+  "http://localhost:9000"` (reused by both `load()`'s `set_default` and the
+  new check, so there's exactly one source of truth), added
+  `ConfigError::R2DevDefaultEndpointInNonLocalRegion(String)`, and a new
+  `validate()` rule: `region_id != "local" && r2_endpoint ==
+  DEV_R2_ENDPOINT_DEFAULT` → hard error. Deliberately did NOT add the same
+  guard for `r2_bucket` — its dev default (`powehi-media`) is a plausible
+  real bucket name, not inherently unsafe the way a loopback URL literal is.
+  Also fixed a latent inconsistency this change exposed: the test module's
+  `default_config()` fixture combined `region_id: "eu-central-1"` with
+  `r2_endpoint: "http://localhost:9000"` — a combination that would now
+  itself fail the new rule — changed its endpoint to a realistic
+  `https://acct.r2.cloudflarestorage.com` so all pre-existing
+  `validate(&cfg).is_ok()` tests built from it stay meaningful. Added 3 new
+  unit tests: dev-default rejected across 3 non-local `region_id`s
+  (`eu-central-1`/`ap-seoul-1`/`us-east-1`), dev-default accepted when
+  `region_id == "local"`, real endpoint accepted regardless of region.
+- Verified: `cargo build --workspace` clean, `cargo test -p powehi-config`
+  24/24 (21 pre-existing + 3 new), full `cargo test --workspace` all green
+  (no other crate matches on `ConfigError::` variants, confirmed via grep —
+  the new enum variant is non-breaking), `cargo clippy -p powehi-config
+  --all-targets -- -D warnings` clean.
+- **security-auditor: GREEN, one CI-blocking (non-security) nit fixed
+  in-cycle.** Confirmed the guard has no bypass on the real code path
+  (`load()` is `validate()`'s only caller, unconditional placement, no
+  early-return interference); confirmed exact-string-match is correct here
+  (targets one specific compiled literal, not a pattern — deliberately
+  narrower than matching e.g. `127.0.0.1` variants, which would require a
+  *deliberate* operator `set`, out of this guard's scope of catching
+  never-set); confirmed `region_id` is non-secret operator-supplied topology
+  metadata already printed unredacted by the existing `Debug` impl, so
+  embedding it in the new error is compliant with `no-plaintext-logging`;
+  confirmed `region_id == "local"` (dev/CI/docker-compose/
+  `ci-e2e-live.yml`) is unaffected since none of those set
+  `POWEHI__REGION_ID`; confirmed `load_uses_defaults_when_no_env_vars_set`
+  builds its own separate `config::Config::builder()` and never calls
+  `validate()`, so it's unaffected either way. **Fixed:** `cargo fmt -p
+  powehi-config -- --check` failed on the new
+  `dev_default_r2_endpoint_in_non_local_region_is_rejected` test's
+  single-line `expect_err(&format!(...))` — ran `cargo fmt -p
+  powehi-config` to the standard multi-line form, re-verified 24/24 still
+  green after. **Two informational advisories, deferred (real, not fixed
+  now — matches this cycle's own precedent of not scope-creeping a single
+  fail-closed guard into "audit every field"):** (1) `r2_access_key_id`/
+  `r2_secret_access_key` default to `""` with no equivalent guard — a
+  non-local region with unset credentials starts fine and only fails at the
+  first real media call, same silent-until-used shape as the bug this cycle
+  fixed, worth its own `region_id != "local"` guard in a future cycle; (2)
+  a doc comment on `handle_oracle_secret_token` (line ~159, pre-existing,
+  not touched this cycle) says the fallback random key is "per-restart
+  only" but `bin/powehi-server/src/main.rs:121-136` now actually persists
+  it in `server_config` — stale comment, unrelated to this cycle's diff,
+  worth a one-line fix whenever that file is next touched.
+- Not architectural (a stricter startup-time validation rule on an existing
+  config field, zero new server-visible metadata, zero new API surface) —
+  `threat-model-checker` correctly not invoked; not MLS/OPAQUE/WASM crypto
+  — `crypto-reviewer` correctly not invoked.
+- No Helm/`.rego`/frontend files touched this cycle (pure Rust,
+  `crates/infra/powehi-config/src/lib.rs` only) — `helm lint`/`conftest`/
+  `pnpm test` correctly not re-run (no-op expected).
+- Target dir hygiene: not checked this cycle (FEATURE mode; next due cycle
+  385, STABILIZATION).
+- **Next cycle candidates:** the two security-auditor advisories above
+  (both good FEATURE or STABILIZATION picks, same class as this cycle's own
+  fix); cycle 383's advisory #2 (`no_literal_secrets.rego` never inspects
+  `ConfigMap` `data` — a credential pasted into `r2Endpoint` would sail
+  through all 108 conftest checks undetected, demonstrated concretely);
+  cycle 379's YELLOW-1 (`ci-infra.yml` `--skip-tests`/`podSelector` labels
+  nit, still open, still low urgency); the long-carried ops/blocked items:
+  provision the 3 environments' `grpc-tls-{cert,key,ca}` secret-store keys
+  (ops task, not code) and real `r2Endpoint`/`r2Bucket`/`vapidContact`
+  values (ops task, not code — chart supports them since cycle 383, and as
+  of this cycle a non-local region with the dev default left in place will
+  now fail loudly at startup instead of silently misbehaving); activating
+  `grpcPeers` for real cross-region mesh traffic (needs its own threat-model
+  check); media-key incoming/outgoing asymmetry (multi-part, needs a full
+  WASM key-export design, cycle 359); PQ hybrid Phase A (blocked on openmls
+  stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated on
+  ADR-0003 Phase B); project-context.md size (now ~2960 lines — still
+  comfortably under the 256KB Read cap, growing steadily, consider trimming
+  at STABILIZATION).
+
+## Previous state (2026-08-28, cycle 383 — FEATURE: wire r2_endpoint/r2_bucket/vapid_contact into Helm chart, commit 84e9b71)
 
 - CI green (`gh run list --limit 5` all success), `gh issue list --state open`
   empty, `git status` clean at cycle start. Scoped candidates first via an
