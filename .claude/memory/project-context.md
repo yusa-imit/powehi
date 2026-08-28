@@ -17,7 +17,111 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-28, cycle 384 — FEATURE: fail-closed r2_endpoint dev-default guard in powehi-config, commit 3a29aa9)
+## Current state (2026-08-29, cycle 385 — STABILIZATION: fail-closed r2_access_key_id/r2_secret_access_key guard + chacha20 unyank, commit 666d185)
+
+- CI green (`gh run list --limit 3` all success), `gh issue list --state open`
+  empty, `git status` clean at cycle start. Picked cycle 384's own advisory
+  #1 (deferred, not fixed that cycle, same class as that cycle's own fix):
+  `r2_access_key_id`/`r2_secret_access_key` default to `""` via
+  `config::Config::builder().set_default(...)` in `load()`, with no
+  fail-closed guard — a non-local `region_id` deployment missing
+  `POWEHI__R2_ACCESS_KEY_ID`/`POWEHI__R2_SECRET_ACCESS_KEY` would start
+  successfully and only fail at the first real media upload/download call,
+  same silent-until-used shape as the `r2_endpoint` bug cycle 384 fixed.
+- **Fix (implemented directly, single small Rust file, no delegation
+  needed):** added `ConfigError::R2CredentialsMissingInNonLocalRegion(String)`
+  and a new `validate()` rule: `region_id != "local" && (r2_access_key_id.is_empty()
+  || r2_secret_access_key.is_empty())` → hard error (embeds only `region_id`,
+  never the credential values, matching the sibling error's shape). Used `||`
+  deliberately, not `&&` — either credential alone being empty (e.g. an
+  operator who set one env var but typo'd the other's name) is a real
+  deployment bug on its own. Added 3 new unit tests: all 3 empty-combinations
+  (access-key-only, secret-only, both) rejected across 3 non-local
+  `region_id`s, missing credentials accepted when `region_id == "local"`,
+  real credentials accepted regardless of region.
+- Verified: `cargo build --workspace` clean, `cargo test -p powehi-config`
+  27/27 (24 pre-existing + 3 new), full `cargo test --workspace` all green,
+  `cargo clippy -p powehi-config --all-targets -- -D warnings` clean,
+  `cargo fmt -p powehi-config -- --check` clean (one auto-fmt pass needed on
+  a multi-line `for` loop header, same as cycle 384's own fmt nit).
+- **security-auditor: GREEN, no findings needing a fix.** Confirmed no bypass
+  (`load()` is `validate()`'s only caller, new check is last before `Ok(())`,
+  no early-return interference from the 4 preceding guards); confirmed the
+  new error only ever embeds `region_id` (non-secret, already unredacted in
+  the existing `Debug` impl) and never the actual credential values,
+  satisfying `no-plaintext-logging`; confirmed `region_id == "local"`
+  (dev/CI/docker-compose/`ci-e2e-live.yml`) is unaffected since none of those
+  set `POWEHI__REGION_ID`; confirmed `||` (not `&&`) is correct since either
+  credential alone being empty makes SigV4 presigning unusable; **checked,
+  not assumed**, that all 3 real overlays (prod-eu/prod-ap/staging) already
+  wire real credentials via `ExternalSecret` → `POWEHI__R2_ACCESS_KEY_ID`/
+  `POWEHI__R2_SECRET_ACCESS_KEY` (confirmed via `values-*.yaml`
+  `remoteRefs.r2AccessKeyId`/`r2SecretAccessKey` + `externalsecret.yaml` +
+  `deployment.yaml` `envFrom.secretRef`), so this guard is a pure
+  vacuous-today/future-regression guard for all 3, same pattern as cycle
+  384's sibling fix. Two informational-only notes, no action needed: `is_empty()`
+  vs `trim().is_empty()` (not realistic for ESO-sourced secrets, consistent
+  with the sibling check's style); `r2_access_key_id` unredacted vs
+  `r2_secret_access_key` redacted in `Debug` (pre-existing, defensible —
+  access-key-id is an identifier not a secret, same AWS/R2 convention).
+- **Also fixed as part of this cycle's STABILIZATION security sweep:**
+  `cargo audit` surfaced a new (not present as of cycle 380's last sweep)
+  yanked-crate warning on `chacha20 0.10.1` (transitive via `rand 0.10.1`,
+  reached both through `hpke-rs-libcrux → openmls_rust_crypto →
+  powehi-crypto-wasm` and through `testcontainers`/`ferroid`, dev-only).
+  Ran `cargo update -p chacha20@0.10.1 --precise 0.10.2` (semver-compatible
+  patch bump within existing `Cargo.toml` constraints, no manifest edits) —
+  confirmed the warning is gone from a re-run of `cargo audit`, `cargo build
+  --workspace` and `cargo test --workspace` both still clean afterward,
+  `cargo deny check` still `advisories ok, bans ok, licenses ok, sources ok`.
+  Not a crypto-code change (no crypto logic/primitive selection touched, pure
+  transitive `Cargo.lock` version bump of a non-primitive dependency used for
+  `rand`'s internal CSPRNG state, openmls_rust_crypto's actual AEAD choice is
+  RustCrypto's `chacha20poly1305` crate directly per `.cargo/audit.toml`'s
+  own prior analysis) — `crypto-reviewer` correctly not separately invoked
+  for this half of the diff; covered instead by the STABILIZATION playbook's
+  own `cargo audit`/`cargo deny check` step.
+- Not architectural (a stricter startup-time validation rule on 2 existing
+  config fields, zero new server-visible metadata, zero new API surface) —
+  `threat-model-checker` correctly not invoked; not MLS/OPAQUE/WASM crypto
+  code (only a transitive Cargo.lock bump, reasoned above) —
+  `crypto-reviewer` correctly not invoked for the whole diff.
+- No Helm/`.rego`/frontend files touched this cycle (pure Rust +
+  `Cargo.lock`) — `helm lint`/`conftest`/`pnpm test` correctly not re-run
+  (no-op expected, confirmed via `git status --short` before commit: exactly
+  2 files, `crates/infra/powehi-config/src/lib.rs` + `Cargo.lock`).
+- Target dir hygiene: `target/` is 28GB (over the 20GB prune threshold,
+  grown from 27GB at cycle 380), ran the 0-byte `.rmeta` sweep (nothing to
+  remove) and the `mtime +7` prune pass — found nothing old enough to prune
+  again (all artifacts recent from active cycles), size unchanged at 28GB.
+  Still not urgent enough to force-delete recent incremental-cache
+  artifacts; re-check next STABILIZATION cycle (390). Growth rate (~0.2-
+  0.33GB/cycle over 5-cycle windows) worth watching if it keeps climbing.
+- **Next cycle candidates:** cycle 383's advisory #2 (`no_literal_secrets.rego`
+  never inspects `ConfigMap` `data` — a credential pasted into `r2Endpoint`
+  would sail through all 108 conftest checks undetected, demonstrated
+  concretely, still open); cycle 379's YELLOW-1 (`ci-infra.yml`
+  `--skip-tests`/`podSelector` labels nit, still open, still low urgency);
+  the long-carried ops/blocked items: provision the 3 environments'
+  `grpc-tls-{cert,key,ca}` secret-store keys (ops task, not code) and real
+  `r2Endpoint`/`r2Bucket`/`vapidContact` values (ops task, not code — chart
+  supports them since cycle 383, and both known silent-misconfiguration
+  failure modes on the config side are now fail-closed as of cycles 384/385);
+  activating `grpcPeers` for real cross-region mesh traffic (needs its own
+  threat-model check); media-key incoming/outgoing asymmetry (multi-part,
+  needs a full WASM key-export design, cycle 359); PQ hybrid Phase A
+  (blocked on openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF
+  upgrade (gated on ADR-0003 Phase B); project-context.md size (now ~3060
+  lines — still comfortably under the 256KB Read cap, growing steadily,
+  consider trimming the oldest "Previous state" entries at next
+  STABILIZATION, 390); consider periodically re-running `cargo audit`/`cargo
+  update` checks for freshly-yanked transitive crates outside STABILIZATION
+  cycles too, since this cycle's chacha20 yank appeared silently between
+  cycle 380 and 385 with no CI failure to surface it (cargo-audit treats
+  `yanked` as a non-fatal warning by default, confirmed via this cycle's own
+  `cargo audit` output).
+
+## Previous state (2026-08-28, cycle 384 — FEATURE: fail-closed r2_endpoint dev-default guard in powehi-config, commit 3a29aa9)
 
 - CI green (`gh run list --limit 5` all success), `gh issue list --state open`
   empty, `git status` clean at cycle start. Picked cycle 383's own advisory
