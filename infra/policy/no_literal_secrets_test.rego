@@ -155,3 +155,86 @@ any_credential_deny if {
 	some msg in deny
 	contains(msg, "literal credential")
 }
+
+# --- ConfigMap data credential-shaped literal checks ---
+
+test_is_credential_looking_configmap_entry_true_for_named_secret_key if {
+	is_credential_looking_configmap_entry("DB_PASSWORD", "hunter2")
+}
+
+test_is_credential_looking_configmap_entry_true_for_embedded_creds_regardless_of_key if {
+	is_credential_looking_configmap_entry("DATABASE_URL", "postgres://u:pw123@db/x")
+}
+
+test_is_credential_looking_configmap_entry_false_for_named_secret_key_empty_value if {
+	not is_credential_looking_configmap_entry("DB_PASSWORD", "")
+}
+
+test_is_credential_looking_configmap_entry_false_for_ordinary_entry if {
+	not is_credential_looking_configmap_entry("RUST_LOG", "info")
+}
+
+test_deny_fires_for_configmap_with_named_credential_key if {
+	resource := {
+		"kind": "ConfigMap",
+		"metadata": {"name": "powehi-config"},
+		"data": {"POWEHI__R2_ACCESS_KEY_ID": "hunter2"},
+	}
+	some msg in deny with input as [{"contents": resource}]
+	contains(msg, "literal credential")
+}
+
+test_deny_fires_for_configmap_with_embedded_creds_in_unnamed_key if {
+	resource := {
+		"kind": "ConfigMap",
+		"metadata": {"name": "powehi-config"},
+		"data": {"POWEHI__DATABASE_URL": "postgres://u:pw123@db/x"},
+	}
+	some msg in deny with input as [{"contents": resource}]
+	contains(msg, "literal credential")
+}
+
+test_deny_absent_for_configmap_with_ordinary_entries if {
+	resource := {
+		"kind": "ConfigMap",
+		"metadata": {"name": "powehi-config"},
+		"data": {
+			"RUST_LOG": "info",
+			"POWEHI__REGION_ID": "eu-frankfurt",
+			"POWEHI__GRPC_TLS_KEY": "/etc/powehi/tls/tls.key",
+			"POWEHI__R2_ENDPOINT": "https://abc.r2.cloudflarestorage.com",
+		},
+	}
+	not any_credential_deny with input as [{"contents": resource}]
+}
+
+test_deny_absent_for_non_configmap_resource_with_credential_shaped_data if {
+	resource := {"kind": "ExternalSecret", "metadata": {"name": "powehi-config"}, "data": {"password": "hunter2"}}
+	not any_credential_deny with input as [{"contents": resource}]
+}
+
+test_deny_fires_for_configmap_with_named_credential_key_in_binarydata if {
+	resource := {
+		"kind": "ConfigMap",
+		"metadata": {"name": "powehi-config"},
+		"binaryData": {"DB_PASSWORD": "aHVudGVyMg=="},
+	}
+	some msg in deny with input as [{"contents": resource}]
+	contains(msg, "literal credential")
+}
+
+# Anti-overlap: `any_credential_deny` matches the substring "literal
+# credential" that BOTH the env[].value rule and the ConfigMap rule emit —
+# assert the ConfigMap-specific wording is what actually fired here, not a
+# coincidental match against some other rule's message.
+test_deny_message_for_configmap_is_configmap_worded_not_env_worded if {
+	resource := {
+		"kind": "ConfigMap",
+		"metadata": {"name": "powehi-config"},
+		"data": {"DB_PASSWORD": "hunter2"},
+	}
+	some msg in deny with input as [{"contents": resource}]
+	contains(msg, "literal credential")
+	contains(msg, "never inlined in a ConfigMap")
+	not contains(msg, "never inlined as env[].value")
+}
