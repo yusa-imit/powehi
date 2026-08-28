@@ -17,7 +17,88 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-29, cycle 385 — STABILIZATION: fail-closed r2_access_key_id/r2_secret_access_key guard + chacha20 unyank, commit 666d185)
+## Current state (2026-08-29, cycle 386 — FEATURE: extend no_literal_secrets.rego to inspect ConfigMap data/binaryData, commit 75f881d)
+
+- CI green (`gh run list --limit 3` all success), `gh issue list --state open`
+  empty, `git status` clean at cycle start. Picked cycle 383's own advisory
+  #2 (deferred, still open through cycles 384/385): `no_literal_secrets.rego`
+  had two `deny` rules — literal `data`/`stringData` values on any
+  `kind: Secret`, and credential-shaped `env[].value` on any workload
+  container — but neither ever inspected `kind: ConfigMap`.
+  `infra/helm/powehi/templates/configmap.yaml` renders several
+  `.Values.config.*` strings (`r2Endpoint`, `grpcPeers`, etc.) straight into
+  a ConfigMap's `data`; a credential pasted into one of those Helm values
+  would sail through all 108→now-more conftest checks undetected.
+- **Fix:** added a third `deny` rule, `is_credential_looking_configmap_entry`,
+  scanning both `data` and `binaryData` (new `configmap_string_fields` set,
+  mirroring the Secret rule's own `secret_string_fields`) for keys/values
+  matching the SAME `credential_name_pattern`/`credential_value_pattern`
+  heuristic already used by the env[].value rule — deliberately NOT a
+  blanket non-empty-string ban like the Secret rule, since ConfigMap data
+  legitimately holds plain non-secret strings (log levels, ports, region
+  ids, TLS mount paths) that would false-positive under a blanket ban.
+- Verified reachable through the real pipeline (not vacuous-by-construction):
+  `helm template ... --set 'config.r2Endpoint=https://key:s3cr3t@...'`
+  correctly fails; all 3 real overlays (prod-eu/prod-ap/staging) pass clean
+  today (`helm lint` + `helm template` + `conftest test --combine`, 7/7 each).
+  `conftest verify --policy infra/policy`: 69/69 (was 58 pre-cycle; +9 tests
+  for the initial ConfigMap rule, +2 more after the security-auditor round
+  added the binaryData + anti-overlap regression cases).
+- **security-auditor: GREEN.** Confirmed reachable/correctly-scoped (disjoint
+  from the Secret and workload rules, no double-counting), no bypass
+  (`annotations` correctly untouched, `data: null` degrades gracefully via
+  `object.get`), heuristic breadth correct for this chart (zero false
+  positives across all 3 overlays, notably the TLS mount-path values are
+  NOT flagged since bare "key" isn't in `credential_name_pattern` — only
+  `private[_-]?key`/`access[_-]?key`/`api[_-]?key`), no value leakage (msg
+  only ever interpolates `resource.metadata.name`/field name/key name, never
+  the flagged value, confirmed against live conftest output with the
+  injected secret not appearing anywhere in the failure message). 5
+  findings, all low/informational, evaluated for in-cycle fix:
+  - Applied (cheap, scoped to this cycle's own new rule): `binaryData` was
+    unscanned (a base64-wrapped credential in `binaryData` would miss the
+    value-pattern half entirely) — fixed via the `configmap_string_fields`
+    set change above. Added a regression test + an explicit anti-overlap
+    test (`any_credential_deny`'s substring match could coincidentally hit
+    the env-rule's message too — added a test asserting the ConfigMap rule's
+    own wording specifically fires, not just "some literal-credential deny").
+  - **Deferred, not fixed this cycle** (both cross-cutting across all 3
+    existing rules, not scoped to this cycle's own diff — would need their
+    own review pass): (a) `resource.metadata.name` referenced directly in
+    all 3 rules' `msg` construction means a resource with no `metadata.name`
+    fails open (rule body goes undefined, credential escapes silently) —
+    pre-existing since checks (c)/env, this diff doesn't regress it, but
+    fixing it means touching all 3 not just the new one; (b)
+    `credential_value_pattern` heuristic breadth — misses JWTs, `ghp_`/
+    `github_pat_`, Slack `xox*`/webhook URLs, AWS STS `ASIA*` temp keys (one
+    char off the existing `AKIA` pattern), bare high-entropy hex/base64 —
+    auditor flagged `ASIA`+JWT as cheap zero-false-positive wins, but
+    broadening it affects the shared predicate used by both the env rule and
+    this new ConfigMap rule, out of scope for a single-rule-addition cycle.
+- Not architectural (a stricter conftest policy check reusing existing
+  predicates, zero new server-visible metadata, zero new API/config surface)
+  — `threat-model-checker` correctly not invoked; not crypto/MLS/OPAQUE/WASM
+  — `crypto-reviewer` correctly not invoked. Only 2 `.rego` files touched
+  (confirmed via `git status --short` before commit) — no Rust/frontend
+  files changed, so `cargo`/`pnpm` suites correctly not re-run.
+- Target dir hygiene: not checked (FEATURE mode, backend/Rust untouched this
+  cycle — last checked at cycle 385, 28GB, re-check due at cycle 390).
+- **Next cycle candidates:** the two deferred security-auditor findings
+  above (metadata.name fail-open across all 3 rules; `ASIA`/JWT heuristic
+  broadening) — both small, could bundle into one STABILIZATION cycle;
+  cycle 379's YELLOW-1 (`ci-infra.yml` `--skip-tests`/`podSelector` labels
+  nit, still open, still low urgency); the long-carried ops/blocked items:
+  provision the 3 environments' `grpc-tls-{cert,key,ca}` secret-store keys
+  (ops task, not code) and real `r2Endpoint`/`r2Bucket`/`vapidContact`
+  values (ops task, not code); activating `grpcPeers` for real cross-region
+  mesh traffic (needs its own threat-model check); media-key incoming/
+  outgoing asymmetry (multi-part, needs a full WASM key-export design, cycle
+  359); PQ hybrid Phase A (blocked on openmls stable `MLS_128_MLKEM768`);
+  OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003 Phase B); project-
+  context.md size (now ~3190 lines, growing steadily, consider trimming the
+  oldest "Previous state" entries at next STABILIZATION, 390).
+
+## Previous state (2026-08-29, cycle 385 — STABILIZATION: fail-closed r2_access_key_id/r2_secret_access_key guard + chacha20 unyank, commit 666d185)
 
 - CI green (`gh run list --limit 3` all success), `gh issue list --state open`
   empty, `git status` clean at cycle start. Picked cycle 384's own advisory
