@@ -42,6 +42,13 @@ pub enum ConfigError {
          operator's own loopback instead of a real R2 endpoint rather than failing loudly"
     )]
     R2DevDefaultEndpointInNonLocalRegion(String),
+    #[error(
+        "r2_access_key_id/r2_secret_access_key are empty but region_id={0:?} is not \"local\": \
+         POWEHI__R2_ACCESS_KEY_ID/POWEHI__R2_SECRET_ACCESS_KEY were never injected for this \
+         deployment, which would start successfully and only fail the first time a real media \
+         upload or download is attempted rather than failing loudly at startup"
+    )]
+    R2CredentialsMissingInNonLocalRegion(String),
 }
 
 /// Below this, a GC/ledger-trim job's dedicated advisory-lock connection plus its own query
@@ -308,6 +315,13 @@ fn validate(app: &AppConfig) -> Result<(), ConfigError> {
             app.region_id.clone(),
         ));
     }
+    if app.region_id != "local"
+        && (app.r2_access_key_id.is_empty() || app.r2_secret_access_key.is_empty())
+    {
+        return Err(ConfigError::R2CredentialsMissingInNonLocalRegion(
+            app.region_id.clone(),
+        ));
+    }
     Ok(())
 }
 
@@ -553,6 +567,58 @@ mod tests {
         assert!(
             validate(&cfg).is_ok(),
             "a real r2_endpoint must be accepted regardless of region_id"
+        );
+    }
+
+    #[test]
+    fn missing_r2_credentials_in_non_local_region_is_rejected() {
+        for region in ["eu-central-1", "ap-seoul-1", "us-east-1"] {
+            for (access_key, secret_key) in
+                [("", "dev-test-secret"), ("dev-test-key", ""), ("", "")]
+            {
+                let cfg = AppConfig {
+                    region_id: region.into(),
+                    r2_access_key_id: access_key.into(),
+                    r2_secret_access_key: secret_key.into(),
+                    ..default_config()
+                };
+                let err = validate(&cfg).expect_err(&format!(
+                    "missing r2 credentials (access_key={access_key:?}, secret_key={secret_key:?}) \
+                     in region {region} must be rejected"
+                ));
+                assert!(matches!(
+                    err,
+                    ConfigError::R2CredentialsMissingInNonLocalRegion(ref r) if r == region
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn missing_r2_credentials_in_local_region_is_accepted() {
+        let cfg = AppConfig {
+            region_id: "local".into(),
+            r2_access_key_id: String::new(),
+            r2_secret_access_key: String::new(),
+            ..default_config()
+        };
+        assert!(
+            validate(&cfg).is_ok(),
+            "missing r2 credentials must be accepted for region_id=local"
+        );
+    }
+
+    #[test]
+    fn real_r2_credentials_in_non_local_region_is_accepted() {
+        let cfg = AppConfig {
+            region_id: "eu-central-1".into(),
+            r2_access_key_id: "AKIAREALKEY".into(),
+            r2_secret_access_key: "real-secret-value".into(),
+            ..default_config()
+        };
+        assert!(
+            validate(&cfg).is_ok(),
+            "real r2 credentials must be accepted regardless of region_id"
         );
     }
 
