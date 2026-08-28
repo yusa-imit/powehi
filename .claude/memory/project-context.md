@@ -17,7 +17,103 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-28, cycle 382 — FEATURE: SHA-pin GitHub Actions in ci-infra/ci-frontend/ci-rust/ci-e2e-live workflows, commit pending)
+## Current state (2026-08-28, cycle 383 — FEATURE: wire r2_endpoint/r2_bucket/vapid_contact into Helm chart, commit 84e9b71)
+
+- CI green (`gh run list --limit 5` all success), `gh issue list --state open`
+  empty, `git status` clean at cycle start. Scoped candidates first via an
+  Explore-style agent before picking (media-key incoming/outgoing asymmetry,
+  carried since cycle 359, confirmed genuinely NOT cycle-sized — needs a new
+  WASM key-export/local-storage-key design derived from the OPAQUE
+  `export_key`, all-or-nothing, correctly stays deferred) — then investigated
+  the scoping agent's #2 candidate (r2_endpoint/r2_bucket/vapid_contact Helm
+  wiring, carried since cycle 359 as "blocked on real Cloudflare values")
+  myself and found it does NOT need real values to fix: only the chart
+  *plumbing* was missing, not the actual account data.
+- **Real bug found while scoping (not just a stale TODO):** grepped
+  `crates/infra/powehi-config/src/lib.rs` and confirmed `r2_endpoint`/
+  `r2_bucket` have compiled dev-only defaults (`http://localhost:9000`/
+  `powehi-media`, `set_default(...)` in `load()`) — so nothing crashes, but
+  every deployed environment (prod-eu/prod-ap/staging) has been silently
+  running with these dev defaults since day one, since `infra/helm/powehi/`
+  never emitted `POWEHI__R2_ENDPOINT`/`POWEHI__R2_BUCKET` at all (confirmed
+  via repo-wide grep, zero hits). Worse: `bin/powehi-server/src/main.rs:91-95`
+  only constructs a working `VapidWebPushAdapter` when BOTH
+  `vapid_private_key_pem` AND `vapid_contact` are `Some` — `vapid_contact` was
+  never wired either, so **Web Push (RFC 8291/8292) has been silently
+  disabled in every deployed environment**, even though `vapidPrivateKey` IS
+  correctly provisioned via ExternalSecret in all 3 `values-*.yaml` files.
+  This had gone unnoticed across 20+ cycles because the TODO was always
+  phrased as "needs real Cloudflare values" and nobody had checked whether
+  the *plumbing itself* existed independent of the values.
+- **Fix (delegated to an infra agent):** added `config.r2Endpoint`/
+  `config.r2Bucket`/`config.vapidContact` to `values.yaml` (blank by default
+  — purely additive, preserves today's exact effective behavior until an
+  operator sets a real value), three `{{- if ... }}` conditional emissions in
+  `configmap.yaml` mirroring the pre-existing `otlp.endpoint` pattern, and
+  matching `values.schema.json` string entries. Deliberately did NOT put
+  fabricated values into `values-prod-eu/prod-ap/staging.yaml` — added a
+  3-line comment in each noting real values are still needed before go-live.
+  Verified myself (not just trusting the agent): `git diff --cached --stat`
+  matches exactly the 6 intended files, diff content matches the spec line
+  for line.
+- **Verification:** `helm lint` clean on chart + all 3 overlays; rendered
+  ConfigMap output **byte-identical to HEAD** across all 3 real overlays
+  (proves the no-op claim); `conftest test -p infra/policy --combine` 108/108
+  pass on every overlay; throwaway `--set config.r2Bucket=...` override
+  confirmed the conditional emits correctly when populated, and
+  `--set config.r2Bucket=12345` confirmed the new schema entries actually
+  enforce `type: string`. `kubeconform` not installed locally, not run
+  (noted honestly rather than assumed).
+- **security-auditor: GREEN.** Confirmed none of the 3 fields are secrets:
+  `r2_endpoint`/`r2_bucket` are already baked into client-visible pre-signed
+  URLs (`crates/adapters/outbound/powehi-r2/src/lib.rs:275-322`), and
+  `vapid_contact` is the public-by-protocol VAPID JWT `sub` claim (RFC 8292
+  §2.1 — telling the push provider how to contact you is the whole point).
+  Confirmed `| quote` (Sprig, Go `%q`) safely escapes injection attempts, no
+  YAML/template-injection risk, consistent with sibling fields. Confirmed
+  `configMapRef` is ordered before `secretRef` in `deployment.yaml` (safe
+  even under a hypothetical key collision, though none exists here). Correctly
+  scoped as security-auditor-only, no threat-model-checker needed (zero new
+  server-visible metadata, restores an already-declared PRD requirement,
+  same precedent as cycle 375's GRPC mTLS Helm wiring).
+- **Two non-blocking advisories, both deferred to a future cycle (not fixed
+  now — out of this cycle's scope, first-time findings):**
+  1. No fail-closed guard stops the `http://localhost:9000` dev default from
+     silently being used in a non-local `region_id` — an environment that
+     ships with `r2Endpoint` still blank gets working-but-wrong pre-signed
+     URLs pointed at the end user's own loopback, not a crash. Suggested fix:
+     a `validate()` rule in `powehi-config/src/lib.rs` rejecting the dev
+     default when `region_id != "local"`.
+  2. `infra/policy/no_literal_secrets.rego` inspects `Secret` objects and
+     workload `env[].value` (cycle 381) but never `ConfigMap` `data` — so a
+     credential accidentally pasted into `r2Endpoint` (e.g.
+     `https://user:pass@host`) would sail through all 108 conftest checks
+     undetected. Demonstrated concretely with a throwaway `--set` value.
+     Suggested fix: a third `deny` rule over `resource.kind == "ConfigMap"`
+     reusing the existing `credential_value_pattern`/`credential_name_pattern`
+     predicates.
+- No `.rs` files touched (pure Helm/config plumbing) — `cargo build`/
+  `pnpm test` correctly not re-run (no-op expected, confirmed via
+  `git status --short` before commit).
+- Target dir hygiene: not checked this cycle (FEATURE mode; next due cycle
+  385, STABILIZATION).
+- **Next cycle candidates:** the two security-auditor advisories above (both
+  good STABILIZATION or FEATURE picks — #2 especially, since it's a concrete
+  policy-gate gap with a demonstrated bypass, same class of fix as cycles
+  379/381); cycle 379's YELLOW-1 (`ci-infra.yml` `--skip-tests`/`podSelector`
+  labels nit, still open, still low urgency); the long-carried ops/blocked
+  items: provision the 3 environments' `grpc-tls-{cert,key,ca}` secret-store
+  keys (ops task, not code) and now also real `r2Endpoint`/`r2Bucket`/
+  `vapidContact` values (ops task, not code — chart now supports them);
+  activating `grpcPeers` for real cross-region mesh traffic (needs its own
+  threat-model check); media-key incoming/outgoing asymmetry (confirmed
+  genuinely multi-part this cycle, needs a full WASM key-export design, not a
+  quick fix — see above); PQ hybrid Phase A (blocked on openmls stable
+  `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003 Phase
+  B); project-context.md size (now ~2870 lines — still comfortably under the
+  256KB Read cap, but growing steadily, consider trimming at STABILIZATION).
+
+## Previous state (2026-08-28, cycle 382 — FEATURE: SHA-pin GitHub Actions in ci-infra/ci-frontend/ci-rust/ci-e2e-live workflows, commit 3f393c8)
 
 - CI green (`gh run list --limit 3` all success), `git status` clean at cycle
   start. Picked cycle 378's own carried-forward F8: `ci-infra.yml`/
