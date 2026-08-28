@@ -23,6 +23,15 @@ data:
   POWEHI__DATABASE_MAX_CONNECTIONS: {{ .Values.config.databaseMaxConnections | default 20 | quote }}
   POWEHI__R2_REQUEST_TIMEOUT_SECS: {{ .Values.config.r2RequestTimeoutSecs | default 30 | quote }}
   POWEHI__MEDIA_GC_SWEEP_TIMEOUT_SECS: {{ .Values.config.mediaGcSweepTimeoutSecs | default 1800 | quote }}
+  {{- if .Values.config.r2Endpoint }}
+  POWEHI__R2_ENDPOINT: {{ .Values.config.r2Endpoint | quote }}
+  {{- end }}
+  {{- if .Values.config.r2Bucket }}
+  POWEHI__R2_BUCKET: {{ .Values.config.r2Bucket | quote }}
+  {{- end }}
+  {{- if .Values.config.vapidContact }}
+  POWEHI__VAPID_CONTACT: {{ .Values.config.vapidContact | quote }}
+  {{- end }}
   {{- if .Values.config.grpcTlsEnabled }}
   # Static in-container paths where deployment.yaml mounts the grpc-tls Secret
   # (see externalsecret.yaml's grpc-tls ExternalSecret). Safe to put in a

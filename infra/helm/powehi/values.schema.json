@@ -48,6 +48,15 @@
         "mediaGcSweepTimeoutSecs": {
           "type": "integer",
           "minimum": 1
+        },
+        "r2Endpoint": {
+          "type": "string"
+        },
+        "r2Bucket": {
+          "type": "string"
+        },
+        "vapidContact": {
+          "type": "string"
         }
       }
     },

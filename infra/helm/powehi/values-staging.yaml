@@ -22,6 +22,9 @@ tier: "Tier1"
 config:
   logLevel: "info"
   grpcTlsEnabled: true
+  # r2Endpoint/r2Bucket/vapidContact are intentionally unset here — this env
+  # needs real Cloudflare R2 account values and a real VAPID contact URI
+  # before it can serve real media or Web Push traffic. Do not fake these.
 
 monitoring:
   serviceMonitor:

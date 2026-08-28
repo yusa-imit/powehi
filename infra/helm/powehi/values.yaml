@@ -53,6 +53,21 @@ config:
   r2RequestTimeoutSecs: 30
   # Whole hourly media-blob GC sweep timeout, seconds. Matches Rust compiled default (POWEHI__MEDIA_GC_SWEEP_TIMEOUT_SECS).
   mediaGcSweepTimeoutSecs: 1800
+  # Cloudflare R2 (S3-compatible) endpoint URL for media storage. Empty means the
+  # Rust compiled dev-only default "http://localhost:9000" applies (AppConfig.r2_endpoint,
+  # crates/infra/powehi-config/src/lib.rs) — operators MUST override with the real
+  # Cloudflare R2 account endpoint before this environment can serve real media traffic.
+  r2Endpoint: ""
+  # Cloudflare R2 bucket name for media storage. Empty means the Rust compiled
+  # dev-only default "powehi-media" applies (AppConfig.r2_bucket) — operators MUST
+  # override with the real bucket name before this environment can serve real media traffic.
+  r2Bucket: ""
+  # Contact URI (mailto: or https:) sent in the VAPID JWT for Web Push (RFC 8292).
+  # Empty means AppConfig.vapid_contact stays None, which keeps VapidWebPushAdapter
+  # from being constructed (bin/powehi-server/src/main.rs) — Web Push stays disabled
+  # until operators set a real contact value here, even though vapidPrivateKey is
+  # already wired via ExternalSecret.
+  vapidContact: ""
 
 # Prometheus Operator ServiceMonitor for scraping /metrics on the admin port.
 # Set monitoring.serviceMonitor.enabled=true when kube-prometheus-stack is installed.
