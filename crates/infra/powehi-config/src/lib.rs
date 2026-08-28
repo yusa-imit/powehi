@@ -35,6 +35,13 @@ pub enum ConfigError {
          batch with non-trivial R2 latency"
     )]
     MediaGcSweepTimeoutTooCloseToR2Timeout(u64, u64),
+    #[error(
+        "r2_endpoint is still the dev-only default ({DEV_R2_ENDPOINT_DEFAULT:?}) but \
+         region_id={0:?} is not \"local\": POWEHI__R2_ENDPOINT was never set for this \
+         deployment, which would silently point every pre-signed media URL at the \
+         operator's own loopback instead of a real R2 endpoint rather than failing loudly"
+    )]
+    R2DevDefaultEndpointInNonLocalRegion(String),
 }
 
 /// Below this, a GC/ledger-trim job's dedicated advisory-lock connection plus its own query
@@ -61,6 +68,15 @@ const MIN_MEDIA_GC_SWEEP_TIMEOUT_SECS: u64 = 30;
 /// an operator who tightens `media_gc_sweep_timeout_secs` down near its own floor while leaving
 /// `r2_request_timeout_secs` at a normal value.
 const MEDIA_GC_SWEEP_TIMEOUT_MIN_MULTIPLE_OF_R2: u64 = 2;
+
+/// The dev-only `r2_endpoint` default installed by `load()`'s `set_default`. Any deployed
+/// (non-`local`) region whose config still resolves to this literal at `validate()` time means
+/// `POWEHI__R2_ENDPOINT` was never actually set by the Helm chart/operator for that
+/// environment — every 3 real overlays (prod-eu, prod-ap, staging) went unnoticed running this
+/// way until it was wired in (see `infra/helm/powehi/values.yaml`'s `config.r2Endpoint`).
+/// Without this guard the failure mode is silent: presigned media URLs point at the server's
+/// own loopback instead of a crash an operator would actually see.
+const DEV_R2_ENDPOINT_DEFAULT: &str = "http://localhost:9000";
 
 #[derive(Deserialize)]
 pub struct AppConfig {
@@ -244,7 +260,7 @@ pub fn load() -> Result<AppConfig, ConfigError> {
         .set_default("port", 8080)?
         .set_default("region_id", "local")?
         .set_default("tier", "Tier1")?
-        .set_default("r2_endpoint", "http://localhost:9000")?
+        .set_default("r2_endpoint", DEV_R2_ENDPOINT_DEFAULT)?
         .set_default("r2_bucket", "powehi-media")?
         .set_default("admin_port", 9090)?
         .set_default("grpc_port", 50051)?
@@ -287,6 +303,11 @@ fn validate(app: &AppConfig) -> Result<(), ConfigError> {
             app.r2_request_timeout_secs,
         ));
     }
+    if app.region_id != "local" && app.r2_endpoint == DEV_R2_ENDPOINT_DEFAULT {
+        return Err(ConfigError::R2DevDefaultEndpointInNonLocalRegion(
+            app.region_id.clone(),
+        ));
+    }
     Ok(())
 }
 
@@ -304,7 +325,7 @@ mod tests {
             redis_url: "redis://localhost".into(),
             host: "0.0.0.0".into(),
             port: 8080,
-            r2_endpoint: "http://localhost:9000".into(),
+            r2_endpoint: "https://acct.r2.cloudflarestorage.com".into(),
             r2_bucket: "powehi-media".into(),
             r2_access_key_id: "dev-test-key".into(),
             r2_secret_access_key: "dev-test-secret".into(),
@@ -488,6 +509,50 @@ mod tests {
         assert!(
             validate(&cfg).is_ok(),
             "sweep timeout at exactly 2x r2 timeout must be accepted"
+        );
+    }
+
+    #[test]
+    fn dev_default_r2_endpoint_in_non_local_region_is_rejected() {
+        for region in ["eu-central-1", "ap-seoul-1", "us-east-1"] {
+            let cfg = AppConfig {
+                region_id: region.into(),
+                r2_endpoint: DEV_R2_ENDPOINT_DEFAULT.into(),
+                ..default_config()
+            };
+            let err = validate(&cfg).expect_err(&format!(
+                "dev r2_endpoint default in region {region} must be rejected"
+            ));
+            assert!(matches!(
+                err,
+                ConfigError::R2DevDefaultEndpointInNonLocalRegion(ref r) if r == region
+            ));
+        }
+    }
+
+    #[test]
+    fn dev_default_r2_endpoint_in_local_region_is_accepted() {
+        let cfg = AppConfig {
+            region_id: "local".into(),
+            r2_endpoint: DEV_R2_ENDPOINT_DEFAULT.into(),
+            ..default_config()
+        };
+        assert!(
+            validate(&cfg).is_ok(),
+            "dev r2_endpoint default must be accepted for region_id=local"
+        );
+    }
+
+    #[test]
+    fn real_r2_endpoint_in_non_local_region_is_accepted() {
+        let cfg = AppConfig {
+            region_id: "eu-central-1".into(),
+            r2_endpoint: "https://acct.r2.cloudflarestorage.com".into(),
+            ..default_config()
+        };
+        assert!(
+            validate(&cfg).is_ok(),
+            "a real r2_endpoint must be accepted regardless of region_id"
         );
     }
 
