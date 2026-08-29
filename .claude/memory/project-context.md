@@ -17,7 +17,127 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-29, cycle 386 — FEATURE: extend no_literal_secrets.rego to inspect ConfigMap data/binaryData, commit 75f881d)
+## Current state (2026-08-29, cycle 388 — FEATURE: media-key local persistence sender/receiver symmetry (ADR-0004), commit 83c3982)
+
+- CI green (`gh run list --limit 3` all success), `git status` at cycle start was
+  NOT clean — found a full, uncommitted ADR-0004 implementation already sitting
+  in the working tree (10 modified files + a new ADR doc), matching exactly the
+  "media-key incoming/outgoing asymmetry" item carried in every cycle's "Next
+  cycle candidates" list since cycle 359. Confirmed via `git log` that no commit
+  for cycle 387 existed (last commit was cycle 386's `chore: update session
+  memory`) — this was cycle 387's own FEATURE work, interrupted before it could
+  commit. Treated finishing/reviewing/committing it as this cycle's own work
+  rather than discarding it or starting something else, per the "investigate
+  before deleting/overwriting" rule for unfamiliar in-progress state.
+- **What it does:** closes the ~30-cycle-old sender/receiver asymmetry where
+  only INCOMING media rows ever persisted a real `mediaJson` (raw key + iv +
+  blobId) to Dexie — a sender's own sent photos/videos/voice notes vanished from
+  their own history on reload while the recipient's copy survived, because the
+  raw AES-256-GCM media key never crossed the WASM→JS boundary on send at all
+  (`mediaEncrypt`/`mediaEncryptChunked` only ever returned an opaque handle).
+  New WASM export `media_export_key_for_storage` (wasm_exports.rs): one-shot,
+  **consuming** (removes from `MEDIA_KEYS` before returning — a second call
+  errors `"unknown media key handle"`), **opt-in** (`{ exportKeyForPersistence:
+  true }`, only passed by `useMediaSend.ts` when a `persistOutgoing` sink
+  exists — `ChatLayout.tsx`'s forwarding flow never opts in), **called last**
+  (only after `sendMessageApi` has already accepted the envelope, so a failed
+  send never even attempts the export and the handle is simply dropped). The
+  exported key lands in the same already-at-rest-encrypted `MessageRow.mediaJson`
+  field (`EncryptedPowehiDb`, `dbKey` from OPAQUE `export_key`) the receive path
+  has always used — see `docs/decisions/0004-media-key-local-persistence.md`
+  for the full design (Option A vs Option B key-wrap tradeoff, security-
+  equivalence argument, rejected sub-options).
+- Verified before delegating to review: `cargo build --workspace` clean,
+  `cargo test -p powehi-crypto-wasm` 178/178 (6 new tests: consuming/one-shot,
+  leaves-other-handles-intact, unknown-handle, post-`mls_clear_session` sweep,
+  round-trip-still-decrypts), `cargo test --workspace` all green, `cargo clippy
+  -p powehi-crypto-wasm --all-targets -- -D warnings` clean. Frontend: `pnpm
+  test` 105 files / 1521 tests all green (including a new end-to-end
+  `ChatLayoutMediaPersistence.test.tsx` case proving the whole chain — WASM
+  export → worker → mediaTransfer → useMediaSend → persistOutgoing → Dexie →
+  rehydration — actually round-trips into a real re-decryptable `MediaImage`,
+  not just a placeholder), `tsc --noEmit` clean, `biome check` clean (one
+  cosmetic double-space fix applied to `mediaTransfer.test.ts` via `biome
+  check --write`, re-verified green + tests still 1521/1521 after).
+- **crypto-reviewer: YELLOW, one required doc-only fix (no code changes).**
+  Independently verified all 7 asked-for properties in code (not just prose):
+  consuming semantics (remove-before-return, tests genuinely exercise one-shot
+  + intact-others + post-clear-session, not just happy path), zeroization
+  (`raw?.fill(0)` in `finally` on both chunked/non-chunked branches, tested),
+  opt-in gating (grepped — only 2 callers of `encryptAndSendMedia` exist,
+  forwarding passes 6 args with no options), no logging anywhere in the diff,
+  called-last ordering (export strictly after `sendMessageApi` resolves,
+  tested via `invocationCallOrder`), `mediaJson` confirmed still in
+  `encrypted-db.ts`'s `SENSITIVE.messages` list (bonus: `encryptDbField` fails
+  closed on an uninitialized `dbKey` rather than writing raw). **Required
+  fix:** ADR lines 100-103 claimed the sender's JS-heap window was "shorter"
+  than the receiver's — false as implemented (the exported key survives as
+  `MessageRow.mediaJson` in React state via `setRows`, same lifetime as the
+  receiver's copy); corrected to "equivalent". Four non-blocking advisories,
+  none fixed this cycle (all real but out of scope / no regression): (A1)
+  Comlink structured-clone leaves an unzeroed worker-side residue, symmetric
+  with the already-accepted inbound `mediaImportKey` residue, cheaply fixable
+  via `Comlink.transfer` in a future cycle but a pattern change (route to
+  crypto-lead); (A2) `HashMap::remove` doesn't scrub the vacated bucket,
+  identical pre-existing limitation as `media_drop_key`; (A3)
+  `persistOutgoing !== undefined` is a function-identity check not a
+  capability check, practically always-true at the sole call site, empty-
+  window informational-only; (A4) no `wasm_bindgen_tests.rs` coverage of the
+  `#[wasm_bindgen]` wrapper itself (only the pure helper), consistent with
+  that file having zero media coverage today.
+- **threat-model-checker: YELLOW, three required doc-only fixes (no
+  redesign).** Verified server gains zero new plaintext/key visibility (the
+  export never crosses the network — traced the full call chain to confirm
+  no network sink); confirmed the security-equivalence argument holds in code
+  (exported key is literally the same bytes `media_message_create*` already
+  puts in the MLS payload for recipients); confirmed fail-closed direction
+  (a failed send never exports, export failure loses the key rather than
+  duplicating it); confirmed opt-in/one-shot/called-last are genuinely load-
+  bearing, not just defensive dressing (opt-in specifically matters for
+  forwarding, which mints a fresh key per target — without it N keys would
+  needlessly enter JS). **Impact matrix:** T1/T2/T3(permanent
+  metadata)/T5/T6/T7 unchanged; **T4 (device seizure) slightly weakened and
+  now documented** — the sending device now holds at-rest (encrypted, HKDF
+  from OPAQUE export_key) key material for its own sent attachments that it
+  previously never retained, and media messages have no TTL plumbing on
+  either direction so this doesn't expire (pre-existing gap on the receive
+  side, now extended to send — flagged as a non-blocking follow-up, not
+  fixed this cycle). **Required fixes, all applied:** (1) prd.md §10.2's
+  `messages` Dexie-store sketch now lists `mediaJson` (was undocumented
+  entirely); (2) prd.md §3.4 gained a paragraph on the new but non-persistent
+  "sender re-requests own blob on rehydration" request-log signal — verified
+  `media_service.rs`'s uploader-confirm-download-is-a-no-op / uploader-
+  excluded-from-`required_ackers` pattern means `media_acks` gains no new
+  rows, so §3.3's permanent-metadata inventory is unaffected; (3) same
+  "shorter"→"equivalent" ADR fix crypto-reviewer also required (both agents
+  independently found the identical prose bug).
+- Architectural (new client-side metadata direction: `mediaJson` sensitivity
+  extends to outgoing rows) → `threat-model-checker` correctly invoked;
+  touches WASM crypto boundary → `crypto-reviewer` correctly invoked; not a
+  backend handler or infra change → `security-auditor` correctly not invoked.
+- Target dir hygiene: not checked (FEATURE mode; last checked cycle 385 at
+  28GB, next due cycle 390).
+- **Next cycle candidates:** (A1) from crypto-reviewer above — adopt
+  `Comlink.transfer` for `mediaExportKeyForStorage`'s return value to
+  eliminate the worker-side unzeroed residue, would need to become the first
+  `Comlink.transfer` usage in this worker (pattern-setting, route to
+  crypto-lead); the T4 media-message-has-no-TTL gap flagged by
+  threat-model-checker (affects both incoming and outgoing now, worth its own
+  design — "Disappearing Messages" doesn't cover media on either direction
+  today); cycle 386's two deferred security-auditor findings (`.rego`
+  metadata.name fail-open across all 3 rules; `ASIA`/JWT credential-pattern
+  heuristic broadening); cycle 379's YELLOW-1 (`ci-infra.yml`
+  `--skip-tests`/`podSelector` labels nit, still open, still low urgency);
+  the long-carried ops/blocked items: provision the 3 environments'
+  `grpc-tls-{cert,key,ca}` secret-store keys (ops task, not code) and real
+  `r2Endpoint`/`r2Bucket`/`vapidContact` values (ops task, not code);
+  activating `grpcPeers` for real cross-region mesh traffic (needs its own
+  threat-model check); PQ hybrid Phase A (blocked on openmls stable
+  `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003 Phase
+  B); project-context.md size (now ~3270 lines, growing steadily, consider
+  trimming the oldest "Previous state" entries at next STABILIZATION, 390).
+
+## Previous state (2026-08-29, cycle 386 — FEATURE: extend no_literal_secrets.rego to inspect ConfigMap data/binaryData, commit 75f881d)
 
 - CI green (`gh run list --limit 3` all success), `gh issue list --state open`
   empty, `git status` clean at cycle start. Picked cycle 383's own advisory
