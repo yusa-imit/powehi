@@ -1,11 +1,19 @@
 /**
  * useMediaSend — encrypt a local file and send it as an §9.2 MLS media message.
  *
- * Security invariants (prd.md §9.2 + §9.4.1 + no-plaintext-logging.md):
- * - The raw AES-256-GCM media key NEVER crosses the WASM-JS boundary.
- *   `mediaEncrypt` returns an opaque handle; `mediaMessageCreate[WithThumbnail]` reads the key
- *   inside WASM, builds the JSON payload, and MLS-encrypts it atomically.
- * - The thumbnail key also stays in WASM via `mediaThumbnailEncrypt` + opaque handle.
+ * Security invariants (prd.md §9.2 + §9.4.1 + no-plaintext-logging.md; ADR-0004):
+ * - The raw AES-256-GCM media key NEVER crosses the WASM-JS boundary during
+ *   encrypt/upload/send. `mediaEncrypt` returns an opaque handle;
+ *   `mediaMessageCreate[WithThumbnail]` reads the key inside WASM, builds the JSON
+ *   payload, and MLS-encrypts it atomically.
+ * - ADR-0004: AFTER the envelope is sent, and ONLY when a `persistOutgoing` sink was
+ *   passed in, `encryptAndSendMedia` is asked (`{ exportKeyForPersistence: true }`)
+ *   to also export the key once for Dexie persistence — see MediaSendOptions.
+ *   persistOutgoing's doc comment below for what that buys. When no `persistOutgoing`
+ *   is supplied the export is never even attempted, so raw key bytes never cross the
+ *   WASM-JS boundary at all in that case, same as before this ADR.
+ * - The thumbnail key also stays in WASM via `mediaThumbnailEncrypt` + opaque handle
+ *   (unaffected by ADR-0004 — thumbnails stay out of scope, see below).
  * - The R2 PUT carries only ciphertext — the server never sees plaintext.
  * - `mediaDropKey` and `mediaThumbnailDrop` are always called in `finally`.
  * - No file content, key bytes, or error details are logged.
@@ -56,20 +64,23 @@ export interface MediaSendOptions {
 	/**
 	 * Persist the sender's own copy of a sent media message to Dexie (the same
 	 * `usePersistentMessages().persistOutgoing` text sends already use) so it survives a
-	 * reload — this cycle's fix; previously `sendMedia` never called any persist hook,
-	 * so every sent photo/video/voice note vanished from chat history on reload. Optional
-	 * so callers/tests that don't need persistence keep working unchanged.
+	 * reload. Optional so callers/tests that don't need persistence keep working
+	 * unchanged — and when omitted, `sendMedia` skips the ADR-0004 key export below
+	 * entirely (no persistence target means no reason to ever bring the raw key into
+	 * JS scope).
 	 *
-	 * KNOWN LIMITATION (architectural, not an oversight — see MessageRow.mediaJson's
-	 * ASYMMETRY note, db/schema.ts): the row this creates carries a placeholder `text`
-	 * ("Image attachment"/"Video attachment"/"Voice message", matching the existing
-	 * optimistic bubble below) but NO `media` payload — the raw AES-256-GCM media key
-	 * never crosses the WASM→JS boundary on send (`encryptAndSendMedia` only ever
-	 * returns an opaque-handle-backed ciphertext), so there is no key to persist for a
-	 * redisplayable copy. This is not a regression: even the live, not-yet-reloaded
-	 * bubble for a message YOU sent has never rendered an inline preview in this app,
-	 * only this same placeholder text — a reload now correctly preserves that
-	 * placeholder instead of losing the message entirely.
+	 * ADR-0004 (media-key local persistence): when this IS supplied, `sendMedia` passes
+	 * `{ exportKeyForPersistence: true }` to `encryptAndSendMedia`, which — after the
+	 * envelope has already been accepted by the server — exports a real, persistable
+	 * `media` payload and passes it through as this call's 7th argument. The row this
+	 * creates therefore carries a genuine `mediaJson` and re-renders as a real
+	 * attachment (`MediaImage`) after reload, exactly like a received one, closing the
+	 * "sent media never survives a reload" gap this hook previously had. The payload
+	 * has no `thumbnail`: the §9.4.1 thumbnail key stays WASM-only on the sender path
+	 * (out of scope for this ADR), so a rehydrated sent image re-fetches the full blob
+	 * from R2 instead of showing the inline preview first. The export is best-effort —
+	 * if it fails, `media` is simply `undefined` and the row still persists with the
+	 * placeholder `text` alone, same as before this ADR.
 	 */
 	persistOutgoing?: PersistedMessages["persistOutgoing"];
 }
@@ -107,7 +118,7 @@ export function useMediaSend({
 			}
 
 			try {
-				const { envelopeId, ciphertextB64 } = await encryptAndSendMedia(
+				const { envelopeId, ciphertextB64, media } = await encryptAndSendMedia(
 					fileBytes,
 					file.type || "application/octet-stream",
 					identityId,
@@ -115,16 +126,29 @@ export function useMediaSend({
 					sessionToken,
 					cryptoWorker,
 					thumbHandle,
+					// ADR-0004: only ask for a persistable key when there is actually
+					// somewhere to persist it — see MediaSendOptions.persistOutgoing's
+					// doc comment above.
+					{ exportKeyForPersistence: persistOutgoing !== undefined },
 				);
-				// See MediaSendOptions.persistOutgoing's KNOWN LIMITATION doc comment — no
-				// `media` payload passed, only a placeholder text (same convention as the
-				// optimistic bubble in ChatLayout's handleFileSelect/sendVoice).
+				// placeholderText matches the optimistic bubble in ChatLayout's
+				// handleFileSelect/sendVoice; `media` (see doc comment above) lets the
+				// persisted row re-render as a real attachment after reload instead of
+				// staying this placeholder forever.
 				const placeholderText = file.type.startsWith("video/")
 					? "Video attachment"
 					: file.type.startsWith("audio/")
 						? "Voice message"
 						: "Image attachment";
-				persistOutgoing?.(envelopeId, groupId, placeholderText, ciphertextB64);
+				persistOutgoing?.(
+					envelopeId,
+					groupId,
+					placeholderText,
+					ciphertextB64,
+					undefined,
+					undefined,
+					media,
+				);
 			} finally {
 				// Always drop the thumbnail handle regardless of success or failure
 				// (the media key handle is dropped inside encryptAndSendMedia itself).

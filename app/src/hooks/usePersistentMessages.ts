@@ -32,11 +32,16 @@ export interface PersistedMessages {
 		expiresAt?: number,
 		/**
 		 * §9.2 media attachment metadata (see MessageRow.mediaJson doc comment,
-		 * db/schema.ts). Optional — text-only sends never pass this. Callers on the
-		 * outgoing/send path typically have no real `mediaKey` to pass (the raw key
-		 * never crosses the WASM→JS boundary on send — mediaTransfer.ts) and should
-		 * omit this param entirely, relying on `text` alone for a placeholder bubble;
-		 * only the receive path (persistIncoming) has a real key available to persist.
+		 * db/schema.ts). Optional — text-only sends never pass this. As of ADR-0004,
+		 * outgoing/send-path callers CAN pass a real `mediaKey` here too: when a caller
+		 * opted in to `encryptAndSendMedia`'s `{ exportKeyForPersistence: true }`
+		 * (`useMediaSend.ts` does this whenever a `persistOutgoing` sink exists), the raw
+		 * key is exported once, AFTER the envelope is accepted by the server, and threaded
+		 * through to this param — the sender's own copy then persists and rehydrates the
+		 * same way the receive path (persistIncoming) always has. Callers with no
+		 * persistence-worthy key (e.g. the forwarding flow, which does not opt in this
+		 * cycle) still omit this param entirely and rely on `text` alone for a
+		 * placeholder bubble.
 		 */
 		media?: MediaPayload,
 	) => void;

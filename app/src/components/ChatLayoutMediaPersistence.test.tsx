@@ -15,6 +15,7 @@ import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
 import * as UseMediaReceiveModule from "../hooks/useMediaReceive";
 import * as UseMessagesModule from "../hooks/useMessages";
 import * as UseThumbnailModule from "../hooks/useThumbnail";
+import { useAuthStore } from "../store/auth";
 import { ChatLayout } from "./ChatLayout";
 
 const MOCK_WORKER = {
@@ -144,9 +145,12 @@ describe("ChatLayout — media message Dexie persistence + rehydration", () => {
 		expect(screen.queryByAltText("Encrypted attachment")).not.toBeInTheDocument();
 	});
 
-	it("rehydrates an outgoing (sender's own) media message as its placeholder text — no mediaJson, no MediaImage (documented ASYMMETRY: raw key never crosses the WASM→JS boundary on send)", async () => {
-		// No mediaJson on this row — mirrors what persistOutgoing actually writes for a
-		// media send today (see MessageRow.mediaJson's ASYMMETRY note, db/schema.ts).
+	it("rehydrates a pre-ADR-0004 outgoing row (no mediaJson) as its placeholder text — back-compat, no MediaImage", async () => {
+		// No mediaJson on this row — this is what persistOutgoing wrote for a media send
+		// before ADR-0004 added the one-shot key export, and what it still writes when
+		// the export is skipped or fails. There is no backfill for these rows: the key
+		// was never exported and is gone from every local store, so the placeholder is
+		// the correct (and only possible) rendering. See MessageRow.mediaJson, schema.ts.
 		await db.messages.put({
 			id: "media-outgoing-1",
 			groupId: MAYA_GROUP_ID,
@@ -159,12 +163,52 @@ describe("ChatLayout — media message Dexie persistence + rehydration", () => {
 
 		render(<ChatLayout />);
 
-		// This is the core regression this cycle fixes: before it, this row was never
-		// written to Dexie at all, so the message vanished entirely on reload. Now it
-		// survives — as the same placeholder text the live optimistic bubble showed.
 		await waitFor(() => {
 			expect(screen.getByText("Image attachment")).toBeInTheDocument();
 		});
 		expect(screen.queryByAltText("Encrypted attachment")).not.toBeInTheDocument();
+	});
+
+	// ADR-0004: the asymmetry this file previously documented is now closed — an
+	// outgoing row carries a real mediaKey and must rehydrate into a real attachment,
+	// exactly like the incoming case at the top of this file. This is the end-to-end
+	// proof of the whole cycle: without the WASM export, without the mediaTransfer
+	// wiring, or without persistOutgoing threading `media` through, this test fails.
+	it("rehydrates an outgoing (sender's own) media message WITH mediaJson into a real MediaImage (ADR-0004)", async () => {
+		// Set on the store rather than reset in afterEach: mutating a zustand store
+		// after teardown re-renders an unmounted tree (useSyncExternalStore throws).
+		// Safe without a reset — this is the last test in the file and vitest isolates
+		// per-file module state.
+		// ChatLayout rehydrates from === "me" by comparing row.senderDeviceId against
+		// the auth store's deviceId, so set it — otherwise this row would rehydrate as
+		// an INCOMING message and the test would not actually cover the sender case.
+		useAuthStore.setState({ deviceId: "my-own-device" });
+		const media = makeMedia("outgoing-adr4");
+		await db.messages.put({
+			id: "media-outgoing-2",
+			groupId: MAYA_GROUP_ID,
+			ciphertextB64: "c2Vlbg==",
+			// Same device the auth store reports, so this rehydrates as from === "me".
+			senderDeviceId: "my-own-device",
+			epochSeq: 3,
+			receivedAt: 3000,
+			plaintextB64: btoa("Image attachment"),
+			mediaJson: JSON.stringify(media),
+		});
+
+		render(<ChatLayout />);
+
+		await waitFor(() => {
+			const img = screen.getByAltText("Encrypted attachment") as HTMLImageElement;
+			expect(img.src).toContain("blob:mock-image");
+		});
+		// The sender's own blobId/blobHash/mediaKey/iv survived the Dexie round trip —
+		// the attachment is genuinely re-decryptable, not just a rendered placeholder.
+		expect(UseMediaReceiveModule.useMediaReceive).toHaveBeenCalledWith(
+			expect.objectContaining(media),
+		);
+		// Guards the premise: this really did rehydrate as the sender's own message.
+		const row = await db.messages.get("media-outgoing-2");
+		expect(row?.senderDeviceId).toBe(useAuthStore.getState().deviceId);
 	});
 });

@@ -13,12 +13,15 @@
  *   for both the chunked and non-chunked paths, and the imported handle is
  *   always dropped afterward.
  * - A thumbHandle passed on the chunked path is dropped, never leaked.
+ * - ADR-0004: mediaExportKeyForStorage is opt-in (only called when the caller
+ *   passes { exportKeyForPersistence: true }), is called AFTER sendMessage, and
+ *   the transient Uint8Array it returns is zeroed once copied into the payload.
  */
 
 import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as mediaApi from "../api/media";
 import * as messagesApi from "../api/messages";
-import type { MediaPayload } from "../hooks/useMessages";
+import { type MediaPayload, isValidMediaPayload } from "../hooks/useMessages";
 import {
 	MEDIA_CHUNK_THRESHOLD,
 	downloadAndDecryptMedia,
@@ -79,6 +82,13 @@ const mediaImportKeyFn = vi.fn(async (_rawKey: Uint8Array) => ({
 	mediaKeyHandle: `mock-imported-handle-${importedKeyCounter++}`,
 }));
 
+// ADR-0004: mock the one-shot sender-path export. Returns a FRESH Uint8Array each
+// call (never a shared buffer) so tests can retain a reference and assert it was
+// zeroed by the caller after use, without cross-test contamination.
+const mediaExportKeyForStorageFn = vi.fn(async (_handle: string) => ({
+	mediaKey: new Uint8Array(32).fill(9),
+}));
+
 const mediaDecryptWithHandleFn = vi.fn(
 	async (_handle: string, _iv: Uint8Array, _ciphertext: Uint8Array, _blobHash: Uint8Array) =>
 		new Uint8Array(10),
@@ -105,6 +115,7 @@ const mockWorker = {
 	mediaImportKey: mediaImportKeyFn,
 	mediaDecryptWithHandle: mediaDecryptWithHandleFn,
 	mediaDecryptChunkedWithHandle: mediaDecryptChunkedWithHandleFn,
+	mediaExportKeyForStorage: mediaExportKeyForStorageFn,
 };
 
 describe("mediaTransfer (prd.md §9.2 + §9.4.2)", () => {
@@ -144,6 +155,10 @@ describe("mediaTransfer (prd.md §9.2 + §9.4.2)", () => {
 		mediaImportKeyFn.mockClear();
 		mediaDecryptWithHandleFn.mockClear();
 		mediaDecryptChunkedWithHandleFn.mockClear();
+		mediaExportKeyForStorageFn.mockClear();
+		mediaExportKeyForStorageFn.mockImplementation(async (_handle: string) => ({
+			mediaKey: new Uint8Array(32).fill(9),
+		}));
 	});
 
 	afterEach(() => {
@@ -394,6 +409,253 @@ describe("mediaTransfer (prd.md §9.2 + §9.4.2)", () => {
 			expect(result.envelopeId).toBe("envelope-chunked-1");
 			// Mock mediaMessageCreateChunked returns a 96-byte ciphertext.
 			expect(atob(result.ciphertextB64)).toHaveLength(96);
+		});
+	});
+
+	// ADR-0004 (docs/decisions/0004-media-key-local-persistence.md): the sender's own
+	// copy of a sent attachment previously had no persistable key, so it rehydrated as a
+	// permanent placeholder while every recipient's copy rehydrated fine. The fix is a
+	// one-shot, opt-in, called-last key export whose JS exposure window is bounded by the
+	// same zeroization discipline the receive path already uses.
+	describe("encryptAndSendMedia — ADR-0004 key export for local persistence", () => {
+		// Reads back the exact Uint8Array the mock handed to the caller, so "was it
+		// zeroed after use?" can be asserted on the real buffer rather than a copy.
+		const exportedBuffer = async (call = 0): Promise<Uint8Array> =>
+			(await mediaExportKeyForStorageFn.mock.results[call].value).mediaKey;
+
+		it("does NOT export the key when the caller did not opt in (non-chunked path)", async () => {
+			const result = await encryptAndSendMedia(
+				new Uint8Array(1024),
+				"image/jpeg",
+				IDENTITY_ID,
+				GROUP_ID,
+				TOKEN,
+				mockWorker as never,
+			);
+
+			expect(mediaExportKeyForStorageFn).not.toHaveBeenCalled();
+			expect(result.media).toBeUndefined();
+		});
+
+		it("does NOT export the key when the caller did not opt in (chunked path)", async () => {
+			const result = await encryptAndSendMedia(
+				new Uint8Array(MEDIA_CHUNK_THRESHOLD + 1),
+				"video/mp4",
+				IDENTITY_ID,
+				GROUP_ID,
+				TOKEN,
+				mockWorker as never,
+			);
+
+			expect(mediaExportKeyForStorageFn).not.toHaveBeenCalled();
+			expect(result.media).toBeUndefined();
+		});
+
+		it("does NOT export the key when exportKeyForPersistence is explicitly false", async () => {
+			const result = await encryptAndSendMedia(
+				new Uint8Array(1024),
+				"image/jpeg",
+				IDENTITY_ID,
+				GROUP_ID,
+				TOKEN,
+				mockWorker as never,
+				null,
+				{ exportKeyForPersistence: false },
+			);
+
+			expect(mediaExportKeyForStorageFn).not.toHaveBeenCalled();
+			expect(result.media).toBeUndefined();
+		});
+
+		it("exports exactly once, for the right handle, and returns a usable payload (non-chunked)", async () => {
+			const result = await encryptAndSendMedia(
+				new Uint8Array(1024),
+				"image/jpeg",
+				IDENTITY_ID,
+				GROUP_ID,
+				TOKEN,
+				mockWorker as never,
+				null,
+				{ exportKeyForPersistence: true },
+			);
+
+			expect(mediaExportKeyForStorageFn).toHaveBeenCalledOnce();
+			expect(mediaExportKeyForStorageFn).toHaveBeenCalledWith("mock-media-key-handle-0");
+
+			expect(result.media).toBeDefined();
+			const media = result.media as MediaPayload;
+			expect(media.blobId).toBe("test-media-id");
+			expect(media.blobHash).toHaveLength(32);
+			expect(media.iv).toHaveLength(12);
+			expect(media.mimeType).toBe("image/jpeg");
+			expect(media.mediaKey).toHaveLength(32);
+			// The payload captured the real key bytes, not an already-zeroed copy.
+			expect(media.mediaKey.every((b) => b === 9)).toBe(true);
+			// Single-shot path carries no chunk metadata and no inline thumbnail (the
+			// §9.4.1 thumbnail key stays WASM-only — out of scope per ADR-0004).
+			expect(media.chunked).toBeUndefined();
+			expect(media.thumbnail).toBeUndefined();
+		});
+
+		it("exports exactly once and returns chunk metadata on the chunked path", async () => {
+			const result = await encryptAndSendMedia(
+				new Uint8Array(MEDIA_CHUNK_THRESHOLD + 1),
+				"video/mp4",
+				IDENTITY_ID,
+				GROUP_ID,
+				TOKEN,
+				mockWorker as never,
+				null,
+				{ exportKeyForPersistence: true },
+			);
+
+			expect(mediaExportKeyForStorageFn).toHaveBeenCalledOnce();
+			expect(mediaExportKeyForStorageFn).toHaveBeenCalledWith("mock-chunked-key-handle-0");
+
+			const media = result.media as MediaPayload;
+			expect(media.chunked).toBe(true);
+			expect(media.totalSize).toBe(MEDIA_CHUNK_THRESHOLD + 1);
+			expect(media.chunkSize).toBe(16 * 1024 * 1024);
+			expect(media.mimeType).toBe("video/mp4");
+			expect(media.thumbnail).toBeUndefined();
+		});
+
+		// The exported payload is written straight into MessageRow.mediaJson and read back
+		// through isValidMediaPayload on rehydration (ChatLayout.tsx). If it did not satisfy
+		// that predicate the row would silently drop its attachment — the exact bug ADR-0004
+		// exists to fix, just moved one layer down.
+		it("produces a payload that passes isValidMediaPayload, before and after the JSON round trip (non-chunked)", async () => {
+			const result = await encryptAndSendMedia(
+				new Uint8Array(1024),
+				"image/jpeg",
+				IDENTITY_ID,
+				GROUP_ID,
+				TOKEN,
+				mockWorker as never,
+				null,
+				{ exportKeyForPersistence: true },
+			);
+
+			expect(isValidMediaPayload(result.media)).toBe(true);
+			expect(isValidMediaPayload(JSON.parse(JSON.stringify(result.media)))).toBe(true);
+		});
+
+		it("produces a payload that passes isValidMediaPayload, before and after the JSON round trip (chunked)", async () => {
+			const result = await encryptAndSendMedia(
+				new Uint8Array(MEDIA_CHUNK_THRESHOLD + 1),
+				"video/mp4",
+				IDENTITY_ID,
+				GROUP_ID,
+				TOKEN,
+				mockWorker as never,
+				null,
+				{ exportKeyForPersistence: true },
+			);
+
+			expect(isValidMediaPayload(result.media)).toBe(true);
+			expect(isValidMediaPayload(JSON.parse(JSON.stringify(result.media)))).toBe(true);
+		});
+
+		// Key-hygiene invariant: the transport buffer that carried the raw key across the
+		// worker boundary must be zeroed as soon as it is serialised, mirroring
+		// downloadAndDecryptMedia's `mediaKey.fill(0)` after mediaImportKey.
+		it("zeroes the exported key buffer immediately after serialising it", async () => {
+			const result = await encryptAndSendMedia(
+				new Uint8Array(1024),
+				"image/jpeg",
+				IDENTITY_ID,
+				GROUP_ID,
+				TOKEN,
+				mockWorker as never,
+				null,
+				{ exportKeyForPersistence: true },
+			);
+
+			const buf = await exportedBuffer();
+			expect(buf).toHaveLength(32);
+			expect(buf.every((b) => b === 0)).toBe(true);
+			// ...while the persisted copy still holds the real key.
+			expect((result.media as MediaPayload).mediaKey.every((b) => b === 9)).toBe(true);
+		});
+
+		it("zeroes the exported key buffer on the chunked path too", async () => {
+			await encryptAndSendMedia(
+				new Uint8Array(MEDIA_CHUNK_THRESHOLD + 1),
+				"video/mp4",
+				IDENTITY_ID,
+				GROUP_ID,
+				TOKEN,
+				mockWorker as never,
+				null,
+				{ exportKeyForPersistence: true },
+			);
+
+			expect((await exportedBuffer()).every((b) => b === 0)).toBe(true);
+		});
+
+		// The message is already delivered by the time the export runs, so a failing export
+		// must degrade to "no persisted payload", never to a thrown send.
+		it("does not fail the send when the export rejects — media is simply undefined", async () => {
+			mediaExportKeyForStorageFn.mockRejectedValueOnce(new Error("unknown media key handle"));
+			sendMessageSpy.mockResolvedValueOnce("envelope-export-fail");
+
+			const result = await encryptAndSendMedia(
+				new Uint8Array(1024),
+				"image/jpeg",
+				IDENTITY_ID,
+				GROUP_ID,
+				TOKEN,
+				mockWorker as never,
+				null,
+				{ exportKeyForPersistence: true },
+			);
+
+			expect(result.envelopeId).toBe("envelope-export-fail");
+			expect(atob(result.ciphertextB64)).toHaveLength(64);
+			expect(result.media).toBeUndefined();
+		});
+
+		// Ordering is a security property, not a style choice: exporting before the envelope
+		// is accepted would hand raw key bytes to JS for a message that may never be
+		// delivered, and would invalidate the handle mediaMessageCreate still needs.
+		it("exports only AFTER mediaMessageCreate and sendMessage have completed", async () => {
+			await encryptAndSendMedia(
+				new Uint8Array(1024),
+				"image/jpeg",
+				IDENTITY_ID,
+				GROUP_ID,
+				TOKEN,
+				mockWorker as never,
+				null,
+				{ exportKeyForPersistence: true },
+			);
+
+			const createOrder = mediaMessageCreateFn.mock.invocationCallOrder[0];
+			const sendOrder = sendMessageSpy.mock.invocationCallOrder[0];
+			const exportOrder = mediaExportKeyForStorageFn.mock.invocationCallOrder[0];
+
+			expect(exportOrder).toBeGreaterThan(createOrder);
+			expect(exportOrder).toBeGreaterThan(sendOrder);
+		});
+
+		it("never exports when the send itself throws, but still releases the handle", async () => {
+			sendMessageSpy.mockRejectedValueOnce(new Error("network error"));
+
+			await expect(
+				encryptAndSendMedia(
+					new Uint8Array(1024),
+					"image/jpeg",
+					IDENTITY_ID,
+					GROUP_ID,
+					TOKEN,
+					mockWorker as never,
+					null,
+					{ exportKeyForPersistence: true },
+				),
+			).rejects.toThrow("network error");
+
+			expect(mediaExportKeyForStorageFn).not.toHaveBeenCalled();
+			expect(mediaDropKeyFn).toHaveBeenCalledWith("mock-media-key-handle-0");
 		});
 	});
 

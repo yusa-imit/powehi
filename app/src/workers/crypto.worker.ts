@@ -168,6 +168,11 @@ interface WasmModule {
 		blobHash: Uint8Array,
 	) => Uint8Array;
 	media_drop_key: (handle: string) => boolean;
+	// ADR-0004: sender-path counterpart of media_import_key. CONSUMING — removes the
+	// MEDIA_KEYS entry before returning, so it may be called at most once per handle;
+	// a second call (or a call on an unknown/already-dropped handle) throws
+	// "unknown media key handle".
+	media_export_key_for_storage: (mediaKeyHandle: string) => { mediaKey: Uint8Array };
 	// §9.2 media_message_create: build + MLS-encrypt a media app message.
 	// Raw media key stays in WASM; only MLS ciphertext crosses the WASM-JS boundary.
 	media_message_create: (
@@ -839,6 +844,35 @@ const api = {
 	async mediaDropKey(handle: string): Promise<boolean> {
 		const wasm = await getWasm();
 		return wasm.media_drop_key(handle);
+	},
+
+	/**
+	 * ADR-0004 — sender-path counterpart of `mediaImportKey`. Hands the sender's own
+	 * copy of a media key to JS exactly once, post-send, so it can be persisted to
+	 * Dexie (`MessageRow.mediaJson`) the same way the receive path already does,
+	 * closing the "sent media never survives a reload" gap.
+	 *
+	 * CONSUMES the handle: the entry is removed from the WASM `MEDIA_KEYS` map before
+	 * this resolves, so it may be called at most once per handle — call it LAST, after
+	 * `mediaMessageCreate*` and after the envelope has been accepted by the server. A
+	 * second call, or a call on an unknown/already-dropped handle, throws "unknown
+	 * media key handle". The existing `mediaDropKey(handle)` in the caller's `finally`
+	 * stays in place and simply becomes a no-op after this has already consumed it.
+	 *
+	 * The caller MUST `mediaKey.fill(0)` as soon as the returned bytes have been
+	 * copied into a persistable payload — the same one-shot discipline
+	 * `downloadAndDecryptMedia` already applies to its `mediaImportKey` input. The
+	 * transient copy Comlink structured-clones across the worker boundary to produce
+	 * this return value is the same accepted residue the inbound `mediaImportKey`
+	 * copy already leaves behind (WASM/JS heap residue is documented at
+	 * `mls_clear_session` in wasm_exports.rs).
+	 *
+	 * @param handle  a MEDIA_KEYS handle from mediaEncrypt/mediaEncryptChunked, not
+	 *                yet exported or dropped.
+	 */
+	async mediaExportKeyForStorage(handle: string): Promise<{ mediaKey: Uint8Array }> {
+		const wasm = await getWasm();
+		return wasm.media_export_key_for_storage(handle);
 	},
 
 	/**

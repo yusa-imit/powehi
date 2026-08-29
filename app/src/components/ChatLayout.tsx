@@ -7449,10 +7449,11 @@ export function ChatLayout() {
 			// thumbnail ct/key/iv exact-length checks and chunked/totalSize/chunkSize bounds
 			// — so rehydration is never a weaker gate than receive on the same downstream
 			// consumers (MediaImage's useThumbnail indexes into thumbnail.key.length with no
-			// try/catch in that call chain). Only ever set on incoming rows (see
-			// MessageRow.mediaJson's ASYMMETRY note, db/schema.ts) — an outgoing media row has
-			// no mediaJson and rehydrates as its plaintextB64 placeholder text alone, same as
-			// it always has.
+			// try/catch in that call chain). As of ADR-0004, mediaJson can legitimately be set
+			// on BOTH incoming and outgoing rows (see MessageRow.mediaJson's doc comment,
+			// db/schema.ts) — an outgoing row only lacks it when the sender didn't opt into
+			// key export (no persistOutgoing sink) or was written by a pre-ADR-0004 build, in
+			// which case it still rehydrates as its plaintextB64 placeholder text alone.
 			let media: ChatMessage["media"];
 			if (row.mediaJson) {
 				try {
@@ -8918,10 +8919,14 @@ export function ChatLayout() {
 	 *
 	 * Each forwarded copy is now also persisted to Dexie under its target group
 	 * (`persistOutgoing`) so it survives a reload, same gap class media send/receive
-	 * had everywhere else before this cycle. Same "no `media` payload, placeholder
-	 * text only" limitation as useMediaSend's persistOutgoing wiring — the freshly
-	 * re-encrypted per-target key is opaque-handle-only here too (`encryptAndSendMedia`
-	 * never returns raw key bytes), see MessageRow.mediaJson's ASYMMETRY note.
+	 * had everywhere else before this cycle. This flow deliberately does NOT opt in
+	 * to ADR-0004's `{ exportKeyForPersistence: true }` — it still calls
+	 * `encryptAndSendMedia` with no options arg, so the freshly re-encrypted
+	 * per-target key stays opaque-handle-only and no raw key bytes ever reach this
+	 * scope; the persisted row carries a placeholder `text` only, same as
+	 * useMediaSend's persistOutgoing did before ADR-0004. This is a tracked
+	 * follow-up (ADR-0004's own "ChatLayout's forward flow still persists a
+	 * placeholder only" note), not an oversight.
 	 * `persistOutgoing` targets whichever group is bound to this component's
 	 * `usePersistentMessages(active?.mlsGroupId)` instance — same cross-group binding
 	 * caveat already documented on `sendForwardToOne`'s call (Dexie itself is

@@ -22,6 +22,11 @@ const IDENTITY_ID = "id-1";
 
 // Defined once; cleared in beforeEach so call counts reset between tests.
 const mediaDropKeyFn = vi.fn(async (_handle: string) => true);
+// ADR-0004: the one-shot sender-path key export. Fresh buffer per call so a test can
+// observe whether the caller zeroed it.
+const mediaExportKeyForStorageFn = vi.fn(async (_handle: string) => ({
+	mediaKey: new Uint8Array(32).fill(9),
+}));
 const mediaThumbnailDropFn = vi.fn(async (_handle: string) => true);
 const mediaThumbnailEncryptFn = vi.fn(async (_thumbBytes: Uint8Array) => ({
 	thumbHandle: "mock-thumb-handle-0",
@@ -56,6 +61,7 @@ const mockWorker = {
 		) => ({ ciphertext: new Uint8Array(64) }),
 	),
 	mediaDropKey: mediaDropKeyFn,
+	mediaExportKeyForStorage: mediaExportKeyForStorageFn,
 	mediaThumbnailEncrypt: mediaThumbnailEncryptFn,
 	mediaThumbnailDrop: mediaThumbnailDropFn,
 	mediaMessageCreateWithThumbnail: mediaMessageCreateWithThumbnailFn,
@@ -97,6 +103,10 @@ describe("useMediaSend (prd.md §9.2)", () => {
 		mockWorker.mediaEncrypt.mockClear();
 		mockWorker.mediaMessageCreate.mockClear();
 		mediaDropKeyFn.mockClear();
+		mediaExportKeyForStorageFn.mockClear();
+		mediaExportKeyForStorageFn.mockImplementation(async (_handle: string) => ({
+			mediaKey: new Uint8Array(32).fill(9),
+		}));
 		mediaThumbnailDropFn.mockClear();
 		mediaThumbnailEncryptFn.mockClear();
 		mediaMessageCreateWithThumbnailFn.mockClear();
@@ -220,7 +230,11 @@ describe("useMediaSend (prd.md §9.2)", () => {
 	// This cycle's fix: sendMedia never called any Dexie persist hook at all, so every
 	// sent photo/video/voice note vanished from chat history on reload.
 	describe("persistOutgoing wiring (Dexie persistence — this cycle's fix)", () => {
-		it("calls persistOutgoing with the envelope id, groupId, an image placeholder text, and the base64 ciphertext — no media payload (see KNOWN LIMITATION doc comment)", async () => {
+		// ADR-0004 (docs/decisions/0004-media-key-local-persistence.md): this used to
+		// assert the OPPOSITE — that no media payload was passed, because the sender's
+		// raw key never crossed the WASM→JS boundary and so the sender's own row was a
+		// permanent placeholder. The one-shot post-send export closes that gap.
+		it("calls persistOutgoing with the envelope id, groupId, placeholder text, ciphertext AND a real media payload (ADR-0004)", async () => {
 			sendMessageSpy.mockResolvedValueOnce("envelope-img-1");
 			const persistOutgoing = vi.fn();
 
@@ -230,13 +244,80 @@ describe("useMediaSend (prd.md §9.2)", () => {
 			await result.current.sendMedia(makeFile()); // makeFile() defaults to image/jpeg
 
 			expect(persistOutgoing).toHaveBeenCalledOnce();
-			const [id, groupId, text, ciphertextB64, ...rest] = persistOutgoing.mock.calls[0];
+			const [id, groupId, text, ciphertextB64, replyTo, expiresAt, media] =
+				persistOutgoing.mock.calls[0];
 			expect(id).toBe("envelope-img-1");
 			expect(groupId).toBe("group-1");
 			expect(text).toBe("Image attachment");
 			expect(typeof ciphertextB64).toBe("string");
-			// No media payload passed — the raw key never crosses the WASM→JS boundary on send.
-			expect(rest.every((arg) => arg === undefined)).toBe(true);
+			// Not a reply, no TTL — those two params stay undefined for a plain media send.
+			expect(replyTo).toBeUndefined();
+			expect(expiresAt).toBeUndefined();
+			// The 7th arg is the ADR-0004 payload that makes the row re-displayable.
+			expect(media).toBeDefined();
+			expect(media.blobId).toBe("test-media-id");
+			expect(media.mediaKey).toHaveLength(32);
+			expect(media.mimeType).toBe("image/jpeg");
+		});
+
+		it("opts into the key export exactly once, for the handle mediaEncrypt returned", async () => {
+			const persistOutgoing = vi.fn();
+			const { result } = renderHook(() =>
+				useMediaSend({ identityId: IDENTITY_ID, groupId: "group-1", persistOutgoing }),
+			);
+			await result.current.sendMedia(makeFile());
+
+			expect(mediaExportKeyForStorageFn).toHaveBeenCalledOnce();
+			expect(mediaExportKeyForStorageFn).toHaveBeenCalledWith("mock-media-key-handle-0");
+		});
+
+		// The opt-in is driven by whether a persistence sink exists at all: with nowhere
+		// to store the key there is no reason to bring it into JS scope.
+		it("never exports the key when no persistOutgoing sink was supplied", async () => {
+			const { result } = renderHook(() =>
+				useMediaSend({ identityId: IDENTITY_ID, groupId: "group-1" }),
+			);
+			await result.current.sendMedia(makeFile());
+
+			expect(mediaExportKeyForStorageFn).not.toHaveBeenCalled();
+		});
+
+		// Best-effort: the envelope is already delivered by the time the export runs, so
+		// a failed export must still persist the row, just without a media payload.
+		it("still persists the row (with media undefined) when the key export fails", async () => {
+			mediaExportKeyForStorageFn.mockRejectedValueOnce(new Error("unknown media key handle"));
+			sendMessageSpy.mockResolvedValueOnce("envelope-export-fail");
+			const persistOutgoing = vi.fn();
+
+			const { result } = renderHook(() =>
+				useMediaSend({ identityId: IDENTITY_ID, groupId: "group-1", persistOutgoing }),
+			);
+			await expect(result.current.sendMedia(makeFile())).resolves.not.toThrow();
+
+			expect(persistOutgoing).toHaveBeenCalledOnce();
+			const [id, , text, , , , media] = persistOutgoing.mock.calls[0];
+			expect(id).toBe("envelope-export-fail");
+			expect(text).toBe("Image attachment");
+			expect(media).toBeUndefined();
+		});
+
+		it("passes a video media payload through for a video/* file", async () => {
+			const persistOutgoing = vi.fn();
+			const videoFile = new File([new Uint8Array(10)], "clip.mp4", { type: "video/mp4" });
+			Object.defineProperty(videoFile, "arrayBuffer", {
+				value: async () => new Uint8Array(10).buffer,
+				configurable: true,
+			});
+
+			const { result } = renderHook(() =>
+				useMediaSend({ identityId: IDENTITY_ID, groupId: "group-1", persistOutgoing }),
+			);
+			await result.current.sendMedia(videoFile);
+
+			const media = persistOutgoing.mock.calls[0][6];
+			expect(media).toBeDefined();
+			expect(media.mimeType).toBe("video/mp4");
+			expect(media.mediaKey).toHaveLength(32);
 		});
 
 		it("uses the 'Video attachment' placeholder for a video/* file", async () => {

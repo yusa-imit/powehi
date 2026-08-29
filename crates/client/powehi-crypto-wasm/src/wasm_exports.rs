@@ -1490,6 +1490,17 @@ pub fn ml_kem_768_verify_encap_key(
 //      returns the MLS ciphertext.  The raw media_key bytes only ever appear
 //      inside MLS ciphertext when crossing service boundaries.
 //
+//   4. (ADR-0004) After the envelope above is accepted by the Delivery Service,
+//      `encryptAndSendMedia`'s post-send persist step calls
+//      `media_export_key_for_storage(mediaKeyHandle)` — a one-shot, consuming
+//      export — to obtain the raw key for exactly one purpose: writing it into
+//      `MessageRow.mediaJson` so the *sender's own* copy of the attachment
+//      survives a reload, the same way a recipient's copy already does. See
+//      docs/decisions/0004-media-key-local-persistence.md. `mediaJson` is a
+//      field `EncryptedPowehiDb` encrypts at rest under `dbKey` before it
+//      reaches IndexedDB, so this is the sender path's only WASM-JS-boundary
+//      exception, and it is opt-in, called last, and single-use.
+//
 // Receiver path (opaque-handle, cycle 309 — closes the cycle-119 YELLOW):
 //   After MLS decrypt, the plaintext JSON contains { mediaKey (bytes), iv, blobId }.
 //   The mediaKey necessarily exists in JS memory once for the MLS decrypt itself; the
@@ -1498,7 +1509,11 @@ pub fn ml_kem_768_verify_encap_key(
 //   never re-appears in JS scope — `media_decrypt_with_handle` /
 //   `media_decrypt_chunked_with_handle` decrypt the R2 blob via the handle, and
 //   `media_drop_key(handle)` releases it when done. This mirrors the sender path,
-//   which never lets the raw key leave WASM at all.
+//   which never lets the raw key leave WASM at all — until step 4 above (ADR-0004),
+//   which deliberately closes that gap for the local-persistence case only. The
+//   symmetry claim now cuts both ways: the sender's export is bounded by the same
+//   one-shot handle-consuming discipline the receiver's `media_import_key` already
+//   established, and it hands JS nothing the message's recipients don't already hold.
 
 /// Encrypt media bytes with a fresh AES-256-GCM key and IV (prd.md §9.2 sender path).
 ///
@@ -1649,6 +1664,80 @@ pub fn media_decrypt_with_handle(
 #[wasm_bindgen]
 pub fn media_drop_key(handle: &str) -> bool {
     MEDIA_KEYS.with(|m| m.borrow_mut().remove(handle).is_some())
+}
+
+/// Removes and returns the media key stored under `handle`, if present.
+///
+/// Pure function — no `JsValue`/`JsError` — so it is callable in native unit
+/// tests, exactly like `kem_cap_check` above. The `#[wasm_bindgen]` wrapper
+/// `media_export_key_for_storage` immediately below only converts this
+/// function's result into a JS object; all of the consuming (remove-before-return)
+/// behaviour lives here so it can be exercised without a `wasm-bindgen-test` runner.
+fn take_media_key_for_export(handle: &str) -> Option<Zeroizing<[u8; 32]>> {
+    MEDIA_KEYS.with(|m| m.borrow_mut().remove(handle))
+}
+
+/// Export a stored media key as raw bytes for local persistence (ADR-0004).
+///
+/// This is the sender-path counterpart of `media_import_key`. It exists for
+/// exactly one caller: `encryptAndSendMedia`'s post-send persist step in
+/// `app/src/lib/mediaTransfer.ts`, which writes the returned key into
+/// `MessageRow.mediaJson` — a field `EncryptedPowehiDb` already encrypts at
+/// rest under `dbKey` (HKDF from the OPAQUE `export_key`, RFC 9807) before it
+/// reaches IndexedDB. Without this export, the sender's own copy of a sent
+/// attachment has no key and can never be re-displayed after a reload, while
+/// every recipient's copy — which received the raw key inline in the
+/// MLS-decrypted JSON payload — already can be. See
+/// docs/decisions/0004-media-key-local-persistence.md for the full design and
+/// rationale.
+///
+/// ## Security equivalence
+/// The JS-side exposure this creates is the one the receiver path already has
+/// and that was accepted by crypto-reviewer in cycle 309: the same 32-byte key
+/// already sits in JS memory on receive (it arrives inline in the
+/// MLS-decrypted JSON — that is the wire format) and is already persisted
+/// verbatim into the same at-rest-encrypted `mediaJson`. Every key this
+/// function can produce is a key the message's recipients already hold in the
+/// clear. No new primitive, no new secret material, no new server visibility
+/// (this export never crosses the network — it is purely local and post-send).
+///
+/// ## Consuming / one-shot
+/// The entry is REMOVED from `MEDIA_KEYS` (via `take_media_key_for_export`,
+/// whose `Zeroizing` buffer is zeroed on drop) BEFORE the JS value is built, so:
+/// - a handle can be exported at most once — a second call errors with
+///   `"unknown media key handle"`;
+/// - no WASM-side copy of the key outlives the exported JS copy.
+///
+/// A failure while building the JS object therefore *loses* the key rather
+/// than leaking or duplicating it; the caller simply degrades to "no persisted
+/// media payload for this message" — the pre-ADR-0004 behaviour.
+///
+/// ## Caller contract
+/// Call this LAST: after `media_message_create`/`media_message_create_with_thumbnail`/
+/// `media_message_create_chunked` and only once the envelope has been accepted
+/// by the Delivery Service, since this call invalidates the handle for any
+/// further use. The caller's existing `media_drop_key(handle)` in a `finally`
+/// block remains correct after this call and simply becomes an idempotent no-op.
+///
+/// The caller MUST zero the returned `Uint8Array` (`mediaKey.fill(0)`) as soon
+/// as it has been copied into the persisted payload, exactly as
+/// `downloadAndDecryptMedia` already does after `media_import_key`.
+///
+/// No cap check is needed here — unlike `media_encrypt`/`media_import_key`,
+/// this function only ever removes from `MEDIA_KEYS`, never inserts.
+///
+/// Returns `{ mediaKey: Uint8Array }` (32 bytes).
+///
+/// # Errors
+/// - `"unknown media key handle"` if `media_key_handle` is not present in
+///   `MEDIA_KEYS` — whether because it was never valid, was already exported
+///   once, was already dropped via `media_drop_key`, or was swept by
+///   `mls_clear_session`.
+#[wasm_bindgen]
+pub fn media_export_key_for_storage(media_key_handle: &str) -> Result<JsValue, JsError> {
+    let key = take_media_key_for_export(media_key_handle)
+        .ok_or_else(|| js_err("unknown media key handle"))?;
+    js_obj(&[("mediaKey", bytes_js(key.as_slice()))])
 }
 
 // ── §9.4.1 Thumbnail encryption ───────────────────────────────────────────────
@@ -3554,6 +3643,126 @@ mod tests {
         assert_eq!(decrypted, plaintext);
 
         MEDIA_KEYS.with(|m| m.borrow_mut().remove(&handle));
+    }
+
+    // ── §9.2 media_export_key_for_storage (ADR-0004) ──────────────────────────
+
+    /// take_media_key_for_export returns exactly the key bytes that were stored
+    /// under the handle, unaltered.
+    #[test]
+    fn test_media_export_key_for_storage_returns_the_stored_key() {
+        let plaintext = b"ADR-0004 sender-side persist export";
+        let (_ct, key, _iv, _blob_hash) = media::encrypt(plaintext).unwrap();
+        let original: Vec<u8> = key.to_vec();
+
+        let handle = next_id();
+        MEDIA_KEYS.with(|m| m.borrow_mut().insert(handle.clone(), key));
+
+        let exported =
+            take_media_key_for_export(&handle).expect("handle must resolve to the stored key");
+        assert_eq!(exported.as_slice(), original.as_slice());
+    }
+
+    /// The functional invariant ADR-0004 depends on: a key exported for local
+    /// storage, fed back in as raw bytes exactly as it would be after a Dexie
+    /// round trip, must still decrypt the R2 blob via decrypt_with_raw_key.
+    #[test]
+    fn test_media_export_key_for_storage_key_still_decrypts() {
+        let plaintext = b"exported key must still decrypt the R2 blob";
+        let (ct, key, iv, blob_hash) = media::encrypt(plaintext).unwrap();
+
+        let handle = next_id();
+        MEDIA_KEYS.with(|m| m.borrow_mut().insert(handle.clone(), key));
+
+        let exported = take_media_key_for_export(&handle).expect("handle must resolve");
+        let decrypted = media::decrypt_with_raw_key(exported.as_slice(), &iv, &ct, &blob_hash)
+            .expect("exported key must still decrypt the ciphertext");
+        assert_eq!(decrypted, plaintext);
+    }
+
+    /// One-shot / consuming property: after one export the handle is gone from
+    /// MEDIA_KEYS, and a second export of the same handle returns None.
+    #[test]
+    fn test_media_export_key_for_storage_consumes_handle() {
+        let handle = next_id();
+        MEDIA_KEYS.with(|m| {
+            m.borrow_mut()
+                .insert(handle.clone(), Zeroizing::new([0x11u8; 32]))
+        });
+
+        let first = take_media_key_for_export(&handle);
+        assert!(first.is_some(), "first export must return the key");
+        assert!(
+            !MEDIA_KEYS.with(|m| m.borrow().contains_key(&handle)),
+            "handle must be removed from MEDIA_KEYS after export"
+        );
+
+        let second = take_media_key_for_export(&handle);
+        assert!(
+            second.is_none(),
+            "second export of the same handle must fail"
+        );
+    }
+
+    /// A handle that was never inserted (unknown / already exported / already
+    /// dropped / swept by mls_clear_session) resolves to None — the
+    /// "unknown media key handle" error path at the wasm_bindgen boundary.
+    #[test]
+    fn test_media_export_key_for_storage_unknown_handle_returns_none() {
+        let handle = next_id();
+        assert!(
+            !MEDIA_KEYS.with(|m| m.borrow().contains_key(&handle)),
+            "handle must not be present before the call"
+        );
+
+        let result = take_media_key_for_export(&handle);
+        assert!(result.is_none(), "unknown handle must return None");
+        assert!(
+            !MEDIA_KEYS.with(|m| m.borrow().contains_key(&handle)),
+            "unknown handle export must not insert anything"
+        );
+    }
+
+    /// Exporting one handle must not disturb any other handle's presence or key.
+    #[test]
+    fn test_media_export_key_for_storage_leaves_other_handles_intact() {
+        let handle_a = next_id();
+        let handle_b = next_id();
+        MEDIA_KEYS.with(|m| {
+            let mut m = m.borrow_mut();
+            m.insert(handle_a.clone(), Zeroizing::new([0xaau8; 32]));
+            m.insert(handle_b.clone(), Zeroizing::new([0xbbu8; 32]));
+        });
+
+        let exported_a = take_media_key_for_export(&handle_a);
+        assert!(exported_a.is_some());
+
+        let stored_b = MEDIA_KEYS
+            .with(|m| m.borrow().get(&handle_b).cloned())
+            .expect("handle_b must still be present");
+        assert_eq!(stored_b.as_slice(), [0xbbu8; 32].as_slice());
+
+        MEDIA_KEYS.with(|m| m.borrow_mut().remove(&handle_b));
+    }
+
+    /// mls_clear_session sweeps MEDIA_KEYS, so an export attempted afterward
+    /// (e.g. a stale handle held by a caller across a logout) must return None.
+    #[test]
+    fn test_media_export_key_for_storage_after_clear_session_returns_none() {
+        let handle = next_id();
+        MEDIA_KEYS.with(|m| {
+            m.borrow_mut()
+                .insert(handle.clone(), Zeroizing::new([0x22u8; 32]))
+        });
+        assert!(MEDIA_KEYS.with(|m| m.borrow().contains_key(&handle)));
+
+        mls_clear_session();
+
+        let result = take_media_key_for_export(&handle);
+        assert!(
+            result.is_none(),
+            "export after mls_clear_session must return None"
+        );
     }
 
     // ── §9.2 build_media_payload_json + media_message_create ─────────────────

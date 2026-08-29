@@ -203,6 +203,8 @@ Sealed Sender는 "envelope 안에 송신자 인증서를 함께 암호화하여 
 
 **미디어 GC 타이밍을 통한 조악한(coarse) 열람 여부 추론 (§9.4.3):** 미디어 GC는 그룹의 모든 수신자가 ACK한 뒤에만 blob을 삭제합니다. (cycle 289 ack-timing 수정, cycle 290 문서 정정) ACK는 다운로드 URL 발급이 아니라 `confirm-download` 호출 — 즉 수신자가 blobHash 검증 및 복호화에 실제로 성공한 시점에 기록됩니다. `media_id`를 아는 누구든(업로더 포함) GC 유예 기간(`expires_at` 또는 업로드 후 기본 30일) 경과 시점 이후에 프리사인 다운로드 URL을 다시 요청해 볼 수 있고, 그 요청이 404(NotFound)로 실패하면 "그룹의 모든 멤버가 최소 한 번은 해당 blob을 실제로 복호화 검증했다"는 것을 추론할 수 있습니다 — 이전에는 "다운로드 URL을 발급받았다"까지만 추론 가능했으므로, 이번 변경으로 이 신호는 다소 더 정밀해졌습니다(요청만 하고 전송이 실패한 경우는 더 이상 포함하지 않음). 이는 여전히 (a) 이진값이며(누가/언제 열람했는지는 알 수 없고, 실제 UI에서 "봤는지"까지는 확인 불가), (b) 최소 유예 기간만큼 지연되고, (c) 서버가 능동적으로 제공하는 정보가 아니라 클라이언트가 유추해야 하는 부산물입니다 — 그럼에도 Pōwehi가 명시적으로 표방하지 않는 "그룹 전체 읽음 확인" 신호를 부수적으로(이전보다 약간 더 정밀하게) 노출하므로 정직하게 기록합니다.
 
+**발신자 자기 blob 재요청 신호 (ADR-0004):** cycle 387부터 발신자의 `mediaJson`도 로컬에 영속화되므로, 발신 디바이스가 재시작/재로그인 후 자신이 보낸 첨부를 재표시하려면 `GET /v1/media/:id` + `POST /v1/media/:id/confirm-download`를 다시 호출합니다. 이는 요청 로그 수준에서 "업로더가 자기 blob을 다시 요청함 = 그 대화를 다시 열었다"는 신호를 새로 노출하지만, `media_service.rs`가 업로더의 confirm-download를 no-op으로 처리하므로(uploader는 `required_ackers`에서 제외) `media_acks`에는 행이 추가되지 않습니다 — 즉 §3.3의 영구 저장 메타데이터는 증가하지 않고, 이 문단이 이미 기술하는 "요청 로그 수준에서는 서버가 매 요청을 볼 수밖에 없다"는 기존 카테고리에 발신자가 새로 편입될 뿐입니다.
+
 **브로드캐스트 envelope GC 타이밍을 통한 동일 계열 추론 (cycle 350):** 위 미디어 GC 오라클과 정확히 같은 형태의 신호가 일반 그룹 메시지(Application)와 MLS Commit envelope에도 적용됩니다 — envelope은 발신자를 제외한 모든 현재 멤버가 `POST /v1/messages/:id/ack`로 ACK해야만 삭제되므로, `envelope_id`를 아는 그룹 멤버는 폴링을 반복해 envelope이 사라지는 시점을 관찰함으로써 "발신자를 제외한 그룹 전원이 최소 한 번은 이 메시지를 수신했다"는 이진 신호를 유추할 수 있습니다. 미디어 GC 오라클과 동일한 한계(이진값, 유예 기간만큼 지연, 클라이언트가 능동적으로 유추해야 함)를 가지며, 추가로 명시적 TTL이 없는 envelope에는 기본 30일 보존 상한이 있어(§11.4, §3.3 `envelope_acks` 항목) 전원 ACK가 영원히 충족되지 않는 경우(예: 멤버가 폴링 없이 이탈)에도 무기한 보존되지는 않습니다.
 
 ### 3.5 멀티 리전 위협 고려 사항
@@ -1396,7 +1398,9 @@ CREATE TABLE region_routing (
 ├── conversations
 │   └── { id, group_id, peer_handle_or_name, last_message_at, unread_count }
 ├── messages
-│   └── { id, conversation_id, sender_device_id, plaintext (encrypted at rest), timestamp }
+│   └── { id, conversation_id, sender_device_id, plaintext (encrypted at rest), timestamp,
+│         mediaJson (encrypted at rest — AES-256-GCM media_key/iv/blobId for §9.2 attachments;
+│         as of ADR-0004 populated on BOTH incoming and outgoing rows, opt-in on send) }
 └── media_cache
     └── { blob_id, decrypted_blob (LRU evicted), media_key }
 ```

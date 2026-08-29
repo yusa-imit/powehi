@@ -6,10 +6,14 @@
  * forwarding (ChatLayout's sendForwardToSelected) instead of being duplicated
  * per call site.
  *
- * Security invariants (prd.md §9.2 + no-plaintext-logging.md):
- * - The raw AES-256-GCM media key never crosses the WASM-JS boundary on send —
- *   `mediaEncrypt` returns an opaque handle, dropped in `finally` regardless of
- *   outcome.
+ * Security invariants (prd.md §9.2 + no-plaintext-logging.md; ADR-0004):
+ * - The raw AES-256-GCM media key never crosses the WASM-JS boundary during
+ *   encrypt/upload/send — `mediaEncrypt` returns an opaque handle, dropped in
+ *   `finally` regardless of outcome. It crosses exactly ONCE, AFTER send, and only
+ *   when the caller opts in (`{ exportKeyForPersistence: true }`): see
+ *   `exportMediaPayloadForPersistence` below, which uses the ADR-0004
+ *   `mediaExportKeyForStorage` one-shot export and zeroes the transient copy in
+ *   `finally` as soon as it is serialised into the returned payload.
  * - On receive, the raw key necessarily arrives inline in the MLS-decrypted payload
  *   once, but is imported into WASM (`mediaImportKey`) and zeroed immediately —
  *   from then on only the opaque handle is used (cycle 309, receiver-side
@@ -174,11 +178,47 @@ export async function downloadAndDecryptMedia(
 }
 
 /**
+ * ADR-0004 — best-effort sender-path key export for local persistence.
+ *
+ * Calls the one-shot `mediaExportKeyForStorage` AFTER the envelope has already
+ * been accepted by the server (see call sites below), so this can only ever
+ * make an already-successful send additionally persistable — it can never turn
+ * a successful send into a failed one. Any failure (unknown handle, worker
+ * error, etc.) is swallowed and reported as `undefined`, letting the caller fall
+ * back to the pre-ADR-0004 "placeholder text only" persistence.
+ *
+ * The `Uint8Array` carrying the key across the worker boundary is zeroed in
+ * `finally` as soon as it has been copied into the payload's `number[]` — the
+ * same one-shot discipline `downloadAndDecryptMedia` already applies after
+ * `mediaImportKey`. The resulting `number[]` then has exactly the same lifetime
+ * and at-rest protection (AES-GCM-256 via `EncryptedPowehiDb`, see
+ * `MessageRow.mediaJson`, db/schema.ts) as the incoming path's already-accepted
+ * `MediaPayload.mediaKey` — this does not introduce a new class of exposure, it
+ * only closes the sender/receiver asymmetry (see ADR-0004's security-equivalence
+ * argument).
+ */
+async function exportMediaPayloadForPersistence(
+	cryptoWorker: CryptoWorker,
+	mediaKeyHandle: string,
+	base: Omit<MediaPayload, "mediaKey">,
+): Promise<MediaPayload | undefined> {
+	let raw: Uint8Array | undefined;
+	try {
+		({ mediaKey: raw } = await cryptoWorker.mediaExportKeyForStorage(mediaKeyHandle));
+		return { ...base, mediaKey: Array.from(raw) };
+	} catch {
+		return undefined;
+	} finally {
+		raw?.fill(0);
+	}
+}
+
+/**
  * Encrypt `bytes` with a fresh AES-256-GCM key, upload the ciphertext to R2,
  * and build+MLS-encrypt+deliver the §9.2 media message envelope to `groupId`.
- * The raw key never leaves WASM — `mediaDropKey` always runs in `finally`.
- * Pass `thumbHandle` (from `mediaThumbnailEncrypt`) to bundle an inline
- * encrypted thumbnail; omit it to send without one.
+ * The raw key never leaves WASM during encrypt/upload/send — `mediaDropKey`
+ * always runs in `finally`. Pass `thumbHandle` (from `mediaThumbnailEncrypt`) to
+ * bundle an inline encrypted thumbnail; omit it to send without one.
  *
  * Files strictly larger than `MEDIA_CHUNK_THRESHOLD` (16 MiB) route through the
  * §9.4.2 chunked path (`mediaEncryptChunked` + `mediaMessageCreateChunked`)
@@ -188,11 +228,20 @@ export async function downloadAndDecryptMedia(
  *
  * Returns the server-assigned envelope id and the base64-encoded MLS ciphertext
  * so callers can persist the sender's own copy to Dexie the same way text sends
- * do (`usePersistentMessages.persistOutgoing`) — added this cycle to close the
- * "sent media never survives a reload" gap. Deliberately does NOT return the raw
- * mediaKey/iv/blobId: they never leave WASM as opaque handles on this path (see
- * MessageRow.mediaJson's ASYMMETRY note, db/schema.ts) — callers persisting this
- * result should pass a placeholder text only, no `media` payload.
+ * do (`usePersistentMessages.persistOutgoing`).
+ *
+ * ADR-0004: pass `{ exportKeyForPersistence: true }` to additionally receive a
+ * full `media` payload (with a real, persistable `mediaKey`) built via
+ * `exportMediaPayloadForPersistence`, AFTER the envelope has been accepted by
+ * the server. This is opt-in and NOT default-on — call sites with no
+ * persistence target (message forwarding in `ChatLayout.tsx`'s
+ * `sendForwardToSelected`) must never pass this option, so they never cause raw
+ * key bytes to cross the WASM-JS boundary at all. `media` is `undefined` when
+ * the option is omitted/false, and best-effort-`undefined` (never throws) when
+ * the export itself fails after opting in. `media` never includes a
+ * `thumbnail` — the §9.4.1 thumbnail key stays WASM-only on the sender path,
+ * out of scope for this ADR; a rehydrated sent image simply re-fetches the full
+ * blob instead of showing an inline preview first.
  */
 export async function encryptAndSendMedia(
 	bytes: Uint8Array,
@@ -202,14 +251,15 @@ export async function encryptAndSendMedia(
 	sessionToken: string,
 	cryptoWorker: CryptoWorker,
 	thumbHandle?: string | null,
-): Promise<{ envelopeId: string; ciphertextB64: string }> {
+	options?: { exportKeyForPersistence?: boolean },
+): Promise<{ envelopeId: string; ciphertextB64: string; media?: MediaPayload }> {
 	if (bytes.length > MEDIA_CHUNK_THRESHOLD) {
 		// §9.4.2 thumbnails are out of scope — drop any handle rather than leak it.
 		if (thumbHandle) {
 			await cryptoWorker.mediaThumbnailDrop(thumbHandle).catch(() => {});
 		}
 
-		const { ciphertext, mediaKeyHandle, iv, blobHash, totalSize } =
+		const { ciphertext, mediaKeyHandle, iv, blobHash, totalSize, chunkSize } =
 			await cryptoWorker.mediaEncryptChunked(bytes);
 		try {
 			const { mediaId, uploadUrl } = await requestMediaUpload(
@@ -244,8 +294,24 @@ export async function encryptAndSendMedia(
 			);
 
 			const envelopeId = await sendMessageApi(sessionToken, groupId, mlsCiphertext);
-			return { envelopeId, ciphertextB64: uint8ToBase64(mlsCiphertext) };
+			// ADR-0004: export happens LAST — after mediaMessageCreateChunked built the
+			// envelope AND the server accepted it — and only when the caller opted in.
+			// No persistence target (options omitted/false) means the handle is simply
+			// dropped below without ever producing raw key bytes in JS.
+			const media = options?.exportKeyForPersistence
+				? await exportMediaPayloadForPersistence(cryptoWorker, mediaKeyHandle, {
+						blobId: mediaId,
+						blobHash: Array.from(blobHash),
+						iv: Array.from(iv),
+						chunked: true,
+						totalSize,
+						chunkSize,
+						mimeType,
+					})
+				: undefined;
+			return { envelopeId, ciphertextB64: uint8ToBase64(mlsCiphertext), media };
 		} finally {
+			// A no-op if exportMediaPayloadForPersistence already consumed the handle above.
 			await cryptoWorker.mediaDropKey(mediaKeyHandle);
 		}
 	}
@@ -293,8 +359,20 @@ export async function encryptAndSendMedia(
 				);
 
 		const envelopeId = await sendMessageApi(sessionToken, groupId, mlsCiphertext);
-		return { envelopeId, ciphertextB64: uint8ToBase64(mlsCiphertext) };
+		// ADR-0004: export happens LAST — after mediaMessageCreate[WithThumbnail] built
+		// the envelope AND the server accepted it — and only when the caller opted in.
+		// No `thumbnail` field: the §9.4.1 thumbnail key stays WASM-only, out of scope.
+		const media = options?.exportKeyForPersistence
+			? await exportMediaPayloadForPersistence(cryptoWorker, mediaKeyHandle, {
+					blobId: mediaId,
+					blobHash: Array.from(blobHash),
+					iv: Array.from(iv),
+					mimeType,
+				})
+			: undefined;
+		return { envelopeId, ciphertextB64: uint8ToBase64(mlsCiphertext), media };
 	} finally {
+		// A no-op if exportMediaPayloadForPersistence already consumed the handle above.
 		await cryptoWorker.mediaDropKey(mediaKeyHandle);
 	}
 }

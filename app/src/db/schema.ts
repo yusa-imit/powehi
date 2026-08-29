@@ -78,20 +78,28 @@ export interface MessageRow {
 	 * raw blob/image bytes, which stay in R2 and are re-fetched + re-decrypted via blobId
 	 * on rehydration) — thumbnails are already capped 64×64 JPEG q0.6 (useMediaSend.ts).
 	 *
-	 * ASYMMETRY (architectural, not a bug): only INCOMING rows ever carry a real
+	 * As of ADR-0004 (media-key local persistence), BOTH directions persist a real
 	 * `mediaKey` here. On receive, the raw key legitimately arrives once inline in the
 	 * MLS-decrypted JSON payload (existing invariant, mediaTransfer.ts) before being
 	 * imported to a WASM opaque handle — persistIncoming captures that same payload
-	 * verbatim. On SEND, the raw key never crosses the WASM→JS boundary at all
-	 * (`mediaEncrypt`/`mediaEncryptChunked` return only an opaque handle — see
-	 * mediaTransfer.ts's own security-invariant doc comment) — so a sender has no raw
-	 * key to persist for their own copy. Outgoing media rows therefore leave this field
-	 * undefined and rely on `plaintextB64` alone (the same human-readable placeholder —
-	 * "Image attachment"/"Video attachment"/"Voice message" — the live optimistic bubble
-	 * already showed pre-reload; sent media has never rendered an inline preview in this
-	 * app, only received media does). Closing this asymmetry would need a new, crypto-
-	 * reviewed WASM key-export-for-local-storage primitive — out of scope for this
-	 * (Dexie-only) cycle. undefined = not a media message (or an outgoing media message).
+	 * verbatim. On SEND, the raw key still never crosses the WASM→JS boundary during
+	 * encrypt/upload/send (`mediaEncrypt`/`mediaEncryptChunked` return only an opaque
+	 * handle), but — opt-in, and only once a `persistOutgoing` sink actually exists
+	 * (useMediaSend.ts) — `encryptAndSendMedia` additionally calls the one-shot
+	 * `mediaExportKeyForStorage` export AFTER the envelope has been accepted by the
+	 * server, so the sender's own copy can be persisted the same way the receive path
+	 * always has. This field is therefore SENSITIVE on incoming AND outgoing rows now,
+	 * so its presence in `EncryptedPowehiDb`'s encrypted-field list (encrypted-db.ts) is
+	 * load-bearing in both directions and must never be removed.
+	 *
+	 * Rows written by pre-ADR-0004 client builds have no `mediaJson` and still rehydrate
+	 * as their `plaintextB64` placeholder text alone ("Image attachment"/"Video
+	 * attachment"/"Voice message") — there is no backfill: the raw key for those
+	 * attachments was never exported and is gone from every local store. The forwarding
+	 * flow (`ChatLayout.tsx`'s `sendForwardToSelected`) also still only ever writes the
+	 * placeholder — it deliberately does not opt in this cycle (ADR-0004's own
+	 * follow-up note). undefined = not a media message, an outgoing media message that
+	 * didn't opt in, or a pre-ADR-0004 row.
 	 */
 	mediaJson?: string;
 }
