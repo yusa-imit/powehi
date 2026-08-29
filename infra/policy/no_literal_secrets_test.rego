@@ -45,6 +45,92 @@ test_deny_absent_for_non_secret_resource if {
 	count(deny) == 0 with input as [{"contents": resource}]
 }
 
+# --- fail-closed resource_name: a resource missing metadata.name must still
+# trip the gate, not silently drop the deny (a direct `resource.metadata.name`
+# reference is undefined when the key is missing, which fails the whole rule
+# body in Rego — this would let the secret escape, not just lose the name).
+
+test_resource_name_falls_back_to_placeholder_when_metadata_missing if {
+	resource_name({"kind": "Secret"}) == "<unnamed>"
+}
+
+test_resource_name_falls_back_to_placeholder_when_name_missing if {
+	resource_name({"kind": "Secret", "metadata": {}}) == "<unnamed>"
+}
+
+# `metadata` present but null (not just absent) is a distinct failure mode: a
+# naive `object.get(object.get(resource, "metadata", {}), "name", ...)` would
+# still dereference `null` on the inner call and reproduce the exact same
+# fail-open bug one level down. The path-form `object.get` must handle both.
+test_resource_name_falls_back_to_placeholder_when_metadata_is_null if {
+	resource_name({"kind": "Secret", "metadata": null}) == "<unnamed>"
+}
+
+test_resource_name_returns_real_name_when_present if {
+	resource_name({"kind": "Secret", "metadata": {"name": "db-creds"}}) == "db-creds"
+}
+
+test_field_name_falls_back_to_placeholder_when_key_missing if {
+	field_name({"value": "x"}, "name") == "<unnamed>"
+}
+
+test_field_name_returns_real_value_when_present if {
+	field_name({"name": "app"}, "name") == "app"
+}
+
+test_deny_fires_for_secret_missing_metadata_name if {
+	resource := {"kind": "Secret", "stringData": {"DATABASE_URL": "postgres://u:pw123@db/x"}}
+	some msg in deny with input as [{"contents": resource}]
+	contains(msg, "literal secret value")
+}
+
+test_deny_fires_for_deployment_missing_metadata_name_with_credential_env if {
+	resource := {
+		"kind": "Deployment",
+		"spec": {"template": {"spec": {"containers": [{
+			"name": "app",
+			"env": [{"name": "DB_PASSWORD", "value": "hunter2"}],
+		}]}}},
+	}
+	some msg in deny with input as [{"contents": resource}]
+	contains(msg, "literal credential")
+}
+
+test_deny_fires_for_configmap_missing_metadata_name_with_credential_entry if {
+	resource := {"kind": "ConfigMap", "data": {"DB_PASSWORD": "hunter2"}}
+	some msg in deny with input as [{"contents": resource}]
+	contains(msg, "literal credential")
+}
+
+# A container or env entry missing its own `name` must still trip the gate —
+# `container.name`/`env.name` direct references in the msg would otherwise
+# silently drop the deny even though `is_credential_looking_env` correctly
+# matched (the predicate doesn't require env.name at all).
+test_deny_fires_for_container_missing_name_with_credential_env if {
+	resource := {
+		"kind": "Deployment",
+		"metadata": {"name": "api"},
+		"spec": {"template": {"spec": {"containers": [{
+			"env": [{"name": "DB_PASSWORD", "value": "hunter2"}],
+		}]}}},
+	}
+	some msg in deny with input as [{"contents": resource}]
+	contains(msg, "literal credential")
+}
+
+test_deny_fires_for_env_missing_name_with_credential_value if {
+	resource := {
+		"kind": "Deployment",
+		"metadata": {"name": "api"},
+		"spec": {"template": {"spec": {"containers": [{
+			"name": "app",
+			"env": [{"value": "postgres://u:pw123@db/x"}],
+		}]}}},
+	}
+	some msg in deny with input as [{"contents": resource}]
+	contains(msg, "literal credential")
+}
+
 # --- container env[].value credential-shaped literal checks ---
 
 test_credential_name_pattern_matches_common_secret_names if {
@@ -68,12 +154,55 @@ test_credential_value_pattern_matches_aws_access_key_id if {
 	credential_value_pattern("AKIAABCDEFGHIJKLMNOP")
 }
 
+test_credential_value_pattern_matches_aws_sts_temp_access_key_id if {
+	credential_value_pattern("ASIAABCDEFGHIJKLMNOP")
+}
+
+test_credential_value_pattern_matches_jwt if {
+	credential_value_pattern("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")
+}
+
+# The pattern must catch a JWT embedded in a larger string, not just a value
+# that is nothing BUT the JWT — a "Bearer <jwt>" header value or a multi-line
+# ConfigMap block (Helm `|` block scalars keep the trailing newline) are the
+# realistic shapes a leaked bearer token actually takes.
+test_credential_value_pattern_matches_jwt_with_bearer_prefix if {
+	credential_value_pattern("Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")
+}
+
+test_credential_value_pattern_matches_jwt_with_trailing_newline if {
+	credential_value_pattern("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk\n")
+}
+
+# `alg: none` unsigned JWTs render an empty signature segment.
+test_credential_value_pattern_matches_jwt_with_empty_signature if {
+	credential_value_pattern("eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxMjM0NTY3ODkwIn0.")
+}
+
+# Base64 (as opposed to base64url) padding on the signature segment doesn't
+# need its own regex handling — under unanchored `regex.match`, the pattern
+# already matches as a substring up to the first `=`, so a padded value still
+# matches. This asserts that behavior explicitly rather than just relying on
+# it implicitly, since it's easy to assume padding needs an explicit `=*` in
+# the pattern (an earlier version of this rule had one; it was dead code).
+test_credential_value_pattern_matches_jwt_with_base64_padding if {
+	credential_value_pattern("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk==")
+}
+
 test_credential_value_pattern_matches_pem_private_key_block if {
 	credential_value_pattern("-----BEGIN PRIVATE KEY-----\nMIIB...")
 }
 
 test_credential_value_pattern_false_for_ordinary_url if {
 	not credential_value_pattern("https://example.com/health")
+}
+
+test_credential_value_pattern_false_for_semver if {
+	not credential_value_pattern("1.2.3")
+}
+
+test_credential_value_pattern_false_for_three_label_hostname if {
+	not credential_value_pattern("sub.example.com")
 }
 
 test_is_credential_looking_env_true_for_named_secret_with_value if {

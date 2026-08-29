@@ -15,6 +15,29 @@ import rego.v1
 
 secret_string_fields := {"data", "stringData"}
 
+# Fail-closed resource-name lookup. All 3 deny rules below build their `msg`
+# via `resource.metadata.name` — but a direct reference to a missing key is
+# undefined in Rego, and an undefined value anywhere in a rule body makes the
+# WHOLE body fail to bind, silently dropping the deny (the secret escapes,
+# not just the name). A malformed/stripped manifest missing `metadata.name`
+# (e.g. a template bug, or a hand-crafted manifest slipped past `helm
+# template`) must still trip the gate — falls back to a placeholder rather
+# than losing the finding. Uses the path form of `object.get` (not a nested
+# `object.get(object.get(...))`) deliberately: `metadata` can be present but
+# `null` (not just absent) on a malformed manifest, and nesting two calls
+# would itself dereference `null` on the inner result, reproducing the exact
+# same fail-open bug one level down — the path form handles both "missing"
+# and "null-valued" in one lookup.
+resource_name(resource) := name if {
+	name := object.get(resource, ["metadata", "name"], "<unnamed>")
+}
+
+# Same fail-closed rationale as resource_name above, for the single-level
+# container.name / env.name references in the env[].value deny message.
+field_name(obj, key) := name if {
+	name := object.get(obj, key, "<unnamed>")
+}
+
 deny contains msg if {
 	some resource in all_resources
 	resource.kind == "Secret"
@@ -23,7 +46,7 @@ deny contains msg if {
 	is_literal_secret_value(value)
 	msg := sprintf(
 		"Secret/%s: field %q key %q contains a literal secret value — secrets must be delivered via ExternalSecret, never inlined in a rendered Secret manifest",
-		[resource.metadata.name, field, key],
+		[resource_name(resource), field, key],
 	)
 }
 
@@ -51,7 +74,7 @@ deny contains msg if {
 	is_credential_looking_env(env)
 	msg := sprintf(
 		"%s/%s: container %q env var %q looks like a literal credential — secrets must be delivered via envFrom.secretRef (ExternalSecret), never inlined as env[].value",
-		[resource.kind, resource.metadata.name, container.name, env.name],
+		[resource.kind, resource_name(resource), field_name(container, "name"), field_name(env, "name")],
 	)
 }
 
@@ -107,7 +130,7 @@ deny contains msg if {
 	is_credential_looking_configmap_entry(key, value)
 	msg := sprintf(
 		"ConfigMap/%s: %s key %q looks like a literal credential — secrets must be delivered via envFrom.secretRef (ExternalSecret) or a Secret volume mount, never inlined in a ConfigMap",
-		[resource.metadata.name, field, key],
+		[resource_name(resource), field, key],
 	)
 }
 
@@ -132,6 +155,38 @@ credential_value_pattern(value) if {
 
 credential_value_pattern(value) if {
 	regex.match(`AKIA[0-9A-Z]{16}`, value)
+}
+
+# AWS STS temporary credentials (from AssumeRole/GetSessionToken) — one
+# character off AKIA (long-term IAM keys, already covered above) but just as
+# sensitive: a temp access-key ID pasted into a literal value is still a live
+# credential until it expires.
+credential_value_pattern(value) if {
+	regex.match(`ASIA[0-9A-Z]{16}`, value)
+}
+
+# JWT (three base64url segments joined by `.`) — header/payload/signature.
+# Matches any JWT-shaped string regardless of issuer, since a bearer token
+# baked into a literal value is a live credential no matter which service
+# minted it (session token, service-account JWT, OIDC id_token, ...).
+# Requires the `eyJ` header prefix (base64url of `{"`, present on every real
+# JWT — its header is always a JSON object) plus a minimum segment length on
+# header/payload, not just "three dot-separated segments": a bare 3-part
+# match would false-positive on semver ("1.2.3") or a 3-label hostname
+# ("sub.example.com"), neither of which is a credential. Deliberately NOT
+# fully `^...$`-anchored: `regex.match` needs no anchors to act as a
+# substring search, and a JWT is just as much a live credential embedded in
+# a larger string (a "Bearer eyJ..." header value, a multi-line ConfigMap
+# block with trailing whitespace/newlines) as it is standing alone — full
+# anchoring would silently miss exactly those realistic cases while the
+# `eyJ`-prefix + minimum-length guard already does the semver/hostname
+# false-positive rejection on its own. The signature segment allows zero
+# characters (`*` not `{8,}`) to still catch `alg: none` unsigned JWTs. No
+# explicit handling for base64 (vs base64url) padding (`=`) is needed: under
+# unanchored `regex.match` the pattern already matches as a prefix substring
+# up to the first `=`, so a padded value still matches without it.
+credential_value_pattern(value) if {
+	regex.match(`eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*`, value)
 }
 
 credential_value_pattern(value) if {
