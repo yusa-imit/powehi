@@ -17,7 +17,114 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-29, cycle 388 — FEATURE: media-key local persistence sender/receiver symmetry (ADR-0004), commit 83c3982)
+## Current state (2026-08-29, cycle 389 — FEATURE: close no_literal_secrets.rego metadata-name fail-open + broaden credential value patterns, commit 54d4484)
+
+- CI green (`gh run list --limit 3` all success), `gh issue list --state
+  open` empty, `git status` clean at cycle start. Picked cycle 386's two
+  carried-forward deferred security-auditor findings together (same file,
+  same class): (a) `resource.metadata.name`/`container.name`/`env.name`
+  direct references in all 3 `deny` rules' `msg` sprintf calls — a resource
+  missing that key makes the reference undefined, and an undefined value
+  anywhere in a Rego rule body silently drops the WHOLE deny (not just the
+  name) — a malformed/stripped manifest missing `metadata.name` would let a
+  real literal secret escape all 3 checks entirely; (b)
+  `credential_value_pattern` only covered `user:pass@host`/AKIA/PEM, missing
+  AWS STS temp keys (`ASIA...`) and JWT-shaped bearer tokens.
+- **Fix, round 1:** added `resource_name(resource)` (nested `object.get`)
+  and swapped all 3 sprintf call sites; added 2 new `credential_value_pattern`
+  clauses for `ASIA[0-9A-Z]{16}` and a fully `^...$`-anchored,
+  `eyJ`-prefixed JWT pattern (prefix + per-segment min-length specifically
+  to avoid false-positiving on semver/hostnames). Verified `conftest verify
+  -p infra/policy` 79/79, mutation-tested the resource_name fix (reverted →
+  confirmed exactly the 3 new missing-name tests go red), all 3 real
+  overlays (`helm lint` + `conftest test --combine`) unchanged/clean.
+- **security-auditor: round 1 NEEDS-REWORK, round 2 PASS (both invoked
+  in-session before commit, per the mandatory review gate).** Round 1 built
+  its own probe tests against a copy of the package and found the round-1
+  fix was itself incomplete in 2 places, plus 1 more pattern gap — all 3
+  fixed before re-review, not deferred:
+  1. **MEDIUM, fixed:** `resource_name`'s nested
+     `object.get(object.get(resource,"metadata",{}),"name",...)` only
+     handled `metadata` *missing*, not `metadata: null` (present-but-null,
+     e.g. a template bug) — the inner call still dereferences `null` on the
+     outer lookup, reproducing the identical fail-open bug one level down.
+     Fixed by switching to the **path-form** `object.get(resource,
+     ["metadata", "name"], "<unnamed>")`, which handles both missing and
+     null-valued intermediates in one lookup. Round-2 auditor independently
+     verified via a scratch OPA probe (outside the repo) that path-form
+     `object.get` returns the default for every broken-intermediate shape
+     (missing key, `null`, wrong type, empty array), not just the one
+     mutation-tested case.
+  2. **MEDIUM, fixed:** `container.name`/`env.name` were still direct
+     references in the env[].value deny message — `is_credential_looking_env`
+     correctly matches an env entry with no `name` key, but building the msg
+     with a direct `env.name` reference silently dropped the deny anyway (same
+     undefined-poisons-whole-body class as #1, at the field level not the
+     resource level). Fixed with a `field_name(obj, key) := object.get(obj,
+     key, "<unnamed>")` helper.
+  3. **LOW, fixed:** the JWT pattern's full `^...$` anchoring meant a JWT
+     embedded in a larger string (a `"Bearer eyJ..."` header value, or a
+     multi-line ConfigMap block scalar with trailing whitespace/newlines —
+     exactly where a leaked bearer token would realistically land) escaped
+     detection entirely; also missed `alg: none` unsigned JWTs (empty
+     signature segment). Fixed by dropping the anchors (the `eyJ`-prefix +
+     per-segment min-length already does the semver/hostname false-positive
+     rejection on its own, so full anchoring wasn't buying anything) and
+     changing the signature segment from `{8,}` to `*` (zero-or-more).
+  All 3 fixes mutation-tested individually (reverted each, confirmed the
+  exact expected tests go red, restored) before the round-2 review.
+  **Round 2 (independent re-verification, not just re-trusting round 1):
+  PASS**, plus 3 informational-only findings, all addressed rather than
+  deferred since they were cheap: (i) an interim version of the JWT pattern
+  had a dead-code trailing `=*` for base64-padding — auditor proved via a
+  scratch probe that unanchored `regex.match` already matches padded values
+  as a prefix substring without it, making `=*` redundant and its own test
+  vacuous; removed the dead regex fragment, kept the test but rewrote it to
+  assert the *actual* (implicit-substring-match) mechanism rather than a
+  fictitious explicit one; (ii) a `metadata: {name: null}` leaf-null case
+  renders `"Secret/null"` in the message — cosmetic only, deny still fires
+  correctly (not a fail-open), left as-is, no test added (round-2 flagged
+  as informational, not required); (iii) AWS credential-prefix coverage is
+  AKIA/ASIA only, `ABIA` (bearer tokens) uncovered — optional, deferred.
+- Verified (both rounds): `conftest verify -p infra/policy` 88/88 final;
+  all 3 real overlays `helm lint` clean + `conftest test --combine` 7/7
+  clean throughout (zero behavior change on production manifests — pure
+  future-regression/edge-case guard, confirmed both before and after the
+  round-2 fixes).
+- Not architectural (pure Rego policy-gate strengthening on 3 existing
+  rules, zero chart-rendered-output change, zero new API/config surface) —
+  `threat-model-checker` correctly not invoked; not crypto/MLS/OPAQUE/WASM
+  — `crypto-reviewer` correctly not invoked. Only 2 `.rego` files touched
+  (confirmed via `git status --short` before commit) — `cargo build`/
+  `pnpm test` correctly not re-run.
+- **Process note for future cycles:** this is the second cycle in a row
+  (386, now 389) where the FIRST security-auditor pass on a `.rego` policy
+  change found a real, fixable gap rather than rubber-stamping — worth
+  treating a round-1 YELLOW/needs-rework on infra-policy diffs as the norm
+  to expect, not an anomaly, and always budgeting a round-2 re-verify pass
+  rather than committing straight off round 1's findings-fixed claim.
+- Target dir hygiene: not checked (FEATURE mode, backend/Rust untouched
+  this cycle — last checked cycle 385 at 28GB, next due cycle 390
+  STABILIZATION per schedule).
+- **Next cycle candidates:** (A1) from cycle 388's crypto-reviewer —
+  adopt `Comlink.transfer` for `mediaExportKeyForStorage`'s return value to
+  eliminate the worker-side unzeroed residue (pattern-setting, route to
+  crypto-lead); the T4 media-message-has-no-TTL gap flagged by cycle 388's
+  threat-model-checker (affects both incoming and outgoing media now,
+  worth its own design); this cycle's own optional/deferred item (iii)
+  above (`ABIA` AWS bearer-token prefix, cheap one-line addition alongside
+  AKIA/ASIA); cycle 379's YELLOW-1 (`ci-infra.yml`
+  `--skip-tests`/`podSelector` labels nit, still open, still low urgency);
+  the long-carried ops/blocked items: provision the 3 environments'
+  `grpc-tls-{cert,key,ca}` secret-store keys (ops task, not code) and real
+  `r2Endpoint`/`r2Bucket`/`vapidContact` values (ops task, not code);
+  activating `grpcPeers` for real cross-region mesh traffic (needs its own
+  threat-model check); PQ hybrid Phase A (blocked on openmls stable
+  `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003 Phase
+  B); project-context.md size (now ~3380 lines, growing steadily — this is
+  cycle 390's STABILIZATION trim target, do not defer again).
+
+## Previous state (2026-08-29, cycle 388 — FEATURE: media-key local persistence sender/receiver symmetry (ADR-0004), commit 83c3982)
 
 - CI green (`gh run list --limit 3` all success), `git status` at cycle start was
   NOT clean — found a full, uncommitted ADR-0004 implementation already sitting
