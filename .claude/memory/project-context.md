@@ -17,7 +17,94 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-30, cycle 390 — STABILIZATION: full green sweep + project-context.md re-archive)
+## Current state (2026-08-30, cycle 391 — FEATURE: Comlink.transfer for mediaExportKeyForStorage (ADR-0004 A1), commit 0f06440)
+
+- CI green (`gh run list --limit 5` all success), `git status` clean at cycle start. Picked
+  cycle 388's own crypto-reviewer advisory A1 (carried through cycles 389/390's "next cycle
+  candidates" without being separately re-listed by name, but never fixed): `mediaExportKeyForStorage`
+  in `app/src/workers/crypto.worker.ts` returned its `{ mediaKey }` result via Comlink's default
+  structured-clone, which COPIES the underlying ArrayBuffer across the worker→main-thread
+  postMessage — leaving an unzeroed residue of the raw sender-side media key sitting in the
+  worker's own JS heap until GC, on top of the already-`.fill(0)`'d main-thread copy.
+- **Fix:** extracted `transferMediaExportResult(result)` (exported, standalone, synchronous —
+  same rationale as the Rust-side `take_media_key_for_export` extraction: testable without the
+  real Worker/wasm-pack plumbing JSDOM can't construct) that wraps the WASM result in
+  `Comlink.transfer(result, [result.mediaKey.buffer])` before it's returned from the exposed API
+  method. `Comlink.transfer` marks the buffer as a postMessage transferable — the browser MOVES
+  (not copies) it, atomically detaching the worker-side view as part of the same call. Verified
+  the load-bearing precondition (`bytes_js`'s `Uint8Array::from(&[u8])` on the Rust side always
+  copies into a fresh, solely-owned JS-heap ArrayBuffer, never a view aliasing live WASM linear
+  memory — confirmed by both review rounds via the actual js-sys/ECMA-262 `InitializeTypedArrayFromTypedArray`
+  copy semantics, not just trusted from the doc comment).
+- Added `app/src/workers/transferMediaExportResult.test.ts` (6 tests): reference-identity,
+  byte-preservation, a real `MessageChannel` + `Comlink.expose`/`Comlink.wrap` round-trip proving
+  actual detachment (`mediaKey.buffer.byteLength === 0` post-call — a discriminator that fails if
+  `Comlink.transfer` is reverted to a plain return), plus 3 tests for the R2 guard below.
+- Verified: `npx tsc -b` clean, `npx biome check` clean (one auto-fmt pass), `pnpm test --run`
+  106 files / 1527 tests all green (+6 new; 1 unrelated flaky `ChatLayoutPoll.test.tsx` failure
+  in the first full run reproduced as green in isolation both before and after this diff — not a
+  regression). No `.rs`/infra files touched — `cargo`/`helm`/`conftest` correctly not re-run.
+- **crypto-reviewer: round 1 YELLOW, round 2 GREEN.** Round 1 independently confirmed the
+  load-bearing precondition holds today, then found 2 required fixes before the transfer pattern
+  was safe to ship: **R1** — `media_export_key_for_storage`'s declared return type (WasmModule
+  interface, `transferMediaExportResult`'s signature, `mediaExportKeyForStorage`'s Promise type)
+  needed narrowing from plain `Uint8Array` to `Uint8Array<ArrayBuffer>`, since `.buffer` on an
+  unparameterized `Uint8Array` types as `ArrayBufferLike` (includes `SharedArrayBuffer`, not
+  assignable to Comlink's `Transferable[]`) under this project's `ES2020` lib target. **R2** — the
+  fix's entire safety rests on `mediaKey` never being a subarray/view over a larger buffer (in the
+  WASM case, potentially the live linear-memory heap, whose accidental transfer+detach would leak/
+  destroy in-flight MLS/OPAQUE session state, not just the media key) — that precondition was
+  previously enforced nowhere, only asserted in a comment. Added a runtime guard
+  (`byteOffset !== 0 || byteLength !== buffer.byteLength` → throw a content-free
+  `media_export_invariant` error) plus 3 tests, mutation-tested by round 2 (flipping `||`→`&&` or
+  deleting the guard both correctly fail tests). Round 2 additionally surfaced why R2 specifically
+  matters beyond defense-in-depth: `getWasm()`'s `as unknown as WasmModule` double-cast means R1's
+  type narrowing is compiler-trusted, not compiler-verified against the actual (stale, pre-
+  `build:wasm`) checked-in `powehi_crypto_wasm.d.ts` — R2's runtime guard is the only real
+  enforcement mechanism in practice, not redundant with R1. 5 non-blocking advisories from round 1
+  (A1: move helper to its own module for direct wiring-test coverage; A2: covered by R2's new
+  tests; A3: wrap `mediaTransfer.ts`'s post-transfer `raw.fill(0)` in try/catch — deliberately
+  skipped, no precedent for defending unreachable states anywhere else in this file/module,
+  matches CLAUDE.md's "don't add error handling for scenarios that can't happen"; A4: test-only
+  Comlink.expose side effect, confirmed harmless — Vitest's `pool: "forks"` + default `isolate:
+  true` keeps it file-scoped; A5: **the same residue class exists on OPAQUE's `exportKey` at
+  crypto.worker.ts ~line 317/345, arguably higher-value key material than a media key, never
+  zeroed after `deriveDbKey` — real, separate scope, good next-cycle candidate**), all deferred by
+  design, re-confirmed still valid post-fix (R1/R2 only tightened the transfer path, didn't widen
+  any exposure surface).
+- Not architectural (transport-mechanism change only, zero new server-visible metadata, ADR-0004's
+  opt-in/one-shot/called-last invariants untouched) — `threat-model-checker` correctly not invoked;
+  not a backend handler or infra change — `security-auditor` correctly not invoked.
+- **Environment note (not project code):** mid-cycle, the local dev machine's root APFS volume hit
+  genuine disk exhaustion (121Mi free of 228Gi) — every Bash tool call failed with ENOSPC (even the
+  harness's own tiny per-command output-capture write couldn't complete). Root cause: this repo's
+  own `target/` (28GB, previously flagged at cycle 390 as "over threshold, nothing prunable" since
+  everything was <7 days old at the time) had since aged past the 7-day mtime window. Applied the
+  existing STABILIZATION prune recipe out-of-band (0-byte `.rmeta` sweep + `-mtime +7` prune on
+  `target/debug/deps`/`target/debug/incremental`) via a dedicated diagnostic agent — freed ~7.6GB
+  system-wide (121Mi → 7.7Gi free), `target/` 28G → 20G. Not a code change, not this cycle's
+  mandatory commit. **Flagging for next STABILIZATION:** the 7-day mtime window is now confirmed
+  too loose to prevent a full disk between checks — consider a lower threshold (3-4 days) or
+  triggering a prune whenever `target/` crosses ~24-25GB regardless of cycle-count schedule, since
+  hitting 0 free bytes system-wide is a hard blocker (not just a hygiene nit) and this is the first
+  time it's actually happened after ~10 cycles of "28GB and climbing, not urgent yet" notes.
+- Target dir hygiene: addressed reactively mid-cycle (see above), not as the scheduled
+  STABILIZATION step (this was a FEATURE cycle) — re-verify at the next scheduled STABILIZATION
+  (395) that the emergency prune didn't mask a faster growth rate than previously estimated.
+- **Next cycle candidates:** (A5 above) OPAQUE `exportKey` residue at crypto.worker.ts's
+  `deriveDbKey` call sites (~line 317/345) — same unzeroed-worker-heap-copy class as this cycle's
+  fix, arguably higher-value key material, no Comlink.transfer applicable there (exportKey is
+  consumed synchronously in-worker via `deriveDbKey`, never returned to the main thread — the fix
+  shape would be a plain `.fill(0)` after derivation, not a transfer); (A1 above) split
+  `transferMediaExportResult` into its own module so the production wiring in
+  `mediaExportKeyForStorage` gets direct test coverage, not just the extracted helper; the
+  target-dir prune-threshold tightening flagged above; the cross-tab cloned-MLS-sender-ratchet
+  property (every open tab independently imports the group's sender ratchet — still not
+  cycle-sized, needs its own design pass); PQ hybrid Phase A (still blocked on openmls stable
+  `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003 Phase B 95%-session
+  threshold).
+
+## Previous state (2026-08-30, cycle 390 — STABILIZATION: full green sweep + project-context.md re-archive)
 
 - CI green (`gh run list --limit 3` all success), `gh issue list --state open` empty,
   `git status` clean at cycle start.
