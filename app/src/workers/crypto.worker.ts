@@ -282,6 +282,28 @@ export function transferMediaExportResult(result: { mediaKey: Uint8Array<ArrayBu
 	return Comlink.transfer(result, [mediaKey.buffer]);
 }
 
+/**
+ * Derives the IndexedDB AES-GCM-256 key from a raw OPAQUE export-key buffer,
+ * then scrubs that buffer's own JS-heap copy.
+ *
+ * `deriveDbKey`'s `crypto.subtle.importKey("raw", ...)` copies `exportKeyBytes`
+ * into the CryptoKey's internal, non-extractable storage — after that call
+ * resolves (or rejects), the caller's own `Uint8Array` copy of the export key
+ * serves no purpose and must not linger unzeroed in the worker's heap until
+ * GC (same unzeroed-residue class as `mediaKey`'s worker-side copy, fixed via
+ * `Comlink.transfer` in cycle 391 — export key never crosses the worker
+ * boundary at all, so the fix here is a plain scrub, not a transfer).
+ * Extracted so it's directly unit-testable without the real Worker/wasm-pack
+ * plumbing JSDOM can't construct (see deriveDbKeyAndScrub.test.ts).
+ */
+export async function deriveDbKeyAndScrub(exportKeyBytes: Uint8Array): Promise<CryptoKey> {
+	try {
+		return await deriveDbKey(exportKeyBytes);
+	} finally {
+		exportKeyBytes.fill(0);
+	}
+}
+
 async function getWasm(): Promise<WasmModule> {
 	if (wasmModule !== null) return wasmModule;
 	// Dynamic import so the WASM bundle is only fetched when the worker starts.
@@ -329,8 +351,9 @@ const api = {
 	): Promise<RegFinishResult> {
 		const wasm = await getWasm();
 		const result = wasm.opaque_registration_finish(sessionId, password, serverResponse);
-		// Derive and hold the DB key inside the worker (F1: export key never leaves).
-		dbKey = await deriveDbKey(result.exportKey);
+		// Derive and hold the DB key inside the worker (F1: export key never leaves),
+		// scrubbing the export key's own worker-heap copy once derivation is done.
+		dbKey = await deriveDbKeyAndScrub(result.exportKey);
 		return { upload: result.upload };
 	},
 
@@ -357,8 +380,9 @@ const api = {
 	): Promise<LoginFinishResult> {
 		const wasm = await getWasm();
 		const result = wasm.opaque_login_finish(sessionId, password, serverResponse);
-		// Derive and hold the DB key inside the worker (F1: export key never leaves).
-		dbKey = await deriveDbKey(result.exportKey);
+		// Derive and hold the DB key inside the worker (F1: export key never leaves),
+		// scrubbing the export key's own worker-heap copy once derivation is done.
+		dbKey = await deriveDbKeyAndScrub(result.exportKey);
 		return { finalization: result.finalization };
 	},
 
