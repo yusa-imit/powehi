@@ -17,7 +17,170 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-30, cycle 392 — FEATURE: scrub OPAQUE export-key worker-heap residue, commit 7ebd270)
+## Current state (2026-08-30, cycle 394 — FEATURE: scrub OPAQUE `password` worker-heap residue across all 4 Comlink call sites, commit fb37364)
+
+- CI green (`gh run list --limit 3` all success), `gh issue list --state open`
+  empty, `git status` clean at cycle start. **Found and closed a process gap
+  first:** cycle 393's own work (commit `a9f3280`, "scrub opaque-ke's own
+  export/session key GenericArrays after finish") was already committed and
+  pushed, but its end-of-cycle memory update never happened — no
+  `chore: update session memory` commit existed for it, so this file's
+  "Current state" header still read cycle 392. Reconstructed cycle 393's
+  entry below from the actual commit diff (not guessed) before doing this
+  cycle's own work, so the history stays accurate for future cycles.
+- Picked cycle 392's own carried-forward "next cycle candidate" A2 (still
+  open through cycle 393, which addressed A1 instead): `password: Uint8Array`
+  crosses Comlink's default structured-clone from `app/src/components/
+  Login.tsx` into `app/src/workers/crypto.worker.ts`'s
+  `opaqueRegistrationStart`/`opaqueRegistrationFinish`/`opaqueLoginStart`/
+  `opaqueLoginFinish` and was never scrubbed on the worker side of any of the
+  four — same unzeroed-worker-heap-copy residue class as the export-key/
+  media-key fixes, but upstream of the export key in the OPRF, and on the
+  password itself rather than a derived key. Confirmed via `Login.tsx` that
+  the main-thread caller's own `pw` copy is already scrubbed (`pw.fill(0)`
+  in a `finally` at ~line 486, covering all 3 flows); the worker-side gap
+  affects all four Comlink calls, not just the two Finish handlers the A2
+  note originally named — `opaqueRegistrationStart`/`opaqueLoginStart` have
+  the identical gap (each Comlink call gets its own independent structured-
+  clone copy of `password`, so Start's copy and Finish's copy are two
+  separate unzeroed buffers, not one).
+- **Fix:** wrapped each of the 4 worker methods' WASM call in `try { ... }
+  finally { password.fill(0); }`. For the two Finish methods, tightened per
+  crypto-reviewer's A1 finding (see below): the `finally` wraps ONLY the
+  synchronous WASM call, not the subsequent `await deriveDbKeyAndScrub(...)`,
+  so the scrub fires immediately when the WASM call returns rather than
+  after the DB-key derivation resolves.
+- Verified: `npx tsc -b` clean, `npx biome check` clean, `pnpm test --run`
+  107 files / 1532 tests all green (no new test file — see coverage-gap note
+  below). No `.rs`/infra files touched — `cargo`/`helm`/`conftest` correctly
+  not re-run.
+- **crypto-reviewer: GREEN on round 1** (no YELLOW round needed this cycle —
+  first time in this residue-closing series). Independently verified: (1)
+  the `try/finally` vs. WASM-read race is safe — traced the actual generated
+  glue (`passArray8ToWasm0` in `app/src/wasm/powehi_crypto_wasm.js`) and
+  confirmed the copy into WASM linear memory is a synchronous `TypedArray.set`
+  that completes before all 4 Rust exports (plain synchronous `pub fn`, not
+  `async`) are even invoked; (2) `password` is never read again after the
+  WASM call in any of the 4 methods; (3) no realistic path where `fill(0)`
+  throws or the WASM call retains a live reference to the JS buffer after
+  returning — traced Comlink's `fromWireValue` (exactly one worker-side copy
+  ever exists) and confirmed WASM holds a pointer into its own linear memory,
+  never a JS `ArrayBuffer` reference; also independently confirmed there is
+  no in-process/same-realm call path that could have made this fix silently
+  derive from an already-zeroed password on `Login.tsx`'s repeated
+  Start-then-Finish reuse of one `pw` — only real `new Worker` + `Comlink.wrap`
+  exists; (4) `bytes_js`'s output-side copy-guarantee (verified in prior
+  cycles) is unaffected since this diff only touches the input side.
+  **1 recommended (non-blocking) fix, applied:** A1 — tighten the two Finish
+  methods' `finally` scope to wrap only the WASM call (as described above),
+  since the original diff's `finally` wrapped the whole body including the
+  `await`, wider than the doc comment's own claim. **1 doc advisory,
+  applied:** A2 — added an explicit doc-comment caveat that this fix closes
+  only the JS-heap copy of `password`; wasm-bindgen's `passArray8ToWasm0`
+  mallocs a SEPARATE, never-zeroized copy into WASM linear memory (the 4
+  Rust exports take `password: &[u8]` with no `Zeroizing` wrapper) — same
+  unclosed-residue caveat already documented for `clearSessionState` and in
+  `opaque.rs`; real gap, correctly deferred (needs a Rust-side change, not a
+  worker-file change) — **next cycle candidate A2-cont'd below.** **1
+  cosmetic fix, applied:** A3 — `opaqueLoginStart`'s doc comment pointed at
+  `opaqueRegistrationStart` (itself a forward reference to
+  `opaqueRegistrationFinish`) — collapsed to a direct reference.
+- **Test coverage gap, confirmed real, shipped without closing (consistent
+  with precedent):** the 4 worker methods live on a non-exported `const api =
+  {...}` object and call `getWasm()` (real WASM dynamic import) — no harness
+  in this repo can construct a real Worker + real WASM in Vitest to exercise
+  them directly (`mediaEncrypt.test.ts`/`mlKem768.test.ts` test a hand-written
+  mock via `getCryptoWorkerProxy`, not the real worker; a mutant deleting all
+  4 `finally` blocks leaves every existing test green). Same class as the gap
+  `opaque.rs` already documents for its own `#[wasm_bindgen]` call sites
+  (cycle 393's commit message). Unlike `deriveDbKeyAndScrub`/
+  `transferMediaExportResult`, there's no meaningful pure unit to extract
+  here (crypto-reviewer: "the unit under test would be
+  `Uint8Array.prototype.fill`... wrapping it in a `withScrubbed()` helper to
+  manufacture testability would be exactly the 'creative wrapping' I'd
+  otherwise flag"). The one genuinely valuable test would be a Playwright e2e
+  asserting a full register→logout→login round-trip still succeeds (proving
+  the worker-side scrub never touches the caller's reused `pw` across the 4
+  calls) — belongs in the existing e2e OPAQUE flow, not a new unit file; not
+  done this cycle (scope), candidate for a future STABILIZATION test-gap pass.
+- Not architectural (no new server-visible metadata, `password` still never
+  leaves the worker/main-thread pair, F1 invariant untouched) —
+  `threat-model-checker` correctly not invoked; not a backend handler or
+  infra change — `security-auditor` correctly not invoked.
+- Target dir hygiene: not checked (FEATURE mode, backend/Rust untouched this
+  cycle — last checked cycle 391 at 20G post-emergency-prune, STABILIZATION
+  recheck due at cycle 395).
+- **Next cycle candidates:** (A2-cont'd, from this cycle's crypto-reviewer
+  A2) the WASM-linear-memory copy of `password` made by `passArray8ToWasm0`
+  is never zeroized — Rust-side fix in `wasm_exports.rs`/`opaque.rs`
+  (`password: &[u8]` copied into a local `Zeroizing<Vec<u8>>` immediately on
+  entry, then the original slice's backing WASM memory zeroed after use, or
+  equivalent), route to crypto-lead; the e2e round-trip test noted above
+  (register→logout→login proving the `pw` reuse path is safe), candidate for
+  next STABILIZATION's test-gap pass; the SAFETY doc comment on `bytes_js`
+  (cycle 392's A3, still open); the lint rule banning direct `deriveDbKey`
+  imports outside `db/` (cycle 392's A5, still open); the target-dir
+  prune-threshold tightening flagged at cycle 391 (still due for verification
+  at STABILIZATION 395); the cross-tab cloned-MLS-sender-ratchet property
+  (still not cycle-sized); PQ hybrid Phase A (still blocked on openmls stable
+  `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003 Phase
+  B 95%-session threshold). **Process note:** double-check at the start of
+  every cycle that the previous cycle's memory-update chore commit actually
+  landed (`git log -1 --grep "session memory"` vs. the latest non-chore
+  commit) — this cycle found one silent skip (393); it's cheap to catch
+  early and expensive to reconstruct later.
+
+## Previous state (2026-08-30, cycle 393 — FEATURE: scrub opaque-ke's own export/session key GenericArrays after finish, commit a9f3280 — reconstructed retroactively by cycle 394 from the commit diff, since cycle 393's own memory-update commit was never made)
+
+- Picked cycle 392's own crypto-reviewer advisory A1 (larger half of the
+  OPAQUE-residue class, deferred as "route to crypto-lead"): opaque-ke
+  4.0.1's `ClientRegistrationFinishResult`/`ClientLoginFinishResult` only
+  derive `Clone`, not `Zeroize`/`ZeroizeOnDrop` — their `export_key`/
+  `session_key` `GenericArray` fields dropped into WASM linear memory
+  unscrubbed even though the copies extracted into `Zeroizing<Vec<u8>>` were
+  already safe.
+- **Fix:** added `scrub_registration_finish_result`/`scrub_login_finish_result`
+  helpers in `crates/client/powehi-crypto-wasm/src/opaque.rs`, called from
+  `wasm_exports.rs` after extracting what's needed from each result (zeroizes
+  the `GenericArray`s in place via `DerefMut` + `zeroize::Zeroize`). Also
+  closed the same gap in `opaque::login_finish` (the truncated-export-key
+  convenience wrapper) — it previously returned a bare `Vec<u8>` and never
+  scrubbed its own `result`; now returns `Zeroizing<Vec<u8>>` and calls the
+  new scrub helper before returning. Both doc comments document a caveat
+  this fix does NOT close: any by-value move of the finish result before the
+  scrub call (e.g. up `opaque-ke`'s own internal call stack) can leave an
+  intermediate stack/linear-memory copy unreached.
+- Added 3 new Rust unit tests (in `opaque.rs`'s `mod tests`), calling the
+  actual production helpers directly rather than replicating the zeroize
+  call inline: registration-finish-result scrub, login-finish-result scrub
+  (both `export_key` and `session_key`), and `login_finish`'s
+  `Zeroizing`-return regression test. Verified load-bearing via manual
+  mutation test (per commit message).
+- **crypto-reviewer pass noted in the commit message** ("closing F3 from the
+  cycle-393 crypto-reviewer pass") — ran in-session before commit per the
+  mandatory gate, though the review's own transcript/verdict detail wasn't
+  captured in this file since the memory-update step never ran. The commit
+  itself documents a known test-coverage gap: `opaque_registration_finish`'s
+  `#[wasm_bindgen]` call site has no coverage in the native `cargo test` run
+  (its `JsValue` return type isn't practically constructible outside a real
+  worker) — the new tests cover the production helper functions directly,
+  not the wiring at the call site, so deleting the helper call from
+  `wasm_exports.rs` would not fail any test today. Same coverage-gap class
+  cycle 394 (above) hit again on the TS side.
+- Not architectural, not a backend handler or infra change (inferred from
+  the diff: only `crates/client/powehi-crypto-wasm/src/{opaque.rs,
+  wasm_exports.rs}` touched) — `threat-model-checker`/`security-auditor`
+  scope not applicable.
+- **Next cycle candidates (as of this reconstruction):** cycle 392's A2
+  (OPAQUE `password: Uint8Array` never zeroed on either side of Comlink,
+  upstream of the export key) — picked up and closed (worker side) by
+  cycle 394 above; cycle 392's A3 (SAFETY doc comment on `bytes_js`) and A5
+  (lint rule banning direct `deriveDbKey` imports outside `db/`) — still
+  open; target-dir prune-threshold tightening (still due at STABILIZATION
+  395); PQ hybrid Phase A / OPAQUE PQ-hybrid OPRF upgrade (still blocked/
+  gated).
+
+## Previous state (2026-08-30, cycle 392 — FEATURE: scrub OPAQUE export-key worker-heap residue, commit 7ebd270)
 
 - CI green (`gh run list --limit 3` all success), `gh issue list --state open` empty,
   `git status` clean at cycle start. Picked cycle 391's own top "next cycle candidate"
