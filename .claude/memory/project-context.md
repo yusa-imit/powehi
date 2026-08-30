@@ -17,7 +17,148 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-30, cycle 396 — FEATURE: structurally enforce OPAQUE password zeroize via RAII guard, commit 5d48428)
+## Current state (2026-08-30, cycle 398 — FEATURE: wasm_bindgen_test coverage for OPAQUE password zeroize, commit 747ee20)
+
+- CI green (`gh run list --limit 3` all success), `gh issue list --state
+  open` empty, `git status` clean at cycle start. Picked cycle 396's own
+  top "next cycle candidate" (crypto-reviewer advisory A-3): no
+  `#[wasm_bindgen_test]` coverage asserted the caller's password buffer is
+  actually all-zero after each of the 4 OPAQUE exports
+  (`opaque_registration_start/finish`, `opaque_login_start/finish`)
+  returns — the `PasswordScrubGuard` RAII invariant had only been reasoned
+  about via compile-error probes, never exercised by a real test.
+- **Why native `cargo test` can't close this gap:** `wasm_exports.rs`'s own
+  test-module doc comment documents that `js_sys` (used internally by
+  `js_obj`/`bytes_js` to build the returned `JsValue`) panics outside a
+  real wasm32+JS-engine environment — confirmed by grepping: zero existing
+  native tests call the 4 OPAQUE `#[wasm_bindgen]` exports directly, they
+  all call the inner `opaque::` functions instead (which bypass
+  `PasswordScrubGuard` entirely, since the guard only wraps the exports in
+  `wasm_exports.rs`). Closing this needed `wasm-pack test --node`
+  (`tests/wasm_bindgen_tests.rs`), already wired into CI's `wasm-test` job.
+- **Added 7 tests** to `tests/wasm_bindgen_tests.rs`: success-path zeroize
+  for all 4 exports (`opaque_registration_finish`/`opaque_login_finish`
+  do a REAL client<->server round trip via new local `server_register`/
+  `server_store_password_file`/`server_login_start` helpers — duplicated,
+  not shared, from `opaque.rs`'s own private `#[cfg(test)] mod tests`,
+  since that module is unreachable from this separate integration-test
+  binary), error-path zeroize for both finish functions (unknown session
+  id), and a wrong-password negative control
+  (`test_opaque_login_finish_wrong_password_fails_and_zeroizes`).
+- **Verified via mutation testing (both directions):** neutering
+  `PasswordScrubGuard`'s `Drop` (made it a no-op) → all 6
+  zeroize-assertion tests correctly failed red; restored → all green
+  again. Separately mutation-tested an "eager scrub BEFORE the opaque-ke
+  call" regression (rather than the correct "on scope exit, after use") —
+  this is the bug class crypto-reviewer's required finding (below)
+  specifically targets, since a shared-guard regression that scrubs early
+  would make every export consistently derive from an all-zero password,
+  so registration and login would "agree" regardless of input and every
+  *success*-path test would stay green.
+- **crypto-reviewer: round 1 YELLOW (1 required fix, applied and
+  independently re-verified via mutation testing, not just re-trusting
+  the review's claim), 3 non-blocking advisories, 2 applied.** Verified
+  independently: production code diff is zero (test-only file), no
+  RFC 9420/9807/8291/FIPS 203 violation, no IV/nonce reuse, no
+  constant-time issue, no key-material process-boundary exposure; traced
+  the server-simulation helpers against the real ciphersuite in
+  `crates/adapters/outbound/powehi-opaque/src/lib.rs` line-by-line
+  (Ristretto255 + TripleDH/SHA-512 + Argon2id, `ServerLoginParameters::
+  default()`) and confirmed field-for-field agreement today (though the
+  review correctly noted this diff doesn't itself *prove* cross-crate
+  agreement — see Y-4 below); confirmed test fixtures are RFC 6761 `.test`
+  TLD + explicit test strings, no real-looking PII/keys (testing-
+  conventions.md); confirmed via `wasm-bindgen-test-macro`'s own source
+  that this file compiles-but-never-executes under native `cargo test`
+  (explains the unchanged 181/181 native count) yet still gets checked by
+  `cargo clippy --all-targets`. **Required fix (Y-1, applied): the
+  wrong-password negative control originally used two DIFFERENT-LENGTH
+  passwords** ("the-real-registered-password" 28B vs
+  "a-completely-different-password" 31B) — under the eager-scrub
+  mutation, two different-length all-zero buffers still hash to two
+  different OPRF inputs, so the test would spuriously stay green (correct
+  rejection) for the WRONG reason, not actually detecting the mutation.
+  **I independently proved this empirically** (not just trusting the
+  finding): re-ran the eager-scrub mutation against the original
+  unequal-length version — it stayed green — then fixed the test to use
+  two equal-length (32B each) passwords and re-ran the same mutation — it
+  correctly went red (only that one test failed, the other 8 stayed
+  green). Fixed version committed. **2 advisories applied (cheap):** Y-2
+  — added end-of-test `mls_clear_session()` to the two start-only success
+  tests (they left a live `OPAQUE_REG`/`OPAQUE_LOGIN` thread-local entry
+  behind, inconsistent with the file's existing hygiene convention); Y-4
+  — added a scope-note doc comment clarifying the server-simulation
+  helpers use THIS crate's own `DefaultCipherSuite`, not the server
+  adapter crate's separately-declared same-named type (currently
+  field-identical, but this diff doesn't prove that agreement holds).
+  **1 advisory deferred (N-1, cosmetic):** `js_sys::Uint8Array::from(val)`
+  is an unchecked cast rather than `dyn_into::<Uint8Array>().expect(...)`
+  — matches an existing pattern already in this file (line ~159, KEM
+  tests), not a new pattern, left as-is. **1 note, no action (N-2):** new
+  tests run Argon2id 3x per test in a debug-profile wasm binary under
+  `wasm-pack test --node` (no `--release`); no CI timeout configured on
+  the `wasm-test` job, observed to add ~0.5s to the suite — not a
+  concern today, flagged for awareness if the suite grows much larger.
+- Verified (independently, not rubber-stamped): `wasm-pack test --node
+  crates/client/powehi-crypto-wasm` 9/9 green (7 new + 2 pre-existing KEM
+  cap tests); `cargo build --workspace` clean; `cargo clippy -p
+  powehi-crypto-wasm --all-targets -- -D warnings` clean; `cargo fmt
+  --check -p powehi-crypto-wasm` clean; `cargo test -p powehi-crypto-wasm`
+  181/181 native (unchanged — zero production code touched).
+- **Explicitly documented remaining gap (not closed this cycle, in the
+  new test-file module doc comment):** these tests call the exported
+  functions as plain Rust (not through the wasm-bindgen-generated JS glue
+  in `pkg/*.js`'s `passArray8ToWasm0` malloc +
+  `__wbg___wbindgen_copy_to_typed_array_*` copy-back that a real
+  browser/Comlink caller goes through), so they do NOT prove the JS-side
+  `Uint8Array` copy-back timing (whether zeroed bytes get copied back, vs.
+  the malloc'd WASM-linear-memory copy being zeroed while the original
+  copy-back already happened with stale bytes). What they DO prove:
+  `PasswordScrubGuard`'s `Drop` fires on every real exit path of the real
+  exported function, running in the actual wasm32 target with real
+  `js_sys` machinery in the body — not just reasoned about via
+  compile-error probes. **Discovered a related pre-existing gap while
+  scoping this:** `app/src/wasm/` (the gitignored local-dev WASM build the
+  frontend/worker actually imports) was stale on this machine (dated
+  Jul 16, missing the cycles-395/396 `&mut [u8]` signature change and its
+  JS copy-back glue entirely — 3-arg vs. the current 4-arg exported
+  signature) — confirms cycle 396's advisory A-5 was real. Not fixed this
+  cycle (it's a local build artifact, not a committed file — `pnpm run
+  build:wasm` regenerates `crates/client/powehi-crypto-wasm/pkg/`, and a
+  separate manual `wasm-pack build --out-dir app/src/wasm` regenerates the
+  dev copy; neither is part of `git status`). **Also confirmed:** CI's
+  `vitest` job (`.github/workflows/ci-frontend.yml`) does NOT build
+  `app/src/wasm` before running tests — no Rust toolchain in that job at
+  all — so a hypothetical Vitest test importing the real WASM module
+  would fail in CI today without first adding a wasm-build step there.
+  That CI-wiring gap is the actual reason the JS-copy-back gap above
+  can't be closed cheaply from the Vitest side either; would need a
+  CI workflow change (bigger than this cycle's scope), route to
+  infra-lead/ci-pipeline-author if picked up.
+- Not architectural (test-only file, zero production code touched, zero
+  new server-visible metadata) — `threat-model-checker` correctly not
+  invoked; not a backend handler or infra change — `security-auditor`
+  correctly not invoked.
+- Target dir hygiene: not checked (FEATURE mode; last checked cycle 395
+  STABILIZATION at 8.5G, next scheduled recheck cycle 400).
+- **Next cycle candidates:** the JS-glue-copy-back gap documented above —
+  needs either (a) a CI workflow change adding a wasm-pack build step to
+  the `vitest` job before a new JS-level test can load the real WASM
+  module, or (b) a wasm-bindgen-internals technique for invoking the
+  generated JS wrapper from within a `#[wasm_bindgen_test]` (unexplored,
+  may not exist cleanly); (A-2 from cycle 396, still open) drop 4
+  `cargo doc` warnings via plain-backtick instead of intra-doc link,
+  trivial; the e2e register→logout→login round-trip Playwright test
+  candidate (carried since cycle 394); Helm wiring for
+  `database_max_connections`/`r2_request_timeout_secs`/
+  `media_gc_sweep_timeout_secs` (bundle, needs infra-lead + real capacity
+  numbers, carried since cycle 372); PQ hybrid Phase A (still blocked on
+  openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade
+  (gated on ADR-0003 Phase B, itself gated on Phase A); frontend `pnpm
+  audit`'s 23 dev/build-time findings (vitest/wrangler/vite transitive,
+  not urgent).
+
+## Previous state (2026-08-30, cycle 396 — FEATURE: structurally enforce OPAQUE password zeroize via RAII guard, commit 5d48428)
 
 - CI green (`gh run list --limit 3` all success), `gh issue list --state
   open` empty, `git status` clean at cycle start. Picked cycle 395's own
