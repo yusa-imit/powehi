@@ -19,15 +19,34 @@
 // zeroed, leaving the raw password bytes in linear memory (which is never
 // itself deterministically zeroed or reused) until something happens to
 // overwrite that region. Taking `&mut [u8]` makes wasm-bindgen copy the slice
-// contents back into the caller's original `Uint8Array` before freeing, so a
-// `password.zeroize()` inside these functions wipes BOTH the WASM-linear-memory
+// contents back into the caller's original `Uint8Array` before freeing, so
+// zeroizing that buffer inside these functions wipes BOTH the WASM-linear-memory
 // copy AND the JS-heap copy. This is distinct from — and layered on top of, not
 // a replacement for — the JS-side `password.fill(0)` scrub in
 // app/src/workers/crypto.worker.ts (cycle 394), matching this crate's
 // defense-in-depth convention of scrubbing independently at every layer (cf.
 // opaque.rs's `Zeroizing` + `scrub_registration_finish_result` pattern).
-// INVARIANT: `password.zeroize()` must run on EVERY path out of these four
-// functions, success and error alike — never behind a `?`.
+// INVARIANT: the password buffer must be zeroized on EVERY path out of these
+// four functions, success and error alike. Cycle 396: this is now enforced
+// STRUCTURALLY, not by convention. Each function wraps its
+// `password: &mut [u8]` parameter in the local `PasswordScrubGuard` RAII guard
+// (below) immediately on entry; the guard's `Drop` impl runs the zeroize
+// unconditionally on every scope exit — success return or early `?` return —
+// so no future added early-return can silently skip the scrub. (Note: this
+// crate targets wasm32-unknown-unknown, where a Rust panic aborts the WASM
+// instance rather than unwinding — `Drop` does NOT run on that path. This
+// residue *class* is pre-existing, but this guard WIDENS the panic window
+// versus the prior manual-zeroize-immediately-after-the-opaque-call code: any
+// panic anywhere in a function body, not just after the OPAQUE call, now
+// leaves the linear-memory copy unzeroed. No panic-capable expression on the
+// widened portion of these four functions is reachable in practice today
+// (grep for `[..EXPORT_KEY_LEN]`/`.borrow_mut()`/allocation), so this is not
+// a new practical exposure, but a future refactor could introduce one without
+// this guard's Drop catching it — worth keeping in mind on future edits here.
+// The JS-heap copy is unaffected by this caveat: `crypto.worker.ts`'s
+// `finally { password.fill(0) }` scrubs it independently and DOES run on a
+// worker-side thrown error, since a WASM trap surfaces there as a rejected
+// promise, not a JS-side unwind-skip.)
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -164,21 +183,40 @@ fn js_err(msg: &str) -> JsError {
 
 // ── OPAQUE exports ─────────────────────────────────────────────────────────────
 
+/// RAII guard wrapping a borrowed password buffer: zeroizes it in `Drop`, so the
+/// compiler runs the scrub on EVERY path out of scope — success, an early `?`
+/// return, or unwind — making the INVARIANT above structurally enforced rather
+/// than dependent on every call site remembering `password.zeroize()`.
+struct PasswordScrubGuard<'a>(&'a mut [u8]);
+
+impl std::ops::Deref for PasswordScrubGuard<'_> {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        self.0
+    }
+}
+
+impl Drop for PasswordScrubGuard<'_> {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
 /// Start OPAQUE registration (client step 1).
 ///
 /// Returns `{ sessionId: string, message: Uint8Array }`.
 /// Send `message` (RegistrationRequest) to the server.
 /// Pass `sessionId` to `opaque_registration_finish`.
-/// `password` is taken as `&mut` and zeroized in place on every path — this closes
-/// the WASM-linear-memory copy (see module doc), distinct from the JS-heap copy
-/// the worker scrubs.
+/// `password` is taken as `&mut` and wrapped in [`PasswordScrubGuard`] immediately on
+/// entry — this closes the WASM-linear-memory copy (see module doc), distinct
+/// from the JS-heap copy the worker scrubs, and the wrap makes the zeroize
+/// unconditional on every exit path rather than a manual per-call-site scrub.
 #[wasm_bindgen]
 pub fn opaque_registration_start(password: &mut [u8]) -> Result<JsValue, JsError> {
+    let password = PasswordScrubGuard(password);
     let mut rng = OsRng;
-    let start_result = opaque::registration_start(password, &mut rng);
-    // Zeroize on ALL paths (success and error) before any `?` early-return.
-    password.zeroize();
-    let (state, message) = start_result.map_err(|e| js_err(&e.to_string()))?;
+    let (state, message) =
+        opaque::registration_start(&password, &mut rng).map_err(|e| js_err(&e.to_string()))?;
     let session_id = next_id();
     // Serialize ephemeral OPRF state to bytes and wrap in Zeroizing so the
     // heap buffer is zeroed when the session is consumed or cleared.
@@ -203,36 +241,28 @@ pub fn opaque_registration_start(password: &mut [u8]) -> Result<JsValue, JsError
 /// Send `upload` (RegistrationUpload) to the server.
 /// `exportKey` is the 32-byte durable key for wrapping local key material.
 /// The session is consumed: calling again with the same `sessionId` returns an error.
-/// `password` is taken as `&mut` and zeroized in place on every path — this closes
-/// the WASM-linear-memory copy (see module doc), distinct from the JS-heap copy
-/// the worker scrubs.
+/// `password` is taken as `&mut` and wrapped in [`PasswordScrubGuard`] immediately on
+/// entry — this closes the WASM-linear-memory copy (see module doc), distinct
+/// from the JS-heap copy the worker scrubs, and the wrap makes the zeroize
+/// unconditional on every exit path rather than a manual per-call-site scrub.
 #[wasm_bindgen]
 pub fn opaque_registration_finish(
     session_id: &str,
     password: &mut [u8],
     server_response: &[u8],
 ) -> Result<JsValue, JsError> {
-    let session = match OPAQUE_REG.with(|s| s.borrow_mut().remove(session_id)) {
-        Some(s) => s,
-        None => {
-            password.zeroize();
-            return Err(js_err("unknown opaque registration session"));
-        }
-    };
+    let password = PasswordScrubGuard(password);
+    let session = OPAQUE_REG
+        .with(|s| s.borrow_mut().remove(session_id))
+        .ok_or_else(|| js_err("unknown opaque registration session"))?;
     // Deserialize from the Zeroizing byte buffer; the buffer is zeroed on drop
     // when `session` goes out of scope at the end of this function.
-    let state =
-        match opaque_ke::ClientRegistration::<DefaultCipherSuite>::deserialize(&session.bytes) {
-            Ok(s) => s,
-            Err(_) => {
-                password.zeroize();
-                return Err(js_err("opaque registration session corrupted"));
-            }
-        };
+    let state = opaque_ke::ClientRegistration::<DefaultCipherSuite>::deserialize(&session.bytes)
+        .map_err(|_| js_err("opaque registration session corrupted"))?;
     let mut rng = OsRng;
-    let finish_result = opaque::registration_finish(state, password, server_response, &mut rng);
-    password.zeroize();
-    let (mut result, upload) = finish_result.map_err(|e| js_err(&e.to_string()))?;
+    let (mut result, upload) =
+        opaque::registration_finish(state, &password, server_response, &mut rng)
+            .map_err(|e| js_err(&e.to_string()))?;
     // Zeroizing ensures the Rust-side copy is wiped from linear memory on drop.
     let export_key = Zeroizing::new(result.export_key[..EXPORT_KEY_LEN].to_vec());
     // opaque-ke's ClientRegistrationFinishResult only derives Clone, not
@@ -251,16 +281,16 @@ pub fn opaque_registration_finish(
 ///
 /// Returns `{ sessionId: string, message: Uint8Array }`.
 /// Send `message` (CredentialRequest) to the server.
-/// `password` is taken as `&mut` and zeroized in place on every path — this closes
-/// the WASM-linear-memory copy (see module doc), distinct from the JS-heap copy
-/// the worker scrubs.
+/// `password` is taken as `&mut` and wrapped in [`PasswordScrubGuard`] immediately on
+/// entry — this closes the WASM-linear-memory copy (see module doc), distinct
+/// from the JS-heap copy the worker scrubs, and the wrap makes the zeroize
+/// unconditional on every exit path rather than a manual per-call-site scrub.
 #[wasm_bindgen]
 pub fn opaque_login_start(password: &mut [u8]) -> Result<JsValue, JsError> {
+    let password = PasswordScrubGuard(password);
     let mut rng = OsRng;
-    let start_result = opaque::login_start(password, &mut rng);
-    // Zeroize on ALL paths (success and error) before any `?` early-return.
-    password.zeroize();
-    let (state, message) = start_result.map_err(|e| js_err(&e.to_string()))?;
+    let (state, message) =
+        opaque::login_start(&password, &mut rng).map_err(|e| js_err(&e.to_string()))?;
     let session_id = next_id();
     // Serialize ephemeral KE1 state (ephemeral DH keys + OPRF client) to bytes
     // and wrap in Zeroizing so the heap buffer is zeroed when the session is
@@ -282,36 +312,28 @@ pub fn opaque_login_start(password: &mut [u8]) -> Result<JsValue, JsError> {
 /// Send `finalization` (CredentialFinalization) to the server.
 /// Wrong password returns an Err — never produces a key on failure.
 /// The session is consumed.
-/// `password` is taken as `&mut` and zeroized in place on every path — this closes
-/// the WASM-linear-memory copy (see module doc), distinct from the JS-heap copy
-/// the worker scrubs.
+/// `password` is taken as `&mut` and wrapped in [`PasswordScrubGuard`] immediately on
+/// entry — this closes the WASM-linear-memory copy (see module doc), distinct
+/// from the JS-heap copy the worker scrubs, and the wrap makes the zeroize
+/// unconditional on every exit path rather than a manual per-call-site scrub.
 #[wasm_bindgen]
 pub fn opaque_login_finish(
     session_id: &str,
     password: &mut [u8],
     server_response: &[u8],
 ) -> Result<JsValue, JsError> {
-    let session = match OPAQUE_LOGIN.with(|s| s.borrow_mut().remove(session_id)) {
-        Some(s) => s,
-        None => {
-            password.zeroize();
-            return Err(js_err("unknown opaque login session"));
-        }
-    };
+    let password = PasswordScrubGuard(password);
+    let session = OPAQUE_LOGIN
+        .with(|s| s.borrow_mut().remove(session_id))
+        .ok_or_else(|| js_err("unknown opaque login session"))?;
     // Deserialize from the Zeroizing byte buffer; the buffer is zeroed on drop
     // when `session` goes out of scope at the end of this function.
-    let state = match opaque_ke::ClientLogin::<DefaultCipherSuite>::deserialize(&session.bytes) {
-        Ok(s) => s,
-        Err(_) => {
-            password.zeroize();
-            return Err(js_err("opaque login session corrupted"));
-        }
-    };
+    let state = opaque_ke::ClientLogin::<DefaultCipherSuite>::deserialize(&session.bytes)
+        .map_err(|_| js_err("opaque login session corrupted"))?;
     // opaque-ke 4.x: ClientLogin::finish takes an rng (used for the CredentialFinalization).
     let mut rng = OsRng;
-    let finish_result = opaque::login_finish_full(state, password, server_response, &mut rng);
-    password.zeroize();
-    let mut result = finish_result.map_err(|e| js_err(&e.to_string()))?;
+    let mut result = opaque::login_finish_full(state, &password, server_response, &mut rng)
+        .map_err(|e| js_err(&e.to_string()))?;
     // Zeroizing ensures the Rust-side copy is wiped from linear memory on drop.
     let export_key = Zeroizing::new(result.export_key[..EXPORT_KEY_LEN].to_vec());
     let finalization = result.message.serialize().to_vec();

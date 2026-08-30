@@ -362,14 +362,22 @@ const api = {
 	 * (not the DB-key derivation below it), so the scrub runs the instant the
 	 * synchronous WASM call returns rather than waiting on that `await`.
 	 *
-	 * This closes only the JS-heap copy of `password`. wasm-bindgen's
-	 * `passArray8ToWasm0` mallocs a SEPARATE copy into WASM linear memory for
-	 * the call, which is never zeroized (the Rust side takes `password: &[u8]`
-	 * and passes it straight through with no `Zeroizing` wrapper) — same
-	 * unclosed-residue caveat already documented for the WASM-linear-memory
-	 * copies at `clearSessionState` and in `opaque.rs`. crypto-reviewer
-	 * cycle-394: real gap, correctly deferred (fixing it means a Rust-side
-	 * change in `wasm_exports.rs`/`opaque.rs`, not this file).
+	 * As of cycle 395/396, this closes BOTH the JS-heap copy of `password`
+	 * (this `finally`) AND the separate WASM-linear-memory copy that
+	 * wasm-bindgen's `passArray8ToWasm0` mallocs for the call: the Rust side
+	 * now takes `password: &mut [u8]`, wraps it in a `PasswordScrubGuard`
+	 * RAII guard on entry (`wasm_exports.rs`), and wasm-bindgen's `&mut [u8]`
+	 * glue copies the (already-zeroized) linear-memory bytes back into this
+	 * `Uint8Array` before freeing — so the two scrubs are complementary, not
+	 * redundant-only: the Rust-side guard closes the linear-memory copy this
+	 * `finally` cannot reach, and this `finally` is what makes the Rust-side
+	 * copy-back land in an already-owned buffer this worker then also zeroes.
+	 * Remaining caveat: on wasm32-unknown-unknown a Rust panic aborts the WASM
+	 * instance rather than unwinding, so the Rust-side guard's `Drop` does not
+	 * run on that path — this `finally` still fires (a WASM trap surfaces here
+	 * as a rejected promise, not a JS-side unwind-skip), so the JS-heap copy is
+	 * unaffected, but the very rare panic-capable case would leave stale bytes
+	 * in WASM linear memory. See the caveat documented in `wasm_exports.rs`.
 	 */
 	async opaqueRegistrationFinish(
 		sessionId: string,
