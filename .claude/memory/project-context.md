@@ -17,7 +17,95 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-30, cycle 391 — FEATURE: Comlink.transfer for mediaExportKeyForStorage (ADR-0004 A1), commit 0f06440)
+## Current state (2026-08-30, cycle 392 — FEATURE: scrub OPAQUE export-key worker-heap residue, commit 7ebd270)
+
+- CI green (`gh run list --limit 3` all success), `gh issue list --state open` empty,
+  `git status` clean at cycle start. Picked cycle 391's own top "next cycle candidate"
+  (advisory A5, first flagged cycle 388): `opaqueRegistrationFinish`/`opaqueLoginFinish`
+  in `app/src/workers/crypto.worker.ts` called `dbKey = await deriveDbKey(result.exportKey)`
+  and never zeroed `result.exportKey` afterward — same unzeroed-worker-heap-copy residue
+  class as cycle 391's media-key fix, but higher-value key material (roots the DB
+  encryption key, not a per-message media key). No `Comlink.transfer` applicable here —
+  `exportKey` is consumed synchronously in-worker (`dbKey` never leaves, matching the
+  existing F1 invariant), so the fix shape is a plain scrub, not a transfer, exactly as
+  predicted in cycle 391's notes.
+- **Fix:** extracted `deriveDbKeyAndScrub(exportKeyBytes)` (exported, in crypto.worker.ts)
+  wrapping `deriveDbKey` in `try { return await deriveDbKey(exportKeyBytes) } finally {
+  exportKeyBytes.fill(0) }`; both call sites now use it. Verified the load-bearing
+  precondition (`wasm_exports.rs`'s `bytes_js` = `Uint8Array::from(&[u8])` always copies
+  into a fresh, solely-owned JS-heap buffer, never a WASM-linear-memory view — same
+  guarantee crypto-reviewer verified for `mediaKey` in cycle 391, independently
+  re-confirmed this cycle down to the generated glue JS and the ECMA-262
+  `InitializeTypedArrayFromTypedArray` copy semantics).
+- Added `app/src/workers/deriveDbKeyAndScrub.test.ts` (5 tests): non-extractable
+  AES-GCM CryptoKey shape, derives-from-real-bytes (not a pre-zeroed buffer, pinned via
+  a negative assertion that an all-zero-key-derived key can NOT decrypt what the real
+  derivation encrypted), zeroes the buffer on success, zeroes the buffer even on
+  rejection (too-short key).
+- Verified: `npx tsc -b` clean, `npx biome check` clean, `pnpm test --run` 107 files /
+  1531 tests green (+4 net; one `ChatLayoutPoll.test.tsx` failure in the full run
+  reproduced as green in isolation, same pre-existing flake noted in cycle 391, confirmed
+  unrelated — no `workers/`/`crypto.worker.ts` overlap). No `.rs`/infra files touched —
+  `cargo`/`helm`/`conftest` correctly not re-run.
+- **crypto-reviewer: round 1 YELLOW, round 2 GREEN (self-verified via mutation testing,
+  not just re-trusting the fix claim).** Round 1 independently re-verified the copy
+  precondition down to the generated wasm-bindgen glue (`__wbg_new_from_slice_...` →
+  copying `new Uint8Array(typedArray)` constructor, not a view), confirmed
+  `crypto.subtle.importKey`'s synchronous "get a copy of the bytes" prologue (W3C Web
+  Crypto spec) makes the post-resolve `finally` scrub race-free, confirmed the
+  rejection-path scrub is safe (unreachable in production since `EXPORT_KEY_LEN` is
+  always 32, but harmless), and confirmed the Rust-side `Zeroizing::new(...)` in
+  `wasm_exports.rs` is complementary (covers the WASM-linear-memory `Vec<u8>`, not the
+  separate JS-heap `Uint8Array` this fix scrubs) rather than already covering this gap.
+  **Required fix (test-only, no production code change):** the new test file's
+  "derives the same key material" test compared two `deriveDbKeyAndScrub` calls against
+  each other — round 1 empirically proved via a scratch mutant (scrub-before-derive,
+  producing a DB key from all-zero bytes) that this comparison stays green under total
+  loss of at-rest confidentiality, since both sides of the comparison would derive from
+  zeros identically. **Fixed** by deriving the reference key via a plain, unscrubbed
+  `deriveDbKey` call and adding a negative assertion (an independently-derived
+  all-zero-key must fail to decrypt what the real derivation encrypted) — re-verified
+  myself by re-introducing the exact scrub-before-derive mutant locally: confirmed the
+  new tests correctly go red (2/5 fail) before restoring the real implementation and
+  re-confirming green. Round 2 (a fresh review pass, not just trusting my own mutation
+  test) confirmed the fix closes the gap: GREEN. 6 non-blocking advisories, none fixed
+  this cycle (real but out of scope for a worker-side JS fix): (A1) opaque-ke 4.0.1's
+  own `ClientLoginFinishResult`/`ClientRegistrationFinishResult` carry `export_key`/
+  `session_key` as plain `GenericArray`s with no `ZeroizeOnDrop` — `wasm_exports.rs`
+  only wraps the `.to_vec()` copy in `Zeroizing`, the opaque-ke-owned originals drop
+  unzeroed into WASM linear memory, arguably the larger remaining half of this residue
+  class, route to crypto-lead; (A2) `password: Uint8Array` crosses Comlink into both
+  finish handlers and is never zeroed on either side, upstream of the export key in the
+  OPRF — next candidate if continuing this residue-closing thread; (A3) `bytes_js`'s
+  copy guarantee is one refactor away from danger (the same wasm bundle already contains
+  a zero-copy `Ref(Slice(U8))` intrinsic elsewhere) — recommend a SAFETY doc comment on
+  `bytes_js` itself, cheap future-cycle pick; (A4) WebCrypto's intermediate `hkdfKey`
+  CryptoKey has no `destroy()` API and lives until GC — unavoidable, JSDoc slightly
+  overstates completeness; (A5) no wiring-level test would catch a revert of the two
+  call sites back to plain `deriveDbKey` (JSDOM can't construct the real worker) —
+  same class as cycle 391's own A1, a lint rule banning direct `deriveDbKey` imports
+  outside `db/` would close it; (A6) pre-existing cosmetic `as unknown as ArrayBuffer`
+  type lie in `encryption.ts`, unrelated to this diff.
+- Not architectural (no new server-visible metadata, `dbKey` still never leaves the
+  worker, F1 invariant untouched) — `threat-model-checker` correctly not invoked; not a
+  backend handler or infra change — `security-auditor` correctly not invoked.
+- Target dir hygiene: not checked (FEATURE mode, backend/Rust untouched this cycle —
+  last checked cycle 391 environment note at 20G post-emergency-prune, next scheduled
+  STABILIZATION recheck is cycle 395 per that note).
+- **Next cycle candidates:** (A1 above) opaque-ke's own unzeroed `export_key`/
+  `session_key` `GenericArray`s in `opaque.rs`'s finish-result structs — larger half of
+  this residue class, needs a crypto-lead-routed design (likely a local zeroizing
+  wrapper around the opaque-ke result before extracting bytes, since opaque-ke itself
+  doesn't implement `ZeroizeOnDrop` on these types); (A2 above) OPAQUE `password:
+  Uint8Array` never zeroed on either side of the Comlink boundary, upstream of the
+  export key; (A3 above) SAFETY doc comment on `bytes_js`, cheap; (A5 above) lint rule
+  banning direct `deriveDbKey` imports outside `db/`; the target-dir prune-threshold
+  tightening flagged at cycle 391 (still due for verification at STABILIZATION 395); the
+  cross-tab cloned-MLS-sender-ratchet property (still not cycle-sized); PQ hybrid Phase A
+  (still blocked on openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade
+  (gated on ADR-0003 Phase B 95%-session threshold).
+
+## Previous state (2026-08-30, cycle 391 — FEATURE: Comlink.transfer for mediaExportKeyForStorage (ADR-0004 A1), commit 0f06440)
 
 - CI green (`gh run list --limit 5` all success), `git status` clean at cycle start. Picked
   cycle 388's own crypto-reviewer advisory A1 (carried through cycles 389/390's "next cycle
