@@ -195,10 +195,17 @@ pub fn opaque_registration_finish(
     let state = opaque_ke::ClientRegistration::<DefaultCipherSuite>::deserialize(&session.bytes)
         .map_err(|_| js_err("opaque registration session corrupted"))?;
     let mut rng = OsRng;
-    let (result, upload) = opaque::registration_finish(state, password, server_response, &mut rng)
-        .map_err(|e| js_err(&e.to_string()))?;
+    let (mut result, upload) =
+        opaque::registration_finish(state, password, server_response, &mut rng)
+            .map_err(|e| js_err(&e.to_string()))?;
     // Zeroizing ensures the Rust-side copy is wiped from linear memory on drop.
     let export_key = Zeroizing::new(result.export_key[..EXPORT_KEY_LEN].to_vec());
+    // opaque-ke's ClientRegistrationFinishResult only derives Clone, not
+    // Zeroize/ZeroizeOnDrop — its own `export_key` GenericArray would otherwise
+    // drop into WASM linear memory unzeroed even though the copy above is wiped.
+    // See scrub_registration_finish_result's doc comment for the move-residue
+    // caveat this does NOT close.
+    opaque::scrub_registration_finish_result(&mut result);
     js_obj(&[
         ("exportKey", bytes_js(&export_key)),
         ("upload", bytes_js(&upload)),
@@ -250,11 +257,18 @@ pub fn opaque_login_finish(
         .map_err(|_| js_err("opaque login session corrupted"))?;
     // opaque-ke 4.x: ClientLogin::finish takes an rng (used for the CredentialFinalization).
     let mut rng = OsRng;
-    let result = opaque::login_finish_full(state, password, server_response, &mut rng)
+    let mut result = opaque::login_finish_full(state, password, server_response, &mut rng)
         .map_err(|e| js_err(&e.to_string()))?;
     // Zeroizing ensures the Rust-side copy is wiped from linear memory on drop.
     let export_key = Zeroizing::new(result.export_key[..EXPORT_KEY_LEN].to_vec());
     let finalization = result.message.serialize().to_vec();
+    // opaque-ke's ClientLoginFinishResult only derives Clone, not
+    // Zeroize/ZeroizeOnDrop — its own `export_key`/`session_key` GenericArrays
+    // would otherwise drop into WASM linear memory unzeroed. `session_key` is
+    // never surfaced to JS at all today (no session-resumption use yet), so this
+    // is its only scrub site. See scrub_login_finish_result's doc comment for
+    // the move-residue caveat this does NOT close.
+    opaque::scrub_login_finish_result(&mut result);
     js_obj(&[
         ("exportKey", bytes_js(&export_key)),
         ("finalization", bytes_js(&finalization)),

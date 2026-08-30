@@ -25,6 +25,7 @@ use opaque_ke::{
     ClientRegistrationFinishParameters, ClientRegistrationFinishResult, CredentialResponse,
     RegistrationResponse,
 };
+use zeroize::{Zeroize, Zeroizing};
 
 /// OPAQUE ciphersuite for Powehi: Ristretto255 + TripleDH + Argon2id KSF
 /// (RFC 9807 / opaque-ke 4.0.1).
@@ -66,6 +67,43 @@ impl From<ProtocolError> for OpaqueError {
     fn from(_: ProtocolError) -> Self {
         OpaqueError::Protocol
     }
+}
+
+/// Zeroes the secret fields of a `ClientRegistrationFinishResult` in place.
+///
+/// opaque-ke 4.0.1's `ClientRegistrationFinishResult` only derives `Clone` —
+/// it does NOT implement `Zeroize`/`ZeroizeOnDrop` — so `export_key` (a
+/// `GenericArray<u8, N>`) would otherwise drop into WASM linear memory
+/// unscrubbed even if the caller's own extracted copy is wrapped in
+/// `Zeroizing`. Call this only AFTER extracting everything needed from
+/// `result` (its `export_key` bytes, `message` for serialization); it zeroes
+/// in place via `GenericArray`'s `DerefMut`, not a detached copy.
+///
+/// Caveat: this scrubs the final resting copy of `result` only. Every
+/// by-value move of a `ClientRegistrationFinishResult` before this call
+/// (e.g. returning it up the call stack from `opaque-ke`'s `finish()`) can
+/// leave an intermediate stack/linear-memory copy that this call does not
+/// reach — the same residue class documented at `opaque_registration_start`'s
+/// `bytes` comment. This reduces the exposure window; it does not close it
+/// completely.
+pub fn scrub_registration_finish_result(
+    result: &mut ClientRegistrationFinishResult<DefaultCipherSuite>,
+) {
+    result.export_key.as_mut_slice().zeroize();
+}
+
+/// Zeroes the secret fields of a `ClientLoginFinishResult` in place.
+///
+/// Same rationale as [`scrub_registration_finish_result`]: opaque-ke 4.0.1's
+/// `ClientLoginFinishResult` only derives `Clone`, so both `export_key` and
+/// `session_key` (each a `GenericArray<u8, N>`) would otherwise drop
+/// unscrubbed. `session_key` is never surfaced to JS today (no session
+/// resumption implemented) — this is its only scrub site. Call only after
+/// extracting `export_key` bytes and serializing `message`. Same
+/// move-residue caveat as [`scrub_registration_finish_result`].
+pub fn scrub_login_finish_result(result: &mut ClientLoginFinishResult<DefaultCipherSuite>) {
+    result.export_key.as_mut_slice().zeroize();
+    result.session_key.as_mut_slice().zeroize();
 }
 
 /// Step 1 of registration (client). Returns the client state to persist and the
@@ -129,10 +167,14 @@ pub fn login_finish<R: RngCore + CryptoRng>(
     password: &[u8],
     server_message: &[u8],
     rng: &mut R,
-) -> Result<Vec<u8>, OpaqueError> {
-    let result = login_finish_full(client_login, password, server_message, rng)?;
-    // Index into the GenericArray directly (avoids the deprecated as_slice).
-    Ok(result.export_key[..EXPORT_KEY_LEN].to_vec())
+) -> Result<Zeroizing<Vec<u8>>, OpaqueError> {
+    let mut result = login_finish_full(client_login, password, server_message, rng)?;
+    let export_key = Zeroizing::new(result.export_key[..EXPORT_KEY_LEN].to_vec());
+    // Scrub opaque-ke's own (non-Zeroizing) result now that we've copied what
+    // we need — see scrub_login_finish_result's doc comment for why this is
+    // necessary and its move-residue caveat.
+    scrub_login_finish_result(&mut result);
+    Ok(export_key)
 }
 
 /// Step 3 of login (client), returning the full result so callers can access
@@ -255,7 +297,6 @@ mod tests {
         let server_session_key = server_login_finish(server_login_state, &finalization);
 
         // AKE session keys must match between client and server.
-        // (Slice via indexing to avoid the deprecated GenericArray::as_slice.)
         assert_eq!(
             &login_full.session_key[..],
             server_session_key.as_slice(),
@@ -300,6 +341,127 @@ mod tests {
         assert!(
             result.is_err(),
             "login with the wrong password must be rejected client-side"
+        );
+    }
+
+    /// `ClientRegistrationFinishResult` (opaque-ke 4.0.1) only derives `Clone`,
+    /// not `Zeroize`/`ZeroizeOnDrop` — its `export_key` `GenericArray` drops
+    /// into WASM linear memory unzeroed unless scrubbed manually. This calls
+    /// the SAME production helper (`scrub_registration_finish_result`) that
+    /// `wasm_exports.rs`'s `opaque_registration_finish` calls, so a no-op
+    /// regression in the helper's own body fails this test. It does NOT cover
+    /// the `#[wasm_bindgen]` call site itself — `opaque_registration_finish`
+    /// has no test coverage in this native `cargo test` run (its `JsValue`
+    /// return type isn't practically constructible outside a real worker), so
+    /// deleting the helper call from `wasm_exports.rs` would NOT fail this or
+    /// any other test today. Closing that gap needs either a
+    /// `wasm-bindgen-test`-driven test or hoisting the scrub call into a
+    /// `JsValue`-independent inner function that both this file and
+    /// `wasm_exports.rs` can call and test directly.
+    #[test]
+    fn test_registration_finish_result_export_key_zeroizes_in_place() {
+        let mut rng = OsRng;
+        let server_setup = ServerSetup::<DefaultCipherSuite>::new(&mut rng);
+        let identity = b"zeroize-reg@powehi.test";
+        let password = b"scrub-me-please";
+
+        let (reg_state, reg_request) = registration_start(password, &mut rng).unwrap();
+        let reg_response = server_register(&server_setup, identity, &reg_request);
+        let (mut result, _upload) =
+            registration_finish(reg_state, password, &reg_response, &mut rng).unwrap();
+
+        // Sanity: the export key is real secret material, not already zero
+        // (astronomically unlikely for a 64-byte SHA-512 OPRF output, but pins
+        // the test against a vacuous pass).
+        assert!(
+            result.export_key.iter().any(|&b| b != 0),
+            "export key must be non-zero before scrubbing"
+        );
+
+        scrub_registration_finish_result(&mut result);
+
+        assert!(
+            result.export_key.iter().all(|&b| b == 0),
+            "export key must be fully zeroed after scrub_registration_finish_result"
+        );
+    }
+
+    /// Same invariant as above for login: `export_key` AND `session_key` (the
+    /// latter never leaves this crate's boundary at all today, so this scrub is
+    /// its only closure point) must both zero in place. Calls the same
+    /// production helper (`scrub_login_finish_result`) that
+    /// `wasm_exports.rs`'s `opaque_login_finish` calls — catches a regression
+    /// in the helper itself, NOT a deletion of that call site (see the
+    /// coverage-gap note on the registration test above, same caveat applies).
+    #[test]
+    fn test_login_finish_result_export_and_session_key_zeroize_in_place() {
+        let mut rng = OsRng;
+        let server_setup = ServerSetup::<DefaultCipherSuite>::new(&mut rng);
+        let identity = b"zeroize-login@powehi.test";
+        let password = b"scrub-me-too";
+
+        let (reg_state, reg_request) = registration_start(password, &mut rng).unwrap();
+        let reg_response = server_register(&server_setup, identity, &reg_request);
+        let (_reg_finish, reg_upload) =
+            registration_finish(reg_state, password, &reg_response, &mut rng).unwrap();
+        let password_file = server_store_password_file(&reg_upload);
+
+        let (login_state, login_request) = login_start(password, &mut rng).unwrap();
+        let (_server_login_state, login_response) =
+            server_login_start(&server_setup, identity, &password_file, &login_request);
+        let mut result = login_finish_full(login_state, password, &login_response, &mut rng)
+            .expect("login with correct password must succeed");
+
+        assert!(
+            result.export_key.iter().any(|&b| b != 0),
+            "export key must be non-zero before scrubbing"
+        );
+        assert!(
+            result.session_key.iter().any(|&b| b != 0),
+            "session key must be non-zero before scrubbing"
+        );
+
+        scrub_login_finish_result(&mut result);
+
+        assert!(
+            result.export_key.iter().all(|&b| b == 0),
+            "export key must be fully zeroed after scrub_login_finish_result"
+        );
+        assert!(
+            result.session_key.iter().all(|&b| b == 0),
+            "session key must be fully zeroed after scrub_login_finish_result"
+        );
+    }
+
+    /// `login_finish` (the truncated-export-key convenience wrapper) must
+    /// return a `Zeroizing` copy AND scrub opaque-ke's own result before
+    /// returning — the same residue class this module's other two tests cover
+    /// for `registration_finish`/`login_finish_full`, closing F3 from the
+    /// cycle-393 crypto-reviewer pass (this wrapper previously returned a
+    /// bare, non-Zeroizing `Vec<u8>` and never scrubbed `result`).
+    #[test]
+    fn test_login_finish_returns_zeroizing_export_key() {
+        let mut rng = OsRng;
+        let server_setup = ServerSetup::<DefaultCipherSuite>::new(&mut rng);
+        let identity = b"zeroize-login-finish@powehi.test";
+        let password = b"scrub-me-three";
+
+        let (reg_state, reg_request) = registration_start(password, &mut rng).unwrap();
+        let reg_response = server_register(&server_setup, identity, &reg_request);
+        let (_reg_finish, reg_upload) =
+            registration_finish(reg_state, password, &reg_response, &mut rng).unwrap();
+        let password_file = server_store_password_file(&reg_upload);
+
+        let (login_state, login_request) = login_start(password, &mut rng).unwrap();
+        let (_server_login_state, login_response) =
+            server_login_start(&server_setup, identity, &password_file, &login_request);
+        let export_key = login_finish(login_state, password, &login_response, &mut rng)
+            .expect("login with correct password must succeed");
+
+        assert_eq!(export_key.len(), EXPORT_KEY_LEN);
+        assert!(
+            export_key.iter().any(|&b| b != 0),
+            "returned export key must be real secret material, not a pre-zeroed buffer"
         );
     }
 }
