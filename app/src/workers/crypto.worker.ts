@@ -172,7 +172,7 @@ interface WasmModule {
 	// MEDIA_KEYS entry before returning, so it may be called at most once per handle;
 	// a second call (or a call on an unknown/already-dropped handle) throws
 	// "unknown media key handle".
-	media_export_key_for_storage: (mediaKeyHandle: string) => { mediaKey: Uint8Array };
+	media_export_key_for_storage: (mediaKeyHandle: string) => { mediaKey: Uint8Array<ArrayBuffer> };
 	// §9.2 media_message_create: build + MLS-encrypt a media app message.
 	// Raw media key stays in WASM; only MLS ciphertext crosses the WASM-JS boundary.
 	media_message_create: (
@@ -247,6 +247,40 @@ let dbKey: CryptoKey | null = null;
 // The path below is relative to the built output; adjust if the wasm-pack
 // output directory changes in package.json build:wasm script.
 let wasmModule: WasmModule | null = null;
+
+/**
+ * Marks `result.mediaKey`'s buffer as a Comlink transferable (ADR-0004 A1).
+ *
+ * Extracted as a standalone, synchronous, non-`async` function — same reason
+ * `take_media_key_for_export` is extracted in wasm_exports.rs — so it can be
+ * unit-tested directly without going through the real `Worker`/wasm-pack
+ * plumbing that JSDOM can't construct (see useCryptoWorker.test.ts).
+ * `Comlink.transfer` returns the same object reference; it only records the
+ * transfer list in an internal WeakMap that `Comlink.expose`'s reply
+ * `postMessage` consults, so this has no effect until the API method's
+ * caller (a real Worker) actually replies.
+ *
+ * SAFETY: transferring hands the *entire backing buffer* to the main thread
+ * and detaches this worker's view of it — safe here only because
+ * `wasm_exports.rs`'s `bytes_js` builds `mediaKey` via `Uint8Array::from(&[u8])`,
+ * which always copies into a fresh, solely-owned ArrayBuffer (verified:
+ * crypto-reviewer cycle 391). If `mediaKey` were ever a subarray/view over a
+ * larger buffer instead (e.g. a raw WASM-linear-memory view), transferring it
+ * would silently hand that whole buffer to the main thread and detach it
+ * inside the worker — for the WASM case specifically, that buffer is the
+ * live WASM heap, so this would leak/destroy in-flight MLS/OPAQUE state, not
+ * just the media key. The guard below turns that class of regression into a
+ * loud, content-free throw instead of a silent scope violation.
+ */
+export function transferMediaExportResult(result: { mediaKey: Uint8Array<ArrayBuffer> }): {
+	mediaKey: Uint8Array<ArrayBuffer>;
+} {
+	const { mediaKey } = result;
+	if (mediaKey.byteOffset !== 0 || mediaKey.byteLength !== mediaKey.buffer.byteLength) {
+		throw new Error("media_export_invariant: mediaKey is not a solely-owned buffer");
+	}
+	return Comlink.transfer(result, [mediaKey.buffer]);
+}
 
 async function getWasm(): Promise<WasmModule> {
 	if (wasmModule !== null) return wasmModule;
@@ -861,18 +895,21 @@ const api = {
 	 *
 	 * The caller MUST `mediaKey.fill(0)` as soon as the returned bytes have been
 	 * copied into a persistable payload — the same one-shot discipline
-	 * `downloadAndDecryptMedia` already applies to its `mediaImportKey` input. The
-	 * transient copy Comlink structured-clones across the worker boundary to produce
-	 * this return value is the same accepted residue the inbound `mediaImportKey`
-	 * copy already leaves behind (WASM/JS heap residue is documented at
-	 * `mls_clear_session` in wasm_exports.rs).
+	 * `downloadAndDecryptMedia` already applies to its `mediaImportKey` input.
+	 * `mediaKey.buffer` is returned via `Comlink.transfer`, not structured-clone: the
+	 * postMessage that carries it across the worker boundary detaches this worker's
+	 * ArrayBuffer as part of the same call, so no unzeroed copy of the key is left
+	 * behind on the worker side once this resolves (the WASM-side `Zeroizing<[u8;
+	 * 32]>` is already gone too — `take_media_key_for_export` removes and drops it
+	 * before this JS copy is even built).
 	 *
 	 * @param handle  a MEDIA_KEYS handle from mediaEncrypt/mediaEncryptChunked, not
 	 *                yet exported or dropped.
 	 */
-	async mediaExportKeyForStorage(handle: string): Promise<{ mediaKey: Uint8Array }> {
+	async mediaExportKeyForStorage(handle: string): Promise<{ mediaKey: Uint8Array<ArrayBuffer> }> {
 		const wasm = await getWasm();
-		return wasm.media_export_key_for_storage(handle);
+		const result = await wasm.media_export_key_for_storage(handle);
+		return transferMediaExportResult(result);
 	},
 
 	/**
