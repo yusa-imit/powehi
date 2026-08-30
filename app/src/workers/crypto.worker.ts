@@ -331,10 +331,19 @@ const api = {
 	/**
 	 * Start OPAQUE registration (client step 1).
 	 * Returns { sessionId, message }. Send `message` to the server.
+	 *
+	 * Same worker-side `password` residue as `opaqueRegistrationFinish` — see
+	 * that method's doc comment. Each Comlink call (`Start` and `Finish`) gets
+	 * its own independent structured-clone copy of `password`, so this call's
+	 * copy must be scrubbed here too, separately from Finish's.
 	 */
 	async opaqueRegistrationStart(password: Uint8Array): Promise<OpaqueStartResult> {
 		const wasm = await getWasm();
-		return wasm.opaque_registration_start(password);
+		try {
+			return wasm.opaque_registration_start(password);
+		} finally {
+			password.fill(0);
+		}
 	},
 
 	/**
@@ -343,6 +352,24 @@ const api = {
 	 * The OPAQUE export key is derived into the IndexedDB AES-GCM-256 key here
 	 * in the worker — it never crosses the worker/main-thread boundary.
 	 * The session is consumed — calling again with the same sessionId errors.
+	 *
+	 * `password` crosses Comlink's default structured-clone from the main
+	 * thread (no `Comlink.transfer`, since the caller in `Login.tsx` still
+	 * needs its own copy for the rest of its lifetime) — this worker holds an
+	 * independent, solely-owned copy that must be scrubbed once
+	 * `opaque_registration_finish` has consumed it, same residue class as the
+	 * export-key scrubs above. The `finally` wraps only the WASM call itself
+	 * (not the DB-key derivation below it), so the scrub runs the instant the
+	 * synchronous WASM call returns rather than waiting on that `await`.
+	 *
+	 * This closes only the JS-heap copy of `password`. wasm-bindgen's
+	 * `passArray8ToWasm0` mallocs a SEPARATE copy into WASM linear memory for
+	 * the call, which is never zeroized (the Rust side takes `password: &[u8]`
+	 * and passes it straight through with no `Zeroizing` wrapper) — same
+	 * unclosed-residue caveat already documented for the WASM-linear-memory
+	 * copies at `clearSessionState` and in `opaque.rs`. crypto-reviewer
+	 * cycle-394: real gap, correctly deferred (fixing it means a Rust-side
+	 * change in `wasm_exports.rs`/`opaque.rs`, not this file).
 	 */
 	async opaqueRegistrationFinish(
 		sessionId: string,
@@ -350,7 +377,12 @@ const api = {
 		serverResponse: Uint8Array,
 	): Promise<RegFinishResult> {
 		const wasm = await getWasm();
-		const result = wasm.opaque_registration_finish(sessionId, password, serverResponse);
+		let result: WasmRegFinishResult;
+		try {
+			result = wasm.opaque_registration_finish(sessionId, password, serverResponse);
+		} finally {
+			password.fill(0);
+		}
 		// Derive and hold the DB key inside the worker (F1: export key never leaves),
 		// scrubbing the export key's own worker-heap copy once derivation is done.
 		dbKey = await deriveDbKeyAndScrub(result.exportKey);
@@ -360,10 +392,17 @@ const api = {
 	/**
 	 * Start OPAQUE login (client step 1).
 	 * Returns { sessionId, message }. Send `message` to the server.
+	 *
+	 * Same worker-side `password` residue as `opaqueRegistrationFinish` — see
+	 * that method's doc comment.
 	 */
 	async opaqueLoginStart(password: Uint8Array): Promise<OpaqueStartResult> {
 		const wasm = await getWasm();
-		return wasm.opaque_login_start(password);
+		try {
+			return wasm.opaque_login_start(password);
+		} finally {
+			password.fill(0);
+		}
 	},
 
 	/**
@@ -372,6 +411,12 @@ const api = {
 	 * The OPAQUE export key is derived into the IndexedDB AES-GCM-256 key here
 	 * in the worker — it never crosses the worker/main-thread boundary.
 	 * Wrong password → rejection; DB key is never set on failure.
+	 *
+	 * Same worker-side `password` residue and scrub-timing rationale as
+	 * `opaqueRegistrationFinish` — see that method's doc comment (including
+	 * the WASM-linear-memory-copy caveat this does NOT close). `finally`
+	 * wraps only the WASM call, so the scrub runs on both the success path
+	 * and a wrong-password rejection without waiting on the DB-key derivation.
 	 */
 	async opaqueLoginFinish(
 		sessionId: string,
@@ -379,7 +424,12 @@ const api = {
 		serverResponse: Uint8Array,
 	): Promise<LoginFinishResult> {
 		const wasm = await getWasm();
-		const result = wasm.opaque_login_finish(sessionId, password, serverResponse);
+		let result: WasmLoginFinishResult;
+		try {
+			result = wasm.opaque_login_finish(sessionId, password, serverResponse);
+		} finally {
+			password.fill(0);
+		}
 		// Derive and hold the DB key inside the worker (F1: export key never leaves),
 		// scrubbing the export key's own worker-heap copy once derivation is done.
 		dbKey = await deriveDbKeyAndScrub(result.exportKey);
