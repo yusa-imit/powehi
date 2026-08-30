@@ -17,7 +17,94 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-30, cycle 394 — FEATURE: scrub OPAQUE `password` worker-heap residue across all 4 Comlink call sites, commit fb37364)
+## Current state (2026-08-30, cycle 395 — STABILIZATION: zeroize OPAQUE password in WASM linear memory, commit ecb46c1)
+
+- CI green (`gh run list --limit 3` all success), `gh issue list --state open`
+  empty, `git status` clean at cycle start. Picked cycle 394's own
+  crypto-reviewer A2-cont'd candidate — the last documented layer of the
+  OPAQUE `password` residue-closing series (cycles 391-394 closed the
+  JS-heap copies for export keys and, at 394, the password itself): the
+  WASM-linear-memory copy that wasm-bindgen's `passArray8ToWasm0` glue mallocs
+  for every `password: &[u8]` export was freed via `__wbindgen_free` without
+  ever being zeroed, so raw password bytes sat in linear memory (never itself
+  deterministically zeroed/reused) from the call until something else
+  happened to overwrite that heap region.
+- **Fix (delegated to crypto-lead):** changed all 4 OPAQUE `#[wasm_bindgen]`
+  exports in `crates/client/powehi-crypto-wasm/src/wasm_exports.rs`
+  (`opaque_registration_start`, `opaque_registration_finish`,
+  `opaque_login_start`, `opaque_login_finish`) from `password: &[u8]` to
+  `&mut [u8]`, calling `password.zeroize()` on every exit path (success and
+  both early-error pre-checks in each `*_finish` — rewrote the
+  `.ok_or_else(...)?`/`.map_err(...)?` one-liners into explicit `match` arms
+  so no path can skip the scrub). Confirmed via the regenerated glue
+  (`pkg/powehi_crypto_wasm.js`) that wasm-bindgen's `&mut [u8]` handling
+  copies the (now-zeroized) WASM-memory contents back into the caller's
+  original JS `Uint8Array` before freeing — so this single change closes the
+  WASM-linear-memory residue AND redundantly re-zeroes the JS-side buffer the
+  worker already scrubs (`crypto.worker.ts`, cycle 394's `finally { password.fill(0) }`)
+  — kept both per this crate's established defense-in-depth convention
+  (independent scrubbing at every layer, cf. `opaque.rs`'s `Zeroizing` +
+  `scrub_registration_finish_result`).
+- The inner `opaque::{registration_start,registration_finish,login_start,
+  login_finish_full}` functions in `opaque.rs` still take `password: &[u8]`
+  unchanged — `&mut [u8] -> &[u8]` is a sound Rust reborrow coercion at the
+  call sites, no signature change needed there.
+- **crypto-reviewer: GREEN** (second, tightly-scoped pass — the first pass
+  went too deep into opaque-ke/argon2's own internal password handling
+  without reaching a verdict and was abandoned/superseded; re-run with an
+  explicit out-of-scope note that a vetted dependency's internal memory
+  handling is not this diff's concern, per crypto-libraries-pinned.md).
+  Verified: zeroize is reached on all 4 exits of all 4 functions (borrowck
+  itself proves no returned value borrows the password slice, since
+  `zeroize()` while the `Result` is still live wouldn't compile otherwise);
+  the `&mut` reborrow coercion is sound with no aliasing (wasm-bindgen mallocs
+  an exclusively-owned linear-memory buffer); OPAQUE/RFC 9807 protocol
+  correctness unchanged (identical bytes, zeroize strictly sequenced after
+  the library call returns); traced the actual generated glue's
+  `__wbg___wbindgen_copy_to_typed_array_*` import to confirm the copy-back
+  claim rather than trusting the doc comment; checked no caller reuses the
+  same `Uint8Array` across a start→finish pair (each Comlink call gets an
+  independent structured-clone copy, no `Comlink.transfer`, so the copy-back
+  can't feed an accidentally-zeroed password into a later call). Two
+  non-blocking observations, not fixed (deferred): (1) the per-call-site
+  zeroize is enforced only by convention/code review, not structurally — a
+  future added early-return could silently skip it; a scopeguard-style defer
+  would make it unfalsifiable, worth a future ticket; (2) a WASM panic path
+  would still leak the linear-memory copy (wasm aborts skip both `zeroize()`
+  and the copy-back guard's `Drop`) — pre-existing, already-documented
+  residue class, not introduced or worsened here.
+- Verified independently (not rubber-stamped): `cargo build --workspace` +
+  `cargo test -p powehi-crypto-wasm` (181 passed, 2 ignored) green, `cargo
+  clippy --workspace --all-targets -- -D warnings` clean, `cargo fmt --check`
+  clean, WASM rebuilt (`pnpm run build:wasm`) to pick up the new `&mut`
+  signatures, `cd app && npx tsc -b` clean (no TS signature change — both
+  `&[u8]`/`&mut [u8]` type as `Uint8Array`), `npx biome check` clean (152
+  files), frontend `pnpm test --run` 1532/1532 green (107 files, unchanged
+  from cycle 394 — no new test added, same rationale as cycle 394's
+  documented coverage gap: no harness here can construct a real Worker + real
+  WASM in Vitest, and a hand-rolled `withScrubbed()` wrapper would be
+  "creative wrapping" purely to manufacture testability).
+- Not architectural (no new server-visible metadata, `password` still never
+  leaves the worker/main-thread pair) — `threat-model-checker` correctly not
+  invoked; not a backend handler or infra change — `security-auditor`
+  correctly not invoked.
+- **Target dir hygiene (due this cycle, STABILIZATION):** `du -sh target/` →
+  8.5G, comfortably under the 20G prune threshold — no pruning action needed.
+- **Next cycle candidates:** the scopeguard/defer structural-safety follow-up
+  from crypto-reviewer's non-blocking observation above (small, could be a
+  quick FEATURE or STABILIZATION pick); the e2e register→logout→login
+  round-trip test candidate carried from cycle 394 (proving the worker-side
+  `pw` reuse path is safe end-to-end, belongs in the existing Playwright
+  OPAQUE flow); Helm wiring for `database_max_connections`/
+  `r2_request_timeout_secs`/`media_gc_sweep_timeout_secs` (bundle, needs
+  infra-lead + real capacity numbers, carried since cycle 372); media-key
+  incoming/outgoing asymmetry (multi-part, cycle 359); PQ hybrid Phase A
+  (still blocked on openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF
+  upgrade (gated on ADR-0003 Phase B, itself gated on Phase A); frontend
+  `pnpm audit`'s 23 dev/build-time findings (vitest/wrangler/vite transitive,
+  not urgent).
+
+## Previous state (2026-08-30, cycle 394 — FEATURE: scrub OPAQUE `password` worker-heap residue across all 4 Comlink call sites, commit fb37364)
 
 - CI green (`gh run list --limit 3` all success), `gh issue list --state open`
   empty, `git status` clean at cycle start. **Found and closed a process gap
