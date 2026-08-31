@@ -28,6 +28,7 @@ dist/
 
 # WASM build artifacts (future)
 pkg/
+pkg-node/
 
 # Cron autonomous-dev runtime state
 .claude/session-counter
