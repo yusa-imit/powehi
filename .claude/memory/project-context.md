@@ -17,7 +17,95 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-31, cycle 403 — FEATURE: wire sidebar Settings icon to a real logout/linked-devices panel, commit 355d8a1)
+## Current state (2026-09-01, cycle 404 — FEATURE: exercise the real logout button in the live-backend auth e2e round trip, commit 9bb974b)
+
+- CI green (`gh run list --limit 3` all success), `gh issue list --state
+  open` empty, `git status` clean at cycle start. Picked cycle 403's own
+  top "next cycle candidate," verified still accurate before starting: the
+  e2e register→logout→login Playwright round-trip, re-scoped as "extend
+  `app/e2e-live/auth.spec.ts` (which already drives a real backend per
+  `ci-e2e-live.yml`) with an explicit logout-button click between a
+  reload-based re-sign-in and a third sign-in" rather than the larger
+  carried candidate of wiring a real backend into `playwright.config.ts`'s
+  `webServer` from scratch (that infra already exists in the separate
+  `playwright.live.config.ts` + `ci-e2e-live.yml`'s `playwright-live-backend`
+  job, confirmed by reading both files first).
+- **Investigated whether inserting logout between the existing reload and
+  re-sign-in made sense, concluded it didn't:** read `auth.spec.ts`'s own
+  comment — `page.reload()` already clears the in-memory session token
+  (auth.ts's initial phase is "login" with no persisted token), so the app
+  is already on the login screen immediately after reload; a logout-button
+  click has nothing to do there. Instead added the logout step as a THIRD
+  leg of the same test, after the existing reload+sign-in already
+  succeeded: register → reach chat → reload → sign in (existing, proves
+  IndexedDB persistence across a real page refresh) → **click the sidebar
+  Settings icon → Log out (new) → sign in again (new)** — this is the part
+  that actually exercises `SettingsPanel.tsx`'s "Log out" button, which
+  cycle 403 found had zero UI callers anywhere before that cycle.
+- **Traced `dropDbKey()`/`clearSessionState()` before writing the
+  assertion, to confirm a real sign-in after logout should behave the same
+  as after a reload:** `crypto.worker.ts`'s `dropDbKey()` just sets an
+  in-memory worker-module `let dbKey = null` (not a DB wipe — the name is
+  about the derived key, not the IndexedDB data); `clearSessionState()`
+  calls `wasm.mls_clear_session()` to drop in-WASM-heap MLS/OPAQUE session
+  state. Neither touches the IndexedDB-persisted device_id/MLS identity
+  that `signIn()`'s real OPAQUE login round trip depends on — so a
+  logout→sign-in round trip should succeed for the same reason a
+  reload→sign-in round trip does, and CI confirmed this (see below).
+- **New helper `logOut(page)` in `app/e2e-live/helpers.ts`:** clicks the
+  `Settings`-labeled sidebar `IconBtn` (aria-label sourced from `IconBtn`'s
+  `label` prop, confirmed via `ChatLayout.tsx:1638`), asserts
+  `settings-panel` is visible, clicks `settings-logout-btn`
+  (`SettingsPanel.tsx`'s testid from cycle 403), then asserts the login
+  heading + handle textbox are back — mirroring the existing
+  `registerAndReachChat`/`signIn` helpers' style and doc-comment
+  conventions in the same file. **Changed `app/e2e-live/auth.spec.ts`:**
+  added the `logOut` import, extended the single test's name and header
+  comment, appended `await logOut(page); await signIn(page, handle,
+  password);` after the pre-existing reload+sign-in — net diff 2 files,
+  +43/-4 lines, no other test file touched.
+- **No local docker** in this environment (`docker: command not found`) —
+  could not spin up the `playwright-live-backend` stack
+  (Postgres/Redis/MinIO/real axum server) locally to pre-validate before
+  pushing, unlike a normal frontend-only change. Ran what COULD be checked
+  locally first (`npx tsc -b` clean, `npx biome check e2e-live` clean, 3
+  files) then pushed and used `gh run watch --exit-status` on the actual
+  `CI — Live-backend E2E` run as the real validation gate, same pattern
+  cycle 402 used for its wasm-pack installer change.
+- **Verified via CI, not just pushed-and-assumed:** watched all 3 workflows
+  to completion — `CI — Live-backend E2E` (run 33415997383) GREEN in
+  3m43s, full job log shows `Run live-backend Playwright E2E` succeeded
+  (the step that actually executes this cycle's new logout+re-sign-in
+  assertions against the real backend, proving the round trip genuinely
+  works, not just that the test file parses); `CI — Rust` GREEN; `CI —
+  Frontend` GREEN (its own `vitest`/`wasm-build`/`wasm-test` jobs
+  unaffected — this diff never touched `app/e2e/` or any Vitest file).
+- **No review agent invoked, judged correctly out of scope:** this diff is
+  test-file-only (`app/e2e-live/*.spec.ts` + `helpers.ts`), touches zero
+  production code — `SettingsPanel.tsx`'s logout button and
+  `crypto.worker.ts`'s `dropDbKey`/`clearSessionState` were already
+  reviewed (security-auditor, cycle 403) when they were introduced/wired
+  up; this cycle only adds live-backend E2E coverage of that
+  already-reviewed path. Not crypto logic implementation (no `.rs`/WASM
+  file touched) — `crypto-reviewer` correctly not invoked; not
+  architectural (no new server-visible metadata, no new endpoint, no
+  behavior change to any handler) — `threat-model-checker` correctly not
+  invoked; not a backend handler or infra change — `security-auditor`
+  correctly not invoked. Consistent with prior test-only cycles (e.g.
+  cycle 399/400's rustdoc-only fixes) that also correctly skipped review.
+- Target dir hygiene: not checked (FEATURE mode; last checked cycle 400
+  STABILIZATION at 9.4G, next scheduled recheck cycle 405 — this cycle).
+- **Next cycle candidates:** the `*_finish` success-path + wrong-password
+  JS-glue coverage (needs test-only server-simulation `#[wasm_bindgen]`
+  exports in `wasm_exports.rs`, route to crypto-lead, carried many cycles);
+  PQ hybrid Phase A (still blocked on openmls stable `MLS_128_MLKEM768`);
+  OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003 Phase B, itself gated on
+  Phase A); frontend `pnpm audit`'s 23 dev/build-time findings
+  (vitest/wrangler/vite transitive, not urgent, not re-checked this
+  cycle); Helm wiring bundle mentioned in cycles before 401 was already
+  confirmed closed (cycle 401 note) — no longer a candidate, not re-listed.
+
+## Previous state (2026-08-31, cycle 403 — FEATURE: wire sidebar Settings icon to a real logout/linked-devices panel, commit 355d8a1)
 
 - CI green (`gh run list --limit 3` all success), `gh issue list --state
   open` empty, `git status` clean at cycle start. This cycle's candidate
