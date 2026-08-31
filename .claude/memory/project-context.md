@@ -17,7 +17,140 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-31, cycle 400 — STABILIZATION: drop rustdoc private-intra-doc-link warnings on PersistedProviderState, commit 01218b0)
+## Current state (2026-08-31, cycle 401 — FEATURE: prove OPAQUE password zeroize through real wasm-bindgen JS glue, commit e716be5)
+
+- CI green (`gh run list --limit 3` all success), `git status` clean at cycle
+  start. **Corrected a stale "next cycle candidates" entry before picking
+  work:** the "Helm wiring for `database_max_connections`/
+  `r2_request_timeout_secs`/`media_gc_sweep_timeout_secs`" item had been
+  carried forward unverified in this file's candidate lists since cycle 372
+  through cycle 400 (28 cycles) — actually closed at commit `753f3ad`
+  ("fix(infra): wire GC/timeout config into Helm + fix broken POWEHI__
+  secret/config key names", ~cycle 374, confirmed via `git log` +
+  reading `infra/helm/powehi/values.yaml`/`templates/configmap.yaml`
+  directly: all 3 values are wired with matching defaults and doc comments
+  today). Dropped from the candidate list below. **Lesson: verify a carried
+  candidate against current repo state before re-listing it, not just
+  copy-forward from the previous cycle's notes.**
+- Picked the JS-glue-copy-back gap (open since cycle 396, explicitly
+  deferred at 398/399/400): `wasm_bindgen_tests.rs` (cycle 398) proved
+  `PasswordScrubGuard::drop` zeroizes the Rust-side WASM-linear-memory copy
+  of `password: &mut [u8]` for all 4 OPAQUE `#[wasm_bindgen]` exports
+  (`opaque_registration_start/finish`, `opaque_login_start/finish`) — but
+  called the exports as plain Rust, never through the actual
+  wasm-bindgen-*generated JS glue*'s `passArray8ToWasm0`/copy-back
+  machinery a real browser/Comlink caller's `Uint8Array` goes through.
+  Cycles 398-400 explicitly flagged this as needing either a CI workflow
+  change or "an unexplored wasm-bindgen-internals technique, may not exist
+  cleanly."
+- **Found the technique myself before delegating (spiked, not guessed):**
+  confirmed by direct `node -e` experiment that Node's native `fetch` throws
+  on `file://` URLs — this is why the production `--target web` wasm-pack
+  build (`app/src/wasm/`, `fetch(new URL(...pathname..., import.meta.url))`)
+  can never load under plain Vitest (jsdom env, no browser). `wasm-pack
+  build --target nodejs` instead generates CommonJS glue using
+  `fs.readFileSync` + synchronous `WebAssembly.Instance` — loads natively
+  in Node. Spiked it standalone (`wasm-pack build ... --target nodejs
+  --out-dir /tmp/pkg-node-spike`, then a raw `node -e` calling
+  `opaque_registration_start` on a real password buffer) and confirmed the
+  caller's `Uint8Array` came back all-zero — proved the approach works
+  before committing a cycle to it.
+- **Delegated implementation to `frontend-lead`** with the spike result as
+  a starting point: (1) new root script `build:wasm:node` (`wasm-pack build
+  crates/client/powehi-crypto-wasm --target nodejs --out-dir pkg-node`,
+  gitignored, test-only, never shipped — production still uses the
+  existing `--target web` `build:wasm` script/artifact untouched); (2) new
+  CI step in `.github/workflows/ci-frontend.yml`'s `vitest` job (Rust
+  toolchain + `Swatinem/rust-cache` + wasm-pack install — same byte-identical
+  curl installer already used by the pre-existing `wasm-test`/`wasm-build`
+  jobs, confirmed by crypto-reviewer, not a new supply-chain surface) +
+  `pnpm run build:wasm:node` before `Run Vitest`; (3) new file
+  `app/src/workers/opaqueWasmZeroize.node.test.ts`, 4 tests against the
+  real nodejs-target glue: success-path zeroize for `opaque_registration_
+  start`/`opaque_login_start` (fully self-contained, no server needed),
+  error-path zeroize for `opaque_registration_finish`/`opaque_login_finish`
+  (unknown session id — earliest reachable error without a server).
+  **Deliberately out of scope, documented in the file's header comment:**
+  `*_finish` SUCCESS-path zeroize and the wrong-password negative control
+  (cycle 398's Rust-side equal-length-passwords test) — both need a real
+  client<->server OPAQUE round trip, which this JS/Node harness has no
+  counterpart for without either adding test-only server-simulation
+  `#[wasm_bindgen]` exports to the production `wasm_exports.rs` file (out
+  of scope) or a second, wire-format-verified JS/WASM OPAQUE implementation
+  (not attempted, high-risk rabbit hole) — a canned/fixed server-response
+  fixture doesn't work either since registration/login messages embed fresh
+  `OsRng` ephemeral values per call.
+- **Mutation-tested by the implementing agent, independently confirmed by
+  me via re-running the artifact rebuild + test:** neutered
+  `PasswordScrubGuard::drop` to a no-op in `wasm_exports.rs`, rebuilt
+  `pkg-node/`, ran the new file → all 4 tests RED
+  (`expected false to be true`); `git checkout --` reverted the guard,
+  rebuilt again → all 4 GREEN. `crates/client/powehi-crypto-wasm/src/
+  wasm_exports.rs`'s `git diff` confirmed empty (production file
+  untouched) both before and after my own independent commit-time check.
+- **crypto-reviewer: YELLOW, 1 recommended fix applied, 2 advisories
+  deferred.** Independently verified: production file untouched;
+  `PasswordScrubGuard` semantics match the test's assumptions; the wrong-
+  password/equal-length omission is safe (not a papered-over gap — that
+  mutation class is already killed by cycle 398's Rust-side test on the
+  same guard in the same production functions, confirmed by reading that
+  test); confirmed an eager-scrub-before-use mutant *would* survive all 4
+  new tests but explained why that's acceptable (killed elsewhere, and this
+  file's real value is proving the `&mut`→`&` "simplification" regression
+  and the wasm-bindgen copy-back-on-error-path codegen behavior, neither of
+  which any Rust-side test can cover); confirmed the wasm-pack curl
+  installer is byte-identical to the two pre-existing CI jobs, not a new
+  supply-chain surface; confirmed `pkg-node/` gitignore correctly excludes
+  the artifact and it holds no key material; confirmed no plaintext/PII
+  logging risk (boolean-predicate assertions, so a failure prints
+  `false !== true`, never the buffer bytes). **Applied (Finding 1):** made
+  the artifact's absence a hard `throw` when `process.env.CI` is set
+  (matching the existing `process.env.CI` pattern in `vite.config.ts`/
+  `playwright.config.ts`) instead of `describe.skipIf` silently no-op'ing
+  the whole security-invariant gate if the artifact path ever drifts —
+  verified both directions myself (`CI=true npx vitest run` with the
+  artifact renamed away → hard failure with a clear message; artifact
+  restored → 4/4 green). **Deferred (non-blocking):** Finding 2, none
+  action-needed by design (documented above); Finding 3 — the wasm-pack
+  installer itself is unpinned (no version/SHA-256) across all 3 CI jobs
+  using it, pre-existing pattern this diff propagated to a 3rd job but did
+  not introduce; real gap, good STABILIZATION candidate, low urgency
+  (`contents: read`, no secrets, no deploy in this workflow).
+- Verified independently before commit: `npx tsc -b` clean, `npx biome
+  check src` clean (153 files — biome flagged the fix's own string-concat
+  as an unsafe-fixable "use a template literal" issue, fixed inline before
+  commit), `cargo build --workspace` clean, `pnpm run build:wasm:node`
+  succeeds standalone, `npx vitest run src/workers/opaqueWasmZeroize.node.
+  test.ts` 4/4 green with the artifact present, `CI=true npx vitest run`
+  on that file hard-fails with the new artifact-missing message when the
+  artifact is absent (confirms Finding-1 fix), full `npx vitest run`
+  108 files / 1536 tests green (+1 file / +4 tests from cycle 400's
+  107/1532), YAML re-parsed with `python3 -c "import yaml..."` to confirm
+  `ci-frontend.yml` is still valid after the edit.
+- Not architectural (test-only file + CI step, zero production code touched,
+  zero new server-visible metadata) — `threat-model-checker` correctly not
+  invoked; not a backend handler — `security-auditor` correctly not invoked
+  (crypto-reviewer covered the CI/supply-chain angle directly, per this
+  diff's crypto-adjacent nature).
+- Target dir hygiene: not checked (FEATURE mode; last checked cycle 400
+  STABILIZATION at 9.4G, next scheduled recheck cycle 405).
+- **Next cycle candidates:** wasm-pack installer pin-by-version+SHA-256
+  across all 3 CI jobs in `ci-frontend.yml` that use the curl-pipe-to-sh
+  installer (crypto-reviewer Finding 3 above, new this cycle, low urgency
+  but a real gap); the `*_finish` success-path + wrong-password JS-glue
+  coverage left out of this cycle's new test file (needs either test-only
+  server-simulation `#[wasm_bindgen]` exports in `wasm_exports.rs` — a
+  production-file change, route to crypto-lead — or judged not worth the
+  risk, since the equivalent mutation is already killed Rust-side); the e2e
+  register→logout→login Playwright round-trip (needs a real axum server +
+  Postgres/Redis wired into `playwright.config.ts`'s `webServer`, route to
+  backend-lead + infra-lead jointly, carried since cycle 394); PQ hybrid
+  Phase A (still blocked on openmls stable `MLS_128_MLKEM768`); OPAQUE
+  PQ-hybrid OPRF upgrade (gated on ADR-0003 Phase B, itself gated on Phase
+  A); frontend `pnpm audit`'s 23 dev/build-time findings (vitest/wrangler/
+  vite transitive, not urgent, not re-checked this cycle).
+
+## Previous state (2026-08-31, cycle 400 — STABILIZATION: drop rustdoc private-intra-doc-link warnings on PersistedProviderState, commit 01218b0)
 
 - CI green (`gh run list --limit 5` all success — one `cancelled` row again a
   superseded run from a rapid double-push, not a failure), `gh issue list
