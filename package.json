@@ -5,7 +5,7 @@
   "packageManager": "pnpm@10.28.2",
   "scripts": {
     "build:wasm": "wasm-pack build crates/client/powehi-crypto-wasm --target web --out-dir pkg",
-    "build:wasm:node": "wasm-pack build crates/client/powehi-crypto-wasm --target nodejs --out-dir pkg-node"
+    "build:wasm:node": "wasm-pack build crates/client/powehi-crypto-wasm --target nodejs --out-dir pkg-node -- --features test-server-sim"
   },
   "pnpm": {
     "onlyBuiltDependencies": ["@biomejs/biome", "esbuild"]

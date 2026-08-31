@@ -9,6 +9,19 @@ publish.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# TEST-ONLY features. Deliberately NOT part of any default-features list: a
+# plain `cargo build` / `cargo test` / `wasm-pack build --target web` (the
+# production `build:wasm` script) enables none of these.
+[features]
+# Gates `src/test_server_sim.rs`, which adds JS-callable OPAQUE *server*
+# simulation exports (`__powehi_test_only_server_sim_*`) so the Vitest suite
+# `app/src/workers/opaqueWasmZeroize.node.test.ts` can drive a real
+# client<->server round trip through the wasm-bindgen JS glue and assert the
+# `*_finish` SUCCESS-path password zeroize. Enabled by exactly one caller:
+# the root `package.json` `build:wasm:node` script (gitignored `pkg-node/`
+# artifact, never shipped). See that module's doc comment and `build.rs`.
+test-server-sim = []
+
 [dependencies]
 wasm-bindgen = "0.2"
 js-sys = "0.3"

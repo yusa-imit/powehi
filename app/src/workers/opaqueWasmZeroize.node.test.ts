@@ -34,30 +34,50 @@
 // the `powehiWasmStub` Vite plugin fallback (vite.config.ts), which are both
 // left untouched by this file.
 //
-// Scope (deliberately narrower than wasm_bindgen_tests.rs's 7-test shape):
+// Scope — now matching wasm_bindgen_tests.rs's OPAQUE zeroize coverage, but
+// at the JS-glue level rather than as plain Rust calls:
 //   - opaque_registration_start / opaque_login_start: SUCCESS-path zeroize.
 //     Fully self-contained — no server needed.
 //   - opaque_registration_finish / opaque_login_finish: ERROR-path zeroize
 //     (unknown session id) — the earliest possible error return, reachable
 //     without a server.
-// NOT covered here: *_finish SUCCESS-path zeroize, and the wrong-password
-// negative control (cycle 398's `test_opaque_login_finish_wrong_password_fails_and_zeroizes`,
-// added after crypto-reviewer round 1 caught an earlier draft using
-// unequal-length passwords that stayed green under an eager-scrub mutation
-// for the wrong reason — see that test's doc comment). Both require a real
-// client<->server OPAQUE round trip. Rust-side, wasm_bindgen_tests.rs gets
-// this "for free" by linking opaque-ke's server types directly into the same
-// wasm32 test binary; this file has no such counterpart reachable from plain
-// Node/Vitest without either (a) adding new test-only server-simulation
-// `#[wasm_bindgen]` exports to wasm_exports.rs (production file — out of
-// scope per this change's constraints) or (b) a second, independently-audited
-// JS/WASM OPAQUE implementation whose wire format is verified byte-compatible
-// with opaque-ke's (unverified, high-risk rabbit hole, not attempted). A
-// canned/fixed server-response fixture is not viable either: registration
-// and login messages embed fresh ephemeral values from `OsRng` on every call,
-// so a pre-recorded server response never validates against a freshly
-// generated client message. Left as a candidate for a future cycle, same as
-// cycle 398 left this file's scope open.
+//   - opaque_registration_finish / opaque_login_finish: SUCCESS-path zeroize,
+//     via a real client<->server OPAQUE round trip.
+//   - opaque_login_finish wrong-password negative control: login must be
+//     rejected AND the buffer must still be zeroed.
+//
+// The last two needed a JS-reachable OPAQUE server. Rust-side,
+// wasm_bindgen_tests.rs gets one "for free" by linking opaque-ke's server
+// types into its own native test binary, but those helpers are private to
+// that binary and invisible from the `--target nodejs` artifact. Earlier
+// cycles left the gap open because the alternatives were bad: a canned
+// server-response fixture cannot work (registration/login messages embed
+// fresh `OsRng` ephemerals on every call, so a pre-recorded response never
+// validates against a freshly generated client message), and a second,
+// independently-audited JS/WASM OPAQUE implementation would need its wire
+// format proven byte-compatible with opaque-ke's — a high-risk rabbit hole.
+//
+// Closed instead by `crates/client/powehi-crypto-wasm/src/test_server_sim.rs`:
+// the same opaque-ke server types and the same `DefaultCipherSuite`, behind
+// JS-callable `__powehi_test_only_server_sim_*` wrappers gated by the
+// default-off `test-server-sim` Cargo feature. That feature is passed by
+// exactly one caller — the `build:wasm:node` script that produces the
+// gitignored `pkg-node/` artifact this file loads. The production
+// `build:wasm` script (`--target web`, the artifact the browser gets) passes
+// no `--features` flag, so those exports do not exist in it; the
+// `__POWEHI_TEST_SERVER_SIM_BUILD_DO_NOT_SHIP` positive-control assertion in
+// the first test below pins that this file really is running against a
+// feature-enabled build (and would catch the feature silently failing to
+// propagate, which would otherwise make the round-trip tests error out for an
+// unrelated-looking reason).
+//
+// Caveat inherited from wasm_bindgen_tests.rs's own scope note: the simulated
+// server uses THIS crate's `DefaultCipherSuite`, not the real server adapter's
+// separately-declared one in `crates/adapters/outbound/powehi-opaque`. The two
+// are currently field-for-field identical (Ristretto255 + TripleDH/SHA-512 +
+// Argon2id), so the round trip is representative — but this file does NOT
+// prove cross-crate ciphersuite agreement; that remains a pre-existing,
+// separate gap.
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -112,8 +132,32 @@ interface OpaqueWasmModule {
 		sessionId: string,
 		password: Uint8Array,
 		serverResponse: Uint8Array,
-	): unknown;
-	opaque_login_finish(sessionId: string, password: Uint8Array, serverResponse: Uint8Array): unknown;
+	): { exportKey: Uint8Array; upload: Uint8Array };
+	opaque_login_finish(
+		sessionId: string,
+		password: Uint8Array,
+		serverResponse: Uint8Array,
+	): { exportKey: Uint8Array; finalization: Uint8Array };
+	// TEST-ONLY server simulation — present only in a `--features test-server-sim`
+	// build (see the header comment). Never in the shipped `--target web` artifact.
+	__POWEHI_TEST_SERVER_SIM_BUILD_DO_NOT_SHIP(): string;
+	__powehi_test_only_server_sim_new(): string;
+	__powehi_test_only_server_sim_drop(serverHandle: string): void;
+	__powehi_test_only_server_sim_register(
+		serverHandle: string,
+		identity: string,
+		registrationRequest: Uint8Array,
+	): Uint8Array;
+	__powehi_test_only_server_sim_store_password_file(
+		serverHandle: string,
+		identity: string,
+		registrationUpload: Uint8Array,
+	): void;
+	__powehi_test_only_server_sim_login_start(
+		serverHandle: string,
+		identity: string,
+		credentialRequest: Uint8Array,
+	): Uint8Array;
 }
 
 // Only required (loaded) when the artifact is present — requiring it
@@ -127,9 +171,64 @@ function freshPassword(): Uint8Array {
 	return new TextEncoder().encode("correct horse battery staple, wasm-glue test");
 }
 
+// Each OPAQUE step is handed its own freshly-encoded copy: the previous step
+// zeroized the buffer it was given (that is the whole invariant under test),
+// and opaque-ke 4.x needs the real password again at *_finish because it
+// re-runs the KSF. Same shape as wasm_bindgen_tests.rs's round-trip tests.
+function encodePassword(text: string): Uint8Array {
+	return new TextEncoder().encode(text);
+}
+
+/**
+ * Two DELIBERATELY EQUAL-LENGTH passwords for the wrong-password negative
+ * control. Cycle 398's crypto-reviewer round rejected an earlier draft that
+ * used unequal lengths: OPAQUE hashes the password bytes directly (no
+ * fixed-width digest first), so two all-zero buffers of DIFFERENT lengths
+ * still map to different OPRF inputs and login legitimately fails — meaning
+ * the test would stay green under an "eager scrub before use" regression for
+ * entirely the wrong reason. At equal length, an eager scrub makes both sides
+ * derive from the same all-zero password, login wrongly SUCCEEDS, and the
+ * `toThrow()` assertion fires. See the matching doc comment on
+ * `test_opaque_login_finish_wrong_password_fails_and_zeroizes` in
+ * crates/client/powehi-crypto-wasm/tests/wasm_bindgen_tests.rs.
+ */
+const PW_LEN = 32;
+const REAL_PASSWORD = "A".repeat(PW_LEN);
+const DIFFERENT_PASSWORD = "B".repeat(PW_LEN);
+
+/**
+ * Boolean-only export-key equality.
+ *
+ * Deliberately NOT `expect(loginKey).toEqual(regKey)` and NOT
+ * `expect(Array.from(loginKey)).toEqual(Array.from(regKey))`: on failure Vitest
+ * renders both operands, which would print 32 bytes of live OPAQUE export key
+ * into the CI log (rule: no-plaintext-logging — key material must never reach
+ * log output, and CI logs are far less protected than the key itself).
+ * `Array.from` additionally materializes two extra plain-`Array` copies of key
+ * material on the JS heap that nothing ever scrubs. Collapsing the comparison
+ * to a boolean means a failure prints `false`, and no copy outlives this call.
+ */
+function sameExportKey(a: Uint8Array, b: Uint8Array): boolean {
+	return a.length === b.length && a.every((byte, i) => byte === b[i]);
+}
+
 describe.skipIf(!pkgNodeExists)(
 	"OPAQUE wasm-bindgen JS-glue password copy-back zeroize (--target nodejs artifact)",
 	() => {
+		// Positive control for the whole file: every round-trip test below depends
+		// on the TEST-ONLY `test-server-sim` Cargo feature having actually
+		// propagated through `wasm-pack build --target nodejs -- --features
+		// test-server-sim`. Without this assertion, a silent regression in that
+		// wiring (feature renamed, `--` separator dropped, script edited) would
+		// surface as a confusing "not a function" deep inside a round trip rather
+		// than as a clear statement of what is missing.
+		it("is running against a test-server-sim-enabled build (positive control)", () => {
+			const mod = wasm as OpaqueWasmModule;
+			expect(typeof mod.__POWEHI_TEST_SERVER_SIM_BUILD_DO_NOT_SHIP).toBe("function");
+			expect(mod.__POWEHI_TEST_SERVER_SIM_BUILD_DO_NOT_SHIP()).toContain("TEST-ONLY");
+			expect(typeof mod.__powehi_test_only_server_sim_new).toBe("function");
+		});
+
 		it("opaque_registration_start zeroizes the caller's Uint8Array after a successful call", () => {
 			const password = freshPassword();
 			const before = password.slice();
@@ -186,6 +285,173 @@ describe.skipIf(!pkgNodeExists)(
 			).toThrow();
 
 			expect(password.every((b) => b === 0)).toBe(true);
+		});
+
+		it("opaque_registration_finish zeroizes the caller's Uint8Array after a SUCCESSFUL round trip", () => {
+			const mod = wasm as OpaqueWasmModule;
+			const server = mod.__powehi_test_only_server_sim_new();
+			const identity = "wasm-glue-reg@powehi.test";
+			try {
+				const startPassword = freshPassword();
+				const start = mod.opaque_registration_start(startPassword);
+				const serverResponse = mod.__powehi_test_only_server_sim_register(
+					server,
+					identity,
+					start.message,
+				);
+
+				// Fresh copy: `opaque_registration_start` already zeroized the one above.
+				const finishPassword = freshPassword();
+				expect(finishPassword.some((b) => b !== 0)).toBe(true); // sanity: started non-zero
+
+				const finish = mod.opaque_registration_finish(
+					start.sessionId,
+					finishPassword,
+					serverResponse,
+				);
+
+				// Sanity that this really is the success path, not a swallowed error.
+				expect(finish.upload).toBeInstanceOf(Uint8Array);
+				expect(finish.upload.length).toBeGreaterThan(0);
+				expect(finish.exportKey.length).toBe(32);
+				expect(finish.exportKey.some((b) => b !== 0)).toBe(true);
+
+				expect(finishPassword.every((b) => b === 0)).toBe(true);
+			} finally {
+				mod.__powehi_test_only_server_sim_drop(server);
+			}
+		});
+
+		it("opaque_login_finish zeroizes the caller's Uint8Array after a SUCCESSFUL round trip", () => {
+			const mod = wasm as OpaqueWasmModule;
+			const server = mod.__powehi_test_only_server_sim_new();
+			const identity = "wasm-glue-login@powehi.test";
+			try {
+				// --- Registration, so the simulated server holds a password file ---
+				const regStart = mod.opaque_registration_start(freshPassword());
+				const regResponse = mod.__powehi_test_only_server_sim_register(
+					server,
+					identity,
+					regStart.message,
+				);
+				const regFinish = mod.opaque_registration_finish(
+					regStart.sessionId,
+					freshPassword(),
+					regResponse,
+				);
+				mod.__powehi_test_only_server_sim_store_password_file(server, identity, regFinish.upload);
+
+				// --- Login with the same password ---
+				const loginStart = mod.opaque_login_start(freshPassword());
+				const credentialResponse = mod.__powehi_test_only_server_sim_login_start(
+					server,
+					identity,
+					loginStart.message,
+				);
+
+				const finishPassword = freshPassword();
+				expect(finishPassword.some((b) => b !== 0)).toBe(true); // sanity: started non-zero
+
+				const loginFinish = mod.opaque_login_finish(
+					loginStart.sessionId,
+					finishPassword,
+					credentialResponse,
+				);
+
+				// Sanity that this really is the success path.
+				expect(loginFinish.finalization).toBeInstanceOf(Uint8Array);
+				expect(loginFinish.finalization.length).toBeGreaterThan(0);
+				expect(loginFinish.exportKey.length).toBe(32);
+				expect(loginFinish.exportKey.some((b) => b !== 0)).toBe(true);
+				// The durable export key must be identical across registration and
+				// login for the same password (RFC 9807). This doubles as proof the
+				// password genuinely reached opaque-ke on both legs. Compared
+				// boolean-only — see `sameExportKey`.
+				expect(loginFinish.exportKey.length).toBe(regFinish.exportKey.length);
+				expect(sameExportKey(loginFinish.exportKey, regFinish.exportKey)).toBe(true);
+
+				expect(finishPassword.every((b) => b === 0)).toBe(true);
+			} finally {
+				mod.__powehi_test_only_server_sim_drop(server);
+			}
+		});
+
+		// Negative control the two success-path tests cannot provide. See the
+		// PW_LEN / REAL_PASSWORD / DIFFERENT_PASSWORD comment above for why the
+		// equal length is load-bearing: it is what makes this test go RED under an
+		// "eager scrub before use" regression in PasswordScrubGuard (registration
+		// and login would both silently derive from an all-zero password, so this
+		// wrong-password login would spuriously SUCCEED and `toThrow()` would fail).
+		//
+		// The test runs BOTH legs against the same server handle, the same
+		// identity, and the same stored password file, and asserts the correct
+		// password logs in cleanly before asserting the wrong one is rejected.
+		// Without that in-test positive control, `toThrow()` would be satisfied by
+		// ANY failure — a typo in the identity, a password file that never got
+		// stored, a dropped sim handle — so the test could quietly stop exercising
+		// the wrong-password path (and therefore stop catching the eager-scrub
+		// regression it exists for) while still reporting green. Running both legs
+		// makes "the only difference between the passing and failing leg is the
+		// password" a structural property of the test rather than an assumption.
+		it("opaque_login_finish rejects a wrong same-length password and still zeroizes the buffer", () => {
+			const mod = wasm as OpaqueWasmModule;
+			const server = mod.__powehi_test_only_server_sim_new();
+			const identity = "wasm-glue-wrong-pw@powehi.test";
+			expect(REAL_PASSWORD.length).toBe(DIFFERENT_PASSWORD.length);
+			try {
+				// --- Register with the real password ---
+				const regStart = mod.opaque_registration_start(encodePassword(REAL_PASSWORD));
+				const regResponse = mod.__powehi_test_only_server_sim_register(
+					server,
+					identity,
+					regStart.message,
+				);
+				const regFinish = mod.opaque_registration_finish(
+					regStart.sessionId,
+					encodePassword(REAL_PASSWORD),
+					regResponse,
+				);
+				mod.__powehi_test_only_server_sim_store_password_file(server, identity, regFinish.upload);
+
+				// --- Positive control: the CORRECT password, same server + identity
+				//     + password file, must log in cleanly. Called directly rather
+				//     than via `expect(...).not.toThrow()` so that an unexpected
+				//     failure surfaces the real error instead of a generic assertion
+				//     message. The export key matching registration's proves this leg
+				//     genuinely completed the AKE, not merely that it did not throw.
+				const okStart = mod.opaque_login_start(encodePassword(REAL_PASSWORD));
+				const okResponse = mod.__powehi_test_only_server_sim_login_start(
+					server,
+					identity,
+					okStart.message,
+				);
+				const okPassword = encodePassword(REAL_PASSWORD);
+				const okFinish = mod.opaque_login_finish(okStart.sessionId, okPassword, okResponse);
+				expect(okFinish.exportKey.length).toBe(regFinish.exportKey.length);
+				expect(sameExportKey(okFinish.exportKey, regFinish.exportKey)).toBe(true);
+				expect(okPassword.every((b) => b === 0)).toBe(true);
+
+				// --- Negative leg: identical to the positive control above in every
+				//     respect EXCEPT the password, which is DIFFERENT, non-zero, and
+				//     the SAME LENGTH. ---
+				const loginStart = mod.opaque_login_start(encodePassword(DIFFERENT_PASSWORD));
+				const credentialResponse = mod.__powehi_test_only_server_sim_login_start(
+					server,
+					identity,
+					loginStart.message,
+				);
+
+				const wrongPassword = encodePassword(DIFFERENT_PASSWORD);
+				expect(wrongPassword.some((b) => b !== 0)).toBe(true); // sanity: started non-zero
+
+				expect(() =>
+					mod.opaque_login_finish(loginStart.sessionId, wrongPassword, credentialResponse),
+				).toThrow();
+
+				expect(wrongPassword.every((b) => b === 0)).toBe(true);
+			} finally {
+				mod.__powehi_test_only_server_sim_drop(server);
+			}
 		});
 	},
 );

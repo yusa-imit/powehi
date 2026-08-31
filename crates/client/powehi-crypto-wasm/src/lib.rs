@@ -13,6 +13,11 @@ pub mod media;
 pub mod mls_group;
 pub mod opaque;
 pub mod recovery;
+/// TEST-ONLY OPAQUE server simulation, gated behind the default-off
+/// `test-server-sim` Cargo feature. Absent from the production
+/// `wasm-pack build --target web` artifact — see the module's own doc comment.
+#[cfg(feature = "test-server-sim")]
+pub mod test_server_sim;
 pub mod wasm_exports;
 
 #[wasm_bindgen]
