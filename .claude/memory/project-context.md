@@ -17,7 +17,122 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-31, cycle 402 — FEATURE: pin wasm-pack installer by version+SHA-256 across all 4 CI call sites, commit 2c81dc1)
+## Current state (2026-08-31, cycle 403 — FEATURE: wire sidebar Settings icon to a real logout/linked-devices panel, commit 355d8a1)
+
+- CI green (`gh run list --limit 3` all success), `gh issue list --state
+  open` empty, `git status` clean at cycle start. This cycle's candidate
+  wasn't from the carried "next cycle candidates" list (all of those were
+  still blocked/oversized or not urgent — see below) — instead found a new,
+  well-scoped gap while re-reading `app/src/store/auth.ts` and grepping for
+  UI call sites: `useAuthStore().logout()` (fully implemented since early
+  cycles, store-tested in `auth.test.ts` — awaits `clearSessionState()` then
+  `dropDbKey()` on the crypto worker, in that order, before resetting auth
+  state) had **zero callers anywhere in `app/src/components/`** — confirmed
+  via `grep -n "\.logout(\|onClick.*[Ll]og"` across all components, no
+  hits. The sidebar's "Settings" icon button existed (`ChatLayout.tsx`'s
+  `Sidebar`, `<IconBtn icon="settings" onClick={onSettings} .../>`) but its
+  `onSettings` prop was wired to `() => undefined` at the `<Sidebar>` call
+  site — a literal no-op. Also found `LinkedDevicesPanel.tsx` (device list +
+  revoke, fully built and tested) was similarly never mounted anywhere.
+  **Net effect before this cycle: a signed-in user had no UI path to log
+  out at all.**
+- **Delegated to `frontend-lead`** (ran in background, hit its 40-turn
+  limit once mid-task — resumed via `SendMessage` to the same agent id to
+  finish verification, per the standing pattern for long agent runs).
+  **New file `app/src/components/SettingsPanel.tsx`:** a fixed-overlay
+  dialog (same pattern as `ChatLayout.tsx`'s existing `StatusEditor`),
+  opened from the Settings icon, with two rows: "Linked devices" (drills
+  into the existing `LinkedDevicesPanel` as a sub-view, reusing it
+  unmodified) and "Log out" (calls `useAuthStore().logout()`, disables
+  itself while in flight). **Changed `app/src/components/ChatLayout.tsx`:**
+  +1 import, +1 `useState` (`settingsOpen`), `onSettings={() => undefined}`
+  → `onSettings={() => setSettingsOpen(true)}`, renders
+  `<SettingsPanel open={settingsOpen} onClose={...} />` alongside the
+  existing `StatusEditor`/`KeyboardShortcutsModal` — net diff on this file:
+  +8/-1, no other line touched. **New file
+  `app/src/components/ChatLayoutSettings.test.tsx`:** Vitest + Testing
+  Library, mocks the crypto worker proxy and the `listDevices` API call at
+  the boundary (never imports real crypto into the component test, per
+  `.claude/rules/react-hooks-only.md`) — asserts the icon opens the panel,
+  close dismisses it, the logout button calls a mocked
+  `useAuthStore.getState().logout`, and the devices row navigates into
+  `LinkedDevicesPanel`.
+- Design-system compliance verified independently (not just trusting the
+  agent): the "Linked devices" row icon uses `var(--photon-300)` (`#a8c8ff`,
+  the "encryption/lock" designated color per `DESIGN.md`'s hard brand rule
+  "lock icon always photon blue" — grepped `index.css` to confirm the token
+  resolves to the correct hex), "Log out" uses the pre-existing `var(--flare)`
+  danger-red token (already used identically in `Login.tsx`/
+  `LinkedDevicesPanel.tsx`'s own error states, not a new color introduced),
+  no emoji, dark-first `var(--bg-surface)`/`var(--border-soft)` reused
+  throughout — zero new hardcoded colors.
+- **security-auditor: YELLOW, 1 MEDIUM finding, applied before commit
+  (not deferred).** Routed here rather than crypto-reviewer/
+  threat-model-checker since no crypto/WASM file was touched and no new
+  server-visible metadata or endpoint was introduced (both existing
+  triggers correctly not invoked) — but flagged this as security-adjacent
+  since it's the first real UI path that can invoke session/key-material
+  teardown, so ran security-auditor as a prudent gate rather than skipping
+  review entirely. **Finding (MEDIUM): `handleLogout`'s original
+  `try/finally` (no `catch`) meant a rejected `dropDbKey()` (uncaught
+  inside `logout()`, unlike the deliberately-swallowed `clearSessionState()`
+  rejection) would leave the user silently still fully authenticated —
+  live `sessionToken`, DB key possibly still resident — with the button
+  just quietly re-enabling and no signal to the user at all; also the
+  original doc comment inaccurately implied `logout()` never rejects.**
+  Fixed: added a `catch` setting a `logoutFailed` state that renders a
+  visible "Log out failed — reload to clear this session" message instead
+  of silently going idle; corrected the misleading comment to document the
+  swallowed-vs-unswallowed distinction explicitly. Added a 5th test
+  (`ChatLayoutSettings.test.tsx`) proving a rejected `logout()` renders the
+  new `settings-logout-error` testid. **2 informational findings, not
+  applied — genuinely low-risk, documented rather than fixed:** the
+  "Linked devices" row wasn't `disabled` during a concurrent logout
+  (benign — own-account data over an already-authenticated endpoint,
+  fixed anyway alongside the main finding since it was a one-line
+  `disabled={loggingOut}` addition, cheap); `LinkedDevicesPanel`'s
+  pre-existing (not this diff's) indefinite-spinner-if-`sessionToken`-null
+  edge case is unreachable today (every `login()` call site supplies a
+  token) — left as-is, correctly out of scope.
+- Not crypto logic (zero `.rs`/wasm files touched, `logout()`/
+  `LinkedDevicesPanel`'s underlying API calls were pre-existing and
+  already reviewed in prior cycles, this diff only adds a UI trigger) —
+  `crypto-reviewer` correctly not invoked; not architectural (no new
+  server-visible metadata, no new endpoint — `listDevices` already
+  existed and was already called by the now-mounted `LinkedDevicesPanel`)
+  — `threat-model-checker` correctly not invoked.
+- Verified independently before commit (not just trusting the agent's
+  report): `git diff --stat` confirmed the exact file set (3 files, no
+  stray changes); `cd app && npx tsc -b` clean; `npx biome check` — 1
+  formatting error surfaced by my own added failure-path test/JSX (a
+  multi-line JSX text node biome wanted joined), fixed via
+  `--write`, re-checked clean, 177 files; `npx vitest run` full suite
+  109 files / 1541 tests green (+1 file over cycle 402's presumed count,
+  +5 tests: 4 from the agent's original test file + 1 I added for the
+  logout-failure path); re-ran just the new test file standalone to
+  confirm a pre-existing, unrelated `act(...)` warning in the full-suite
+  log (generic "TestComponent" name, not present when the new file runs
+  alone) wasn't coming from this diff.
+- Target dir hygiene: not checked (FEATURE mode; last checked cycle 400
+  STABILIZATION at 9.4G, next scheduled recheck cycle 405).
+- **Next cycle candidates:** the `*_finish` success-path + wrong-password
+  JS-glue coverage (needs test-only server-simulation `#[wasm_bindgen]`
+  exports in `wasm_exports.rs`, route to crypto-lead, carried many cycles);
+  the e2e register→logout→login Playwright round-trip — **now unblocked on
+  the UI side** (a real logout button exists for the first time this
+  cycle), still needs a real axum server + Postgres/Redis wired into
+  `playwright.config.ts`'s `webServer` OR could instead extend
+  `app/e2e-live/auth.spec.ts` (which already drives a real backend per
+  `ci-e2e-live.yml`) with an explicit logout-button click between the
+  reload and the re-sign-in, which would be a much smaller, single-cycle-
+  sized version of this long-carried candidate — route to frontend-lead,
+  worth prioritizing next; PQ hybrid Phase A (still blocked on openmls
+  stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated on
+  ADR-0003 Phase B, itself gated on Phase A); frontend `pnpm audit`'s 23
+  dev/build-time findings (vitest/wrangler/vite transitive, not urgent, not
+  re-checked this cycle).
+
+## Previous state (2026-08-31, cycle 402 — FEATURE: pin wasm-pack installer by version+SHA-256 across all 4 CI call sites, commit 2c81dc1)
 
 - CI green (`gh run list --limit 3` all success), `git status` clean at
   cycle start. Picked cycle 401's own top "next cycle candidate"
