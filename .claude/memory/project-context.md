@@ -17,7 +17,75 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-31, cycle 399 — FEATURE: drop rustdoc private-intra-doc-link warnings on PasswordScrubGuard, commit 5fa4c4e)
+## Current state (2026-08-31, cycle 400 — STABILIZATION: drop rustdoc private-intra-doc-link warnings on PersistedProviderState, commit 01218b0)
+
+- CI green (`gh run list --limit 5` all success — one `cancelled` row again a
+  superseded run from a rapid double-push, not a failure), `gh issue list
+  --state open` empty, `git status` clean at cycle start.
+- **Environment note:** `~/.cargo/bin` was not on `PATH` for fresh Bash
+  invocations this cycle (`cargo: command not found`) despite 4 matching
+  lines already in `~/.zshrc` — this tool's shell state does not persist
+  between calls, so every cargo/cargo-adjacent command this cycle was run
+  with `export PATH="$HOME/.cargo/bin:$PATH"` prefixed inline. Not a repo
+  issue, just a per-command harness quirk worth remembering if a future
+  cycle sees the same spurious "command not found: cargo".
+- Picked cycle 399's own explicitly-listed "next cycle candidate" (also
+  independently rediscovered by running `cargo doc -p powehi-crypto-wasm
+  --no-deps` fresh this cycle): the 3 pre-existing
+  `rustdoc::private_intra_doc_links` warnings in
+  `crates/client/powehi-crypto-wasm/src/mls_group.rs` — 3 doc comments (on
+  `export_provider_state` x2, `import_provider_state` x1) linked the
+  private `PersistedProviderState` struct via bracketed intra-doc-link
+  syntax (`` [`PersistedProviderState`] ``), same warning class as cycle
+  399's `PasswordScrubGuard` fix in the same crate.
+- **Fix:** replaced all 3 `` [`PersistedProviderState`] `` occurrences with
+  plain `` `PersistedProviderState` `` backticks — identical pattern to
+  cycle 399. Doc-comment-only; confirmed via `git diff --stat`: 3
+  insertions/3 deletions, one file, all three hunks on `///` lines only.
+- Verified: `cargo doc -p powehi-crypto-wasm --no-deps` now emits **0**
+  warnings (was 3 target + the cycle-399 fix already zeroed the other 4,
+  so this closes the class entirely for this crate); `cargo build -p
+  powehi-crypto-wasm` clean; `cargo clippy -p powehi-crypto-wasm
+  --all-targets -- -D warnings` clean; `cargo fmt --check -p
+  powehi-crypto-wasm` clean; `cargo test -p powehi-crypto-wasm` 181/181
+  unchanged (zero behavior change).
+- **Broader STABILIZATION sweep this cycle (beyond the single fix):**
+  `cargo nextest` is not installed in this environment (`error: no such
+  command: nextest`) — fell back to `cargo test --workspace` per the
+  documented fallback rule; full workspace test run green, zero failures
+  (`grep -E "FAILED|error\["` on the full log found nothing). `cargo
+  audit` clean (652 crates scanned, exit 0, no advisories). `cargo deny
+  check` clean (`advisories ok, bans ok, licenses ok, sources ok`).
+  Frontend: `npx biome check` clean (174 files), `npx tsc -b` clean, `npx
+  vitest run` 107/107 files, 1532/1532 tests green (unchanged from cycle
+  395's count — no frontend files touched this cycle).
+- Not architectural (doc-comment-only, zero behavior/metadata change) —
+  `threat-model-checker` correctly not invoked; not a backend handler or
+  infra change, and not crypto *logic* (pure rustdoc link syntax, same
+  reasoning cycle 399 used for the identical fix class) —
+  `crypto-reviewer`/`security-auditor` correctly not invoked.
+- **Target dir hygiene (due this cycle, STABILIZATION):** `du -sh target/`
+  → 9.4G (up from 8.5G at cycle 395's check, still comfortably under the
+  20G prune threshold) — no pruning action needed. Pruned 0-byte aborted
+  `.rmeta` stubs unconditionally per the standing instruction (none found
+  this run).
+- **Next cycle candidates (unchanged from cycle 399's list, this cycle's
+  pick fully closed both known private-intra-doc-link warning sites in
+  `powehi-crypto-wasm`):** the e2e register→logout→login Playwright
+  round-trip (re-scoped cycle 399 — needs a real axum server + Postgres/
+  Redis wired into `playwright.config.ts`'s `webServer`, route to
+  backend-lead + infra-lead jointly); the JS-glue-copy-back gap (cycle 398
+  — needs a CI workflow change adding a wasm-pack build step to the
+  `vitest` job, or an unexplored wasm-bindgen-internals technique); Helm
+  wiring for `database_max_connections`/`r2_request_timeout_secs`/
+  `media_gc_sweep_timeout_secs` (bundle, needs infra-lead + real capacity
+  numbers, carried since cycle 372); PQ hybrid Phase A (still blocked on
+  openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade
+  (gated on ADR-0003 Phase B, itself gated on Phase A); frontend `pnpm
+  audit`'s 23 dev/build-time findings (vitest/wrangler/vite transitive,
+  not urgent, not re-checked this cycle).
+
+## Previous state (2026-08-31, cycle 399 — FEATURE: drop rustdoc private-intra-doc-link warnings on PasswordScrubGuard, commit 5fa4c4e)
 
 - CI green (`gh run list --limit 3` all success — the one `cancelled` row was
   a superseded run from a rapid double-push, not a failure), `gh issue list
