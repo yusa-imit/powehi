@@ -365,13 +365,13 @@ const PROVIDER_STATE_VERSION: u16 = 1;
 /// # Generation / freshness
 /// `generation` is a caller-minted monotonic counter (e.g. incremented on every
 /// successful export) bundled *inside* the serialized bytes via
-/// [`PersistedProviderState`]. [`import_provider_state`] rejects any blob whose
+/// `PersistedProviderState`. [`import_provider_state`] rejects any blob whose
 /// bundled generation is less than the caller-supplied `min_generation`,
 /// preventing a stale (but validly-AEAD-authenticated-at-rest) snapshot from
 /// being replayed to resume the ratchet at an already-used position.
 ///
 /// # Serialization format
-/// `serde_json` encoding of [`PersistedProviderState`]; `pairs` is a JSON array
+/// `serde_json` encoding of `PersistedProviderState`; `pairs` is a JSON array
 /// of `[key, value]` pairs, where each key/value is a JSON array of byte values
 /// (`serde_json` renders `Vec<u8>` as a number array). This is chosen over a
 /// JSON object because the map keys are opaque, frequently non-UTF-8 byte
@@ -436,7 +436,7 @@ pub fn export_provider_state(provider: &Provider, generation: u64) -> Result<Vec
 /// Returns [`MlsError::Persistence`] on malformed input, an unsupported
 /// `version`, a stale `generation`, or a poisoned state lock. No
 /// `unwrap`/`expect` is used in this function itself, so bytes that are not a
-/// well-formed [`PersistedProviderState`] can never panic *here*, and no
+/// well-formed `PersistedProviderState` can never panic *here*, and no
 /// partial state is ever installed on any error path (the fresh `Provider` is
 /// only returned after every prior check succeeds).
 ///
