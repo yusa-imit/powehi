@@ -17,7 +17,80 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-30, cycle 398 — FEATURE: wasm_bindgen_test coverage for OPAQUE password zeroize, commit 747ee20)
+## Current state (2026-08-31, cycle 399 — FEATURE: drop rustdoc private-intra-doc-link warnings on PasswordScrubGuard, commit 5fa4c4e)
+
+- CI green (`gh run list --limit 3` all success — the one `cancelled` row was
+  a superseded run from a rapid double-push, not a failure), `gh issue list
+  --state open` empty, `git status` clean at cycle start; confirmed cycle
+  398's own memory-update commit landed (`git log -1 --grep "session
+  memory"` matched HEAD). Picked cycle 396's own carried "next cycle
+  candidate" A-2 (also re-listed by cycle 398): `cargo doc -p
+  powehi-crypto-wasm --no-deps` emitted 4 `rustdoc::private_intra_doc_links`
+  warnings — 4 doc comments in `wasm_exports.rs` (on
+  `opaque_registration_start/finish`, `opaque_login_start/finish`)
+  referenced the private `PasswordScrubGuard` RAII guard via bracketed
+  intra-doc-link syntax (`` [`PasswordScrubGuard`] ``), which rustdoc warns
+  on since the link can't resolve for a private item.
+- **First considered the e2e register→logout→login Playwright round-trip
+  candidate (carried since cycle 394) instead, but ruled it out as
+  mis-scoped for a single cycle:** read `app/playwright.config.ts` and the
+  existing specs (`login.spec.ts`, `chat.spec.ts`) — confirmed the
+  `webServer` block only runs `pnpm dev` (Vite dev server), no backend, no
+  Postgres/Redis testcontainers, and `login.spec.ts`'s own comment
+  documents "with no backend the worker throws → stays on login". A real
+  register→logout→login round-trip needs an actual running axum server +
+  DB, which is a backend-lead/infra-lead-sized Playwright `webServer` wiring
+  change, not a same-cycle test addition — re-flagged below as a properly
+  scoped multi-step candidate rather than picked up incorrectly.
+- **Fix:** replaced all 4 `` [`PasswordScrubGuard`] `` occurrences in
+  `crates/client/powehi-crypto-wasm/src/wasm_exports.rs` with plain
+  `` `PasswordScrubGuard` `` backticks — matches the pattern already used
+  for the same identifier at line 32 (a `//` line comment) in the same
+  file, per cycle 398's own N-1 note that this file already has bracket-free
+  precedent. Doc-comment-only; zero non-comment lines changed (confirmed via
+  `git diff --stat`: 4 insertions/4 deletions, one file).
+- Verified independently before delegating review: `cargo doc -p
+  powehi-crypto-wasm --no-deps` dropped from 7 total warnings (4 target +
+  3 pre-existing, unrelated `PersistedProviderState` intra-doc-link
+  warnings in `mls_group.rs`, left untouched — out of this advisory's
+  scope) to 3 (only the pre-existing ones remain); `cargo build -p
+  powehi-crypto-wasm` clean; `cargo test -p powehi-crypto-wasm` 181/181
+  (unchanged, zero behavior change); `cargo clippy -p powehi-crypto-wasm
+  --all-targets -- -D warnings` clean; `cargo fmt --check -p
+  powehi-crypto-wasm` clean.
+- **crypto-reviewer: GREEN** (single round). Confirmed via direct `git
+  diff` read: all 4 hunks are on `///` doc-comment lines only, zero
+  non-comment lines touched; the substituted prose reads identically in
+  meaning (only link markup removed, no wording change); confirmed
+  `PasswordScrubGuard` is genuinely private (no `pub`) so the lint firing
+  was correct rustdoc behavior, not a false positive; confirmed no changes
+  to the guard's `Drop`/`Deref` impls, OPAQUE call logic, parameter types,
+  or any key-material handling in the 4 `#[wasm_bindgen]` functions —
+  purely cosmetic. No fixes required.
+- Not architectural (doc-comment-only, zero behavior/metadata change) —
+  `threat-model-checker` correctly not invoked; not a backend handler or
+  infra change — `security-auditor` correctly not invoked.
+- Target dir hygiene: not checked (FEATURE mode; last checked cycle 395
+  STABILIZATION at 8.5G, next scheduled recheck cycle 400).
+- **Next cycle candidates:** the e2e register→logout→login Playwright
+  round-trip (re-scoped this cycle, see above) — properly sized as "wire a
+  real axum server + Postgres/Redis into `playwright.config.ts`'s
+  `webServer`, then add the round-trip spec," route to backend-lead +
+  infra-lead jointly, not a single-agent pick; the JS-glue-copy-back gap
+  from cycle 398 (needs a CI workflow change adding a wasm-pack build step
+  to the `vitest` job before a new JS-level test can load the real WASM
+  module, or an unexplored wasm-bindgen-internals technique); Helm wiring
+  for `database_max_connections`/`r2_request_timeout_secs`/
+  `media_gc_sweep_timeout_secs` (bundle, needs infra-lead + real capacity
+  numbers, carried since cycle 372); PQ hybrid Phase A (still blocked on
+  openmls stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated
+  on ADR-0003 Phase B, itself gated on Phase A); frontend `pnpm audit`'s 23
+  dev/build-time findings (vitest/wrangler/vite transitive, not urgent);
+  the 3 pre-existing `PersistedProviderState` rustdoc warnings in
+  `mls_group.rs` (out of this cycle's scope, same class, cheap follow-up if
+  ever prioritized).
+
+## Previous state (2026-08-30, cycle 398 — FEATURE: wasm_bindgen_test coverage for OPAQUE password zeroize, commit 747ee20)
 
 - CI green (`gh run list --limit 3` all success), `gh issue list --state
   open` empty, `git status` clean at cycle start. Picked cycle 396's own
