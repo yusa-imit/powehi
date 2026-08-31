@@ -90,3 +90,25 @@ export async function signIn(page: Page, handle: string, password: string): Prom
 
 	await expect(page.getByTestId("chat-sidebar")).toBeVisible({ timeout: 30_000 });
 }
+
+/**
+ * Drives the real "log out" flow through the sidebar Settings icon → Log out
+ * button (SettingsPanel.tsx), which calls useAuthStore().logout() — awaiting
+ * clearSessionState() then dropDbKey() on the crypto worker before resetting
+ * auth state back to the login phase. Assumes the page is currently on the
+ * chat layout (i.e. `chat-sidebar` is visible).
+ *
+ * Unlike `page.reload()` (which only drops the in-memory session token by
+ * restarting the tab), this exercises the actual in-app button path a real
+ * user has to sign out — there was no UI caller for `logout()` at all before
+ * SettingsPanel.tsx was wired up.
+ */
+export async function logOut(page: Page): Promise<void> {
+	await page.getByRole("button", { name: "Settings" }).click();
+	await expect(page.getByTestId("settings-panel")).toBeVisible();
+
+	await page.getByTestId("settings-logout-btn").click();
+
+	await expect(page.getByRole("heading", { name: /powehi/i })).toBeVisible({ timeout: 15_000 });
+	await expect(page.getByRole("textbox", { name: /handle/i })).toBeVisible();
+}
