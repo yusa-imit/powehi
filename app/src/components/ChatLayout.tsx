@@ -47,6 +47,7 @@ import { Icon } from "./Icon";
 import { InviteModal } from "./InviteModal";
 import { MediaImage } from "./MediaImage";
 import { SafetyNumbers } from "./SafetyNumbers";
+import { SettingsPanel } from "./SettingsPanel";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -6936,6 +6937,9 @@ export function ChatLayout() {
 	const [customStatus, setCustomStatus] = useState<CustomStatus>(null);
 	const [statusEditorOpen, setStatusEditorOpen] = useState(false);
 
+	// ── Account settings (log out, linked devices) ────────────────────────────
+	const [settingsOpen, setSettingsOpen] = useState(false);
+
 	// ── Quick switcher (Cmd+K / Ctrl+K) ──────────────────────────────────────
 	const [quickSwitcherOpen, setQuickSwitcherOpen] = useState(false);
 	const [quickSwitcherQuery, setQuickSwitcherQuery] = useState("");
@@ -9682,7 +9686,7 @@ export function ChatLayout() {
 				onSelect={handleSelectChat}
 				onNewChat={() => setInviteOpen(true)}
 				onNewGroup={() => setCreateGroupOpen(true)}
-				onSettings={() => undefined}
+				onSettings={() => setSettingsOpen(true)}
 				searchQuery={search}
 				onSearch={setSearch}
 				onJumpToMessage={handleJumpToMessage}
@@ -10288,6 +10292,9 @@ export function ChatLayout() {
 					onClose={() => setStatusEditorOpen(false)}
 				/>
 			)}
+
+			{/* ── Account settings (log out, linked devices) ────────────────────── */}
+			<SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
 
 			{/* ── Keyboard shortcuts help modal ─────────────────────────────────── */}
 			<KeyboardShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
