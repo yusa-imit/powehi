@@ -17,7 +17,97 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-08-31, cycle 401 — FEATURE: prove OPAQUE password zeroize through real wasm-bindgen JS glue, commit e716be5)
+## Current state (2026-08-31, cycle 402 — FEATURE: pin wasm-pack installer by version+SHA-256 across all 4 CI call sites, commit 2c81dc1)
+
+- CI green (`gh run list --limit 3` all success), `git status` clean at
+  cycle start. Picked cycle 401's own top "next cycle candidate"
+  (crypto-reviewer Finding 3): all 4 `curl .../init.sh -sSf | sh`
+  wasm-pack install steps (3 in `ci-frontend.yml`'s `vitest`/`wasm-build`/
+  `wasm-test` jobs, confirmed by cycle-401's memory; **found a 4th
+  previously-missed site** in `ci-e2e-live.yml` via a repo-wide grep before
+  starting — cycle 401's "all 3 CI jobs" phrasing undercounted by one, this
+  cycle's grep-first approach caught it) had no version pin and no
+  checksum verification — a curl-pipe-to-shell supply-chain gap.
+- **Fix:** new composite action `.github/actions/install-wasm-pack/
+  action.yml` — downloads a pinned wasm-pack v0.13.1 release tarball
+  directly from GitHub Releases (`x86_64-unknown-linux-musl`, matching all
+  4 call sites' `runs-on: ubuntu-latest`), verifies its SHA-256 via
+  `sha256sum -c -` under `set -euo pipefail`, extracts, and installs the
+  binary with `install -m 0755` — no content is ever piped into an
+  interpreter. **Independently obtained the checksum myself, not
+  copied from anywhere:** downloaded the actual release asset via `curl`
+  and computed its SHA-256 via `shasum -a 256` (macOS has no `sha256sum`)
+  before hardcoding it into the action; also noticed and confirmed via the
+  GitHub API that the wasm-pack project moved from the `rustwasm` org to
+  `wasm-bindgen` (the current `rustwasm.github.io` installer script's own
+  `UPDATE_ROOT` already pointed there) — the new pinned URL uses
+  `github.com/wasm-bindgen/wasm-pack/releases/...`. All 4
+  `- name: Install wasm-pack\n  run: curl ... | sh` steps replaced with
+  `uses: ./.github/actions/install-wasm-pack`.
+- **security-auditor: GREEN** (routed here, not crypto-reviewer — this is
+  CI/infra config, zero crypto logic touched). Verified independently:
+  checksum mismatch reliably fails the job (`sha256sum -c -`'s two-space
+  text-mode record format, tested both directions); single-arch pin is
+  safe (grepped both workflow files, confirmed no arm64/self-hosted
+  runner exists anywhere); GitHub Releases + hardcoded checksum is an
+  adequate trust anchor, arguably better than adding a third-party
+  `jetli/wasm-pack-action`-style dependency that would itself need
+  SHA-pinning; composite actions can't declare their own `permissions:`
+  (GitHub Actions limitation, not a gap) but both workflows already
+  declare `permissions: contents: read` at the top level; local path
+  refs (`./.github/actions/...`) correctly don't need SHA-pinning since
+  they resolve from the same checked-out commit, unlike the other
+  external actions in these files which remain SHA-pinned with version
+  comments. **1 advisory applied (cheap):** added an inline comment
+  noting the x86_64/`ubuntu-latest` architecture coupling so a future
+  runner-arch change fails loudly instead of silently. **1 own catch,
+  fixed before commit (not from the review):** the action's original doc
+  comment cited a specific GitHub issue number
+  (`rustwasm/wasm-pack#1440`) I had fabricated by pattern-matching, not
+  verified — caught this myself re-reading the file before commit and
+  removed the fabricated citation (kept the accurate plain-English
+  description of the risk instead), per the standing rule to never
+  present unverified specifics as fact.
+- Verified independently (functional test, not just review-trusted):
+  locally reproduced the exact download+checksum+extract sequence the
+  composite action runs (`curl -fsSL -o` the pinned URL, `shasum -a 256`
+  compare, `tar -xzf`, confirmed `wasm-pack` binary present in the
+  extracted dir) — proved the pin resolves and the checksum matches
+  before ever pushing to CI. `python3 -c "import yaml; yaml.safe_load(...)"`
+  confirmed all 3 touched/added YAML files parse. Post-push: watched all 3
+  CI workflows to completion via `gh run watch --exit-status` rather than
+  polling status repeatedly (a `gh run list` "duration" column was
+  observed frozen at a few seconds across 3 separate re-checks ~90s apart
+  — likely a display/caching quirk of `gh run list`, not a stuck job;
+  `gh run watch` gave a reliable blocking wait instead) — `CI — Frontend`
+  all 6 jobs green (including the 3 that now use the new composite
+  action), `CI — Rust` success, `CI — Live-backend E2E` success (the 4th,
+  previously-missed call site).
+- Not crypto logic (no `.rs`/`.ts` crypto code touched) —
+  `crypto-reviewer` correctly not invoked; not architectural/new
+  server-visible metadata (CI-internal tooling change only) —
+  `threat-model-checker` correctly not invoked.
+- Target dir hygiene: not checked (FEATURE mode; last checked cycle 400
+  STABILIZATION at 9.4G, next scheduled recheck cycle 405).
+- **Next cycle candidates (unchanged from cycle 401's list, this cycle's
+  pick fully closes the wasm-pack-installer-pin gap across all 4 sites):**
+  the `*_finish` success-path + wrong-password JS-glue coverage left out
+  of cycle 401's new test file (needs either test-only
+  server-simulation `#[wasm_bindgen]` exports in `wasm_exports.rs` — a
+  production-file change, route to crypto-lead — or judged not worth the
+  risk, since the equivalent mutation is already killed Rust-side); the
+  e2e register→logout→login Playwright round-trip against a real backend
+  (needs a real axum server + Postgres/Redis wired into
+  `playwright.config.ts`'s `webServer`, route to backend-lead +
+  infra-lead jointly, carried since cycle 394 — note this is distinct
+  from `ci-e2e-live.yml`'s existing live-backend E2E job, which already
+  exists and is green); PQ hybrid Phase A (still blocked on openmls
+  stable `MLS_128_MLKEM768`); OPAQUE PQ-hybrid OPRF upgrade (gated on
+  ADR-0003 Phase B, itself gated on Phase A); frontend `pnpm audit`'s 23
+  dev/build-time findings (vitest/wrangler/vite transitive, not urgent,
+  not re-checked this cycle).
+
+## Previous state (2026-08-31, cycle 401 — FEATURE: prove OPAQUE password zeroize through real wasm-bindgen JS glue, commit e716be5)
 
 - CI green (`gh run list --limit 3` all success), `git status` clean at cycle
   start. **Corrected a stale "next cycle candidates" entry before picking
