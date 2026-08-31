@@ -207,7 +207,7 @@ impl Drop for PasswordScrubGuard<'_> {
 /// Returns `{ sessionId: string, message: Uint8Array }`.
 /// Send `message` (RegistrationRequest) to the server.
 /// Pass `sessionId` to `opaque_registration_finish`.
-/// `password` is taken as `&mut` and wrapped in [`PasswordScrubGuard`] immediately on
+/// `password` is taken as `&mut` and wrapped in `PasswordScrubGuard` immediately on
 /// entry — this closes the WASM-linear-memory copy (see module doc), distinct
 /// from the JS-heap copy the worker scrubs, and the wrap makes the zeroize
 /// unconditional on every exit path rather than a manual per-call-site scrub.
@@ -241,7 +241,7 @@ pub fn opaque_registration_start(password: &mut [u8]) -> Result<JsValue, JsError
 /// Send `upload` (RegistrationUpload) to the server.
 /// `exportKey` is the 32-byte durable key for wrapping local key material.
 /// The session is consumed: calling again with the same `sessionId` returns an error.
-/// `password` is taken as `&mut` and wrapped in [`PasswordScrubGuard`] immediately on
+/// `password` is taken as `&mut` and wrapped in `PasswordScrubGuard` immediately on
 /// entry — this closes the WASM-linear-memory copy (see module doc), distinct
 /// from the JS-heap copy the worker scrubs, and the wrap makes the zeroize
 /// unconditional on every exit path rather than a manual per-call-site scrub.
@@ -281,7 +281,7 @@ pub fn opaque_registration_finish(
 ///
 /// Returns `{ sessionId: string, message: Uint8Array }`.
 /// Send `message` (CredentialRequest) to the server.
-/// `password` is taken as `&mut` and wrapped in [`PasswordScrubGuard`] immediately on
+/// `password` is taken as `&mut` and wrapped in `PasswordScrubGuard` immediately on
 /// entry — this closes the WASM-linear-memory copy (see module doc), distinct
 /// from the JS-heap copy the worker scrubs, and the wrap makes the zeroize
 /// unconditional on every exit path rather than a manual per-call-site scrub.
@@ -312,7 +312,7 @@ pub fn opaque_login_start(password: &mut [u8]) -> Result<JsValue, JsError> {
 /// Send `finalization` (CredentialFinalization) to the server.
 /// Wrong password returns an Err — never produces a key on failure.
 /// The session is consumed.
-/// `password` is taken as `&mut` and wrapped in [`PasswordScrubGuard`] immediately on
+/// `password` is taken as `&mut` and wrapped in `PasswordScrubGuard` immediately on
 /// entry — this closes the WASM-linear-memory copy (see module doc), distinct
 /// from the JS-heap copy the worker scrubs, and the wrap makes the zeroize
 /// unconditional on every exit path rather than a manual per-call-site scrub.
