@@ -17,7 +17,54 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-09-01, cycle 408 — FEATURE: forwards now carry the target chat's disappearing-TTL, commit 5b619e7)
+## Current state (2026-09-01, cycle 409 — FEATURE: write dev-setup README + sync stale phase 1-4 STATUS.md, commit 965a41e)
+
+- CI green (`gh run list --limit 5` all success), `git status` clean at cycle
+  start. Repeated cycle 408's fresh-scan approach since no candidate was
+  carried with confidence: `gh issue list --state open` empty, `cargo audit`
+  clean (652 crates, 0 vulnerabilities), `cargo deny check` clean
+  (advisories/bans/licenses/sources all ok), `pnpm audit` (app/) clean, and a
+  repo-wide TODO/FIXME/`unimplemented!()` grep turned up nothing new (the
+  `powehi-rest-api` hits are pre-verified `#[cfg(test)]` mock trait impls,
+  per cycle 407).
+- Widened the scan to doc/process drift (this file's own FEATURE-mode step 1
+  says to read "the ACTIVE phase's `docs/phases/phase-N/STATUS.md`") and
+  found `docs/phases/phase-{1,2,3,4}/STATUS.md` were **still "Status:
+  Pending" with every DoD item unchecked**, even though this file's own
+  Phase checklist has marked all of Phase 1-4 `[x]` (with commit hashes)
+  since cycle 54 — only phase-5/phase-6 STATUS.md had ever been kept in
+  sync. Verified this wasn't just staleness masking a real gap: cross-checked
+  every phase-1..4 DoD line against the commit references already recorded
+  in this file's Phase checklist, and specifically checked "development
+  environment setup documented" (Phase 1) — `README.md` was in fact still
+  just a bare `# POWEHI` title, a genuine unmet DoD item, not a false
+  negative.
+- **Fix:** wrote a real `README.md` (architecture summary, prerequisites
+  table incl. exact pinned versions — Rust 1.96.0 from `rust-toolchain.toml`,
+  pnpm 10.28.2 from `package.json`'s `packageManager`, wasm-pack 0.13.1 from
+  `.github/actions/install-wasm-pack`, `docker compose` for local Postgres/
+  Redis/MinIO — and the build/test/lint commands already listed in
+  `CLAUDE.md`). Then rewrote `docs/phases/phase-{1,2,3,4}/STATUS.md` to
+  `Status: COMPLETE (cycle N)` with every DoD item checked and cited against
+  the commit hash already on file in this document's Phase checklist,
+  matching the detail level phase-5/phase-6 already used. Pure
+  documentation — zero code changed, nothing in `crates/` or `app/src`
+  touched.
+- Not crypto, not architectural, not a backend/infra handler change —
+  `crypto-reviewer`/`threat-model-checker`/`security-auditor` correctly not
+  invoked (same precedent as cycle 296/320's pure docs/memory-only cycles).
+  No build/test run needed for a docs-only diff; `git status` confirmed only
+  the 5 intended markdown files changed before commit.
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates:** none carried with confidence again — repeat the
+  fresh-scan approach (`cargo audit`/`cargo deny check`/`pnpm audit`/`gh
+  issue list`/TODO grep, now also including a STATUS.md/doc-drift check) if
+  cycle 410 also finds no queued item. The PQ Phase A prerequisite decision
+  from cycle 407 (ml-kem 0.2.3→0.3.2 + libcrux/x-wing admissibility) is still
+  open but explicitly flagged as needing a human/crypto-lead policy call, not
+  a blind retry.
+
+## Previous state (2026-09-01, cycle 408 — FEATURE: forwards now carry the target chat's disappearing-TTL, commit 5b619e7)
 
 - CI green (`gh run list --limit 3` all success), `git status` clean at cycle
   start. All 6 phase checklists in this file are fully `[x]` (last item closed
