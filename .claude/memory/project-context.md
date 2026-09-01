@@ -17,7 +17,94 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-09-01, cycle 409 — FEATURE: write dev-setup README + sync stale phase 1-4 STATUS.md, commit 965a41e)
+## Current state (2026-09-01, cycle 411 — FEATURE: finish an interrupted act()-warning cleanup sweep across 13 frontend test files, commit 31d241c)
+
+- Cycle counter incremented to 411 (410 was skipped without a matching commit —
+  see below). CI green (`gh run list --limit 3` all success), but `git status`
+  at cycle start was **not clean**: 6 test files (`AcceptInviteModal.test.tsx`,
+  `ChatLayout.test.tsx`, `ChatLayoutGroupReactions.test.tsx`,
+  `ChatLayoutMediaGallery.test.tsx`, `ChatLayoutSlowMode.test.tsx`,
+  `useMediaSend.test.ts`) already had uncommitted, coherent `act()`-wrapping
+  fixes for React "not wrapped in act(...)" warnings — clearly a real, in-
+  progress cycle-410 fix that was interrupted before its commit step (same
+  failure mode cycle 407 backfilled for cycles 405/406: a real diff landing
+  without the matching commit). Read and verified all 6 diffs before touching
+  anything further: coherent single-purpose pattern (wrap a raw
+  `useAuthStore.setState(...)`/DOM `.click()`/unflushed async effect in
+  `act()`), `tsc -b` clean, full suite 109 files/1546 tests green — confirmed
+  this was finished-and-correct work, not garbage, so treated it as a real
+  candidate to complete rather than reverting it.
+- **Found the fix was only partially applied:** a repo-wide `npx vitest run`
+  still printed the identical warning class in ~14 more files. Rather than
+  commit the partial 6-file fix alone, treated the mechanical act()-wrapping
+  sweep as this cycle's item and finished it end-to-end (matches this
+  project's established pattern of fully closing a gap in one cycle rather
+  than re-splitting it — e.g. cycle 401's JS-glue-coverage closure).
+- **Delegated to `frontend-lead`**, which first did a precise per-file warning
+  count and found only 7 of the ~18 remaining candidate files actually had any
+  occurrences (11 already clean) — then fanned out 4 parallel background
+  sub-agents, one per file/group: `useMessages.test.ts` (91→0, root cause:
+  unwrapped `useAuthStore.setState` in 2 stacked `afterEach`s exercised via
+  `useSyncExternalStore`), `ChatLayoutTimeGrouping.test.tsx` (121→0, root
+  cause: unwrapped `render()`/`vi.advanceTimersByTime()` calls plus an
+  unwrapped `afterEach` fake-timer flush that fires the 30s disappearing-
+  message `sweep()` interval), `usePersistentMessages.test.ts` (135→0, root
+  cause: unwrapped `afterEach` `setState` + one test needing real
+  `setTimeout` ticks to drain `fake-indexeddb`'s macrotask-based, not
+  microtask-based, internal scheduling), and a 4-file batch —
+  `LinkedDevicesPanel.test.tsx`, `useMediaReceive.test.ts`,
+  `useWelcomePoller.test.ts`, `ChatLayoutTheme.test.tsx` (24+13+9+7→0
+  combined) — all via the same unwrapped-`setState`/unflushed-async-effect
+  pattern. Two of the four sub-agents hit their 30-turn limit right before
+  finishing final verification; resumed both via `SendMessage` to the same
+  agent id (standard pattern for long agent runs, per cycle 403's precedent)
+  and got complete final reports from both.
+- **Independently re-verified after all 4 sub-agents reported done (not just
+  trusted their individual reports):** a fresh full-suite `npx vitest run`
+  still showed 51 residual "not wrapped in act" occurrences — 50 in
+  `ChatLayoutSlowMode.test.tsx` (one of the *original* 6 "already fixed"
+  files — it had only been partially fixed before this cycle started) and 1
+  in `ChatLayoutTheme.test.tsx`. Fixed both myself rather than re-delegating:
+  (1) `ChatLayoutSlowMode.test.tsx`'s `afterEach` called
+  `vi.runOnlyPendingTimersAsync()` unwrapped, which flushes the countdown
+  badge's pending 1s interval tick and races a `setState` outside `act()`
+  after almost every test in the file — wrapped it in `act()`; (2)
+  `"slow-mode section is NOT shown for DM chats"` never flushed `InfoPanel`'s
+  async `getVerifiedContact()` mount effect before asserting — added the same
+  `await act(async () => { ... })` flush the file's other DM-chat-adjacent
+  tests already used. Re-ran the full suite after these two fixes: 0
+  remaining occurrences, 109 files/1546 tests green, `tsc -b` clean, `biome
+  check .` clean (177 files).
+- **13 files touched in total, all test-only** (the original 6 partial fixes
+  + 7 more from the delegated sweep, one of the 6 — `ChatLayoutSlowMode
+  .test.tsx` — touched twice, first by the earlier interrupted cycle then
+  again by me to close the last 2 test cases): +288/-118 lines, zero
+  assertions/test-counts/production code changed anywhere in the diff (only
+  `act()`/`await act(async () => {})` wrapping added or an occasional
+  synchronous `it()` callback converted to `async`).
+- Not crypto logic (zero `.rs`/WASM files touched) — `crypto-reviewer`
+  correctly not invoked; not architectural (no behavior/metadata change, pure
+  test-harness correctness) — `threat-model-checker` correctly not invoked;
+  not a backend handler or infra change — `security-auditor` correctly not
+  invoked. Consistent with prior test-only cycles (399, 400, 404) that also
+  correctly skipped review.
+- Target dir hygiene: not checked (FEATURE mode).
+- **Cycle 410 was silently skipped without a commit** (its work is what this
+  cycle found already sitting uncommitted in the working tree and finished).
+  Lesson, same as cycle 407's for 405/406: don't let the memory-update +
+  commit step get skipped even under time/turn pressure — the "next cycle
+  candidates" list and the skipped-cycle detection this cycle relied on both
+  depend on every cycle actually landing its commit.
+- **Next cycle candidates:** none carried with confidence — this cycle's item
+  came from finding leftover uncommitted work, not from the prior fresh-scan
+  list (cycle 409's candidates: none). Next cycle should repeat the
+  fresh-scan approach (`cargo audit`/`cargo deny check`/`pnpm audit`/`gh issue
+  list`/TODO grep/STATUS.md doc-drift check) if no candidate is found waiting.
+  The PQ Phase A prerequisite decision from cycle 407 (ml-kem 0.2.3→0.3.2 +
+  libcrux/x-wing admissibility) is still open but explicitly flagged as
+  needing a human/crypto-lead policy call, not a blind retry.
+
+## Previous state (2026-09-01, cycle 409 — FEATURE: write dev-setup README + sync stale phase 1-4 STATUS.md, commit 965a41e)
 
 - CI green (`gh run list --limit 5` all success), `git status` clean at cycle
   start. Repeated cycle 408's fresh-scan approach since no candidate was
