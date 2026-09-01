@@ -17,7 +17,79 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-09-01, cycle 411 — FEATURE: finish an interrupted act()-warning cleanup sweep across 13 frontend test files, commit 31d241c)
+## Current state (2026-09-02, cycle 413 — FEATURE: fix raw ★ glyph in Starred-panel empty state, commit 3228333)
+
+- CI green (`gh run list --limit 5` all success — last run was cycle 411's
+  memory-update commit), `git status` clean at cycle start. Cycle 412 appears
+  to have been skipped entirely (counter jumped 411→413 with no cycle-412
+  commit anywhere in `git log` — unlike cycles 405/406/410's "skipped memory
+  commit but real code landed" pattern, this one has no orphaned diff either;
+  nothing to backfill, just noting the gap for continuity).
+- Cycle 411 carried no confident "next cycle candidate" — repeated its
+  recommended fresh-scan: `gh issue list --state open` empty; `cargo audit`
+  clean (no vulnerabilities); `cargo deny check` clean (advisories/bans/
+  licenses/sources all ok — noted in passing that `libcrux-sha3`/`hpke-rs`
+  appear in the dependency tree, but traced via `cargo tree -i` to
+  `openmls_rust_crypto 0.5.1` — the *current, already-pinned* openmls 0.8.1's
+  own crypto backend, not a new/uncovered addition; unrelated to cycle 407's
+  rejected 0.9.0-bump libcrux/x-wing concern, which was about NEW transitive
+  additions from a version bump, not this pre-existing baseline); `pnpm
+  audit` (app/) clean; repo-wide TODO/FIXME/`unimplemented!()` grep found
+  nothing new beyond the pre-verified `#[cfg(test)]` mock impls (cycle 407).
+  Phase checklist fully `[x]` since cycle 54, phase-1..4 STATUS.md already
+  synced (cycle 409).
+- **Delegated a fresh-gap scan to an Explore agent** (broader than a manual
+  grep sweep, given how thoroughly prior cycles have already mined the
+  obvious candidates) rather than digging through the whole codebase myself.
+  It found: (1) `ChatLayout.tsx`'s Starred Messages panel empty-state hint
+  text embedded a literal Unicode `★` glyph directly in chrome copy
+  ("Hover a message and click ★ to star it.") — DESIGN.md's hard rule is no
+  emoji/raw glyphs in UI chrome, and this exact panel already uses the
+  `Icon name="star"` SVG component two lines above (header icon) and at the
+  real star-toggle button elsewhere — this one spot was the inconsistent
+  holdout; (2) `SettingsPanel.tsx` (and 9 other components) use a manual
+  `<dialog open>` + custom Escape/backdrop-click handlers instead of the
+  native `showModal()` API — investigated myself before deciding: this is a
+  **consistent, deliberate app-wide pattern across all 10 dialog usages**
+  (`AcceptInviteModal`, `AddMemberModal`, `ChatLayout` x4, `CreateGroupModal`,
+  `InviteModal`, `RecoveryPhraseModal`, `SettingsPanel`), not an isolated
+  oversight — likely intentional given jsdom's incomplete `<dialog
+  showModal()>` support would complicate every one of these components'
+  existing Vitest suites. Correctly rejected as a candidate: not an actual
+  gap, and even if it were, a 10-component pattern change is not a
+  single-cycle-sized fix.
+- **Fix (`app/src/components/ChatLayout.tsx`, Starred Messages empty state):**
+  replaced the literal `★` character with `<Icon name="star" size={11} />`
+  rendered inline via a flex span, matching the header icon's usage of the
+  same `Icon` component two lines above. No test in
+  `ChatLayoutStarred.test.tsx` asserted on the literal copy text (confirmed
+  via grep before editing), so this was a safe swap with no test-fixture
+  update needed.
+- Not crypto logic (no `.rs`/WASM file touched) — `crypto-reviewer`
+  correctly not invoked; not architectural (pure UI copy/icon swap, no
+  behavior or metadata change) — `threat-model-checker` correctly not
+  invoked; not a backend handler or infra change — `security-auditor`
+  correctly not invoked. Consistent with prior UI-copy/design-compliance-only
+  cycles that also correctly skipped review.
+- Verified before commit: `npx tsc -b` clean; `npx biome check
+  src/components/ChatLayout.tsx` clean; `npx vitest run
+  src/components/ChatLayoutStarred.test.tsx` (14/14) then full suite — 109
+  files / 1546 tests green (unchanged count, no test added/removed — pure
+  copy/markup fix); `git diff --stat` confirmed only the one intended file
+  changed (+12/-2 lines).
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates:** none carried with confidence — this cycle's
+  item came from a delegated Explore scan rather than a pre-existing queue,
+  and that scan's only other candidate (native `<dialog showModal()>`
+  migration) was explicitly rejected as not-a-gap/too-large above. Next
+  cycle should either repeat the fresh-scan approach (`cargo audit`/`cargo
+  deny check`/`pnpm audit`/`gh issue list`/TODO grep, now also trying a
+  delegated Explore-agent scan if the manual sweep comes up empty again) or
+  pick up the PQ Phase A prerequisite decision IF a human/crypto-lead has
+  made the ml-kem 0.2.3→0.3.2 + libcrux/x-wing admissibility policy call
+  since cycle 407 — otherwise still not a blind-retry candidate.
+
+## Previous state (2026-09-01, cycle 411 — FEATURE: finish an interrupted act()-warning cleanup sweep across 13 frontend test files, commit 31d241c)
 
 - Cycle counter incremented to 411 (410 was skipped without a matching commit —
   see below). CI green (`gh run list --limit 3` all success), but `git status`
