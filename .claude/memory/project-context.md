@@ -17,7 +17,68 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-09-02, cycle 413 — FEATURE: fix raw ★ glyph in Starred-panel empty state, commit 3228333)
+## Current state (2026-09-02, cycle 414 — FEATURE: add missing Icon.tsx test coverage, commit ce4e6d0)
+
+- CI green (`gh run list --limit 5` all success), `git status` clean at cycle
+  start. Repeated the now-standard fresh-scan approach since no candidate was
+  carried with confidence from cycle 413: `gh issue list --state open` empty;
+  `cargo deny check` clean (advisories/bans/licenses/sources all ok, same
+  libcrux/hpke-rs-via-openmls_rust_crypto baseline noted in cycle 413, nothing
+  new); `pnpm audit` (app/) clean. `cargo audit` itself hung indefinitely on
+  the RustSec advisory-db git fetch step in this environment (no output after
+  the "Updating crates.io index" line across 3 separate invocations, no
+  `timeout` binary available on this macOS shell to bound it) — not treated as
+  a blocker since `cargo deny check`'s `advisories ok` already covers the same
+  RustSec DB. Note for a future cycle: `cargo`/`rustc`/etc. are not on PATH by
+  default in this shell (`~/.cargo/bin` missing) — had to `export
+  PATH="$HOME/.cargo/bin:$PATH"` manually before any cargo command worked.
+- **Delegated a fresh-gap scan to an Explore agent** (same pattern as cycle
+  413, given how thoroughly prior cycles have mined the obvious candidates).
+  It ruled out: remaining raw glyphs in JSX (none — only comment/JSDoc arrows
+  remain, the star glyph was already fixed cycle 413); hardcoded hex colors in
+  components (these are DESIGN.md's literal brand-required values, not a
+  token-bypass bug); `unimplemented!()`/`.unwrap()` in `crates/` (all confined
+  to `#[cfg(test)]` modules, verified per-file); recently-added modules
+  (`leader_lock.rs`, `mediaTransfer.ts`, `concurrencyLimiter.ts`,
+  `notificationSound.ts`, `useVoiceRecorder.ts`) already have matching test
+  coverage. **Found:** `app/src/components/Icon.tsx` — the app-wide SVG icon
+  lookup primitive (single component, ~40-entry path table) — had **zero
+  co-located test file**, unlike every other component in
+  `app/src/components/` (the project's own `react-hooks-only.md` convention:
+  "co-locate component, styles, and tests"). Specifically untested: the `if
+  (!path) return null` fallback for an unrecognized icon name, and the
+  `size`/`color`/`className`/`style` prop pass-throughs.
+- **Fix:** new `app/src/components/Icon.test.tsx`, 6 tests — known-name
+  render (correct `viewBox`/default `stroke="currentColor"`), unknown-name
+  returns `null`, default `size=20` vs. custom `size` prop, custom `color`
+  prop overrides `currentColor` on `stroke`, `className`/`style` pass-through,
+  and a known SVG path element actually renders (`<polyline>` for `check`).
+  Pure test-only addition — `Icon.tsx` itself untouched, zero production code
+  changed.
+- Not crypto logic (no `.rs`/WASM file touched) — `crypto-reviewer` correctly
+  not invoked; not architectural (no behavior/metadata change, pure test
+  addition) — `threat-model-checker` correctly not invoked; not a backend
+  handler or infra change — `security-auditor` correctly not invoked.
+  Consistent with prior test-only cycles (399, 400, 404, 406) that also
+  correctly skipped review.
+- Verified before commit: `npx tsc -b` clean; `npx biome check
+  src/components/Icon.test.tsx` clean; `npx vitest run
+  src/components/Icon.test.tsx` (6/6) then full suite — 110 files / 1552
+  tests green (was 109/1546 — +1 file/+6 tests, exactly this cycle's new
+  file, no other test count changed); `git status` confirmed only the one
+  new file before `git add`.
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates:** none carried with confidence — same pattern as
+  recent cycles, this one came from a delegated Explore scan rather than a
+  pre-existing queue. Next cycle should repeat the fresh-scan approach
+  (`cargo deny check`/`pnpm audit`/`gh issue list`/TODO grep/delegated Explore
+  scan) — note `cargo audit` may need investigation (hung 3x this cycle on
+  advisory-db fetch; `cargo deny check` is a working substitute for the
+  advisory coverage in the meantime). The PQ Phase A prerequisite decision
+  (ml-kem 0.2.3→0.3.2 + libcrux/x-wing admissibility, open since cycle 407)
+  remains a human/crypto-lead policy call, not a blind retry.
+
+## Previous state (2026-09-02, cycle 413 — FEATURE: fix raw ★ glyph in Starred-panel empty state, commit 3228333)
 
 - CI green (`gh run list --limit 5` all success — last run was cycle 411's
   memory-update commit), `git status` clean at cycle start. Cycle 412 appears
