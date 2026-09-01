@@ -305,7 +305,12 @@ describe("ChatLayout — message forwarding", () => {
 			fireEvent.click(screen.getByTestId("forward-send-button"));
 		});
 
-		expect(MOCK_WORKER.mlsEncrypt.mock.calls.length).toBe(encryptCallsBefore + 2);
+		// Each forward target now reads its persisted disappearing-TTL setting from Dexie
+		// (db.groups.get) before encrypting, so the mlsEncrypt calls land after an extra
+		// microtask hop — wait for both rather than asserting immediately post-act.
+		await waitFor(() => {
+			expect(MOCK_WORKER.mlsEncrypt.mock.calls.length).toBe(encryptCallsBefore + 2);
+		});
 		expect(screen.queryByTestId("forward-modal")).not.toBeInTheDocument();
 	});
 
@@ -598,9 +603,93 @@ describe("ChatLayout — message forwarding", () => {
 			// wrong group's ciphertext) got persisted.
 			expect(row?.ciphertextB64).toBe("3q0=");
 			expect(row?.ciphertextB64).not.toBe("Zg==");
-			// Forwards carry no reply context and (pre-existing, unchanged by this fix) no TTL.
+			// Forwards carry no reply context, and this target group has no disappearing
+			// timer set, so no TTL either — see the next test for the TTL-carried case.
 			expect(row?.expiresAt).toBeUndefined();
 			expect(row?.replyToJson).toBeUndefined();
+		});
+	});
+
+	it("carries the target chat's disappearing-TTL onto a forwarded message, both on the wire and in the sender's own persisted copy", async () => {
+		let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+		let capturedOnNewGroup:
+			| ((event: { groupId: string; senderDeviceId: string }) => void)
+			| undefined;
+		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_id, _gid, onMsg) => {
+			capturedOnMessage = onMsg;
+		});
+		vi.spyOn(WelcomePollerModule, "useWelcomePoller").mockImplementation(
+			(_identityId, onNewGroup) => {
+				capturedOnNewGroup = onNewGroup;
+			},
+		);
+		useAuthStore.setState({
+			sessionToken: "tok-fwd-ttl",
+			identityId: "id-fwd-ttl",
+			deviceId: "dev-fwd-ttl",
+		});
+		const sendMessageSpy = vi.spyOn(MessagesApi, "sendMessage").mockResolvedValue("env-fwd-ttl-id");
+
+		render(<ChatLayout />);
+		await waitFor(() => expect(capturedOnNewGroup).toBeTypeOf("function"));
+
+		act(() => {
+			capturedOnNewGroup?.({ groupId: "fwd-ttl-target", senderDeviceId: "peer-device-ttl" });
+		});
+		// handleNewGroup mirrors the new chat into Dexie fire-and-forget — wait for the row
+		// to exist before setting its disappearing timer, same as the app's own
+		// handleToggleTtl would only ever run after that mirror has landed.
+		await waitFor(async () => {
+			expect(await db.groups.get("fwd-ttl-target")).toBeDefined();
+		});
+		await db.groups.update("fwd-ttl-target", { disappearingTtlSeconds: 3600 });
+
+		await act(async () => {
+			capturedOnMessage?.({
+				id: "fwd-ttl-uuid-0014",
+				senderId: "peer-device-fwd",
+				groupId: "11111111-1111-1111-1111-111111111111",
+				text: "Forward with a timer on the target",
+				ciphertextB64: "Zg==",
+				epochSeq: 1,
+			});
+		});
+
+		const bubbles = screen.getAllByTestId("message-bubble");
+		fireEvent.mouseEnter(bubbles[bubbles.length - 1]);
+		fireEvent.click(screen.getByTestId("forward-button"));
+		fireEvent.click(screen.getByTestId("forward-target-fwd-ttl-target"));
+
+		await act(async () => {
+			fireEvent.click(screen.getByTestId("forward-send-button"));
+		});
+
+		await waitFor(() => expect(sendMessageSpy).toHaveBeenCalled());
+		// The server-visible ttlSeconds arg (sendMessage's 4th param) must reflect the
+		// target's persisted timer, not the always-undefined value the pre-fix code sent.
+		expect(sendMessageSpy).toHaveBeenCalledWith(
+			"tok-fwd-ttl",
+			"fwd-ttl-target",
+			expect.anything(),
+			3600,
+		);
+
+		// The optimistic bubble itself must carry expiresAt too — not just the Dexie row —
+		// otherwise the on-screen "Disappearing" badge never shows and the in-memory expiry
+		// sweep (which filters on msg.expiresAt) never removes it, even though the
+		// server/peer/Dexie copies all correctly expire. The forwarded bubble lives in the
+		// TARGET chat (not the currently active one), so switch to it via its sidebar row
+		// first — same "Contact <shortId>" accessible name the sidebar-row test above relies on.
+		fireEvent.click(await screen.findByRole("button", { name: /^Contact / }));
+		await waitFor(() => {
+			expect(screen.getAllByTestId("disappearing-badge").length).toBeGreaterThan(0);
+		});
+
+		await waitFor(async () => {
+			const row = await db.messages.get("env-fwd-ttl-id");
+			expect(row).toBeDefined();
+			expect(row?.expiresAt).toBeGreaterThan(Date.now());
+			expect(row?.expiresAt).toBeLessThanOrEqual(Date.now() + 3600 * 1000);
 		});
 	});
 

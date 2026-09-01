@@ -8834,7 +8834,7 @@ export function ChatLayout() {
 	 * Optimistically append `text` as a "me" bubble to `targetId`'s chat.
 	 * Shared by both the plain-text and media forward paths below.
 	 */
-	const appendForwardOptimistic = (targetId: string, text: string) => {
+	const appendForwardOptimistic = (targetId: string, text: string, expiresAt?: number) => {
 		const now = new Date();
 		const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
 		setChats((cs) =>
@@ -8847,7 +8847,7 @@ export function ChatLayout() {
 						break;
 					}
 				}
-				msgs.push({ from: "me", text, last: true, time, continued: false });
+				msgs.push({ from: "me", text, last: true, time, continued: false, expiresAt });
 				return { ...c, messages: msgs, last: text, time };
 			}),
 		);
@@ -8863,17 +8863,21 @@ export function ChatLayout() {
 	 * Only used for text-only forwards; see `sendForwardToSelected` for media (media messages
 	 * have no Dexie persistence at all yet, sent or received — a separate, larger gap, not
 	 * attempted here).
-	 * RETENTION NOTE (crypto-reviewer finding, accepted): a forward has never carried the
-	 * target chat's `disappearingTtl` on the wire — `sendMessageApi` here is called with
-	 * `ttlSeconds: undefined` and a raw (non-JSON) payload, unlike `sendMessage`'s
-	 * `{type:"text",text,ttl}` structure, so the peer has never received an expiry for a
-	 * forwarded message either. What this diff changes: the sender's own plaintext copy now
-	 * reaches encrypted-at-rest Dexie with `expiresAt` always `undefined`, so it is never
-	 * swept by `purgeExpired` — before this fix nothing was persisted at all, so there was
-	 * nothing to leave un-purged. This widens the existing "forwards ignore TTL" gap from
-	 * "peer keeps it forever" to "sender AND peer keep it forever," rather than opening a new
-	 * gap class. Not fixed here (would need the JSON `{type:"text",...,ttl}` payload shape,
-	 * a bigger change than this persistence fix); tracked as a follow-up.
+	 * RETENTION (fixed, was a tracked follow-up): now reads the *target* group's persisted
+	 * `disappearingTtlSeconds` via `encryptedDb.getGroupDisappearingTtl` (not the in-memory
+	 * `disappearingTtl` state, which only ever tracks the currently active chat) and, when
+	 * set, uses the same `{type:"text",text,ttl}` JSON payload `sendMessage` does — so the
+	 * peer derives its own expiry — plus passes it as `sendMessageApi`'s server-visible
+	 * `ttlSeconds` arg. `expiresAt` is computed once, right after the TTL lookup resolves
+	 * (same single-timestamp-reused pattern `sendMessage` uses), and threaded into BOTH the
+	 * optimistic bubble (so the "disappearing" badge and in-memory expiry sweep — `msg.expiresAt`
+	 * consumers elsewhere in this file — see it immediately) and `persistOutgoing` (so the
+	 * sender's own Dexie copy is swept by `purgeExpired` too). A forward into a chat with no
+	 * disappearing timer set keeps sending the raw non-JSON payload, matching `sendMessage`'s
+	 * own undefined-ttl path. The optimistic bubble is deliberately appended AFTER the TTL
+	 * lookup (a local-only Dexie read, not a network call) rather than before it, so it can
+	 * carry the correct `expiresAt` from the start instead of a UI-only bubble that never
+	 * expires while its Dexie-persisted twin does.
 	 */
 	const sendForwardToOne = (targetId: string) => {
 		if (!forwardMsg || !sessionToken || !cryptoWorker) return;
@@ -8881,23 +8885,41 @@ export function ChatLayout() {
 		if (!targetChat?.mlsGroupId || !targetChat?.mlsIdentityId) return;
 		const { mlsGroupId, mlsIdentityId } = targetChat;
 		const text = forwardMsg.text;
-		appendForwardOptimistic(targetId, text);
-		const plaintext = new TextEncoder().encode(text);
-		cryptoWorker
-			.mlsEncrypt(mlsIdentityId, mlsGroupId, plaintext)
-			.then(({ ciphertext }) =>
-				sendMessageApi(sessionToken, mlsGroupId, ciphertext, undefined).then((envelopeId) => {
-					// Persisted under the target group's id, which may not be the currently
-					// active chat — same accepted `usePersistentMessages(active?.mlsGroupId)`
-					// cross-group binding limitation already documented on fireScheduled's
-					// persistOutgoing call: Dexie itself is unaffected (putMessage keys by
-					// row.groupId, not the hook's bound group), only the local `rows` cache can
-					// transiently reflect the wrong group until the next chat switch reloads it.
-					persistOutgoing(envelopeId, mlsGroupId, text, uint8ToBase64(ciphertext));
-				}),
-			)
-			.catch(() => {})
-			.finally(() => plaintext.fill(0));
+		const ttlPromise = encryptedDb
+			? encryptedDb.getGroupDisappearingTtl(mlsGroupId)
+			: Promise.resolve(undefined);
+		ttlPromise
+			.then((persisted) => {
+				const ttlSeconds = TTL_OPTIONS.includes(persisted as TtlOption)
+					? (persisted as TtlOption)
+					: undefined;
+				const expiresAt = ttlSeconds ? Date.now() + ttlSeconds * 1000 : undefined;
+				appendForwardOptimistic(targetId, text, expiresAt);
+				const payload = ttlSeconds ? JSON.stringify({ type: "text", text, ttl: ttlSeconds }) : text;
+				const plaintext = new TextEncoder().encode(payload);
+				return cryptoWorker
+					.mlsEncrypt(mlsIdentityId, mlsGroupId, plaintext)
+					.then(({ ciphertext }) =>
+						sendMessageApi(sessionToken, mlsGroupId, ciphertext, ttlSeconds).then((envelopeId) => {
+							// Persisted under the target group's id, which may not be the currently
+							// active chat — same accepted `usePersistentMessages(active?.mlsGroupId)`
+							// cross-group binding limitation already documented on fireScheduled's
+							// persistOutgoing call: Dexie itself is unaffected (putMessage keys by
+							// row.groupId, not the hook's bound group), only the local `rows` cache can
+							// transiently reflect the wrong group until the next chat switch reloads it.
+							persistOutgoing(
+								envelopeId,
+								mlsGroupId,
+								text,
+								uint8ToBase64(ciphertext),
+								undefined,
+								expiresAt,
+							);
+						}),
+					)
+					.finally(() => plaintext.fill(0));
+			})
+			.catch(() => {});
 	};
 
 	/** Toggle a chat's selection state in the (multi-select) forward modal. */
