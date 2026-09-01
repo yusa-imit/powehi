@@ -981,8 +981,18 @@ function StarredPanel({
 					>
 						No starred messages yet.
 						<br />
-						<span style={{ opacity: 0.6, fontSize: 12 }}>
-							Hover a message and click ★ to star it.
+						<span
+							style={{
+								opacity: 0.6,
+								fontSize: 12,
+								display: "inline-flex",
+								alignItems: "center",
+								gap: 4,
+							}}
+						>
+							Hover a message and click
+							<Icon name="star" size={11} />
+							to star it.
 						</span>
 					</div>
 				) : (
