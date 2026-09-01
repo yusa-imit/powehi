@@ -17,7 +17,76 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-09-01, cycle 407 — FEATURE: evaluate openmls 0.9.0 for ADR-0003 Phase A, spike blocked and documented, commit TBD)
+## Current state (2026-09-01, cycle 408 — FEATURE: forwards now carry the target chat's disappearing-TTL, commit 5b619e7)
+
+- CI green (`gh run list --limit 3` all success), `git status` clean at cycle
+  start. All 6 phase checklists in this file are fully `[x]` (last item closed
+  cycle 54); `gh issue list --state open` empty; `cargo audit`, `cargo deny
+  check`, and `pnpm audit` (app/) all clean. No new candidate surfaced by any
+  of those — as cycle 407 anticipated, did a fresh gap scan instead: grepped
+  for `TODO`/`FIXME`/`unimplemented!()` across `crates/` and `app/src`. The
+  only non-test hit was a documented, explicitly-tracked follow-up inside
+  `ChatLayout.tsx`'s `sendForwardToOne` doc-comment: forwarding a text
+  message into another chat always sent `ttlSeconds: undefined` to the REST
+  API and a raw (non-JSON) MLS payload, ignoring whatever disappearing-message
+  timer was actually configured on the *target* chat — so a forward into a
+  TTL-enabled chat silently became permanent for both the peer and (after an
+  earlier persistence fix) the sender's own Dexie copy. Picked this as the
+  cycle's item.
+- **Fix (`app/src/components/ChatLayout.tsx`, `sendForwardToOne` +
+  `appendForwardOptimistic`):** now reads the target group's persisted
+  `disappearingTtlSeconds` via `encryptedDb.getGroupDisappearingTtl()` (the
+  existing helper in `encrypted-db.ts` built for exactly this — not a raw
+  `db.groups.get()`, and not the in-memory `disappearingTtl` state, which only
+  ever tracks the currently *active* chat). When set: wraps the plaintext in
+  the same `{type:"text",text,ttl}` JSON payload `sendMessage` uses (so the
+  peer derives its own expiry), passes it as `sendMessageApi`'s server-visible
+  `ttlSeconds` arg, and threads a single `expiresAt` timestamp into BOTH the
+  optimistic bubble (`appendForwardOptimistic` gained an `expiresAt` param) and
+  `persistOutgoing` — so the "Disappearing" badge shows immediately, the
+  in-memory expiry sweep (which filters on `msg.expiresAt`) can reap it, and
+  the sender's Dexie copy is swept by `purgeExpired` too. Media forwards
+  remain untouched (already-documented, larger, separate persistence gap).
+  Media-only, TTL-free forwards keep the old raw-string payload — no behavior
+  change there.
+- **security-auditor: GREEN** on the diff (spawned proactively — this is a
+  frontend-only change, not a backend handler, so not a mandatory gate per
+  this file's non-negotiables, but the change alters what's sent over the
+  wire so worth checking). 4 non-blocking findings, all fixed before commit:
+  (1) optimistic bubble wasn't getting `expiresAt` even though the Dexie row
+  was — fixed by threading `expiresAt` into `appendForwardOptimistic`; (2)
+  `expiresAt` was anchored post-server-ACK instead of at compose time like
+  `sendMessage` — fixed by computing it once right after the TTL lookup
+  resolves, before the optimistic append; (3) raw `db.groups.get()` bypassed
+  the existing `encryptedDb.getGroupDisappearingTtl()` helper — switched to
+  it; (4) new test didn't decode the MLS plaintext to confirm the JSON `ttl`
+  wrapper reached the wire — left as-is (the existing `mlsEncrypt` mock in
+  this test file returns a fixed ciphertext regardless of input, so decoding
+  it wouldn't actually verify the payload; would need a mock rewrite out of
+  scope for this fix).
+- Not crypto logic (no `.rs`/WASM file touched) — `crypto-reviewer` correctly
+  not invoked. Not architectural / no new server-visible metadata (reuses the
+  exact same `sendMessageApi` `ttlSeconds` param `sendMessage` already sends
+  for regular messages, just now also from the forward path) —
+  `threat-model-checker` correctly not invoked.
+- Tests: added one new test (`ChatLayoutForwarding.test.tsx`) covering the
+  server-visible `ttlSeconds` arg, the persisted Dexie `expiresAt`, and the
+  on-screen "Disappearing" badge after switching to the target chat; fixed
+  one pre-existing test's timing assumption (`mlsEncrypt` call count checked
+  synchronously post-click — now needs a `waitFor` since the TTL lookup adds
+  an async Dexie hop before encryption). Full suite: 109 files / 1546 tests
+  green (was 1545); `tsc --noEmit` clean; `biome check .` clean (177 files).
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates:** none carried with confidence — this cycle's own
+  gap scan (audits, `gh issue list`, TODO/FIXME grep) came up empty aside from
+  the item just closed. Next cycle should repeat the same fresh-scan approach
+  (`cargo audit`/`cargo deny check`/`pnpm audit`/`gh issue list`/TODO grep)
+  rather than assume a candidate is waiting. The PQ Phase A prerequisite
+  decision from cycle 407 (ml-kem 0.2.3→0.3.2 + libcrux/x-wing admissibility)
+  is still open but explicitly flagged as needing a human/crypto-lead policy
+  call, not a blind retry.
+
+## Previous state (2026-09-01, cycle 407 — FEATURE: evaluate openmls 0.9.0 for ADR-0003 Phase A, spike blocked and documented, commit TBD)
 
 - CI green (`gh run list --limit 3` all success), `git status` clean at
   cycle start. Found cycles 405/406 had landed real commits (`8d3e147`,
