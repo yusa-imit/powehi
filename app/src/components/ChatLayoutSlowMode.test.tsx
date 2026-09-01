@@ -27,9 +27,21 @@ const MOCK_WORKER = {
 	decryptDbField: vi.fn(async (v: string) => v),
 };
 
-function openDesignTeamInfo() {
+async function openDesignTeamInfo() {
 	fireEvent.click(screen.getByRole("button", { name: /design team/i }));
 	fireEvent.click(screen.getByRole("button", { name: /info/i }));
+	// Selecting a group chat kicks off ChatLayout's db.groups.get(...) rehydration effect
+	// (slowModeDelay/disappearingTtl/etc.) plus InfoPanel's getVerifiedContact() read; both go
+	// through fake-indexeddb, which schedules its callbacks via real setTimeout internally, so
+	// under `vi.useFakeTimers()` a plain microtask flush isn't enough — advance the fake timers
+	// too, inside act(), so the resulting setState doesn't land outside an act() boundary.
+	await act(async () => {
+		if (vi.isFakeTimers()) {
+			await vi.runOnlyPendingTimersAsync();
+			await vi.runOnlyPendingTimersAsync();
+			await vi.runOnlyPendingTimersAsync();
+		}
+	});
 }
 
 describe("ChatLayout — slow mode", () => {
@@ -42,81 +54,97 @@ describe("ChatLayout — slow mode", () => {
 	});
 
 	afterEach(async () => {
+		// Pending countdown/interval timers fire state updates on flush (e.g. the 1s
+		// countdown ticker started by "countdown decrements over time"); must be wrapped in
+		// act() to avoid the "not wrapped in act" warning.
 		if (vi.isFakeTimers()) {
-			await vi.runOnlyPendingTimersAsync();
+			await act(async () => {
+				await vi.runOnlyPendingTimersAsync();
+			});
 		}
 		vi.useRealTimers();
 		cleanup();
 		vi.restoreAllMocks();
 	});
 
-	it("slow-mode section appears in group InfoPanel", () => {
+	it("slow-mode section appears in group InfoPanel", async () => {
 		render(<ChatLayout />);
-		openDesignTeamInfo();
+		await openDesignTeamInfo();
 		expect(screen.getByText(/slow mode/i)).toBeInTheDocument();
 	});
 
-	it("slow-mode section is NOT shown for DM chats", () => {
+	it("slow-mode section is NOT shown for DM chats", async () => {
 		render(<ChatLayout />);
 		fireEvent.click(screen.getByRole("button", { name: /maya akana/i }));
 		fireEvent.click(screen.getByRole("button", { name: /info/i }));
+		// InfoPanel kicks off an async getVerifiedContact() read on mount; flush it inside
+		// act() so the resulting setState doesn't land outside an act() boundary.
+		await act(async () => {
+			if (vi.isFakeTimers()) {
+				await vi.runOnlyPendingTimersAsync();
+			}
+		});
 		expect(screen.queryByText(/slow mode/i)).not.toBeInTheDocument();
 	});
 
-	it("admin sees a select to change the delay", () => {
+	it("admin sees a select to change the delay", async () => {
 		vi.spyOn(AuthStore.useAuthStore, "getState").mockReturnValue({
 			myHandle: "finn",
 		} as ReturnType<typeof AuthStore.useAuthStore.getState>);
 		render(<ChatLayout />);
-		openDesignTeamInfo();
+		await openDesignTeamInfo();
 		expect(screen.getByTestId("slow-mode-select")).toBeInTheDocument();
 	});
 
-	it("non-admin sees the read-only delay row (no select)", () => {
+	it("non-admin sees the read-only delay row (no select)", async () => {
 		vi.spyOn(AuthStore.useAuthStore, "getState").mockReturnValue({
 			myHandle: "maya",
 		} as ReturnType<typeof AuthStore.useAuthStore.getState>);
 		render(<ChatLayout />);
-		openDesignTeamInfo();
+		await openDesignTeamInfo();
 		expect(screen.queryByTestId("slow-mode-select")).not.toBeInTheDocument();
 		expect(screen.getByTestId("slow-mode-member-row")).toBeInTheDocument();
 	});
 
-	it("admin can set slow mode to 30s via the select", () => {
+	it("admin can set slow mode to 30s via the select", async () => {
 		vi.spyOn(AuthStore.useAuthStore, "getState").mockReturnValue({
 			myHandle: "finn",
 		} as ReturnType<typeof AuthStore.useAuthStore.getState>);
 		render(<ChatLayout />);
-		openDesignTeamInfo();
+		await openDesignTeamInfo();
 		const sel = screen.getByTestId("slow-mode-select") as HTMLSelectElement;
 		fireEvent.change(sel, { target: { value: "30" } });
 		expect(sel.value).toBe("30");
 	});
 
-	it("slow-mode banner appears in composer when delay > 0", () => {
+	it("slow-mode banner appears in composer when delay > 0", async () => {
 		vi.spyOn(AuthStore.useAuthStore, "getState").mockReturnValue({
 			myHandle: "finn",
 		} as ReturnType<typeof AuthStore.useAuthStore.getState>);
 		render(<ChatLayout />);
-		openDesignTeamInfo();
+		await openDesignTeamInfo();
 		fireEvent.change(screen.getByTestId("slow-mode-select"), { target: { value: "30" } });
 		fireEvent.click(screen.getByRole("button", { name: /close/i }));
 		expect(screen.getByTestId("slow-mode-banner")).toBeInTheDocument();
 		expect(screen.getByTestId("slow-mode-banner")).toHaveTextContent("30s between messages");
 	});
 
-	it("slow-mode banner is absent when delay is Off", () => {
+	it("slow-mode banner is absent when delay is Off", async () => {
 		render(<ChatLayout />);
 		fireEvent.click(screen.getByRole("button", { name: /design team/i }));
+		// Selecting a group chat kicks off ChatLayout's db.groups.get(...) rehydration effect,
+		// which resolves as a microtask after this synchronous click; flush it inside act() so
+		// the resulting setState doesn't land outside an act() boundary.
+		await act(async () => {});
 		expect(screen.queryByTestId("slow-mode-banner")).not.toBeInTheDocument();
 	});
 
-	it("sending a message while slow mode is active shows countdown badge", () => {
+	it("sending a message while slow mode is active shows countdown badge", async () => {
 		vi.spyOn(AuthStore.useAuthStore, "getState").mockReturnValue({
 			myHandle: "finn",
 		} as ReturnType<typeof AuthStore.useAuthStore.getState>);
 		render(<ChatLayout />);
-		openDesignTeamInfo();
+		await openDesignTeamInfo();
 		fireEvent.change(screen.getByTestId("slow-mode-select"), { target: { value: "5" } });
 		fireEvent.click(screen.getByRole("button", { name: /close/i }));
 
@@ -129,12 +157,12 @@ describe("ChatLayout — slow mode", () => {
 		expect(screen.getByTestId("slow-mode-countdown").textContent).toMatch(/\ds/);
 	});
 
-	it("send button is absent during cooldown (countdown shown instead)", () => {
+	it("send button is absent during cooldown (countdown shown instead)", async () => {
 		vi.spyOn(AuthStore.useAuthStore, "getState").mockReturnValue({
 			myHandle: "finn",
 		} as ReturnType<typeof AuthStore.useAuthStore.getState>);
 		render(<ChatLayout />);
-		openDesignTeamInfo();
+		await openDesignTeamInfo();
 		fireEvent.change(screen.getByTestId("slow-mode-select"), { target: { value: "5" } });
 		fireEvent.click(screen.getByRole("button", { name: /close/i }));
 
@@ -150,7 +178,7 @@ describe("ChatLayout — slow mode", () => {
 			myHandle: "finn",
 		} as ReturnType<typeof AuthStore.useAuthStore.getState>);
 		render(<ChatLayout />);
-		openDesignTeamInfo();
+		await openDesignTeamInfo();
 		fireEvent.change(screen.getByTestId("slow-mode-select"), { target: { value: "5" } });
 		fireEvent.click(screen.getByRole("button", { name: /close/i }));
 
@@ -170,12 +198,12 @@ describe("ChatLayout — slow mode", () => {
 		expect(laterSec).toBeLessThan(initialSec);
 	});
 
-	it("slow mode selector default value is Off (0)", () => {
+	it("slow mode selector default value is Off (0)", async () => {
 		vi.spyOn(AuthStore.useAuthStore, "getState").mockReturnValue({
 			myHandle: "finn",
 		} as ReturnType<typeof AuthStore.useAuthStore.getState>);
 		render(<ChatLayout />);
-		openDesignTeamInfo();
+		await openDesignTeamInfo();
 		const sel = screen.getByTestId("slow-mode-select") as HTMLSelectElement;
 		expect(sel.value).toBe("0");
 	});
@@ -193,7 +221,7 @@ describe("ChatLayout — slow mode", () => {
 			myHandle: "finn",
 		} as ReturnType<typeof AuthStore.useAuthStore.getState>);
 		render(<ChatLayout />);
-		openDesignTeamInfo();
+		await openDesignTeamInfo();
 		fireEvent.change(screen.getByTestId("slow-mode-select"), { target: { value: "60" } });
 		await waitFor(async () => {
 			const row = await db.groups.get(DESIGN_TEAM_GROUP_ID);
@@ -215,7 +243,7 @@ describe("ChatLayout — slow mode", () => {
 			myHandle: "finn",
 		} as ReturnType<typeof AuthStore.useAuthStore.getState>);
 		render(<ChatLayout />);
-		openDesignTeamInfo();
+		await openDesignTeamInfo();
 		await waitFor(() => {
 			const sel = screen.getByTestId("slow-mode-select") as HTMLSelectElement;
 			expect(sel.value).toBe("300");

@@ -28,7 +28,13 @@ describe("LinkedDevicesPanel", () => {
 
 	afterEach(() => {
 		vi.restoreAllMocks();
-		useAuthStore.setState({ sessionToken: null, deviceId: null, phase: "login" });
+		// useAuthStore is a real zustand store subscribed to via useSyncExternalStore;
+		// @testing-library/react's auto-cleanup unmount runs as an outer afterEach (registered at
+		// module import time), so this reset still lands on a mounted component and must be
+		// wrapped in act() to avoid the "not wrapped in act" warning.
+		act(() => {
+			useAuthStore.setState({ sessionToken: null, deviceId: null, phase: "login" });
+		});
 	});
 
 	it("shows loading state initially", async () => {
@@ -138,6 +144,10 @@ describe("LinkedDevicesPanel", () => {
 		vi.spyOn(AuthApi, "listDevices").mockResolvedValue(MOCK_DEVICES);
 		const onClose = vi.fn();
 		render(<LinkedDevicesPanel onClose={onClose} />);
+		// Mount kicks off the fetchDevices() effect (listDevices) which resolves as a
+		// microtask after this synchronous click; flush it inside act() so the resulting
+		// setState doesn't land outside an act() boundary.
+		await act(async () => {});
 		fireEvent.click(screen.getByTestId("linked-devices-close"));
 		expect(onClose).toHaveBeenCalledTimes(1);
 	});

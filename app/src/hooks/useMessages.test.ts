@@ -35,20 +35,28 @@ beforeEach(() => {
 	vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
 		mockWorker as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
 	);
-	useAuthStore.setState({
-		phase: "app",
-		deviceId: "my-device",
-		sessionToken: TOKEN,
+	act(() => {
+		useAuthStore.setState({
+			phase: "app",
+			deviceId: "my-device",
+			sessionToken: TOKEN,
+		});
 	});
 });
 
 afterEach(() => {
 	vi.restoreAllMocks();
-	useAuthStore.setState({
-		phase: "login",
-		deviceId: null,
-		sessionToken: null,
-		pqDecapKeyHandle: null,
+	// useAuthStore is a real zustand store subscribed to via useSyncExternalStore;
+	// this reset can still land on a mounted renderHook test component, so it must
+	// be wrapped in act() to avoid the "not wrapped in act" warning (see
+	// AcceptInviteModal.test.tsx for the same pattern).
+	act(() => {
+		useAuthStore.setState({
+			phase: "login",
+			deviceId: null,
+			sessionToken: null,
+			pqDecapKeyHandle: null,
+		});
 	});
 });
 
@@ -152,10 +160,12 @@ describe("useMessages", () => {
 	});
 
 	it("does not poll when sessionToken is absent", async () => {
-		useAuthStore.setState({
-			phase: "login",
-			deviceId: null,
-			sessionToken: null,
+		act(() => {
+			useAuthStore.setState({
+				phase: "login",
+				deviceId: null,
+				sessionToken: null,
+			});
 		});
 
 		await act(async () => {
@@ -424,7 +434,9 @@ describe("useMessages — pq_init handling (§5.3 Phase B)", () => {
 	}
 
 	beforeEach(() => {
-		useAuthStore.setState({ pqDecapKeyHandle: PQ_HANDLE });
+		act(() => {
+			useAuthStore.setState({ pqDecapKeyHandle: PQ_HANDLE });
+		});
 		mockWorker.mlsDecrypt.mockResolvedValue({
 			plaintext: new TextEncoder().encode(JSON.stringify({ type: "pq_init", ct: [1, 2, 3, 4] })),
 		});
@@ -492,7 +504,9 @@ describe("useMessages — pq_init handling (§5.3 Phase B)", () => {
 	});
 
 	it("skips PQ decap when pqDecapKeyHandle is null (handle already consumed)", async () => {
-		useAuthStore.setState({ pqDecapKeyHandle: null });
+		act(() => {
+			useAuthStore.setState({ pqDecapKeyHandle: null });
+		});
 		pollSpy.mockResolvedValueOnce([makePqEnvelope()]);
 		const onPqBinding = vi.fn();
 
@@ -533,18 +547,22 @@ describe("useMessages — §9.4.1 thumbnail parsing", () => {
 		vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
 			mockWorker as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
 		);
-		useAuthStore.setState({
-			phase: "app",
-			deviceId: "my-device",
-			sessionToken: TOKEN,
+		act(() => {
+			useAuthStore.setState({
+				phase: "app",
+				deviceId: "my-device",
+				sessionToken: TOKEN,
+			});
 		});
 	});
 	afterEach(() => {
 		vi.restoreAllMocks();
-		useAuthStore.setState({
-			phase: "login",
-			deviceId: null,
-			sessionToken: null,
+		act(() => {
+			useAuthStore.setState({
+				phase: "login",
+				deviceId: null,
+				sessionToken: null,
+			});
 		});
 	});
 

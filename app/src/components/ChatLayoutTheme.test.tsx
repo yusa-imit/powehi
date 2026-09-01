@@ -3,7 +3,7 @@
  * Users can pick from 6 preset themes (or reset to default) in the InfoPanel.
  * The theme is local-only — never sent to server, never in MLS payload, never logged.
  */
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db/schema";
 import * as CryptoWorkerHook from "../hooks/useCryptoWorker";
@@ -24,14 +24,24 @@ const MOCK_WORKER = {
 	decryptDbField: vi.fn(async (v: string) => v),
 };
 
-function openMayaInfo() {
+async function openMayaInfo() {
 	fireEvent.click(screen.getByRole("button", { name: /maya akana/i }));
 	fireEvent.click(screen.getByRole("button", { name: /info/i }));
+	// Selecting a chat kicks off ChatLayout's db.groups.get(...) rehydration effect plus
+	// InfoPanel's getVerifiedContact() read; both resolve as a microtask after this
+	// synchronous click, so flush them inside act() to avoid the resulting setState
+	// landing outside an act() boundary.
+	await act(async () => {});
 }
 
-function openDesignTeamInfo() {
+async function openDesignTeamInfo() {
 	fireEvent.click(screen.getByRole("button", { name: /design team/i }));
 	fireEvent.click(screen.getByRole("button", { name: /info/i }));
+	// Selecting a chat kicks off ChatLayout's db.groups.get(...) rehydration effect plus
+	// InfoPanel's getVerifiedContact() read; both resolve as a microtask after this
+	// synchronous click, so flush them inside act() to avoid the resulting setState
+	// landing outside an act() boundary.
+	await act(async () => {});
 }
 
 describe("ChatLayout — per-chat theme", () => {
@@ -47,57 +57,57 @@ describe("ChatLayout — per-chat theme", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("chat theme section is present in DM InfoPanel", () => {
+	it("chat theme section is present in DM InfoPanel", async () => {
 		render(<ChatLayout />);
-		openMayaInfo();
+		await openMayaInfo();
 		expect(screen.getByTestId("chat-theme-section")).toBeInTheDocument();
 	});
 
-	it("chat theme section is present in group InfoPanel", () => {
+	it("chat theme section is present in group InfoPanel", async () => {
 		render(<ChatLayout />);
-		openDesignTeamInfo();
+		await openDesignTeamInfo();
 		expect(screen.getByTestId("chat-theme-section")).toBeInTheDocument();
 	});
 
-	it("theme label shows 'Default' when no theme is set", () => {
+	it("theme label shows 'Default' when no theme is set", async () => {
 		render(<ChatLayout />);
-		openMayaInfo();
+		await openMayaInfo();
 		expect(screen.getByTestId("chat-theme-label")).toHaveTextContent("Default");
 	});
 
-	it("default swatch is present", () => {
+	it("default swatch is present", async () => {
 		render(<ChatLayout />);
-		openMayaInfo();
+		await openMayaInfo();
 		expect(screen.getByTestId("chat-theme-swatch-default")).toBeInTheDocument();
 	});
 
-	it("all 6 preset swatches are rendered", () => {
+	it("all 6 preset swatches are rendered", async () => {
 		render(<ChatLayout />);
-		openMayaInfo();
+		await openMayaInfo();
 		for (const key of ["warm", "ocean", "forest", "rose", "lavender", "slate"]) {
 			expect(screen.getByTestId(`chat-theme-swatch-${key}`)).toBeInTheDocument();
 		}
 	});
 
-	it("clicking a theme swatch updates the label", () => {
+	it("clicking a theme swatch updates the label", async () => {
 		render(<ChatLayout />);
-		openMayaInfo();
+		await openMayaInfo();
 		fireEvent.click(screen.getByTestId("chat-theme-swatch-ocean"));
 		expect(screen.getByTestId("chat-theme-label")).toHaveTextContent("Ocean");
 	});
 
-	it("clicking the default swatch resets the label to Default", () => {
+	it("clicking the default swatch resets the label to Default", async () => {
 		render(<ChatLayout />);
-		openMayaInfo();
+		await openMayaInfo();
 		fireEvent.click(screen.getByTestId("chat-theme-swatch-warm"));
 		expect(screen.getByTestId("chat-theme-label")).toHaveTextContent("Warm");
 		fireEvent.click(screen.getByTestId("chat-theme-swatch-default"));
 		expect(screen.getByTestId("chat-theme-label")).toHaveTextContent("Default");
 	});
 
-	it("message list scroll area changes background when a theme is applied", () => {
+	it("message list scroll area changes background when a theme is applied", async () => {
 		render(<ChatLayout />);
-		openMayaInfo();
+		await openMayaInfo();
 		const scrollEl = screen.getByTestId("message-list-scroll");
 		const defaultBg = scrollEl.style.background;
 		fireEvent.click(screen.getByTestId("chat-theme-swatch-forest"));
@@ -107,9 +117,9 @@ describe("ChatLayout — per-chat theme", () => {
 		expect(themedBg).not.toBe(defaultBg);
 	});
 
-	it("message list background resets to default when theme is cleared", () => {
+	it("message list background resets to default when theme is cleared", async () => {
 		render(<ChatLayout />);
-		openMayaInfo();
+		await openMayaInfo();
 		fireEvent.click(screen.getByTestId("chat-theme-swatch-rose"));
 		fireEvent.click(screen.getByRole("button", { name: /close/i }));
 		const themed = screen.getByTestId("message-list-scroll").style.background;
@@ -120,25 +130,25 @@ describe("ChatLayout — per-chat theme", () => {
 		expect(reset).not.toBe(themed);
 	});
 
-	it("theme is per-chat — switching chats shows independent themes", () => {
+	it("theme is per-chat — switching chats shows independent themes", async () => {
 		render(<ChatLayout />);
 		// Set ocean theme for Maya
-		openMayaInfo();
+		await openMayaInfo();
 		fireEvent.click(screen.getByTestId("chat-theme-swatch-ocean"));
 		fireEvent.click(screen.getByRole("button", { name: /close/i }));
 		const mayaBg = screen.getByTestId("message-list-scroll").style.background;
 
 		// Switch to Design Team (no theme)
-		openDesignTeamInfo();
+		await openDesignTeamInfo();
 		fireEvent.click(screen.getByRole("button", { name: /close/i }));
 		const teamBg = screen.getByTestId("message-list-scroll").style.background;
 
 		expect(mayaBg).not.toBe(teamBg);
 	});
 
-	it("theme persists when switching away and back", () => {
+	it("theme persists when switching away and back", async () => {
 		render(<ChatLayout />);
-		openMayaInfo();
+		await openMayaInfo();
 		fireEvent.click(screen.getByTestId("chat-theme-swatch-lavender"));
 		fireEvent.click(screen.getByRole("button", { name: /close/i }));
 		const before = screen.getByTestId("message-list-scroll").style.background;
@@ -147,6 +157,9 @@ describe("ChatLayout — per-chat theme", () => {
 		fireEvent.click(screen.getByRole("button", { name: /design team/i }));
 		// Switch back to Maya
 		fireEvent.click(screen.getByRole("button", { name: /maya akana/i }));
+		// Flush the db.groups.get(...) rehydration effect kicked off by the chat switches
+		// above, so the resulting setState doesn't land outside an act() boundary.
+		await act(async () => {});
 		const after = screen.getByTestId("message-list-scroll").style.background;
 		expect(after).toBe(before);
 	});
@@ -161,7 +174,7 @@ describe("ChatLayout — per-chat theme", () => {
 			lastActivity: Date.now(),
 		});
 		render(<ChatLayout />);
-		openMayaInfo();
+		await openMayaInfo();
 		fireEvent.click(screen.getByTestId("chat-theme-swatch-forest"));
 		await waitFor(async () => {
 			const row = await db.groups.get(MAYA_GROUP_ID);
@@ -180,13 +193,13 @@ describe("ChatLayout — per-chat theme", () => {
 			chatTheme: "slate",
 		});
 		render(<ChatLayout />);
-		openMayaInfo();
+		await openMayaInfo();
 		await waitFor(() => expect(screen.getByTestId("chat-theme-label")).toHaveTextContent("Slate"));
 	});
 
-	it("theme swatches have descriptive aria-labels", () => {
+	it("theme swatches have descriptive aria-labels", async () => {
 		render(<ChatLayout />);
-		openMayaInfo();
+		await openMayaInfo();
 		expect(screen.getByLabelText("Default theme")).toBeInTheDocument();
 		expect(screen.getByLabelText("Warm theme")).toBeInTheDocument();
 		expect(screen.getByLabelText("Slate theme")).toBeInTheDocument();

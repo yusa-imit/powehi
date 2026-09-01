@@ -33,7 +33,13 @@ afterEach(() => {
 	vi.restoreAllMocks();
 	mockWorker.mlsJoinGroup.mockReset();
 	mockWorker.mlsJoinGroup.mockResolvedValue({ groupId: JOINED_GROUP_ID });
-	useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null });
+	// useAuthStore is a real zustand store the hook subscribes to via useSyncExternalStore;
+	// @testing-library/react's auto-cleanup unmount runs as an outer afterEach (registered at
+	// module import time), so this reset still lands on a mounted component and must be
+	// wrapped in act() to avoid the "not wrapped in act" warning.
+	act(() => {
+		useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null });
+	});
 });
 
 function makeEnvelope(overrides: Partial<Envelope> = {}): Envelope {

@@ -763,7 +763,11 @@ describe("ChatLayout", () => {
 			expect(afterRead).toBeGreaterThan(beforeRead);
 
 			sendSpy.mockRestore();
-			useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null });
+			// ChatLayout is still mounted here; RTL's outer auto-cleanup unmount hasn't run yet,
+			// so this store mutation must be wrapped in act() to avoid the "not wrapped in act" warning.
+			act(() => {
+				useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null });
+			});
 		});
 	});
 
@@ -852,7 +856,11 @@ describe("ChatLayout", () => {
 			expect(afterDelivered).toBeGreaterThan(beforeDelivered);
 
 			sendSpy.mockRestore();
-			useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null });
+			// ChatLayout is still mounted here; RTL's outer auto-cleanup unmount hasn't run yet,
+			// so this store mutation must be wrapped in act() to avoid the "not wrapped in act" warning.
+			act(() => {
+				useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null });
+			});
 		});
 
 		it("delivered message transitions to Read after subsequent read_receipt", async () => {
@@ -928,7 +936,11 @@ describe("ChatLayout", () => {
 			expect(stillDelivered).toBe(deliveredCount - 1);
 
 			sendSpy.mockRestore();
-			useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null });
+			// ChatLayout is still mounted here; RTL's outer auto-cleanup unmount hasn't run yet,
+			// so this store mutation must be wrapped in act() to avoid the "not wrapped in act" warning.
+			act(() => {
+				useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null });
+			});
 		});
 	});
 

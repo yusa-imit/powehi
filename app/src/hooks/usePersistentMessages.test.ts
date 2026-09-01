@@ -50,7 +50,13 @@ beforeEach(async () => {
 
 afterEach(() => {
 	vi.restoreAllMocks();
-	useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null });
+	// useAuthStore is a real zustand store subscribed to via useSyncExternalStore;
+	// @testing-library/react's auto-cleanup unmount runs as an outer afterEach (registered at
+	// module import time), so this reset still lands on a mounted component and must be
+	// wrapped in act() to avoid the "not wrapped in act" warning.
+	act(() => {
+		useAuthStore.setState({ phase: "login", deviceId: null, sessionToken: null });
+	});
 });
 
 describe("usePersistentMessages", () => {
@@ -949,6 +955,17 @@ describe("usePersistentMessages", () => {
 	it("claimScheduledFire returns undefined for an id that was never persisted", async () => {
 		const { result } = renderHook(() => usePersistentMessages(GROUP_ID));
 		await act(async () => {});
+		// fake-indexeddb's own internal callbacks are scheduled via setImmediate/setTimeout
+		// (a real macrotask, not a microtask — see its scheduling.js), and this test (unlike
+		// its siblings) has no further act()-wrapped call after the initial flush to
+		// incidentally absorb a late-resolving getMessagesByGroup() setRows. Flush a real
+		// timer tick inside act() so that update lands inside act()'s tracking too.
+		await act(async () => {
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			await new Promise((resolve) => setTimeout(resolve, 0));
+		});
 
 		await expect(result.current.claimScheduledFire("never-existed")).resolves.toBeUndefined();
 	});

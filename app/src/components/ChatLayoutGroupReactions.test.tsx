@@ -86,7 +86,11 @@ describe("ChatLayout — group message reactions total summary + sidebar preview
 		// Select Design Team (isGroup=true)
 		const designTeamBtn = screen.getByText("Design Team").closest("button");
 		expect(designTeamBtn).toBeTruthy();
-		designTeamBtn?.click();
+		// Raw DOM click() triggers a React state update (active chat selection); must be
+		// wrapped in act() to avoid the "not wrapped in act" warning.
+		act(() => {
+			designTeamBtn?.click();
+		});
 
 		const MSG_ID = "grp-summary-uuid-1111-111111111111";
 		await act(async () => {
@@ -166,7 +170,11 @@ describe("ChatLayout — group message reactions total summary + sidebar preview
 
 		// Navigate to Design Team
 		const designTeamBtn = screen.getByText("Design Team").closest("button");
-		designTeamBtn?.click();
+		// Raw DOM click() triggers a React state update (active chat selection); must be
+		// wrapped in act() to avoid the "not wrapped in act" warning.
+		act(() => {
+			designTeamBtn?.click();
+		});
 
 		const MSG_ID = "grp-one-react-uuid-3333-333333333333";
 		await act(async () => {
@@ -210,7 +218,11 @@ describe("ChatLayout — group message reactions total summary + sidebar preview
 		render(<ChatLayout />);
 
 		const designTeamBtn = screen.getByText("Design Team").closest("button");
-		designTeamBtn?.click();
+		// Raw DOM click() triggers a React state update (active chat selection); must be
+		// wrapped in act() to avoid the "not wrapped in act" warning.
+		act(() => {
+			designTeamBtn?.click();
+		});
 
 		const MSG_ID = "grp-count-uuid-4444-444444444444";
 		await act(async () => {
@@ -258,7 +270,11 @@ describe("ChatLayout — group message reactions total summary + sidebar preview
 		render(<ChatLayout />);
 
 		const designTeamBtn = screen.getByText("Design Team").closest("button");
-		designTeamBtn?.click();
+		// Raw DOM click() triggers a React state update (active chat selection); must be
+		// wrapped in act() to avoid the "not wrapped in act" warning.
+		act(() => {
+			designTeamBtn?.click();
+		});
 
 		const MSG_ID = "plural-uuid-5555-555555555555";
 		await act(async () => {

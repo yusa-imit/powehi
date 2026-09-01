@@ -33,6 +33,29 @@ const makeMsg = (id: string, text: string): IncomingMessage => ({
 	epochSeq: 1,
 });
 
+async function renderChat() {
+	render(<ChatLayout />);
+	// ChatLayout's initial mount effects (seed message/contact hydration, verified-contact
+	// lookups, etc.) resolve as microtasks — and, under fake timers, via fake-indexeddb's
+	// internal setTimeout scheduling — after this synchronous render() call returns. Flush
+	// them inside act() so the resulting setState doesn't land outside an act() boundary.
+	await act(async () => {
+		if (vi.isFakeTimers()) {
+			await vi.runOnlyPendingTimersAsync();
+			await vi.runOnlyPendingTimersAsync();
+			await vi.runOnlyPendingTimersAsync();
+		}
+	});
+}
+
+async function advanceTimers(ms: number) {
+	// Advancing fake timers can trigger effects (e.g. periodic refresh/read-receipt timers)
+	// that call setState; wrap the advance in act() so those updates aren't flagged.
+	await act(async () => {
+		vi.advanceTimersByTime(ms);
+	});
+}
+
 describe("ChatLayout — time-window message grouping", () => {
 	beforeEach(async () => {
 		await db.verifiedContacts.clear();
@@ -45,7 +68,11 @@ describe("ChatLayout — time-window message grouping", () => {
 
 	afterEach(async () => {
 		if (vi.isFakeTimers()) {
-			await vi.runOnlyPendingTimersAsync();
+			// A pending setInterval (e.g. the disappearing-messages sweep) can still be due;
+			// flush it inside act() so its setState doesn't land outside an act() boundary.
+			await act(async () => {
+				await vi.runOnlyPendingTimersAsync();
+			});
 		}
 		vi.useRealTimers();
 		cleanup();
@@ -57,7 +84,7 @@ describe("ChatLayout — time-window message grouping", () => {
 		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_id, _gid, onMsg) => {
 			capturedOnMessage = onMsg;
 		});
-		render(<ChatLayout />);
+		await renderChat();
 
 		const before = screen.queryAllByTestId("msg-avatar").length;
 
@@ -74,7 +101,7 @@ describe("ChatLayout — time-window message grouping", () => {
 		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_id, _gid, onMsg) => {
 			capturedOnMessage = onMsg;
 		});
-		render(<ChatLayout />);
+		await renderChat();
 
 		await act(async () => {
 			capturedOnMessage?.(makeMsg("tw-uuid-2a", "First message"));
@@ -82,7 +109,7 @@ describe("ChatLayout — time-window message grouping", () => {
 		const afterFirst = screen.queryAllByTestId("msg-avatar").length;
 
 		// Advance 1 minute (within the 3-minute window).
-		vi.advanceTimersByTime(60_000);
+		await advanceTimers(60_000);
 
 		await act(async () => {
 			capturedOnMessage?.(makeMsg("tw-uuid-2b", "Second quick message"));
@@ -97,7 +124,7 @@ describe("ChatLayout — time-window message grouping", () => {
 		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_id, _gid, onMsg) => {
 			capturedOnMessage = onMsg;
 		});
-		render(<ChatLayout />);
+		await renderChat();
 
 		await act(async () => {
 			capturedOnMessage?.(makeMsg("tw-uuid-3a", "Early message"));
@@ -105,7 +132,7 @@ describe("ChatLayout — time-window message grouping", () => {
 		const afterFirst = screen.queryAllByTestId("msg-avatar").length;
 
 		// Advance 4 minutes (beyond the 3-minute window).
-		vi.advanceTimersByTime(4 * 60_000);
+		await advanceTimers(4 * 60_000);
 
 		await act(async () => {
 			capturedOnMessage?.(makeMsg("tw-uuid-3b", "Late message from same sender"));
@@ -120,7 +147,7 @@ describe("ChatLayout — time-window message grouping", () => {
 		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_id, _gid, onMsg) => {
 			capturedOnMessage = onMsg;
 		});
-		render(<ChatLayout />);
+		await renderChat();
 
 		await act(async () => {
 			capturedOnMessage?.(makeMsg("tw-uuid-4a", "Boundary first"));
@@ -128,7 +155,7 @@ describe("ChatLayout — time-window message grouping", () => {
 		const afterFirst = screen.queryAllByTestId("msg-avatar").length;
 
 		// Exactly 2 min 59 s (just under the 3-minute window).
-		vi.advanceTimersByTime(2 * 60_000 + 59_000);
+		await advanceTimers(2 * 60_000 + 59_000);
 
 		await act(async () => {
 			capturedOnMessage?.(makeMsg("tw-uuid-4b", "Boundary second"));
@@ -138,8 +165,8 @@ describe("ChatLayout — time-window message grouping", () => {
 		expect(screen.queryAllByTestId("msg-avatar").length).toBe(afterFirst);
 	});
 
-	it("seed data messages without ts fall back to continued flag (no regression)", () => {
-		render(<ChatLayout />);
+	it("seed data messages without ts fall back to continued flag (no regression)", async () => {
+		await renderChat();
 		// Seed data has continued/last flags; avatars should render correctly (no crash).
 		// Maya's first message starts a group so at least 1 msg-avatar should exist.
 		const avatars = screen.queryAllByTestId("msg-avatar");
@@ -151,7 +178,7 @@ describe("ChatLayout — time-window message grouping", () => {
 		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_id, _gid, onMsg) => {
 			capturedOnMessage = onMsg;
 		});
-		render(<ChatLayout />);
+		await renderChat();
 
 		await act(async () => {
 			capturedOnMessage?.(makeMsg("tw-uuid-5a", "They said something"));
@@ -161,7 +188,7 @@ describe("ChatLayout — time-window message grouping", () => {
 		// Advance 1 minute (within 3-min window), but then the "me" side sends.
 		// After "me" sends (via seed, not simulated here), a "them" would start fresh.
 		// To test: inject two more "them" messages after each other without a break.
-		vi.advanceTimersByTime(30_000);
+		await advanceTimers(30_000);
 
 		await act(async () => {
 			capturedOnMessage?.(makeMsg("tw-uuid-5b", "They continued quickly"));
@@ -177,12 +204,12 @@ describe("ChatLayout — time-window message grouping", () => {
 		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_id, _gid, onMsg) => {
 			capturedOnMessage = onMsg;
 		});
-		render(<ChatLayout />);
+		await renderChat();
 
 		await act(async () => {
 			capturedOnMessage?.(makeMsg("tw-uuid-6a", "First in group"));
 		});
-		vi.advanceTimersByTime(30_000);
+		await advanceTimers(30_000);
 		await act(async () => {
 			capturedOnMessage?.(makeMsg("tw-uuid-6b", "Grouped continuation"));
 		});
@@ -198,12 +225,12 @@ describe("ChatLayout — time-window message grouping", () => {
 		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_id, _gid, onMsg) => {
 			capturedOnMessage = onMsg;
 		});
-		render(<ChatLayout />);
+		await renderChat();
 
 		await act(async () => {
 			capturedOnMessage?.(makeMsg("tw-uuid-7a", "Early message"));
 		});
-		vi.advanceTimersByTime(4 * 60_000);
+		await advanceTimers(4 * 60_000);
 		await act(async () => {
 			capturedOnMessage?.(makeMsg("tw-uuid-7b", "New group start"));
 		});
@@ -219,18 +246,18 @@ describe("ChatLayout — time-window message grouping", () => {
 		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_id, _gid, onMsg) => {
 			capturedOnMessage = onMsg;
 		});
-		render(<ChatLayout />);
+		await renderChat();
 
 		const beforeCount = screen.queryAllByTestId("msg-avatar").length;
 
 		await act(async () => {
 			capturedOnMessage?.(makeMsg("tw-uuid-8a", "First"));
 		});
-		vi.advanceTimersByTime(30_000);
+		await advanceTimers(30_000);
 		await act(async () => {
 			capturedOnMessage?.(makeMsg("tw-uuid-8b", "Second"));
 		});
-		vi.advanceTimersByTime(30_000);
+		await advanceTimers(30_000);
 		await act(async () => {
 			capturedOnMessage?.(makeMsg("tw-uuid-8c", "Third"));
 		});
@@ -244,7 +271,7 @@ describe("ChatLayout — time-window message grouping", () => {
 		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_id, _gid, onMsg) => {
 			capturedOnMessage = onMsg;
 		});
-		render(<ChatLayout />);
+		await renderChat();
 
 		// Two consecutive messages from the same sender.
 		await act(async () => {
@@ -253,7 +280,7 @@ describe("ChatLayout — time-window message grouping", () => {
 		const afterFirst = screen.queryAllByTestId("msg-avatar").length;
 
 		// Advance more than 3 minutes to ensure the second is a new group.
-		vi.advanceTimersByTime(4 * 60_000);
+		await advanceTimers(4 * 60_000);
 		await act(async () => {
 			capturedOnMessage?.(makeMsg("tw-uuid-9b", "After gap"));
 		});

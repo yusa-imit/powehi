@@ -107,12 +107,18 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	useAuthStore.setState({
-		phase: "login",
-		deviceId: null,
-		sessionToken: null,
-		identityId: null,
-		pqDecapKeyHandle: null,
+	// useAuthStore is a real zustand store subscribed to via useSyncExternalStore;
+	// @testing-library/react's auto-cleanup unmount runs as an outer afterEach (registered at
+	// module import time), so this reset still lands on a mounted component and must be
+	// wrapped in act() to avoid the "not wrapped in act" warning.
+	act(() => {
+		useAuthStore.setState({
+			phase: "login",
+			deviceId: null,
+			sessionToken: null,
+			identityId: null,
+			pqDecapKeyHandle: null,
+		});
 	});
 	vi.restoreAllMocks();
 });

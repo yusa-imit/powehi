@@ -55,10 +55,15 @@ describe("ChatLayout — media gallery in InfoPanel", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("empty state shown when no media in active chat", () => {
+	it("empty state shown when no media in active chat", async () => {
 		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation(() => {});
 		render(<ChatLayout />);
 		openInfoPanel();
+		// InfoPanel kicks off an async mlsGroupMembers/getVerifiedContact promise chain on
+		// mount (safety-number computation) that resolves after this synchronous test body
+		// would otherwise finish; flush it inside act() so the resulting setState doesn't
+		// land outside an act() boundary.
+		await act(async () => {});
 		expect(screen.getByTestId("media-gallery-empty")).toBeInTheDocument();
 		expect(screen.getByTestId("media-gallery-empty")).toHaveTextContent("No shared media");
 	});
