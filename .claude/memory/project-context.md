@@ -17,7 +17,197 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-09-01, cycle 404 — FEATURE: exercise the real logout button in the live-backend auth e2e round trip, commit 9bb974b)
+## Current state (2026-09-01, cycle 407 — FEATURE: evaluate openmls 0.9.0 for ADR-0003 Phase A, spike blocked and documented, commit TBD)
+
+- CI green (`gh run list --limit 3` all success), `git status` clean at
+  cycle start. Found cycles 405/406 had landed real commits (`8d3e147`,
+  `cdbb752`) but skipped their "End of Cycle" memory-update step —
+  backfilled both as `Previous state` entries below before starting new
+  work (see those entries for what each cycle actually did).
+- With the two long-carried "next cycle candidates" (pnpm audit, JS-glue
+  `*_finish` coverage) now closed by 405/406, and the e2e logout round
+  trip closed by 404, re-scanned for fresh work: `gh issue list` empty,
+  workspace `cargo clippy --workspace --all-targets` / `cargo doc
+  --workspace --no-deps` both clean (no warnings anywhere), no stray
+  `unimplemented!()`/TODO in production code (the ~40 `unimplemented!()`
+  hits in `powehi-rest-api/src/lib.rs` are `#[cfg(test)]` mock/stub trait
+  impls for unrelated handler tests, not production gaps — confirmed by
+  reading context around them). This pushed the search toward the one
+  remaining long-blocked candidate: **PQ hybrid Phase A** (ADR-0003),
+  gated on `openmls` shipping a stable native PQ ciphersuite.
+- **`WebSearch` + `crates.io` API check found `openmls` 0.9.0 published
+  2026-08-25 (6 days before this cycle)** — the first potential trigger
+  event for ADR-0003 Phase A since the ADR was written. Read the upstream
+  changelog: 0.9.0 does add a native PQ ciphersuite
+  (`MLS_256_MLKEM1024_AES256GCM_SHA512_MLDSA87`) but at 256-bit level, not
+  the 128-bit `MLS_128_MLKEM768...MlDsa65` suite the ADR names as its
+  exact trigger, and it sits behind openmls's own
+  `draft-ietf-mls-pq-ciphersuites` Cargo feature — openmls itself doesn't
+  consider the wire format interop-stable. Judged the full 7-item Phase A
+  checklist (native ciphersuite wiring across WASM/domain/REST-API/DB/UI)
+  far too large and risky for a single cycle regardless; scoped this
+  cycle down to just the mechanical prerequisite — bumping the `openmls`
+  *dependency* to 0.9.0 while keeping the classical ciphersuite
+  unchanged, to unblock a future cycle's actual Phase A work.
+- **Delegated the dependency-bump spike to `crypto-lead` (background
+  agent).** It correctly stopped short of making the change: bumping
+  `openmls` 0.8.1 → 0.9.0 forces `openmls_traits` 0.5→0.6, which forces
+  `openmls_rust_crypto` 0.6.0, whose `hpke-rs-rust-crypto 0.7.0`
+  dependency requires `ml-kem 0.3.2` **unconditionally** (no feature
+  gate — pulled in even without enabling the PQ ciphersuite feature) —
+  conflicting with this repo's own deliberate `ml-kem = "=0.2.3"` exact
+  pin (cycle-92 risk item Y-6, closed specifically to prevent silent
+  `ml-kem` drift from shifting FIPS 203/NIST ACVP KAT output for the
+  already-live `POWEHI_PQ_KEM_EXT_TYPE` KeyPackage extension in
+  `kem.rs`). The same 0.9.0 tree also pulls in the `libcrux-*` crate
+  family and `x-wing 0.1.0` — **neither is on
+  `crypto-libraries-pinned.md`'s approved list** (openmls, opaque-ke,
+  RustCrypto, `ml-kem`, `getrandom`) — so even a PQ-feature-disabled
+  0.9.0 bump would need an explicit `deny.toml`/rules-file admissibility
+  ruling. Correctly treated as "a design decision, not an API
+  adaptation" per this cycle's own instruction to the agent, reverted its
+  `Cargo.toml` edit, left the working tree clean. Captured baselines for
+  whoever picks this up next: `cargo test --workspace` 748 passed/0
+  failed/64 ignored; `wasm-pack test --node
+  crates/client/powehi-crypto-wasm` 9/9 — both at the *current* (0.8.1)
+  pin, useful as a regression baseline for a future bump attempt.
+- **Wrote the ADR-0003 status update myself** (not the agent's draft
+  verbatim, but the same substance) at
+  `docs/decisions/0003-pq-migration.md`'s Decision section: records
+  openmls 0.9.0 was evaluated and NOT adopted, the exact two-part
+  blocker (ciphersuite-name/security-level mismatch +
+  ml-kem/libcrux/x-wing dependency conflict), and that Phase A now needs
+  two prior decisions sequenced before the bump itself — (1) wait for the
+  exact 128-bit suite / IETF draft finalization vs. consciously adopt the
+  256-bit draft suite early with crypto-reviewer sign-off, and (2) a
+  crypto-reviewer-gated `ml-kem` 0.2.3→0.3.2 migration with KAT
+  re-validation plus a libcrux/x-wing admissibility ruling.
+- **Also found and fixed a genuinely stale comment** (not the field I
+  first guessed): initially edited `Cargo.toml`'s
+  `rust-version = "1.87"` toward 1.91 assuming it tracked the toolchain,
+  then caught my own mistake before committing — that field is
+  deliberately the real MSRV floor for `is_multiple_of` (cycle-92
+  Y-ACVP-1), unrelated to which toolchain CI actually runs; reverted it
+  (confirmed via `git diff Cargo.toml` showing no change). The actual
+  staleness crypto-lead flagged was `.github/workflows/release.yml`'s
+  comment claiming "Toolchain version 1.87.0 matches Dockerfile,
+  rust-toolchain.toml and Cargo.toml rust-version" directly above a
+  `toolchain: "1.96.0"` pin two lines later — fixed the comment to state
+  the true relationship (toolchain pinned above the MSRV floor, not
+  equal to it).
+- Verified before commit: `python3 -c "import yaml; yaml.safe_load(...)"`
+  confirms `release.yml` still parses; `git diff --stat Cargo.toml`
+  empty (confirms the revert); `cargo build --workspace` clean (no code
+  touched, comment/docs-only diff, sanity-checked anyway since
+  `Cargo.toml` was transiently edited during the mistaken-then-reverted
+  MSRV change).
+- **Not crypto logic** (no `.rs`/WASM file touched — `Cargo.toml` diff is
+  net-zero, the actual diff is 2 doc/comment files) — `crypto-reviewer`
+  correctly not invoked for this cycle's landed change (it WAS invoked,
+  correctly, as part of the background spike that did NOT land — that's
+  consistent, review gates apply to changes that ship, and this cycle's
+  ADR-documentation of a rejected spike is not itself a crypto change).
+  Not architectural (no behavior/metadata change, pure documentation of
+  an already-true dependency-resolution fact) — `threat-model-checker`
+  correctly not invoked.
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates:** the two-part PQ Phase A prerequisite
+  decision documented above (needs a human/crypto-lead policy call on
+  ml-kem 0.2.3→0.3.2 + libcrux/x-wing admissibility before any further
+  openmls-bump attempt — NOT a good candidate to just retry blindly);
+  OPAQUE PQ-hybrid OPRF upgrade (gated on ADR-0003 Phase B, itself gated
+  on Phase A, now also gated transitively on the same ml-kem question);
+  no other carried candidates remain open as of this cycle — the next
+  cycle should do a fresh gap scan (test coverage, `pnpm audit`/`cargo
+  audit` re-check, `gh issue list`) rather than assume a candidate is
+  waiting, since this cycle's sweep found the well-known list fully
+  drained.
+
+## Previous state (2026-09-01, cycle 406 — FEATURE: close OPAQUE *_finish success-path + wrong-password JS-glue coverage, commit cdbb752)
+
+- **Memory-update commits were skipped for cycles 405 and 406 at the time**
+  (both left real code commits on `main` — `8d3e147`, `cdbb752` — but no
+  matching `chore: update session memory` commit followed). Backfilled here
+  by cycle 407 from `git show --stat`/full commit messages before starting
+  new work, per the standing "End of Cycle" requirement neither cycle
+  completed. Lesson for future cycles: don't skip the memory-update step
+  even under time pressure — it's what keeps the "next cycle candidates"
+  list trustworthy for the following cycle's picks.
+- Picked cycle 401/404's carried candidate (needs test-only
+  server-simulation `#[wasm_bindgen]` exports in `wasm_exports.rs`,
+  explicitly out of scope for the earlier Node-glue test file per its own
+  header comment): `opaqueWasmZeroize.node.test.ts` could only exercise the
+  real wasm-bindgen JS copy-back glue for `*_start` success and `*_finish`
+  error paths (no JS-reachable OPAQUE server to complete a round trip
+  against). Added a default-off `test-server-sim` Cargo feature gating a
+  new `test_server_sim.rs` module — JS-callable, handle-based wrappers
+  around the same opaque-ke server-simulation logic
+  `wasm_bindgen_tests.rs` already used natively. Enabled only by the
+  test-only `build:wasm:node` script; the production `build:wasm`
+  (`--target web`) script passes no `--features` flag — verified by a
+  build + byte-level scan that zero test-only symbols reach the shipped
+  artifact.
+- New tests: `*_finish` success-path zeroize for registration and login
+  (real client<->server round trip through the test-server-sim feature),
+  plus a wrong-password negative control using EQUAL-length passwords with
+  an in-test positive-control leg first — same mutation-testing lesson
+  cycle 398 learned (unequal lengths, or a bare negative-only assertion,
+  can pass for the wrong reason under an eager-scrub-before-use
+  regression); both failure modes mutation-tested and confirmed caught.
+- **crypto-reviewer: YELLOW, fixes applied, re-verified.** Required
+  changes: export-key comparisons made boolean-only (no-plaintext-logging
+  — raw key bytes must never render in a failure-assertion log), and the
+  wrong-password test given an in-test positive control so `toThrow()`
+  can't pass for an unrelated reason.
+- Verified: `wasm_exports.rs`, `opaque.rs`, and `PasswordScrubGuard` itself
+  untouched (production crypto logic diff is zero — only new test-gated
+  module + Cargo feature + build script); 181 native tests unchanged,
+  `wasm-pack --node` suite unchanged, full Vitest suite 109 files/1545
+  tests (+4 over cycle 404's 1541); production `build:wasm` output
+  independently verified clean of test-only exports.
+- Not architectural (test-only feature-gated module, zero production
+  behavior change) — `threat-model-checker` correctly not invoked; not a
+  backend handler or infra change — `security-auditor` correctly not
+  invoked (crypto-reviewer covered this diff directly, consistent with
+  cycles 398/401's identical routing for the same file).
+- Target dir hygiene: not checked (FEATURE mode).
+- **This closes the last "JS-glue coverage" gap carried since cycle
+  396/398/401/404** — no longer a next-cycle candidate.
+
+## Previous state (2026-09-01, cycle 405 — STABILIZATION: resolve 23 pnpm audit vulnerabilities via in-range update, commit 8d3e147)
+
+- CI green, `git status` clean at cycle start. Ran the STABILIZATION
+  security sweep (`counter % 5 == 0`): `pnpm audit` in `app/` surfaced 23
+  findings — 1 critical (vitest's UI-server arbitrary file read/exec,
+  reachable via `infra/cloudflare/workers/smart-router`'s own vitest dep,
+  resolved by 3.2.4 despite an already-wide `^3.2.1` range not having
+  picked it up yet), 10 high (undici/ws/sharp bundled inside wrangler's
+  miniflare; vite dev-server `fs.deny` bypass; postcss/nanoid
+  path-traversal and infinite-loop bugs), 12 moderate/low.
+- **Fix:** `pnpm update -r` re-resolved every workspace package within its
+  existing caret range and rewrote `package.json` ranges to match (e.g.
+  `wrangler ^4.20.0` → `^4.127.1`, `vite ^6.3.5` → `^6.4.3`) — also pulled
+  in same-range bumps to production deps (react, react-dom, dexie,
+  zustand) alongside dev-tooling (wrangler, vitest, vite, playwright,
+  tailwind). No crypto package or Rust/WASM code touched; verified the
+  Comlink worker boundary (`comlink@4.4.2`, version unchanged) and the
+  Dexie storage layer's encrypt-before-write ordering are unaffected
+  regardless of the dexie patch bump. `pnpm audit` now reports zero
+  vulnerabilities.
+- **security-auditor: GREEN.** Verified: `tsc`, `biome`, full Vitest suite
+  (109 files/1541 tests) and `smart-router`'s own vitest (27 tests) all
+  green, production build succeeds under the bundle budget script.
+- Not crypto logic (no `.rs`/WASM file touched) — `crypto-reviewer`
+  correctly not invoked; not architectural — `threat-model-checker`
+  correctly not invoked.
+- **This closes the "frontend `pnpm audit`'s 23 dev/build-time findings"
+  candidate** carried unresolved (not urgent) since cycle 401 — no longer
+  a next-cycle candidate.
+- Target dir hygiene: due this cycle (STABILIZATION) — not recorded at
+  memory-backfill time (cycle 407); if this matters, re-check `du -sh
+  target/` fresh rather than trusting this gap.
+
+## Previous state (2026-09-01, cycle 404 — FEATURE: exercise the real logout button in the live-backend auth e2e round trip, commit 9bb974b)
 
 - CI green (`gh run list --limit 3` all success), `gh issue list --state
   open` empty, `git status` clean at cycle start. Picked cycle 403's own

@@ -84,6 +84,40 @@ map entry is zeroized on drop.
 When `openmls` adds a stable `MLS_128_MLKEM768_AES128GCM_SHA256_MlDsa65`
 ciphersuite, Powehi will complete the migration in three additional phases:
 
+**Status update (2026-09-01, cycle 407): `openmls` 0.9.0 evaluated, NOT
+adopted.** `openmls` 0.9.0 (published 2026-08-25) does ship a native PQ
+ciphersuite, but it is `MLS_256_MLKEM1024_AES256GCM_SHA512_MLDSA87`
+(256-bit level, ML-KEM-1024 + ML-DSA-87) — not the 128-bit
+`MLS_128_MLKEM768...MlDsa65` suite this ADR names as the trigger — and it
+remains behind openmls's own `draft-ietf-mls-pq-ciphersuites` Cargo
+feature, i.e. openmls itself does not consider the wire format
+interop-stable yet. Powehi remains pinned to `openmls` 0.8.1; this bump
+was NOT applied. A dependency-resolution spike (cycle 407, isolated
+scratch crate + `cargo build --workspace` against a real `openmls = "0.9"`
+edit, reverted before commit) found a second, independent blocker beyond
+the ciphersuite-name mismatch: `openmls_traits` 0.6.0 (required by
+`openmls` 0.9.0; the 0.5.x line does not satisfy it) pulls in
+`openmls_rust_crypto` 0.6.0, whose `hpke-rs-rust-crypto 0.7.0` dependency
+requires `ml-kem 0.3.2` **unconditionally** (no feature gate, present even
+without enabling the PQ ciphersuite feature) — conflicting with this
+repo's deliberate `ml-kem = "=0.2.3"` exact pin (see risk item Y-6 in the
+cycle-92 record, closed specifically to prevent a silent `ml-kem` version
+drift from shifting FIPS 203/NIST ACVP KAT output for the already-live
+`POWEHI_PQ_KEM_EXT_TYPE` KeyPackage extension in `kem.rs`). The same
+0.9.0 dependency tree also pulls in the `libcrux-*` crate family and
+`x-wing 0.1.0` — neither is on `crypto-libraries-pinned.md`'s approved
+list (openmls, opaque-ke, RustCrypto, `ml-kem`, `getrandom`) — so their
+admissibility needs an explicit `deny.toml`/rules-file ruling even before
+any PQ feature flag is enabled. **Phase A adoption therefore needs two
+prior decisions, not one:** (1) whether to wait for the exact named
+128-bit suite / IETF draft finalization, or consciously adopt the shipped
+256-bit draft suite early with `crypto-reviewer` sign-off; and (2) a
+`crypto-reviewer`-gated `ml-kem 0.2.3 → 0.3.2` migration (with FIPS
+203/ACVP KAT re-validation against the live PQ extension wire format) plus
+a `libcrux`/`x-wing` admissibility ruling — sequenced *before* the
+`openmls` 0.9.0 bump itself, since the bump cannot land in isolation from
+either.
+
 ### Phase A — Native MLS PQ ciphersuite (dual-mode)
 
 **Trigger:** `openmls` publishes a semver-stable release containing

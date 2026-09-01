@@ -28,8 +28,9 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
       # dtolnay/rust-toolchain SHA-pinned to master@2026-06.
-      # Toolchain version 1.87.0 matches Dockerfile, rust-toolchain.toml and
-      # Cargo.toml rust-version (MSRV).
+      # Toolchain version 1.96.0 matches Dockerfile and rust-toolchain.toml
+      # (both pinned above the Cargo.toml rust-version=1.87 MSRV floor,
+      # since transitive deps require newer than the code's actual minimum).
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
           toolchain: "1.96.0"
