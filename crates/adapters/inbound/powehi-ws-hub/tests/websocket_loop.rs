@@ -60,7 +60,12 @@ impl CachePort for FakeCache {
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, DomainError> {
         Ok(self.store.lock().unwrap().get(key).cloned())
     }
-    async fn set(&self, key: &str, value: Vec<u8>, _ttl: Option<Duration>) -> Result<(), DomainError> {
+    async fn set(
+        &self,
+        key: &str,
+        value: Vec<u8>,
+        _ttl: Option<Duration>,
+    ) -> Result<(), DomainError> {
         self.store.lock().unwrap().insert(key.to_owned(), value);
         Ok(())
     }
@@ -139,7 +144,10 @@ const TEST_TOKEN: &str = "ws-loop-test-token";
 
 /// Bind a real TCP listener, serve the WS router on it, and return the
 /// `ws://` base URL plus the hub used to publish notifications.
-async fn spawn_server(group_repo: Arc<dyn GroupRepository>, device_id: &DeviceId) -> (String, Arc<WsHub>) {
+async fn spawn_server(
+    group_repo: Arc<dyn GroupRepository>,
+    device_id: &DeviceId,
+) -> (String, Arc<WsHub>) {
     let hub = Arc::new(WsHub::new());
     let cache = FakeCache::seeded(TEST_TOKEN, device_id);
     let app = router(hub.clone(), cache, group_repo);
@@ -153,7 +161,9 @@ async fn spawn_server(group_repo: Arc<dyn GroupRepository>, device_id: &DeviceId
     (format!("ws://{addr}/v1/ws"), hub)
 }
 
-async fn connect(url: &str) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+async fn connect(
+    url: &str,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
     let mut request = url.into_client_request().unwrap();
     request.headers_mut().insert(
         "authorization",
@@ -229,7 +239,11 @@ async fn upgrade_without_authorization_header_returns_401() {
 
     match err {
         tokio_tungstenite::tungstenite::Error::Http(resp) => {
-            assert_eq!(resp.status(), 401, "expected 401 Unauthorized, got {resp:?}");
+            assert_eq!(
+                resp.status(),
+                401,
+                "expected 401 Unauthorized, got {resp:?}"
+            );
         }
         other => panic!("expected an HTTP-level rejection, got: {other:?}"),
     }
@@ -243,8 +257,9 @@ async fn lagged_receiver_stays_connected_and_keeps_receiving() {
     let device_id = DeviceId::new();
     let my_group = GroupId::new();
     let other_group = GroupId::new();
-    let repo: Arc<dyn GroupRepository> =
-        Arc::new(FakeGroupRepo(MembershipFixture::Groups(vec![my_group.clone()])));
+    let repo: Arc<dyn GroupRepository> = Arc::new(FakeGroupRepo(MembershipFixture::Groups(vec![
+        my_group.clone(),
+    ])));
     let (url, hub) = spawn_server(repo, &device_id).await;
 
     let mut ws = connect(&url).await;
