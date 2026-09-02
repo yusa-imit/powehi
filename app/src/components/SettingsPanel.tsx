@@ -85,7 +85,13 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
 			<div
 				data-testid="settings-panel"
 				onClick={(e) => e.stopPropagation()}
-				onKeyDown={(e) => e.stopPropagation()}
+				// Stop propagation for every key except Escape: Escape must keep
+				// bubbling to the overlay's onKeyDown so dismiss-on-Escape works
+				// from wherever focus is inside the panel (nothing ever focuses
+				// the bare overlay <dialog> itself to trigger its handler directly).
+				onKeyDown={(e) => {
+					if (e.key !== "Escape") e.stopPropagation();
+				}}
 				style={{
 					background: "var(--bg-surface)",
 					border: "1px solid var(--border-soft)",
