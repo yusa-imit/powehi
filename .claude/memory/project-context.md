@@ -17,7 +17,95 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-09-02, cycle 415 — STABILIZATION: real-socket integration coverage for powehi-ws-hub's connection loop, commits 432336f + c8178d7)
+## Current state (2026-09-02, cycle 418 — FEATURE: implement the local-only block-contact feature (InfoPanel), commit ac750cb)
+
+- CI green at cycle start (`gh run list --limit 3` all success). `git status`
+  was **not clean**: `app/src/components/ChatLayout.tsx` and
+  `app/src/db/schema.ts` had substantial uncommitted diffs, plus an untracked
+  `app/src/components/ChatLayoutBlock.test.tsx` (21 tests) — a complete,
+  working "block contact" feature left over from an interrupted prior
+  session (same recurring failure mode as cycles 405/406/410: real work
+  landed without its commit step). Read the full diff before touching
+  anything, verified it built/passed clean (`tsc -b`, `biome check`, and the
+  new test file 21/21) before deciding whether to finish it or discard it —
+  chose to finish it: coherent, well-scoped, and closes a real gap (the
+  InfoPanel "Block · Report" button had rendered with zero handler since the
+  very first mock-UI commit).
+- **What it does:** local-only `blocked` boolean on `GroupRow` (Dexie schema
+  v28) toggled via InfoPanel's Block button (inline confirm) / single-click
+  Unblock. No MLS message, no server contact — confirmed by inspection and a
+  new test. While a chat is blocked: incoming messages are still persisted
+  to Dexie (history survives an eventual unblock) but suppressed from the
+  visible message list/sidebar preview/unread+mention counts/notifications
+  (sound/vibrate/OS); peer-driven side-channel signals (typing, reactions,
+  edits, deletes, pins, presence/lastSeenAt) are suppressed too, including
+  while the blocked chat is the open/active conversation — the sharpest case
+  being edit-injection into an already-rendered, already-trusted bubble.
+- **Ran a fresh `security-auditor` pass myself before committing** rather
+  than trusting the diff's own inline comments (which claimed several
+  "security-auditor finding, this cycle" fixes were already applied) — since
+  I had no way to verify that a prior review actually happened or was
+  thorough in an interrupted session, treated the diff as unreviewed.
+  **Verdict: YELLOW, all findings fixed before commit:**
+  1. **Plaintext PII write (MEDIUM):** `handleToggleBlock`'s fallback
+     insert-if-update-affected-zero-rows path called raw `db.groups.add()`,
+     bypassing `encryptedDb.addGroup()` — `name` and `mlsStateB64` are both
+     in `encrypted-db.ts`'s `SENSITIVE.groups` list, so this wrote the
+     contact's display name to IndexedDB unencrypted. Fixed: routed through
+     `encryptedDb?.addGroup()` instead.
+  2. **Missed suppression call sites (LOW-MED):** `handleIncomingReadReceipt`
+     and `handleIncomingDeliveryReceipt` were unguarded on `blocked` — a
+     blocked peer could still flip our own bubbles to "read"/"delivered" and
+     have it persisted (a liveness oracle: confirms their message is still
+     being processed). `handlePqBinding` (safety-number header badge) was
+     also unguarded. Fixed: added the same `chatsRef.current...?.blocked`
+     early-return / in-map guard used by the other suppression call sites.
+  3. **Understated race-window comment (MEDIUM, doc-only):** a comment
+     claimed the accepted "blocked flag hasn't hydrated yet" merge race was
+     "mount-time only" — actually recurs on every switch into a blocked chat
+     (no bulk `GroupRow.blocked` preload exists; `useMessages` polls
+     immediately on every group switch), worst exactly when a server-side
+     backlog bursts in at that moment. Corrected the comment; the underlying
+     race itself remains accepted/deferred (fixing it was tried and reverted
+     in the original diff — breaks the pinned/unread-divider restore
+     effects, a larger sequencing change than this cycle's scope).
+  4. **Unhandled rejection (LOW):** the `db.groups.update().then()` chain had
+     no outer `.catch()`. Fixed.
+  5. **Test gaps:** added a test asserting block/unblock never calls
+     `mlsEncrypt` or `sendMessage` (the highest-value untested claim per the
+     auditor), and split the mislabeled "vibration, sound, or OS
+     notification" test (which only asserted vibration) into a real
+     vibration test plus a new dedicated sound-suppression test spying on
+     `playNotificationSound`. Not added (accepted gap, lower value): explicit
+     tests for `onDelete`/`onReactionRemove`/auto-unarchive-while-blocked/
+     mentionCount-reset-while-blocked — all use the identical
+     `if (c.blocked) return c;` guard pattern already covered by the
+     edit/reaction/pin/presence tests in the suite, judged low marginal
+     value for this cycle.
+- Not crypto logic (no `.rs`/WASM file touched) — `crypto-reviewer`
+  correctly not invoked. Not server-visible metadata (the `blocked` flag
+  never leaves the client — confirmed as part of the security-auditor pass)
+  — `threat-model-checker` correctly not invoked. Not a backend handler or
+  infra change, but proactively ran `security-auditor` anyway given the
+  feature is explicitly about suppressing peer-visible-state/information —
+  same precedent as cycle 408's frontend-only-but-security-adjacent routing.
+- Verified before commit: `npx tsc -b` clean; `npx biome check` clean on all
+  3 touched files; `npx vitest run src/components/ChatLayoutBlock.test.tsx`
+  23/23 (21 original + 2 added); full suite 111 files/1575 tests green (was
+  111/1573 before this cycle's 2 added tests — pre-existing file/test count
+  from the interrupted session's own work, not a regression); `git diff
+  --stat` confirmed only the 3 intended files before `git add`.
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates:** none carried with confidence. The persistent
+  `cargo audit` hang (noted cycles 414/415, 2+ cycles running) is still
+  worth a real investigation if a future cycle has spare time. The PQ Phase
+  A prerequisite decision (ml-kem 0.2.3→0.3.2 + libcrux/x-wing
+  admissibility, open since cycle 407) remains a human/crypto-lead policy
+  call, not a blind retry. Otherwise repeat the fresh-scan approach (`cargo
+  deny check`/`pnpm audit`/`gh issue list`/delegated Explore scan) next
+  cycle.
+
+## Previous state (2026-09-02, cycle 415 — STABILIZATION: real-socket integration coverage for powehi-ws-hub's connection loop, commits 432336f + c8178d7)
 
 - CI green (`gh run list --limit 5` all success), `git status` clean at cycle
   start. `cargo deny check` clean, `pnpm audit` (app/) clean. `cargo audit`
