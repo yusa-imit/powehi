@@ -15,7 +15,9 @@
 //!   - `presigned_upload_url`/`presigned_download_url` NotFound for an absent row.
 //!   - `presigned_download_url` embeds the bucket + storage_key.
 //!   - `delete` removes BOTH the S3 object and the Postgres row; delete of an
-//!     absent id is a no-op (not an error).
+//!     absent id is a no-op (not an error); retrying `delete` on a row whose
+//!     S3 object was already removed by a crashed prior attempt is idempotent
+//!     (proves the documented crash self-heal, not just an assumption).
 //!   - full upload->download round-trip through the pre-signed URLs (reqwest PUT/GET).
 //!
 //! Uses postgres:16-alpine explicitly (the modules default 11-alpine is EOL) and
@@ -536,6 +538,77 @@ async fn delete_removes_s3_object_and_row() {
             .expect("find_by_id after delete")
             .is_none(),
         "delete must remove the Postgres row"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn delete_retry_after_crash_between_s3_and_db_steps_is_idempotent() {
+    // `delete` (lib.rs) removes the S3 object FIRST, then the Postgres row.
+    // A crash between those two steps leaves an orphaned row pointing at an
+    // already-deleted object. This is documented as self-healing (a retried
+    // `delete` should just re-issue the S3 DELETE, which is a no-op on an
+    // already-missing key per S3 semantics, then finish removing the row) —
+    // this test proves that recovery path actually works end to end rather
+    // than trusting the claim.
+    let h = setup().await;
+    let device = insert_device(&h.pool).await;
+    let body = b"opaque-ciphertext-bytes".to_vec();
+    let mut blob = media_fixture(device, None);
+    blob.size_bytes = body.len() as u64;
+    h.adapter.save(&blob).await.expect("save");
+
+    let upload_url = h
+        .adapter
+        .presigned_upload_url(&blob.id, &blob.content_type)
+        .await
+        .expect("presigned_upload_url");
+    let client = reqwest::Client::new();
+    let resp = client
+        .put(&upload_url)
+        .header("content-type", &blob.content_type)
+        .body(body)
+        .send()
+        .await
+        .expect("PUT to presigned url");
+    assert!(resp.status().is_success(), "upload PUT must succeed");
+
+    // Simulate the crashed first `delete` call's S3 step having already
+    // completed, by removing the object directly via the raw S3 client —
+    // the Postgres row is deliberately left behind, as it would be if the
+    // process died right after the S3 call returned.
+    h.s3.delete_object()
+        .bucket(TEST_BUCKET)
+        .key(&blob.storage_key)
+        .send()
+        .await
+        .expect("simulate the crashed attempt's already-completed S3 delete");
+    assert!(
+        list_keys(&h.s3, &blob.storage_key).await.is_empty(),
+        "object must already be gone from S3, simulating the crashed attempt"
+    );
+    assert!(
+        h.adapter
+            .find_by_id(&blob.id)
+            .await
+            .expect("find_by_id before retry")
+            .is_some(),
+        "row must still be present, simulating a crash before the DB delete step"
+    );
+
+    // Retry: must not error even though the S3 object is already gone.
+    h.adapter
+        .delete(&blob.id)
+        .await
+        .expect("retrying delete on an orphaned row must succeed, not error");
+
+    assert!(
+        h.adapter
+            .find_by_id(&blob.id)
+            .await
+            .expect("find_by_id after retry")
+            .is_none(),
+        "retry must finish removing the orphaned row"
     );
 }
 
