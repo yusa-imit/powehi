@@ -17,7 +17,120 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-09-03, cycle 420 — STABILIZATION: SettingsPanel Escape-close test gap → found & fixed a real dead-code bug, commit 5af1f5f)
+## Current state (2026-09-03, cycle 421 — FEATURE: sweep the cycle-420 dead-Escape-key bug across 4 more dialogs, commit 158bb60)
+
+- CI green at cycle start (`gh run list --limit 5` all success), `git status` clean,
+  `gh issue list --state open` empty.
+- Cycle 420's own "next cycle candidates" flagged the exact `onClick`+`onKeyDown`
+  both-stopPropagation pattern as reused verbatim elsewhere in `ChatLayout.tsx`
+  beyond `SettingsPanel`, worth a dedicated sweep rather than fixing
+  opportunistically. `grep -n 'onKeyDown={(e) => e.stopPropagation()}'
+  app/src/components/ChatLayout.tsx` found 5 occurrences. Inspected each site's
+  enclosing function and ancestor chain before touching anything (same discipline
+  as cycle 420 — not every hit is a live bug): `Lightbox`'s
+  `lightbox-image-container` (line ~4882) is backed by a
+  `window.addEventListener("keydown", ...)` in a `useEffect` — React's synthetic
+  `stopPropagation()` only blocks the React-level onKeyDown chain, not a native
+  window-level listener, so Escape/arrow-keys still work there (not a bug, left
+  alone); `CallOverlay`'s `<dialog>` (line ~6871) has no ancestor Escape handler
+  at all to block (verified — the outer `call-overlay` div has neither onClick nor
+  onKeyDown), so the stopPropagation is a harmless no-op (left alone, and
+  confirmed correct-as-is by the security-auditor pass below). The other 3 —
+  `StatusEditor`'s `status-editor` content div (line ~1122), the forward-message
+  modal's `forward-modal` content div (line ~10459), and
+  `KeyboardShortcutsModal`'s unnamed content div (line ~10709) — each had a real,
+  live parent-overlay Escape handler being silently blocked, identical to cycle
+  420's SettingsPanel bug.
+- **Fix applied to all 3 real sites:**
+  `onKeyDown={(e) => { if (e.key !== "Escape") e.stopPropagation(); }}` — same
+  pattern cycle 420 used, still blocks Enter/Space/etc. from bubbling (whatever
+  the original stopPropagation's a11y-lint purpose was) while explicitly letting
+  Escape through to reach the overlay's own `Escape → onClose` handler.
+- **Tests added/fixed, mutation-verified myself before committing** (temporarily
+  `git stash push -- <file>` to isolate just the production fix per file, ran the
+  new/changed test, confirmed it failed, `git stash pop` to restore):
+  1. `ChatLayoutCustomStatus.test.tsx` — new Escape-close test. First attempt
+     dispatched from `status-text-input`, which **passed even with the bug
+     present** — turned out that specific input has its own independent
+     `onKeyDown={(e) => { if (e.key === "Escape") onClose(); }}` handler,
+     completely bypassing the wrapper-level bug. Caught this by mutation-testing
+     rather than trusting a green run; switched the test to dispatch from
+     `status-emoji-input` instead (verified it has no own onKeyDown), which
+     correctly failed pre-fix and passes post-fix.
+  2. `ChatLayoutForwarding.test.tsx` — new Escape-close test dispatched from
+     `forward-modal-close` (a real descendant of the buggy wrapper).
+  3. `ChatLayoutShortcuts.test.tsx` — fixed test #8 ("pressing Escape closes the
+     modal"), which was a false positive of the exact same class cycle 420 found
+     for SettingsPanel: it dispatched `fireEvent.keyDown` directly on the
+     `keyboard-shortcuts-modal` testid, which IS the outer dialog owning the
+     correct handler — never exercised the inner wrapper's bug at all. Fixed to
+     dispatch from `keyboard-shortcuts-close` (inside the buggy wrapper) instead.
+- **Ran `security-auditor` proactively** (frontend-only, security-adjacent
+  dialog-dismiss UX — same precedent as cycle 420) on the diff before committing.
+  **Verdict: GREEN.** Confirmed no security regression (the only handlers newly
+  reachable via Escape bubble-through are the pre-existing pure-dismiss `window`
+  listeners for the lightbox and in-chat search — no send/delete/key-rotation
+  action reachable). It independently traced every patched site's ancestor chain
+  and confirmed the fix is genuinely load-bearing (not cosmetic) at all 3.
+  **Found 2 more real instances I hadn't checked, both fixed in the same commit:**
+  `AddMemberModal.tsx`'s content-wrapper div had the identical unconditional
+  `onKeyDown={(e) => e.stopPropagation()}` blocking its own `<dialog>`'s Escape
+  handler — notably this component ALSO has a
+  `document.addEventListener("keydown", ...)` fallback listener as a second line
+  of defense, but the auditor correctly identified that doesn't save it either:
+  React's synthetic `stopPropagation()` calls through to
+  `nativeEvent.stopPropagation()`, which halts native propagation before it ever
+  reaches a `document`-level listener. And `AddMemberModal.test.tsx` had the same
+  false-positive-test class: `fireEvent.keyDown(document, {key: "Escape"})` hits
+  the document listener directly, bypassing the DOM tree (and the buggy wrapper)
+  entirely — fixed to dispatch from `contact-option` instead (mutation-verified
+  the same stash/pop way as the other 3).
+  **2 additional findings deferred as non-blocking (info-level, not fixed this
+  cycle):** (a) `Lightbox`'s `lightbox-image-container` stopPropagation is
+  currently latent/harmless (no focusable descendant today — only a
+  non-focusable `<img>`) but would become a live bug the moment that subtree
+  gains a focusable element (e.g. video controls); (b) Escape now
+  double-dismisses across layers in one edge case — if the in-chat search bar
+  (Ctrl+F) happens to be open when one of the 4 patched dialogs is also open, a
+  single Escape closes both, since the dialogs' own Escape handlers don't call
+  stopPropagation after handling it. Purely cosmetic (clears a local,
+  non-sensitive search query), not a security issue.
+- Not crypto (no `.rs`/WASM file touched) — `crypto-reviewer` correctly not
+  invoked. Not architectural (no new API surface, DB column, or server-visible
+  metadata; pure client-side dialog-dismiss UX, same as cycle 420) —
+  `threat-model-checker` correctly not invoked.
+- Verified before commit: `npx tsc -b` clean; `npx biome check` clean on all 6
+  touched files; full suite 111 files/1582 tests green (was 1580 at cycle 420
+  end, +2 new tests from this cycle — `ChatLayoutPoll.test.tsx` transiently
+  failed once mid-suite on an unrelated pre-existing test-order flake,
+  unreproducible in isolation and gone on a clean full-suite rerun, confirmed
+  unrelated since this cycle touched zero poll-related code).
+- **Process note:** the Bash tool's cwd did NOT reliably persist a `cd app &&`
+  prefix across separate tool-call invocations this cycle (worked within one
+  invocation, reverted to repo root on the next) — used full `app/`-prefixed
+  paths from repo root for `git stash push -- <path>` to avoid a pathspec
+  mismatch after cwd silently reset.
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates:**
+  1. The 2 deferred security-auditor info findings above (lightbox latent
+     instance, double-dismiss cosmetic edge case) — both explicitly judged
+     non-blocking/optional, pick up only if a future cycle has nothing
+     higher-value.
+  2. Carried from cycle 419/420: orphan-object sweeper for R2 `delete()`'s
+     untested/unreachable 4th state (S3 object present, DB row absent) — needs a
+     design decision (periodic sweep vs. upload-confirmation transaction), good
+     backend-lead task, FEATURE mode.
+  3. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 + libcrux/x-wing
+     admissibility) remains a human/crypto-lead policy call, not a blind retry.
+  4. Carried: prd.md §6.4's cross-region abuse-signal propagation ("차단된 IP/
+     사용자 → 전 리전 전파") documented-but-unimplemented — worth a
+     threat-model-checker-gated scoping pass before committing to size.
+  5. project-context.md is well past the point where the next STABILIZATION
+     cycle should archive older cycles again (last archived at cycle 390) — this
+     file hits the Read tool's pagination cap on the first read attempt every
+     cycle now.
+
+## Previous state (2026-09-03, cycle 420 — STABILIZATION: SettingsPanel Escape-close test gap → found & fixed a real dead-code bug, commit 5af1f5f)
 
 - CI green at cycle start (`gh run list --limit 5` all success), `git status` clean,
   `gh issue list --state open` empty. Reconfirmed cycle 419's PATH note: bare `cargo`
