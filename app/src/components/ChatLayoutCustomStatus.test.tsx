@@ -176,6 +176,24 @@ describe("ChatLayout — custom user status", () => {
 		expect(screen.getByTestId("user-status-placeholder")).toBeInTheDocument();
 	});
 
+	it("pressing Escape inside the editor closes it without saving", async () => {
+		render(<ChatLayout />);
+		await act(async () => {
+			fireEvent.click(screen.getByTestId("user-status-edit-btn"));
+		});
+		await act(async () => {
+			fireEvent.change(screen.getByTestId("status-text-input"), { target: { value: "nope" } });
+		});
+		// Dispatch from the emoji input, not the text input — the text input has
+		// its own direct onClose()-on-Escape handler that would mask a broken
+		// bubble-up path through the content wrapper's stopPropagation guard.
+		await act(async () => {
+			fireEvent.keyDown(screen.getByTestId("status-emoji-input"), { key: "Escape" });
+		});
+		expect(screen.queryByTestId("status-editor")).not.toBeInTheDocument();
+		expect(screen.getByTestId("user-status-placeholder")).toBeInTheDocument();
+	});
+
 	it("clicking the overlay backdrop closes the editor without saving", async () => {
 		render(<ChatLayout />);
 		await act(async () => {

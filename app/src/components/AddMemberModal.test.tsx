@@ -102,7 +102,11 @@ describe("AddMemberModal", () => {
 
 	it("closes on Escape key", () => {
 		render(<AddMemberModal {...defaultProps} />);
-		fireEvent.keyDown(document, { key: "Escape" });
+		// Dispatch from a real descendant inside the content wrapper (not
+		// `document`) — the wrapper has its own stopPropagation-on-keydown
+		// guard, so firing on `document` bypasses the DOM tree entirely and
+		// would pass even if that guard swallowed Escape before it could bubble.
+		fireEvent.keyDown(screen.getAllByTestId("contact-option")[0], { key: "Escape" });
 		expect(defaultProps.onClose).toHaveBeenCalled();
 	});
 

@@ -1119,7 +1119,9 @@ function StatusEditor({
 			<div
 				data-testid="status-editor"
 				onClick={(e) => e.stopPropagation()}
-				onKeyDown={(e) => e.stopPropagation()}
+				onKeyDown={(e) => {
+					if (e.key !== "Escape") e.stopPropagation();
+				}}
 				style={{
 					background: "var(--bg-surface)",
 					border: "1px solid var(--border-soft)",
@@ -10456,7 +10458,9 @@ export function ChatLayout() {
 							boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
 						}}
 						onClick={(e) => e.stopPropagation()}
-						onKeyDown={(e) => e.stopPropagation()}
+						onKeyDown={(e) => {
+							if (e.key !== "Escape") e.stopPropagation();
+						}}
 					>
 						<div
 							style={{
@@ -10706,7 +10710,9 @@ function KeyboardShortcutsModal({ open, onClose }: { open: boolean; onClose: () 
 		>
 			<div
 				onClick={(e) => e.stopPropagation()}
-				onKeyDown={(e) => e.stopPropagation()}
+				onKeyDown={(e) => {
+					if (e.key !== "Escape") e.stopPropagation();
+				}}
 				style={{
 					background: "var(--bg-void)",
 					border: "1px solid var(--border-soft)",

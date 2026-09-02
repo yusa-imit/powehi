@@ -171,6 +171,33 @@ describe("ChatLayout — message forwarding", () => {
 		expect(screen.queryByTestId("forward-modal")).not.toBeInTheDocument();
 	});
 
+	it("pressing Escape inside the modal dismisses it", async () => {
+		let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
+		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_id, _gid, onMsg) => {
+			capturedOnMessage = onMsg;
+		});
+		render(<ChatLayout />);
+
+		await act(async () => {
+			capturedOnMessage?.({
+				id: "fwd-escape-uuid-0005",
+				senderId: "peer-device-fwd",
+				groupId: "11111111-1111-1111-1111-111111111111",
+				text: "Escape the modal",
+				ciphertextB64: "Zg==",
+				epochSeq: 1,
+			});
+		});
+
+		const bubbles = screen.getAllByTestId("message-bubble");
+		fireEvent.mouseEnter(bubbles[bubbles.length - 1]);
+		fireEvent.click(screen.getByTestId("forward-button"));
+		expect(screen.getByTestId("forward-modal")).toBeInTheDocument();
+
+		fireEvent.keyDown(screen.getByTestId("forward-modal-close"), { key: "Escape" });
+		expect(screen.queryByTestId("forward-modal")).not.toBeInTheDocument();
+	});
+
 	it("forward modal shows 'No other conversations' when no other chat has an MLS session", async () => {
 		let capturedOnMessage: ((msg: IncomingMessage) => void) | undefined;
 		vi.spyOn(UseMessagesModule, "useMessages").mockImplementation((_id, _gid, onMsg) => {

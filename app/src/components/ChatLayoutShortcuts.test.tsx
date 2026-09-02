@@ -112,7 +112,11 @@ describe("keyboard shortcuts modal", () => {
 		});
 		expect(screen.getByTestId("keyboard-shortcuts-modal")).toBeInTheDocument();
 		await act(async () => {
-			fireEvent.keyDown(screen.getByTestId("keyboard-shortcuts-modal"), { key: "Escape" });
+			// Dispatch from a real descendant (the close button, inside the content
+			// wrapper) rather than the outer dialog testid itself — the content
+			// wrapper has its own stopPropagation-on-keydown guard, so firing
+			// directly on the dialog would pass even if that guard swallowed Escape.
+			fireEvent.keyDown(screen.getByTestId("keyboard-shortcuts-close"), { key: "Escape" });
 		});
 		expect(screen.queryByTestId("keyboard-shortcuts-modal")).not.toBeInTheDocument();
 	});
