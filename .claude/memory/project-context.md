@@ -17,7 +17,137 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-09-02, cycle 414 — FEATURE: add missing Icon.tsx test coverage, commit ce4e6d0)
+## Current state (2026-09-02, cycle 415 — STABILIZATION: real-socket integration coverage for powehi-ws-hub's connection loop, commits 432336f + c8178d7)
+
+- CI green (`gh run list --limit 5` all success), `git status` clean at cycle
+  start. `cargo deny check` clean, `pnpm audit` (app/) clean. `cargo audit`
+  still hangs indefinitely at "Scanning Cargo.lock for vulnerabilities" in
+  this shell environment (progressed past the old "Updating crates.io index"
+  hang point this cycle, but still never produced a final result across 3
+  more attempts, including a manual background-kill wrapper) — not a
+  blocker, `cargo deny check`'s `advisories ok` covers the same RustSec DB;
+  this is now confirmed persistent across cycles 414→415, worth a future
+  cycle actually investigating the root cause (proxy/network config?) rather
+  than re-attempting blindly. `cargo test --workspace` (748+ tests) and
+  `npx vitest run` (110 files/1552 tests) both green at cycle start; `tsc -b`
+  and `biome check .` clean.
+- **Delegated a fresh STABILIZATION-focused gap scan to an Explore agent**
+  (test-coverage-at-assertion-level, security-adjacent gaps, `#[allow(...)]`
+  suppressions, doc/code drift) rather than repeating the same TODO/glyph
+  greps cycles 413/414 already drained. It returned 5 ranked candidates but
+  **3 of the top 4 turned out to be stale/wrong on verification** — the
+  agent searched only within individual route files under
+  `powehi-rest-api/src/routes/*.rs` and missed that this crate's actual test
+  home is one giant `#[cfg(test)] mod tests` in `src/lib.rs` (not
+  co-located per-route): `key_package.rs`'s ownership-check/malformed-input
+  paths, `auth.rs`'s revoke-device anti-oracle, `media.rs`'s upload
+  size-bound, and `messaging.rs`'s TTL-range/`since_id`-without-`since`
+  guards were ALL already covered there (`upload_key_packages_cross_
+  device_returns_401`, `revoke_non_owned_device_returns_401`,
+  `media_upload_size_too_large_returns_400`,
+  `poll_with_since_id_but_no_since_returns_400`, etc. — all found via grep
+  before writing any code). **Lesson for future scans: a file having no
+  local `#[cfg(test)]` module does NOT mean the route is untested in this
+  codebase — always grep the crate's `lib.rs` test module by handler/
+  behavior name before trusting a "zero coverage" claim.**
+- **The one candidate that held up: `powehi-ws-hub/src/handler.rs`'s
+  `handle_socket` connection loop had zero coverage through a real socket.**
+  `filter_notification` and `PingRateLimiter` were already thoroughly unit-
+  tested (confirmed by reading the file), but three loop-level behaviors
+  were untested: (1) fail-closed empty-groups path when `GroupRepository::
+  list_groups_for_device` errors, (2) `RecvError::Lagged` handling on a
+  stalled receiver (skip missed frames, keep connection alive — not
+  disconnect), (3) missing-`Authorization`-header 401 rejection at the wire
+  level (previously only unit-tested at the `extract_device_id` function
+  level, never through an actual upgrade attempt).
+- **Fix:** new `crates/adapters/inbound/powehi-ws-hub/tests/websocket_loop.rs`
+  — a real integration test spinning up `axum::serve` on a
+  `TcpListener::bind("127.0.0.1:0")` and connecting a real
+  `tokio-tungstenite` WS client. Added `tokio-tungstenite = "0.24"` as a
+  crate-local `[dev-dependencies]` entry (already resolved transitively at
+  this exact version via axum 0.7's own `ws` feature per
+  `cargo tree -i tokio-tungstenite -e normal` — zero new package entries in
+  `Cargo.lock`, confirmed by diff). 3 tests: `membership_load_failure_
+  upgrades_but_delivers_nothing` (dispatches a notification for a foreign
+  group after a simulated DB-error membership load, asserts no frame within
+  300ms, THEN a positive-control self-addressed `MemberAdded` barrier frame
+  to prove the connection was alive/responsive rather than hung — added
+  after security-auditor flagged the bare timeout-only version as a
+  deadline-based negative assertion that could pass vacuously on a loaded
+  CI runner); `lagged_receiver_stays_connected_and_keeps_receiving` (floods
+  562 synchronous `hub.dispatch()` calls with no `.await` in a
+  `#[tokio::test(flavor = "current_thread")]` test to deterministically
+  starve `handle_socket`'s task of any chance to drain the ring buffer,
+  forcing a real `RecvError::Lagged`, then asserts the connection survives
+  and still delivers one final in-scope notification);
+  `upgrade_without_authorization_header_returns_401` (wire-level auth-bypass
+  coverage, `testing-conventions.md`'s explicit "auth bypass impossible"
+  gate — added at security-auditor's suggestion since the crate's HTTP
+  harness was new this cycle and the check was "nearly free").
+- **Mutation-tested both original findings myself before committing** (same
+  discipline as cycle 406's lesson): temporarily changed the `Lagged` arm
+  from `continue` to `break` in `handler.rs` — confirmed
+  `lagged_receiver_stays_connected_and_keeps_receiving` fails with a
+  `Protocol(ResetWithoutClosingHandshake)` panic; temporarily changed the
+  fail-closed `Err(_) => Vec::new()` branch to `.unwrap()` — confirmed
+  `membership_load_failure_upgrades_but_delivers_nothing` fails via a
+  propagated panic. Reverted both (`git diff` confirmed zero net change to
+  `handler.rs`) before writing the real tests.
+- **security-auditor: PASS, 5 low/informational findings, 3 fixed before
+  commit.** Fixed: (1) unused direct `http = "1"` dev-dependency (dead
+  weight + version-skew footgun since tungstenite's own `http` re-export
+  already provided `HeaderValue`) — removed; (2) the fail-closed test's
+  doc-comment over-claimed "zero notifications until reconnect" when a
+  self-addressed `MemberAdded` legitimately still gets through by design
+  (matches `handler.rs`'s own documented race-acceptance comment) — reworded
+  to be precise, and added the positive-control barrier frame described
+  above; (3) added the wire-level 401 test (finding #5, "nearly free").
+  **Not fixed, judged acceptable:** un-aborted `axum::serve` background task
+  per test (each `#[tokio::test]` gets its own runtime, dropped at test end —
+  auditor confirmed nothing outlives the test); `.unwrap()` on the spawned
+  serve task (diagnostics-only concern, test-only code).
+- Not crypto logic (no `.rs` file under `powehi-crypto-wasm`/`powehi-mls`/
+  `powehi-opaque` touched) — `crypto-reviewer` correctly not invoked; not
+  architectural (test-only, zero production code changed in `handler.rs` —
+  confirmed via `git diff --stat` showing only `Cargo.toml`/`Cargo.lock`/the
+  new test file) — `threat-model-checker` correctly not invoked;
+  `security-auditor` invoked proactively (backend-adapter-adjacent + new
+  Cargo dependency) even though not strictly a "handler" change, consistent
+  with cycle 403's precedent for security-adjacent-but-not-strictly-gated
+  diffs.
+- **Process gap this cycle: forgot to run `cargo fmt` before the first
+  commit (432336f)** — CI's Format check job caught it immediately (`cargo
+  fmt --check` failed on 4 long function signatures/match arms in the new
+  test file). Fixed with a second commit (c8178d7, `cargo fmt` applied,
+  re-verified tests still pass) rather than amending, since 432336f was
+  already pushed. **Lesson: run `cargo fmt --check` (not just `clippy`/
+  `test`) as a standard pre-commit step for every Rust diff, especially
+  longer integration-test files with multi-arg function signatures that are
+  likely to trip fmt's line-length wrapping.** Watched both CI runs
+  (`33581768868` CI—Rust, `33581768872` CI—Live-backend E2E) to green via
+  `gh run watch --exit-status` before ending the cycle, not just push-and-
+  assume.
+- Target dir hygiene (STABILIZATION, due this cycle): `du -sh target/` = 12G,
+  under the 20G prune threshold — pruned only 0-byte `.rmeta` stubs (routine
+  step), no further action needed. Re-check again around cycle 420.
+- **Next cycle candidates:** none carried with confidence. The Explore
+  agent's fresh-scan pattern (cycles 413/414/415) is now hitting diminishing
+  returns — 3 of its last 5 candidates were stale re-discoveries of
+  already-tested code, only findable-as-real by manually grepping `lib.rs`'s
+  test module first. A future cycle should either (a) explicitly instruct
+  the scanning agent to check `src/lib.rs`'s test module by behavior name
+  before reporting a "no coverage" finding in `powehi-rest-api`, or (b) pick
+  a different crate/layer to scan (frontend hooks/stores, `powehi-grpc`,
+  `powehi-postgres` adapter edge cases) rather than re-scanning
+  `powehi-rest-api` again. The PQ Phase A prerequisite decision (ml-kem
+  0.2.3→0.3.2 + libcrux/x-wing admissibility, open since cycle 407) remains
+  a human/crypto-lead policy call, not a blind retry. The persistent
+  `cargo audit` hang (noted above, now 2 cycles running) is worth a real
+  investigation if a future cycle has spare time — e.g. checking for a
+  proxy env var, DNS issue, or trying `cargo audit --db <local-path>` to
+  skip the network fetch entirely.
+
+## Previous state (2026-09-02, cycle 414 — FEATURE: add missing Icon.tsx test coverage, commit ce4e6d0)
 
 - CI green (`gh run list --limit 5` all success), `git status` clean at cycle
   start. Repeated the now-standard fresh-scan approach since no candidate was
