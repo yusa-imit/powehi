@@ -17,7 +17,90 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
-## Current state (2026-09-02, cycle 418 — FEATURE: implement the local-only block-contact feature (InfoPanel), commit ac750cb)
+## Current state (2026-09-02, cycle 419 — FEATURE: prove R2 delete's crash self-heal with a regression test, commit 2ef9d89)
+
+- CI green at cycle start (`gh run list --limit 5` all success), `git status`
+  clean, `gh issue list --state open` empty. **Found and fixed a tooling gap
+  first:** the Bash tool's default `$PATH` in this environment does not
+  include `~/.cargo/bin`, so bare `cargo ...` invocations fail with "command
+  not found" — this, not a real hang, is almost certainly what cycles
+  414/415/418 logged as a "persistent `cargo audit` hang" (2+ cycles noted,
+  never actually reproduced once PATH was fixed). Confirmed clean with the
+  correct PATH: `cargo audit` (0 vulnerabilities, ~5s, no hang), `cargo deny
+  check` (advisories/bans/licenses/sources all ok), `pnpm audit` in `/app`
+  (no known vulnerabilities). **Action for future cycles:** `export
+  PATH="$HOME/.cargo/bin:$PATH"` before any `cargo`/`cargo-audit`/`cargo-deny`
+  invocation in a fresh Bash call, or the same false "hang" will recur.
+- Delegated an Explore-style research pass (no code changes) to find a
+  concrete next task since memory's own carried-candidate list was empty
+  with confidence. It ranked a real, previously-flagged-but-never-tested gap
+  top: `R2MediaAdapter::delete` (`crates/adapters/outbound/powehi-r2/src/lib.rs:255-272`)
+  deletes the S3 object before the Postgres row; a crash between the two
+  steps leaves an orphaned row pointing at a deleted object. A cycle-372
+  security-auditor pass had judged this "self-healing" (retried `delete()`
+  just re-issues an idempotent S3 DELETE-on-missing-key, then finishes the
+  DB delete) but nobody had ever written a test proving that recovery path
+  actually works.
+- **What it does:** added
+  `delete_retry_after_crash_between_s3_and_db_steps_is_idempotent` to
+  `crates/adapters/outbound/powehi-r2/tests/r2_media_it.rs` (testcontainers
+  Postgres+MinIO, `#[ignore]`, runs in CI via the existing `r2_media_it`
+  nextest binary). It uploads real bytes through the adapter's presigned
+  URL, deletes the object directly via the raw S3 client (reproducing the
+  exact post-crash state: object gone, row still present — since `delete()`
+  has no intermediate state beyond those two ordered calls), asserts that
+  state, then retries `adapter.delete()` and asserts it succeeds and
+  finishes removing the row. Also tightened the file's header doc-comment
+  list to describe the new coverage.
+- Not crypto (no `.rs` crypto/MLS/OPAQUE/WASM file touched) — `crypto-reviewer`
+  correctly not invoked. Not architectural/new-metadata (test-only, no new
+  API surface, no DB schema change) — `threat-model-checker` correctly not
+  invoked. Ran `security-auditor` anyway (backend adapter behavior,
+  data-integrity-adjacent): **verdict GREEN**, no blocking findings. It
+  confirmed the test reproduces the crash state with no timing assumption,
+  no plaintext/PII/secret leakage (synthetic `b"opaque-ciphertext-bytes"`
+  body, matches existing fixture conventions), no flakiness (each test gets
+  its own fresh Postgres+MinIO container pair, `TEST_BUCKET` is a per-container
+  name not shared mutable state), and that the 3 tests together
+  (`delete_removes_s3_object_and_row`, this new test,
+  `delete_nonexistent_id_is_a_noop`) now cover all 3 reachable
+  {S3 object, DB row} states along `delete()`'s crash timeline. One
+  **non-blocking LOW finding, deferred (see next-cycle candidates)**: the
+  4th state — S3 object present, DB row absent (e.g. a succeeded presigned
+  PUT whose row was never/no-longer persisted) — is untested AND
+  unreachable by `delete()` itself (`find_by_id` returns `None`, short-
+  circuiting the S3 call), so such an object leaks permanently; needs an
+  orphan-object sweeper, not a change to this test.
+- Verified before commit: `cargo test -p powehi-r2 --test r2_media_it
+  --no-run` compiles clean (no Docker available in this sandbox to actually
+  run the `#[ignore]`d testcontainers tests locally — CI's `ci-rust.yml` runs
+  them via `cargo nextest run -p powehi-r2 --run-ignored all -E
+  'binary(r2_media_it)'` with real Docker); `cargo clippy -p powehi-r2
+  --all-targets -- -D warnings` clean; `cargo fmt --check` clean (one nit
+  auto-fixed: chained method call formatting); `cargo build --workspace`
+  clean; `cargo test --workspace` (fallback, no nextest installed in this
+  environment either — noted for future cycles) 0 failures across every
+  crate.
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates:**
+  1. Orphan-object sweeper for the S3-object-present/DB-row-absent state
+     flagged by this cycle's security-auditor pass (storage cost + data-
+     retention exposure) — needs a design decision (periodic sweep vs.
+     upload-confirmation transaction) before implementation, good backend-lead
+     task.
+  2. `pnpm PATH` note above should be treated as durable tooling knowledge,
+     not re-investigated as a mystery hang.
+  3. Carried from cycle 407: PQ hybrid Phase A prerequisite (ml-kem
+     0.2.3→0.3.2 + libcrux/x-wing admissibility) remains a human/crypto-lead
+     policy call, not a blind retry.
+  4. A separate Explore-agent pass (informal, not authoritative) flagged
+     prd.md §6.4's "차단된 IP/사용자 → 전 리전 전파 (Redis pub/sub 또는 gRPC)"
+     cross-region abuse-signal propagation as documented-but-unimplemented —
+     worth a threat-model-checker-gated scoping pass before committing to
+     implementation size, since it's a real architectural change (new
+     inter-region signal), not confirmed cycle-sized.
+
+## Previous state (2026-09-02, cycle 418 — FEATURE: implement the local-only block-contact feature (InfoPanel), commit ac750cb)
 
 - CI green at cycle start (`gh run list --limit 3` all success). `git status`
   was **not clean**: `app/src/components/ChatLayout.tsx` and
