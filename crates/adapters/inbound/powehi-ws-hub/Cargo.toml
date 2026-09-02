@@ -18,3 +18,10 @@ async-trait = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 futures-util = "0.3"
+
+[dev-dependencies]
+# Real WebSocket client for connection-loop integration tests (test-only; not
+# part of the crypto-libraries-pinned list since it carries no crypto). Header
+# types are reached via tokio-tungstenite's own `http` re-export rather than a
+# second direct `http` dependency, to avoid a version-skew footgun.
+tokio-tungstenite = "0.24"
