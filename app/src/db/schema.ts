@@ -156,6 +156,9 @@ export interface GroupRow {
 	 * never sent to server. Not sensitive — an opaque timestamp, not content, same tier as
 	 * pinnedMessageId/unread. undefined = never gone offline / no data yet. */
 	lastSeenAt?: number;
+	/** True when the local user has blocked this contact. Local-only, never sent to server.
+	 * Not sensitive — a boolean flag, like muted/vibrate. */
+	blocked?: boolean;
 }
 
 // LocalIdentity — singleton device identity record.
@@ -518,6 +521,17 @@ export class PowehiDb extends Dexie {
 		// oversight). No index change needed — mediaJson is never queried, only read/
 		// written per-row, like pollJson/replyToJson.
 		this.version(27).stores({
+			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
+			groups: "id, lastActivity",
+			identity: "id",
+			verifiedContacts: "contactId, verifiedAt",
+		});
+		// v28: added blocked to GroupRow — the InfoPanel "Block · Report" button (previously
+		// dead, rendered with zero handler since the very first mock-UI commit) now actually
+		// blocks the contact and survives a reload, same gap archived/pinnedTop had before
+		// v18. Not sensitive (a boolean flag, like muted/archived) — no index change needed,
+		// never queried across groups, only read/written per-group.
+		this.version(28).stores({
 			messages: "id, groupId, epochSeq, receivedAt, expiresAt",
 			groups: "id, lastActivity",
 			identity: "id",

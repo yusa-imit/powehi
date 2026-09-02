@@ -129,6 +129,10 @@ interface Chat {
 	members?: ChatMember[];
 	/** When true, incoming messages do not increment the unread badge. Local-only, never sent to server. */
 	muted?: boolean;
+	/** True when the local user has blocked this contact (local-only, not synced). Incoming
+	 * messages are still persisted (schema v28) but suppressed from the visible chat/sidebar
+	 * preview/notifications while blocked. */
+	blocked?: boolean;
 	/** When false, incoming messages do not trigger notification sounds. Local-only, never sent to server. */
 	sound?: boolean;
 	/** Selected notification sound id for this chat. Local-only, never sent to server. undefined behaves as "default". */
@@ -1426,6 +1430,16 @@ function ChatRow({
 							style={{ display: "flex", alignItems: "center" }}
 						>
 							<Icon name="bell-off" size={11} color="var(--fg-3)" />
+						</span>
+					)}
+					{chat.blocked && (
+						<span
+							data-testid="blocked-icon"
+							title="Blocked"
+							aria-hidden="true"
+							style={{ display: "flex", alignItems: "center" }}
+						>
+							<Icon name="alert" size={11} color="#FF9999" />
 						</span>
 					)}
 				</div>
@@ -4964,6 +4978,8 @@ function InfoPanel({
 	onToggleVibrate,
 	archived,
 	onToggleArchive,
+	blocked,
+	onToggleBlock,
 	pinnedTop,
 	onTogglePinTop,
 	myHandle,
@@ -4992,6 +5008,8 @@ function InfoPanel({
 	onToggleVibrate: () => void;
 	archived: boolean;
 	onToggleArchive: () => void;
+	blocked: boolean;
+	onToggleBlock: () => void;
 	pinnedTop: boolean;
 	onTogglePinTop: () => void;
 	myHandle?: string;
@@ -5016,6 +5034,16 @@ function InfoPanel({
 	const [nicknameDraft, setNicknameDraft] = useState("");
 	const [clearConfirm, setClearConfirm] = useState(false);
 	const [exportConfirm, setExportConfirm] = useState(false);
+	const [blockConfirm, setBlockConfirm] = useState(false);
+	// Reset the block confirmation dialog when switching chats — InfoPanel has no
+	// key={active.id}, so without this, arming the dialog on chat A then switching to
+	// chat B and confirming would silently block chat B instead (wrong target). Mirrors
+	// the computedSafetyNumber per-chat reset below (Y2) — same precedent, same fix
+	// shape (security-auditor finding).
+	// biome-ignore lint/correctness/useExhaustiveDependencies: chat.id is the trigger; setBlockConfirm is stable
+	useEffect(() => {
+		setBlockConfirm(false);
+	}, [chat.id]);
 	const [safetyVerified, setSafetyVerified] = useState(false);
 	const [verifiedAt, setVerifiedAt] = useState<number | undefined>(undefined);
 	const [mitmAlert, setMitmAlert] = useState(false);
@@ -5202,6 +5230,29 @@ function InfoPanel({
 						<>@{chat.handle}</>
 					)}
 				</div>
+				{blocked && (
+					<div
+						data-testid="info-panel-blocked-badge"
+						style={{
+							display: "inline-flex",
+							alignItems: "center",
+							gap: 4,
+							marginTop: 8,
+							fontSize: 11,
+							fontWeight: 600,
+							letterSpacing: "0.06em",
+							textTransform: "uppercase",
+							color: "#FF9999",
+							background: "rgba(255,100,100,0.1)",
+							border: "1px solid rgba(255,100,100,0.3)",
+							borderRadius: 4,
+							padding: "2px 7px",
+						}}
+					>
+						<Icon name="alert" size={10} color="#FF9999" />
+						Blocked
+					</div>
+				)}
 				<div
 					style={{
 						display: "flex",
@@ -6265,9 +6316,92 @@ function InfoPanel({
 						Clear messages
 					</button>
 				)}
-				<button type="button" style={destructiveButton}>
-					Block · Report
-				</button>
+				{blocked ? (
+					<button
+						type="button"
+						data-testid="unblock-button"
+						onClick={onToggleBlock}
+						style={destructiveButton}
+					>
+						Unblock
+					</button>
+				) : blockConfirm ? (
+					<div
+						data-testid="block-confirm"
+						style={{
+							background: "var(--bg-elevated)",
+							border: "1px solid var(--border-soft)",
+							borderRadius: 10,
+							padding: "10px 14px",
+							display: "flex",
+							flexDirection: "column",
+							gap: 6,
+						}}
+					>
+						<span
+							style={{
+								color: "var(--fg-2)",
+								fontFamily: "var(--font-sans)",
+								fontSize: 13,
+								textAlign: "center",
+							}}
+						>
+							Block this contact? You won't receive their messages until you unblock.
+						</span>
+						<div style={{ display: "flex", gap: 6 }}>
+							<button
+								type="button"
+								data-testid="block-cancel"
+								onClick={() => setBlockConfirm(false)}
+								style={{
+									flex: 1,
+									background: "var(--bg-elevated)",
+									border: "1px solid var(--border-soft)",
+									borderRadius: 8,
+									padding: "7px 0",
+									cursor: "pointer",
+									color: "var(--fg-2)",
+									fontFamily: "var(--font-sans)",
+									fontSize: 13,
+									fontWeight: 500,
+								}}
+							>
+								Cancel
+							</button>
+							<button
+								type="button"
+								data-testid="block-confirm-btn"
+								onClick={() => {
+									onToggleBlock?.();
+									setBlockConfirm(false);
+								}}
+								style={{
+									flex: 1,
+									background: "rgba(205,48,63,0.14)",
+									border: "1px solid rgba(205,48,63,0.32)",
+									borderRadius: 8,
+									padding: "7px 0",
+									cursor: "pointer",
+									color: "#E05261",
+									fontFamily: "var(--font-sans)",
+									fontSize: 13,
+									fontWeight: 600,
+								}}
+							>
+								Block
+							</button>
+						</div>
+					</div>
+				) : (
+					<button
+						type="button"
+						data-testid="block-button"
+						onClick={() => setBlockConfirm(true)}
+						style={destructiveButton}
+					>
+						Block
+					</button>
+				)}
 			</div>
 		</aside>
 	);
@@ -7528,6 +7662,33 @@ export function ChatLayout() {
 		setChats((cs) =>
 			cs.map((c) => {
 				if (c.mlsGroupId !== groupId) return c;
+				// Blocked chats: suppress merging Dexie-sourced rows into the visible list
+				// entirely — reads `c.blocked` fresh from this functional updater (not a
+				// stale closure), so a message that arrived while this chat was blocked (in
+				// the background, or reopened while still blocked) never surfaces just
+				// because the chat is (re)selected. persistIncoming/markMessage* above still
+				// wrote it to Dexie unconditionally, so it's not lost — this only gates what
+				// gets merged into React state. Full history (including anything that landed
+				// while blocked) reappears once unblocked, the next time this effect re-runs.
+				// Narrower residual race (accepted, not closed here — see security-auditor
+				// finding, this cycle): on a fresh mount this reads the in-memory `c.blocked`,
+				// which is itself set by a separate effect's own async db.groups.get() below
+				// — if `rows` resolves first, a message that arrived while persisted-blocked
+				// could momentarily merge before that effect's flag catches up. Gating on a
+				// second direct Dexie read here instead was tried and reverted: it broke the
+				// "apply persisted pin/firstUnread" effects further down, which depend on
+				// `rows` and run in the same synchronous pass as this effect used to — they
+				// have no way to re-run once this effect's merge is deferred behind an extra
+				// microtask, so the pinned/unread-divider restore silently stopped finding the
+				// now-later-arriving message. Fixing both together is a larger sequencing
+				// change than this cycle's scope. NOT mount-time only (security-auditor
+				// correction, this cycle): `blocked` only ever hydrates for the chat that's
+				// actually selected (there's no bulk load of every GroupRow's `blocked` flag
+				// on startup), and useMessages fires its poll immediately on every group
+				// switch — so this window recurs on EVERY switch into a blocked chat, not
+				// just first mount, and is worst exactly when a server-side backlog bursts
+				// in at that moment.
+				if (c.blocked) return c;
 				let anyReconciled = false;
 				// NOTE (security-auditor finding, cycle 339, accepted/deferred): this loop only
 				// updates ids still present in Dexie — `!fresh` returns `m` unchanged, it never
@@ -7650,6 +7811,7 @@ export function ChatLayout() {
 								unread: row.unread ?? c.unread,
 								archived: row.archived ?? c.archived,
 								pinnedTop: row.pinnedTop ?? c.pinnedTop,
+								blocked: row.blocked ?? c.blocked,
 								lastSeen: persistedLastSeen ?? c.lastSeen,
 							};
 						}),
@@ -7781,68 +7943,103 @@ export function ChatLayout() {
 					if (c.mlsGroupId !== msg.groupId) return c;
 					const now = new Date();
 					const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-					const msgs = [...c.messages];
-					for (let i = msgs.length - 1; i >= 0; i--) {
-						if (msgs[i].from === "them" && msgs[i].last) {
-							msgs[i] = { ...msgs[i], last: false, continued: true };
-							break;
+					const isActive = c.id === activeIdRef.current;
+					// Blocked chats: persistIncoming (below, outside this map) still writes the
+					// message to Dexie unconditionally so history is preserved for if the user
+					// unblocks later, but — unlike muting, which still shows the message just
+					// without alerting — a blocked chat's message must NOT be appended to the
+					// visible list or reflected in the sidebar preview (last/time). The append-
+					// only work below (continued-marking, displayText, day divider, mention
+					// detection) is specific to that visible append, so it's skipped entirely
+					// rather than computed and discarded.
+					let msgs = c.messages;
+					let last = c.last;
+					let previewTime = c.time;
+					let mentionCount = c.mentionCount;
+					// Auto-unarchive-on-incoming-message must NOT fire for a blocked chat (fix
+					// below, security-auditor YELLOW): otherwise a blocked contact's suppressed
+					// message would still observably un-archive the chat, leaking "a blocked
+					// contact messaged you" even though the message itself is hidden.
+					let archived = c.archived;
+					if (!c.blocked) {
+						const nextMsgs = [...c.messages];
+						for (let i = nextMsgs.length - 1; i >= 0; i--) {
+							if (nextMsgs[i].from === "them" && nextMsgs[i].last) {
+								nextMsgs[i] = { ...nextMsgs[i], last: false, continued: true };
+								break;
+							}
 						}
-					}
-					const displayText = msg.media
-						? msg.media.chunked === true
-							? "Video attachment"
-							: "Image attachment"
-						: msg.text;
-					const dayLabel = getDayLabel(now.getTime());
-					// Find the last explicitly-set day label in the history (sparse field).
-					let prevDay: string | undefined;
-					for (let j = msgs.length - 1; j >= 0; j--) {
-						if (msgs[j].day) {
-							prevDay = msgs[j].day;
-							break;
+						const displayText = msg.media
+							? msg.media.chunked === true
+								? "Video attachment"
+								: "Image attachment"
+							: msg.text;
+						const dayLabel = getDayLabel(now.getTime());
+						// Find the last explicitly-set day label in the history (sparse field).
+						let prevDay: string | undefined;
+						for (let j = nextMsgs.length - 1; j >= 0; j--) {
+							if (nextMsgs[j].day) {
+								prevDay = nextMsgs[j].day;
+								break;
+							}
 						}
+						nextMsgs.push({
+							id: msg.id,
+							from: "them",
+							text: displayText,
+							last: true,
+							time,
+							ts: now.getTime(),
+							day: dayLabel !== prevDay ? dayLabel : undefined,
+							continued: nextMsgs.length > 0 && nextMsgs[nextMsgs.length - 1].from === "them",
+							media: msg.media,
+							expiresAt: msg.expiresAt,
+							replyTo: msg.replyTo,
+						});
+						msgs = nextMsgs;
+						last = displayText;
+						previewTime = time;
+						// @mention detection for group chats: increment when text contains @all,
+						// @everyone, or @<myHandle> (case-insensitive). Cleared when chat is opened.
+						const rawLower = msg.text.toLowerCase();
+						const mh = useAuthStore.getState().myHandle?.toLowerCase();
+						const isMention =
+							!isActive &&
+							!!c.isGroup &&
+							(rawLower.includes("@all") ||
+								rawLower.includes("@everyone") ||
+								(!!mh && rawLower.includes(`@${mh}`)));
+						mentionCount = isMention ? (c.mentionCount ?? 0) + 1 : c.mentionCount;
+						archived = c.archived ? false : c.archived;
 					}
-					msgs.push({
-						id: msg.id,
-						from: "them",
-						text: displayText,
-						last: true,
-						time,
-						ts: now.getTime(),
-						day: dayLabel !== prevDay ? dayLabel : undefined,
-						continued: msgs.length > 0 && msgs[msgs.length - 1].from === "them",
-						media: msg.media,
-						expiresAt: msg.expiresAt,
-						replyTo: msg.replyTo,
-					});
+					// Opening/reselecting a chat always clears its mentionCount, whether or not
+					// it's blocked — this reset is "you looked at this conversation", unrelated to
+					// the append-suppression above. Applying it unconditionally (rather than only
+					// inside the `!c.blocked` branch) keeps this in sync with the outer
+					// nextMentionCount persist below, which already resets to 0 for the active
+					// chat regardless of blocked (security-auditor LOW — the two had diverged:
+					// Dexie got 0 but in-memory kept the stale value for a blocked+active chat).
+					if (isActive) mentionCount = 0;
 					// Increment unread only when the message arrives for a background chat.
 					// activeIdRef.current reflects the current selection without making this
 					// callback re-create on every chat switch.
-					const isActive = c.id === activeIdRef.current;
 					// Track the index of the first unread message so MessageList can render
 					// the "New Messages" divider at the right position.
-					// Muted chats skip the divider too — no unread tracking for muted chats.
+					// Muted and blocked chats both skip the divider — no unread tracking for
+					// either (independent flags, combined here — a chat can be either/both).
 					const firstUnreadAt =
-						!isActive && !c.muted && c.unread === 0 ? msgs.length - 1 : c.firstUnreadAt;
-					// @mention detection for group chats: increment when text contains @all,
-					// @everyone, or @<myHandle> (case-insensitive). Cleared when chat is opened.
-					const rawLower = msg.text.toLowerCase();
-					const mh = useAuthStore.getState().myHandle?.toLowerCase();
-					const isMention =
-						!isActive &&
-						!!c.isGroup &&
-						(rawLower.includes("@all") ||
-							rawLower.includes("@everyone") ||
-							(!!mh && rawLower.includes(`@${mh}`)));
+						!isActive && !c.muted && !c.blocked && c.unread === 0
+							? msgs.length - 1
+							: c.firstUnreadAt;
 					return {
 						...c,
 						messages: msgs,
-						last: displayText,
-						time,
-						unread: isActive ? 0 : c.muted ? c.unread : c.unread + 1,
+						last,
+						time: previewTime,
+						unread: isActive ? 0 : c.muted || c.blocked ? c.unread : c.unread + 1,
 						firstUnreadAt: isActive ? undefined : firstUnreadAt,
-						mentionCount: isActive ? 0 : isMention ? (c.mentionCount ?? 0) + 1 : c.mentionCount,
-						archived: c.archived ? false : c.archived,
+						mentionCount,
+						archived,
 					};
 				}),
 			);
@@ -7860,6 +8057,7 @@ export function ChatLayout() {
 				const mhIncoming = useAuthStore.getState().myHandle?.toLowerCase();
 				const isMentionIncoming =
 					!isActiveIncoming &&
+					!incomingChat.blocked &&
 					!!incomingChat.isGroup &&
 					(rawLowerIncoming.includes("@all") ||
 						rawLowerIncoming.includes("@everyone") ||
@@ -7872,55 +8070,79 @@ export function ChatLayout() {
 				// Same recompute-from-snapshot approach for unread + the first-unread marker:
 				// the marker is only ever set once (the transition from 0 unread to 1), then
 				// left alone until cleared — mirrors the in-memory firstUnreadAt index logic.
+				// muted and blocked are independent flags (a chat could have either/both) — both
+				// suppress the increment, combined below rather than replacing either check.
 				const wasZeroUnread = incomingChat.unread === 0;
 				const nextUnread = isActiveIncoming
 					? 0
-					: incomingChat.muted
+					: incomingChat.muted || incomingChat.blocked
 						? incomingChat.unread
 						: incomingChat.unread + 1;
-				const setsFirstUnread = !isActiveIncoming && !incomingChat.muted && wasZeroUnread;
+				const setsFirstUnread =
+					!isActiveIncoming && !incomingChat.muted && !incomingChat.blocked && wasZeroUnread;
 				const groupUpdate: Partial<GroupRow> = {};
 				if (nextMentionCount !== incomingChat.mentionCount)
 					groupUpdate.mentionCount = nextMentionCount;
 				if (nextUnread !== incomingChat.unread) groupUpdate.unread = nextUnread;
 				if (setsFirstUnread) groupUpdate.firstUnreadMessageId = msg.id;
 				// Mirror the in-memory auto-unarchive-on-incoming-message rule (line ~7655) so
-				// the persisted archived flag doesn't go stale relative to the sidebar.
-				if (incomingChat.archived) groupUpdate.archived = false;
+				// the persisted archived flag doesn't go stale relative to the sidebar. Guarded
+				// on !blocked too (security-auditor YELLOW) — a blocked contact's suppressed
+				// message must not un-archive the chat, in Dexie any more than in memory.
+				if (incomingChat.archived && !incomingChat.blocked) groupUpdate.archived = false;
 				if (Object.keys(groupUpdate).length > 0) {
 					db.groups.update(msg.groupId, groupUpdate).catch(() => {});
 				}
 			}
-			if (incomingChat && !incomingChat.muted && (incomingChat.vibrate ?? true)) {
+			if (
+				incomingChat &&
+				!incomingChat.muted &&
+				!incomingChat.blocked &&
+				(incomingChat.vibrate ?? true)
+			) {
 				navigator.vibrate?.([100]);
 			}
 			// Play a short synthesized notification tone unless sound is disabled or the chat is
-			// muted. Only an opaque NotificationSoundId crosses this boundary — never message
-			// content or sender identity (no-plaintext-logging.md).
-			if (incomingChat && !incomingChat.muted && (incomingChat.sound ?? true)) {
+			// muted or blocked. Only an opaque NotificationSoundId crosses this boundary — never
+			// message content or sender identity (no-plaintext-logging.md).
+			if (
+				incomingChat &&
+				!incomingChat.muted &&
+				!incomingChat.blocked &&
+				(incomingChat.sound ?? true)
+			) {
 				playNotificationSound(incomingChat.notificationSoundId ?? "default");
 			}
 			// Show a native OS notification when the app window is in the background.
 			// The hook internally guards on !document.hasFocus() and Tauri availability.
 			// Title/body are fixed ("Powehi" / "New message") — no content or sender exposed.
-			if (incomingChat && !incomingChat.muted) {
+			if (incomingChat && !incomingChat.muted && !incomingChat.blocked) {
 				showTauriNotificationRef.current();
 			}
-			// Notify sender that we received and decrypted the message (best-effort).
-			sendDeliveryReceiptRef.current([msg.id]);
-			// Read receipt: only dispatch immediately when this chat is active and the window is
-			// focused — the user has actually seen the message. Otherwise buffer it; flushed when
-			// the user opens the chat or the window regains focus.
-			// Always pass the incoming message's own group IDs so the receipt is encrypted to the
-			// correct MLS group regardless of which chat is currently active.
-			if (incomingChat?.id === activeIdRef.current && document.hasFocus()) {
-				const gId = incomingChat?.mlsGroupId;
-				const iId = incomingChat?.mlsIdentityId;
-				if (gId && iId) sendReadReceiptRef.current(gId, iId, [msg.id]);
-			} else {
-				const queue = pendingReadReceipts.current.get(msg.groupId) ?? [];
-				queue.push(msg.id);
-				pendingReadReceipts.current.set(msg.groupId, queue);
+			// Notify sender that we received and decrypted the message (best-effort) — but
+			// never for a blocked chat (security-auditor YELLOW): a blocked contact must not
+			// learn their message was delivered/read just because it was silently persisted.
+			// Skipping the buffer push below too (not just the immediate-send branch) means
+			// nothing lingers to leak later either, when the window regains focus or the chat
+			// is eventually reopened. (NOT fixed here — pre-existing, out of scope: sendDeliveryReceipt
+			// itself encrypts to `active`'s group rather than this message's own group for a
+			// background chat; tracked as a separate follow-up.)
+			if (!incomingChat?.blocked) {
+				sendDeliveryReceiptRef.current([msg.id]);
+				// Read receipt: only dispatch immediately when this chat is active and the window is
+				// focused — the user has actually seen the message. Otherwise buffer it; flushed when
+				// the user opens the chat or the window regains focus.
+				// Always pass the incoming message's own group IDs so the receipt is encrypted to the
+				// correct MLS group regardless of which chat is currently active.
+				if (incomingChat?.id === activeIdRef.current && document.hasFocus()) {
+					const gId = incomingChat?.mlsGroupId;
+					const iId = incomingChat?.mlsIdentityId;
+					if (gId && iId) sendReadReceiptRef.current(gId, iId, [msg.id]);
+				} else {
+					const queue = pendingReadReceipts.current.get(msg.groupId) ?? [];
+					queue.push(msg.id);
+					pendingReadReceipts.current.set(msg.groupId, queue);
+				}
 			}
 		},
 		[persistIncoming],
@@ -8010,8 +8232,13 @@ export function ChatLayout() {
 
 	/** Record the PQ group binding once the pq_init exchange completes (§5.3 Phase B). */
 	const handlePqBinding = useCallback((groupId: string, bindingHex: string) => {
+		// A blocked contact's pq_init exchange must not update the visible safety-number
+		// header badge — same suppression tier as typing/reactions/pins (security-auditor
+		// finding, this cycle).
 		setChats((cs) =>
-			cs.map((c) => (c.mlsGroupId === groupId ? { ...c, pqBindingHex: bindingHex } : c)),
+			cs.map((c) =>
+				c.mlsGroupId === groupId && !c.blocked ? { ...c, pqBindingHex: bindingHex } : c,
+			),
 		);
 	}, []);
 
@@ -8022,7 +8249,11 @@ export function ChatLayout() {
 	const handleIncomingTyping = useCallback((gId: string) => {
 		const existing = typingTimersRef.current.get(gId);
 		if (existing !== undefined) clearTimeout(existing);
-		setChats((cs) => cs.map((c) => (c.mlsGroupId === gId ? { ...c, typing: true } : c)));
+		// A blocked contact's "typing…" state must not surface anywhere in the UI —
+		// same suppression tier as their messages (security-auditor finding, this cycle).
+		setChats((cs) =>
+			cs.map((c) => (c.mlsGroupId === gId && !c.blocked ? { ...c, typing: true } : c)),
+		);
 		const handle = setTimeout(() => {
 			typingTimersRef.current.delete(gId);
 			setChats((cs) => cs.map((c) => (c.mlsGroupId === gId ? { ...c, typing: false } : c)));
@@ -8039,6 +8270,10 @@ export function ChatLayout() {
 			setChats((cs) =>
 				cs.map((c) => {
 					if (c.mlsGroupId !== gId) return c;
+					// A blocked contact's reaction (peer-controlled emoji string) must not
+					// render on-screen — same suppression tier as their messages/typing
+					// (security-auditor finding, this cycle).
+					if (c.blocked) return c;
 					const msgs = c.messages.map((m) => {
 						if (m.id !== targetId) return m;
 						const existing = m.reactions ?? {};
@@ -8076,6 +8311,9 @@ export function ChatLayout() {
 			setChats((cs) =>
 				cs.map((c) => {
 					if (c.mlsGroupId !== gId) return c;
+					// See handleIncomingReaction — a blocked contact's reaction change must
+					// not render on-screen.
+					if (c.blocked) return c;
 					const msgs = c.messages.map((m) => {
 						if (m.id !== targetId) return m;
 						const existing = m.reactions ?? {};
@@ -8156,6 +8394,12 @@ export function ChatLayout() {
 	 */
 	const handleIncomingReadReceipt = useCallback(
 		(gId: string, messageIds: string[], _readAt: number, senderDeviceId: string) => {
+			// A blocked contact's read receipt must not flip our own bubbles to "read"/
+			// append to readBy, in memory or in Dexie — same suppression tier as their
+			// messages/reactions/edits (security-auditor finding, this cycle). Also
+			// closes a liveness oracle: without this, a blocked peer could keep
+			// confirming their receipts are still being processed.
+			if (chatsRef.current.find((c) => c.mlsGroupId === gId)?.blocked) return;
 			const idSet = new Set(messageIds);
 			setChats((cs) =>
 				cs.map((c) => {
@@ -8194,6 +8438,9 @@ export function ChatLayout() {
 	 */
 	const handleIncomingDeliveryReceipt = useCallback(
 		(gId: string, messageIds: string[]) => {
+			// See handleIncomingReadReceipt — a blocked contact's delivery receipt must
+			// not flip our bubbles to "delivered" either.
+			if (chatsRef.current.find((c) => c.mlsGroupId === gId)?.blocked) return;
 			const idSet = new Set(messageIds);
 			setChats((cs) =>
 				cs.map((c) => {
@@ -8225,6 +8472,14 @@ export function ChatLayout() {
 			setChats((cs) =>
 				cs.map((c) => {
 					if (c.mlsGroupId !== gId) return c;
+					// A blocked contact's edit must not rewrite visible bubble text — this is
+					// the sharpest version of the suppression invariant: an edit lets a
+					// blocked peer inject arbitrary new text into an already-rendered,
+					// already-trusted bubble, including while this chat is the open/active
+					// conversation (security-auditor HIGH finding, this cycle). Still applies
+					// to Dexie below regardless of blocked, same "preserved but hidden"
+					// tier as regular incoming messages.
+					if (c.blocked) return c;
 					const msgs = c.messages.map((m) => {
 						if (m.id !== targetMessageId || m.from !== "them") return m;
 						return { ...m, text: newText, edited: true };
@@ -8289,6 +8544,9 @@ export function ChatLayout() {
 			setChats((cs) =>
 				cs.map((c) => {
 					if (c.mlsGroupId !== gId) return c;
+					// See handleIncomingEdit — a blocked contact's delete signal must not
+					// change the visible bubble state either.
+					if (c.blocked) return c;
 					const msgs = c.messages.map((m) => {
 						if (m.id !== targetMessageId || m.from !== "them") return m;
 						return { ...m, deleted: true };
@@ -8347,6 +8605,10 @@ export function ChatLayout() {
 	 */
 	const handleIncomingPin = useCallback(
 		(gId: string, targetMessageId: string, action: "pin" | "unpin") => {
+			// A blocked contact's pin/unpin signal must not change the visible pinned-
+			// message banner or persist a new pin target — same suppression tier as
+			// edits/reactions/typing (security-auditor finding, this cycle).
+			if (chatsRef.current.find((c) => c.mlsGroupId === gId)?.blocked) return;
 			setChats((cs) =>
 				cs.map((c) => {
 					if (c.mlsGroupId !== gId) return c;
@@ -8400,6 +8662,10 @@ export function ChatLayout() {
 	 * fire-and-forget, same pattern as every other db.groups.update() call site in this file.
 	 */
 	const handleIncomingPresence = useCallback((gId: string, status: "online" | "offline") => {
+		// A blocked contact's online/offline/last-seen state must not surface in the
+		// sidebar or header — same suppression tier as typing/edits/reactions/pins
+		// (security-auditor finding, this cycle).
+		if (chatsRef.current.find((c) => c.mlsGroupId === gId)?.blocked) return;
 		const existing = presenceTimersRef.current.get(gId);
 		if (existing) clearTimeout(existing);
 
@@ -8561,6 +8827,61 @@ export function ChatLayout() {
 			db.groups.update(chat.mlsGroupId, { archived: !chat.archived }).catch(() => {});
 		}
 	}, []);
+
+	/** Toggle the blocked flag on a chat. Local-only — no MLS message sent, no server contact.
+	 * Persisted to Dexie (GroupRow.blocked, schema v28) so it survives a reload.
+	 * Takes the current `blocked`/`mlsGroupId` values from the caller (InfoPanel's
+	 * `active` prop, freshly re-read every render) instead of computing the toggle
+	 * inside the setChats updater or reading chatsRef — React's setState updater
+	 * functions are not guaranteed to run synchronously (they're only eagerly
+	 * evaluated as a bail-out optimization when no other update is already queued
+	 * on that fiber), so capturing "the new value" via a closure variable set
+	 * inside the updater and read immediately after is unreliable; chatsRef is
+	 * exactly as stale since it only syncs via a post-commit effect. Reading
+	 * straight from the prop sidesteps both. */
+	const handleToggleBlock = useCallback(
+		(chatId: string, currentBlocked: boolean, mlsGroupId?: string) => {
+			const nextBlocked = !currentBlocked;
+			setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, blocked: nextBlocked } : c)));
+			if (mlsGroupId) {
+				// .update() never inserts — it silently resolves 0 if no GroupRow exists yet
+				// (e.g. the crypto worker wasn't ready when this chat's group was created, so
+				// handleNewGroup/handleGroupCreated's own putGroup() never landed — same gap
+				// noted at handleNewGroup's comment). Unlike the other preference toggles
+				// above, a silently-failed block is a security control regressing to
+				// "appears blocked in this session, but reverts on reload" — worth the
+				// fallback insert (security-auditor finding, this cycle). The insert goes
+				// through encryptedDb.addGroup (not a raw db.groups.add) — `name` and
+				// `mlsStateB64` are both in encrypted-db.ts's SENSITIVE.groups list, so a raw
+				// insert would have written the contact's display name to IndexedDB in
+				// plaintext (security-auditor finding, this cycle).
+				db.groups
+					.update(mlsGroupId, { blocked: nextBlocked })
+					.then((updatedCount) => {
+						if (updatedCount > 0) return;
+						const chatName = chatsRef.current.find((c) => c.id === chatId)?.name ?? "Contact";
+						encryptedDb
+							?.addGroup({
+								id: mlsGroupId,
+								name: chatName,
+								mlsStateB64: "",
+								lastActivity: Date.now(),
+								blocked: nextBlocked,
+							})
+							.catch(() => {});
+					})
+					.catch(() => {});
+			}
+			// A newly-blocked contact's already-queued-but-unflushed read receipts must not
+			// go out on the next focus/chat-open flush (they'd tell a just-blocked peer
+			// exactly which of their pre-block messages were read) — pre-block reactions/
+			// pins/etc. have no equivalent queued-for-later-send state, only receipts do.
+			if (nextBlocked && mlsGroupId) {
+				pendingReadReceipts.current.delete(mlsGroupId);
+			}
+		},
+		[encryptedDb],
+	);
 
 	/** Toggle the pinnedTop flag on a chat. Local-only — no MLS message sent, no server contact.
 	 * Persisted to Dexie (GroupRow.pinnedTop, schema v18) so it survives a reload. */
@@ -9993,6 +10314,10 @@ export function ChatLayout() {
 					onToggleVibrate={() => handleToggleVibrate(active.id)}
 					archived={active.archived ?? false}
 					onToggleArchive={() => handleToggleArchive(active.id)}
+					blocked={active.blocked ?? false}
+					onToggleBlock={() =>
+						handleToggleBlock(active.id, active.blocked ?? false, active.mlsGroupId)
+					}
 					pinnedTop={active.pinnedTop ?? false}
 					onTogglePinTop={() => handleTogglePinTop(active.id)}
 					myHandle={useAuthStore.getState().myHandle ?? undefined}
