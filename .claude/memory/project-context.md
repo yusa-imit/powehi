@@ -24,7 +24,83 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-03, cycle 426 — FEATURE: R2 orphan-sweep owner-sentinel, closes cycle-424's #1 next-cycle candidate)
+## Current state (2026-09-03, cycle 427 — FEATURE: R2 owner-sentinel claim-path hardening, closes cycle-426's Y1+Y3 next-cycle candidates)
+
+- Picked up next-cycle candidates #1 (security-auditor Y1) and #3 (Y3) from
+  cycle 426's owner-sentinel review, both in the same method so fixed
+  together: `R2MediaAdapter::verify_region_ownership`
+  (`crates/adapters/outbound/powehi-r2/src/lib.rs`).
+- **Y1 fix:** the claim-success path (`Ok(_) => Ok(true)` after the
+  conditional `put_object`) no longer trusts the SDK's 2xx blindly — it now
+  re-reads `owner_key` via `read_owner_sentinel` and compares against
+  `local_owner_id` via `owner_matches`, same as every other path in this
+  method. Closes the theoretical gap where a non-conforming S3-compatible
+  endpoint silently ignoring `If-None-Match: *` could let two racing
+  claimants both observe success and both conclude ownership. `None` on
+  re-read (object vanished between write and read) fails closed to
+  `Ok(false)`.
+- **Y3 fix:** the claim-race-loss detection now matches
+  `Some("PreconditionFailed") | Some("ConditionalRequestConflict")` via
+  `matches!`, not just `PreconditionFailed` — AWS returns
+  `409 ConditionalRequestConflict` (not `412 PreconditionFailed`) to the
+  losing side of a genuinely concurrent conditional `PutObject`, so both
+  codes are benign race-losses for this specific call site and belong in
+  the fail-closed-but-quiet branch rather than the generic-error branch.
+- Verified before commit: `cargo build -p powehi-r2` clean; `cargo test
+  --workspace` all green (0 failed); `cargo clippy --workspace
+  --all-targets -- -D warnings` clean; `cargo fmt --all --check` clean. No
+  new dependency, no migration change, no test file touched this cycle —
+  the two prior owner-sentinel `#[ignore]`d testcontainers tests already
+  exercise the happy claim path (now implicitly covers the Y1 self-verify
+  read too); no Docker in this sandbox to run them.
+- Not crypto (no `.rs` crypto/MLS/OPAQUE/WASM file touched) —
+  `crypto-reviewer` correctly not invoked. Not a new architectural change or
+  new server-visible metadata (same mechanism, same `.owner` object,
+  already threat-modeled in cycle 426 — only the internal verification
+  logic changed) — `threat-model-checker` correctly not invoked this cycle.
+  Backend adapter touching a security-critical claim path —
+  `security-auditor` invoked (first two attempts hit transient `529
+  Overloaded` from the API, both auto-retried; third attempt succeeded on
+  retry, one more retry with an explicit Sonnet model override after a
+  same-cycle 529 streak). **Verdict: PASS/GREEN**, no blocking findings.
+  Confirmed Y1 introduces no new TOCTOU (re-read window compares against a
+  private per-environment random UUID, not attacker-controlled input) and
+  Y3's widened match doesn't swallow a real error into the benign-race
+  branch (both codes are AWS's documented outcomes for a losing concurrent
+  conditional `PutObject` on this exact call site). One informational,
+  non-blocking note: the two new branches (self-verify mismatch/vanished on
+  success, and the `ConditionalRequestConflict` arm specifically) aren't
+  exercised by the existing testcontainers tests — would need either a
+  non-conforming S3 backend or a genuine concurrent-write race to trigger,
+  which the MinIO harness doesn't simulate. Same category of accepted gap
+  as cycle 426's own Y2 (MinIO version predates conditional-write support)
+  — reasoned through via code review, not left silently unconsidered.
+- Phase 1-6 checklist: no change — all items already `[x]`; this cycle's
+  work again came from the next-cycle-candidates backlog.
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates (carried/updated):**
+  1. security-auditor Y2 (carried from 426): bump the MinIO testcontainers
+     image past `RELEASE.2022-02-07` so the owner-sentinel tests can
+     exercise real conditional-write races, not just read/mismatch paths.
+  2. New, informational from this cycle's review: consider a mock-`S3Client`
+     unit test to close coverage on the Y1 self-verify mismatch/vanished
+     branches and the Y3 `ConditionalRequestConflict` arm specifically —
+     non-blocking, no existing mock harness for `S3Client` in this crate
+     yet, would be new infra.
+  3. prd.md §3.3 cross-reference for region_id-in-storage-key metadata
+     (carried since cycle 424, still not done — good filler task).
+  4. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  5. Carried: prd.md §6.4 cross-region abuse-signal propagation
+     (documented-but-unimplemented) — worth a threat-model-checker-gated
+     scoping pass.
+  6. Carried, still not scoped this cycle: the residual gap where the
+     winner of a *legitimate* (non-racing) ownership claim can still delete
+     a colliding environment's live media forever — only a real close via
+     distinct buckets (operational) or moving `owner_id` into the
+     storage-key path itself (bigger migration).
+
+## Previous state (2026-09-03, cycle 426 — FEATURE: R2 orphan-sweep owner-sentinel, closes cycle-424's #1 next-cycle candidate)
 
 - Picked up the top "next cycle candidate" carried since cycle 424: both
   review agents had independently proposed an "owner-sentinel" design
