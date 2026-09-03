@@ -49,6 +49,24 @@
           "type": "integer",
           "minimum": 1
         },
+        "mediaOrphanSweepGraceHours": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "mediaOrphanSweepTimeoutSecs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "mediaOrphanSweepEnabled": {
+          "type": "boolean",
+          "description": "Kill switch for the orphan sweep background job. Flip to false to stop it without a code revert (e.g. during a DB restore or a suspected bucket misconfiguration)."
+        },
+        "mediaOrphanSweepMaxDeletesPerRun": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000,
+          "description": "Blast-radius cap: max objects the orphan sweep may delete in a single 6-hourly tick."
+        },
         "r2Endpoint": {
           "type": "string"
         },

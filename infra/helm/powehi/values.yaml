@@ -53,6 +53,18 @@ config:
   r2RequestTimeoutSecs: 30
   # Whole hourly media-blob GC sweep timeout, seconds. Matches Rust compiled default (POWEHI__MEDIA_GC_SWEEP_TIMEOUT_SECS).
   mediaGcSweepTimeoutSecs: 1800
+  # Grace period, hours, before a row-less R2 object is eligible for the 6-hourly
+  # orphan sweep. Matches Rust compiled default (POWEHI__MEDIA_ORPHAN_SWEEP_GRACE_HOURS).
+  mediaOrphanSweepGraceHours: 24
+  # Whole 6-hourly media-orphan sweep timeout, seconds. Matches Rust compiled default (POWEHI__MEDIA_ORPHAN_SWEEP_TIMEOUT_SECS).
+  mediaOrphanSweepTimeoutSecs: 1800
+  # Kill switch for the orphan sweep. Flip to false + redeploy to stop the job without a
+  # code revert (e.g. mid DB-restore, or a suspected cross-region/bucket misconfiguration).
+  # Matches Rust compiled default (POWEHI__MEDIA_ORPHAN_SWEEP_ENABLED).
+  mediaOrphanSweepEnabled: true
+  # Blast-radius cap: max objects the orphan sweep may delete in a single 6-hourly tick.
+  # Matches Rust compiled default (POWEHI__MEDIA_ORPHAN_SWEEP_MAX_DELETES_PER_RUN).
+  mediaOrphanSweepMaxDeletesPerRun: 500
   # Cloudflare R2 (S3-compatible) endpoint URL for media storage. Empty means the
   # Rust compiled dev-only default "http://localhost:9000" applies (AppConfig.r2_endpoint,
   # crates/infra/powehi-config/src/lib.rs) — operators MUST override with the real

@@ -19,6 +19,17 @@
 //!     S3 object was already removed by a crashed prior attempt is idempotent
 //!     (proves the documented crash self-heal, not just an assumption).
 //!   - full upload->download round-trip through the pre-signed URLs (reqwest PUT/GET).
+//!   - `sweep_orphaned_storage_objects` deletes a row-less S3 object once it is
+//!     past the grace cutoff, but leaves a young row-less object alone and never
+//!     touches an object whose `media_blobs` row still exists (cycle 419-421
+//!     deferred-gap fix: `delete()` starting from `find_by_id` can never reach an
+//!     object whose row was removed before its still-valid presigned PUT landed).
+//!   - `sweep_orphaned_storage_objects` on an empty bucket returns 0 (pagination
+//!     loop's empty-page exit).
+//!   - `sweep_orphaned_storage_objects` never enumerates or deletes an object
+//!     under a different region's key prefix (cycle 422 region-scope fix),
+//!     respects its `max_deletes_per_run` blast-radius cap, and aborts
+//!     without deleting anything once its orphan-ratio circuit breaker trips.
 //!
 //! Uses postgres:16-alpine explicitly (the modules default 11-alpine is EOL) and
 //! minio/minio:RELEASE.2022-02-07T08-17-33Z (the modules default) which serves the
@@ -69,6 +80,14 @@ const UPLOAD_TTL_SECS: u64 = 900;
 const DOWNLOAD_TTL_SECS: u64 = 300;
 /// Bounds each R2 operation (and each individual attempt) issued by the adapter.
 const REQUEST_TIMEOUT_SECS: u64 = 30;
+/// This test harness's region id — `media_fixture`'s storage keys and
+/// `setup()`'s adapter must agree on it, since the orphan sweep now scopes
+/// its bucket-wide LIST by `media/{region_id}/` (region-prefix fix, cycle 422).
+const TEST_REGION_ID: &str = "eu-test-1";
+/// Default blast-radius cap passed to the adapter under test — generous
+/// enough that ordinary tests never hit it; the dedicated cap test below
+/// overrides it with a small value instead of using this constant.
+const MAX_DELETES_PER_RUN: u64 = 500;
 
 // ── Container setup ───────────────────────────────────────────────────────────
 
@@ -99,6 +118,13 @@ fn build_s3_client(endpoint: &str) -> S3Client {
 /// and return a ready `R2MediaAdapter` plus handles for fixtures and assertions.
 /// Caller must keep the returned containers alive for the duration of the test.
 async fn setup() -> Harness {
+    setup_with_max_deletes(MAX_DELETES_PER_RUN).await
+}
+
+/// Same as `setup`, but with an explicit blast-radius cap — for tests that
+/// exercise `sweep_orphaned_storage_objects`'s `max_deletes_per_run` limiter
+/// directly rather than relying on the generous default.
+async fn setup_with_max_deletes(max_deletes_per_run: u64) -> Harness {
     // Postgres (16-alpine — the modules default 11-alpine is EOL).
     let pg = Postgres::default()
         .with_tag("16-alpine")
@@ -142,6 +168,8 @@ async fn setup() -> Harness {
         UPLOAD_TTL_SECS,
         DOWNLOAD_TTL_SECS,
         REQUEST_TIMEOUT_SECS,
+        TEST_REGION_ID,
+        max_deletes_per_run,
     );
 
     Harness {
@@ -195,13 +223,27 @@ fn media_fixture(uploader: DeviceId, group_id: Option<GroupId>) -> MediaBlob {
     MediaBlob {
         id: MediaId::new(),
         uploader_device: uploader,
-        storage_key: format!("media/{}/blob", Uuid::new_v4()),
+        storage_key: format!("media/{TEST_REGION_ID}/{}", Uuid::new_v4()),
         content_type: "image/jpeg".to_string(),
         size_bytes: 4096,
         uploaded_at: Utc::now(),
         expires_at: None,
         group_id,
     }
+}
+
+/// Put a raw, row-less object directly (bypassing the presigned-URL round
+/// trip) — for tests that need several orphan candidates cheaply, where the
+/// point is the sweep's bucket-vs-DB reconciliation logic, not the upload
+/// path itself (already covered by the presigned-URL tests above).
+async fn put_raw_object(s3: &S3Client, key: &str, body: &[u8]) {
+    s3.put_object()
+        .bucket(TEST_BUCKET)
+        .key(key)
+        .body(aws_sdk_s3::primitives::ByteStream::from(body.to_vec()))
+        .send()
+        .await
+        .expect("put_object");
 }
 
 /// List object keys under `prefix` in the test bucket (for delete assertions).
@@ -1083,6 +1125,305 @@ async fn deleting_a_blob_cascades_its_acks() {
     assert!(
         acked.is_empty(),
         "ON DELETE CASCADE must remove orphaned acks"
+    );
+}
+
+// ── sweep_orphaned_storage_objects (cycles 419-421 deferred gap, closed here) ──
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn sweep_orphaned_storage_objects_removes_row_less_object_past_grace() {
+    // Reproduces the exact cycle 419-421 race: `delete()`/`run_gc` removed the
+    // `media_blobs` row, then the client's still-valid presigned PUT landed
+    // anyway. `delete()` can never clean this up — it starts from `find_by_id`,
+    // and `None` short-circuits the S3 delete — so the object is unreachable
+    // forever without an out-of-band bucket-vs-DB reconciliation sweep.
+    let h = setup().await;
+    let device = insert_device(&h.pool).await;
+    let body = b"opaque-ciphertext-bytes".to_vec();
+    let mut blob = media_fixture(device, None);
+    // size_bytes is bound into the presigned URL's signature (content-length) —
+    // it must equal the actual PUT body length or the upload is rejected.
+    blob.size_bytes = body.len() as u64;
+    h.adapter.save(&blob).await.expect("save");
+
+    let upload_url = h
+        .adapter
+        .presigned_upload_url(&blob.id, &blob.content_type)
+        .await
+        .expect("presigned_upload_url");
+    let client = reqwest::Client::new();
+    let resp = client
+        .put(&upload_url)
+        .header("content-type", &blob.content_type)
+        .body(body)
+        .send()
+        .await
+        .expect("PUT to presigned url");
+    assert!(resp.status().is_success(), "upload PUT must succeed");
+    assert_eq!(
+        list_keys(&h.s3, &blob.storage_key).await,
+        vec![blob.storage_key.clone()],
+        "object must exist in S3 before the row is removed"
+    );
+
+    // Simulate the row being removed before the still-valid presigned PUT
+    // landed — exactly the cycle 419-421 race: `delete()`/`run_gc` removed the
+    // row, then the client's still-valid presigned PUT landed, and `delete()`
+    // can never clean it up because it starts from `find_by_id` (`None`
+    // short-circuits the S3 delete).
+    sqlx::query("DELETE FROM media_blobs WHERE id = $1")
+        .bind(blob.id.as_uuid())
+        .execute(&h.pool)
+        .await
+        .expect("simulate the row being removed before the still-valid presigned PUT landed");
+
+    // CRITICAL DIRECTION FIRST: a cutoff in the past must sweep nothing — an
+    // object newer than the grace cutoff is an in-flight upload, not an orphan.
+    let swept = h
+        .adapter
+        .sweep_orphaned_storage_objects(Utc::now() - chrono::Duration::hours(1000))
+        .await
+        .expect("sweep with a past cutoff");
+    assert_eq!(
+        swept, 0,
+        "an object newer than the grace cutoff is an in-flight upload, not an orphan"
+    );
+    assert_eq!(
+        list_keys(&h.s3, &blob.storage_key).await,
+        vec![blob.storage_key.clone()],
+        "a young row-less object must survive: deleting it would destroy a legitimate in-flight upload"
+    );
+
+    // Now a cutoff in the future (every object is "older than" it, no sleep needed).
+    let swept = h
+        .adapter
+        .sweep_orphaned_storage_objects(Utc::now() + chrono::Duration::hours(1000))
+        .await
+        .expect("sweep with a future cutoff");
+    // Exactly 1, not just `>= 1`: this test's harness bucket/container is
+    // fresh per test (`setup()`), so an over-eager sweep deleting more than
+    // the single fixture object would still pass a `>= 1` assertion
+    // (security-auditor finding, cycle 422).
+    assert_eq!(
+        swept, 1,
+        "exactly the one orphaned fixture must be swept, got {swept}"
+    );
+    assert!(
+        list_keys(&h.s3, &blob.storage_key).await.is_empty(),
+        "the orphaned object must actually be gone from S3"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn sweep_orphaned_storage_objects_never_touches_an_object_with_a_matching_row() {
+    // A matching `storage_key` row protects the object regardless of age — age
+    // is only a tiebreaker for row-less objects, never a retention policy of
+    // its own.
+    let h = setup().await;
+    let device = insert_device(&h.pool).await;
+    let body = b"opaque-ciphertext-bytes".to_vec();
+    let mut blob = media_fixture(device, None);
+    blob.size_bytes = body.len() as u64;
+    h.adapter.save(&blob).await.expect("save");
+
+    let upload_url = h
+        .adapter
+        .presigned_upload_url(&blob.id, &blob.content_type)
+        .await
+        .expect("presigned_upload_url");
+    let client = reqwest::Client::new();
+    let resp = client
+        .put(&upload_url)
+        .header("content-type", &blob.content_type)
+        .body(body)
+        .send()
+        .await
+        .expect("PUT to presigned url");
+    assert!(resp.status().is_success(), "upload PUT must succeed");
+
+    // Row is deliberately left intact — sweep with a far-future cutoff so every
+    // object is treated as arbitrarily old, and it must still be left alone.
+    let swept = h
+        .adapter
+        .sweep_orphaned_storage_objects(Utc::now() + chrono::Duration::hours(1000))
+        .await
+        .expect("sweep with a future cutoff");
+    assert_eq!(
+        swept, 0,
+        "an object with a matching media_blobs row must never be swept, regardless of age"
+    );
+    assert_eq!(
+        list_keys(&h.s3, &blob.storage_key).await,
+        vec![blob.storage_key.clone()],
+        "the object must still be in S3"
+    );
+    assert!(
+        h.adapter
+            .find_by_id(&blob.id)
+            .await
+            .expect("find_by_id")
+            .is_some(),
+        "the row must still be intact"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn sweep_orphaned_storage_objects_returns_zero_on_empty_bucket() {
+    // Guards the pagination loop's empty-page / `next_continuation_token: None`
+    // exit — an empty bucket must not error or loop forever.
+    let h = setup().await;
+    let swept = h
+        .adapter
+        .sweep_orphaned_storage_objects(Utc::now() + chrono::Duration::hours(1000))
+        .await
+        .expect("sweep against an empty bucket");
+    assert_eq!(swept, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn sweep_orphaned_storage_objects_never_touches_a_different_region_prefix() {
+    // Region-prefix scoping fix (threat-model-checker RED finding, cycle
+    // 422): without a `.prefix(...)` on the bucket-wide LIST, a bucket shared
+    // or misconfigured across regions would let this region's sweep
+    // enumerate — and delete — another region's objects. Simulates that by
+    // placing a row-less, aged-eligible object under a foreign region's key
+    // prefix and asserting the sweep never even sees it.
+    let h = setup().await;
+    let foreign_key = "media/other-region-9x/orphan";
+    put_raw_object(&h.s3, foreign_key, b"opaque-ciphertext-bytes").await;
+
+    let swept = h
+        .adapter
+        .sweep_orphaned_storage_objects(Utc::now() + chrono::Duration::hours(1000))
+        .await
+        .expect("sweep with a future cutoff");
+    assert_eq!(
+        swept, 0,
+        "an object under a different region's key prefix must never be swept"
+    );
+    assert_eq!(
+        list_keys(&h.s3, foreign_key).await,
+        vec![foreign_key.to_string()],
+        "the foreign-region object must still be in S3"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn sweep_orphaned_storage_objects_respects_max_deletes_per_run_cap() {
+    // Blast-radius cap fix (threat-model-checker / security-auditor finding,
+    // cycle 422): a run must never delete more than
+    // `max_deletes_per_run`, regardless of how many orphans it finds.
+    let h = setup_with_max_deletes(1).await;
+    let key_a = format!("media/{TEST_REGION_ID}/cap-orphan-a");
+    let key_b = format!("media/{TEST_REGION_ID}/cap-orphan-b");
+    put_raw_object(&h.s3, &key_a, b"opaque-ciphertext-bytes").await;
+    put_raw_object(&h.s3, &key_b, b"opaque-ciphertext-bytes").await;
+
+    let swept = h
+        .adapter
+        .sweep_orphaned_storage_objects(Utc::now() + chrono::Duration::hours(1000))
+        .await
+        .expect("sweep with a future cutoff and a cap of 1");
+    assert_eq!(swept, 1, "the cap must stop the run after exactly 1 delete");
+
+    let remaining_a = list_keys(&h.s3, &key_a).await;
+    let remaining_b = list_keys(&h.s3, &key_b).await;
+    assert_eq!(
+        remaining_a.len() + remaining_b.len(),
+        1,
+        "exactly one of the two orphans must survive the capped run: a={remaining_a:?} b={remaining_b:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn sweep_orphaned_storage_objects_ratio_guard_aborts_on_suspiciously_high_orphan_rate() {
+    // Orphan-ratio circuit breaker fix (threat-model-checker / security-
+    // auditor finding, cycle 422): a run where nearly everything examined is
+    // "orphaned" is far more likely to mean the database itself is
+    // untrustworthy for this run (wrong/empty DB, a PITR restore in
+    // progress) than that storage is genuinely full of orphans — the sweep
+    // must abort rather than delete anything in that case.
+    let h = setup().await;
+    // Comfortably above the guard's minimum sample size so the guard is
+    // guaranteed to evaluate before the run ends.
+    let orphan_count = 60;
+    let mut keys = Vec::with_capacity(orphan_count);
+    for i in 0..orphan_count {
+        let key = format!("media/{TEST_REGION_ID}/ratio-orphan-{i}");
+        put_raw_object(&h.s3, &key, b"opaque-ciphertext-bytes").await;
+        keys.push(key);
+    }
+    // Deliberately no matching `media_blobs` rows for any of the above — a
+    // 100% orphan rate over a well-above-minimum sample.
+
+    let swept = h
+        .adapter
+        .sweep_orphaned_storage_objects(Utc::now() + chrono::Duration::hours(1000))
+        .await
+        .expect("sweep with a future cutoff");
+    assert_eq!(
+        swept, 0,
+        "the ratio guard must abort the run before deleting anything"
+    );
+    for key in &keys {
+        assert_eq!(
+            list_keys(&h.s3, key).await,
+            vec![key.clone()],
+            "every candidate must survive an aborted run"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn sweep_orphaned_storage_objects_pre_sample_cap_bounds_damage_below_min_sample() {
+    // Pre-sample cap fix (security-auditor finding, cycle 424): below the
+    // ratio guard's minimum sample size, the ratio guard cannot evaluate at
+    // all, so — before this fix — a run could delete every orphan it found
+    // (up to `ORPHAN_RATIO_ABORT_MIN_SAMPLE - 1` of them) even against a
+    // completely wrong or empty database. Reproduces that scenario directly:
+    // well under the 50-sample floor, 100% orphaned, and asserts the run
+    // stops at the small pre-sample cap rather than deleting everything.
+    let h = setup().await;
+    let orphan_count = 20; // < ORPHAN_RATIO_ABORT_MIN_SAMPLE (50)
+    let mut keys = Vec::with_capacity(orphan_count);
+    for i in 0..orphan_count {
+        let key = format!("media/{TEST_REGION_ID}/pre-sample-orphan-{i}");
+        put_raw_object(&h.s3, &key, b"opaque-ciphertext-bytes").await;
+        keys.push(key);
+    }
+
+    let swept = h
+        .adapter
+        .sweep_orphaned_storage_objects(Utc::now() + chrono::Duration::hours(1000))
+        .await
+        .expect("sweep with a future cutoff");
+    assert!(
+        swept < orphan_count as u64,
+        "the pre-sample cap must stop the run before it can delete every orphan \
+         in a below-minimum-sample batch, got {swept} of {orphan_count}"
+    );
+    assert!(
+        swept > 0,
+        "the pre-sample cap must still allow some progress, got 0"
+    );
+
+    let mut survived = 0;
+    for key in &keys {
+        if !list_keys(&h.s3, key).await.is_empty() {
+            survived += 1;
+        }
+    }
+    assert_eq!(
+        survived as u64,
+        orphan_count as u64 - swept,
+        "every object not counted as swept must still be present in S3"
     );
 }
 

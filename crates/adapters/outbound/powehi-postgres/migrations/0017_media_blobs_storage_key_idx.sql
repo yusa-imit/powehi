@@ -1,0 +1,24 @@
+-- no-transaction
+-- Backs the new orphan-object sweep's `WHERE storage_key = ANY($1)` lookup
+-- (R2MediaAdapter::sweep_orphaned_storage_objects, cycles 419-422). Without
+-- this, every 1000-key bucket page the sweep checks is a full seq scan of
+-- media_blobs — security-auditor finding, this cycle: at scale that both
+-- starves the shared connection pool every 6 hours and can make the sweep's
+-- own timeout truncate the walk before it reaches every page, permanently
+-- under-sweeping the tail of the bucket.
+--
+-- UNIQUE, not just an index: storage_key is generated as `media/{region}/
+-- {uuid_v4}` (MediaService::request_upload) and is meant to be a 1:1
+-- pointer to exactly one R2 object, so a duplicate would already indicate a
+-- bug elsewhere — this also buys that as a real DB-enforced invariant, not
+-- just an assumption the sweep's ANY($1) lookup silently relies on.
+--
+-- CREATE INDEX CONCURRENTLY cannot run inside sqlx's default migration
+-- transaction (Postgres forbids CONCURRENTLY in a transaction block
+-- outright), hence `-- no-transaction` above, matching the 0011/0014/0016
+-- precedent. OPERATIONAL NOTE: if this build is interrupted, `IF NOT
+-- EXISTS` makes a migration retry no-op past a resulting INVALID index —
+-- run `DROP INDEX CONCURRENTLY media_blobs_storage_key_idx` manually, then
+-- re-run migrations, to actually rebuild it.
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS media_blobs_storage_key_idx
+    ON media_blobs(storage_key);

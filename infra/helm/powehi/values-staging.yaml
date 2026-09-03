@@ -25,6 +25,17 @@ config:
   # r2Endpoint/r2Bucket/vapidContact are intentionally unset here — this env
   # needs real Cloudflare R2 account values and a real VAPID contact URI
   # before it can serve real media or Web Push traffic. Do not fake these.
+  # r2Bucket in particular MUST be a distinct real bucket from every other
+  # environment's — this overlay shares `region: eu-frankfurt` with
+  # values-prod-eu.yaml, and the media orphan-sweep job's region-prefix
+  # isolation (crates/adapters/outbound/powehi-r2, R2MediaAdapter::region_prefix)
+  # only separates distinct regions sharing one bucket, not two environments
+  # in the same region — sharing a bucket here would let this environment's
+  # sweep delete prod-eu's live media (threat-model-checker RED finding,
+  # cycle 424). AppConfig::validate() fails the pod at startup if r2Bucket is
+  # left at the compiled dev default outside region_id=local, but that only
+  # catches "forgot to set it", not "set both environments to the same real
+  # bucket by mistake".
 
 monitoring:
   serviceMonitor:

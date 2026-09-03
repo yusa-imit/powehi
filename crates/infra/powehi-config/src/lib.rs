@@ -43,12 +43,62 @@ pub enum ConfigError {
     )]
     R2DevDefaultEndpointInNonLocalRegion(String),
     #[error(
+        "r2_bucket is still the dev-only default ({DEV_R2_BUCKET_DEFAULT:?}) but \
+         region_id={0:?} is not \"local\": POWEHI__R2_BUCKET was never set for this \
+         deployment. Two real, non-local deployments left at this default (e.g. two \
+         environments that also share a region_id, such as this repo's staging/prod-eu Helm \
+         overlays) would silently share one bucket — and the orphan sweep's region-prefix \
+         scoping (see R2MediaAdapter::region_prefix) only isolates distinct regions sharing a \
+         bucket from each other, not two environments that resolve to the same bucket AND the \
+         same region_id"
+    )]
+    R2DevDefaultBucketInNonLocalRegion(String),
+    #[error(
+        "region_id={0:?} is invalid: must be non-empty and contain only lowercase ASCII \
+         letters, digits, and '-'. The orphan sweep's region-prefix scoping \
+         (`media/{{region_id}}/`, R2MediaAdapter::region_prefix) relies on region_id never \
+         containing '/' — a region_id like \"eu/central\" would make region \"eu\"'s prefix a \
+         strict prefix of region \"eu/central\"'s keyspace, letting one region's sweep \
+         enumerate and delete the other's live objects (security-auditor finding, cycle 424)"
+    )]
+    RegionIdInvalid(String),
+    #[error(
         "r2_access_key_id/r2_secret_access_key are empty but region_id={0:?} is not \"local\": \
          POWEHI__R2_ACCESS_KEY_ID/POWEHI__R2_SECRET_ACCESS_KEY were never injected for this \
          deployment, which would start successfully and only fail the first time a real media \
          upload or download is attempted rather than failing loudly at startup"
     )]
     R2CredentialsMissingInNonLocalRegion(String),
+    #[error(
+        "media_orphan_sweep_grace_hours={0} is zero or does not clear \
+         {MEDIA_ORPHAN_GRACE_MIN_MULTIPLE_OF_UPLOAD_TTL}x r2_presign_upload_ttl_secs={1}: the \
+         orphan sweep would then be able to delete an object whose pre-signed upload is still \
+         in flight, destroying a user's upload mid-transfer with no way to recover it"
+    )]
+    MediaOrphanGraceTooCloseToUploadTtl(u64, u64),
+    #[error(
+        "media_orphan_sweep_timeout_secs={0} is below the minimum safe value \
+         ({MIN_MEDIA_ORPHAN_SWEEP_TIMEOUT_SECS}): a bucket-wide list_objects_v2 walk can \
+         legitimately take several seconds, so anything below the floor would abort a healthy \
+         sweep before it can make progress"
+    )]
+    MediaOrphanSweepTimeoutTooLow(u64),
+    #[error(
+        "media_orphan_sweep_grace_hours={0} exceeds the maximum safe value \
+         ({MAX_MEDIA_ORPHAN_GRACE_HOURS}): a value this large risks overflowing the u64->i64 \
+         cast used to build the sweep's cutoff timestamp, which could silently invert the grace \
+         window and make the sweep treat every object in the bucket as eligible for deletion"
+    )]
+    MediaOrphanGraceHoursTooHigh(u64),
+    #[error(
+        "media_orphan_sweep_max_deletes_per_run={0} is outside the safe range \
+         [{MIN_MEDIA_ORPHAN_SWEEP_MAX_DELETES_PER_RUN}, \
+         {MAX_MEDIA_ORPHAN_SWEEP_MAX_DELETES_PER_RUN}]: this value is the orphan sweep's \
+         blast-radius cap — a bucket-vs-database mismatch (wrong/empty database, cross-region \
+         bucket misconfiguration) can only ever destroy at most this many objects in a single \
+         6-hourly tick"
+    )]
+    MediaOrphanSweepMaxDeletesOutOfRange(u64),
 }
 
 /// Below this, a GC/ledger-trim job's dedicated advisory-lock connection plus its own query
@@ -76,6 +126,37 @@ const MIN_MEDIA_GC_SWEEP_TIMEOUT_SECS: u64 = 30;
 /// `r2_request_timeout_secs` at a normal value.
 const MEDIA_GC_SWEEP_TIMEOUT_MIN_MULTIPLE_OF_R2: u64 = 2;
 
+/// An orphan-sweep grace period must clear the pre-signed upload TTL by this
+/// multiple, so an upload that legitimately lands at the very end of its window
+/// (slow connection, client retry, clock skew between the server and R2) is
+/// never mistaken for an orphan and deleted out from under the user. Shipped
+/// defaults (24 h vs 900 s) clear this by 48x.
+const MEDIA_ORPHAN_GRACE_MIN_MULTIPLE_OF_UPLOAD_TTL: u64 = 2;
+
+/// A bucket-wide `list_objects_v2` walk plus its batched deletes can take a
+/// while even when healthy; below this, the sweep would abort on its first page
+/// against any non-trivial bucket.
+const MIN_MEDIA_ORPHAN_SWEEP_TIMEOUT_SECS: u64 = 30;
+
+/// Hard ceiling on `media_orphan_sweep_grace_hours`. Comfortably below any
+/// value that could overflow when this `u64` is cast to `i64` for
+/// `chrono::Duration::hours()` (`bin/powehi-server/src/main.rs`), while still
+/// covering any operationally sane grace window — security-auditor finding,
+/// cycle 422: an unbounded value could wrap the cast negative, flipping the
+/// cutoff to `now + N hours` and making the sweep treat every object in the
+/// bucket as past-grace regardless of actual age. 5 years.
+const MAX_MEDIA_ORPHAN_GRACE_HOURS: u64 = 24 * 365 * 5;
+
+/// Bounds on `media_orphan_sweep_max_deletes_per_run`, the orphan sweep's
+/// blast-radius cap (threat-model-checker RED finding, cycle 422: an
+/// unbounded sweep run against a wrong/empty database or a misconfigured
+/// cross-region bucket could otherwise delete the entire bucket in a single
+/// 6-hourly tick). Below the minimum the job could never make real progress
+/// on a large bucket; above the maximum the cap stops meaningfully bounding
+/// a single tick's damage.
+const MIN_MEDIA_ORPHAN_SWEEP_MAX_DELETES_PER_RUN: u64 = 1;
+const MAX_MEDIA_ORPHAN_SWEEP_MAX_DELETES_PER_RUN: u64 = 100_000;
+
 /// The dev-only `r2_endpoint` default installed by `load()`'s `set_default`. Any deployed
 /// (non-`local`) region whose config still resolves to this literal at `validate()` time means
 /// `POWEHI__R2_ENDPOINT` was never actually set by the Helm chart/operator for that
@@ -84,6 +165,17 @@ const MEDIA_GC_SWEEP_TIMEOUT_MIN_MULTIPLE_OF_R2: u64 = 2;
 /// Without this guard the failure mode is silent: presigned media URLs point at the server's
 /// own loopback instead of a crash an operator would actually see.
 const DEV_R2_ENDPOINT_DEFAULT: &str = "http://localhost:9000";
+
+/// The dev-only `r2_bucket` default installed by `load()`'s `set_default`. Kept as its own
+/// literal (not derived from `DEV_R2_ENDPOINT_DEFAULT`) because it guards a distinct failure
+/// mode: two real, non-`local` deployments (e.g. `staging` and `prod-eu`, which currently ship
+/// the same `region: eu-frankfurt` in their Helm overlays and both leave `r2Bucket` unset until
+/// real Cloudflare account values are wired in) would otherwise silently collapse onto the same
+/// bucket. `sweep_orphaned_storage_objects`'s region-prefix scoping only isolates *regions*
+/// sharing one bucket from each other's objects — it does nothing for two *environments* that
+/// both resolve to this same default bucket, since they'd also share the same region_id
+/// (threat-model-checker RED finding, cycle 424).
+const DEV_R2_BUCKET_DEFAULT: &str = "powehi-media";
 
 #[derive(Deserialize)]
 pub struct AppConfig {
@@ -130,6 +222,42 @@ pub struct AppConfig {
     /// the lock is always released before the job would run again anyway.
     #[serde(default = "default_media_gc_sweep_timeout_secs")]
     pub media_gc_sweep_timeout_secs: u64,
+    /// Grace period, in hours, before an R2 object with no `media_blobs` row is
+    /// considered orphaned and swept (`sweep_orphaned_storage_objects`).
+    /// "No row" is also the normal transient state of a legitimate in-flight
+    /// upload — the client PUTs straight to R2 with a presigned URL valid for
+    /// `r2_presign_upload_ttl_secs`, and a concurrent `save()` may not have
+    /// committed its row yet — so this must stay far above that TTL plus any
+    /// plausible clock skew between the server and R2. Default 24 (hours), a
+    /// ~96x margin over the 900 s default upload TTL; the cost of erring long
+    /// is one extra 6-hourly sweep of storage, the cost of erring short is
+    /// deleting a user's upload mid-flight.
+    #[serde(default = "default_media_orphan_sweep_grace_hours")]
+    pub media_orphan_sweep_grace_hours: u64,
+    /// Bounds the whole 6-hourly orphan sweep, the same way
+    /// `media_gc_sweep_timeout_secs` bounds the hourly blob GC: the sweep
+    /// enumerates the entire bucket, so its runtime scales with total stored
+    /// objects, and without a cap a large bucket could hold
+    /// `GC_LOCK_MEDIA_ORPHANS` past the next tick and starve every other
+    /// replica. A truncated sweep is harmless — it resumes from the top next
+    /// tick and orphans are not time-critical. Default 1800 (30 min).
+    #[serde(default = "default_media_orphan_sweep_timeout_secs")]
+    pub media_orphan_sweep_timeout_secs: u64,
+    /// Explicit kill switch for the orphan sweep, independent of the
+    /// interval/lock plumbing. This is the only background job that can
+    /// irreversibly bulk-delete user data (a bucket-vs-database
+    /// reconciliation) — an operator who suspects a false positive (DB
+    /// pointed at the wrong environment, a PITR restore in progress, a
+    /// bucket shared across regions) can disable it with one config flip
+    /// instead of reverting code. Default true.
+    #[serde(default = "default_media_orphan_sweep_enabled")]
+    pub media_orphan_sweep_enabled: bool,
+    /// Hard cap on objects deleted by a single orphan-sweep tick — the
+    /// sweep's blast-radius limiter. A truncated run is not lossy: whatever
+    /// wasn't reached this tick is still protected by its own age/row
+    /// checks and is re-evaluated next tick. Default 500.
+    #[serde(default = "default_media_orphan_sweep_max_deletes_per_run")]
+    pub media_orphan_sweep_max_deletes_per_run: u64,
     /// Internal admin port for Prometheus metrics scraping.
     /// Bound to 127.0.0.1 only — MUST NOT be exposed via the public ingress.
     /// Prometheus scrapes from within the cluster (k8s pod-to-pod).
@@ -183,6 +311,18 @@ fn default_r2_request_timeout_secs() -> u64 {
 }
 fn default_media_gc_sweep_timeout_secs() -> u64 {
     1800
+}
+fn default_media_orphan_sweep_grace_hours() -> u64 {
+    24
+}
+fn default_media_orphan_sweep_timeout_secs() -> u64 {
+    1800
+}
+fn default_media_orphan_sweep_enabled() -> bool {
+    true
+}
+fn default_media_orphan_sweep_max_deletes_per_run() -> u64 {
+    500
 }
 fn default_admin_port() -> u16 {
     9090
@@ -247,6 +387,22 @@ impl std::fmt::Debug for AppConfig {
                 "media_gc_sweep_timeout_secs",
                 &self.media_gc_sweep_timeout_secs,
             )
+            .field(
+                "media_orphan_sweep_grace_hours",
+                &self.media_orphan_sweep_grace_hours,
+            )
+            .field(
+                "media_orphan_sweep_timeout_secs",
+                &self.media_orphan_sweep_timeout_secs,
+            )
+            .field(
+                "media_orphan_sweep_enabled",
+                &self.media_orphan_sweep_enabled,
+            )
+            .field(
+                "media_orphan_sweep_max_deletes_per_run",
+                &self.media_orphan_sweep_max_deletes_per_run,
+            )
             .field("admin_port", &self.admin_port)
             .field("grpc_port", &self.grpc_port)
             .field("grpc_peers", &self.grpc_peers)
@@ -268,12 +424,16 @@ pub fn load() -> Result<AppConfig, ConfigError> {
         .set_default("region_id", "local")?
         .set_default("tier", "Tier1")?
         .set_default("r2_endpoint", DEV_R2_ENDPOINT_DEFAULT)?
-        .set_default("r2_bucket", "powehi-media")?
+        .set_default("r2_bucket", DEV_R2_BUCKET_DEFAULT)?
         .set_default("admin_port", 9090)?
         .set_default("grpc_port", 50051)?
         .set_default("database_max_connections", 20)?
         .set_default("r2_request_timeout_secs", 30)?
         .set_default("media_gc_sweep_timeout_secs", 1800)?
+        .set_default("media_orphan_sweep_grace_hours", 24)?
+        .set_default("media_orphan_sweep_timeout_secs", 1800)?
+        .set_default("media_orphan_sweep_enabled", true)?
+        .set_default("media_orphan_sweep_max_deletes_per_run", 500)?
         // No defaults for credentials — POWEHI__R2_ACCESS_KEY_ID and
         // POWEHI__R2_SECRET_ACCESS_KEY must be injected by the operator.
         .set_default("r2_access_key_id", "")?
@@ -285,6 +445,19 @@ pub fn load() -> Result<AppConfig, ConfigError> {
 }
 
 fn validate(app: &AppConfig) -> Result<(), ConfigError> {
+    // Checked first, unconditionally (not just in the non-local branches below):
+    // every later guard that compares or embeds `region_id` (the r2_endpoint/
+    // r2_bucket dev-default checks, and the orphan sweep's region-prefix
+    // scoping at request time) assumes it is a safe, unambiguous path-segment
+    // string.
+    if app.region_id.is_empty()
+        || !app
+            .region_id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Err(ConfigError::RegionIdInvalid(app.region_id.clone()));
+    }
     if app.database_max_connections < MIN_DATABASE_MAX_CONNECTIONS {
         return Err(ConfigError::DatabaseMaxConnectionsTooLow(
             app.database_max_connections,
@@ -310,8 +483,46 @@ fn validate(app: &AppConfig) -> Result<(), ConfigError> {
             app.r2_request_timeout_secs,
         ));
     }
+    // `== 0` is checked explicitly, not just via the multiple comparison below:
+    // if `r2_presign_upload_ttl_secs` were ever 0 too, `0 * 3600 < 0 * N` is
+    // false and a zero grace period would silently pass (security-auditor
+    // finding, cycle 422) — an orphan-sweep cutoff of "now" with no grace at
+    // all, able to delete an upload mid-flight.
+    if app.media_orphan_sweep_grace_hours == 0
+        || app.media_orphan_sweep_grace_hours.saturating_mul(3600)
+            < app
+                .r2_presign_upload_ttl_secs
+                .saturating_mul(MEDIA_ORPHAN_GRACE_MIN_MULTIPLE_OF_UPLOAD_TTL)
+    {
+        return Err(ConfigError::MediaOrphanGraceTooCloseToUploadTtl(
+            app.media_orphan_sweep_grace_hours,
+            app.r2_presign_upload_ttl_secs,
+        ));
+    }
+    if app.media_orphan_sweep_grace_hours > MAX_MEDIA_ORPHAN_GRACE_HOURS {
+        return Err(ConfigError::MediaOrphanGraceHoursTooHigh(
+            app.media_orphan_sweep_grace_hours,
+        ));
+    }
+    if app.media_orphan_sweep_timeout_secs < MIN_MEDIA_ORPHAN_SWEEP_TIMEOUT_SECS {
+        return Err(ConfigError::MediaOrphanSweepTimeoutTooLow(
+            app.media_orphan_sweep_timeout_secs,
+        ));
+    }
+    if !(MIN_MEDIA_ORPHAN_SWEEP_MAX_DELETES_PER_RUN..=MAX_MEDIA_ORPHAN_SWEEP_MAX_DELETES_PER_RUN)
+        .contains(&app.media_orphan_sweep_max_deletes_per_run)
+    {
+        return Err(ConfigError::MediaOrphanSweepMaxDeletesOutOfRange(
+            app.media_orphan_sweep_max_deletes_per_run,
+        ));
+    }
     if app.region_id != "local" && app.r2_endpoint == DEV_R2_ENDPOINT_DEFAULT {
         return Err(ConfigError::R2DevDefaultEndpointInNonLocalRegion(
+            app.region_id.clone(),
+        ));
+    }
+    if app.region_id != "local" && app.r2_bucket == DEV_R2_BUCKET_DEFAULT {
+        return Err(ConfigError::R2DevDefaultBucketInNonLocalRegion(
             app.region_id.clone(),
         ));
     }
@@ -340,13 +551,17 @@ mod tests {
             host: "0.0.0.0".into(),
             port: 8080,
             r2_endpoint: "https://acct.r2.cloudflarestorage.com".into(),
-            r2_bucket: "powehi-media".into(),
+            r2_bucket: "acct-eu-central-1-media".into(),
             r2_access_key_id: "dev-test-key".into(),
             r2_secret_access_key: "dev-test-secret".into(),
             r2_presign_upload_ttl_secs: 900,
             r2_presign_download_ttl_secs: 300,
             r2_request_timeout_secs: 30,
             media_gc_sweep_timeout_secs: 1800,
+            media_orphan_sweep_grace_hours: 24,
+            media_orphan_sweep_timeout_secs: 1800,
+            media_orphan_sweep_enabled: true,
+            media_orphan_sweep_max_deletes_per_run: 500,
             admin_port: 9090,
             grpc_port: 50051,
             grpc_peers: String::new(),
@@ -527,6 +742,171 @@ mod tests {
     }
 
     #[test]
+    fn media_orphan_sweep_defaults_are_correct() {
+        assert_eq!(default_media_orphan_sweep_grace_hours(), 24);
+        assert_eq!(default_media_orphan_sweep_timeout_secs(), 1800);
+        assert_eq!(default_config().media_orphan_sweep_grace_hours, 24);
+        assert_eq!(default_config().media_orphan_sweep_timeout_secs, 1800);
+    }
+
+    #[test]
+    fn media_orphan_grace_below_upload_ttl_multiple_is_rejected() {
+        let cfg = AppConfig {
+            r2_presign_upload_ttl_secs: 900,
+            media_orphan_sweep_grace_hours: 0,
+            ..default_config()
+        };
+        let err = validate(&cfg).expect_err("zero grace hours must be rejected");
+        assert!(matches!(
+            err,
+            ConfigError::MediaOrphanGraceTooCloseToUploadTtl(0, 900)
+        ));
+
+        let cfg = AppConfig {
+            r2_presign_upload_ttl_secs: 7200,
+            media_orphan_sweep_grace_hours: 1,
+            ..default_config()
+        };
+        let err = validate(&cfg).expect_err("grace hours short of 2x upload ttl must be rejected");
+        assert!(matches!(
+            err,
+            ConfigError::MediaOrphanGraceTooCloseToUploadTtl(1, 7200)
+        ));
+    }
+
+    #[test]
+    fn media_orphan_grace_at_exactly_2x_upload_ttl_is_accepted() {
+        let cfg = AppConfig {
+            r2_presign_upload_ttl_secs: 1800,
+            media_orphan_sweep_grace_hours: 1,
+            ..default_config()
+        };
+        assert!(
+            validate(&cfg).is_ok(),
+            "grace hours at exactly 2x upload ttl must be accepted"
+        );
+    }
+
+    #[test]
+    fn media_orphan_sweep_timeout_below_floor_is_rejected() {
+        for bad in [0, MIN_MEDIA_ORPHAN_SWEEP_TIMEOUT_SECS - 1] {
+            let cfg = AppConfig {
+                media_orphan_sweep_timeout_secs: bad,
+                ..default_config()
+            };
+            let err = validate(&cfg).expect_err(&format!(
+                "media_orphan_sweep_timeout_secs={bad} must be rejected"
+            ));
+            assert!(matches!(err, ConfigError::MediaOrphanSweepTimeoutTooLow(v) if v == bad));
+        }
+    }
+
+    #[test]
+    fn media_orphan_sweep_timeout_at_or_above_floor_is_accepted() {
+        for ok in [
+            MIN_MEDIA_ORPHAN_SWEEP_TIMEOUT_SECS,
+            MIN_MEDIA_ORPHAN_SWEEP_TIMEOUT_SECS + 1,
+            1800,
+            7200,
+        ] {
+            let cfg = AppConfig {
+                media_orphan_sweep_timeout_secs: ok,
+                ..default_config()
+            };
+            assert!(
+                validate(&cfg).is_ok(),
+                "media_orphan_sweep_timeout_secs={ok} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn media_orphan_grace_zero_is_rejected_even_with_zero_upload_ttl() {
+        // Regression for the zero-bypass (security-auditor, cycle 422): the
+        // multiple check alone (`grace*3600 < ttl*N`) is `0 < 0` == false when
+        // both sides are zero, which would let a zero grace period slip
+        // through if it only relied on that comparison.
+        let cfg = AppConfig {
+            r2_presign_upload_ttl_secs: 0,
+            media_orphan_sweep_grace_hours: 0,
+            ..default_config()
+        };
+        let err = validate(&cfg)
+            .expect_err("zero grace hours must be rejected even when upload ttl is also zero");
+        assert!(matches!(
+            err,
+            ConfigError::MediaOrphanGraceTooCloseToUploadTtl(0, 0)
+        ));
+    }
+
+    #[test]
+    fn media_orphan_grace_above_ceiling_is_rejected() {
+        let cfg = AppConfig {
+            media_orphan_sweep_grace_hours: MAX_MEDIA_ORPHAN_GRACE_HOURS + 1,
+            ..default_config()
+        };
+        let err = validate(&cfg).expect_err("grace hours above the ceiling must be rejected");
+        assert!(matches!(
+            err,
+            ConfigError::MediaOrphanGraceHoursTooHigh(v) if v == MAX_MEDIA_ORPHAN_GRACE_HOURS + 1
+        ));
+    }
+
+    #[test]
+    fn media_orphan_grace_at_ceiling_is_accepted() {
+        let cfg = AppConfig {
+            media_orphan_sweep_grace_hours: MAX_MEDIA_ORPHAN_GRACE_HOURS,
+            ..default_config()
+        };
+        assert!(
+            validate(&cfg).is_ok(),
+            "grace hours exactly at the ceiling must be accepted"
+        );
+    }
+
+    #[test]
+    fn media_orphan_sweep_max_deletes_per_run_default_is_500() {
+        assert_eq!(default_media_orphan_sweep_max_deletes_per_run(), 500);
+        assert_eq!(default_config().media_orphan_sweep_max_deletes_per_run, 500);
+        assert!(default_config().media_orphan_sweep_enabled);
+    }
+
+    #[test]
+    fn media_orphan_sweep_max_deletes_per_run_out_of_range_is_rejected() {
+        for bad in [0, MAX_MEDIA_ORPHAN_SWEEP_MAX_DELETES_PER_RUN + 1, u64::MAX] {
+            let cfg = AppConfig {
+                media_orphan_sweep_max_deletes_per_run: bad,
+                ..default_config()
+            };
+            let err = validate(&cfg).expect_err(&format!(
+                "media_orphan_sweep_max_deletes_per_run={bad} must be rejected"
+            ));
+            assert!(matches!(
+                err,
+                ConfigError::MediaOrphanSweepMaxDeletesOutOfRange(v) if v == bad
+            ));
+        }
+    }
+
+    #[test]
+    fn media_orphan_sweep_max_deletes_per_run_in_range_is_accepted() {
+        for ok in [
+            MIN_MEDIA_ORPHAN_SWEEP_MAX_DELETES_PER_RUN,
+            500,
+            MAX_MEDIA_ORPHAN_SWEEP_MAX_DELETES_PER_RUN,
+        ] {
+            let cfg = AppConfig {
+                media_orphan_sweep_max_deletes_per_run: ok,
+                ..default_config()
+            };
+            assert!(
+                validate(&cfg).is_ok(),
+                "media_orphan_sweep_max_deletes_per_run={ok} must be accepted"
+            );
+        }
+    }
+
+    #[test]
     fn dev_default_r2_endpoint_in_non_local_region_is_rejected() {
         for region in ["eu-central-1", "ap-seoul-1", "us-east-1"] {
             let cfg = AppConfig {
@@ -568,6 +948,90 @@ mod tests {
             validate(&cfg).is_ok(),
             "a real r2_endpoint must be accepted regardless of region_id"
         );
+    }
+
+    #[test]
+    fn dev_default_r2_bucket_in_non_local_region_is_rejected() {
+        for region in ["eu-central-1", "ap-seoul-1", "us-east-1"] {
+            let cfg = AppConfig {
+                region_id: region.into(),
+                r2_bucket: DEV_R2_BUCKET_DEFAULT.into(),
+                ..default_config()
+            };
+            let err = validate(&cfg).expect_err(&format!(
+                "dev r2_bucket default in region {region} must be rejected"
+            ));
+            assert!(matches!(
+                err,
+                ConfigError::R2DevDefaultBucketInNonLocalRegion(ref r) if r == region
+            ));
+        }
+    }
+
+    #[test]
+    fn dev_default_r2_bucket_in_local_region_is_accepted() {
+        let cfg = AppConfig {
+            region_id: "local".into(),
+            r2_bucket: DEV_R2_BUCKET_DEFAULT.into(),
+            ..default_config()
+        };
+        assert!(
+            validate(&cfg).is_ok(),
+            "dev r2_bucket default must be accepted for region_id=local"
+        );
+    }
+
+    #[test]
+    fn distinct_r2_bucket_in_non_local_region_is_accepted() {
+        let cfg = AppConfig {
+            region_id: "eu-central-1".into(),
+            r2_bucket: "some-real-bucket-name".into(),
+            ..default_config()
+        };
+        assert!(
+            validate(&cfg).is_ok(),
+            "a real, non-default r2_bucket must be accepted regardless of region_id"
+        );
+    }
+
+    #[test]
+    fn region_id_with_disallowed_characters_is_rejected() {
+        // '/' is the specific case that would break the orphan sweep's
+        // region-prefix isolation (a region_id containing '/' could make one
+        // region's prefix a strict prefix of another's keyspace); the rest
+        // round out "must be a safe path segment".
+        for bad in ["eu/central", "EU-CENTRAL", "eu_central", "eu central", " "] {
+            let cfg = AppConfig {
+                region_id: bad.into(),
+                ..default_config()
+            };
+            let err = validate(&cfg).expect_err(&format!("region_id={bad:?} must be rejected"));
+            assert!(matches!(
+                err,
+                ConfigError::RegionIdInvalid(ref r) if r == bad
+            ));
+        }
+    }
+
+    #[test]
+    fn region_id_empty_is_rejected() {
+        let cfg = AppConfig {
+            region_id: String::new(),
+            ..default_config()
+        };
+        let err = validate(&cfg).expect_err("empty region_id must be rejected");
+        assert!(matches!(err, ConfigError::RegionIdInvalid(ref r) if r.is_empty()));
+    }
+
+    #[test]
+    fn region_id_with_lowercase_digits_and_hyphens_is_accepted() {
+        for ok in ["local", "eu-central-1", "ap-seoul-2", "a", "region9"] {
+            let cfg = AppConfig {
+                region_id: ok.into(),
+                ..default_config()
+            };
+            assert!(validate(&cfg).is_ok(), "region_id={ok:?} must be accepted");
+        }
     }
 
     #[test]
@@ -752,6 +1216,8 @@ mod tests {
         assert_eq!(app.r2_presign_download_ttl_secs, 300);
         assert_eq!(app.r2_request_timeout_secs, 30);
         assert_eq!(app.media_gc_sweep_timeout_secs, 1800);
+        assert_eq!(app.media_orphan_sweep_grace_hours, 24);
+        assert_eq!(app.media_orphan_sweep_timeout_secs, 1800);
         assert!(
             app.r2_access_key_id.is_empty(),
             "credentials must be injected by operator"

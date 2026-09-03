@@ -10,19 +10,21 @@
 //!
 //! The S3 client's own request timeout is separately configurable and distinct
 //! from the presign TTLs above: presign TTL is the client-facing upload/download
-//! window, while the request timeout bounds server-to-R2 call latency — currently
-//! only `delete()` (used by the hourly media-blob GC job) makes a real R2 network
-//! call; the daily ledger-trim job is Postgres-only and never touches R2.
+//! window, while the request timeout bounds server-to-R2 call latency — `delete()`
+//! (used by the hourly media-blob GC job) and `sweep_orphaned_storage_objects()`
+//! (the 6-hourly orphan sweep) both make real R2 network calls; the daily
+//! ledger-trim job is Postgres-only and never touches R2.
 
 pub mod error;
 
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use async_trait::async_trait;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::{
     config::{timeout::TimeoutConfig, Builder as S3ConfigBuilder, Region},
     presigning::PresigningConfig,
+    types::{Delete, ObjectIdentifier},
     Client as S3Client,
 };
 use chrono::{DateTime, Utc};
@@ -60,6 +62,45 @@ pub const MAX_MEDIA_BYTES: u64 = 100 * 1024 * 1024;
 /// regardless of how many rows are past the cutoff.
 const TRIM_LEDGER_BATCH_SIZE: i64 = 5_000;
 
+/// Hard S3/R2 API limit on keys per `DeleteObjects` request. `list_objects_v2`
+/// pages are already capped at 1000 keys, so in practice a page never exceeds
+/// this — the chunking in `sweep_orphaned_storage_objects` is defence against
+/// that assumption silently changing, not an expected path.
+const DELETE_OBJECTS_MAX_KEYS: usize = 1_000;
+
+/// Cumulative-ratio circuit breaker for `sweep_orphaned_storage_objects`: once
+/// at least this many past-grace candidates have been examined across the
+/// whole run, a very high orphan hit rate is treated as a signal that
+/// `media_blobs` itself is untrustworthy for this run (wrong/empty database,
+/// a PITR restore in progress, a bucket shared across regions) rather than as
+/// evidence that legitimate storage is genuinely orphaned — and the sweep
+/// stops deleting rather than trusting the reconciliation. A real orphan is a
+/// rare row-less/PUT-timing race, not a bulk population, so a healthy sweep
+/// should never come close to this threshold; kept low (below the minimum
+/// sample size) so small buckets/test fixtures with a single legitimate
+/// orphan never trip it.
+const ORPHAN_RATIO_ABORT_MIN_SAMPLE: usize = 50;
+// Lowered from an earlier 80 (security-auditor finding, cycle 424): two real,
+// non-`local` deployments that share both a bucket AND a region_id (e.g. this
+// repo's `staging`/`prod-eu` Helm overlays, both `region: eu-frankfurt`, both
+// leaving `r2Bucket` unset today) would together produce close to a 50/50
+// orphan rate from each side's point of view — the old 80% bar let that case
+// sail through and quietly delete the other side's live media. 50% still
+// leaves genuine legitimate-orphan runs (expected to be single-digit
+// percent) with a wide margin.
+const ORPHAN_RATIO_ABORT_THRESHOLD_PERCENT: u64 = 50;
+/// Absolute cap on cumulative deletes while `aged_checked_total` is still
+/// below `ORPHAN_RATIO_ABORT_MIN_SAMPLE` — i.e. before the ratio guard above
+/// has enough evidence to evaluate at all. Without this, a run whose aged
+/// candidates trickle in a few per page (rather than one large page) could
+/// delete up to `ORPHAN_RATIO_ABORT_MIN_SAMPLE - 1` objects against a wrong or
+/// empty database before the ratio guard ever gets a chance to trip
+/// (security-auditor finding, cycle 424) — worst case for a small/new-region
+/// bucket, which is exactly where a misconfiguration is least likely to have
+/// been noticed yet. Kept well below the min sample size so a single
+/// legitimate orphan in a small bucket/test fixture never trips it.
+const ORPHAN_PRE_SAMPLE_MAX_DELETES: u64 = 5;
+
 /// Outbound adapter: Cloudflare R2 for pre-signed URL generation + Postgres for metadata.
 pub struct R2MediaAdapter {
     pool: PgPool,
@@ -67,6 +108,15 @@ pub struct R2MediaAdapter {
     bucket: String,
     upload_ttl: Duration,
     download_ttl: Duration,
+    /// This deployment's region id. Scopes `sweep_orphaned_storage_objects`'s
+    /// bucket-wide LIST to just this region's own storage keys (see
+    /// `region_prefix`) — without it, a bucket shared or misconfigured across
+    /// regions would let one region's sweep delete another region's live
+    /// media (threat-model-checker RED finding, cycle 422).
+    region_id: String,
+    /// Blast-radius cap for `sweep_orphaned_storage_objects` — see that
+    /// method's doc comment.
+    max_deletes_per_run: u64,
 }
 
 /// Builds the S3-compatible client config used to talk to R2, including its
@@ -118,8 +168,12 @@ impl R2MediaAdapter {
     ///   stalled single attempt still leaves room for the SDK's standard retry
     ///   policy to try again, and a stalled R2 call can't hang the media-blob GC
     ///   job (or, transitively, the advisory lock guarding it) indefinitely
-    // 8 plain construction params, each independently meaningful (creds,
-    // endpoint/bucket, and three orthogonal TTL/timeout knobs) — a builder
+    /// `region_id`            — this deployment's region id; scopes the orphan sweep's
+    ///   bucket-wide LIST to this region's own storage keys (`region_prefix`)
+    /// `max_deletes_per_run`  — blast-radius cap for the orphan sweep (see
+    ///   `sweep_orphaned_storage_objects`)
+    // 10 plain construction params, each independently meaningful (creds,
+    // endpoint/bucket, and orthogonal TTL/timeout/scope/cap knobs) — a builder
     // would be more ceremony than value for a single-call adapter
     // constructor with no optional fields.
     #[allow(clippy::too_many_arguments)]
@@ -132,6 +186,8 @@ impl R2MediaAdapter {
         upload_ttl_secs: u64,
         download_ttl_secs: u64,
         request_timeout_secs: u64,
+        region_id: &str,
+        max_deletes_per_run: u64,
     ) -> Self {
         let s3_cfg = build_s3_config(
             endpoint,
@@ -146,6 +202,8 @@ impl R2MediaAdapter {
             bucket: bucket.to_string(),
             upload_ttl: Duration::from_secs(upload_ttl_secs),
             download_ttl: Duration::from_secs(download_ttl_secs),
+            region_id: region_id.to_string(),
+            max_deletes_per_run,
         }
     }
 
@@ -155,6 +213,62 @@ impl R2MediaAdapter {
         } else {
             Err(DomainError::InvalidInput("content_type not allowed".into()))
         }
+    }
+
+    /// The S3 key prefix scoping this adapter's orphan sweep to just this
+    /// region's own objects. Storage keys are generated as
+    /// `media/{region_id}/{uuid}` (`MediaService::request_upload`), so this
+    /// prefix exactly covers every object this region could itself have
+    /// created — and, structurally, nothing outside it — regardless of
+    /// whether the bucket is (mis)configured to be shared across regions.
+    fn region_prefix(&self) -> String {
+        format!("media/{}/", self.region_id)
+    }
+
+    /// Bulk-delete up to `DELETE_OBJECTS_MAX_KEYS` keys in one `DeleteObjects`
+    /// call, returning how many were actually removed. Per-key failures are
+    /// reported by S3 in the response body rather than as a call error, so
+    /// they are counted out of the total and logged as a bare count under an
+    /// error category — never the keys themselves (rule: no-plaintext-logging).
+    async fn delete_object_batch(&self, keys: &[String]) -> Result<u64, DomainError> {
+        let mut identifiers = Vec::with_capacity(keys.len());
+        for key in keys {
+            identifiers.push(
+                ObjectIdentifier::builder()
+                    .key(key)
+                    // Fixed category string, not the builder error's message:
+                    // that message can echo the offending field back into a
+                    // log line, and this error surfaces through DomainError
+                    // into the sweep job's `error = %e` field.
+                    .build()
+                    .map_err(|_| map_r2(R2Error::S3("object identifier build failed".into())))?,
+            );
+        }
+        let delete = Delete::builder()
+            .set_objects(Some(identifiers))
+            // Quiet mode: suppress the per-key success list in the response
+            // (we only need the count and the failures), keeping the response
+            // body small and free of any key echo on the happy path.
+            .quiet(true)
+            .build()
+            .map_err(|_| map_r2(R2Error::S3("delete request build failed".into())))?;
+        let out = self
+            .s3
+            .delete_objects()
+            .bucket(&self.bucket)
+            .delete(delete)
+            .send()
+            .await
+            .map_err(|e| map_r2(R2Error::S3(e.to_string())))?;
+        let failed = out.errors().len();
+        if failed > 0 {
+            tracing::warn!(
+                error_kind = "r2_bulk_delete",
+                failed = failed,
+                "media.orphan_sweep_batch_partial_failure"
+            );
+        }
+        Ok(keys.len().saturating_sub(failed) as u64)
     }
 }
 
@@ -475,6 +589,155 @@ impl MediaRepository for R2MediaAdapter {
         }
         Ok(total)
     }
+
+    // Orphan sweep (closes the cycle 419-421 deferred finding; see the trait
+    // doc comment on `sweep_orphaned_storage_objects` for the race itself).
+    // Deliberately a periodic reconciliation rather than an upload-confirmation
+    // transaction: the sweep is adapter-only and reuses the existing
+    // leader-lock/interval background-job pattern, whereas making the object
+    // and the row commit atomically would mean reworking the client upload API
+    // contract (the client PUTs straight to R2 without ever calling back).
+    //
+    // Bucket enumeration is the only place in this adapter that touches
+    // objects it has no row for, so it is also the only place that could leak
+    // a key into a log line — the whole method logs nothing but counts and
+    // error categories.
+    #[instrument(skip(self, older_than))]
+    async fn sweep_orphaned_storage_objects(
+        &self,
+        older_than: DateTime<Utc>,
+    ) -> Result<u64, DomainError> {
+        // Compared in epoch seconds against S3's own `LastModified`, avoiding a
+        // fallible smithy-DateTime -> chrono conversion in a path that must not
+        // panic. Second-granularity truncation is irrelevant against a grace
+        // period measured in hours, and rounds toward NOT deleting.
+        let cutoff_epoch_secs = older_than.timestamp();
+        let region_prefix = self.region_prefix();
+        let mut continuation: Option<String> = None;
+        let mut deleted_total: u64 = 0;
+        // Budget consumption is tracked by keys *attempted*, not keys
+        // actually deleted — `deleted_total` alone would let a run where
+        // every `DeleteObjects` call fails (e.g. a transient R2 outage) never
+        // advance the cap, issuing bulk-delete calls for the entire
+        // `media_orphan_sweep_timeout_secs` budget instead of backing off
+        // (security-auditor finding, cycle 424).
+        let mut attempted_deletes_total: u64 = 0;
+        // Cumulative across the whole run (not per-page): feeds the ratio
+        // circuit breaker below, which must judge the run as a whole, not
+        // reset its judgement every 1000-key page.
+        let mut aged_checked_total: usize = 0;
+        let mut orphans_found_total: usize = 0;
+
+        'paginate: loop {
+            let page = self
+                .s3
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                // Region scope (see `region_prefix`): structurally prevents
+                // this replica from ever enumerating — let alone deleting —
+                // another region's objects, even if the bucket itself is
+                // shared or misconfigured across regions.
+                .prefix(&region_prefix)
+                .set_continuation_token(continuation.take())
+                .send()
+                .await
+                .map_err(|e| map_r2(R2Error::S3(e.to_string())))?;
+
+            // Only past-grace objects are candidates. An object with no
+            // `LastModified` at all is skipped rather than swept: unknown age
+            // must fail closed, since deleting a live in-flight upload is
+            // unrecoverable while leaving an orphan another 6 hours is not.
+            let aged_keys: Vec<String> = page
+                .contents()
+                .iter()
+                .filter(|obj| {
+                    obj.last_modified()
+                        .is_some_and(|t| t.secs() < cutoff_epoch_secs)
+                })
+                .filter_map(|obj| obj.key().map(str::to_string))
+                .collect();
+
+            if !aged_keys.is_empty() {
+                aged_checked_total += aged_keys.len();
+                // One `= ANY($1)` per page, not one query per key: a bucket
+                // sweep is O(objects) and an N+1 here would put a query per
+                // stored blob on the DB every 6 hours.
+                let known: Vec<String> = sqlx::query_scalar(
+                    "SELECT storage_key FROM media_blobs WHERE storage_key = ANY($1)",
+                )
+                .bind(&aged_keys)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(map_sqlx)?;
+                let known: HashSet<String> = known.into_iter().collect();
+                let orphans: Vec<String> = aged_keys
+                    .into_iter()
+                    .filter(|key| !known.contains(key))
+                    .collect();
+                orphans_found_total += orphans.len();
+
+                // Circuit breaker: a suspiciously high cumulative orphan rate
+                // means `media_blobs` itself is the untrustworthy party this
+                // run (wrong/empty database, cross-region bucket collision),
+                // not that storage is genuinely full of orphans — stop before
+                // deleting anything from this page or any further one.
+                if aged_checked_total >= ORPHAN_RATIO_ABORT_MIN_SAMPLE
+                    && (orphans_found_total as u64) * 100
+                        >= (aged_checked_total as u64) * ORPHAN_RATIO_ABORT_THRESHOLD_PERCENT
+                {
+                    tracing::warn!(
+                        error_kind = "gc_orphan_ratio_guard",
+                        aged_checked = aged_checked_total,
+                        orphans_found = orphans_found_total,
+                        deleted_before_abort = deleted_total,
+                        "media.orphan_sweep_ratio_guard_triggered"
+                    );
+                    break 'paginate;
+                }
+
+                // Below the ratio guard's minimum sample size, there isn't
+                // enough evidence yet to trust a low orphan ratio, so this
+                // run's effective budget is the small pre-sample cap instead
+                // of the full configured `max_deletes_per_run` — see
+                // `ORPHAN_PRE_SAMPLE_MAX_DELETES`.
+                let effective_cap = if aged_checked_total < ORPHAN_RATIO_ABORT_MIN_SAMPLE {
+                    ORPHAN_PRE_SAMPLE_MAX_DELETES.min(self.max_deletes_per_run)
+                } else {
+                    self.max_deletes_per_run
+                };
+                for chunk in orphans.chunks(DELETE_OBJECTS_MAX_KEYS) {
+                    // Blast-radius cap: never delete past the configured
+                    // per-run budget (or, pre-sample, the smaller
+                    // `effective_cap`) regardless of how many more orphans
+                    // this or a later page finds. A truncated run is not
+                    // lossy — whatever's left is still row-checked and
+                    // re-evaluated next tick.
+                    let remaining_budget = effective_cap.saturating_sub(attempted_deletes_total);
+                    if remaining_budget == 0 {
+                        tracing::warn!(
+                            error_kind = "gc_max_deletes_cap",
+                            cap = effective_cap,
+                            pre_sample = aged_checked_total < ORPHAN_RATIO_ABORT_MIN_SAMPLE,
+                            "media.orphan_sweep_max_deletes_reached"
+                        );
+                        break 'paginate;
+                    }
+                    let take = (chunk.len() as u64).min(remaining_budget) as usize;
+                    attempted_deletes_total += take as u64;
+                    deleted_total += self.delete_object_batch(&chunk[..take]).await?;
+                }
+            }
+
+            // Deleting keys already returned by an earlier page is safe:
+            // `list_objects_v2` continuation is key-ordered, so a removed key
+            // can never shift an unvisited one out of a later page.
+            continuation = page.next_continuation_token().map(str::to_string);
+            if continuation.is_none() {
+                break;
+            }
+        }
+        Ok(deleted_total)
+    }
 }
 
 #[cfg(test)]
@@ -493,6 +756,43 @@ mod tests {
     #[test]
     fn max_media_bytes_is_100mb() {
         assert_eq!(MAX_MEDIA_BYTES, 100 * 1024 * 1024);
+    }
+
+    #[test]
+    fn delete_objects_max_keys_matches_s3_api_limit() {
+        assert_eq!(DELETE_OBJECTS_MAX_KEYS, 1_000);
+    }
+
+    #[tokio::test]
+    async fn region_prefix_is_scoped_under_media_and_region_id() {
+        let adapter = R2MediaAdapter {
+            pool: PgPool::connect_lazy("postgres://localhost/unused")
+                .expect("lazy pool never connects"),
+            s3: S3Client::from_conf(build_s3_config(
+                "http://localhost:9000",
+                "key",
+                "secret",
+                30,
+            )),
+            bucket: "bucket".into(),
+            upload_ttl: Duration::from_secs(900),
+            download_ttl: Duration::from_secs(300),
+            region_id: "eu-central-1".into(),
+            max_deletes_per_run: 500,
+        };
+        assert_eq!(adapter.region_prefix(), "media/eu-central-1/");
+    }
+
+    #[test]
+    fn orphan_ratio_guard_thresholds_are_sane() {
+        // Min sample stays below what a small test bucket/fixture set would
+        // ever hit, and the threshold stays high enough that a real (rare)
+        // orphan alongside normal traffic never trips it, while low enough to
+        // catch a ~50/50 orphan rate (two deployments sharing both a bucket
+        // and a region_id) rather than only a near-total mismatch.
+        assert_eq!(ORPHAN_RATIO_ABORT_MIN_SAMPLE, 50);
+        assert_eq!(ORPHAN_RATIO_ABORT_THRESHOLD_PERCENT, 50);
+        assert!(ORPHAN_PRE_SAMPLE_MAX_DELETES < ORPHAN_RATIO_ABORT_MIN_SAMPLE as u64);
     }
 
     #[test]

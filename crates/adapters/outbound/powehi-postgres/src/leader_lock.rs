@@ -16,6 +16,7 @@ use crate::map_err;
 /// the *same* job across server replicas.
 pub const GC_LOCK_MEDIA_BLOBS: i64 = 0x706f_7765_6869_0001;
 pub const GC_LOCK_MEDIA_LEDGER: i64 = 0x706f_7765_6869_0002;
+pub const GC_LOCK_MEDIA_ORPHANS: i64 = 0x706f_7765_6869_0003;
 
 /// Holds a session-scoped Postgres advisory lock acquired via
 /// `PgLeaderLock::try_lock`. `pg_advisory_lock`/`pg_advisory_unlock` are tied

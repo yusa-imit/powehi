@@ -96,13 +96,27 @@ use tracing::instrument;
 pub struct MediaService {
     media_repo: Arc<dyn MediaRepository>,
     group_repo: Arc<dyn GroupRepository>,
+    /// This deployment's region id, embedded into every generated
+    /// `storage_key` (`media/{region_id}/{uuid}`). Structurally scopes R2
+    /// object ownership to the region that created it — the orphan sweep's
+    /// bucket-wide LIST prefixes by the same region id
+    /// (`R2MediaAdapter::region_prefix`), so a bucket shared or
+    /// misconfigured across regions can never let one region's sweep
+    /// enumerate, let alone delete, another region's objects
+    /// (threat-model-checker RED finding, cycle 422).
+    region_id: String,
 }
 
 impl MediaService {
-    pub fn new(media_repo: Arc<dyn MediaRepository>, group_repo: Arc<dyn GroupRepository>) -> Self {
+    pub fn new(
+        media_repo: Arc<dyn MediaRepository>,
+        group_repo: Arc<dyn GroupRepository>,
+        region_id: String,
+    ) -> Self {
         Self {
             media_repo,
             group_repo,
+            region_id,
         }
     }
 
@@ -211,7 +225,7 @@ impl MediaUseCase for MediaService {
         let blob = MediaBlob {
             id: MediaId::new(),
             uploader_device: uploader_device.clone(),
-            storage_key: format!("media/{}", uuid::Uuid::new_v4()),
+            storage_key: format!("media/{}/{}", self.region_id, uuid::Uuid::new_v4()),
             content_type: content_type.to_string(),
             size_bytes,
             uploaded_at: chrono::Utc::now(),
@@ -472,6 +486,16 @@ mod tests {
             locked.retain(|(_, _, at)| *at >= cutoff);
             Ok((before - locked.len()) as u64)
         }
+
+        async fn sweep_orphaned_storage_objects(
+            &self,
+            _older_than: chrono::DateTime<chrono::Utc>,
+        ) -> Result<u64, DomainError> {
+            // No object store behind this mock — the sweep is adapter-only
+            // (bucket enumeration), so there is nothing for the application
+            // layer's tests to exercise here.
+            Ok(0)
+        }
     }
 
     struct FakeGroupRepo {
@@ -578,7 +602,7 @@ mod tests {
     }
 
     fn svc(repo: Arc<MockMediaRepo>) -> MediaService {
-        MediaService::new(repo, FakeGroupRepo::empty())
+        MediaService::new(repo, FakeGroupRepo::empty(), "test-region".into())
     }
 
     #[tokio::test]
@@ -815,6 +839,7 @@ mod tests {
         let s = MediaService::new(
             repo.clone(),
             FakeGroupRepo::with_member(group.clone(), device.clone()),
+            "test-region".into(),
         );
         let (id, _) = s
             .request_upload(&device, "image/jpeg", 512, Some(&group))
@@ -900,7 +925,7 @@ mod tests {
             (group.clone(), uploader.clone()),
             (group.clone(), member.clone()),
         ]);
-        let s = MediaService::new(repo.clone(), group_repo);
+        let s = MediaService::new(repo.clone(), group_repo, "test-region".into());
         let (id, _) = s
             .request_upload(&uploader, "image/jpeg", 512, Some(&group))
             .await
@@ -917,7 +942,7 @@ mod tests {
         let group = GroupId::new();
         // Uploader is a member (so upload succeeds), but non_member is not.
         let group_repo = FakeGroupRepo::with_member(group.clone(), uploader.clone());
-        let s = MediaService::new(repo.clone(), group_repo);
+        let s = MediaService::new(repo.clone(), group_repo, "test-region".into());
         let (id, _) = s
             .request_upload(&uploader, "image/jpeg", 512, Some(&group))
             .await
@@ -961,6 +986,7 @@ mod tests {
         let s = MediaService::new(
             repo.clone(),
             FakeGroupRepo::with_member(group.clone(), uploader.clone()),
+            "test-region".into(),
         );
         let (id, _) = s
             .request_upload(&uploader, "image/jpeg", 1024, Some(&group))
@@ -981,6 +1007,7 @@ mod tests {
         let s = MediaService::new(
             repo.clone(),
             FakeGroupRepo::with_member(group.clone(), other.clone()),
+            "test-region".into(),
         );
         let err = s
             .request_upload(&uploader, "image/jpeg", 512, Some(&group))
@@ -996,7 +1023,7 @@ mod tests {
         // No membership data → fail-closed, upload rejected.
         let repo = Arc::new(MockMediaRepo::new("u", "d"));
         let group = GroupId::new();
-        let s = MediaService::new(repo.clone(), FakeGroupRepo::empty());
+        let s = MediaService::new(repo.clone(), FakeGroupRepo::empty(), "test-region".into());
         let err = s
             .request_upload(&DeviceId::new(), "image/jpeg", 512, Some(&group))
             .await
@@ -1031,7 +1058,7 @@ mod tests {
             (group.clone(), uploader.clone()),
             (group.clone(), member.clone()),
         ]);
-        let s = MediaService::new(repo.clone(), group_repo);
+        let s = MediaService::new(repo.clone(), group_repo, "test-region".into());
         let (id, _) = s
             .request_upload(&uploader, "image/jpeg", 512, Some(&group))
             .await
@@ -1051,7 +1078,7 @@ mod tests {
             (group.clone(), uploader.clone()),
             (group.clone(), member.clone()),
         ]);
-        let s = MediaService::new(repo.clone(), group_repo);
+        let s = MediaService::new(repo.clone(), group_repo, "test-region".into());
         let (id, _) = s
             .request_upload(&uploader, "image/jpeg", 512, Some(&group))
             .await
@@ -1081,7 +1108,7 @@ mod tests {
         let non_member = DeviceId::new();
         let group = GroupId::new();
         let group_repo = FakeGroupRepo::with_member(group.clone(), uploader.clone());
-        let s = MediaService::new(repo.clone(), group_repo);
+        let s = MediaService::new(repo.clone(), group_repo, "test-region".into());
         let (id, _) = s
             .request_upload(&uploader, "image/jpeg", 512, Some(&group))
             .await
@@ -1135,7 +1162,7 @@ mod tests {
             (group.clone(), uploader.clone()),
             (group.clone(), member.clone()),
         ]);
-        let s = MediaService::new(repo.clone(), group_repo);
+        let s = MediaService::new(repo.clone(), group_repo, "test-region".into());
         let deleted = s.run_gc().await.unwrap();
         assert_eq!(deleted, 0, "member has not acked yet");
         assert_eq!(repo.saved.lock().unwrap().len(), 1);
@@ -1154,7 +1181,7 @@ mod tests {
             (group.clone(), uploader.clone()),
             (group.clone(), member.clone()),
         ]);
-        let s = MediaService::new(repo.clone(), group_repo);
+        let s = MediaService::new(repo.clone(), group_repo, "test-region".into());
         let deleted = s.run_gc().await.unwrap();
         assert_eq!(deleted, 1);
         assert!(repo.saved.lock().unwrap().is_empty());
@@ -1176,7 +1203,7 @@ mod tests {
             (group.clone(), uploader.clone()),
             (group.clone(), member.clone()),
         ]);
-        let s = MediaService::new(repo.clone(), group_repo);
+        let s = MediaService::new(repo.clone(), group_repo, "test-region".into());
         assert_eq!(s.run_gc().await.unwrap(), 1);
     }
 
@@ -1288,7 +1315,7 @@ mod tests {
             (group.clone(), uploader.clone()),
             (group.clone(), member.clone()),
         ]);
-        let s = MediaService::new(repo.clone(), group_repo);
+        let s = MediaService::new(repo.clone(), group_repo, "test-region".into());
         let deleted = s.run_gc_batched(1).await.unwrap();
         assert_eq!(deleted, 1, "only the ungrouped blob is deletable");
         assert_eq!(

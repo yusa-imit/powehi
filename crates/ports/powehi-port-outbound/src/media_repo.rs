@@ -74,4 +74,33 @@ pub trait MediaRepository: Send + Sync {
         &self,
         cutoff: DateTime<Utc>,
     ) -> Result<u64, DomainError>;
+
+    /// Delete objects in the media bucket that have no matching
+    /// `media_blobs.storage_key` row AND were last modified strictly before
+    /// `older_than`. Returns the number of objects deleted.
+    ///
+    /// Closes the orphaned-object gap deferred across cycles 419-421:
+    /// `delete()` (and the hourly `run_gc` that calls it) deletes the S3
+    /// object, then removes the Postgres row (corrected cycle 424 — an
+    /// earlier version of this comment had the order backwards). A client's
+    /// presigned PUT stays valid for `r2_presign_upload_ttl_secs` after it
+    /// was issued, independent of `delete()`'s own timeline — if that upload
+    /// lands after `delete()` has already run to completion for that id, the
+    /// PUT recreates the S3 object with no matching row, and `delete()` can
+    /// never reach it again because a second call starts from `find_by_id`
+    /// (`None` short-circuits the S3 delete). Nothing else ever enumerates
+    /// the bucket, so without this sweep those objects are
+    /// billable forever.
+    ///
+    /// `older_than` is a grace cutoff, not a retention policy: an object
+    /// newer than it MUST NOT be deleted, because "no row yet" is the normal
+    /// transient state of a legitimate in-flight upload (a presigned PUT
+    /// still inside its TTL, or a `save()` whose row insert has not committed
+    /// yet). Callers must pass a cutoff with a wide margin past the upload
+    /// presign TTL plus any plausible clock skew — see
+    /// `media_orphan_sweep_grace_hours`.
+    async fn sweep_orphaned_storage_objects(
+        &self,
+        older_than: DateTime<Utc>,
+    ) -> Result<u64, DomainError>;
 }

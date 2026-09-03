@@ -28,6 +28,7 @@ use powehi_postgres::{
     connect as pg_connect, run_migrations, PgDeviceRepository, PgEnvelopeRepository,
     PgGroupRepository, PgKeyPackageRepository, PgLeaderLock, PgPushSubscriptionRepository,
     PgServerConfigRepository, PgUserRepository, GC_LOCK_MEDIA_BLOBS, GC_LOCK_MEDIA_LEDGER,
+    GC_LOCK_MEDIA_ORPHANS,
 };
 use powehi_proto::region::region_service_server::RegionServiceServer;
 use powehi_r2::R2MediaAdapter;
@@ -209,15 +210,22 @@ async fn main() -> Result<()> {
         cfg.r2_presign_upload_ttl_secs,
         cfg.r2_presign_download_ttl_secs,
         cfg.r2_request_timeout_secs,
+        &cfg.region_id,
+        cfg.media_orphan_sweep_max_deletes_per_run,
     ));
     let media_repo_gc: Arc<dyn powehi_port_outbound::media_repo::MediaRepository> =
+        media_r2.clone();
+    let media_repo_orphans: Arc<dyn powehi_port_outbound::media_repo::MediaRepository> =
         media_r2.clone();
     // Postgres advisory-lock leader-election helper for the background GC
     // jobs below — a pure Postgres primitive (moved off the R2 adapter cycle
     // 373), shares the same pool as everything else, cheap to construct.
     let leader_lock = Arc::new(PgLeaderLock::new(pool.clone()));
-    let media: Arc<dyn powehi_port_inbound::media::MediaUseCase> =
-        Arc::new(MediaService::new(media_r2, group_repo_media));
+    let media: Arc<dyn powehi_port_inbound::media::MediaUseCase> = Arc::new(MediaService::new(
+        media_r2,
+        group_repo_media,
+        cfg.region_id.clone(),
+    ));
     let media_gc = Arc::clone(&media);
 
     let invite: Arc<dyn powehi_port_inbound::invite::InviteUseCase> =
@@ -423,6 +431,10 @@ async fn main() -> Result<()> {
     // doc comment) — N slow-but-not-hung deletes could otherwise hold
     // `GC_LOCK_MEDIA_BLOBS` past the next hourly tick, delaying every other replica.
     let media_gc_sweep_timeout = std::time::Duration::from_secs(cfg.media_gc_sweep_timeout_secs);
+    // Same rationale as `media_gc_sweep_timeout` above, but for the orphan sweep below.
+    let media_orphan_sweep_timeout =
+        std::time::Duration::from_secs(cfg.media_orphan_sweep_timeout_secs);
+    let media_orphan_grace_hours = cfg.media_orphan_sweep_grace_hours;
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
         loop {
@@ -464,6 +476,10 @@ async fn main() -> Result<()> {
     // Advisory-lock-guarded (cycle 368) for the same reason as the media
     // blob GC job above — a distinct lock key, so the two jobs never block
     // each other, only concurrent replicas racing this same job.
+    //
+    // Cloned before this job's `tokio::spawn` moves `leader_lock` itself —
+    // the orphan-sweep job below needs its own handle.
+    let leader_lock_orphans = leader_lock.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
         loop {
@@ -492,6 +508,89 @@ async fn main() -> Result<()> {
                     error_kind = "gc_lock",
                     error = %e,
                     "gc.media_ledger_lock_acquire_failed"
+                ),
+            }
+        }
+    });
+
+    // ── Background sweep: orphaned R2 objects (cycles 419-421 deferred gap) ─
+    // `delete()` starts from `find_by_id`, so an object whose pre-signed PUT
+    // lands AFTER its `media_blobs` row was removed (by `delete()` itself or
+    // by the hourly `run_gc`) is unreachable forever: no row means no storage
+    // key means no S3 delete. Nothing else enumerates the bucket, so those
+    // objects would stay billable indefinitely. Reconcile bucket against DB
+    // every 6 hours — orphans are rare and this is a cost/hygiene sweep, not
+    // a latency-sensitive or privacy-deadline job, so a long interval keeps
+    // the bucket-wide LIST cost negligible.
+    // Chosen over an upload-confirmation transaction (which would make the
+    // object and the row commit atomically) because that would require
+    // reworking the client upload API contract — the client PUTs straight to
+    // R2 and never calls back — while this is adapter-only.
+    // ZK invariant preserved: the sweep reads object keys and timestamps
+    // only, never object bodies (the server still never sees ciphertext, let
+    // alone plaintext), and logs carry only a deleted count.
+    // Advisory-lock-guarded on its own key so N replicas don't each run a
+    // full bucket enumeration on the same tick, and so it never blocks (or is
+    // blocked by) the blob-GC and ledger-trim jobs.
+    //
+    // `media_orphan_sweep_enabled` is an explicit kill switch (threat-model-
+    // checker / security-auditor finding, cycle 422): this is the only
+    // background job that can irreversibly bulk-delete user data based on a
+    // bucket-vs-DB reconciliation, so an operator who suspects a false
+    // positive (DB pointed at the wrong environment, a PITR restore in
+    // progress, a bucket shared across regions) needs a way to stop it that
+    // doesn't require reverting code. Default true.
+    let media_orphan_sweep_enabled = cfg.media_orphan_sweep_enabled;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
+        // Skip the immediate first tick `tokio::time::interval` fires on
+        // creation: this job's action is irreversible and bucket-wide, unlike
+        // the row-scoped GC jobs above, so a freshly booted (possibly
+        // misconfigured) replica gets one full interval before its first
+        // sweep — a window for other startup checks/alarms to surface a bad
+        // deploy before anything gets deleted (security-auditor finding).
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if !media_orphan_sweep_enabled {
+                tracing::debug!("gc.media_orphans_sweep_disabled_skipping");
+                continue;
+            }
+            match leader_lock_orphans.try_lock(GC_LOCK_MEDIA_ORPHANS).await {
+                Ok(Some(guard)) => {
+                    // Grace cutoff: only objects older than this are eligible.
+                    // Anything newer may be a legitimate in-flight upload
+                    // still inside its pre-signed PUT TTL, or a `save()` whose
+                    // row insert has not committed yet.
+                    let cutoff = chrono::Utc::now()
+                        - chrono::Duration::hours(media_orphan_grace_hours as i64);
+                    match tokio::time::timeout(
+                        media_orphan_sweep_timeout,
+                        media_repo_orphans.sweep_orphaned_storage_objects(cutoff),
+                    )
+                    .await
+                    {
+                        Ok(Ok(n)) if n > 0 => {
+                            tracing::info!(deleted = n, "gc.media_orphans_swept")
+                        }
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => tracing::warn!(
+                            error_kind = "gc",
+                            error = %e,
+                            "gc.media_orphan_sweep_failed"
+                        ),
+                        Err(_) => tracing::warn!(
+                            error_kind = "gc_timeout",
+                            "gc.media_orphan_sweep_timed_out"
+                        ),
+                    }
+                    guard.release().await;
+                }
+                Ok(None) => tracing::debug!("gc.media_orphans_lock_held_elsewhere_skipping"),
+                Err(e) => tracing::warn!(
+                    error_kind = "gc_lock",
+                    error = %e,
+                    "gc.media_orphans_lock_acquire_failed"
                 ),
             }
         }
