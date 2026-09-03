@@ -23,7 +23,9 @@ use async_trait::async_trait;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::{
     config::{timeout::TimeoutConfig, Builder as S3ConfigBuilder, Region},
+    error::ProvideErrorMetadata,
     presigning::PresigningConfig,
+    primitives::ByteStream,
     types::{Delete, ObjectIdentifier},
     Client as S3Client,
 };
@@ -100,6 +102,12 @@ const ORPHAN_RATIO_ABORT_THRESHOLD_PERCENT: u64 = 50;
 /// been noticed yet. Kept well below the min sample size so a single
 /// legitimate orphan in a small bucket/test fixture never trips it.
 const ORPHAN_PRE_SAMPLE_MAX_DELETES: u64 = 5;
+
+/// Key suffix (appended to `region_prefix`) of this environment's ownership
+/// marker object — see `R2MediaAdapter::verify_region_ownership`. A leading
+/// `.` keeps it lexically first in `list_objects_v2` pages and visually
+/// distinct from real `{uuid}` media keys.
+const OWNER_SENTINEL_KEY_SUFFIX: &str = ".owner";
 
 /// Outbound adapter: Cloudflare R2 for pre-signed URL generation + Postgres for metadata.
 pub struct R2MediaAdapter {
@@ -223,6 +231,169 @@ impl R2MediaAdapter {
     /// whether the bucket is (mis)configured to be shared across regions.
     fn region_prefix(&self) -> String {
         format!("media/{}/", self.region_id)
+    }
+
+    /// Verifies (and, on first run, claims) ownership of `region_prefix`
+    /// before `sweep_orphaned_storage_objects` is allowed to delete anything
+    /// under it.
+    ///
+    /// `region_prefix` only isolates *distinct* region ids sharing one
+    /// bucket — it does nothing for two separate environments (e.g. staging
+    /// and prod-eu) that are both misconfigured to share the same bucket
+    /// AND region_id, since their storage keys would then collide under an
+    /// identical prefix while each environment's own Postgres only knows
+    /// about its own blobs (threat-model-checker RED finding, cycle 424;
+    /// `AppConfig::validate()`'s dev-bucket-default guard narrows this to
+    /// "forgot to set r2_bucket" but cannot catch "set two environments to
+    /// the same real bucket on purpose or by mistake").
+    ///
+    /// This NARROWS that residual gap, it does not close it. Each
+    /// environment generates a random owner id once, persists it in *its
+    /// own* Postgres (`media_region_owner` — a different database per
+    /// environment, so this value is never shared even when the bucket and
+    /// region_id are), then races to claim `{region_prefix}.owner` in R2
+    /// with a conditional (`If-None-Match: *`) write the first time it
+    /// runs. Because the sweep is a periodic reconciliation job rather than
+    /// a one-time boot check (see the impl-level doc comment above), every
+    /// subsequent run re-reads that object and refuses to delete anything
+    /// if the stored id doesn't match its own. This eliminates *mutual*
+    /// destruction between two colliding environments (at most one of them
+    /// can ever win the claim) and gives the losing side a loud, permanent
+    /// `gc_orphan_owner_mismatch` signal instead of silent data loss — but
+    /// it does **not** protect the winning side's victim: whichever
+    /// environment's sweep claims the prefix first can still delete the
+    /// other, still-live environment's media as "orphans" on every run
+    /// thereafter, since the winner's Postgres genuinely has no row for
+    /// them. Distinct real buckets per environment remain a hard
+    /// requirement; this is a one-directional-protection-plus-detection
+    /// mechanism, not full isolation (threat-model-checker + security-
+    /// auditor, cycle 426 fresh review pass — see prd.md §9.4.3).
+    ///
+    /// The conditional write closes the naive GET-then-PUT sequence's own
+    /// TOCTOU: without it, two environments racing to claim the same
+    /// *empty* prefix on their respective first-ever runs could both
+    /// observe "absent" and both unconditionally PUT, both concluding
+    /// ownership in the same run (the exact mutual-destruction case this
+    /// mechanism exists to prevent). `If-None-Match: *` makes the loser's
+    /// write fail with a precondition error instead, and the loser then
+    /// re-reads whatever the winner wrote to compare against.
+    ///
+    /// A benign multi-replica boot race within the *same* environment is
+    /// resolved by the atomic Postgres upsert below (`RETURNING` always
+    /// yields the one persisted value, regardless of which replica's
+    /// `INSERT` actually won) before any replica touches R2, so replicas of
+    /// the same environment always agree before racing for the R2 write.
+    ///
+    /// Returns `Ok(true)` if this run owns the prefix and may proceed,
+    /// `Ok(false)` if ownership is contested (fail closed — the caller must
+    /// not delete anything this run). Real S3/Postgres errors propagate as
+    /// errors, same as every other guard in this adapter.
+    async fn verify_region_ownership(&self, region_prefix: &str) -> Result<bool, DomainError> {
+        // Atomic upsert-or-fetch: `DO UPDATE` (even as a no-op on the PK
+        // itself) forces `RETURNING` to fire on a pre-existing row, unlike
+        // `DO NOTHING`, which would leave a second query needed to read it
+        // back — closing a benign-but-real gap where a fetch immediately
+        // after a `DO NOTHING` insert could race a concurrent replica's
+        // still-uncommitted insert (security-auditor F2, cycle 426 fresh
+        // review pass).
+        let local_owner_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO media_region_owner (region_id, owner_id)
+             VALUES ($1, $2)
+             ON CONFLICT (region_id) DO UPDATE SET region_id = EXCLUDED.region_id
+             RETURNING owner_id",
+        )
+        .bind(&self.region_id)
+        .bind(Uuid::new_v4())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        let owner_key = format!("{region_prefix}{OWNER_SENTINEL_KEY_SUFFIX}");
+        if let Some(remote_owner_id) = self.read_owner_sentinel(&owner_key).await? {
+            return Ok(self.owner_matches(local_owner_id, remote_owner_id));
+        }
+
+        match self
+            .s3
+            .put_object()
+            .bucket(&self.bucket)
+            .key(&owner_key)
+            .if_none_match("*")
+            .body(ByteStream::from(local_owner_id.to_string().into_bytes()))
+            .send()
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(e) => {
+                let lost_the_claim_race = e
+                    .as_service_error()
+                    .is_some_and(|se| se.code() == Some("PreconditionFailed"));
+                if !lost_the_claim_race {
+                    return Err(map_r2(R2Error::S3(e.to_string())));
+                }
+                // Another environment's concurrent first claim won this
+                // race — re-read whatever it wrote rather than assuming we
+                // simply lost; either way this run fails closed.
+                match self.read_owner_sentinel(&owner_key).await? {
+                    Some(remote_owner_id) => {
+                        Ok(self.owner_matches(local_owner_id, remote_owner_id))
+                    }
+                    None => Ok(false),
+                }
+            }
+        }
+    }
+
+    /// Reads `owner_key`'s content as a `Uuid`, or `None` if the object
+    /// doesn't exist (yet). Any other S3 error propagates.
+    async fn read_owner_sentinel(&self, owner_key: &str) -> Result<Option<Uuid>, DomainError> {
+        match self
+            .s3
+            .get_object()
+            .bucket(&self.bucket)
+            .key(owner_key)
+            .send()
+            .await
+        {
+            Ok(out) => {
+                let bytes = out
+                    .body
+                    .collect()
+                    .await
+                    .map_err(|e| map_r2(R2Error::S3(e.to_string())))?
+                    .into_bytes();
+                Ok(std::str::from_utf8(&bytes)
+                    .ok()
+                    .and_then(|s| Uuid::parse_str(s.trim()).ok()))
+            }
+            Err(e) => {
+                if e.as_service_error().is_some_and(|se| se.is_no_such_key()) {
+                    Ok(None)
+                } else {
+                    Err(map_r2(R2Error::S3(e.to_string())))
+                }
+            }
+        }
+    }
+
+    /// Compares this environment's own owner id against the value read from
+    /// R2, logging a diagnosable mismatch. Both ids are server-generated
+    /// random v4 UUIDs with no linkage to users, devices, keys, or
+    /// ciphertext, so logging them is not a plaintext/PII leak (rule:
+    /// `no-plaintext-logging`) — and doing so is the only way this failure
+    /// mode is diagnosable at all (security-auditor F3, cycle 426 fresh
+    /// review pass).
+    fn owner_matches(&self, local_owner_id: Uuid, remote_owner_id: Uuid) -> bool {
+        let owned = local_owner_id == remote_owner_id;
+        if !owned {
+            tracing::error!(
+                error_kind = "gc_orphan_owner_mismatch",
+                local_owner_id = %local_owner_id,
+                remote_owner_id = %remote_owner_id,
+                "media.orphan_sweep_owner_mismatch_refusing_sweep"
+            );
+        }
+        owned
     }
 
     /// Bulk-delete up to `DELETE_OBJECTS_MAX_KEYS` keys in one `DeleteObjects`
@@ -613,6 +784,16 @@ impl MediaRepository for R2MediaAdapter {
         // period measured in hours, and rounds toward NOT deleting.
         let cutoff_epoch_secs = older_than.timestamp();
         let region_prefix = self.region_prefix();
+
+        // Ownership gate: refuse to delete anything if another environment
+        // has already claimed this exact region_prefix (see
+        // `verify_region_ownership`'s doc comment) — fail closed rather than
+        // trust a bucket-wide LIST that could belong to someone else.
+        if !self.verify_region_ownership(&region_prefix).await? {
+            return Ok(0);
+        }
+        let owner_key = format!("{region_prefix}{OWNER_SENTINEL_KEY_SUFFIX}");
+
         let mut continuation: Option<String> = None;
         let mut deleted_total: u64 = 0;
         // Budget consumption is tracked by keys *attempted*, not keys
@@ -650,6 +831,11 @@ impl MediaRepository for R2MediaAdapter {
             let aged_keys: Vec<String> = page
                 .contents()
                 .iter()
+                // Never treat this adapter's own ownership marker as a
+                // candidate: it has no `media_blobs` row by design, so
+                // without this it would eventually age past the grace
+                // period and get swept away by the very mechanism it gates.
+                .filter(|obj| obj.key() != Some(owner_key.as_str()))
                 .filter(|obj| {
                     obj.last_modified()
                         .is_some_and(|t| t.secs() < cutoff_epoch_secs)

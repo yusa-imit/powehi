@@ -1433,6 +1433,164 @@ async fn sweep_orphaned_storage_objects_pre_sample_cap_bounds_damage_below_min_s
     );
 }
 
+// ── owner-sentinel guard (cycle 426) ─────────────────────────────────────────
+// Narrows (does not close) the residual gap left open by cycle 424's
+// review: region-prefix scoping only isolates distinct region ids sharing
+// one bucket, not two separate environments misconfigured to share the
+// same bucket AND region_id. This eliminates mutual destruction between
+// two colliding environments; it does not protect the winning side's
+// victim. See `R2MediaAdapter::verify_region_ownership`'s doc comment.
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn sweep_orphaned_storage_objects_claims_owner_sentinel_on_first_run() {
+    // The very first sweep run against a fresh region_prefix must claim it
+    // by writing `.owner` to R2 with this environment's freshly persisted
+    // `media_region_owner` id, and still do its normal orphan-sweeping work
+    // in that same run.
+    let h = setup().await;
+    let orphan_key = format!("media/{TEST_REGION_ID}/owner-claim-orphan");
+    put_raw_object(&h.s3, &orphan_key, b"opaque-ciphertext-bytes").await;
+
+    let owner_key = format!("media/{TEST_REGION_ID}/.owner");
+    assert!(
+        list_keys(&h.s3, &owner_key).await.is_empty(),
+        "no owner sentinel should exist before the first sweep run"
+    );
+
+    let swept = h
+        .adapter
+        .sweep_orphaned_storage_objects(Utc::now() + chrono::Duration::hours(1000))
+        .await
+        .expect("first sweep run claims ownership and sweeps the orphan");
+    assert_eq!(
+        swept, 1,
+        "the real orphan must still be swept on the claiming run"
+    );
+
+    let owner_object =
+        h.s3.get_object()
+            .bucket(TEST_BUCKET)
+            .key(&owner_key)
+            .send()
+            .await
+            .expect("owner sentinel must exist after the first sweep run");
+    let body = owner_object
+        .body
+        .collect()
+        .await
+        .expect("read owner sentinel body")
+        .into_bytes();
+    let claimed_owner_id: Uuid = std::str::from_utf8(&body)
+        .expect("owner sentinel body is UTF-8")
+        .trim()
+        .parse()
+        .expect("owner sentinel body is a UUID");
+
+    let db_owner_id: Uuid =
+        sqlx::query_scalar("SELECT owner_id FROM media_region_owner WHERE region_id = $1")
+            .bind(TEST_REGION_ID)
+            .fetch_one(&h.pool)
+            .await
+            .expect("media_region_owner row must exist after the first sweep run");
+    assert_eq!(
+        claimed_owner_id, db_owner_id,
+        "the R2 sentinel must match this environment's own persisted owner id"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn sweep_orphaned_storage_objects_refuses_when_owner_sentinel_belongs_to_another_environment()
+{
+    // Simulates the exact scenario the owner sentinel exists to close: two
+    // separate environments (different Postgres databases — e.g. staging and
+    // prod-eu) misconfigured to share the same bucket AND region_id. A
+    // foreign environment already wrote its own id to `.owner`, so this
+    // environment's freshly generated `media_region_owner` id will never
+    // match it — the sweep must fail closed and delete nothing, even though
+    // a real orphan is sitting right there under the same prefix.
+    let h = setup().await;
+    let orphan_key = format!("media/{TEST_REGION_ID}/owner-mismatch-orphan");
+    put_raw_object(&h.s3, &orphan_key, b"opaque-ciphertext-bytes").await;
+
+    let owner_key = format!("media/{TEST_REGION_ID}/.owner");
+    let foreign_owner_id = Uuid::new_v4();
+    put_raw_object(&h.s3, &owner_key, foreign_owner_id.to_string().as_bytes()).await;
+
+    let swept = h
+        .adapter
+        .sweep_orphaned_storage_objects(Utc::now() + chrono::Duration::hours(1000))
+        .await
+        .expect("sweep must not error, just refuse to delete");
+    assert_eq!(
+        swept, 0,
+        "a contested region_prefix (owner sentinel belongs to another \
+         environment) must refuse to delete anything"
+    );
+    assert_eq!(
+        list_keys(&h.s3, &orphan_key).await,
+        vec![orphan_key.clone()],
+        "the real orphan must survive an ownership-contested run"
+    );
+
+    let owner_object =
+        h.s3.get_object()
+            .bucket(TEST_BUCKET)
+            .key(&owner_key)
+            .send()
+            .await
+            .expect("owner sentinel still readable");
+    let body = owner_object
+        .body
+        .collect()
+        .await
+        .expect("read owner sentinel body")
+        .into_bytes();
+    assert_eq!(
+        std::str::from_utf8(&body).expect("utf8").trim(),
+        foreign_owner_id.to_string(),
+        "the foreign owner id must not have been overwritten by this environment's own id"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn sweep_orphaned_storage_objects_never_sweeps_its_own_owner_sentinel() {
+    // The `.owner` sentinel has no `media_blobs` row by design — without an
+    // explicit exclusion it would eventually age past the grace cutoff and
+    // get swept away by the very mechanism it gates, silently reopening the
+    // gap on whichever run happened to sweep it.
+    let h = setup().await;
+
+    h.adapter
+        .sweep_orphaned_storage_objects(Utc::now() + chrono::Duration::hours(1000))
+        .await
+        .expect("first run claims ownership");
+
+    let owner_key = format!("media/{TEST_REGION_ID}/.owner");
+    assert_eq!(
+        list_keys(&h.s3, &owner_key).await,
+        vec![owner_key.clone()],
+        "owner sentinel must exist after the claiming run"
+    );
+
+    // A second run, further in the future, would treat every object
+    // (including the sentinel) as maximally aged if it weren't explicitly
+    // excluded from orphan candidacy.
+    let swept = h
+        .adapter
+        .sweep_orphaned_storage_objects(Utc::now() + chrono::Duration::hours(2000))
+        .await
+        .expect("second sweep run");
+    assert_eq!(swept, 0, "nothing else to sweep in this fixture");
+    assert_eq!(
+        list_keys(&h.s3, &owner_key).await,
+        vec![owner_key.clone()],
+        "the owner sentinel itself must never be swept as an orphan"
+    );
+}
+
 // GC advisory lock coverage (cycle 368) moved to powehi-postgres's
 // `pg_security_it.rs` cycle 373 — `try_gc_lock`/`GcLockGuard` now live on
 // `powehi_postgres::PgLeaderLock`, a pure Postgres primitive with no R2/MinIO
