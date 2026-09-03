@@ -4227,6 +4227,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures-core",
+ "futures-util",
  "powehi-domain",
  "powehi-port-outbound",
  "redis",
