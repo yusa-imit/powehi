@@ -1355,7 +1355,10 @@ async fn sweep_orphaned_storage_objects_ratio_guard_aborts_on_suspiciously_high_
     let orphan_count = 60;
     let mut keys = Vec::with_capacity(orphan_count);
     for i in 0..orphan_count {
-        let key = format!("media/{TEST_REGION_ID}/ratio-orphan-{i}");
+        // Zero-padded: `list_keys` below does a `prefix` list, and an
+        // unpadded "ratio-orphan-1" would also match "ratio-orphan-10"
+        // through "-19" as false positives, undercounting survivors.
+        let key = format!("media/{TEST_REGION_ID}/ratio-orphan-{i:02}");
         put_raw_object(&h.s3, &key, b"opaque-ciphertext-bytes").await;
         keys.push(key);
     }
@@ -1394,7 +1397,10 @@ async fn sweep_orphaned_storage_objects_pre_sample_cap_bounds_damage_below_min_s
     let orphan_count = 20; // < ORPHAN_RATIO_ABORT_MIN_SAMPLE (50)
     let mut keys = Vec::with_capacity(orphan_count);
     for i in 0..orphan_count {
-        let key = format!("media/{TEST_REGION_ID}/pre-sample-orphan-{i}");
+        // Zero-padded: `list_keys` below does a `prefix` list, and an
+        // unpadded "pre-sample-orphan-1" would also match "-10" through
+        // "-19" as false positives, overcounting survivors.
+        let key = format!("media/{TEST_REGION_ID}/pre-sample-orphan-{i:02}");
         put_raw_object(&h.s3, &key, b"opaque-ciphertext-bytes").await;
         keys.push(key);
     }
