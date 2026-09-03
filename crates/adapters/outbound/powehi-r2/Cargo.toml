@@ -33,3 +33,10 @@ powehi-port-outbound = { workspace = true }
 powehi-postgres = { workspace = true }
 testcontainers = { workspace = true }
 testcontainers-modules = { workspace = true }
+# Test-only HTTP replay client for unit-testing verify_region_ownership's S3
+# claim/self-verify/race-loss branches without Docker/MinIO (mismatch/vanished
+# branches the real testcontainers claim-race test in tests/r2_media_it.rs
+# can't deterministically hit). Not a new production runtime dependency.
+aws-smithy-http-client = { version = "1", features = ["test-util"] }
+aws-smithy-types = "1"
+http = "1"

@@ -308,6 +308,22 @@ impl R2MediaAdapter {
         .await
         .map_err(map_sqlx)?;
 
+        self.verify_region_ownership_with_local_id(region_prefix, local_owner_id)
+            .await
+    }
+
+    /// The R2-only half of `verify_region_ownership`, split out so its
+    /// claim/self-verify/race-loss branches are unit-testable against a
+    /// mocked `S3Client` (see the `mock_s3_client` test helper below)
+    /// without needing a real Postgres pool — `local_owner_id` is normally
+    /// sourced from the Postgres upsert above, but the R2 read/claim/verify
+    /// logic itself never touches `self.pool`. Pure extraction, no behavior
+    /// change.
+    async fn verify_region_ownership_with_local_id(
+        &self,
+        region_prefix: &str,
+        local_owner_id: Uuid,
+    ) -> Result<bool, DomainError> {
         let owner_key = format!("{region_prefix}{OWNER_SENTINEL_KEY_SUFFIX}");
         if let Some(remote_owner_id) = self.read_owner_sentinel(&owner_key).await? {
             return Ok(self.owner_matches(local_owner_id, remote_owner_id));
@@ -958,7 +974,211 @@ impl MediaRepository for R2MediaAdapter {
 
 #[cfg(test)]
 mod tests {
+    use aws_smithy_http_client::test_util::{ReplayEvent, StaticReplayClient};
+    use aws_smithy_types::body::SdkBody;
+
     use super::*;
+
+    /// Builds an `S3Client` whose HTTP transport is a `StaticReplayClient`
+    /// returning `responses` in order regardless of the actual request sent —
+    /// lets `verify_region_ownership_with_local_id`'s claim/self-verify/
+    /// race-loss branches (including the mismatch/vanished-on-success paths
+    /// no real S3-compatible backend will deterministically reproduce) be
+    /// unit-tested without Docker/MinIO.
+    fn mock_s3_client(responses: Vec<http::Response<SdkBody>>) -> S3Client {
+        let dummy_request = || {
+            http::Request::builder()
+                .uri("https://example.test/")
+                .body(SdkBody::empty())
+                .expect("static request builds")
+        };
+        let events = responses
+            .into_iter()
+            .map(|resp| ReplayEvent::new(dummy_request(), resp))
+            .collect::<Vec<_>>();
+        let cfg = S3ConfigBuilder::new()
+            .region(Region::new("auto"))
+            .endpoint_url("https://example.test")
+            .credentials_provider(Credentials::new(
+                "key",
+                "secret",
+                None,
+                None,
+                "powehi-r2-test",
+            ))
+            .force_path_style(true)
+            .http_client(StaticReplayClient::new(events))
+            .build();
+        S3Client::from_conf(cfg)
+    }
+
+    fn owner_sentinel_adapter(s3: S3Client) -> R2MediaAdapter {
+        R2MediaAdapter {
+            pool: PgPool::connect_lazy("postgres://localhost/unused")
+                .expect("lazy pool never connects"),
+            s3,
+            bucket: "bucket".into(),
+            upload_ttl: Duration::from_secs(900),
+            download_ttl: Duration::from_secs(300),
+            region_id: "eu-central-1".into(),
+            max_deletes_per_run: 500,
+        }
+    }
+
+    fn no_such_key_response() -> http::Response<SdkBody> {
+        http::Response::builder()
+            .status(404)
+            .header("content-type", "application/xml")
+            .body(SdkBody::from(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                 <Error><Code>NoSuchKey</Code>\
+                 <Message>The specified key does not exist.</Message>\
+                 <Key>x</Key><RequestId>req</RequestId><HostId>host</HostId></Error>",
+            ))
+            .expect("static response builds")
+    }
+
+    fn owner_body_response(id: Uuid) -> http::Response<SdkBody> {
+        http::Response::builder()
+            .status(200)
+            .body(SdkBody::from(id.to_string()))
+            .expect("static response builds")
+    }
+
+    fn put_ok_response() -> http::Response<SdkBody> {
+        http::Response::builder()
+            .status(200)
+            .body(SdkBody::empty())
+            .expect("static response builds")
+    }
+
+    fn precondition_failed_response() -> http::Response<SdkBody> {
+        http::Response::builder()
+            .status(412)
+            .header("content-type", "application/xml")
+            .body(SdkBody::from(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                 <Error><Code>PreconditionFailed</Code>\
+                 <Message>At least one of the pre-conditions you specified did not hold.</Message>\
+                 <RequestId>req</RequestId><HostId>host</HostId></Error>",
+            ))
+            .expect("static response builds")
+    }
+
+    #[tokio::test]
+    async fn verify_region_ownership_already_claimed_matches() {
+        let local_id = Uuid::new_v4();
+        let adapter = owner_sentinel_adapter(mock_s3_client(vec![owner_body_response(local_id)]));
+        let owned = adapter
+            .verify_region_ownership_with_local_id("media/eu-central-1/", local_id)
+            .await
+            .expect("no S3 error");
+        assert!(owned, "matching remote owner id must be treated as owned");
+    }
+
+    #[tokio::test]
+    async fn verify_region_ownership_already_claimed_mismatch_fails_closed() {
+        let local_id = Uuid::new_v4();
+        let other_id = Uuid::new_v4();
+        let adapter = owner_sentinel_adapter(mock_s3_client(vec![owner_body_response(other_id)]));
+        let owned = adapter
+            .verify_region_ownership_with_local_id("media/eu-central-1/", local_id)
+            .await
+            .expect("no S3 error");
+        assert!(!owned, "a foreign remote owner id must fail closed");
+    }
+
+    #[tokio::test]
+    async fn verify_region_ownership_claims_when_absent_and_self_verify_matches() {
+        let local_id = Uuid::new_v4();
+        let adapter = owner_sentinel_adapter(mock_s3_client(vec![
+            no_such_key_response(),        // initial read: sentinel absent
+            put_ok_response(),             // conditional claim PUT succeeds
+            owner_body_response(local_id), // self-verify re-read matches
+        ]));
+        let owned = adapter
+            .verify_region_ownership_with_local_id("media/eu-central-1/", local_id)
+            .await
+            .expect("no S3 error");
+        assert!(
+            owned,
+            "a self-verified successful claim must be treated as owned"
+        );
+    }
+
+    /// security-auditor Y1 (cycle 426): the claim-success path must not
+    /// trust the SDK's 2xx blindly. A non-conforming S3-compatible endpoint
+    /// that silently ignores `If-None-Match: *` could let two racing
+    /// claimants both observe a "successful" PUT — this reproduces that
+    /// exact scenario (PUT reports success, but the self-verify re-read
+    /// shows a different id already stored) deterministically, which no
+    /// real MinIO/R2 backend will do since both honor the conditional
+    /// header correctly.
+    #[tokio::test]
+    async fn verify_region_ownership_self_verify_mismatch_fails_closed() {
+        let local_id = Uuid::new_v4();
+        let other_id = Uuid::new_v4();
+        let adapter = owner_sentinel_adapter(mock_s3_client(vec![
+            no_such_key_response(),
+            put_ok_response(),
+            owner_body_response(other_id), // self-verify sees someone else's id
+        ]));
+        let owned = adapter
+            .verify_region_ownership_with_local_id("media/eu-central-1/", local_id)
+            .await
+            .expect("no S3 error");
+        assert!(
+            !owned,
+            "a non-conforming endpoint that let the PUT through despite a losing race \
+             must fail closed on self-verify mismatch, not trust the 2xx"
+        );
+    }
+
+    /// security-auditor Y1 (cycle 426), the other self-verify failure mode:
+    /// the object we just wrote is already gone by the time we re-read it
+    /// (e.g. a concurrent external delete) — must fail closed rather than
+    /// assume the claim still holds.
+    #[tokio::test]
+    async fn verify_region_ownership_self_verify_vanished_fails_closed() {
+        let local_id = Uuid::new_v4();
+        let adapter = owner_sentinel_adapter(mock_s3_client(vec![
+            no_such_key_response(),
+            put_ok_response(),
+            no_such_key_response(), // self-verify: sentinel vanished
+        ]));
+        let owned = adapter
+            .verify_region_ownership_with_local_id("media/eu-central-1/", local_id)
+            .await
+            .expect("no S3 error");
+        assert!(
+            !owned,
+            "the sentinel vanishing between the claim write and the self-verify read \
+             must fail closed, not assume the claim still holds"
+        );
+    }
+
+    /// security-auditor Y3 (cycle 426): `PreconditionFailed` on the claim PUT
+    /// is a genuine claim-race loss, not an error — the losing side must
+    /// re-read and compare against whatever the winner wrote, not assume
+    /// loss without checking.
+    #[tokio::test]
+    async fn verify_region_ownership_claim_race_loss_precondition_failed_reads_winner() {
+        let local_id = Uuid::new_v4();
+        let winner_id = Uuid::new_v4();
+        let adapter = owner_sentinel_adapter(mock_s3_client(vec![
+            no_such_key_response(),
+            precondition_failed_response(),
+            owner_body_response(winner_id),
+        ]));
+        let owned = adapter
+            .verify_region_ownership_with_local_id("media/eu-central-1/", local_id)
+            .await
+            .expect("no S3 error");
+        assert!(
+            !owned,
+            "losing the claim race means the winner's id, not ours, is stored remotely"
+        );
+    }
 
     #[test]
     fn allowed_content_types_covers_common_media() {
