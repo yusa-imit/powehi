@@ -323,11 +323,41 @@ impl R2MediaAdapter {
             .send()
             .await
         {
-            Ok(_) => Ok(true),
+            Ok(_) => {
+                // Self-verify rather than trust the 2xx: a non-conforming
+                // S3-compatible endpoint that silently ignores
+                // `If-None-Match` would otherwise let two racing claimants
+                // both observe success and both conclude ownership — the
+                // exact mutual-destruction case this mechanism exists to
+                // prevent (security-auditor Y1, cycle 426). R2 itself is
+                // conformant, but the sweep is written against the
+                // `S3Client` port, not R2 specifically, so this guard is
+                // cheap and load-bearing for any future S3-compatible
+                // adapter swap.
+                match self.read_owner_sentinel(&owner_key).await? {
+                    Some(remote_owner_id) => {
+                        Ok(self.owner_matches(local_owner_id, remote_owner_id))
+                    }
+                    // The object we just wrote is already gone (e.g. a
+                    // concurrent external deletion) — fail closed rather
+                    // than assume the claim still holds.
+                    None => Ok(false),
+                }
+            }
             Err(e) => {
-                let lost_the_claim_race = e
-                    .as_service_error()
-                    .is_some_and(|se| se.code() == Some("PreconditionFailed"));
+                // `PreconditionFailed` is the code most S3-compatible
+                // endpoints (including R2) return for a failed
+                // `If-None-Match`; `ConditionalRequestConflict` is AWS S3's
+                // own newer name for the same condition. Matching both
+                // keeps the fail-closed generic-error branch below reserved
+                // for genuinely unexpected errors rather than a known,
+                // benign claim-race loss (security-auditor Y3, cycle 426).
+                let lost_the_claim_race = e.as_service_error().is_some_and(|se| {
+                    matches!(
+                        se.code(),
+                        Some("PreconditionFailed") | Some("ConditionalRequestConflict")
+                    )
+                });
                 if !lost_the_claim_race {
                     return Err(map_r2(R2Error::S3(e.to_string())));
                 }
