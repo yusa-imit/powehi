@@ -106,9 +106,10 @@ jobs:
         run: docker pull redis:7-alpine
 
       - name: cargo nextest run (redis testcontainers integration)
-        # Runs only the redis_cache_it binary (testcontainers-based) which starts
-        # its own ephemeral Redis and exercises RedisCache against real Redis.
-        run: cargo nextest run -p powehi-redis --run-ignored all -E 'binary(redis_cache_it)'
+        # Runs the redis_cache_it and redis_event_bus_it binaries (both
+        # testcontainers-based), each starting its own ephemeral Redis and
+        # exercising RedisCache / RedisEventBus against real Redis.
+        run: cargo nextest run -p powehi-redis --run-ignored all -E 'binary(redis_cache_it) or binary(redis_event_bus_it)'
 
       - name: Pre-pull MinIO image
         # Pre-pull avoids transient "bytes remaining on stream" errors during
