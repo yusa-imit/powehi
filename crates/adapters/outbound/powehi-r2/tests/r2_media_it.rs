@@ -32,8 +32,22 @@
 //!     without deleting anything once its orphan-ratio circuit breaker trips.
 //!
 //! Uses postgres:16-alpine explicitly (the modules default 11-alpine is EOL) and
-//! minio/minio:RELEASE.2022-02-07T08-17-33Z (the modules default) which serves the
-//! S3 API on container port 9000, ready once stdout contains `"API:"`.
+//! minio/minio:RELEASE.2025-02-28T09-55-16Z, pinned explicitly via `.with_tag`
+//! rather than trusted implicitly from `testcontainers_modules::minio::MinIO`'s
+//! own default. Two reasons: (1) an earlier revision of this file documented
+//! the modules default as `RELEASE.2022-02-07T08-17-33Z`, which predates
+//! MinIO's support for AWS S3's conditional-write wildcard
+//! (`If-None-Match: *`, added in MinIO PR minio/minio#19682, merged
+//! 2024-05-07) that `R2MediaAdapter::verify_region_ownership`'s claim PUT
+//! depends on — that comment had gone stale (the modules crate's own default
+//! had already moved to a 2025 image) without anyone noticing, so the
+//! owner-sentinel claim-race path below was silently exercising a
+//! conditional-write-capable MinIO only by accident of an upstream crate
+//! bump, never verified as intentional; (2) pinning explicitly means a
+//! future `testcontainers-modules` upgrade can't silently swap in an older
+//! or newer default and change this file's behaviour without a visible diff
+//! here. Serves the S3 API on container port 9000, ready once stdout
+//! contains `"API:"`.
 //!
 //! Tests are `#[ignore]` because they require Docker (testcontainers).
 //! Run them in CI via: `cargo nextest run -p powehi-r2 --run-ignored all
@@ -70,7 +84,12 @@ use uuid::Uuid;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-/// MinIO default credentials (image `minio/minio:RELEASE.2022-02-07T08-17-33Z`).
+/// MinIO tag pinned explicitly by every container start below — see the
+/// module doc comment for why this isn't left to the `testcontainers_modules`
+/// crate's own default.
+const MINIO_TAG: &str = "RELEASE.2025-02-28T09-55-16Z";
+/// MinIO default credentials (unaffected by the tag pin above — MinIO's
+/// `minioadmin`/`minioadmin` static default has been stable across releases).
 const MINIO_ACCESS_KEY: &str = "minioadmin";
 /// MinIO default secret credential (the modules image ships this static value).
 const MINIO_SECRET: &str = "minioadmin";
@@ -114,18 +133,13 @@ fn build_s3_client(endpoint: &str) -> S3Client {
     S3Client::from_conf(cfg)
 }
 
-/// Start a throwaway Postgres + MinIO pair, migrate the DB, create the bucket,
-/// and return a ready `R2MediaAdapter` plus handles for fixtures and assertions.
-/// Caller must keep the returned containers alive for the duration of the test.
-async fn setup() -> Harness {
-    setup_with_max_deletes(MAX_DELETES_PER_RUN).await
-}
-
-/// Same as `setup`, but with an explicit blast-radius cap — for tests that
-/// exercise `sweep_orphaned_storage_objects`'s `max_deletes_per_run` limiter
-/// directly rather than relying on the generous default.
-async fn setup_with_max_deletes(max_deletes_per_run: u64) -> Harness {
-    // Postgres (16-alpine — the modules default 11-alpine is EOL).
+/// Starts a throwaway Postgres 16-alpine container (the modules default
+/// 11-alpine is EOL), migrates it, and returns both the container handle
+/// (caller must keep it alive) and a ready connection pool. Factored out so
+/// the owner-sentinel claim-race test below can start TWO independent
+/// Postgres pools — modeling two separately-provisioned environments, each
+/// with its own `media_region_owner` row — while sharing one MinIO bucket.
+async fn start_postgres() -> (ContainerAsync<Postgres>, PgPool) {
     let pg = Postgres::default()
         .with_tag("16-alpine")
         .start()
@@ -139,9 +153,16 @@ async fn setup_with_max_deletes(max_deletes_per_run: u64) -> Harness {
     powehi_postgres::run_migrations(&pool)
         .await
         .expect("migrations");
+    (pg, pool)
+}
 
-    // MinIO (S3 API on port 9000, ready once stdout has "API:").
+/// Starts a throwaway MinIO container pinned to `MINIO_TAG` (S3 API on port
+/// 9000, ready once stdout has "API:"), creates `TEST_BUCKET`, and returns
+/// the container handle (caller must keep it alive), its HTTP endpoint, and
+/// a raw `S3Client` for fixture writes/reads.
+async fn start_minio_with_bucket() -> (ContainerAsync<MinIO>, String, S3Client) {
     let minio = MinIO::default()
+        .with_tag(MINIO_TAG)
         .start()
         .await
         .expect("MinIO container started");
@@ -151,13 +172,29 @@ async fn setup_with_max_deletes(max_deletes_per_run: u64) -> Harness {
         .expect("minio host port");
     let endpoint = format!("http://127.0.0.1:{minio_port}");
 
-    // Create the bucket BEFORE constructing the adapter (mirrors minio_buckets).
     let s3 = build_s3_client(&endpoint);
     s3.create_bucket()
         .bucket(TEST_BUCKET)
         .send()
         .await
         .expect("create bucket");
+
+    (minio, endpoint, s3)
+}
+
+/// Start a throwaway Postgres + MinIO pair, migrate the DB, create the bucket,
+/// and return a ready `R2MediaAdapter` plus handles for fixtures and assertions.
+/// Caller must keep the returned containers alive for the duration of the test.
+async fn setup() -> Harness {
+    setup_with_max_deletes(MAX_DELETES_PER_RUN).await
+}
+
+/// Same as `setup`, but with an explicit blast-radius cap — for tests that
+/// exercise `sweep_orphaned_storage_objects`'s `max_deletes_per_run` limiter
+/// directly rather than relying on the generous default.
+async fn setup_with_max_deletes(max_deletes_per_run: u64) -> Harness {
+    let (pg, pool) = start_postgres().await;
+    let (minio, endpoint, s3) = start_minio_with_bucket().await;
 
     let adapter = R2MediaAdapter::new(
         pool.clone(),
@@ -1589,6 +1626,148 @@ async fn sweep_orphaned_storage_objects_never_sweeps_its_own_owner_sentinel() {
         vec![owner_key.clone()],
         "the owner sentinel itself must never be swept as an orphan"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn sweep_orphaned_storage_objects_owner_sentinel_claim_race_is_mutually_exclusive() {
+    // The three owner-sentinel tests above never exercise the conditional
+    // PUT's actual failure arm (`verify_region_ownership`'s `Err(e) if
+    // lost_the_claim_race` branch, `powehi-r2/src/lib.rs`): the "claims on
+    // first run" test races nobody, and the "refuses when owned by another
+    // environment" test pre-writes `.owner` BEFORE calling sweep, so
+    // `read_owner_sentinel` short-circuits before the PUT is ever attempted.
+    // Neither reaches the `if_none_match("*")` PUT actually losing a real
+    // concurrent race (cycle 427's next-cycle-candidate #1 / cycle 426's Y2
+    // gap). This test does: two independent Postgres pools (so each derives
+    // its own random `local_owner_id`, modeling two separately-provisioned
+    // environments — not one environment's own replicas racing on boot,
+    // which cycle 426's F2 fix already covers) share ONE MinIO bucket AND
+    // region_id, the exact misconfiguration the sentinel exists to defend
+    // against, and both call `sweep_orphaned_storage_objects` truly
+    // concurrently (`tokio::join!`) against a freshly empty `.owner` prefix.
+    let (pg_a, pool_a) = start_postgres().await;
+    let (pg_b, pool_b) = start_postgres().await;
+    let (minio, endpoint, s3) = start_minio_with_bucket().await;
+
+    let orphan_key = format!("media/{TEST_REGION_ID}/claim-race-orphan");
+    put_raw_object(&s3, &orphan_key, b"opaque-ciphertext-bytes").await;
+    let owner_key = format!("media/{TEST_REGION_ID}/.owner");
+    assert!(
+        list_keys(&s3, &owner_key).await.is_empty(),
+        "no owner sentinel should exist before either racing environment sweeps"
+    );
+
+    let adapter_a = R2MediaAdapter::new(
+        pool_a.clone(),
+        &endpoint,
+        TEST_BUCKET,
+        MINIO_ACCESS_KEY,
+        MINIO_SECRET,
+        UPLOAD_TTL_SECS,
+        DOWNLOAD_TTL_SECS,
+        REQUEST_TIMEOUT_SECS,
+        TEST_REGION_ID,
+        MAX_DELETES_PER_RUN,
+    );
+    let adapter_b = R2MediaAdapter::new(
+        pool_b.clone(),
+        &endpoint,
+        TEST_BUCKET,
+        MINIO_ACCESS_KEY,
+        MINIO_SECRET,
+        UPLOAD_TTL_SECS,
+        DOWNLOAD_TTL_SECS,
+        REQUEST_TIMEOUT_SECS,
+        TEST_REGION_ID,
+        MAX_DELETES_PER_RUN,
+    );
+
+    let cutoff = Utc::now() + chrono::Duration::hours(1000);
+    let (result_a, result_b) = tokio::join!(
+        adapter_a.sweep_orphaned_storage_objects(cutoff),
+        adapter_b.sweep_orphaned_storage_objects(cutoff),
+    );
+    let swept_a = result_a.expect("environment A's sweep must not error even if it loses the race");
+    let swept_b = result_b.expect("environment B's sweep must not error even if it loses the race");
+
+    // The invariant the whole mechanism exists for: exactly one side may
+    // conclude ownership and act. Both sides deleting would be the mutual
+    // destruction the sentinel was built to prevent (cycle 426); both sides
+    // refusing would silently leave a real orphan behind forever, which is
+    // just as much a failure of this specific guarded path.
+    assert_eq!(
+        swept_a + swept_b,
+        1,
+        "exactly one of the two racing environments may claim ownership and \
+         delete the real orphan, swept_a={swept_a} swept_b={swept_b}"
+    );
+    assert!(
+        list_keys(&s3, &orphan_key).await.is_empty(),
+        "the orphan must have been deleted by whichever environment won the claim"
+    );
+
+    let owner_object = s3
+        .get_object()
+        .bucket(TEST_BUCKET)
+        .key(&owner_key)
+        .send()
+        .await
+        .expect("owner sentinel must exist after the race settles");
+    let body = owner_object
+        .body
+        .collect()
+        .await
+        .expect("read owner sentinel body")
+        .into_bytes();
+    let sentinel_owner_id: Uuid = std::str::from_utf8(&body)
+        .expect("owner sentinel body is UTF-8")
+        .trim()
+        .parse()
+        .expect("owner sentinel body is a UUID");
+
+    let db_owner_a: Uuid =
+        sqlx::query_scalar("SELECT owner_id FROM media_region_owner WHERE region_id = $1")
+            .bind(TEST_REGION_ID)
+            .fetch_one(&pool_a)
+            .await
+            .expect("pool_a's media_region_owner row");
+    let db_owner_b: Uuid =
+        sqlx::query_scalar("SELECT owner_id FROM media_region_owner WHERE region_id = $1")
+            .bind(TEST_REGION_ID)
+            .fetch_one(&pool_b)
+            .await
+            .expect("pool_b's media_region_owner row");
+    assert_ne!(
+        db_owner_a, db_owner_b,
+        "sanity check that this test models two DIFFERENT environments (two \
+         independent Postgres pools deriving two different owner ids), not \
+         one environment's own replicas racing on boot"
+    );
+
+    let (winner_swept, loser_swept) = if sentinel_owner_id == db_owner_a {
+        (swept_a, swept_b)
+    } else if sentinel_owner_id == db_owner_b {
+        (swept_b, swept_a)
+    } else {
+        panic!(
+            "the R2 sentinel ({sentinel_owner_id}) must belong to exactly one \
+             of the two racing environments (a={db_owner_a}, b={db_owner_b})"
+        );
+    };
+    assert_eq!(
+        winner_swept, 1,
+        "the environment whose id the sentinel actually holds must be the \
+         one that swept the orphan"
+    );
+    assert_eq!(
+        loser_swept, 0,
+        "the environment that lost the claim race must not have swept anything"
+    );
+
+    let _pg_a = pg_a;
+    let _pg_b = pg_b;
+    let _minio = minio;
 }
 
 // GC advisory lock coverage (cycle 368) moved to powehi-postgres's
