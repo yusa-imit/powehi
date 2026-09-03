@@ -1396,3 +1396,146 @@
   threat-model-update, infra-test.
 - Review is part of writing: implement → run the relevant review agent → fix → commit.
 
+
+## cycle 424 — FEATURE: R2 orphan-object sweep + close 2 RED review findings, commit 27647b0
+
+- Counter jumped 421→424 (cycles 422/423 have no commits in `git log`) —
+  but this time, unlike prior "skipped commit" incidents, the missing
+  cycles' real work was NOT lost: it was sitting uncommitted in the
+  working tree at this cycle's start (R2 orphan-sweep feature, config
+  validation, migration 0017, Helm changes), clearly a coherent,
+  substantially-complete implementation of the orphan-object sweeper
+  that cycles 419/420/421 had all flagged as a "next cycle candidate."
+  Its own inline comments claimed a threat-model-checker RED finding and
+  a security-auditor finding had already been found-and-fixed at "cycle
+  422" — **treated that claim as unverified** (same discipline as cycle
+  418's precedent for interrupted-session diffs) rather than trusting it.
+- Read every file in the diff before touching anything, confirmed
+  `cargo build/test/clippy/fmt` all clean on the as-found diff, then ran
+  a **fresh** `security-auditor` + `threat-model-checker` pass (in
+  parallel) rather than accepting the diff's self-reported review
+  history. **Both came back RED**, proving the "already reviewed" claim
+  in the diff's own comments was not reliable:
+  - security-auditor RED: (F1, HIGH) Helm's
+    `POWEHI__MEDIA_ORPHAN_SWEEP_ENABLED: {{ ... | default true | quote }}`
+    kill switch was silently inert — Sprig's `default` treats boolean
+    `false` as empty, so `mediaOrphanSweepEnabled: false` rendered as
+    `"true"` (reproduced with `helm template`). (F2, MEDIUM) the
+    cumulative orphan-ratio circuit breaker's 80% threshold missed a
+    ~50/50 orphan rate (two environments sharing a bucket+region_id),
+    and up to 49 objects could be deleted before the guard had enough
+    samples (50) to evaluate at all. (F3, MEDIUM) `region_id` had zero
+    format validation despite the whole region-prefix isolation
+    guarantee depending on it never containing `/`. (F4, LOW) failed
+    deletes didn't consume the blast-radius budget (counted successes,
+    not attempts).
+  - threat-model-checker RED: the region-prefix scoping
+    (`media/{region_id}/{uuid}`) only isolates *distinct regions*
+    sharing one bucket — it does nothing for **two environments sharing
+    the same region_id AND bucket**, which is exactly this repo's actual
+    `values-staging.yaml`/`values-prod-eu.yaml` (both `region:
+    eu-frankfurt`, both leaving `r2Bucket` unset until real Cloudflare
+    values are wired in — confirmed by reading both files). prd.md's own
+    new paragraph overclaimed "구조적으로 막음" (structurally prevented)
+    for a guarantee that doesn't cover this case, and separately claimed
+    "새로운 영구 메타데이터 카테고리 없음" (no new metadata) when
+    `region_id` embedded in the object key/presigned URL path *is* new
+    metadata (low sensitivity, but a real T5/T7 delta) — a documentation
+    drift is exactly the kind of thing this gate exists to catch.
+- **Fixed all of it before committing** (not reverted, not shipped as-is
+  — CLAUDE.md's "never weaken a security non-negotiable to make
+  progress" bar):
+  1. Helm: removed the broken `| default true`, now
+     `{{ .Values.config.mediaOrphanSweepEnabled | quote }}` (values.yaml
+     already supplies a real default). Verified with `helm template
+     --set config.mediaOrphanSweepEnabled=false/true` against all 3 real
+     overlays — renders correctly both ways.
+  2. Ratio breaker: threshold 80%→50%
+     (`ORPHAN_RATIO_ABORT_THRESHOLD_PERCENT`), plus a new
+     `ORPHAN_PRE_SAMPLE_MAX_DELETES = 5` absolute cap applied via an
+     `effective_cap` computed before the delete loop whenever
+     `aged_checked_total < ORPHAN_RATIO_ABORT_MIN_SAMPLE` — bounds
+     pre-evidence damage to 5 objects/run instead of up to 49. New
+     integration test
+     `sweep_orphaned_storage_objects_pre_sample_cap_bounds_damage_below_min_sample`.
+  3. `region_id` charset validation added to `AppConfig::validate()`
+     (non-empty, `[a-z0-9-]+` only) — checked first, unconditionally,
+     before every other guard that uses it. New `ConfigError::RegionIdInvalid`.
+  4. Budget now tracks *attempted* deletes (`attempted_deletes_total`),
+     not just successes, so a run where every `DeleteObjects` call fails
+     still respects the cap.
+  5. **Closed the actual cross-environment gap** (not just documented
+     it): `AppConfig::validate()` now also rejects `r2_bucket` left at
+     its compiled dev default (`"powehi-media"`, now
+     `DEV_R2_BUCKET_DEFAULT`) whenever `region_id != "local"` — new
+     `ConfigError::R2DevDefaultBucketInNonLocalRegion`, mirroring the
+     existing `r2_endpoint` guard right above it. This makes any real
+     deployment that forgot to set `r2Bucket` fail to start rather than
+     silently sharing storage with another environment. Added matching
+     warning comments to `values-staging.yaml`/`values-prod-eu.yaml`/
+     `values-prod-ap.yaml` (all three, since prod-ap could hit the same
+     class of mistake even though it doesn't currently share a
+     region_id) explaining the guard's real limits: it catches "forgot
+     to set it," not "set two environments to the same real bucket by
+     mistake" — that residual gap is accepted as operational discipline
+     (both reviewers agreed after the guard was added: not blocking,
+     comparable to existing unguarded shared-DATABASE_URL/Redis risk
+     elsewhere in the repo).
+  6. Fixed the `delete()`-ordering doc-comment inaccuracy (it deletes
+     the S3 object first, then the Postgres row — an earlier version of
+     the trait doc comment and prd.md both had this backwards) in both
+     `media_repo.rs` and prd.md.
+  7. Rewrote prd.md's whole orphan-sweep addendum to be accurate: states
+     the real new-metadata delta (region_id in storage key) instead of
+     denying one, scopes the region-prefix guarantee correctly
+     (cross-region only, not cross-environment-same-region), and updates
+     the safety-mechanism numbers (50%/50-sample ratio guard, new
+     5-object pre-sample cap, actually-working kill switch).
+  8. Proactively also fixed a security-auditor-flagged nit found only in
+     the **second** (re-verification) pass: `load()`'s
+     `.set_default("r2_bucket", "powehi-media")` used a hardcoded literal
+     instead of the new `DEV_R2_BUCKET_DEFAULT` const (unlike the
+     `r2_endpoint` default right above it, which already used its own
+     const) — a silent-desync risk where changing the literal in one
+     place wouldn't update the other. Fixed to use the const.
+- **Re-ran both review agents fresh on the fixed diff** (not just
+  trusted my own fix reasoning) — both returned **GREEN**. Each
+  independently traced the fixed code paths (ratio-guard math,
+  effective_cap ordering, region_id validation placement,
+  `helm template` re-render) rather than re-reading the first pass's
+  notes. Non-blocking follow-ups both flagged, **deferred, not fixed
+  this cycle**: (a) the residual same-bucket-same-region_id-by-mistake
+  gap noted above; (b) prd.md §3.3 (the canonical metadata-exposure
+  index) doesn't yet have a bullet for the new region_id-in-storage-key
+  metadata, only §9.4.3 (the detailed addendum) does; (c) a structural
+  fix idea from both reviewers independently (owner-sentinel object:
+  write a deployment UUID to `media/{region_id}/.owner` at boot, have
+  the sweep verify it before deleting anything) that would close the
+  residual gap without relying on operational discipline — a real
+  design task, not a quick fix. **Implemented in cycle 426.**
+- Verified before commit: `cargo build --workspace` clean, `cargo test
+  --workspace` all green (0 failed across every crate, r2_media_it.rs's
+  34 tests — including 2 new ones — compile and collect correctly but
+  are `#[ignore]`d, no Docker in this sandbox; CI runs them for real),
+  `cargo clippy --workspace --all-targets -- -D warnings` clean, `cargo
+  fmt --all --check` clean, `helm lint` clean on the base chart + all 3
+  overlays. Both fresh review passes independently also ran `cargo
+  audit`/`cargo deny check`/`pnpm audit`/`conftest` as part of their own
+  verification — all clean, nothing this cycle's diff introduced.
+- Crypto (no `.rs`/WASM crypto/MLS/OPAQUE file touched) —
+  `crypto-reviewer` correctly not invoked. Architectural + new
+  server-visible metadata (new background job, bucket-wide LIST
+  capability requirement, region_id embedded in storage keys) —
+  `threat-model-checker` invoked, twice (RED then GREEN), correctly.
+  Backend handlers + infra — `security-auditor` invoked, twice (RED
+  then GREEN), correctly.
+- **Process note reinforced this cycle:** an interrupted session's own
+  inline comments claiming "reviewed, findings fixed" are not evidence
+  a review actually happened rigorously — this cycle's fresh passes
+  found real, reproducible RED findings (the Helm kill-switch bug was
+  confirmed by literally running `helm template` and seeing `"true"`
+  come out for a `false` input) despite the diff's own comments citing
+  specific "cycle 422" finding numbers as already resolved. Always
+  re-run the required review agents fresh on inherited/interrupted work
+  before committing, never treat embedded review claims as sufficient.
+- Target dir hygiene: not checked (FEATURE mode).
