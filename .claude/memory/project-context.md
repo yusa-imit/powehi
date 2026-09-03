@@ -24,7 +24,92 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-03, cycle 427 — FEATURE: R2 owner-sentinel claim-path hardening, closes cycle-426's Y1+Y3 next-cycle candidates)
+## Current state (2026-09-04, cycle 428 — FEATURE: real MinIO conditional-write claim-race test, closes cycle-427's next-cycle candidate #1 / cycle-426's Y2)
+
+- Picked up next-cycle candidate #1 (carried since cycle 426 as Y2): the
+  three existing owner-sentinel tests never exercised
+  `verify_region_ownership`'s actual conditional-PUT race-loss branch
+  (`Err(e)` matching `PreconditionFailed`/`ConditionalRequestConflict`) —
+  one races nobody (first-run claim), the other pre-writes `.owner` before
+  calling sweep so `read_owner_sentinel` short-circuits before the PUT is
+  ever attempted. Y2 as originally framed assumed the blocker was the
+  pinned MinIO image (`RELEASE.2022-02-07T08-17-33Z`, believed too old for
+  AWS's `If-None-Match: *` conditional-write wildcard).
+- **Investigated before writing any test** (WebSearch + `gh issue view`/`gh
+  pr view` on `minio/minio`, not assumed): the `RELEASE.2022-02-07` tag
+  named in this repo's own doc comments was stale — the actual resolved
+  dependency (`testcontainers-modules` 0.15.0, checked by reading its
+  vendored source under `~/.cargo/registry/src`) defaults to
+  `RELEASE.2025-02-28T09-55-16Z`, and had been silently used by every
+  owner-sentinel test since cycle 426 without anyone noticing the comment
+  was wrong. Confirmed via `minio/minio` GitHub history that `*`-wildcard
+  `If-None-Match`/`If-Match` support landed in PR #19682 (merged
+  2024-05-07) — well before the actual pinned default — and that the one
+  open compatibility report (#20346) was a reporter-side `minio-go` client
+  bug (an old client version double-quoting the header value), not a
+  server-side gap; MinIO's server has supported the real AWS wildcard
+  semantics correctly since mid-2024.
+- **Fix:** pinned the MinIO tag explicitly via `.with_tag(MINIO_TAG =
+  "RELEASE.2025-02-28T09-55-16Z")` in both container-start call sites
+  (`crates/adapters/outbound/powehi-r2/tests/r2_media_it.rs`) instead of
+  relying on the crate's implicit default — makes the dependency intentional
+  and immune to a future silent `testcontainers-modules` bump, and corrected
+  the stale module-doc-comment claim.
+- **New test:** `sweep_orphaned_storage_objects_owner_sentinel_claim_race_is_mutually_exclusive`
+  — two independent Postgres pools (distinct `local_owner_id` each, modeling
+  two separately-provisioned environments rather than one environment's own
+  replicas racing on boot, which cycle 426's F2 fix already covers) share
+  ONE MinIO bucket+region_id and race `sweep_orphaned_storage_objects`
+  concurrently via `tokio::join!` against a freshly empty `.owner` prefix.
+  Asserts exactly one side claims ownership and deletes the real orphan, the
+  other refuses and deletes nothing (`swept_a + swept_b == 1`), and that the
+  R2 sentinel's final content matches whichever Postgres pool actually won.
+  Factored `start_postgres()`/`start_minio_with_bucket()` helpers out of
+  `setup_with_max_deletes` (no behavior change to existing tests) so the new
+  test can compose two Postgres pools with one shared MinIO instance without
+  duplicating container-start boilerplate.
+- **Verified against real CI, not just local compilation** (same discipline
+  as cycle 425): no Docker in this sandbox, so `cargo test -p powehi-r2
+  --test r2_media_it --no-run` (compiles clean) + `cargo build --workspace`
+  + `cargo test --workspace` (0 failures) + `cargo clippy -p powehi-r2
+  --all-targets -- -D warnings` + `cargo fmt --all --check` were the only
+  local checks possible. Pushed (`372df4e`), watched `gh run watch
+  33781183409 --exit-status` to completion — all jobs green, and
+  `gh run view --log` confirms the new test actually executed and **PASSed**
+  in the real "Integration Tests (Docker)" job (`PASS [6.850s] (28/38)
+  ...claim_race_is_mutually_exclusive`), alongside the 3 pre-existing
+  owner-sentinel tests all still passing. This is the first real evidence
+  (not just code-review reasoning) that the conditional-write race guard
+  actually holds under genuine concurrency against a real MinIO backend.
+- Test-only change (no production `.rs` logic touched — `verify_region_ownership`
+  itself is unmodified this cycle) — `crypto-reviewer`/`threat-model-checker`/
+  `security-auditor` correctly not invoked, same precedent as cycle 425's
+  test-only diff.
+- Phase 1-6 checklist: no change — all items already `[x]`; this cycle's
+  work again came from the next-cycle-candidates backlog.
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates (carried/updated):**
+  1. New, informational from this cycle: consider a mock-`S3Client` unit
+     test to close coverage on the Y1 self-verify mismatch/vanished branches
+     specifically (object disappears between the claim PUT and the
+     self-verify re-read) — the new claim-race test covers the `Err(e)`
+     race-loss branch for real now, but not that specific narrower
+     mismatch/vanished-on-success sub-case; non-blocking, no existing mock
+     harness for `S3Client` in this crate yet, would be new infra.
+  2. prd.md §3.3 cross-reference for region_id-in-storage-key metadata
+     (carried since cycle 424, still not done — good filler task).
+  3. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  4. Carried: prd.md §6.4 cross-region abuse-signal propagation
+     (documented-but-unimplemented) — worth a threat-model-checker-gated
+     scoping pass.
+  5. Carried, still not scoped this cycle: the residual gap where the
+     winner of a *legitimate* (non-racing) ownership claim can still delete
+     a colliding environment's live media forever — only a real close via
+     distinct buckets (operational) or moving `owner_id` into the
+     storage-key path itself (bigger migration).
+
+## Previous state (2026-09-03, cycle 427 — FEATURE: R2 owner-sentinel claim-path hardening, closes cycle-426's Y1+Y3 next-cycle candidates)
 
 - Picked up next-cycle candidates #1 (security-auditor Y1) and #3 (Y3) from
   cycle 426's owner-sentinel review, both in the same method so fixed
