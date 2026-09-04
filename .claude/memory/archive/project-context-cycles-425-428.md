@@ -391,3 +391,93 @@
   process failure — but it means **always checking `gh run list` at the
   very start of the next cycle**, not assuming a clean local
   build+test+clippy+fmt pass means CI is green too.
+
+## Previous state (2026-09-04, cycle 429 — FEATURE: mocked-S3Client unit tests for verify_region_ownership self-verify branches, closes cycle-428's next-cycle candidate #1)
+
+- Picked up next-cycle candidate #1 from cycle 428: even with the real MinIO
+  claim-race test added last cycle, two branches of
+  `R2MediaAdapter::verify_region_ownership` (security-auditor Y1, cycle 426)
+  remained unexercised by any test — the self-verify-after-successful-claim
+  path's **mismatch** (a different UUID already stored) and **vanished**
+  (404 on re-read) outcomes. Neither is reachable against a real, conforming
+  S3-compatible backend (MinIO/R2 both honor `If-None-Match` correctly), so
+  only a mock can trigger them deterministically — exactly why cycle 428
+  flagged this as "new infra, no existing mock harness for `S3Client` in
+  this crate yet" rather than attempting it inline.
+- **Refactor (pure extraction, no behavior change):** split
+  `verify_region_ownership` into (1) the Postgres upsert for
+  `local_owner_id` (unchanged) calling (2) a new private
+  `verify_region_ownership_with_local_id(&self, region_prefix,
+  local_owner_id)` holding the exact same S3-only read/claim/self-verify/
+  race-loss logic as before, verbatim — done so the S3-only half is
+  unit-testable without a real Postgres pool (`PgPool::connect_lazy` never
+  connects, same pattern already used by the existing
+  `region_prefix_is_scoped_under_media_and_region_id` unit test).
+- **New mock infra:** `aws-smithy-http-client`'s `StaticReplayClient` (test-
+  util feature) plugged into `S3ConfigBuilder::http_client(...)` — replays
+  canned HTTP responses (404 `NoSuchKey`, 200 PUT success, 200 GET with a
+  UUID body, 412 `PreconditionFailed`) in FIFO order regardless of actual
+  request content. Added `aws-smithy-http-client`, `aws-smithy-types`, `http`
+  as **dev-dependencies only** (confirmed via `cargo build -p powehi-r2`
+  prod-profile compiling clean without them) — no new production runtime
+  dependency, `cargo deny check` clean (advisories/bans/licenses/sources ok).
+- **6 new unit tests** in `crates/adapters/outbound/powehi-r2/src/lib.rs`'s
+  existing `#[cfg(test)] mod tests`: already-claimed match/mismatch, claim-
+  when-absent-then-self-verify-match, the two target branches (self-verify
+  **mismatch** and self-verify **vanished**, both asserting fail-closed
+  `Ok(false)`), and claim-race-loss via `PreconditionFailed` re-reading the
+  winner's id. All pass; full workspace `cargo test --workspace` still 0
+  failures (144/44/181/46/... suites all green, r2's own lib tests now 18
+  passing incl. the 6 new ones); `cargo clippy -p powehi-r2 --all-targets --
+  -D warnings` and `cargo fmt --all --check` both clean.
+- **`security-auditor` invoked (backend adapter, security-critical claim
+  path touched) — PASS/GREEN**, with an unusually thorough pass: the agent
+  diffed the extracted method body byte-for-byte against the original inline
+  logic (confirmed identical, no accidental change during the split), then
+  did targeted **mutation testing on the real source** (flipped the
+  self-verify-vanished return, flipped `owner_matches`'s comparison to
+  always-true, removed `PreconditionFailed` from the matched error codes)
+  and confirmed every mutation broke the corresponding new test — ruling out
+  the failure mode where a mock test is trivially green regardless of the
+  logic under test. Also confirmed the 412 + `<Code>PreconditionFailed</Code>`
+  XML body genuinely parses through the real AWS SDK's error-metadata path
+  (not just assumed from reading the source), and that
+  `verify_region_ownership_with_local_id` stayed non-`pub` (no new API
+  surface). All mutations reverted before reporting; `git diff --stat`
+  confirmed the file matched the intended 220-line diff before commit.
+- Not crypto (no `.rs` crypto/MLS/OPAQUE/WASM file touched) —
+  `crypto-reviewer` correctly not invoked. Not a new architectural change or
+  new server-visible metadata (no new data exposed, no new object/table, the
+  extraction doesn't change what's observable externally) —
+  `threat-model-checker` correctly not invoked this cycle.
+- Verified before commit: `cargo build --workspace` clean, `cargo test
+  --workspace` 0 failures, `cargo clippy --workspace --all-targets -- -D
+  warnings` clean (confirmed by both the main session and, independently,
+  the security-auditor sub-agent), `cargo fmt --all --check` clean, `cargo
+  deny check` clean. Pushed (`9f56abd`); `gh run watch` on the resulting `CI
+  — Rust` run was in progress as of this memory update — verify it landed
+  green before trusting this entry's "all green" claim in a future cycle if
+  no completion note follows. **Confirmed at cycle 430's start**: `gh run
+  list` showed run `33799167955` as `completed`/`success` — this entry's
+  claim held.
+- Phase 1-6 checklist: no change — all items already `[x]`; this cycle's
+  work again came from the next-cycle-candidates backlog.
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates (carried/updated):**
+  1. prd.md §3.3 cross-reference for region_id-in-storage-key metadata
+     (carried since cycle 424, still not done — good filler task).
+  2. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  3. Carried: prd.md §6.4 cross-region abuse-signal propagation
+     (documented-but-unimplemented) — worth a threat-model-checker-gated
+     scoping pass.
+  4. Carried, still not scoped: the residual gap where the winner of a
+     *legitimate* (non-racing) ownership claim can still delete a colliding
+     environment's live media forever — only a real close via distinct
+     buckets (operational) or moving `owner_id` into the storage-key path
+     itself (bigger migration).
+  5. This file is 417+ lines (4 "state" sections back to cycle 425) — not
+     yet at the prior archival trigger point (~742 lines), but due for an
+     archive sweep next STABILIZATION cycle (430) per the established
+     rolling pattern (keep only current + immediate-prior cycle, archive
+     the rest to `.claude/memory/archive/`).

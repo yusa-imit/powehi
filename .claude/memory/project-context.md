@@ -24,7 +24,101 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-03, cycle 430 — STABILIZATION: real testcontainers coverage for RedisEventBus::publish + CI filter fix, commits f8d6513 + 251d8d9)
+## Current state (2026-09-04, cycle 432 — FEATURE: §3.3 cross-reference for media storage_key region_id metadata)
+
+- Mode selection: counter 431→432, 432 % 5 != 0 → FEATURE.
+- CI check (FEATURE step 2): `gh run list --limit 3` green on `main`
+  (`33826979798`/`33816380358`/`33815946137` all `completed`/`success`).
+  `gh issue list --state open`: empty.
+- Phase 1-6 checklist: still all `[x]` — picked next-cycle candidate #1 from
+  cycle 431's list (the other filler task; #2/#3/#4 still need a
+  human/crypto-lead policy call or a threat-model-checker-gated scoping
+  pass and aren't a fit for a routine cycle).
+- **Fix:** `docs/prd.md` §3.3 ("서버가 불가피하게 알게 되는 것") never had its
+  own bullet for the media storage_key's `{region_id}` prefix or the
+  `{region_id}/.owner` sentinel object — both were already fully documented
+  in §9.4.3 (added cycle 426, itself already threat-model-checker-reviewed
+  there) but §3.3's own enumeration list was missing the cross-reference,
+  so a reader scanning only §3.3 (the canonical "what the server
+  unavoidably learns" list) would miss this category. Added one bullet to
+  §3.3 summarizing the exposure and pointing to §9.4.3 for full detail
+  (owner-sentinel guarantee scope, deletion safeguards) — verified via
+  `grep -n "region_id" docs/prd.md` and reading §9.4.3 in full before
+  writing, to match existing bullets' style/precision rather than
+  re-describing the mechanism from scratch.
+- Doc-only change, no `.rs` file touched, no new architecture or new
+  server-visible metadata (this metadata already exists in code since
+  cycle 426 and was already threat-model-checker-reviewed there — this
+  cycle only adds a cross-reference in a different section) — consistent
+  with cycles 425/428/429/430/431's precedent, no crypto-reviewer /
+  threat-model-checker / security-auditor invocation needed. No build/test
+  gate applies (docs-only). Handled directly (single-agent, well under the
+  20-tool-call delegation threshold).
+- `gh issue list --state open`: empty (checked above).
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates (carried/updated):**
+  1. Closed this cycle (was: prd.md §3.3 cross-reference for
+     region_id-in-storage-key metadata) — removed from list.
+  2. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  3. Carried: prd.md §6.4 cross-region abuse-signal propagation
+     (documented-but-unimplemented) — worth a threat-model-checker-gated
+     scoping pass.
+  4. Carried, still not scoped: the residual gap where the winner of a
+     *legitimate* (non-racing) ownership claim can still delete a colliding
+     environment's live media forever (documented in §9.4.3's owner
+     sentinel paragraph as "one-directional protection, not isolation" —
+     a real fix needs either a stronger uniqueness guarantee than
+     region_id+bucket convention, or accepting this as a permanent
+     operational-discipline requirement and closing the candidate as
+     "won't fix, documented").
+
+## Previous state (2026-09-04, cycle 431 — FEATURE: fix stale MinIO pre-pull tag in CI, commit 213a767)
+
+- Mode selection: counter 430→431, 431 % 5 != 0 → FEATURE.
+- CI check (FEATURE step 2): `gh run list --limit 3` green on `main`
+  (`33816380358`/`33815946137`/`33815475249` all `completed`/`success`).
+  `gh issue list --state open`: empty.
+- Phase 1-6 checklist: still all `[x]` — picked next-cycle candidate #5 from
+  cycle 430's list (mechanical filler task) rather than the bigger scoping
+  items (#1/#2/#3/#4), which still need a human/crypto-lead policy call or a
+  threat-model-checker-gated pass and aren't a fit for a routine cycle.
+- **Fix:** `.github/workflows/ci-rust.yml`'s "Pre-pull MinIO image" step
+  still warmed `minio/minio:RELEASE.2022-02-07T08-17-33Z`, but
+  `crates/adapters/outbound/powehi-r2/tests/r2_media_it.rs`'s `MINIO_TAG`
+  const has pinned `RELEASE.2025-02-28T09-55-16Z` since cycle 428 — verified
+  the actual mismatch via grep before editing (`grep -rn "RELEASE\." crates/`
+  vs the workflow file), not just trusting cycle 430's note. Updated the
+  pre-pull tag to match, added a one-line comment explaining the two must
+  stay in sync (this exact drift is how the bug happened the first time).
+  Not a functional CI break (testcontainers pulls the real tag on demand
+  regardless), just restores the pre-pull step's actual purpose (avoiding
+  transient layer-download errors during the test run).
+- Validated YAML syntax with `python3 -c "import yaml; yaml.safe_load(...)"`
+  (no `actionlint`/`yamllint` available in this sandbox). Not crypto, not
+  architectural, not a backend handler — CI-workflow-only change, consistent
+  with cycles 425/428/429/430's precedent that test/CI-only diffs don't need
+  crypto-reviewer/threat-model-checker/security-auditor. Handled directly
+  (single-agent, well under the 20-tool-call delegation threshold) rather
+  than routing through infra-lead.
+- Pushed as `213a767`; CI run verification in progress via Monitor as of
+  this memory write — confirm green before trusting this entry's claim in a
+  future cycle if no completion note follows here.
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates (carried/updated):**
+  1. prd.md §3.3 cross-reference for region_id-in-storage-key metadata
+     (carried since cycle 424, still not done — good filler task).
+  2. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  3. Carried: prd.md §6.4 cross-region abuse-signal propagation
+     (documented-but-unimplemented) — worth a threat-model-checker-gated
+     scoping pass.
+  4. Carried, still not scoped: the residual gap where the winner of a
+     *legitimate* (non-racing) ownership claim can still delete a colliding
+     environment's live media forever.
+  5. Closed this cycle (was: stale MinIO pre-pull tag) — removed from list.
+
+## Previous state (2026-09-03, cycle 430 — STABILIZATION: real testcontainers coverage for RedisEventBus::publish + CI filter fix, commits f8d6513 + 251d8d9)
 
 - Mode selection: counter 429→430, 430 % 5 == 0 → STABILIZATION.
 - **Process gap found and closed first:** cycle 429's own "chore: update
@@ -144,96 +238,7 @@ follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
      scope (skip the full-workspace test dump, just target the touched
      crate) to fit in one run.
 
-## Previous state (2026-09-04, cycle 429 — FEATURE: mocked-S3Client unit tests for verify_region_ownership self-verify branches, closes cycle-428's next-cycle candidate #1)
-
-- Picked up next-cycle candidate #1 from cycle 428: even with the real MinIO
-  claim-race test added last cycle, two branches of
-  `R2MediaAdapter::verify_region_ownership` (security-auditor Y1, cycle 426)
-  remained unexercised by any test — the self-verify-after-successful-claim
-  path's **mismatch** (a different UUID already stored) and **vanished**
-  (404 on re-read) outcomes. Neither is reachable against a real, conforming
-  S3-compatible backend (MinIO/R2 both honor `If-None-Match` correctly), so
-  only a mock can trigger them deterministically — exactly why cycle 428
-  flagged this as "new infra, no existing mock harness for `S3Client` in
-  this crate yet" rather than attempting it inline.
-- **Refactor (pure extraction, no behavior change):** split
-  `verify_region_ownership` into (1) the Postgres upsert for
-  `local_owner_id` (unchanged) calling (2) a new private
-  `verify_region_ownership_with_local_id(&self, region_prefix,
-  local_owner_id)` holding the exact same S3-only read/claim/self-verify/
-  race-loss logic as before, verbatim — done so the S3-only half is
-  unit-testable without a real Postgres pool (`PgPool::connect_lazy` never
-  connects, same pattern already used by the existing
-  `region_prefix_is_scoped_under_media_and_region_id` unit test).
-- **New mock infra:** `aws-smithy-http-client`'s `StaticReplayClient` (test-
-  util feature) plugged into `S3ConfigBuilder::http_client(...)` — replays
-  canned HTTP responses (404 `NoSuchKey`, 200 PUT success, 200 GET with a
-  UUID body, 412 `PreconditionFailed`) in FIFO order regardless of actual
-  request content. Added `aws-smithy-http-client`, `aws-smithy-types`, `http`
-  as **dev-dependencies only** (confirmed via `cargo build -p powehi-r2`
-  prod-profile compiling clean without them) — no new production runtime
-  dependency, `cargo deny check` clean (advisories/bans/licenses/sources ok).
-- **6 new unit tests** in `crates/adapters/outbound/powehi-r2/src/lib.rs`'s
-  existing `#[cfg(test)] mod tests`: already-claimed match/mismatch, claim-
-  when-absent-then-self-verify-match, the two target branches (self-verify
-  **mismatch** and self-verify **vanished**, both asserting fail-closed
-  `Ok(false)`), and claim-race-loss via `PreconditionFailed` re-reading the
-  winner's id. All pass; full workspace `cargo test --workspace` still 0
-  failures (144/44/181/46/... suites all green, r2's own lib tests now 18
-  passing incl. the 6 new ones); `cargo clippy -p powehi-r2 --all-targets --
-  -D warnings` and `cargo fmt --all --check` both clean.
-- **`security-auditor` invoked (backend adapter, security-critical claim
-  path touched) — PASS/GREEN**, with an unusually thorough pass: the agent
-  diffed the extracted method body byte-for-byte against the original inline
-  logic (confirmed identical, no accidental change during the split), then
-  did targeted **mutation testing on the real source** (flipped the
-  self-verify-vanished return, flipped `owner_matches`'s comparison to
-  always-true, removed `PreconditionFailed` from the matched error codes)
-  and confirmed every mutation broke the corresponding new test — ruling out
-  the failure mode where a mock test is trivially green regardless of the
-  logic under test. Also confirmed the 412 + `<Code>PreconditionFailed</Code>`
-  XML body genuinely parses through the real AWS SDK's error-metadata path
-  (not just assumed from reading the source), and that
-  `verify_region_ownership_with_local_id` stayed non-`pub` (no new API
-  surface). All mutations reverted before reporting; `git diff --stat`
-  confirmed the file matched the intended 220-line diff before commit.
-- Not crypto (no `.rs` crypto/MLS/OPAQUE/WASM file touched) —
-  `crypto-reviewer` correctly not invoked. Not a new architectural change or
-  new server-visible metadata (no new data exposed, no new object/table, the
-  extraction doesn't change what's observable externally) —
-  `threat-model-checker` correctly not invoked this cycle.
-- Verified before commit: `cargo build --workspace` clean, `cargo test
-  --workspace` 0 failures, `cargo clippy --workspace --all-targets -- -D
-  warnings` clean (confirmed by both the main session and, independently,
-  the security-auditor sub-agent), `cargo fmt --all --check` clean, `cargo
-  deny check` clean. Pushed (`9f56abd`); `gh run watch` on the resulting `CI
-  — Rust` run was in progress as of this memory update — verify it landed
-  green before trusting this entry's "all green" claim in a future cycle if
-  no completion note follows. **Confirmed at cycle 430's start**: `gh run
-  list` showed run `33799167955` as `completed`/`success` — this entry's
-  claim held.
-- Phase 1-6 checklist: no change — all items already `[x]`; this cycle's
-  work again came from the next-cycle-candidates backlog.
-- Target dir hygiene: not checked (FEATURE mode).
-- **Next cycle candidates (carried/updated):**
-  1. prd.md §3.3 cross-reference for region_id-in-storage-key metadata
-     (carried since cycle 424, still not done — good filler task).
-  2. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
-     libcrux/x-wing admissibility) — human/crypto-lead policy call.
-  3. Carried: prd.md §6.4 cross-region abuse-signal propagation
-     (documented-but-unimplemented) — worth a threat-model-checker-gated
-     scoping pass.
-  4. Carried, still not scoped: the residual gap where the winner of a
-     *legitimate* (non-racing) ownership claim can still delete a colliding
-     environment's live media forever — only a real close via distinct
-     buckets (operational) or moving `owner_id` into the storage-key path
-     itself (bigger migration).
-  5. This file is 417+ lines (4 "state" sections back to cycle 425) — not
-     yet at the prior archival trigger point (~742 lines), but due for an
-     archive sweep next STABILIZATION cycle (430) per the established
-     rolling pattern (keep only current + immediate-prior cycle, archive
-     the rest to `.claude/memory/archive/`).
-
-(cycles 425-428: see `.claude/memory/archive/project-context-cycles-425-428.md`.
+(cycles 425-429: see `.claude/memory/archive/project-context-cycles-425-428.md`,
+now extended with cycle 429's full entry.
 cycle 424 and earlier: see `.claude/memory/archive/project-context-cycles-402-421.md`,
 now extended with cycle 424's full entry.)
