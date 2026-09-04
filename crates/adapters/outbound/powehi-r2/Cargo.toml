@@ -12,6 +12,7 @@ powehi-port-outbound = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+metrics = { workspace = true }
 thiserror = { workspace = true }
 sqlx = { workspace = true }
 uuid = { workspace = true }

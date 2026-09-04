@@ -30,6 +30,7 @@ use aws_sdk_s3::{
     Client as S3Client,
 };
 use chrono::{DateTime, Utc};
+use metrics::counter;
 use powehi_domain::{
     device::DeviceId,
     error::DomainError,
@@ -429,6 +430,18 @@ impl R2MediaAdapter {
     /// `no-plaintext-logging`) — and doing so is the only way this failure
     /// mode is diagnosable at all (security-auditor F3, cycle 426 fresh
     /// review pass).
+    ///
+    /// Also increments `media_orphan_sweep_owner_mismatch_total{region_id}`
+    /// (cycle 436): before this, the mismatch signal existed only as a log
+    /// line, so the losing side's "permanent, loud" detection (see the
+    /// `verify_region_ownership` doc comment) was only actually loud if an
+    /// operator had already built a log-based alert. This condition never
+    /// self-resolves — every subsequent run re-triggers it — so it is a
+    /// counter, not a gauge, and every tick after the first mismatch adds 1;
+    /// an operator alerts on `increase(...) > 0` rather than on the raw
+    /// value. `region_id` is a small operator-controlled enum (Helm
+    /// `values-*.yaml`), not user data — same cardinality class as the
+    /// existing `http_requests_total{method,status}` labels.
     fn owner_matches(&self, local_owner_id: Uuid, remote_owner_id: Uuid) -> bool {
         let owned = local_owner_id == remote_owner_id;
         if !owned {
@@ -438,6 +451,11 @@ impl R2MediaAdapter {
                 remote_owner_id = %remote_owner_id,
                 "media.orphan_sweep_owner_mismatch_refusing_sweep"
             );
+            counter!(
+                "media_orphan_sweep_owner_mismatch_total",
+                "region_id" => self.region_id.clone()
+            )
+            .increment(1);
         }
         owned
     }
@@ -924,6 +942,11 @@ impl MediaRepository for R2MediaAdapter {
                         deleted_before_abort = deleted_total,
                         "media.orphan_sweep_ratio_guard_triggered"
                     );
+                    counter!(
+                        "media_orphan_sweep_ratio_guard_total",
+                        "region_id" => self.region_id.clone()
+                    )
+                    .increment(1);
                     break 'paginate;
                 }
 

@@ -4209,6 +4209,7 @@ dependencies = [
  "aws-smithy-types",
  "chrono",
  "http 1.4.1",
+ "metrics",
  "powehi-domain",
  "powehi-port-outbound",
  "powehi-postgres",
