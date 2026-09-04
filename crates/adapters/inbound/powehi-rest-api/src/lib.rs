@@ -463,6 +463,7 @@ mod tests {
             _sender: &DeviceId,
             _group_id: &GroupId,
             _commit: Bytes,
+            _expected_epoch: Epoch,
         ) -> Result<Epoch, DomainError> {
             unimplemented!()
         }
@@ -750,6 +751,7 @@ mod tests {
             _sender: &DeviceId,
             _group_id: &GroupId,
             _commit: Bytes,
+            _expected_epoch: Epoch,
         ) -> Result<Epoch, DomainError> {
             Ok(Epoch(42))
         }
@@ -832,6 +834,7 @@ mod tests {
             _: &DeviceId,
             _: &GroupId,
             _: Bytes,
+            _: Epoch,
         ) -> Result<Epoch, DomainError> {
             unimplemented!()
         }
@@ -1388,7 +1391,8 @@ mod tests {
         let group = GroupId::new();
         let body = serde_json::json!({
             "group_id": group.to_string(),
-            "commit": [7u8, 8, 9]
+            "commit": [7u8, 8, 9],
+            "expected_epoch": 0u64
         });
         let resp = messaging_router()
             .oneshot(

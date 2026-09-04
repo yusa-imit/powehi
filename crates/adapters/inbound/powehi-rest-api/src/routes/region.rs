@@ -168,6 +168,7 @@ mod tests {
                 _: &DeviceId,
                 _: &GroupId,
                 _: Bytes,
+                _: Epoch,
             ) -> Result<Epoch, DomainError> {
                 unimplemented!()
             }

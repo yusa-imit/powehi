@@ -516,10 +516,28 @@ service RegionService {
 
 ```
 1. 모든 commit 메시지는 그룹의 home_region DS로 라우팅
-2. home_region DS가 epoch 순서 보장 (동시 commit 시 첫 번째만 수락)
+2. home_region DS가 epoch 순서 보장 (동시 commit 시 첫 번째만 수락) — `GroupRepository::advance_epoch`의
+   원자적 compare-and-swap(`UPDATE ... WHERE epoch = $expected RETURNING epoch`)으로 구현 (cycle 438).
+   클라이언트/피어가 보낸 `expected_epoch`는 CAS precondition으로만 쓰이고, 실제 새 epoch은 항상
+   DB가 계산한 `stored + 1`이다 — 호출자 값을 그대로 채택하지 않는다.
 3. 수락된 commit은 모든 관련 리전으로 fan-out
-4. 거부된 commit → 클라이언트에 CONFLICT 응답 → 재시도
-```
+4. 거부된 commit → 클라이언트에 CONFLICT(REST 409) / FailedPrecondition(gRPC) 응답 → 클라이언트가
+   새 epoch을 다시 조회해 Commit을 재빌드 후 재시도 (재시도 없이 즉시 거부 — 서버가 알아서
+   재시도하지 않음, 그렇지 않으면 클라이언트가 실제로 빌드하지 않은 epoch에 대해 Commit이
+   수락된 것처럼 보일 수 있음)
+
+**알려진 잔여 리스크 (accepted, cycle 438)**: `advance_epoch`(CAS)와 뒤따르는
+`EnvelopeRepository::save`(commit envelope 저장)는 하나의 DB 트랜잭션으로 묶여 있지 않다 —
+`GroupRepository`/`EnvelopeRepository`가 별도 outbound port(hexagonal 경계)이기 때문에, 진짜
+원자성을 보장하려면 포트 경계를 가로지르는 unit-of-work 추상화가 필요하고, 이는 이번 수정
+범위를 넘는 별도의 아키텍처 작업이다. CAS가 성공한 직후 `save`가 실패하면(드묾 — 같은 Postgres
+커넥션 풀 대상) epoch만 소비되고 커밋 envelope는 존재하지 않아 해당 그룹이 "막힌" 상태가 될 수
+있다 — 이후 모든 `ForwardCommit`이 정당하게 거부되며 자동 복구 경로가 없다. 완화책 1단계(이번
+사이클에 적용): `save` 실패 시 `mls_commit_epoch_stall_total{path="send_commit"|"forward_commit"}`
+Prometheus 카운터를 증가시켜, 이 드문 실패가 조용히 묻히지 않고 알림 가능하도록 함
+(`messaging_service.rs::send_commit`, `powehi-grpc/server.rs::forward_commit`). 완화책 2단계
+(다음 사이클 후보로 기록, 아직 미착수): 위 카운터 기반 Alertmanager/Grafana 룰 배선, 또는
+outbox 패턴 기반 진짜 원자성 확보 — 카운터 자체는 관측성만 제공할 뿐 문제를 막지는 않는다.
 
 **크로스 리전 commit 흐름:**
 
@@ -530,12 +548,12 @@ sequenceDiagram
     participant EU as EU Region (Group Home)
     participant B as Bob (EU)
 
-    A->>KR: POST /v1/groups/<gid>/commit
-    KR->>EU: gRPC ForwardCommit(gid, commit)
-    EU->>EU: epoch 순서 검증 + 수락
+    A->>KR: POST /v1/groups/<gid>/commit {expected_epoch}
+    KR->>EU: gRPC ForwardCommit(gid, sender_device_id, commit, expected_epoch)
+    EU->>EU: advance_epoch CAS(expected_epoch) 검증 + 수락
     EU->>B: WS push: commit (로컬)
-    EU->>KR: gRPC response: accepted(new_epoch)
-    KR->>A: WS push: commit accepted
+    EU->>KR: gRPC response: accepted(new_epoch) / FailedPrecondition(EpochMismatch)
+    KR->>A: WS push: commit accepted / 409 CONFLICT
 ```
 
 ### 4A.6 데이터 거주성
@@ -551,7 +569,7 @@ sequenceDiagram
 | 로그/메트릭 | 리전 로컬 보관 | 리전 로컬 보관 | 리전 로컬 보관 |
 | 백업 | 리전 로컬 | 리전 로컬 | 리전 로컬 |
 
-**원칙**: 사용자 PII (handle_hash, OPAQUE envelope, device 정보)는 절대 home_region 밖으로 나가지 않음. 크로스 리전 전달되는 것은 ciphertext envelope과 공개 KeyPackage뿐.
+**원칙**: 사용자 PII (handle_hash, OPAQUE envelope, device 정보)는 절대 home_region 밖으로 나가지 않음. 크로스 리전 전달되는 것은 ciphertext envelope, 공개 KeyPackage, 그리고 (ForwardCommit 한정) group epoch 카운터(`expected_epoch`/`accepted_epoch`, §4A.5)뿐 — epoch은 그룹의 진행 순서를 나타내는 정수일 뿐 메시지 내용이나 멤버십 자체를 노출하지 않는다.
 
 ### 4A.7 글로벌 장애 복구
 
@@ -873,8 +891,13 @@ pub trait RegionRouter: Send + Sync {
     async fn resolve_group_region(&self, group_id: &GroupId) -> Result<RegionId, DomainError>;
     /// 크로스 리전 envelope 포워딩
     async fn forward_envelope(&self, target_region: &RegionId, envelope: &Envelope) -> Result<(), DomainError>;
-    /// 크로스 리전 commit 포워딩
-    async fn forward_commit(&self, target_region: &RegionId, group_id: &GroupId, commit: Bytes) -> Result<Epoch, DomainError>;
+    /// 크로스 리전 commit 포워딩. `expected_epoch`는 호출자가 이 Commit을
+    /// 빌드할 때 기준으로 삼은 epoch — 목적지 region은 이를 CAS
+    /// precondition으로만 사용해 자신의 저장된 epoch와 비교하고
+    /// (`GroupRepository::advance_epoch`), 값이 stale하면 `EpochMismatch`로
+    /// 거부한다. 새 epoch 값은 항상 목적지가 자체 계산한 `stored + 1`이며,
+    /// 호출자가 보낸 값을 그대로 채택하지 않는다 (§4A.5, cycle 438).
+    async fn forward_commit(&self, target_region: &RegionId, group_id: &GroupId, sender_device_id: &DeviceId, commit: Bytes, expected_epoch: Epoch) -> Result<Epoch, DomainError>;
     /// 현재 리전이 해당 그룹의 home인지 확인
     fn is_local(&self, region: &RegionId) -> bool;
 }

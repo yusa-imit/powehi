@@ -82,11 +82,20 @@ export async function sendWelcome(
 	await throwOnError(resp);
 }
 
-/** POST /v1/messages/commit — broadcast MLS Commit. Returns new epoch. */
+/**
+ * POST /v1/messages/commit — broadcast MLS Commit. Returns new epoch.
+ * @param expectedEpoch The epoch this Commit was built against (the
+ *   caller's own last-known epoch for the group) — the server uses it as a
+ *   compare-and-swap precondition and rejects with `epoch_mismatch` (409) if
+ *   another commit already landed first. On rejection, re-fetch the group's
+ *   current epoch and rebuild the Commit before retrying; never resubmit the
+ *   same commit bytes with a bumped epoch number.
+ */
 export async function sendCommit(
 	token: string,
 	groupId: string,
 	commit: Uint8Array,
+	expectedEpoch: number,
 ): Promise<number> {
 	const resp = await fetch(`${API_BASE}/messages/commit`, {
 		method: "POST",
@@ -94,6 +103,7 @@ export async function sendCommit(
 		body: JSON.stringify({
 			group_id: groupId,
 			commit: Array.from(commit),
+			expected_epoch: expectedEpoch,
 		}),
 	});
 	await throwOnError(resp);

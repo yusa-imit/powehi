@@ -61,6 +61,12 @@ impl PgGroupRepository {
 #[async_trait]
 impl GroupRepository for PgGroupRepository {
     async fn save(&self, group: &Group) -> Result<(), DomainError> {
+        // Same range guard as `advance_epoch`: an out-of-range epoch must
+        // fail loudly here rather than silently wrap negative via `as i64`,
+        // which `advance_epoch`'s own `i64::try_from` would then reject on
+        // every future call for this group.
+        let epoch_i64 = i64::try_from(group.epoch.0)
+            .map_err(|_| DomainError::Internal("epoch exceeds representable range".into()))?;
         sqlx::query(
             "INSERT INTO groups (id, home_region, epoch, created_at)
              VALUES ($1, $2, $3, $4)
@@ -70,7 +76,7 @@ impl GroupRepository for PgGroupRepository {
         )
         .bind(group.id.as_uuid())
         .bind(group.home_region.as_str())
-        .bind(group.epoch.0 as i64)
+        .bind(epoch_i64)
         .bind(group.created_at)
         .execute(&self.pool)
         .await
@@ -78,11 +84,42 @@ impl GroupRepository for PgGroupRepository {
         Ok(())
     }
 
+    async fn advance_epoch(
+        &self,
+        group_id: &GroupId,
+        expected: Epoch,
+    ) -> Result<Option<Epoch>, DomainError> {
+        // Reject out-of-range input before it ever reaches the WHERE clause —
+        // silently truncating via `as i64` here would let a caller's stale/
+        // corrupt u64 match an unrelated stored value. `expected_epoch`
+        // arrives directly from a client (REST) or peer region (gRPC), so an
+        // out-of-range value is bad *input*, not a server fault — map it to
+        // `InvalidInput` (400/InvalidArgument), not `Internal` (500).
+        let expected_i64 = i64::try_from(expected.0)
+            .map_err(|_| DomainError::InvalidInput("epoch exceeds representable range".into()))?;
+        // `epoch = epoch + 1 WHERE epoch = $2` is the compare-and-swap: only
+        // the caller whose `expected` matches the row currently in the
+        // database moves it, and Postgres's bigint `+` raises on overflow
+        // rather than wrapping (see the port doc comment on why a blind
+        // Rust-side `+ 1` must never be used for this).
+        let row: Option<(i64,)> = sqlx::query_as(
+            "UPDATE groups SET epoch = epoch + 1 WHERE id = $1 AND epoch = $2 RETURNING epoch",
+        )
+        .bind(group_id.as_uuid())
+        .bind(expected_i64)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_err)?;
+        Ok(row.map(|(e,)| Epoch(e as u64)))
+    }
+
     async fn create_if_absent(&self, group: &Group) -> Result<bool, DomainError> {
         // DO NOTHING, not DO UPDATE: an id that already exists must keep its
         // epoch, home_region and created_at untouched, so a client-supplied
         // group_id colliding with an existing group cannot reset it. Same shape
         // as the group-stub insert in `upsert_members`.
+        let epoch_i64 = i64::try_from(group.epoch.0)
+            .map_err(|_| DomainError::Internal("epoch exceeds representable range".into()))?;
         let res = sqlx::query(
             "INSERT INTO groups (id, home_region, epoch, created_at)
              VALUES ($1, $2, $3, $4)
@@ -90,7 +127,7 @@ impl GroupRepository for PgGroupRepository {
         )
         .bind(group.id.as_uuid())
         .bind(group.home_region.as_str())
-        .bind(group.epoch.0 as i64)
+        .bind(epoch_i64)
         .bind(group.created_at)
         .execute(&self.pool)
         .await

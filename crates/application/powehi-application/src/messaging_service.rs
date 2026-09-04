@@ -279,21 +279,41 @@ impl MessagingUseCase for MessagingService {
         sender: &DeviceId,
         group_id: &GroupId,
         commit: Bytes,
+        expected_epoch: Epoch,
     ) -> Result<Epoch, DomainError> {
         // Free size check before the group-lookup + membership DB round-trips
         // (same reasoning as send_message, cycle 353).
         if commit.len() > MAX_COMMIT_BYTES {
             return Err(DomainError::InvalidInput("commit too large".into()));
         }
-        let mut group = self
+        let group = self
             .group_repo
             .find_by_id(group_id)
             .await?
             .ok_or_else(|| DomainError::NotFound("group".into()))?;
         self.check_sender_is_member(sender, &group.id).await?;
-        let new_epoch = Epoch(group.epoch.0 + 1);
-        group.epoch = new_epoch;
-        self.group_repo.save(&group).await?;
+
+        // Advance epoch via CAS, not `save`'s blind upsert, gated on the
+        // *client's own* expected_epoch — the epoch it actually built this
+        // Commit against. A Commit built at epoch N is only valid if N is
+        // still current; if another commit already landed first (whether a
+        // real race or a stale retry), this one MUST be rejected rather than
+        // silently re-targeted at whatever epoch happens to be current now
+        // (that would let a Commit built for N get stamped N+2, which is not
+        // what the sender cryptographically committed to — RFC 9420 permits
+        // exactly one Commit per epoch, and only the one actually built
+        // against the CAS's precondition epoch). No retry-on-mismatch here:
+        // the caller must rebuild its Commit against the fresh epoch and
+        // resubmit, mirroring the cross-region `ForwardCommit` contract.
+        let new_epoch = self
+            .group_repo
+            .advance_epoch(group_id, expected_epoch)
+            .await?
+            .ok_or(DomainError::EpochMismatch {
+                expected: expected_epoch.0,
+                got: group.epoch.0,
+            })?;
+
         let mut envelope = Envelope::new(
             group_id.clone(),
             sender.clone(),
@@ -302,7 +322,16 @@ impl MessagingUseCase for MessagingService {
             commit.to_vec(),
         );
         envelope.epoch = Some(new_epoch);
-        self.envelope_repo.save(&envelope).await?;
+        // The epoch CAS above and this save are not one transaction (accepted
+        // risk, prd.md §4A.5): a save failure here durably consumes the epoch
+        // with no Commit envelope to deliver, wedging the group. Emit a
+        // counter so this rare failure is alertable rather than silent —
+        // turns a silent wedge into a paged one (security-auditor follow-up,
+        // cycle 438).
+        if let Err(e) = self.envelope_repo.save(&envelope).await {
+            metrics::counter!("mls_commit_epoch_stall_total", "path" => "send_commit").increment(1);
+            return Err(e);
+        }
         let _ = self
             .event_bus
             .publish(DomainEvent::EpochAdvanced {
@@ -548,6 +577,21 @@ mod tests {
                 .unwrap()
                 .insert(group.id.clone(), group.clone());
             Ok(())
+        }
+        async fn advance_epoch(
+            &self,
+            group_id: &GroupId,
+            expected: Epoch,
+        ) -> Result<Option<Epoch>, DomainError> {
+            let mut groups = self.groups.lock().unwrap();
+            let Some(group) = groups.get_mut(group_id) else {
+                return Ok(None);
+            };
+            if group.epoch != expected {
+                return Ok(None);
+            }
+            group.epoch = Epoch(group.epoch.0 + 1);
+            Ok(Some(group.epoch))
         }
         async fn create_if_absent(&self, group: &Group) -> Result<bool, DomainError> {
             // Mirrors ON CONFLICT (id) DO NOTHING: an existing row is left intact.
@@ -842,7 +886,7 @@ mod tests {
         let svc = make_service(env_repo.clone(), group_repo.clone());
 
         let new_epoch = svc
-            .send_commit(&sender, &group_id, Bytes::from_static(b"commit"))
+            .send_commit(&sender, &group_id, Bytes::from_static(b"commit"), Epoch(0))
             .await
             .unwrap();
 
@@ -858,10 +902,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_commit_stale_expected_epoch_is_rejected_not_retargeted() {
+        // A Commit built against epoch 0 must be rejected once the epoch has
+        // already moved (another commit landed first) — never silently
+        // re-targeted at whatever epoch happens to be current, which would
+        // accept a Commit the sender never actually built for that epoch.
+        let sender = DeviceId::new();
+        let group = Group::new(GroupId::new(), RegionId::new("eu-central"));
+        let group_id = group.id.clone();
+        let env_repo = FakeEnvelopeRepo::new();
+        let group_repo = FakeGroupRepo::with_group_and_member(group, sender.clone());
+        let svc = make_service(env_repo, group_repo.clone());
+
+        // First commit at epoch 0 lands, advancing the group to epoch 1.
+        svc.send_commit(&sender, &group_id, Bytes::from_static(b"c1"), Epoch(0))
+            .await
+            .unwrap();
+
+        // A second commit (e.g. a racing device, or a retried request) still
+        // claiming epoch 0 (stale) must be rejected.
+        let err = svc
+            .send_commit(&sender, &group_id, Bytes::from_static(b"c2"), Epoch(0))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            DomainError::EpochMismatch { expected: 0, .. }
+        ));
+
+        let updated = group_repo.find_by_id(&group_id).await.unwrap().unwrap();
+        assert_eq!(
+            updated.epoch,
+            Epoch(1),
+            "a rejected commit must not advance the epoch a second time"
+        );
+    }
+
+    #[tokio::test]
     async fn send_commit_unknown_group_returns_not_found() {
         let svc = make_service(FakeEnvelopeRepo::new(), FakeGroupRepo::empty());
         let err = svc
-            .send_commit(&DeviceId::new(), &GroupId::new(), Bytes::from_static(b"x"))
+            .send_commit(
+                &DeviceId::new(),
+                &GroupId::new(),
+                Bytes::from_static(b"x"),
+                Epoch(0),
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::NotFound(_)));
@@ -876,7 +962,7 @@ mod tests {
         let svc = make_service(FakeEnvelopeRepo::new(), group_repo);
         let oversized = Bytes::from(vec![0u8; MAX_COMMIT_BYTES + 1]);
         let err = svc
-            .send_commit(&sender, &group_id, oversized)
+            .send_commit(&sender, &group_id, oversized, Epoch(0))
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::InvalidInput(_)));
@@ -1279,7 +1365,12 @@ mod tests {
         let group_repo = FakeGroupRepo::with_group_and_member(group, other_device);
         let svc = make_service(FakeEnvelopeRepo::new(), group_repo);
         let err = svc
-            .send_commit(&non_member, &group_id, Bytes::from_static(b"commit"))
+            .send_commit(
+                &non_member,
+                &group_id,
+                Bytes::from_static(b"commit"),
+                Epoch(0),
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::Unauthorized));
@@ -1370,9 +1461,14 @@ mod tests {
         let svc =
             MessagingService::new(FakeEnvelopeRepo::new(), group_repo, Arc::new(FakeEventBus))
                 .with_push(subs, push_ref);
-        svc.send_commit(&committer, &group_id, Bytes::from_static(b"commit"))
-            .await
-            .unwrap();
+        svc.send_commit(
+            &committer,
+            &group_id,
+            Bytes::from_static(b"commit"),
+            Epoch(0),
+        )
+        .await
+        .unwrap();
         // Only peer (not committer) should be notified.
         assert_eq!(
             push.call_count.load(Ordering::SeqCst),

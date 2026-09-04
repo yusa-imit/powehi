@@ -910,6 +910,121 @@ async fn create_if_absent_does_not_overwrite_an_existing_group() {
     assert_eq!(count, 1, "exactly one group row must exist");
 }
 
+/// `advance_epoch` is the CAS primitive that `forward_commit`/`send_commit`
+/// rely on to accept exactly one MLS Commit per epoch (crypto-reviewer
+/// finding on the cross-region ForwardCommit RPC — `save`'s blind upsert
+/// cannot provide this). A matching `expected` must advance-and-persist by
+/// exactly 1; a stale `expected` must be rejected without touching the row.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn advance_epoch_succeeds_when_expected_matches_and_persists() {
+    let (_c, pool) = setup().await;
+    let repo = PgGroupRepository::new(pool.clone());
+    let group_id = insert_group(&pool).await; // starts at Epoch(0)
+
+    let advanced = repo
+        .advance_epoch(&group_id, Epoch(0))
+        .await
+        .expect("advance_epoch");
+    assert_eq!(advanced, Some(Epoch(1)));
+
+    let stored = repo
+        .find_by_id(&group_id)
+        .await
+        .expect("find_by_id")
+        .expect("group row must exist");
+    assert_eq!(stored.epoch, Epoch(1));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn advance_epoch_rejects_stale_expected_and_leaves_epoch_untouched() {
+    let (_c, pool) = setup().await;
+    let repo = PgGroupRepository::new(pool.clone());
+    let group_id = insert_group(&pool).await; // starts at Epoch(0)
+
+    let result = repo
+        .advance_epoch(&group_id, Epoch(41))
+        .await
+        .expect("advance_epoch");
+    assert_eq!(
+        result, None,
+        "a mismatched expected epoch must be rejected, not fabricate a new epoch"
+    );
+
+    let stored = repo
+        .find_by_id(&group_id)
+        .await
+        .expect("find_by_id")
+        .expect("group row must exist");
+    assert_eq!(
+        stored.epoch,
+        Epoch(0),
+        "a rejected CAS must never mutate the stored epoch"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn advance_epoch_unknown_group_returns_none() {
+    let (_c, pool) = setup().await;
+    let repo = PgGroupRepository::new(pool.clone());
+    let result = repo
+        .advance_epoch(&GroupId::from(Uuid::new_v4()), Epoch(0))
+        .await
+        .expect("advance_epoch");
+    assert_eq!(result, None);
+}
+
+/// The concurrency guarantee this primitive exists for: two callers racing
+/// `advance_epoch` from the same starting epoch against real Postgres must
+/// never both succeed — exactly one wins, the epoch advances by exactly 1
+/// (never 2), and the loser observes the loss via `None` rather than a
+/// second, forked "success". This is the exact race the crypto-reviewer
+/// flagged against the pre-CAS `find_by_id` + `save` sequence.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn advance_epoch_concurrent_race_only_one_winner() {
+    let (_c, pool) = setup().await;
+    let group_id = insert_group(&pool).await; // starts at Epoch(0)
+
+    let pool_a = pool.clone();
+    let pool_b = pool.clone();
+    let gid_a = group_id.clone();
+    let gid_b = group_id.clone();
+    let (a, b) = tokio::join!(
+        tokio::spawn(async move {
+            PgGroupRepository::new(pool_a)
+                .advance_epoch(&gid_a, Epoch(0))
+                .await
+        }),
+        tokio::spawn(async move {
+            PgGroupRepository::new(pool_b)
+                .advance_epoch(&gid_b, Epoch(0))
+                .await
+        }),
+    );
+    let a = a.expect("task a").expect("advance_epoch a");
+    let b = b.expect("task b").expect("advance_epoch b");
+
+    let winners = [a, b].into_iter().filter(|r| *r == Some(Epoch(1))).count();
+    let losers = [a, b].into_iter().filter(|r| r.is_none()).count();
+    assert_eq!(winners, 1, "exactly one racer must win the CAS");
+    assert_eq!(losers, 1, "exactly one racer must lose the CAS");
+
+    let repo = PgGroupRepository::new(pool.clone());
+    let stored = repo
+        .find_by_id(&group_id)
+        .await
+        .expect("find_by_id")
+        .expect("group row must exist");
+    assert_eq!(
+        stored.epoch,
+        Epoch(1),
+        "the epoch must advance by exactly 1, never 2, under a concurrent race"
+    );
+}
+
 /// `create_with_creator` must create the group row and the creator's
 /// membership row atomically: a fresh id gets both in one commit, and a
 /// colliding id leaves both untouched (no orphan group with zero members, and

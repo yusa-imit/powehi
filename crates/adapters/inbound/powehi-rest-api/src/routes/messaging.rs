@@ -19,7 +19,7 @@ use powehi_domain::{
     device::DeviceId,
     envelope::{Envelope, EnvelopeId},
     error::DomainError,
-    group::GroupId,
+    group::{Epoch, GroupId},
 };
 use serde::{Deserialize, Serialize};
 
@@ -127,6 +127,11 @@ pub async fn send_welcome(
 pub struct SendCommitRequest {
     pub group_id: GroupId,
     pub commit: Vec<u8>,
+    /// The epoch the client built this Commit against (its own last-known
+    /// epoch for the group) — required as the server-side CAS precondition.
+    /// A stale value (another commit already landed) is rejected with
+    /// `409 Conflict`, not silently re-targeted at the current epoch.
+    pub expected_epoch: u64,
 }
 
 #[derive(Serialize)]
@@ -147,7 +152,12 @@ pub async fn send_commit(
     );
     let epoch = state
         .messaging
-        .send_commit(&sender, &req.group_id, Bytes::from(req.commit))
+        .send_commit(
+            &sender,
+            &req.group_id,
+            Bytes::from(req.commit),
+            Epoch(req.expected_epoch),
+        )
         .await?;
     counter!("messages_sent_total", "kind" => "commit").increment(1);
     Ok(Json(SendCommitResponse { epoch: epoch.0 }))

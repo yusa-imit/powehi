@@ -2,12 +2,32 @@ use async_trait::async_trait;
 use powehi_domain::{
     device::DeviceId,
     error::DomainError,
-    group::{Group, GroupId, GroupMember},
+    group::{Epoch, Group, GroupId, GroupMember},
 };
 
 #[async_trait]
 pub trait GroupRepository: Send + Sync {
     async fn save(&self, group: &Group) -> Result<(), DomainError>;
+    /// Atomically advance `group_id`'s epoch by exactly 1, iff its
+    /// currently-stored epoch equals `expected`.
+    ///
+    /// This is the only safe primitive for accepting an MLS Commit: two
+    /// concurrent commits against the same epoch must result in exactly one
+    /// accepted advance, never both (RFC 9420 requires exactly one Commit be
+    /// applied per epoch — a home region racily accepting two would fork
+    /// group state). [`GroupRepository::save`]'s blind upsert provides no
+    /// such guarantee and MUST NOT be used to advance epoch.
+    ///
+    /// Returns `Ok(Some(new_epoch))` when the compare-and-swap succeeded.
+    /// Returns `Ok(None)` when the group's stored epoch no longer equals
+    /// `expected` (lost the race to a concurrent commit, or the caller's
+    /// view of the epoch is stale) or when the group does not exist —
+    /// callers must treat both as a rejection, not a 0-epoch success.
+    async fn advance_epoch(
+        &self,
+        group_id: &GroupId,
+        expected: Epoch,
+    ) -> Result<Option<Epoch>, DomainError>;
     /// Insert a group row only if `group.id` is not already present.
     ///
     /// Returns `true` when a new row was created, `false` when the id already

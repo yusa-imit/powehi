@@ -531,6 +531,13 @@ mod tests {
         async fn save(&self, _group: &Group) -> Result<(), DomainError> {
             Ok(())
         }
+        async fn advance_epoch(
+            &self,
+            _group_id: &GroupId,
+            _expected: Epoch,
+        ) -> Result<Option<Epoch>, DomainError> {
+            unimplemented!("media_service tests never advance a group epoch")
+        }
         async fn create_if_absent(&self, group: &Group) -> Result<bool, DomainError> {
             // Mirrors ON CONFLICT (id) DO NOTHING: an existing id is left intact.
             let mut groups = self.groups.lock().unwrap();

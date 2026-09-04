@@ -225,6 +225,7 @@ impl RegionRouter for RegionGrpcRouter {
         group_id: &GroupId,
         sender_device_id: &DeviceId,
         commit: Bytes,
+        expected_epoch: Epoch,
     ) -> Result<Epoch, DomainError> {
         let peer = self
             .get_peer(target_region)
@@ -244,7 +245,7 @@ impl RegionRouter for RegionGrpcRouter {
                         group_id: gid,
                         sender_device_id: sid,
                         commit: cb.to_vec(),
-                        expected_epoch: 0,
+                        expected_epoch: expected_epoch.0,
                     }))
                     .await?
                     .into_inner();
@@ -563,6 +564,7 @@ mod tests {
                 &group_id,
                 &sender,
                 bytes::Bytes::from(vec![0xca, 0xfe]),
+                Epoch(0),
             )
             .await;
         assert!(matches!(result, Err(DomainError::Internal(_))));

@@ -26,11 +26,20 @@ pub trait MessagingUseCase: Send + Sync {
         target: &DeviceId,
     ) -> Result<(), DomainError>;
 
+    /// `expected_epoch` MUST be the epoch the sender's client built this
+    /// Commit against (its own last-known epoch for the group). The server
+    /// uses it as a compare-and-swap precondition and rejects with
+    /// `DomainError::EpochMismatch` if the stored epoch has already moved —
+    /// this is what makes it safe for two clients to race a Commit for the
+    /// same group: exactly one is ever accepted, the other must re-fetch the
+    /// new epoch and rebuild its Commit before retrying. Mirrors the
+    /// cross-region `RegionRouter::forward_commit` contract.
     async fn send_commit(
         &self,
         sender: &DeviceId,
         group_id: &GroupId,
         commit: Bytes,
+        expected_epoch: Epoch,
     ) -> Result<Epoch, DomainError>;
 
     /// `since`/`since_id` form an exact keyset cursor — see

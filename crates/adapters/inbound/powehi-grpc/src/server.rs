@@ -8,6 +8,7 @@ use powehi_domain::{
     abuse::{AbuseReason as DomainAbuseReason, AbuseSignal, AbuseSubject, ABUSE_IP_HASH_LEN},
     device::DeviceId,
     envelope::{Envelope, EnvelopeId, MessageType},
+    error::DomainError,
     event::DomainEvent,
     group::{Epoch, Group, GroupId, GroupMember},
     key_package::{ConsumeResult, KeyPackageId},
@@ -513,46 +514,99 @@ impl RegionService for RegionGrpcServer {
         let group_id = parse_group_id(&req.group_id)
             .ok_or_else(|| Status::invalid_argument("invalid group_id UUID"))?;
 
-        // Home-region epoch serialisation: store the commit envelope.
         // The commit bytes are opaque — we do not decrypt them.
         let sender = parse_device_id(&req.sender_device_id)
             .ok_or_else(|| Status::invalid_argument("invalid sender_device_id UUID"))?;
 
         // RED-2: verify calling peer's mTLS cert matches the group's home_region.
-        if let Some(group) = self
+        let group = self
             .group_repo
             .find_by_id(&group_id)
             .await
-            .map_err(|e| domain_err_to_status(&e))?
-        {
-            self.verify_peer_region(&request_exts, &group.home_region.to_string())?;
+            .map_err(|e| domain_err_to_status(&e))?;
+
+        if let Some(g) = &group {
+            self.verify_peer_region(&request_exts, &g.home_region.to_string())?;
         }
 
         self.check_sender_is_member(&group_id, &sender).await?;
 
-        let envelope = Envelope::new(
+        // `group` was already fetched above for the RED-2 peer-region check
+        // (GroupRepository has always been injected on this struct; the
+        // previous "deferred until GroupRepository is injected" note was
+        // stale). `check_sender_is_member` above already fails closed on
+        // empty membership, so a `None` here — this region has no record of
+        // the group at all — cannot occur via a real request; still handled
+        // explicitly rather than assumed unreachable.
+        let group = group.ok_or_else(|| {
+            Status::failed_precondition("group is unknown to this region's GroupRepository")
+        })?;
+
+        // Home-region epoch serialisation (prd.md §6, "동시 commit 시 첫 번째만
+        // 수락, 나머지는 거부"): `req.expected_epoch` is the peer's claim about
+        // which epoch it built this Commit against. We do NOT adopt it as the
+        // new epoch value (that always comes from the server's own `+ 1`),
+        // but it MUST gate acceptance as a compare-and-swap precondition —
+        // otherwise two concurrent commits (or a stale retry racing a fresher
+        // commit) can both be accepted against the same starting epoch, which
+        // RFC 9420 forbids (exactly one Commit is valid per epoch) and would
+        // fork group state. `GroupRepository::advance_epoch` is the CAS
+        // primitive for this; `save`'s blind upsert must never be used here.
+        //
+        // A CAS loss and an unmapped/expired FailedPrecondition are both
+        // rejections, not empty-epoch successes: the client's gRPC layer
+        // treats FailedPrecondition as non-retryable, so a lost race reports
+        // failure once instead of the previous behaviour where a retried
+        // call after a dropped response would advance the epoch again on
+        // every attempt.
+        let new_epoch = self
+            .group_repo
+            .advance_epoch(&group_id, Epoch(req.expected_epoch))
+            .await
+            .map_err(|e| domain_err_to_status(&e))?
+            .ok_or_else(|| {
+                domain_err_to_status(&DomainError::EpochMismatch {
+                    expected: req.expected_epoch,
+                    got: group.epoch.0,
+                })
+            })?;
+
+        let mut envelope = Envelope::new(
             group_id.clone(),
             sender,
             None,
             MessageType::Commit,
             req.commit.to_vec(),
         );
+        envelope.epoch = Some(new_epoch);
 
-        self.envelope_repo
-            .save(&envelope)
+        // The epoch CAS above and this save are not one transaction (accepted
+        // risk, prd.md §4A.5): a save failure here durably consumes the epoch
+        // with no Commit envelope to deliver, wedging the group. Emit a
+        // counter so this rare failure is alertable rather than silent —
+        // turns a silent wedge into a paged one (security-auditor follow-up,
+        // cycle 438).
+        if let Err(e) = self.envelope_repo.save(&envelope).await {
+            metrics::counter!("mls_commit_epoch_stall_total", "path" => "forward_commit")
+                .increment(1);
+            return Err(domain_err_to_status(&e));
+        }
+
+        if let Err(e) = self
+            .event_bus
+            .publish(DomainEvent::EpochAdvanced {
+                group_id: group_id.clone(),
+                new_epoch,
+                at: chrono::Utc::now(),
+            })
             .await
-            .map_err(|e| domain_err_to_status(&e))?;
-
-        // Security: we do NOT trust req.expected_epoch from the peer for the
-        // EpochAdvanced event. Epoch validation against the DB is deferred until
-        // GroupRepository is injected (Phase 6 follow-up). The commit envelope is
-        // stored for recipients to poll; no epoch event is published to avoid
-        // injecting an attacker-controlled epoch value into the event bus.
+        {
+            tracing::warn!(error = %e, "event_bus publish failed for forwarded commit epoch");
+        }
 
         Ok(Response::new(ForwardCommitResponse {
             status: ForwardStatus::Accepted as i32,
-            // accepted_epoch is left as 0 until GroupRepository validates the epoch.
-            accepted_epoch: 0,
+            accepted_epoch: new_epoch.0,
         }))
     }
 
@@ -1072,6 +1126,21 @@ mod tests {
                 .insert(group.id.clone(), group.clone());
             Ok(())
         }
+        async fn advance_epoch(
+            &self,
+            group_id: &GroupId,
+            expected: Epoch,
+        ) -> Result<Option<Epoch>, DomainError> {
+            let mut groups = self.groups.lock().unwrap();
+            let Some(group) = groups.get_mut(group_id) else {
+                return Ok(None);
+            };
+            if group.epoch != expected {
+                return Ok(None);
+            }
+            group.epoch = Epoch(group.epoch.0 + 1);
+            Ok(Some(group.epoch))
+        }
         async fn create_if_absent(&self, group: &Group) -> Result<bool, DomainError> {
             // Mirrors ON CONFLICT (id) DO NOTHING: an existing row is left intact.
             let mut groups = self.groups.lock().unwrap();
@@ -1305,8 +1374,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forward_commit_returns_accepted_with_zero_epoch() {
+    async fn forward_commit_advances_epoch_when_expected_epoch_matches() {
         // Sender must be a known member for the commit to be accepted (fail-closed policy).
+        // `with_member` seeds the group at Epoch(0), so a matching expected_epoch of 0
+        // yields an authoritative advance to 1 — the new value is server-derived
+        // (`stored + 1`), never echoed back from the request.
         let group_id = GroupId::from(Uuid::new_v4());
         let sender = DeviceId::new();
         let server = make_server_with_group_member(group_id.clone(), sender.clone());
@@ -1314,16 +1386,140 @@ mod tests {
             group_id: group_id.as_uuid().to_string(),
             sender_device_id: sender.as_uuid().to_string(),
             commit: vec![0x01, 0x02],
-            // expected_epoch from peer is NOT trusted — server returns 0 until GroupRepository validates
-            expected_epoch: 42,
+            expected_epoch: 0,
         });
         let resp = server.forward_commit(req).await.unwrap();
         let body = resp.into_inner();
         assert_eq!(body.status, ForwardStatus::Accepted as i32);
         assert_eq!(
-            body.accepted_epoch, 0,
-            "server must not echo back peer-supplied epoch"
+            body.accepted_epoch, 1,
+            "server must derive the new epoch from stored group state (stored + 1)"
         );
+
+        let updated = server
+            .group_repo
+            .find_by_id(&group_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            updated.epoch,
+            Epoch(1),
+            "GroupRepository must persist the advanced epoch"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_commit_rejects_stale_expected_epoch() {
+        // A peer claiming to build against an epoch that no longer matches
+        // stored state (already advanced, or simply wrong) must be rejected
+        // with FailedPrecondition — never silently accepted at a fabricated
+        // epoch. This is the CAS precondition (prd.md §6) that prevents two
+        // concurrent commits from both landing against the same epoch.
+        let group_id = GroupId::from(Uuid::new_v4());
+        let sender = DeviceId::new();
+        let server = make_server_with_group_member(group_id.clone(), sender.clone());
+        let req = Request::new(ForwardCommitRequest {
+            group_id: group_id.as_uuid().to_string(),
+            sender_device_id: sender.as_uuid().to_string(),
+            commit: vec![0x01, 0x02],
+            expected_epoch: 42,
+        });
+        let err = server.forward_commit(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+
+        let unchanged = server
+            .group_repo
+            .find_by_id(&group_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            unchanged.epoch,
+            Epoch(0),
+            "a rejected CAS must never advance the stored epoch"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_commit_second_call_must_use_the_new_epoch() {
+        let group_id = GroupId::from(Uuid::new_v4());
+        let sender = DeviceId::new();
+        let server = make_server_with_group_member(group_id.clone(), sender.clone());
+        for expected in [0u64, 1u64] {
+            let req = Request::new(ForwardCommitRequest {
+                group_id: group_id.as_uuid().to_string(),
+                sender_device_id: sender.as_uuid().to_string(),
+                commit: vec![0x01, 0x02],
+                expected_epoch: expected,
+            });
+            let resp = server.forward_commit(req).await.unwrap();
+            assert_eq!(resp.into_inner().accepted_epoch, expected + 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn forward_commit_retry_with_stale_epoch_after_success_is_rejected_not_double_applied() {
+        // Simulates a client retrying a call whose response was lost after the
+        // server already committed it: the retry reuses the *same*
+        // expected_epoch as the original (successful) attempt. It must be
+        // rejected, not re-accepted and re-advance the epoch a second time —
+        // this is what makes ForwardCommit safe under the gRPC client's
+        // automatic retry-on-transient-error behaviour.
+        let group_id = GroupId::from(Uuid::new_v4());
+        let sender = DeviceId::new();
+        let server = make_server_with_group_member(group_id.clone(), sender.clone());
+        let make_req = || {
+            Request::new(ForwardCommitRequest {
+                group_id: group_id.as_uuid().to_string(),
+                sender_device_id: sender.as_uuid().to_string(),
+                commit: vec![0x01, 0x02],
+                expected_epoch: 0,
+            })
+        };
+        let first = server.forward_commit(make_req()).await.unwrap();
+        assert_eq!(first.into_inner().accepted_epoch, 1);
+
+        let retry_err = server.forward_commit(make_req()).await.unwrap_err();
+        assert_eq!(retry_err.code(), tonic::Code::FailedPrecondition);
+
+        let final_state = server
+            .group_repo
+            .find_by_id(&group_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            final_state.epoch,
+            Epoch(1),
+            "a rejected retry must not advance the epoch a second time"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_commit_unknown_group_returns_permission_denied_and_no_group_write() {
+        // `check_sender_is_member` fails closed (empty membership) before the
+        // epoch-advance branch is reached — confirms the `group == None` path
+        // in `forward_commit` is unreachable via a real request, but stays
+        // defined and safe (FailedPrecondition, not a fabricated Accepted)
+        // rather than panicking.
+        let group_id = GroupId::from(Uuid::new_v4());
+        let sender = DeviceId::new();
+        let server = make_server_with_group_member(GroupId::from(Uuid::new_v4()), sender.clone());
+        let req = Request::new(ForwardCommitRequest {
+            group_id: group_id.as_uuid().to_string(),
+            sender_device_id: sender.as_uuid().to_string(),
+            commit: vec![0x01, 0x02],
+            expected_epoch: 0,
+        });
+        let err = server.forward_commit(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert!(server
+            .group_repo
+            .find_by_id(&group_id)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

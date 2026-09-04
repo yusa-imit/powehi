@@ -33,7 +33,7 @@ use powehi_domain::{
     envelope::EnvelopeId,
     error::DomainError,
     event::DomainEvent,
-    group::{Group, GroupId, GroupMember},
+    group::{Epoch, Group, GroupId, GroupMember},
 };
 use powehi_port_outbound::{cache::CachePort, group_repo::GroupRepository};
 use powehi_ws_hub::{router, WsHub};
@@ -92,6 +92,13 @@ struct FakeGroupRepo(MembershipFixture);
 #[async_trait]
 impl GroupRepository for FakeGroupRepo {
     async fn save(&self, _group: &Group) -> Result<(), DomainError> {
+        unimplemented!()
+    }
+    async fn advance_epoch(
+        &self,
+        _group_id: &GroupId,
+        _expected: Epoch,
+    ) -> Result<Option<Epoch>, DomainError> {
         unimplemented!()
     }
     async fn create_if_absent(&self, _group: &Group) -> Result<bool, DomainError> {

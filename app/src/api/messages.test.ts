@@ -118,19 +118,27 @@ describe("sendWelcome", () => {
 // ── sendCommit ────────────────────────────────────────────────────────────────
 
 describe("sendCommit", () => {
-	it("posts commit bytes and returns epoch", async () => {
+	it("posts commit bytes with the expected epoch and returns the new epoch", async () => {
 		fetchMock.mockResolvedValueOnce(jsonResp({ epoch: 7 }));
 
-		const epoch = await sendCommit(TOKEN, GROUP_ID, new Uint8Array([0xff]));
+		const epoch = await sendCommit(TOKEN, GROUP_ID, new Uint8Array([0xff]), 6);
 
 		expect(epoch).toBe(7);
-		const [url] = fetchMock.mock.calls[0];
+		const [url, init] = fetchMock.mock.calls[0];
 		expect(url).toBe("/v1/messages/commit");
+		expect(JSON.parse(init?.body as string)).toMatchObject({ expected_epoch: 6 });
 	});
 
 	it("throws on failure", async () => {
 		fetchMock.mockResolvedValueOnce(jsonResp({ code: "not_member" }, 403));
-		await expect(sendCommit(TOKEN, GROUP_ID, new Uint8Array([1]))).rejects.toThrow("not_member");
+		await expect(sendCommit(TOKEN, GROUP_ID, new Uint8Array([1]), 0)).rejects.toThrow("not_member");
+	});
+
+	it("throws epoch_mismatch when the server rejects a stale expected_epoch", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp({ code: "epoch_mismatch" }, 409));
+		await expect(sendCommit(TOKEN, GROUP_ID, new Uint8Array([1]), 0)).rejects.toThrow(
+			"epoch_mismatch",
+		);
 	});
 });
 

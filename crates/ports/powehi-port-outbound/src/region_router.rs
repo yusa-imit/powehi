@@ -25,12 +25,23 @@ pub trait RegionRouter: Send + Sync {
     /// caller. The destination region cross-checks group membership and the
     /// mTLS peer certificate; passing an untrusted value will produce a
     /// `PermissionDenied` response from the peer.
+    ///
+    /// `expected_epoch` MUST be the epoch the caller built this Commit
+    /// against (i.e. the group's last-known epoch locally). The destination
+    /// region uses it as a compare-and-swap precondition and rejects the
+    /// call with `DomainError::EpochMismatch` if its own stored epoch has
+    /// already moved past it — this is the sole mechanism that prevents two
+    /// concurrent commits for the same group from both being accepted
+    /// against the same epoch. Passing a stale value is always safe (it can
+    /// only cause a legitimate rejection); it is never adopted as the new
+    /// epoch, which is always the destination's own `stored_epoch + 1`.
     async fn forward_commit(
         &self,
         target_region: &RegionId,
         group_id: &GroupId,
         sender_device_id: &DeviceId,
         commit: Bytes,
+        expected_epoch: Epoch,
     ) -> Result<Epoch, DomainError>;
     /// Fan an abuse signal out to every peer region (prd.md §6.4).
     ///

@@ -148,6 +148,13 @@ mod tests {
                 .insert(group.id.clone(), group.clone());
             Ok(())
         }
+        async fn advance_epoch(
+            &self,
+            _group_id: &GroupId,
+            _expected: Epoch,
+        ) -> Result<Option<Epoch>, DomainError> {
+            unimplemented!("group_service tests never advance a group epoch")
+        }
         async fn create_if_absent(&self, group: &Group) -> Result<bool, DomainError> {
             // Mirrors ON CONFLICT (id) DO NOTHING: an existing row is left intact.
             let mut groups = self.groups.lock().unwrap();
