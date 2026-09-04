@@ -23,7 +23,7 @@ async-trait = { workspace = true }
 # SECURITY: do NOT add the "tracing" feature — it logs raw client IPs via
 # key_name() which violates the no-plaintext-logging rule.
 tower_governor = { version = "0.4", features = ["axum"] }
-governor = "0.6"
+governor = { workspace = true }
 http = "1"
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }

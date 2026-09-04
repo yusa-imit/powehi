@@ -1,3 +1,4 @@
+pub mod abuse_signal;
 pub mod cache;
 pub mod device_repo;
 pub mod envelope_repo;

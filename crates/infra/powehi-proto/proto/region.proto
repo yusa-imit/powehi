@@ -20,6 +20,9 @@ service RegionService {
   // Confirm cross-region KeyPackage consumption to prevent double-use.
   rpc ConsumeKeyPackage(ConsumeKeyPackageRequest) returns (ConsumeKeyPackageResponse);
 
+  // Propagate a local abuse/block decision to a peer region (prd.md §6.4).
+  rpc PropagateAbuseSignal(PropagateAbuseSignalRequest) returns (PropagateAbuseSignalResponse);
+
   // Health probe for the inter-region circuit breaker.
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
 }
@@ -87,6 +90,39 @@ message ConsumeKeyPackageRequest {
 
 message ConsumeKeyPackageResponse {
   ConsumeStatus status = 1;
+}
+
+// ── PropagateAbuseSignal ───────────────────────────────────────────────────
+
+// One region's local block decision, fanned out to the mesh so the block takes
+// effect everywhere (prd.md §6.4, "리전 간 abuse signal 동기화"). Delivery is
+// best-effort / eventually consistent; the receiver stores the block and MUST
+// NOT re-broadcast it (one hop from the origin region, or the mesh loops).
+//
+// PII invariant: an IP address is PII and never crosses the wire. Only the
+// 32-byte SHA-256 digest of the address, or an internal user UUID, is sent.
+message PropagateAbuseSignalRequest {
+  // Exactly one subject form must be set.
+  oneof subject {
+    bytes  subject_ip_hash  = 1; // SHA-256 of the client IP: 32 opaque bytes
+    string subject_user_id  = 2; // user UUID (opaque, no PII)
+  }
+  AbuseReason reason        = 3;
+  string origin_region      = 4; // region that made the block decision
+  int64  expires_at_unix_ms = 5; // UTC milliseconds; blocks are always bounded
+}
+
+message PropagateAbuseSignalResponse {
+  ForwardStatus status = 1;
+}
+
+// Block triggers named in prd.md §6.4: IP rate limiting, KeyPackage
+// consumption flooding, and auth brute force.
+enum AbuseReason {
+  ABUSE_REASON_UNSPECIFIED         = 0;
+  ABUSE_REASON_RATE_LIMIT_EXCEEDED = 1;
+  ABUSE_REASON_KEY_PACKAGE_FLOOD   = 2;
+  ABUSE_REASON_AUTH_BRUTE_FORCE    = 3;
 }
 
 // ── HealthCheck ────────────────────────────────────────────────────────────

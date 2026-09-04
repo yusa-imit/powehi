@@ -1,28 +1,35 @@
+use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::DateTime;
+use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use powehi_domain::{
+    abuse::{AbuseReason as DomainAbuseReason, AbuseSignal, AbuseSubject, ABUSE_IP_HASH_LEN},
     device::DeviceId,
     envelope::{Envelope, EnvelopeId, MessageType},
     event::DomainEvent,
     group::{Epoch, Group, GroupId, GroupMember},
     key_package::{ConsumeResult, KeyPackageId},
     region::RegionId,
+    user::UserId,
 };
 use powehi_port_outbound::{
-    envelope_repo::EnvelopeRepository, event_bus::DomainEventBus, group_repo::GroupRepository,
-    key_package_repo::KeyPackageRepository,
+    abuse_signal::AbuseSignalStore, envelope_repo::EnvelopeRepository, event_bus::DomainEventBus,
+    group_repo::GroupRepository, key_package_repo::KeyPackageRepository,
 };
 use tonic::{Request, Response, Status};
 use tracing::{instrument, warn};
 use uuid::Uuid;
 
 use powehi_proto::region::{
-    region_service_server::RegionService, ConsumeKeyPackageRequest, ConsumeKeyPackageResponse,
-    ConsumeStatus, EnvelopeType, ForwardCommitRequest, ForwardCommitResponse,
-    ForwardEnvelopeRequest, ForwardEnvelopeResponse, ForwardStatus, HealthCheckRequest,
-    HealthCheckResponse, HealthStatus, SyncGroupMembershipRequest, SyncGroupMembershipResponse,
+    propagate_abuse_signal_request::Subject as ProtoAbuseSubject,
+    region_service_server::RegionService, AbuseReason as ProtoAbuseReason,
+    ConsumeKeyPackageRequest, ConsumeKeyPackageResponse, ConsumeStatus, EnvelopeType,
+    ForwardCommitRequest, ForwardCommitResponse, ForwardEnvelopeRequest, ForwardEnvelopeResponse,
+    ForwardStatus, HealthCheckRequest, HealthCheckResponse, HealthStatus,
+    PropagateAbuseSignalRequest, PropagateAbuseSignalResponse, SyncGroupMembershipRequest,
+    SyncGroupMembershipResponse,
 };
 
 use crate::error::domain_err_to_status;
@@ -57,6 +64,40 @@ pub const MAX_WELCOME_BYTES: usize = 256 * 1024; // 256 KiB
 /// Prevents amplified DB writes from a malicious or misconfigured peer.
 const MAX_SYNC_MEMBERS: usize = 10_000;
 
+/// Maximum region-ID length accepted from a peer, for both `home_region`
+/// (SyncGroupMembership) and `origin_region` (PropagateAbuseSignal).
+const MAX_REGION_ID_LEN: usize = 64;
+
+/// Hard ceiling on the lifetime of a peer-supplied abuse block (prd.md §6.4).
+///
+/// `expires_at_unix_ms` is attacker-controllable by a compromised peer region.
+/// Without a cap, a single PropagateAbuseSignal could install an effectively
+/// permanent mesh-wide block on an IP digest or user — turning the abuse
+/// defence into a denial-of-service weapon against legitimate users. Blocks are
+/// re-propagated by the origin region for as long as the abuse continues, so
+/// clamping to 24h costs nothing operationally.
+const MAX_ABUSE_SIGNAL_TTL_SECS: u64 = 24 * 60 * 60;
+
+/// Per-origin-region rate limit for `PropagateAbuseSignal` (security-auditor
+/// finding, cycle 433).
+///
+/// Without this, one authenticated peer region could call the RPC without
+/// bound, writing an unlimited number of distinct `abuse:*` keys (each with
+/// up to a 24h TTL) into the region-local Redis — the same T7-class threat
+/// (prd.md §3.5.1, hostile/compromised peer region) that `MAX_SYNC_MEMBERS`
+/// already defends against for `SyncGroupMembership`, just unaddressed here.
+/// This bounds *call frequency* per claimed origin region — it does NOT by
+/// itself bound the rate limiter's own key space (see
+/// `abuse_signal_limiter_handle`'s doc comment for that separate guard).
+/// Burst=60, 1 token refilled per second — mirrors the KeyPackage-consumption
+/// limit prd.md §6.4 already documents ("동일 IP에서 분당 60회 제한"): legitimate
+/// abuse-signal traffic from one peer region is bursty (reacting to an
+/// attack), not sustained near this rate.
+const ABUSE_SIGNAL_RATE_BURST: NonZeroU32 = match NonZeroU32::new(60) {
+    Some(n) => n,
+    None => panic!("ABUSE_SIGNAL_RATE_BURST must be non-zero"),
+};
+
 /// Maximum allowed clock skew for `sent_at_unix_ms` in ForwardEnvelope (Y-14 closure).
 /// Timestamps outside ±5 minutes of server-local time are clamped to now, preventing
 /// a compromised peer from manipulating envelope ordering via far-past/future timestamps.
@@ -68,6 +109,20 @@ pub struct RegionGrpcServer {
     pub event_bus: Arc<dyn DomainEventBus>,
     pub key_package_repo: Arc<dyn KeyPackageRepository>,
     pub group_repo: Arc<dyn GroupRepository>,
+    /// Region-local store for cross-region abuse blocks (prd.md §6.4).
+    ///
+    /// This is the RECEIVING end of the mesh fan-out: signals arriving via
+    /// `PropagateAbuseSignal` are written here and deliberately NOT
+    /// re-broadcast. `RegionGrpcServer` intentionally holds no `RegionRouter`,
+    /// which makes "receivers never re-broadcast" a structural guarantee
+    /// rather than a convention.
+    pub abuse_signal_store: Arc<dyn AbuseSignalStore>,
+    /// Bounds `PropagateAbuseSignal` call frequency per claimed `origin_region`.
+    /// See `ABUSE_SIGNAL_RATE_BURST`. Keyed by region ID (not by peer
+    /// connection), so a peer can't multiply its quota by opening more
+    /// connections — but see `abuse_signal_limiter_handle` for the *map's own*
+    /// memory-growth guard, which this field alone does not provide.
+    abuse_signal_limiter: Arc<DefaultKeyedRateLimiter<String>>,
     /// When `true`, requests that arrive without `TlsConnectInfo` are rejected with
     /// PermissionDenied instead of being passed through with a warning. Set to
     /// `cfg.grpc_tls_enabled()` in the composition root so that any misconfiguration
@@ -83,16 +138,42 @@ impl RegionGrpcServer {
         event_bus: Arc<dyn DomainEventBus>,
         key_package_repo: Arc<dyn KeyPackageRepository>,
         group_repo: Arc<dyn GroupRepository>,
+        abuse_signal_store: Arc<dyn AbuseSignalStore>,
         tls_required: bool,
     ) -> Self {
+        // `per_minute(60)` replenishes one token every 60s/60 = 1s with a burst
+        // capacity of 60 — the exact quota this module documents ("Burst=60, 1
+        // token refilled per second"), expressed via a `const fn` constructor
+        // instead of `Quota::with_period(..).expect(..)` so no runtime
+        // unwrap/expect is needed for a value that can never actually fail
+        // (rule: crates-naming, no unwrap/expect in lib code).
+        let quota = Quota::per_minute(ABUSE_SIGNAL_RATE_BURST);
         Self {
             local_region,
             envelope_repo,
             event_bus,
             key_package_repo,
             group_repo,
+            abuse_signal_store,
+            abuse_signal_limiter: Arc::new(RateLimiter::keyed(quota)),
             tls_required,
         }
+    }
+
+    /// A cloned handle to the per-origin-region abuse-signal rate limiter, so
+    /// the composition root can run periodic `retain_recent()` GC on it
+    /// (security-auditor finding, cycle 434): the limiter's internal map
+    /// grows once per distinct claimed `origin_region` and is never reaped by
+    /// the limiter itself, so it can grow without bound — most importantly on
+    /// the `tls_required=false` fail-open path, where `origin_region` is
+    /// attacker-chosen (see `verify_peer_region`) rather than mTLS-verified
+    /// against a finite peer set. Mirrors `HandleRateLimiter::retain_recent`'s
+    /// GC task in `powehi-rest-api` / the composition root (`bin/powehi-server`).
+    ///
+    /// Call this **before** moving `self` into `RegionServiceServer::new`,
+    /// which takes `self` by value.
+    pub fn abuse_signal_limiter_handle(&self) -> Arc<DefaultKeyedRateLimiter<String>> {
+        Arc::clone(&self.abuse_signal_limiter)
     }
 }
 
@@ -493,7 +574,7 @@ impl RegionService for RegionGrpcServer {
             .ok_or_else(|| Status::invalid_argument("invalid group_id UUID"))?;
 
         // Validate home_region shape before any cert work: non-empty, ≤64 bytes.
-        if req.home_region.is_empty() || req.home_region.len() > 64 {
+        if req.home_region.is_empty() || req.home_region.len() > MAX_REGION_ID_LEN {
             return Err(Status::invalid_argument(
                 "home_region must be 1–64 characters",
             ));
@@ -600,6 +681,159 @@ impl RegionService for RegionGrpcServer {
         }))
     }
 
+    /// Receive a peer region's abuse/block decision and apply it locally
+    /// (prd.md §6.4 — "리전 간 abuse signal 동기화").
+    ///
+    /// This is the RECEIVING end of the mesh fan-out. It stores the block and
+    /// deliberately does **not** re-broadcast: propagation is exactly one hop
+    /// from the origin region, otherwise every peer would re-emit to every
+    /// other peer and the mesh would loop forever.
+    ///
+    /// Trust model: the claimed `origin_region` is bound to the caller's mTLS
+    /// peer certificate (same check `sync_group_membership` applies to
+    /// `home_region`), so a peer inside the mTLS perimeter cannot forge a block
+    /// attributed to a different region.
+    ///
+    /// Logging policy (no-plaintext-logging.md): only the origin region, the
+    /// reason token, the subject *kind* and the TTL are logged. The IP digest
+    /// and the user UUID are never logged, and a raw IP address never reaches
+    /// this process at all — only its SHA-256 crosses the wire.
+    #[instrument(
+        skip(self, request),
+        fields(region = %self.local_region)
+    )]
+    async fn propagate_abuse_signal(
+        &self,
+        request: Request<PropagateAbuseSignalRequest>,
+    ) -> Result<Response<PropagateAbuseSignalResponse>, Status> {
+        let (_metadata, request_exts, req) = request.into_parts();
+
+        // Validate origin_region shape before any cert work (cheap fail-fast).
+        // The mTLS peer-cert check below is the primary defence against a
+        // forged origin_region in production, but this string still reaches
+        // `tracing` fields on the dev/test fail-open path (tls_required=false,
+        // see `verify_peer_region`) — reject control characters so that path
+        // can never carry a log-injection payload (security-auditor finding,
+        // cycle 433).
+        if req.origin_region.is_empty()
+            || req.origin_region.len() > MAX_REGION_ID_LEN
+            || req.origin_region.bytes().any(|b| b.is_ascii_control())
+        {
+            return Err(Status::invalid_argument(
+                "origin_region must be 1–64 printable characters",
+            ));
+        }
+
+        // Bind the claimed origin to the mTLS peer identity: a peer may only
+        // propagate signals it decided itself.
+        self.verify_peer_region(&request_exts, &req.origin_region)?;
+
+        // Defence in depth: no peer may claim to *be* this region. Under mTLS
+        // the cert check above already makes this unreachable, but an explicit
+        // check keeps the invariant true even in the dev/test fail-open path.
+        if req.origin_region == self.local_region.as_str() {
+            warn!("abuse signal rejected: peer claimed the local region as origin");
+            return Err(Status::permission_denied(
+                "origin_region must not be the local region",
+            ));
+        }
+
+        // Bound call frequency per origin region (see ABUSE_SIGNAL_RATE_BURST doc
+        // comment) — prevents an authenticated peer from flooding this region's
+        // Redis with unbounded abuse-signal keys.
+        if self
+            .abuse_signal_limiter
+            .check_key(&req.origin_region)
+            .is_err()
+        {
+            warn!(
+                origin_region = %req.origin_region,
+                "abuse signal rejected: per-region rate limit exceeded"
+            );
+            return Err(Status::resource_exhausted(
+                "PropagateAbuseSignal rate limit exceeded for this origin region",
+            ));
+        }
+
+        let reason =
+            match ProtoAbuseReason::try_from(req.reason).unwrap_or(ProtoAbuseReason::Unspecified) {
+                ProtoAbuseReason::RateLimitExceeded => DomainAbuseReason::RateLimitExceeded,
+                ProtoAbuseReason::KeyPackageFlood => DomainAbuseReason::KeyPackageFlood,
+                ProtoAbuseReason::AuthBruteForce => DomainAbuseReason::AuthBruteForce,
+                ProtoAbuseReason::Unspecified => {
+                    return Err(Status::invalid_argument("reason unspecified"))
+                }
+            };
+
+        // The subject is opaque by construction: either a fixed-length digest
+        // or a UUID. A wrong-length digest is rejected rather than padded or
+        // truncated, so a peer cannot smuggle arbitrary-length bytes into the
+        // key space.
+        let subject = match req.subject {
+            Some(ProtoAbuseSubject::SubjectIpHash(bytes)) => {
+                let hash: [u8; ABUSE_IP_HASH_LEN] = bytes.as_slice().try_into().map_err(|_| {
+                    Status::invalid_argument("subject_ip_hash must be exactly 32 bytes")
+                })?;
+                AbuseSubject::IpHash(hash)
+            }
+            Some(ProtoAbuseSubject::SubjectUserId(id)) => {
+                let uuid = Uuid::parse_str(&id)
+                    .map_err(|_| Status::invalid_argument("invalid subject_user_id UUID"))?;
+                AbuseSubject::User(UserId::from(uuid))
+            }
+            None => return Err(Status::invalid_argument("subject must be set")),
+        };
+
+        let expires_at = DateTime::from_timestamp_millis(req.expires_at_unix_ms)
+            .ok_or_else(|| Status::invalid_argument("invalid expires_at_unix_ms"))?;
+        let signal = AbuseSignal::new(
+            subject,
+            reason,
+            RegionId::new(req.origin_region.clone()),
+            expires_at,
+        );
+
+        let now = chrono::Utc::now();
+        let Some(remaining) = signal.ttl_from(now) else {
+            // Already expired on arrival (clock skew or a late delivery).
+            // Nothing to store. REJECTED rather than an error: propagation is
+            // fire-and-forget, and an error status here would be
+            // indistinguishable from a genuine failure at the sender.
+            tracing::debug!(
+                origin_region = %signal.origin_region,
+                "abuse signal ignored: already expired on arrival"
+            );
+            return Ok(Response::new(PropagateAbuseSignalResponse {
+                status: ForwardStatus::Rejected as i32,
+            }));
+        };
+        // Clamp the peer-controlled lifetime — see MAX_ABUSE_SIGNAL_TTL_SECS.
+        let ttl = remaining.min(Duration::from_secs(MAX_ABUSE_SIGNAL_TTL_SECS));
+
+        self.abuse_signal_store
+            .block(
+                &signal.subject,
+                signal.reason,
+                ttl,
+                signal.origin_region.clone(),
+            )
+            .await
+            .map_err(|e| domain_err_to_status(&e))?;
+
+        tracing::debug!(
+            origin_region = %signal.origin_region,
+            reason = signal.reason.as_str(),
+            subject_kind = signal.subject.kind(),
+            ttl_secs = ttl.as_secs(),
+            "abuse signal accepted from peer region"
+        );
+
+        // No re-broadcast: see the doc comment above.
+        Ok(Response::new(PropagateAbuseSignalResponse {
+            status: ForwardStatus::Accepted as i32,
+        }))
+    }
+
     async fn health_check(
         &self,
         request: Request<HealthCheckRequest>,
@@ -632,7 +866,8 @@ mod tests {
         key_package::{ConsumeResult, KeyPackage, KeyPackageId},
     };
     use powehi_port_outbound::{
-        envelope_repo::EnvelopeRepository, event_bus::DomainEventBus, group_repo::GroupRepository,
+        abuse_signal::AbuseSignalStore, envelope_repo::EnvelopeRepository,
+        event_bus::DomainEventBus, group_repo::GroupRepository,
         key_package_repo::KeyPackageRepository,
     };
     use std::collections::HashMap;
@@ -933,6 +1168,58 @@ mod tests {
         }
     }
 
+    /// One recorded `block()` call: subject, reason, clamped TTL, attributed region.
+    type RecordedBlock = (
+        AbuseSubject,
+        DomainAbuseReason,
+        std::time::Duration,
+        RegionId,
+    );
+
+    /// Records every `block()` call so tests can assert what the handler
+    /// actually stored.
+    struct FakeAbuseStore {
+        blocks: Mutex<Vec<RecordedBlock>>,
+    }
+
+    impl FakeAbuseStore {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                blocks: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn calls(&self) -> Vec<RecordedBlock> {
+            self.blocks.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl AbuseSignalStore for FakeAbuseStore {
+        async fn block(
+            &self,
+            subject: &AbuseSubject,
+            reason: DomainAbuseReason,
+            ttl: std::time::Duration,
+            origin_region: RegionId,
+        ) -> Result<(), DomainError> {
+            self.blocks
+                .lock()
+                .unwrap()
+                .push((subject.clone(), reason, ttl, origin_region));
+            Ok(())
+        }
+
+        async fn is_blocked(&self, subject: &AbuseSubject) -> Result<bool, DomainError> {
+            Ok(self
+                .blocks
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(s, ..)| s == subject))
+        }
+    }
+
     fn make_server() -> RegionGrpcServer {
         RegionGrpcServer::new(
             RegionId::new("eu-central-1"),
@@ -940,6 +1227,7 @@ mod tests {
             Arc::new(NoopEventBus),
             FakeKpRepo::new(),
             FakeGroupRepo::new(),
+            FakeAbuseStore::new(),
             false, // tls_required=false in unit tests (no TLS listener)
         )
     }
@@ -951,6 +1239,7 @@ mod tests {
             Arc::new(NoopEventBus),
             FakeKpRepo::with_kp(kp),
             FakeGroupRepo::new(),
+            FakeAbuseStore::new(),
             false,
         )
     }
@@ -962,6 +1251,7 @@ mod tests {
             Arc::new(NoopEventBus),
             FakeKpRepo::new(),
             FakeGroupRepo::with_member(group_id, device_id),
+            FakeAbuseStore::new(),
             false,
         )
     }
@@ -1400,6 +1690,385 @@ mod tests {
         assert_eq!(fwd_resp.into_inner().status, ForwardStatus::Accepted as i32);
     }
 
+    // ── PropagateAbuseSignal tests (prd.md §6.4) ─────────────────────────────
+
+    const PEER_REGION: &str = "ap-seoul-1";
+
+    fn make_server_with_abuse_store(
+        store: Arc<FakeAbuseStore>,
+        tls_required: bool,
+    ) -> RegionGrpcServer {
+        RegionGrpcServer::new(
+            RegionId::new("eu-central-1"),
+            Arc::new(NoopEnvelopeRepo),
+            Arc::new(NoopEventBus),
+            FakeKpRepo::new(),
+            FakeGroupRepo::new(),
+            store,
+            tls_required,
+        )
+    }
+
+    fn abuse_req(subject: Option<ProtoAbuseSubject>) -> PropagateAbuseSignalRequest {
+        PropagateAbuseSignalRequest {
+            subject,
+            reason: ProtoAbuseReason::RateLimitExceeded as i32,
+            origin_region: PEER_REGION.to_string(),
+            expires_at_unix_ms: (chrono::Utc::now() + chrono::Duration::seconds(300))
+                .timestamp_millis(),
+        }
+    }
+
+    fn ip_hash_subject() -> ProtoAbuseSubject {
+        ProtoAbuseSubject::SubjectIpHash(vec![0xab; ABUSE_IP_HASH_LEN])
+    }
+
+    #[tokio::test]
+    async fn propagate_abuse_signal_ip_hash_is_accepted_and_stored() {
+        let store = FakeAbuseStore::new();
+        let server = make_server_with_abuse_store(Arc::clone(&store), false);
+        let resp = server
+            .propagate_abuse_signal(Request::new(abuse_req(Some(ip_hash_subject()))))
+            .await
+            .unwrap();
+        assert_eq!(resp.into_inner().status, ForwardStatus::Accepted as i32);
+
+        let calls = store.calls();
+        assert_eq!(calls.len(), 1, "exactly one block must be recorded");
+        let (subject, reason, ttl, origin) = &calls[0];
+        assert_eq!(*subject, AbuseSubject::IpHash([0xab; ABUSE_IP_HASH_LEN]));
+        assert_eq!(*reason, DomainAbuseReason::RateLimitExceeded);
+        assert_eq!(*origin, RegionId::new(PEER_REGION));
+        assert!(ttl.as_secs() > 0 && ttl.as_secs() <= 300);
+    }
+
+    #[tokio::test]
+    async fn propagate_abuse_signal_user_id_is_accepted_and_stored() {
+        let store = FakeAbuseStore::new();
+        let server = make_server_with_abuse_store(Arc::clone(&store), false);
+        let user_uuid = Uuid::new_v4();
+        let mut req = abuse_req(Some(ProtoAbuseSubject::SubjectUserId(
+            user_uuid.to_string(),
+        )));
+        req.reason = ProtoAbuseReason::AuthBruteForce as i32;
+
+        let resp = server
+            .propagate_abuse_signal(Request::new(req))
+            .await
+            .unwrap();
+        assert_eq!(resp.into_inner().status, ForwardStatus::Accepted as i32);
+
+        let calls = store.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, AbuseSubject::User(UserId::from(user_uuid)));
+        assert_eq!(calls[0].1, DomainAbuseReason::AuthBruteForce);
+    }
+
+    #[tokio::test]
+    async fn propagate_abuse_signal_maps_key_package_flood_reason() {
+        let store = FakeAbuseStore::new();
+        let server = make_server_with_abuse_store(Arc::clone(&store), false);
+        let mut req = abuse_req(Some(ip_hash_subject()));
+        req.reason = ProtoAbuseReason::KeyPackageFlood as i32;
+        server
+            .propagate_abuse_signal(Request::new(req))
+            .await
+            .unwrap();
+        assert_eq!(store.calls()[0].1, DomainAbuseReason::KeyPackageFlood);
+    }
+
+    // ── Spoofing / authorization ─────────────────────────────────────────────
+
+    /// A peer must not be able to attribute a block to this region: that would
+    /// launder a remote decision as locally-made and defeat attribution.
+    #[tokio::test]
+    async fn propagate_abuse_signal_origin_equal_to_local_region_is_rejected() {
+        let store = FakeAbuseStore::new();
+        let server = make_server_with_abuse_store(Arc::clone(&store), false);
+        let mut req = abuse_req(Some(ip_hash_subject()));
+        req.origin_region = "eu-central-1".to_string(); // == server's local region
+        let err = server
+            .propagate_abuse_signal(Request::new(req))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert!(store.calls().is_empty(), "nothing may be stored on reject");
+    }
+
+    /// With tls_required=true a request carrying no TlsConnectInfo cannot have
+    /// its claimed origin_region bound to a peer certificate — fail closed.
+    /// This is the spoofed-peer path: an unauthenticated caller claiming to be
+    /// `ap-seoul-1` gets PermissionDenied and stores nothing.
+    #[tokio::test]
+    async fn propagate_abuse_signal_spoofed_origin_rejected_when_tls_required() {
+        let store = FakeAbuseStore::new();
+        let server = make_server_with_abuse_store(Arc::clone(&store), true);
+        let err = server
+            .propagate_abuse_signal(Request::new(abuse_req(Some(ip_hash_subject()))))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code(),
+            tonic::Code::PermissionDenied,
+            "unverified peer must not be able to inject a mesh-wide block"
+        );
+        assert!(store.calls().is_empty(), "nothing may be stored on reject");
+    }
+
+    // ── Malformed input ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn propagate_abuse_signal_missing_subject_returns_invalid_argument() {
+        let store = FakeAbuseStore::new();
+        let server = make_server_with_abuse_store(Arc::clone(&store), false);
+        let err = server
+            .propagate_abuse_signal(Request::new(abuse_req(None)))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(store.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn propagate_abuse_signal_wrong_hash_length_returns_invalid_argument() {
+        let store = FakeAbuseStore::new();
+        let server = make_server_with_abuse_store(Arc::clone(&store), false);
+        // Under-, over-, and zero-length digests are all rejected — never
+        // padded or truncated into the key space.
+        for len in [
+            0usize,
+            1,
+            ABUSE_IP_HASH_LEN - 1,
+            ABUSE_IP_HASH_LEN + 1,
+            4096,
+        ] {
+            let req = abuse_req(Some(ProtoAbuseSubject::SubjectIpHash(vec![0x01; len])));
+            let err = server
+                .propagate_abuse_signal(Request::new(req))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err.code(),
+                tonic::Code::InvalidArgument,
+                "digest of {len} bytes must be rejected"
+            );
+        }
+        assert!(store.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn propagate_abuse_signal_invalid_user_uuid_returns_invalid_argument() {
+        let store = FakeAbuseStore::new();
+        let server = make_server_with_abuse_store(Arc::clone(&store), false);
+        let req = abuse_req(Some(ProtoAbuseSubject::SubjectUserId(
+            "not-a-uuid".to_string(),
+        )));
+        let err = server
+            .propagate_abuse_signal(Request::new(req))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(store.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn propagate_abuse_signal_unspecified_reason_returns_invalid_argument() {
+        let store = FakeAbuseStore::new();
+        let server = make_server_with_abuse_store(Arc::clone(&store), false);
+        let mut req = abuse_req(Some(ip_hash_subject()));
+        req.reason = 0; // UNSPECIFIED
+        let err = server
+            .propagate_abuse_signal(Request::new(req))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(store.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn propagate_abuse_signal_unknown_reason_value_returns_invalid_argument() {
+        let store = FakeAbuseStore::new();
+        let server = make_server_with_abuse_store(Arc::clone(&store), false);
+        let mut req = abuse_req(Some(ip_hash_subject()));
+        req.reason = 9_999; // not a known enum value
+        let err = server
+            .propagate_abuse_signal(Request::new(req))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn propagate_abuse_signal_empty_origin_region_returns_invalid_argument() {
+        let store = FakeAbuseStore::new();
+        let server = make_server_with_abuse_store(Arc::clone(&store), false);
+        let mut req = abuse_req(Some(ip_hash_subject()));
+        req.origin_region = String::new();
+        let err = server
+            .propagate_abuse_signal(Request::new(req))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn propagate_abuse_signal_oversized_origin_region_returns_invalid_argument() {
+        let store = FakeAbuseStore::new();
+        let server = make_server_with_abuse_store(Arc::clone(&store), false);
+        let mut req = abuse_req(Some(ip_hash_subject()));
+        req.origin_region = "x".repeat(MAX_REGION_ID_LEN + 1);
+        let err = server
+            .propagate_abuse_signal(Request::new(req))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(store.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn propagate_abuse_signal_out_of_range_expiry_returns_invalid_argument() {
+        let store = FakeAbuseStore::new();
+        let server = make_server_with_abuse_store(Arc::clone(&store), false);
+        let mut req = abuse_req(Some(ip_hash_subject()));
+        req.expires_at_unix_ms = i64::MIN; // not a representable timestamp
+        let err = server
+            .propagate_abuse_signal(Request::new(req))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    // ── TTL bounds ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn propagate_abuse_signal_expired_on_arrival_is_rejected_without_storing() {
+        let store = FakeAbuseStore::new();
+        let server = make_server_with_abuse_store(Arc::clone(&store), false);
+        let mut req = abuse_req(Some(ip_hash_subject()));
+        req.expires_at_unix_ms =
+            (chrono::Utc::now() - chrono::Duration::seconds(60)).timestamp_millis();
+        let resp = server
+            .propagate_abuse_signal(Request::new(req))
+            .await
+            .unwrap();
+        assert_eq!(resp.into_inner().status, ForwardStatus::Rejected as i32);
+        assert!(
+            store.calls().is_empty(),
+            "an already-expired signal must not create a block"
+        );
+    }
+
+    /// A compromised peer must not be able to install a near-permanent block.
+    #[tokio::test]
+    async fn propagate_abuse_signal_clamps_absurd_ttl() {
+        let store = FakeAbuseStore::new();
+        let server = make_server_with_abuse_store(Arc::clone(&store), false);
+        let mut req = abuse_req(Some(ip_hash_subject()));
+        req.expires_at_unix_ms =
+            (chrono::Utc::now() + chrono::Duration::days(3650)).timestamp_millis();
+        server
+            .propagate_abuse_signal(Request::new(req))
+            .await
+            .unwrap();
+        let ttl = store.calls()[0].2;
+        assert_eq!(
+            ttl.as_secs(),
+            MAX_ABUSE_SIGNAL_TTL_SECS,
+            "peer-supplied TTL must be clamped to the 24h ceiling"
+        );
+    }
+
+    // ── No re-broadcast (mesh loop prevention) ───────────────────────────────
+
+    /// The receiving side stores the block exactly once and has no outbound
+    /// router at all — `RegionGrpcServer` holds no `RegionRouter` field, so
+    /// re-broadcast is structurally impossible, not merely omitted. This test
+    /// pins the runtime half of that: one inbound RPC produces exactly one
+    /// local write and no further work.
+    #[tokio::test]
+    async fn propagate_abuse_signal_does_not_re_broadcast() {
+        let store = FakeAbuseStore::new();
+        let server = make_server_with_abuse_store(Arc::clone(&store), false);
+        server
+            .propagate_abuse_signal(Request::new(abuse_req(Some(ip_hash_subject()))))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.calls().len(),
+            1,
+            "one inbound signal must produce exactly one local block"
+        );
+    }
+
+    // ── Data residency invariant (prd.md §4A.6) ──────────────────────────────
+
+    /// Exhaustive destructuring: if a PII field is ever added to
+    /// PropagateAbuseSignalRequest this test fails to compile.
+    #[test]
+    fn propagate_abuse_signal_request_carries_only_opaque_fields() {
+        let req = PropagateAbuseSignalRequest {
+            subject: Some(ip_hash_subject()),
+            reason: ProtoAbuseReason::RateLimitExceeded as i32,
+            origin_region: PEER_REGION.to_string(),
+            expires_at_unix_ms: 1_700_000_000_000,
+        };
+        let PropagateAbuseSignalRequest {
+            subject,
+            reason,
+            origin_region,
+            expires_at_unix_ms,
+        } = req;
+
+        match subject.expect("subject set") {
+            // A raw IP never crosses the wire — only a fixed-length digest.
+            ProtoAbuseSubject::SubjectIpHash(h) => assert_eq!(h.len(), ABUSE_IP_HASH_LEN),
+            ProtoAbuseSubject::SubjectUserId(id) => {
+                assert!(Uuid::parse_str(&id).is_ok(), "user id must be a UUID")
+            }
+        }
+        assert!(reason > 0, "reason is a protocol enum, not user data");
+        assert!(
+            origin_region.len() <= MAX_REGION_ID_LEN,
+            "region ID is an operator-assigned label"
+        );
+        assert!(
+            expires_at_unix_ms > 0,
+            "expiry is a timestamp, not identity"
+        );
+    }
+
+    /// The 32-byte digest is the only IP-derived value on the wire: a request
+    /// built from a real address must not contain the address in any form.
+    #[test]
+    fn propagate_abuse_signal_request_never_contains_a_raw_ip() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+        let AbuseSubject::IpHash(hash) = AbuseSubject::from_ip(&ip) else {
+            panic!("from_ip must yield IpHash");
+        };
+        let req = PropagateAbuseSignalRequest {
+            subject: Some(ProtoAbuseSubject::SubjectIpHash(hash.to_vec())),
+            reason: ProtoAbuseReason::RateLimitExceeded as i32,
+            origin_region: PEER_REGION.to_string(),
+            expires_at_unix_ms: 1_700_000_000_000,
+        };
+        let encoded = {
+            use prost::Message as _;
+            req.encode_to_vec()
+        };
+        let octets = ip.to_string().into_bytes();
+        assert!(
+            !encoded
+                .windows(octets.len())
+                .any(|w| w == octets.as_slice()),
+            "the dotted-quad address must never appear in the encoded request"
+        );
+        assert!(
+            !encoded.windows(4).any(|w| w == [203u8, 0, 113, 7]),
+            "the raw address octets must never appear in the encoded request"
+        );
+    }
+
     // ── peer_cert_matches_region unit tests ──────────────────────────────────
     //
     // Pre-generated with OpenSSL (P-256 ECDSA). These are self-signed test certs:
@@ -1569,6 +2238,7 @@ mod tests {
             Arc::new(NoopEventBus),
             FakeKpRepo::new(),
             FakeGroupRepo::new(),
+            FakeAbuseStore::new(),
             true, // tls_required — no TlsConnectInfo in extensions → must reject
         );
         // A plain Request::new() has no TlsConnectInfo in its extensions.
@@ -1699,6 +2369,7 @@ mod tests {
             Arc::new(NoopEventBus),
             FakeKpRepo::new(),
             group_repo,
+            FakeAbuseStore::new(),
             true, // tls_required
         );
         let req = Request::new(ForwardEnvelopeRequest {
@@ -1729,6 +2400,7 @@ mod tests {
             Arc::new(NoopEventBus),
             FakeKpRepo::new(),
             group_repo,
+            FakeAbuseStore::new(),
             true, // tls_required
         );
         let req = Request::new(ForwardCommitRequest {
@@ -1784,6 +2456,7 @@ mod tests {
             Arc::new(NoopEventBus),
             FakeKpRepo::new(),
             FakeGroupRepo::with_member(group_id.clone(), sender.clone()),
+            FakeAbuseStore::new(),
             false,
         );
         let now = chrono::Utc::now();
@@ -1820,6 +2493,7 @@ mod tests {
             Arc::new(NoopEventBus),
             FakeKpRepo::new(),
             FakeGroupRepo::with_member(group_id.clone(), sender.clone()),
+            FakeAbuseStore::new(),
             false,
         );
         let now = chrono::Utc::now();
@@ -1857,6 +2531,7 @@ mod tests {
             Arc::new(NoopEventBus),
             FakeKpRepo::new(),
             FakeGroupRepo::with_member(group_id.clone(), sender.clone()),
+            FakeAbuseStore::new(),
             false,
         );
         let now = chrono::Utc::now();
@@ -1895,6 +2570,7 @@ mod tests {
             Arc::new(NoopEventBus),
             FakeKpRepo::new(),
             FakeGroupRepo::with_member(group_id.clone(), sender.clone()),
+            FakeAbuseStore::new(),
             false,
         );
         let now = chrono::Utc::now();
@@ -1930,6 +2606,7 @@ mod tests {
             Arc::new(NoopEventBus),
             FakeKpRepo::new(),
             FakeGroupRepo::with_member(group_id.clone(), sender.clone()),
+            FakeAbuseStore::new(),
             false,
         );
         let now = chrono::Utc::now();

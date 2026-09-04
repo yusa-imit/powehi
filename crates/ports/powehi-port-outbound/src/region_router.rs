@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use powehi_domain::{
+    abuse::AbuseSignal,
     device::DeviceId,
     envelope::Envelope,
     error::DomainError,
@@ -31,5 +32,19 @@ pub trait RegionRouter: Send + Sync {
         sender_device_id: &DeviceId,
         commit: Bytes,
     ) -> Result<Epoch, DomainError>;
+    /// Fan an abuse signal out to every peer region (prd.md §6.4).
+    ///
+    /// **Best-effort / fire-and-forget.** prd.md §6.4 specifies cross-region
+    /// abuse synchronisation as asynchronous with 최종 일관성 (eventual
+    /// consistency), so implementations MUST return `Ok(())` even when some or
+    /// all peers are unreachable: the caller's *local* block decision has
+    /// already been committed and must never be failed or rolled back because a
+    /// remote region is down. Individual peer failures are logged (opaque
+    /// region ID + error kind only) and dropped.
+    ///
+    /// Receivers MUST NOT re-broadcast a signal they received — the fan-out is
+    /// one hop from the origin region, otherwise the mesh loops forever.
+    async fn broadcast_abuse_signal(&self, signal: &AbuseSignal) -> Result<(), DomainError>;
+
     fn is_local(&self, region: &RegionId) -> bool;
 }

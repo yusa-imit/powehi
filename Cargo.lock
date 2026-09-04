@@ -4093,6 +4093,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
  "uuid",
 ]
@@ -4106,6 +4107,7 @@ dependencies = [
  "bytes",
  "chrono",
  "futures-core",
+ "governor",
  "http 1.4.1",
  "powehi-domain",
  "powehi-port-outbound",

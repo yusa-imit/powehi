@@ -5,6 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use powehi_domain::{
+    abuse::{AbuseReason, AbuseSignal, AbuseSubject},
     device::DeviceId,
     envelope::Envelope,
     error::DomainError,
@@ -14,11 +15,12 @@ use powehi_domain::{
 };
 use powehi_port_outbound::region_router::RegionRouter;
 use tonic::transport::Channel;
-use tracing::{instrument, warn};
+use tracing::{debug, instrument, warn};
 
 use powehi_proto::region::{
-    region_service_client::RegionServiceClient, EnvelopeType, ForwardCommitRequest,
-    ForwardEnvelopeRequest, ForwardStatus,
+    propagate_abuse_signal_request::Subject as ProtoAbuseSubject,
+    region_service_client::RegionServiceClient, AbuseReason as ProtoAbuseReason, EnvelopeType,
+    ForwardCommitRequest, ForwardEnvelopeRequest, ForwardStatus, PropagateAbuseSignalRequest,
 };
 
 use crate::circuit::CircuitBreaker;
@@ -26,6 +28,13 @@ use crate::tls::TlsConfig;
 
 const RETRY_MAX: u32 = 3;
 const RETRY_BASE_MS: u64 = 100;
+/// Retry budget for an abuse-signal broadcast.
+///
+/// Lower than `RETRY_MAX` on purpose: propagation is best-effort with eventual
+/// consistency (prd.md §6.4), the origin region re-emits while the abuse
+/// continues, and a full retry ladder per peer would turn a fire-and-forget
+/// fan-out into a long-running call.
+const ABUSE_BROADCAST_RETRY_MAX: u32 = 1;
 const CIRCUIT_THRESHOLD: u32 = 5;
 const CIRCUIT_OPEN_SECS: u64 = 30;
 
@@ -113,6 +122,38 @@ fn envelope_type_proto(envelope: &Envelope) -> i32 {
         powehi_domain::envelope::MessageType::Welcome => EnvelopeType::Welcome as i32,
         powehi_domain::envelope::MessageType::Commit => EnvelopeType::Commit as i32,
         powehi_domain::envelope::MessageType::Proposal => EnvelopeType::Proposal as i32,
+    }
+}
+
+fn abuse_reason_proto(reason: AbuseReason) -> i32 {
+    match reason {
+        AbuseReason::RateLimitExceeded => ProtoAbuseReason::RateLimitExceeded as i32,
+        AbuseReason::KeyPackageFlood => ProtoAbuseReason::KeyPackageFlood as i32,
+        AbuseReason::AuthBruteForce => ProtoAbuseReason::AuthBruteForce as i32,
+    }
+}
+
+fn abuse_subject_proto(subject: &AbuseSubject) -> ProtoAbuseSubject {
+    match subject {
+        // The digest is already opaque — a raw IP never reaches this adapter.
+        AbuseSubject::IpHash(hash) => ProtoAbuseSubject::SubjectIpHash(hash.to_vec()),
+        AbuseSubject::User(user_id) => {
+            ProtoAbuseSubject::SubjectUserId(user_id.as_uuid().to_string())
+        }
+    }
+}
+
+/// Coarse, content-free label for a failed peer call.
+///
+/// Deliberately does NOT include the error's message: `GrpcError`'s Display
+/// embeds peer-supplied status text, which must not reach our logs
+/// (rule: no-plaintext-logging — error categories, not error messages).
+fn broadcast_error_kind(e: &GrpcError) -> (&'static str, Option<tonic::Code>) {
+    match e {
+        GrpcError::Transport(_) => ("transport", None),
+        GrpcError::Status(s) => ("rpc_status", Some(s.code())),
+        GrpcError::CircuitOpen(_) => ("circuit_open", None),
+        GrpcError::InvalidRequest(_) => ("invalid_request", None),
     }
 }
 
@@ -216,6 +257,100 @@ impl RegionRouter for RegionGrpcRouter {
         })
         .await
         .map_err(DomainError::from)
+    }
+
+    /// Fan an abuse signal out to every peer region (prd.md §6.4).
+    ///
+    /// Best-effort by contract (see the port doc comment): this always returns
+    /// `Ok(())`. The caller's local block has already been committed, and a
+    /// remote region being down must never undo or fail it — prd.md §6.4
+    /// specifies this path as asynchronous with 최종 일관성.
+    ///
+    /// Peers are contacted concurrently; peers whose circuit breaker is open
+    /// are skipped outright rather than paying the retry ladder. Individual
+    /// failures are logged with the peer region and a coarse error kind only —
+    /// never a raw IP (one never reaches this adapter: `AbuseSubject::IpHash`
+    /// is already a SHA-256 digest) and never peer-supplied status text.
+    #[instrument(
+        skip(self, signal),
+        fields(
+            origin_region = %signal.origin_region,
+            reason = signal.reason.as_str(),
+            subject_kind = signal.subject.kind(),
+        )
+    )]
+    async fn broadcast_abuse_signal(&self, signal: &AbuseSignal) -> Result<(), DomainError> {
+        let req_body = PropagateAbuseSignalRequest {
+            subject: Some(abuse_subject_proto(&signal.subject)),
+            reason: abuse_reason_proto(signal.reason),
+            origin_region: signal.origin_region.to_string(),
+            expires_at_unix_ms: signal.expires_at.timestamp_millis(),
+        };
+
+        let mut tasks = tokio::task::JoinSet::new();
+        for (region, peer) in &self.peers {
+            if peer.lock().await.circuit.is_open() {
+                debug!(
+                    peer_region = %region,
+                    "skipping abuse signal broadcast: peer circuit open"
+                );
+                continue;
+            }
+            let peer = Arc::clone(peer);
+            let region = region.clone();
+            let body = req_body.clone();
+            tasks.spawn(async move {
+                let result = with_retry(
+                    peer,
+                    ABUSE_BROADCAST_RETRY_MAX,
+                    RETRY_BASE_MS,
+                    move |mut client| {
+                        let req = body.clone();
+                        Box::pin(async move {
+                            let resp = client
+                                .propagate_abuse_signal(tonic::Request::new(req))
+                                .await?
+                                .into_inner();
+                            if resp.status == ForwardStatus::Accepted as i32 {
+                                Ok(())
+                            } else {
+                                Err(tonic::Status::failed_precondition(
+                                    "abuse signal not accepted",
+                                ))
+                            }
+                        })
+                    },
+                )
+                .await;
+                (region, result)
+            });
+        }
+
+        while let Some(joined) = tasks.join_next().await {
+            match joined {
+                Ok((_, Ok(()))) => {}
+                Ok((region, Err(e))) => {
+                    let (error_kind, code) = broadcast_error_kind(&e);
+                    warn!(
+                        peer_region = %region,
+                        error_kind,
+                        code = ?code,
+                        "abuse signal propagation to peer failed (best-effort, ignored)"
+                    );
+                }
+                Err(e) => {
+                    // A broadcast task panicked or was cancelled. Never fail the
+                    // caller for it; log the category only.
+                    warn!(
+                        error_kind = "join",
+                        panicked = e.is_panic(),
+                        "abuse signal broadcast task did not complete"
+                    );
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn is_local(&self, region: &RegionId) -> bool {
@@ -555,6 +690,186 @@ mod tests {
             3,
             "Unavailable must be retried up to max_retries+1 times"
         );
+    }
+
+    // ── broadcast_abuse_signal (prd.md §6.4) ──────────────────────────────
+
+    fn test_signal() -> AbuseSignal {
+        use std::net::{IpAddr, Ipv4Addr};
+        AbuseSignal::new(
+            // TEST-NET-3 (RFC 5737) documentation address.
+            AbuseSubject::from_ip(&IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))),
+            AbuseReason::RateLimitExceeded,
+            RegionId::new("eu-central-1"),
+            chrono::Utc::now() + chrono::Duration::seconds(300),
+        )
+    }
+
+    fn router_with_peer(region: &str, circuit: CircuitBreaker) -> RegionGrpcRouter {
+        // Lazy channel: no connection is made until an RPC is attempted, so
+        // these tests run offline.
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let mut peers = HashMap::new();
+        peers.insert(
+            region.to_string(),
+            Arc::new(tokio::sync::Mutex::new(PeerState {
+                client: RegionServiceClient::new(channel),
+                circuit,
+            })),
+        );
+        RegionGrpcRouter {
+            local_region: RegionId::new("eu-central-1"),
+            peers,
+        }
+    }
+
+    /// With no peers configured the broadcast is a no-op that still succeeds.
+    #[tokio::test]
+    async fn broadcast_abuse_signal_with_no_peers_returns_ok() {
+        let router = RegionGrpcRouter {
+            local_region: RegionId::new("eu-central-1"),
+            peers: HashMap::new(),
+        };
+        assert!(router.broadcast_abuse_signal(&test_signal()).await.is_ok());
+    }
+
+    /// Core contract: an unreachable peer must NOT fail the caller. The local
+    /// block has already been committed; propagation is eventually consistent.
+    #[tokio::test]
+    async fn broadcast_abuse_signal_ignores_unreachable_peers() {
+        let router = router_with_peer(
+            "ap-seoul-1",
+            CircuitBreaker::new(CIRCUIT_THRESHOLD, Duration::from_secs(CIRCUIT_OPEN_SECS)),
+        );
+        // 127.0.0.1:1 refuses the connection — every attempt fails.
+        assert!(
+            router.broadcast_abuse_signal(&test_signal()).await.is_ok(),
+            "a dead peer must never fail the caller's local block"
+        );
+    }
+
+    /// A peer whose circuit is open is skipped without any RPC attempt, and the
+    /// broadcast still reports success.
+    #[tokio::test]
+    async fn broadcast_abuse_signal_skips_open_circuit_peers() {
+        let circuit = CircuitBreaker::new(1, Duration::from_secs(60));
+        circuit.record_failure(); // threshold=1 → opens immediately
+        let router = router_with_peer("ap-seoul-1", circuit);
+
+        let start = std::time::Instant::now();
+        assert!(router.broadcast_abuse_signal(&test_signal()).await.is_ok());
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "an open-circuit peer must be skipped, not dialled"
+        );
+    }
+
+    /// Multiple failing peers still yield Ok — fire-and-forget by design.
+    #[tokio::test]
+    async fn broadcast_abuse_signal_tolerates_all_peers_failing() {
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let mut peers = HashMap::new();
+        for region in ["ap-seoul-1", "us-east-1", "eu-west-1"] {
+            peers.insert(
+                region.to_string(),
+                Arc::new(tokio::sync::Mutex::new(PeerState {
+                    client: RegionServiceClient::new(channel.clone()),
+                    circuit: CircuitBreaker::new(
+                        CIRCUIT_THRESHOLD,
+                        Duration::from_secs(CIRCUIT_OPEN_SECS),
+                    ),
+                })),
+            );
+        }
+        let router = RegionGrpcRouter {
+            local_region: RegionId::new("eu-central-1"),
+            peers,
+        };
+        assert!(router.broadcast_abuse_signal(&test_signal()).await.is_ok());
+    }
+
+    /// A user-subject signal broadcasts through the same path.
+    #[tokio::test]
+    async fn broadcast_abuse_signal_supports_user_subjects() {
+        let router = router_with_peer(
+            "ap-seoul-1",
+            CircuitBreaker::new(CIRCUIT_THRESHOLD, Duration::from_secs(CIRCUIT_OPEN_SECS)),
+        );
+        let signal = AbuseSignal::new(
+            AbuseSubject::User(UserId::new()),
+            AbuseReason::AuthBruteForce,
+            RegionId::new("eu-central-1"),
+            chrono::Utc::now() + chrono::Duration::seconds(60),
+        );
+        assert!(router.broadcast_abuse_signal(&signal).await.is_ok());
+    }
+
+    // ── proto mapping ─────────────────────────────────────────────────────
+
+    #[test]
+    fn abuse_reason_proto_maps_every_variant_distinctly() {
+        let mapped = [
+            abuse_reason_proto(AbuseReason::RateLimitExceeded),
+            abuse_reason_proto(AbuseReason::KeyPackageFlood),
+            abuse_reason_proto(AbuseReason::AuthBruteForce),
+        ];
+        assert_eq!(mapped[0], ProtoAbuseReason::RateLimitExceeded as i32);
+        assert_eq!(mapped[1], ProtoAbuseReason::KeyPackageFlood as i32);
+        assert_eq!(mapped[2], ProtoAbuseReason::AuthBruteForce as i32);
+        for m in mapped {
+            assert_ne!(
+                m,
+                ProtoAbuseReason::Unspecified as i32,
+                "no domain reason may map to UNSPECIFIED"
+            );
+        }
+    }
+
+    #[test]
+    fn abuse_subject_proto_sends_only_the_digest_for_an_ip() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+        match abuse_subject_proto(&AbuseSubject::from_ip(&ip)) {
+            ProtoAbuseSubject::SubjectIpHash(hash) => {
+                assert_eq!(hash.len(), 32, "digest must be exactly 32 bytes");
+                // The raw octets must not survive into the wire value.
+                assert!(!hash.windows(4).any(|w| w == [203u8, 0, 113, 7]));
+            }
+            ProtoAbuseSubject::SubjectUserId(_) => panic!("IP subject must map to a digest"),
+        }
+    }
+
+    #[test]
+    fn abuse_subject_proto_sends_the_uuid_for_a_user() {
+        let user_id = UserId::new();
+        match abuse_subject_proto(&AbuseSubject::User(user_id.clone())) {
+            ProtoAbuseSubject::SubjectUserId(id) => {
+                assert_eq!(id, user_id.as_uuid().to_string())
+            }
+            ProtoAbuseSubject::SubjectIpHash(_) => panic!("user subject must map to a UUID"),
+        }
+    }
+
+    // ── error-kind labels must stay content-free ──────────────────────────
+
+    /// `broadcast_error_kind` feeds a tracing field. It must emit a fixed label,
+    /// never peer-supplied status text (rule: no-plaintext-logging).
+    #[test]
+    fn broadcast_error_kind_never_echoes_peer_message_text() {
+        let secret = "SELECT credentials FROM users; --";
+        let (kind, code) =
+            broadcast_error_kind(&GrpcError::Status(tonic::Status::internal(secret)));
+        assert_eq!(kind, "rpc_status");
+        assert_eq!(code, Some(tonic::Code::Internal));
+        assert!(!kind.contains("SELECT"));
+
+        let (kind, code) = broadcast_error_kind(&GrpcError::CircuitOpen("ap-seoul-1".to_string()));
+        assert_eq!(kind, "circuit_open");
+        assert_eq!(code, None);
+
+        let (kind, _) = broadcast_error_kind(&GrpcError::InvalidRequest(secret.to_string()));
+        assert_eq!(kind, "invalid_request");
+        assert!(!kind.contains("SELECT"));
     }
 
     // ── is_retryable unit tests ────────────────────────────────────────────

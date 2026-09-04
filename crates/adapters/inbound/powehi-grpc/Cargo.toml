@@ -24,6 +24,9 @@ futures-core = "0.3"
 http = "1"
 # X.509 peer-cert parsing for mTLS region binding (RED-2/RED-3)
 x509-parser = { workspace = true }
+# Per-origin-region rate limiting for PropagateAbuseSignal (security-auditor
+# finding, cycle 433) — same crate/version already vetted via powehi-rest-api.
+governor = { workspace = true }
 
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }

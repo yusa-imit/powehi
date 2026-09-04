@@ -12,6 +12,9 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 bytes = { workspace = true }
+# SHA-256 for AbuseSubject::from_ip — pure computation, no I/O, keeps raw IPs
+# (PII) out of storage, logs and the inter-region wire (prd.md §6.4).
+sha2 = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

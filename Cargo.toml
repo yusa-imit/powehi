@@ -61,6 +61,10 @@ tracing-opentelemetry = "0.27"
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
+# Rate limiting — used directly by powehi-rest-api (HandleRateLimiter) and
+# powehi-grpc (PropagateAbuseSignal per-origin-region limiter). Workspaced so
+# the two literal pins can't drift apart (security-auditor finding, cycle 434).
+governor = "0.6"
 # database
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "migrate"] }
 # redis

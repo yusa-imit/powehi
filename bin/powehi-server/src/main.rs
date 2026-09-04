@@ -52,11 +52,17 @@ async fn main() -> Result<()> {
         .context("connect postgres")?;
     run_migrations(&pool).await.context("run db migrations")?;
 
-    let cache: Arc<dyn powehi_port_outbound::cache::CachePort> = Arc::new(
+    // One RedisCache instance serves two ports: CachePort (general cache) and
+    // AbuseSignalStore (cross-region abuse blocks, prd.md §6.4). Held as a
+    // concrete Arc so it can be handed to both without a second connection.
+    let redis_cache = Arc::new(
         RedisCache::new(&cfg.redis_url)
             .await
             .context("connect redis cache")?,
     );
+    let cache: Arc<dyn powehi_port_outbound::cache::CachePort> = redis_cache.clone();
+    let abuse_signal_store: Arc<dyn powehi_port_outbound::abuse_signal::AbuseSignalStore> =
+        redis_cache.clone();
     let redis_bus: Arc<dyn powehi_port_outbound::event_bus::DomainEventBus> = Arc::new(
         RedisEventBus::new(&cfg.redis_url)
             .await
@@ -258,8 +264,13 @@ async fn main() -> Result<()> {
         event_bus,
         key_package_repo,
         group_repo_grpc,
+        abuse_signal_store,
         cfg.grpc_tls_enabled(),
     );
+    // Held before `grpc_server_impl` is moved into `RegionServiceServer::new`
+    // below, so the periodic GC task started further down can still reach the
+    // same rate-limiter map (security-auditor finding, cycle 434).
+    let abuse_signal_limiter = grpc_server_impl.abuse_signal_limiter_handle();
     // Max message size = 64 KiB for MLS ciphertext (prd.md §6.4).
     // This caps memory usage per in-flight RPC and matches the envelope size limit.
     const GRPC_MAX_MSG_BYTES: usize = 64 * 1024;
@@ -402,6 +413,21 @@ async fn main() -> Result<()> {
         loop {
             interval.tick().await;
             handle_rl_gc.retain_recent();
+        }
+    });
+
+    // ── Background GC: PropagateAbuseSignal per-origin-region rate limiter ──
+    // Same shape as the handle-rate-limiter GC above (security-auditor
+    // finding, cycle 434): without this, `abuse_signal_limiter`'s internal
+    // map grows once per distinct claimed `origin_region` and is never
+    // reclaimed, which is unbounded on the `tls_required=false` fail-open
+    // path (`origin_region` is attacker-chosen there, not mTLS-verified).
+    let abuse_signal_limiter_gc = Arc::clone(&abuse_signal_limiter);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            abuse_signal_limiter_gc.retain_recent();
         }
     });
 

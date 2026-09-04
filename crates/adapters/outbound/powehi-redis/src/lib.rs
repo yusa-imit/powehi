@@ -1,6 +1,7 @@
 //! Redis outbound adapters.
 //!
-//! - `RedisCache` implements `CachePort` (GET / SET / DEL / EXISTS).
+//! - `RedisCache` implements `CachePort` (GET / SET / DEL / EXISTS) and
+//!   `AbuseSignalStore` (region-local cross-region abuse blocks, prd.md §6.4).
 //! - `RedisEventBus` implements `DomainEventBus` (PUBLISH; subscribe returns
 //!   an empty stream — real fan-out wired when WS hub lands in Phase 3).
 //!
@@ -13,8 +14,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_core::Stream;
-use powehi_domain::{error::DomainError, event::DomainEvent};
+use powehi_domain::{
+    abuse::{AbuseReason, AbuseSubject},
+    error::DomainError,
+    event::DomainEvent,
+    region::RegionId,
+};
 use powehi_port_outbound::{
+    abuse_signal::AbuseSignalStore,
     cache::CachePort,
     event_bus::{DomainEventBus, EventStream},
 };
@@ -119,6 +126,86 @@ impl CachePort for RedisCache {
     }
 }
 
+// ── AbuseSignalStore ────────────────────────────────────────────────────────
+
+/// Key namespace for abuse blocks. Separate prefixes per subject kind so an
+/// IP digest and a user UUID can never collide, and so an operator can scan
+/// one class without touching the other.
+const ABUSE_IP_PREFIX: &str = "abuse:ip:";
+const ABUSE_USER_PREFIX: &str = "abuse:user:";
+
+/// Stored value for an abuse block.
+///
+/// Deliberately minimal: the subject itself is already encoded in the key, so
+/// the value carries only *why* and *who decided*. No raw IP, no handle, no
+/// content — the same zero-knowledge rule the rest of this adapter follows.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AbuseBlockValue<'a> {
+    reason: &'a str,
+    origin_region: &'a str,
+}
+
+fn abuse_key(subject: &AbuseSubject) -> String {
+    let prefix = match subject {
+        AbuseSubject::IpHash(_) => ABUSE_IP_PREFIX,
+        AbuseSubject::User(_) => ABUSE_USER_PREFIX,
+    };
+    // `opaque_key()` is hex(SHA-256(ip)) or the user UUID — never a raw address.
+    format!("{prefix}{}", subject.opaque_key())
+}
+
+#[async_trait]
+impl AbuseSignalStore for RedisCache {
+    async fn block(
+        &self,
+        subject: &AbuseSubject,
+        reason: AbuseReason,
+        ttl: Duration,
+        origin_region: RegionId,
+    ) -> Result<(), DomainError> {
+        let key = abuse_key(subject);
+        let payload = serde_json::to_vec(&AbuseBlockValue {
+            reason: reason.as_str(),
+            origin_region: origin_region.as_str(),
+        })
+        .map_err(map_serde)?;
+
+        // Redis rejects EX 0, and a zero TTL would mean "never expires" if we
+        // fell through to a plain SET — clamp to at least one second so a block
+        // is always bounded. Also clamp the upper end to MAX_ABUSE_SIGNAL_TTL as
+        // defense in depth: the gRPC receiving path already clamps a
+        // peer-supplied TTL before calling `block()`, but this adapter must not
+        // rely on every future caller remembering to do the same
+        // (security-auditor finding, cycle 433).
+        let secs = ttl
+            .min(powehi_port_outbound::abuse_signal::MAX_ABUSE_SIGNAL_TTL)
+            .as_secs()
+            .max(1);
+        let mut conn = self.conn.clone();
+        conn.set_ex::<_, _, ()>(&key, payload, secs)
+            .await
+            .map_err(map_err)?;
+
+        // Opaque fields only (rule: no-plaintext-logging): the subject kind and
+        // the deciding region, never the digest, the UUID or a raw address.
+        tracing::debug!(
+            subject_kind = subject.kind(),
+            reason = reason.as_str(),
+            origin_region = origin_region.as_str(),
+            ttl_secs = secs,
+            "abuse block stored"
+        );
+        Ok(())
+    }
+
+    async fn is_blocked(&self, subject: &AbuseSubject) -> Result<bool, DomainError> {
+        let key = abuse_key(subject);
+        let mut conn = self.conn.clone();
+        let n: u32 = conn.exists(&key).await.map_err(map_err)?;
+        Ok(n > 0)
+    }
+}
+
 // ── DomainEventBus ──────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -191,10 +278,16 @@ mod tests {
 
     fn assert_cache<T: CachePort>() {}
     fn assert_bus<T: DomainEventBus>() {}
+    fn assert_abuse_store<T: AbuseSignalStore>() {}
 
     #[test]
     fn redis_cache_impl_trait() {
         assert_cache::<RedisCache>();
+    }
+
+    #[test]
+    fn redis_cache_impl_abuse_signal_store() {
+        assert_abuse_store::<RedisCache>();
     }
 
     #[test]
@@ -374,5 +467,53 @@ mod tests {
         let mut stream = EmptyStream;
         let pin = Pin::new(&mut stream);
         assert!(matches!(pin.poll_next(&mut cx), Poll::Ready(None)));
+    }
+
+    // ── abuse key scheme (prd.md §6.4) ───────────────────────────────────────
+
+    #[test]
+    fn abuse_key_for_ip_uses_hashed_prefix() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+        let key = abuse_key(&AbuseSubject::from_ip(&ip));
+        assert!(key.starts_with("abuse:ip:"));
+        // 64 hex chars of SHA-256 follow the prefix.
+        assert_eq!(key.len(), "abuse:ip:".len() + 64);
+        // The raw address must never appear in a Redis key.
+        assert!(!key.contains("203.0.113.7"));
+    }
+
+    #[test]
+    fn abuse_key_for_user_uses_uuid() {
+        let id = UserId::from(Uuid::new_v4());
+        let key = abuse_key(&AbuseSubject::User(id.clone()));
+        assert_eq!(key, format!("abuse:user:{}", id.as_uuid()));
+    }
+
+    #[test]
+    fn abuse_keys_for_ip_and_user_never_collide() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let ip_key = abuse_key(&AbuseSubject::from_ip(&IpAddr::V4(Ipv4Addr::new(
+            198, 51, 100, 1,
+        ))));
+        let user_key = abuse_key(&AbuseSubject::User(UserId::from(Uuid::new_v4())));
+        assert_ne!(ip_key, user_key);
+        assert!(ip_key.starts_with("abuse:ip:"));
+        assert!(user_key.starts_with("abuse:user:"));
+    }
+
+    #[test]
+    fn abuse_block_value_contains_only_reason_and_region() {
+        let json = serde_json::to_string(&AbuseBlockValue {
+            reason: AbuseReason::KeyPackageFlood.as_str(),
+            origin_region: "eu-central-1",
+        })
+        .expect("serialize");
+        assert!(json.contains("key_package_flood"));
+        assert!(json.contains("eu-central-1"));
+        // No subject material, no content.
+        assert!(!json.contains("ip"));
+        assert!(!json.contains("hash"));
+        assert!(!json.contains("plaintext"));
     }
 }
