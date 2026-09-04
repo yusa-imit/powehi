@@ -24,7 +24,136 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-05, cycle 436 — FEATURE: R2 orphan-sweep observability (owner-mismatch + ratio-guard counters), commit c727c53)
+## Current state (2026-09-05, cycle 438 — FEATURE: atomic epoch CAS for MLS Commit acceptance (finished inherited cycle-437 work, found+fixed a blocker, committed), commit 7cfd244)
+
+- Mode selection: counter 437→438, 438 % 5 != 0 → FEATURE.
+- **Session start found a large uncommitted working tree** (10 files),
+  same "prior cycle's own memory write never happened" pattern as
+  cycles 429/433/434: a fully-formed, well-documented feature was
+  already implemented — `GroupRepository::advance_epoch` (atomic
+  Postgres CAS: `UPDATE groups SET epoch = epoch + 1 WHERE id = $1 AND
+  epoch = $2 RETURNING epoch`), wired into `ForwardCommit`
+  (`powehi-grpc/server.rs`, using the mTLS-authenticated peer's
+  `expected_epoch` as the CAS precondition) and `send_commit`
+  (`messaging_service.rs`, via a bounded retry loop). This closed a
+  real, previously-documented gap: `ForwardCommit` used to ignore
+  `req.expected_epoch` entirely and always return `accepted_epoch: 0`
+  (pure theater, no actual epoch validation — RFC 9420 requires exactly
+  one Commit accepted per epoch). Treated as real in-progress work to
+  verify and land, not discard, per standing "investigate unfamiliar
+  state before overwriting" discipline. Build/test/clippy/fmt all green
+  on the inherited diff before touching anything.
+- **Required review agents run in-session** (crypto-reviewer,
+  threat-model-checker, security-auditor — this is MLS Commit
+  epoch/concurrency logic, a new architectural CAS port method, and a
+  gRPC handler, so all three routing triggers apply):
+  - **crypto-reviewer: BLOCKER found.** `send_commit`'s retry loop
+    defeated the CAS invariant it claimed to enforce — the REST
+    endpoint/port trait had no caller-supplied `expected_epoch` at all,
+    so on CAS loss the code just re-read the current epoch and retried
+    against it. Two concurrent `send_commit` calls therefore both
+    "succeeded", at N+1 and N+2 — the second commit was never actually
+    built against N+1, so this would have silently forked group state
+    (contradicting the very RFC 9420 invariant the feature existed to
+    enforce) and permanently desynced any later cross-region
+    `ForwardCommit` (which *does* validate the real epoch).
+  - **Fix**: added `expected_epoch: Epoch` to `MessagingUseCase::send_commit`'s
+    signature (port), `SendCommitRequest.expected_epoch: u64` (REST wire),
+    and the frontend `sendCommit()` client (`app/src/api/messages.ts` —
+    no production caller yet, but the exported function needed to match
+    the contract). Removed the retry loop entirely — single CAS attempt,
+    hard `EpochMismatch` (409/FailedPrecondition) rejection on loss, no
+    silent re-targeting. Updated every call site/mock/test (6 mock
+    `MessagingUseCase` impls, `messaging_service.rs` tests including a
+    new `send_commit_stale_expected_epoch_is_rejected_not_retargeted`
+    test). Also fixed two smaller findings from the same/other passes:
+    `advance_epoch`'s out-of-range-epoch error now maps to
+    `DomainError::InvalidInput` (400/InvalidArgument) not `Internal`
+    (500) since the value is client-controlled; added matching
+    `i64::try_from` range guards to `save`/`create_if_absent` (previously
+    silently-truncating `as i64`, now load-bearing since `advance_epoch`
+    would hard-reject a negative-wrapped value forever).
+  - **Re-verified with a second crypto-reviewer pass**: PASS — CAS is a
+    single atomic DB statement (not read-modify-write), retry loop
+    confirmed gone, race condition confirmed closed (concurrent-race
+    testcontainers test asserts exactly one winner), RFC 9420 §12.4
+    satisfied, no attacker-controlled epoch reaches the event bus.
+  - **threat-model-checker: yellow** — CAS-precondition design judged a
+    net hardening vs. the prior always-return-0 behavior (T7 hostile
+    peer region can now only cause its own rejection, not forge state).
+    Required prd.md updates applied: §4A.5's `RegionRouter::forward_commit`
+    code snippet was stale (missing `sender_device_id`/`expected_epoch`
+    params) — fixed; §4A.6's cross-region-metadata list didn't mention
+    the epoch counter as now-declared cross-region metadata — fixed;
+    required documenting the CAS-then-envelope-save non-atomicity
+    ("wedge") risk — added as an explicit accepted-risk paragraph in
+    §4A.5 (not silently ignored) with a concrete first-stage mitigation
+    (see next bullet) and an explicit second-stage follow-up.
+  - **security-auditor: initial FAIL** (compile break — the fix above
+    wasn't complete yet when first audited: mock/route signature
+    mismatch across 5+ files) **→ re-verified PASS-with-non-blocking-
+    followups** after the fix was completed. Accepted the CAS+save
+    non-atomicity as a defensible documented risk (liveness/availability
+    only — fail-closed, member-observable, no plaintext/auth-bypass/
+    content-integrity break) but required it be a *tracked* mitigation,
+    not just prose — implemented immediately since it was cheap: added
+    a `mls_commit_epoch_stall_total{path}` Prometheus counter (same
+    `metrics::counter!` pattern as cycle 436's R2 orphan-sweep work) at
+    both wedge points (`send_commit`, `forward_commit`), so a save
+    failure after a successful CAS is alertable instead of silent. Full
+    outbox/unit-of-work atomicity fix explicitly still NOT done — it's
+    a genuine separate architectural task (crosses the `GroupRepository`/
+    `EnvelopeRepository` port boundary) — carried as a next-cycle
+    candidate below, now with a concrete counter to alert on in the
+    meantime rather than vague "future" prose.
+- Build/test gate (repeated after every fix round): `cargo build
+  --workspace --all-targets`, `cargo test --workspace` (45/45 binaries
+  green, 0 failures throughout), `cargo clippy --workspace --all-targets
+  -- -D warnings` (clean), `cargo fmt --all --check` (clean), `cargo deny
+  check` (advisories/bans/licenses/sources all ok — `metrics` added to
+  `powehi-grpc`/`powehi-application` Cargo.toml is an already-pinned
+  workspace dep, no new external crate). Frontend: `pnpm vitest run
+  src/api/messages.test.ts` (16/16, includes 2 new tests for the
+  `expected_epoch` wire field and `epoch_mismatch` rejection), `tsc -b`
+  (clean), `biome check` (clean after `--write` auto-format). New
+  Postgres CAS integration tests (incl. a `tokio::join!` concurrent-race
+  test) are `#[ignore]`'d — no Docker available in this environment to
+  run them locally; will run in CI's Docker job.
+- Committed `7cfd244` (`feat(mls): enforce atomic epoch CAS for MLS
+  Commit acceptance`), pushed. CI (`33928060176`/`33928060627`/`33928060097`)
+  triggered on push, in progress as of this write — confirm green before
+  trusting this cycle's claim in a future session if not already done.
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates (carried/updated):**
+  1. Carried: host disk risk from other `~/codespace/*` projects — not
+     actionable from this repo.
+  2. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  3. Carried: R2 orphan-sweep owner-mismatch/ratio-guard metrics
+     (cycle 436) still need an actual Alertmanager/Grafana rule wired —
+     infra-lead/ops task, not a routine backend cycle.
+  4. Carried, still explicitly BLOCKED: wiring
+     `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal` into a real
+     caller needs F3 (incl. the `IpHash` extension) and the
+     HMAC-vs-plain-SHA256 gate resolved first — do not wire without
+     re-reading both prd.md sections.
+  5. **New**: `mls_commit_epoch_stall_total{path="send_commit"|
+     "forward_commit"}` (this cycle) is emitted but has no
+     Alertmanager/Grafana rule yet — same "counter exists, alert
+     doesn't" pattern as candidate #3. A genuine follow-up would wire
+     both together, or at minimum both should be tracked as one
+     alerting task rather than two separate ones.
+  6. **New, real architecture task** (not filler): `GroupRepository::advance_epoch`
+     (CAS) and `EnvelopeRepository::save` (commit envelope persist) are
+     two separate DB statements across two separate hexagonal ports, not
+     one transaction — documented as accepted risk in prd.md §4A.5. A
+     proper fix needs a unit-of-work abstraction spanning both ports (or
+     an outbox pattern) — this is a legitimate, non-trivial
+     architectural change deserving its own dedicated cycle + its own
+     threat-model-checker pass, not a quick patch. Do not attempt as a
+     "quick fix" without designing the unit-of-work port shape first.
+
+## Previous state (2026-09-05, cycle 436 — FEATURE: R2 orphan-sweep observability (owner-mismatch + ratio-guard counters), commit c727c53)
 
 - Mode selection: counter 435→436, 436 % 5 != 0 → FEATURE.
 - **CI check found main red first**: `gh run list --limit 5` showed the
