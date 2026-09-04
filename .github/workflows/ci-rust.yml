@@ -113,8 +113,10 @@ jobs:
 
       - name: Pre-pull MinIO image
         # Pre-pull avoids transient "bytes remaining on stream" errors during
-        # the testcontainers layer download inside the test process.
-        run: docker pull minio/minio:RELEASE.2022-02-07T08-17-33Z
+        # the testcontainers layer download inside the test process. Tag must
+        # match MINIO_TAG in r2_media_it.rs, or this step warms an image the
+        # test never actually uses.
+        run: docker pull minio/minio:RELEASE.2025-02-28T09-55-16Z
 
       - name: cargo nextest run (r2 testcontainers integration)
         # Runs only the r2_media_it binary (testcontainers-based) which starts
