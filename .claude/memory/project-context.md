@@ -24,7 +24,96 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-04, cycle 435 — STABILIZATION: disk-hygiene cargo clean + dead deny.toml license-allowance cleanup, commit 4e7e1f6)
+## Current state (2026-09-05, cycle 436 — FEATURE: R2 orphan-sweep observability (owner-mismatch + ratio-guard counters), commit c727c53)
+
+- Mode selection: counter 435→436, 436 % 5 != 0 → FEATURE.
+- **CI check found main red first**: `gh run list --limit 5` showed the
+  cycle-435 memory-only commit's `CI — Rust` run (`33881237625`) as
+  `completed`/`failure`. Investigated via `gh run view --log-failed`
+  before assuming a code regression — the failure was in the
+  "Integration Tests (Docker)" job at the `docker pull postgres:16-alpine`
+  step: `Error response from daemon: ... read tcp ...: connection reset by
+  peer` against `registry-1.docker.io`, i.e. a transient Docker Hub
+  network blip in the runner, not caused by the pushed commit (which only
+  touched `.claude/memory/project-context.md` and `deny.toml`, both
+  already independently green on the prior push). `gh run rerun --failed`
+  confirmed this: the rerun completed `success` with no code change.
+  FEATURE-mode step 2 ("if red on main, switch to STABILIZATION") was
+  judged satisfied by fixing/confirming the actual root cause (a rerun,
+  not a code change) rather than mechanically flipping modes for an
+  infra flake — proceeded with FEATURE mode.
+- Picked next-cycle candidate #3 (carried since ≥ cycle 434, "still not
+  scoped"): the residual gap where the *winner* of a legitimate
+  (non-racing) owner-sentinel arbitration in the R2 orphan sweep
+  (`verify_region_ownership`, prd.md §9.4.3, cycle 426) can keep deleting
+  a colliding-but-still-live sibling environment's media forever, while
+  the *loser* only gets a `tracing::error!` log line
+  (`error_kind = "gc_orphan_owner_mismatch"`) — no metric, so the
+  "permanent, loud" detection the doc comment promises was only actually
+  loud if an operator had already built a log-based alert. Scoped this
+  cycle's fix narrowly: the underlying architectural gap is explicitly
+  accepted risk in prd.md §9.4.3 (full fix = distinct real buckets per
+  environment, an operational-discipline requirement, not a code fix) —
+  what was actually unscoped/missing was making the *existing* detection
+  operationally actionable.
+- **Fix** (`crates/adapters/outbound/powehi-r2/src/lib.rs` +
+  `Cargo.toml`): added `metrics = { workspace = true }` (already a pinned
+  workspace dep, used elsewhere by `powehi-rest-api`'s
+  `http_metrics.rs`/`routes/auth.rs` via the same
+  `counter!("x_total", "label" => v).increment(1)` pattern) and emitted
+  two new counters alongside the existing log lines, purely additive (no
+  control-flow/threshold/deletion-logic change):
+  - `media_orphan_sweep_owner_mismatch_total{region_id}` next to
+    `owner_matches()`'s existing `tracing::error!`.
+  - `media_orphan_sweep_ratio_guard_total{region_id}` next to the
+    existing `tracing::warn!` in the ratio-guard circuit-breaker branch.
+  `region_id` label confirmed by security-auditor to be a small
+  operator-set Helm enum (`eu-frankfurt`/`ap-seoul`, gated by
+  `configmap.yaml`'s `required "values.region is required"`), never
+  user/request-derived — same cardinality class as the existing
+  `http_requests_total{method,status}` labels.
+- Build/test gate: `cargo build -p powehi-r2 --all-targets`,
+  `cargo test -p powehi-r2 --lib` (18/18 green), `cargo clippy -p
+  powehi-r2 --all-targets -- -D warnings` (clean), `cargo fmt -p powehi-r2
+  --check` (clean), `cargo deny check` (clean — no new external crate,
+  only a new intra-workspace dep edge), full `cargo build --workspace` +
+  `cargo test --workspace` (all green, 0 failures — `cargo nextest` still
+  not installed in this environment, used the documented `cargo test
+  --workspace` fallback per cycle 435's precedent).
+- **security-auditor: PASS**, no changes required (backend adapter change,
+  not crypto/architectural, so `crypto-reviewer`/`threat-model-checker`
+  correctly not invoked per routing rules) — independently verified
+  `region_id`'s source, confirmed bounded cardinality, confirmed no
+  control-flow change by diffing against `git diff`, confirmed metric
+  naming/dependency conventions match existing precedent.
+- Committed `c727c53` (`feat(r2): emit Prometheus counters for
+  orphan-sweep owner-mismatch and ratio-guard trips`), pushed. CI status
+  on this commit pending confirmation as of this write — verify before
+  relying on this cycle's "green" claim in a future cycle if not already
+  confirmed.
+- Target dir hygiene: not checked (FEATURE mode; last STABILIZATION pass
+  cycle 435 already brought target/ to 7.5G/22GiB free).
+- **Next cycle candidates (carried/updated):**
+  1. Carried: host disk risk from other `~/codespace/*` projects — not
+     actionable from this repo.
+  2. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  3. **Downgraded from "not scoped" to "done, monitoring-only":** the
+     owner-mismatch/ratio-guard signals are now Prometheus-alertable
+     (`media_orphan_sweep_owner_mismatch_total`,
+     `media_orphan_sweep_ratio_guard_total`). The underlying architectural
+     gap itself (winner-keeps-destroying-live-sibling) remains accepted
+     risk per §9.4.3 — no further code action expected here; a genuine
+     next step would be wiring an actual Alertmanager/Grafana rule on
+     these two metrics, which is an infra-lead/ops task, not a routine
+     backend cycle.
+  4. Carried, still explicitly BLOCKED: wiring
+     `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal` into a real
+     caller needs F3 (incl. the `IpHash` extension) and the
+     HMAC-vs-plain-SHA256 gate resolved first — do not wire without
+     re-reading both prd.md sections.
+
+## Previous state (2026-09-04, cycle 435 — STABILIZATION: disk-hygiene cargo clean + dead deny.toml license-allowance cleanup, commit 4e7e1f6)
 
 - Mode selection: counter 434→435, 435 % 5 == 0 → STABILIZATION.
 - CI check: `gh run list --limit 5` green on `main` (last 2 pushes both
