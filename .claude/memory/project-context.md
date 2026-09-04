@@ -24,7 +24,90 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-04, cycle 434 — FEATURE: finished + hardened + committed cycle 433's cross-region abuse-signal propagation, commit 325ad1e)
+## Current state (2026-09-04, cycle 435 — STABILIZATION: disk-hygiene cargo clean + dead deny.toml license-allowance cleanup, commit 4e7e1f6)
+
+- Mode selection: counter 434→435, 435 % 5 == 0 → STABILIZATION.
+- CI check: `gh run list --limit 5` green on `main` (last 2 pushes both
+  `completed`/`success` on both `CI — Rust` and `CI — Live-backend E2E`).
+  `gh issue list --state open`: empty.
+- **Disk was critical again at session start** (same standing operational
+  flag cycle 434 raised): `df` showed only 6.3 GiB free on the 228 GiB
+  volume (97% full), powehi's own `target/` at 24G. A 2-day-mtime prune
+  (cycle 434's emergency threshold) only freed ~1G this time — most of
+  the bloat was **duplicate hash-variant `.rlib`s from repeated recent
+  rebuilds** (e.g. 9 separate `libaws_sdk_s3-*.rlib` copies at 127M each,
+  1.1G just for that one crate), not stale-old artifacts, so mtime-based
+  pruning couldn't touch them. Ran a full `cargo clean` instead (source
+  code untouched, fully reversible via rebuild, matches the STABILIZATION
+  target-hygiene mandate's spirit when duplication rather than age is the
+  driver) — reclaimed 24.8 GiB (85999 files). Full rebuild from clean
+  finished at only 7.5G total, host disk now at 22 GiB free / 89% — well
+  under the 20G prune-threshold and no longer critical. Other
+  `~/codespace/*` project directories are still the bulk of host usage
+  (~65G+, out of this repo's control) — same standing note as cycle 434,
+  still nothing actionable from within this repo.
+- Full sweep after the clean, all green: `cargo build --workspace`
+  (58.84s clean build), `cargo test --workspace` (0 failures across every
+  crate — `cargo nextest` isn't installed in this environment, used the
+  documented `cargo test --workspace` fallback), `cargo clippy --workspace
+  --all-targets -- -D warnings` (clean), `cargo fmt --all --check`
+  (clean), `cargo audit` (0 advisories, 664 crates), frontend `pnpm test
+  --run` (1582/1582 green, 111 files), `tsc -b`/`biome check` (clean, 179
+  files).
+- **Concrete fix, found via the sweep, not pre-planned:** `cargo deny
+  check` was emitting `warning[license-not-encountered]` for two
+  allow-listed SPDX licenses — `"OpenSSL"` and `"Unicode-DFS-2016"` — that
+  no crate in the current 664-crate tree actually uses. Root-caused both:
+  `openssl-probe` (the only openssl-named crate present) is
+  `MIT OR Apache-2.0`, not `OpenSSL` — the stack is all-rustls, nothing
+  ever pulled in a real OpenSSL-licensed crate; `unicode-ident` relicensed
+  upstream off `Unicode-DFS-2016` onto `Unicode-3.0` (already separately
+  allow-listed) some versions back. Removed both dead entries from
+  `deny.toml`'s `[licenses] allow` list — same precedent as `aa1d88e`
+  (cycle 270, dead `cargo-audit` ignores). Removing an *allow* entry only
+  tightens the policy (a future dep needing either license now hard-fails
+  CI instead of silently passing) — no way to weaken the gate this way.
+  `cargo deny check` clean before *and* after (this was a warning, not a
+  failure — housekeeping, not a break-fix), `license-not-encountered`
+  count 2→0.
+- **security-auditor: PASS** (dependency-audit is explicitly in this
+  agent's remit per its own description) — verified the diff is exactly
+  the 2 deletions, confirmed both entries are genuinely dead via
+  `cargo metadata` + re-running `cargo deny check` with the change
+  stashed/restored, confirmed monotonic-tightening direction (no
+  `[licenses] exceptions` or `deny` table that could interact), flagged
+  two non-blocking observations (this was warning-hygiene not a CI
+  break-fix; the AGPL-3.0-only workspace makes the OpenSSL-license
+  fail-closed behavior specifically well-justified given historical
+  OpenSSL/GPL advertising-clause friction). Not crypto/architectural/a
+  backend handler — `crypto-reviewer`/`threat-model-checker` correctly
+  not invoked, consistent with the routing rules.
+- Committed `4e7e1f6` (`chore(deps): remove dead license allowances from
+  deny.toml`), pushed, confirmed `CI — Rust` (`33880772879`) completed
+  `success` on the pushed commit before writing this entry.
+- Target dir hygiene: already covered above (the `cargo clean` *was* this
+  cycle's hygiene action, done early because it was blocking rather than
+  as the routine end-of-cycle step) — final state 7.5G / 22 GiB free, no
+  further action needed.
+- **Next cycle candidates (carried from cycle 434, still accurate):**
+  1. Host disk is still the dominant risk — other `~/codespace/*`
+     projects (not powehi) are ~65G+ of the 228 GiB volume; a future
+     cycle can still get blocked fast since powehi's own `target/` alone
+     regrows several GB per build cycle. Not actionable from this repo;
+     keep flagging to a human rather than touching other projects' files.
+  2. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  3. Carried, still not scoped: the residual gap where the winner of a
+     *legitimate* (non-racing) ownership claim can still delete a
+     colliding environment's live media forever (§9.4.3, "won't fix,
+     documented" candidate).
+  4. Carried, still explicitly BLOCKED: wiring
+     `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal` into a real
+     caller needs F3 (incl. the `IpHash` extension) and the
+     HMAC-vs-plain-SHA256 gate resolved first — do not wire without
+     re-reading both prd.md sections.
+
+## Previous state (2026-09-04, cycle 434 — FEATURE: finished + hardened + committed cycle 433's cross-region abuse-signal propagation, commit 325ad1e)
 
 - Mode selection: counter 433→434, 434 % 5 != 0 → FEATURE.
 - **Session start found a large uncommitted working tree**, not a clean
