@@ -24,7 +24,120 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-05, cycle 441 — FEATURE: close the CommitLedger id-collision hole (cycle 440's next-cycle candidate #6), commit 969a304)
+## Current state (2026-09-05, cycle 442 — FEATURE: wire the R2 orphan-sweep owner-mismatch/ratio-guard Prometheus counters to an actual PrometheusRule (closes cycle 436's carried candidate #3), commit pending)
+
+- Mode selection: counter 441→442, 442 % 5 != 0 → FEATURE.
+- CI check: `gh run list --limit 5` green on `main` (cycle 441's push
+  `completed`/`success` on both `CI — Rust` and `CI — Live-backend E2E`).
+  `gh issue list --state open`: empty. Clean working tree at session start.
+- Cycle 441's own "Next cycle candidates" list was explicitly thin (its
+  #6 said the pool needed looking beyond the carried list). Of the
+  carried candidates, #1 (host disk) and #2 (PQ hybrid) and #4 (F3-blocked
+  abuse-signal wiring) are non-actionable-from-this-repo/policy-gated as
+  before. #3 (R2 orphan-sweep owner-mismatch/ratio-guard metrics need an
+  actual alert rule, carried since cycle 436) turned out to be genuinely
+  actionable from this repo after all: `infra/helm/powehi/` already has a
+  `servicemonitor.yaml` template and Prometheus Operator wiring, but no
+  `PrometheusRule` template existed yet — this wasn't purely an
+  ops/infra-lead-external task, it was a missing Helm template in this
+  chart. Delegated to `infra-lead`.
+- **Fix**: new `infra/helm/powehi/templates/prometheusrule.yaml` (first
+  `PrometheusRule` in this chart), gated by
+  `.Values.monitoring.prometheusRule.enabled` (default `false`, same
+  precedent as `serviceMonitor`), using the existing
+  `powehi.fullname`/`powehi.labels` helpers. Two alerts, group
+  `powehi.media-orphan-sweep`:
+  - `PowehiMediaOrphanSweepOwnerMismatch` (severity `critical`) on
+    `sum by (region_id) (increase(media_orphan_sweep_owner_mismatch_total[1h])) > 0`.
+  - `PowehiMediaOrphanSweepRatioGuard` (severity `warning`) on
+    `sum by (region_id) (increase(media_orphan_sweep_ratio_guard_total[1h])) > 0`.
+  Both `for: 0m` — deliberate, not an oversight: both counters track
+  conditions that never self-resolve (every subsequent 6-hourly sweep
+  re-triggers them once broken per the cycle-436 doc comments), so
+  "any increase in the window" is already a low-noise, correct signal
+  with no need for alertmanager debounce. Annotations cite prd.md
+  §9.4.3 and use `{{ $labels.region_id }}` templating so on-call has
+  context without reading the source. Added
+  `monitoring.prometheusRule.{enabled,window,additionalLabels}` to
+  `values.yaml` (mirroring the `serviceMonitor` block's style/doc-comment
+  pattern) and declared `monitoring.serviceMonitor`/`monitoring.prometheusRule`
+  in `values.schema.json` (previously `monitoring` was entirely
+  undeclared there — also newly schema-enforced: `window` must match a
+  Prometheus duration pattern, since a malformed value makes Prometheus
+  reject the whole rule *group*, silently dropping both alerts).
+- **security-auditor: PASS-with-nits, addressed in-session** (infra
+  observability config, additive-only, no new server-visible metadata —
+  both counters already existed and were already reviewed in cycle 436,
+  so per routing rules only `security-auditor` applies here, not
+  `crypto-reviewer`/`threat-model-checker`). Confirmed no plaintext/PII/
+  secret leakage, `region_id` is the same bounded operator enum already
+  scraped elsewhere, confirmed the `{{ "{{" }}...{{ "}}" }}` Helm-escaping
+  renders a correct literal Alertmanager template var. Required fixes,
+  applied: (1) `window` needed the duration-pattern schema constraint
+  (malformed value → silent whole-group drop); (2) both `expr`s needed
+  `sum by (region_id)` — without it, multiple replicas in the same region
+  would each fire their own alert for the same underlying event instead
+  of one alert per region; (3) a stale region-enum comment (actual enum
+  is `eu-frankfurt`/`ap-seoul`/`ap-tokyo`/`""`, comment only listed two).
+  Left as explicitly out-of-scope for a future cycle (correctly, per this
+  cycle's chart-only mandate): (a) CI overlay files (`values-*.yaml`)
+  don't enable the rule yet, so `kubeconform` never exercises this
+  template in CI; (b) enabling in a real kube-prometheus-stack install
+  needs `additionalLabels.release: kube-prometheus-stack` (or whatever
+  that install's `ruleSelector` requires) set by the operator — chart
+  correctly leaves this to the environment's `values-prod-*.yaml`, not
+  hardcoded.
+- **Validation, re-run independently in this session** (not just
+  trusting the subagent's self-report): `helm lint infra/helm/powehi`
+  clean at both default and `--set monitoring.prometheusRule.enabled=true`;
+  `helm template ... --set region=eu-frankfurt` with the flag left
+  default-false renders **zero** `kind: PrometheusRule` occurrences
+  (correctly omitted); with the flag enabled, `helm template` output
+  parses cleanly via `yaml.safe_load_all` (16 docs) and
+  `--show-only templates/prometheusrule.yaml` shows both alert exprs
+  correctly wrapped in `sum by (region_id)(...)`; `values.schema.json`
+  is valid JSON (`json.load` clean); **`conftest test` against the full
+  rendered manifest with the flag enabled, using this repo's own
+  `infra/policy/` OPA suite: 112/112 tests passed, 0 failures** (deny-all
+  NetworkPolicy / resource-limits / no-`:latest`/ runAsNonRoot / no-literal-
+  secrets policies all still hold with the new resource present).
+  `kubeconform`/`tflint` not installed in this environment — same gap as
+  prior infra cycles, not newly introduced.
+- No `.rs` file touched — Helm-only change, so the backend build/test
+  gate (`cargo build`/`test`/`clippy`/`fmt`) doesn't apply; not re-run
+  this cycle since nothing in `crates/` changed.
+- Committing `infra/helm/powehi/templates/prometheusrule.yaml`,
+  `infra/helm/powehi/values.yaml`, `infra/helm/powehi/values.schema.json`
+  as a `feat(infra):` commit, pushing. Confirm CI green in a future
+  session if not already done by the time this is read (CI's Helm/infra
+  validation job, if any, is the relevant one to check — not the Rust job).
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates (carried/updated):**
+  1. Carried: host disk risk from other `~/codespace/*` projects — not
+     actionable from this repo.
+  2. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  3. **Downgraded to done, with a documented residual:** the R2
+     orphan-sweep owner-mismatch/ratio-guard alert rule is now wired in
+     the chart itself. Residual (not urgent, correctly out of scope this
+     cycle): no `values-prod-*.yaml`/CI overlay actually flips
+     `monitoring.prometheusRule.enabled=true` yet, and a real
+     kube-prometheus-stack install will need `additionalLabels.release`
+     (or equivalent) set to match its `ruleSelector` — an ops/environment-
+     config task, not a further chart-code task.
+  4. Carried, still explicitly BLOCKED: wiring
+     `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal` into a real
+     caller needs F3 (incl. the `IpHash` extension) and the
+     HMAC-vs-plain-SHA256 gate resolved first — do not wire without
+     re-reading both prd.md sections.
+  5. **New, minor:** CI has no job that renders this chart with
+     `monitoring.prometheusRule.enabled=true` (or `serviceMonitor.enabled=true`
+     for that matter — same gap predates this cycle), so a future Helm
+     template regression in either optional resource wouldn't be caught
+     by CI until an operator actually flips the flag in a real
+     environment. A genuine `ci-pipeline-author` follow-up, not urgent.
+
+## Previous state (2026-09-05, cycle 441 — FEATURE: close the CommitLedger id-collision hole (cycle 440's next-cycle candidate #6), commit 969a304)
 
 - Mode selection: counter 440→441, 441 % 5 != 0 → FEATURE.
 - CI check: `gh run list --limit 3` green on `main` (cycle 440's push both
