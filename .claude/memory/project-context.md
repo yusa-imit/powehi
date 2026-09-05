@@ -24,7 +24,105 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-05, cycle 442 — FEATURE: wire the R2 orphan-sweep owner-mismatch/ratio-guard Prometheus counters to an actual PrometheusRule (closes cycle 436's carried candidate #3), commit pending)
+## Current state (2026-09-06, cycle 443 — FEATURE: enable the media-orphan-sweep PrometheusRule in prod-eu/prod-ap/staging overlays (closes cycle 442's candidate #5), commit 87398b2)
+
+- Mode selection: counter 442→443, 443 % 5 != 0 → FEATURE.
+- CI check: `gh run list --limit 5` green on `main` (cycle 442's push
+  `completed`/`success` on both `CI — Rust` and the now-present
+  `CI — Infra` job). `gh issue list --state open`: empty. Clean working
+  tree at session start (no inherited uncommitted work this time).
+- Picked cycle 442's candidate #5 (the only genuinely actionable item;
+  #1/#2/#4 remain non-actionable-from-this-repo/policy-gated/BLOCKED as
+  before): CI's existing `ci-infra.yml` `helm-validate` job already loops
+  `helm lint` + `helm template | kubeconform` + `helm template | conftest`
+  over `values-prod-eu.yaml`/`values-prod-ap.yaml`/`values-staging.yaml`,
+  but none of those three overlays set `monitoring.prometheusRule.enabled`,
+  so the new PrometheusRule template (cycle 442) was never actually
+  rendered/validated by CI, and a real kube-prometheus-stack install would
+  render it without the `additionalLabels.release` its `ruleSelector`
+  needs.
+- **Fix**: added a `monitoring.prometheusRule` block to all three overlay
+  files, mirroring the existing (already-enabled, already-reviewed)
+  `monitoring.serviceMonitor` block's shape exactly —
+  `enabled: true`, `window: "1h"`, `additionalLabels: {release:
+  kube-prometheus-stack}` — same value in all three files, same pattern
+  the `serviceMonitor` block in the same file already uses. Pure
+  values-file diff, zero template/schema/code changes (those already
+  landed cycle 442).
+- **Validated locally before delegating review** (not just trusting the
+  template renders): `helm lint` clean on all three overlays;
+  `helm template ... | grep -c "kind: PrometheusRule"` → 1 for each
+  overlay (previously 0 — confirms this closes the actual gap);
+  `conftest verify -p infra/policy` (88/88) and `helm template ... |
+  conftest test - -p infra/policy --combine` (7/7 per overlay, 0
+  failures) — `conftest` happened to be installed locally this session
+  (`kubeconform` still wasn't, same gap as prior infra cycles) so this ran
+  for real instead of only being deferred to CI.
+- **security-auditor: PASS, no required fixes.** Independently re-derived
+  rather than trusting this session's own claims: diffed rendered
+  manifests at HEAD vs. working tree (73 added lines, 0 removed/modified,
+  all originating from `templates/prometheusrule.yaml` — confirms
+  no other resource/limits/NetworkPolicy path was touched), confirmed
+  both underlying counters carry only the `region_id` label (schema-bound
+  enum, no user data), byte-compared all six `release:` lines for exact
+  match, confirmed `window: "1h"` and the rendered `for: 0m` both satisfy
+  their respective duration-pattern schemas (values.schema.json and the
+  real PrometheusRule CRD from the datreeio catalog CI actually fetches),
+  and explicitly reasoned about whether staging should get this alert at
+  all — concluded **yes, arguably required**: `values-staging.yaml` sets
+  `region: eu-frankfurt`, the same region as prod-eu, and the file's own
+  cycle-424 comment already documents that a shared bucket between the
+  two would let staging's orphan sweep delete prod-eu's live media — the
+  owner-mismatch alert is the detection control for exactly that
+  misconfiguration, so gating it to prod-only would blind the one
+  environment where the risk is documented as live. Two non-blocking
+  nits, not applied this cycle (correctly out of scope for a two-line
+  enablement diff): (a) if staging and prod-eu ever scrape into one
+  Prometheus, `sum by (region_id)` alone can't tell their alerts apart
+  (both `region_id="eu-frankfurt"`) — would need an `env` label or
+  `enforcedNamespaceLabel` if that topology ever happens; (b)
+  `values.schema.json`'s `prometheusRule` object doesn't declare
+  `additionalLabels` (same pre-existing omission as `serviceMonitor`) —
+  a typo in the release-label value fails silently at runtime, not in CI.
+- No `.rs` file touched — pure Helm values diff, so `crypto-reviewer`/
+  `threat-model-checker` correctly don't apply (same routing precedent as
+  cycle 442's template-authoring commit) and the backend build/test gate
+  doesn't apply either; not re-run this cycle.
+- Committed `87398b2` (`feat(infra): enable media-orphan-sweep
+  PrometheusRule in prod/staging overlays`), pushed. Confirm `CI — Infra`
+  green in a future session if not already done by the time this is read.
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates (carried/updated):**
+  1. Carried: host disk risk from other `~/codespace/*` projects — not
+     actionable from this repo.
+  2. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  3. Carried, still explicitly BLOCKED: wiring
+     `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal` into a real
+     caller needs F3 (incl. the `IpHash` extension) and the
+     HMAC-vs-plain-SHA256 gate resolved first — do not wire without
+     re-reading both prd.md sections.
+  4. **Downgraded to done:** cycle 442's candidate #5 (CI never rendering
+     the PrometheusRule template) is now closed — all three overlays
+     enable it and CI's existing `ci-infra.yml` loop will render/validate
+     it on every future push that touches `infra/helm/**`.
+  5. **New, minor, optional (security-auditor nit, not applied this
+     cycle):** `values.schema.json`'s `monitoring.prometheusRule` object
+     (and `serviceMonitor`, pre-existing) doesn't declare
+     `additionalLabels` as a schema property, so a typo in
+     `release: kube-prometheus-stack` would validate cleanly and only
+     fail silently at runtime (Prometheus Operator's `ruleSelector`
+     simply wouldn't pick up the rule) instead of failing in CI. Cheap
+     one-line schema addition if a future cycle touches this file again;
+     not worth a dedicated cycle.
+  6. **New, minor, optional (security-auditor nit, not applied this
+     cycle):** if staging and prod-eu (same `region_id=eu-frankfurt`)
+     ever get scraped by the same Prometheus instance, `sum by
+     (region_id)` can't distinguish their alerts. Not urgent since they're
+     currently separate clusters — would need an `env` label or
+     `enforcedNamespaceLabel` only if that topology changes.
+
+## Previous state (2026-09-05, cycle 442 — FEATURE: wire the R2 orphan-sweep owner-mismatch/ratio-guard Prometheus counters to an actual PrometheusRule (closes cycle 436's carried candidate #3), commit pending)
 
 - Mode selection: counter 441→442, 442 % 5 != 0 → FEATURE.
 - CI check: `gh run list --limit 5` green on `main` (cycle 441's push
