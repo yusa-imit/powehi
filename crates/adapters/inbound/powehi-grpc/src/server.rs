@@ -16,8 +16,8 @@ use powehi_domain::{
     user::UserId,
 };
 use powehi_port_outbound::{
-    abuse_signal::AbuseSignalStore, envelope_repo::EnvelopeRepository, event_bus::DomainEventBus,
-    group_repo::GroupRepository, key_package_repo::KeyPackageRepository,
+    abuse_signal::AbuseSignalStore, commit_ledger::CommitLedger, envelope_repo::EnvelopeRepository,
+    event_bus::DomainEventBus, group_repo::GroupRepository, key_package_repo::KeyPackageRepository,
 };
 use tonic::{Request, Response, Status};
 use tracing::{instrument, warn};
@@ -110,6 +110,11 @@ pub struct RegionGrpcServer {
     pub event_bus: Arc<dyn DomainEventBus>,
     pub key_package_repo: Arc<dyn KeyPackageRepository>,
     pub group_repo: Arc<dyn GroupRepository>,
+    /// Single-transaction epoch-CAS + Commit-envelope persist (prd.md §4A.5),
+    /// used by `forward_commit`. Required, not optional: accepting a forwarded
+    /// Commit is only correct if the epoch advance and the envelope insert
+    /// commit or roll back together.
+    pub commit_ledger: Arc<dyn CommitLedger>,
     /// Region-local store for cross-region abuse blocks (prd.md §6.4).
     ///
     /// This is the RECEIVING end of the mesh fan-out: signals arriving via
@@ -133,12 +138,21 @@ pub struct RegionGrpcServer {
 }
 
 impl RegionGrpcServer {
+    // Every parameter is a required collaborator of the composition root, and
+    // each is load-bearing for a security invariant (`commit_ledger` for the
+    // epoch/envelope atomicity in `forward_commit`, `tls_required` for the
+    // fail-closed mTLS check). A builder with `with_*` setters would make them
+    // individually omissible and turn a wiring mistake into a silent runtime
+    // degradation instead of a compile error, so keep the positional
+    // constructor and take the lint suppression.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         local_region: RegionId,
         envelope_repo: Arc<dyn EnvelopeRepository>,
         event_bus: Arc<dyn DomainEventBus>,
         key_package_repo: Arc<dyn KeyPackageRepository>,
         group_repo: Arc<dyn GroupRepository>,
+        commit_ledger: Arc<dyn CommitLedger>,
         abuse_signal_store: Arc<dyn AbuseSignalStore>,
         tls_required: bool,
     ) -> Self {
@@ -155,6 +169,7 @@ impl RegionGrpcServer {
             event_bus,
             key_package_repo,
             group_repo,
+            commit_ledger,
             abuse_signal_store,
             abuse_signal_limiter: Arc::new(RateLimiter::keyed(quota)),
             tls_required,
@@ -550,8 +565,9 @@ impl RegionService for RegionGrpcServer {
         // otherwise two concurrent commits (or a stale retry racing a fresher
         // commit) can both be accepted against the same starting epoch, which
         // RFC 9420 forbids (exactly one Commit is valid per epoch) and would
-        // fork group state. `GroupRepository::advance_epoch` is the CAS
-        // primitive for this; `save`'s blind upsert must never be used here.
+        // fork group state. `CommitLedger::commit_epoch_and_save` is the CAS
+        // primitive for this; `GroupRepository::save`'s blind upsert must
+        // never be used here.
         //
         // A CAS loss and an unmapped/expired FailedPrecondition are both
         // rejections, not empty-epoch successes: the client's gRPC layer
@@ -559,9 +575,24 @@ impl RegionService for RegionGrpcServer {
         // failure once instead of the previous behaviour where a retried
         // call after a dropped response would advance the epoch again on
         // every attempt.
+        //
+        // The CAS and the Commit-envelope insert are ONE Postgres transaction
+        // (prd.md §4A.5). Previously (cycle 438) they were two separate writes
+        // and a failure between them durably consumed the epoch with no Commit
+        // envelope to deliver, permanently wedging the group; a failed insert
+        // now rolls the epoch back instead. `envelope.epoch` is left unset —
+        // the ledger ignores it and stamps the epoch its own CAS just won.
+        let envelope = Envelope::new(
+            group_id.clone(),
+            sender,
+            None,
+            MessageType::Commit,
+            req.commit.to_vec(),
+        );
+
         let new_epoch = self
-            .group_repo
-            .advance_epoch(&group_id, Epoch(req.expected_epoch))
+            .commit_ledger
+            .commit_epoch_and_save(&group_id, Epoch(req.expected_epoch), &envelope)
             .await
             .map_err(|e| domain_err_to_status(&e))?
             .ok_or_else(|| {
@@ -570,27 +601,6 @@ impl RegionService for RegionGrpcServer {
                     got: group.epoch.0,
                 })
             })?;
-
-        let mut envelope = Envelope::new(
-            group_id.clone(),
-            sender,
-            None,
-            MessageType::Commit,
-            req.commit.to_vec(),
-        );
-        envelope.epoch = Some(new_epoch);
-
-        // The epoch CAS above and this save are not one transaction (accepted
-        // risk, prd.md §4A.5): a save failure here durably consumes the epoch
-        // with no Commit envelope to deliver, wedging the group. Emit a
-        // counter so this rare failure is alertable rather than silent —
-        // turns a silent wedge into a paged one (security-auditor follow-up,
-        // cycle 438).
-        if let Err(e) = self.envelope_repo.save(&envelope).await {
-            metrics::counter!("mls_commit_epoch_stall_total", "path" => "forward_commit")
-                .increment(1);
-            return Err(domain_err_to_status(&e));
-        }
 
         if let Err(e) = self
             .event_bus
@@ -920,8 +930,8 @@ mod tests {
         key_package::{ConsumeResult, KeyPackage, KeyPackageId},
     };
     use powehi_port_outbound::{
-        abuse_signal::AbuseSignalStore, envelope_repo::EnvelopeRepository,
-        event_bus::DomainEventBus, group_repo::GroupRepository,
+        abuse_signal::AbuseSignalStore, commit_ledger::CommitLedger,
+        envelope_repo::EnvelopeRepository, event_bus::DomainEventBus, group_repo::GroupRepository,
         key_package_repo::KeyPackageRepository,
     };
     use std::collections::HashMap;
@@ -1237,6 +1247,72 @@ mod tests {
         }
     }
 
+    /// In-memory [`CommitLedger`] fake that delegates to whichever
+    /// `GroupRepository`/`EnvelopeRepository` fakes a test already wired up,
+    /// so the ledger observes and mutates the same state the rest of the test
+    /// asserts against.
+    ///
+    /// Deliberately NOT atomic: unit tests only need the accept/reject
+    /// semantics of the CAS plus the epoch-stamping contract. Real
+    /// all-or-nothing behaviour is a property of `PgCommitLedger`'s
+    /// transaction and belongs to the Postgres integration suite.
+    struct FakeCommitLedger {
+        group_repo: Arc<dyn GroupRepository>,
+        envelope_repo: Arc<dyn EnvelopeRepository>,
+    }
+
+    impl FakeCommitLedger {
+        fn new(
+            group_repo: Arc<dyn GroupRepository>,
+            envelope_repo: Arc<dyn EnvelopeRepository>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                group_repo,
+                envelope_repo,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl CommitLedger for FakeCommitLedger {
+        async fn commit_epoch_and_save(
+            &self,
+            group_id: &GroupId,
+            expected: Epoch,
+            commit_envelope: &Envelope,
+        ) -> Result<Option<Epoch>, DomainError> {
+            let Some(new_epoch) = self.group_repo.advance_epoch(group_id, expected).await? else {
+                return Ok(None);
+            };
+            // Mirror the real adapter's contract: the caller's `epoch` field is
+            // ignored and the freshly-won epoch is stamped instead.
+            let mut envelope = commit_envelope.clone();
+            envelope.epoch = Some(new_epoch);
+            self.envelope_repo.save(&envelope).await?;
+            Ok(Some(new_epoch))
+        }
+    }
+
+    /// [`CommitLedger`] that always fails without touching any state — stands
+    /// in for the DB blip / pod kill that used to wedge a group (prd.md
+    /// §4A.5). Because the real adapter runs the CAS and the envelope insert
+    /// in one transaction, a failure means NEITHER happened.
+    struct FailingCommitLedger;
+
+    #[async_trait]
+    impl CommitLedger for FailingCommitLedger {
+        async fn commit_epoch_and_save(
+            &self,
+            _group_id: &GroupId,
+            _expected: Epoch,
+            _commit_envelope: &Envelope,
+        ) -> Result<Option<Epoch>, DomainError> {
+            Err(DomainError::Internal(
+                "simulated commit ledger failure".into(),
+            ))
+        }
+    }
+
     /// One recorded `block()` call: subject, reason, clamped TTL, attributed region.
     type RecordedBlock = (
         AbuseSubject,
@@ -1289,8 +1365,34 @@ mod tests {
         }
     }
 
-    fn make_server() -> RegionGrpcServer {
+    /// Test-only constructor mirroring `RegionGrpcServer::new`, but deriving
+    /// the `CommitLedger` from the same group/envelope fakes the caller
+    /// passes, so every test site keeps its original argument list.
+    #[allow(clippy::too_many_arguments)]
+    fn make_server_full(
+        local_region: RegionId,
+        envelope_repo: Arc<dyn EnvelopeRepository>,
+        event_bus: Arc<dyn DomainEventBus>,
+        key_package_repo: Arc<dyn KeyPackageRepository>,
+        group_repo: Arc<dyn GroupRepository>,
+        abuse_signal_store: Arc<dyn AbuseSignalStore>,
+        tls_required: bool,
+    ) -> RegionGrpcServer {
+        let commit_ledger = FakeCommitLedger::new(group_repo.clone(), envelope_repo.clone());
         RegionGrpcServer::new(
+            local_region,
+            envelope_repo,
+            event_bus,
+            key_package_repo,
+            group_repo,
+            commit_ledger,
+            abuse_signal_store,
+            tls_required,
+        )
+    }
+
+    fn make_server() -> RegionGrpcServer {
+        make_server_full(
             RegionId::new("eu-central-1"),
             Arc::new(NoopEnvelopeRepo),
             Arc::new(NoopEventBus),
@@ -1302,7 +1404,7 @@ mod tests {
     }
 
     fn make_server_with_kp(kp: KeyPackage) -> RegionGrpcServer {
-        RegionGrpcServer::new(
+        make_server_full(
             RegionId::new("eu-central-1"),
             Arc::new(NoopEnvelopeRepo),
             Arc::new(NoopEventBus),
@@ -1314,7 +1416,7 @@ mod tests {
     }
 
     fn make_server_with_group_member(group_id: GroupId, device_id: DeviceId) -> RegionGrpcServer {
-        RegionGrpcServer::new(
+        make_server_full(
             RegionId::new("eu-central-1"),
             Arc::new(NoopEnvelopeRepo),
             Arc::new(NoopEventBus),
@@ -1438,6 +1540,80 @@ mod tests {
             unchanged.epoch,
             Epoch(0),
             "a rejected CAS must never advance the stored epoch"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_commit_persists_commit_envelope_stamped_with_the_accepted_epoch() {
+        // The Commit envelope must actually be persisted (that is the half of
+        // the unit of work whose failure used to wedge the group), and it must
+        // carry the epoch the CAS actually won — not one the handler picked.
+        let group_id = GroupId::from(Uuid::new_v4());
+        let sender = DeviceId::new();
+        let env_repo = CaptureEnvelopeRepo::new();
+        let server = make_server_full(
+            RegionId::new("eu-central-1"),
+            env_repo.clone(),
+            Arc::new(NoopEventBus),
+            FakeKpRepo::new(),
+            FakeGroupRepo::with_member(group_id.clone(), sender.clone()),
+            FakeAbuseStore::new(),
+            false,
+        );
+        let req = Request::new(ForwardCommitRequest {
+            group_id: group_id.as_uuid().to_string(),
+            sender_device_id: sender.as_uuid().to_string(),
+            commit: vec![0x01, 0x02],
+            expected_epoch: 0,
+        });
+
+        let resp = server.forward_commit(req).await.unwrap().into_inner();
+        assert_eq!(resp.accepted_epoch, 1);
+
+        let captured = env_repo.captured.lock().unwrap();
+        assert_eq!(captured.len(), 1, "exactly one Commit envelope persisted");
+        assert_eq!(captured[0].message_type, MessageType::Commit);
+        assert_eq!(
+            captured[0].epoch,
+            Some(Epoch(1)),
+            "the persisted envelope must carry the epoch the CAS won"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_commit_ledger_failure_returns_error_and_does_not_advance_epoch() {
+        // The wedge this closes (prd.md §4A.5): the epoch advance and the
+        // Commit-envelope insert are one transaction, so a failure must leave
+        // the stored epoch untouched and the group still committable — not
+        // durably consume an epoch whose Commit envelope never existed.
+        let group_id = GroupId::from(Uuid::new_v4());
+        let sender = DeviceId::new();
+        let group_repo = FakeGroupRepo::with_member(group_id.clone(), sender.clone());
+        let server = RegionGrpcServer::new(
+            RegionId::new("eu-central-1"),
+            Arc::new(NoopEnvelopeRepo),
+            Arc::new(NoopEventBus),
+            FakeKpRepo::new(),
+            group_repo.clone(),
+            Arc::new(FailingCommitLedger),
+            FakeAbuseStore::new(),
+            false,
+        );
+        let req = Request::new(ForwardCommitRequest {
+            group_id: group_id.as_uuid().to_string(),
+            sender_device_id: sender.as_uuid().to_string(),
+            commit: vec![0x01, 0x02],
+            expected_epoch: 0,
+        });
+
+        let err = server.forward_commit(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Internal);
+
+        let unchanged = group_repo.find_by_id(&group_id).await.unwrap().unwrap();
+        assert_eq!(
+            unchanged.epoch,
+            Epoch(0),
+            "a failed commit must not consume the epoch — that was the wedge"
         );
     }
 
@@ -1894,7 +2070,7 @@ mod tests {
         store: Arc<FakeAbuseStore>,
         tls_required: bool,
     ) -> RegionGrpcServer {
-        RegionGrpcServer::new(
+        make_server_full(
             RegionId::new("eu-central-1"),
             Arc::new(NoopEnvelopeRepo),
             Arc::new(NoopEventBus),
@@ -2428,7 +2604,7 @@ mod tests {
     #[tokio::test]
     async fn sync_group_membership_without_tls_info_rejected_when_tls_required() {
         // Build a server with tls_required=true (production mode).
-        let server = RegionGrpcServer::new(
+        let server = make_server_full(
             RegionId::new("eu-central-1"),
             Arc::new(NoopEnvelopeRepo),
             Arc::new(NoopEventBus),
@@ -2559,7 +2735,7 @@ mod tests {
         let group_id = GroupId::from(Uuid::new_v4());
         let sender = DeviceId::new();
         let group_repo = FakeGroupRepo::with_member(group_id.clone(), sender.clone());
-        let server = RegionGrpcServer::new(
+        let server = make_server_full(
             RegionId::new("eu-central-1"),
             Arc::new(NoopEnvelopeRepo),
             Arc::new(NoopEventBus),
@@ -2590,7 +2766,7 @@ mod tests {
         let group_id = GroupId::from(Uuid::new_v4());
         let sender = DeviceId::new();
         let group_repo = FakeGroupRepo::with_member(group_id.clone(), sender.clone());
-        let server = RegionGrpcServer::new(
+        let server = make_server_full(
             RegionId::new("eu-central-1"),
             Arc::new(NoopEnvelopeRepo),
             Arc::new(NoopEventBus),
@@ -2646,7 +2822,7 @@ mod tests {
         let group_id = GroupId::from(Uuid::new_v4());
         let sender = DeviceId::new();
         let capture_repo = CaptureEnvelopeRepo::new();
-        let server = RegionGrpcServer::new(
+        let server = make_server_full(
             RegionId::new("eu-central-1"),
             capture_repo.clone(),
             Arc::new(NoopEventBus),
@@ -2683,7 +2859,7 @@ mod tests {
         let group_id = GroupId::from(Uuid::new_v4());
         let sender = DeviceId::new();
         let capture_repo = CaptureEnvelopeRepo::new();
-        let server = RegionGrpcServer::new(
+        let server = make_server_full(
             RegionId::new("eu-central-1"),
             capture_repo.clone(),
             Arc::new(NoopEventBus),
@@ -2721,7 +2897,7 @@ mod tests {
         let group_id = GroupId::from(Uuid::new_v4());
         let sender = DeviceId::new();
         let capture_repo = CaptureEnvelopeRepo::new();
-        let server = RegionGrpcServer::new(
+        let server = make_server_full(
             RegionId::new("eu-central-1"),
             capture_repo.clone(),
             Arc::new(NoopEventBus),
@@ -2760,7 +2936,7 @@ mod tests {
         let group_id = GroupId::from(Uuid::new_v4());
         let sender = DeviceId::new();
         let capture_repo = CaptureEnvelopeRepo::new();
-        let server = RegionGrpcServer::new(
+        let server = make_server_full(
             RegionId::new("eu-central-1"),
             capture_repo.clone(),
             Arc::new(NoopEventBus),
@@ -2796,7 +2972,7 @@ mod tests {
         let group_id = GroupId::from(Uuid::new_v4());
         let sender = DeviceId::new();
         let capture_repo = CaptureEnvelopeRepo::new();
-        let server = RegionGrpcServer::new(
+        let server = make_server_full(
             RegionId::new("eu-central-1"),
             capture_repo.clone(),
             Arc::new(NoopEventBus),

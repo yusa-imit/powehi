@@ -1,5 +1,6 @@
 pub mod abuse_signal;
 pub mod cache;
+pub mod commit_ledger;
 pub mod device_repo;
 pub mod envelope_repo;
 pub mod event_bus;

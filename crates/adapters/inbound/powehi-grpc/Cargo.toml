@@ -14,7 +14,6 @@ tonic = { workspace = true, features = ["tls"] }
 prost = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-metrics = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }

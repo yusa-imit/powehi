@@ -516,28 +516,39 @@ service RegionService {
 
 ```
 1. 모든 commit 메시지는 그룹의 home_region DS로 라우팅
-2. home_region DS가 epoch 순서 보장 (동시 commit 시 첫 번째만 수락) — `GroupRepository::advance_epoch`의
-   원자적 compare-and-swap(`UPDATE ... WHERE epoch = $expected RETURNING epoch`)으로 구현 (cycle 438).
+2. home_region DS가 epoch 순서 보장 (동시 commit 시 첫 번째만 수락) — 원자적
+   compare-and-swap(`UPDATE ... WHERE epoch = $expected RETURNING epoch`)으로 구현 (cycle 438).
    클라이언트/피어가 보낸 `expected_epoch`는 CAS precondition으로만 쓰이고, 실제 새 epoch은 항상
-   DB가 계산한 `stored + 1`이다 — 호출자 값을 그대로 채택하지 않는다.
+   DB가 계산한 `stored + 1`이다 — 호출자 값을 그대로 채택하지 않는다. commit 수락 경로는
+   `CommitLedger::commit_epoch_and_save`(cycle 439)를 통해 이 CAS와 commit envelope 저장을
+   하나의 단위로 실행한다 (아래 참조). `GroupRepository::advance_epoch`는 여전히 CAS
+   primitive이지만 commit 수락 경로에서 단독으로 호출되지 않는다.
 3. 수락된 commit은 모든 관련 리전으로 fan-out
 4. 거부된 commit → 클라이언트에 CONFLICT(REST 409) / FailedPrecondition(gRPC) 응답 → 클라이언트가
    새 epoch을 다시 조회해 Commit을 재빌드 후 재시도 (재시도 없이 즉시 거부 — 서버가 알아서
    재시도하지 않음, 그렇지 않으면 클라이언트가 실제로 빌드하지 않은 epoch에 대해 Commit이
    수락된 것처럼 보일 수 있음)
 
-**알려진 잔여 리스크 (accepted, cycle 438)**: `advance_epoch`(CAS)와 뒤따르는
-`EnvelopeRepository::save`(commit envelope 저장)는 하나의 DB 트랜잭션으로 묶여 있지 않다 —
-`GroupRepository`/`EnvelopeRepository`가 별도 outbound port(hexagonal 경계)이기 때문에, 진짜
-원자성을 보장하려면 포트 경계를 가로지르는 unit-of-work 추상화가 필요하고, 이는 이번 수정
-범위를 넘는 별도의 아키텍처 작업이다. CAS가 성공한 직후 `save`가 실패하면(드묾 — 같은 Postgres
-커넥션 풀 대상) epoch만 소비되고 커밋 envelope는 존재하지 않아 해당 그룹이 "막힌" 상태가 될 수
-있다 — 이후 모든 `ForwardCommit`이 정당하게 거부되며 자동 복구 경로가 없다. 완화책 1단계(이번
-사이클에 적용): `save` 실패 시 `mls_commit_epoch_stall_total{path="send_commit"|"forward_commit"}`
-Prometheus 카운터를 증가시켜, 이 드문 실패가 조용히 묻히지 않고 알림 가능하도록 함
-(`messaging_service.rs::send_commit`, `powehi-grpc/server.rs::forward_commit`). 완화책 2단계
-(다음 사이클 후보로 기록, 아직 미착수): 위 카운터 기반 Alertmanager/Grafana 룰 배선, 또는
-outbox 패턴 기반 진짜 원자성 확보 — 카운터 자체는 관측성만 제공할 뿐 문제를 막지는 않는다.
+**epoch wedge — CLOSED (cycle 439)**: 이전에는 CAS(`advance_epoch`)와 뒤따르는
+`EnvelopeRepository::save`(commit envelope 저장)가 별개의 DB write였고, CAS 성공 직후 `save`가
+실패하면(DB 순단, pod kill) epoch만 소비되고 커밋 envelope는 존재하지 않아 해당 그룹이 영구히
+"막힌" 상태가 될 수 있었다 — 이후 모든 commit이 정당하게 거부되며 자동 복구 경로가 없었다.
+cycle 438에서는 이를 accepted risk로 두고 `mls_commit_epoch_stall_total` 카운터로 관측만 했다.
+
+이제 이 두 write는 **하나의 Postgres 트랜잭션**이다. 전용 outbound port
+`CommitLedger::commit_epoch_and_save`(`powehi-port-outbound/src/commit_ledger.rs`)와 그 어댑터
+`PgCommitLedger`(`powehi-postgres/src/commit_ledger.rs`)가 같은 트랜잭션 안에서 CAS UPDATE와
+envelope INSERT를 실행한다: INSERT가 실패하면 epoch 증가도 롤백되므로 "epoch만 소비되고 envelope는
+없는" 상태가 구조적으로 불가능하다. CAS를 잃으면(`Ok(None)`) envelope는 저장되지 않고 호출자는
+`EpochMismatch`로 거부한다 — 기존 `advance_epoch`와 동일한 거부 계약. envelope에 찍히는 epoch은
+항상 그 트랜잭션이 방금 획득한 값이며 호출자가 넘긴 `commit_envelope.epoch`는 무시된다.
+`messaging_service.rs::send_commit`과 `powehi-grpc/server.rs::forward_commit` 두 경로 모두 이
+포트를 사용한다. 관측용이던 `mls_commit_epoch_stall_total` 카운터는 추적하던 실패 모드가 사라져
+제거했다 — 남겨두면 stale/오해를 부르는 신호가 된다.
+
+`CommitLedger`는 의도적으로 이 하나의 cross-aggregate invariant("epoch이 소비되는 것과 그 epoch을
+소비한 commit envelope이 저장되는 것은 동치")만을 위한 좁은 포트이며, 범용 unit-of-work / outbox
+추상화가 아니다 — 다른 다중 테이블 write를 위해 메서드를 추가하지 말 것.
 
 **크로스 리전 commit 흐름:**
 
@@ -550,7 +561,7 @@ sequenceDiagram
 
     A->>KR: POST /v1/groups/<gid>/commit {expected_epoch}
     KR->>EU: gRPC ForwardCommit(gid, sender_device_id, commit, expected_epoch)
-    EU->>EU: advance_epoch CAS(expected_epoch) 검증 + 수락
+    EU->>EU: CommitLedger CAS(expected_epoch) 검증 + envelope 저장 (단일 트랜잭션)
     EU->>B: WS push: commit (로컬)
     EU->>KR: gRPC response: accepted(new_epoch) / FailedPrecondition(EpochMismatch)
     KR->>A: WS push: commit accepted / 409 CONFLICT
@@ -894,7 +905,7 @@ pub trait RegionRouter: Send + Sync {
     /// 크로스 리전 commit 포워딩. `expected_epoch`는 호출자가 이 Commit을
     /// 빌드할 때 기준으로 삼은 epoch — 목적지 region은 이를 CAS
     /// precondition으로만 사용해 자신의 저장된 epoch와 비교하고
-    /// (`GroupRepository::advance_epoch`), 값이 stale하면 `EpochMismatch`로
+    /// (`CommitLedger::commit_epoch_and_save`), 값이 stale하면 `EpochMismatch`로
     /// 거부한다. 새 epoch 값은 항상 목적지가 자체 계산한 `stored + 1`이며,
     /// 호출자가 보낸 값을 그대로 채택하지 않는다 (§4A.5, cycle 438).
     async fn forward_commit(&self, target_region: &RegionId, group_id: &GroupId, sender_device_id: &DeviceId, commit: Bytes, expected_epoch: Epoch) -> Result<Epoch, DomainError>;

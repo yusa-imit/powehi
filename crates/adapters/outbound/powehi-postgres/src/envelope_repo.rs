@@ -100,7 +100,10 @@ struct EnvelopeRow {
     expires_at: Option<DateTime<Utc>>,
 }
 
-fn msg_type_to_str(t: MessageType) -> &'static str {
+/// `pub(crate)` so `commit_ledger.rs` binds the `message_type` column with the
+/// exact same mapping this repo's `save` uses — the two write the same table
+/// and must never disagree on the string form.
+pub(crate) fn msg_type_to_str(t: MessageType) -> &'static str {
     match t {
         MessageType::Application => "application",
         MessageType::Welcome => "welcome",

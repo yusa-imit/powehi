@@ -25,10 +25,10 @@ use powehi_application::{
 use powehi_grpc::{RegionGrpcServer, TlsConfig};
 use powehi_opaque::OpaqueServer;
 use powehi_postgres::{
-    connect as pg_connect, run_migrations, PgDeviceRepository, PgEnvelopeRepository,
-    PgGroupRepository, PgKeyPackageRepository, PgLeaderLock, PgPushSubscriptionRepository,
-    PgServerConfigRepository, PgUserRepository, GC_LOCK_MEDIA_BLOBS, GC_LOCK_MEDIA_LEDGER,
-    GC_LOCK_MEDIA_ORPHANS,
+    connect as pg_connect, run_migrations, PgCommitLedger, PgDeviceRepository,
+    PgEnvelopeRepository, PgGroupRepository, PgKeyPackageRepository, PgLeaderLock,
+    PgPushSubscriptionRepository, PgServerConfigRepository, PgUserRepository, GC_LOCK_MEDIA_BLOBS,
+    GC_LOCK_MEDIA_LEDGER, GC_LOCK_MEDIA_ORPHANS,
 };
 use powehi_proto::region::region_service_server::RegionServiceServer;
 use powehi_r2::R2MediaAdapter;
@@ -83,6 +83,11 @@ async fn main() -> Result<()> {
         Arc::new(PgDeviceRepository::new(pool.clone()));
     let envelope_repo = Arc::new(PgEnvelopeRepository::new(pool.clone()));
     let group_repo = Arc::new(PgGroupRepository::new(pool.clone()));
+    // Spans both `groups` and `envelopes` in ONE transaction (prd.md §4A.5) —
+    // must share the same pool as `group_repo`/`envelope_repo` above for the
+    // epoch CAS and the Commit-envelope insert to be atomic.
+    let commit_ledger: Arc<dyn powehi_port_outbound::commit_ledger::CommitLedger> =
+        Arc::new(PgCommitLedger::new(pool.clone()));
     let key_package_repo = Arc::new(PgKeyPackageRepository::new(pool.clone()));
     let push_sub_repo = Arc::new(PgPushSubscriptionRepository::new(pool.clone()));
 
@@ -200,8 +205,13 @@ async fn main() -> Result<()> {
         powehi_domain::region::RegionId::new(&cfg.region_id),
     ));
     let messaging: Arc<dyn powehi_port_inbound::messaging::MessagingUseCase> = Arc::new(
-        MessagingService::new(envelope_repo.clone(), group_repo, event_bus.clone())
-            .with_push(push_sub_repo.clone(), web_push_adapter),
+        MessagingService::new(
+            envelope_repo.clone(),
+            group_repo,
+            commit_ledger.clone(),
+            event_bus.clone(),
+        )
+        .with_push(push_sub_repo.clone(), web_push_adapter),
     );
 
     let key_package: Arc<dyn powehi_port_inbound::key_package::KeyPackageUseCase> =
@@ -264,6 +274,7 @@ async fn main() -> Result<()> {
         event_bus,
         key_package_repo,
         group_repo_grpc,
+        commit_ledger,
         abuse_signal_store,
         cfg.grpc_tls_enabled(),
     );

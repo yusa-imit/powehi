@@ -27,13 +27,13 @@ use powehi_domain::{
     user::{User, UserId},
 };
 use powehi_port_outbound::{
-    device_repo::DeviceRepository, envelope_repo::EnvelopeRepository, group_repo::GroupRepository,
-    key_package_repo::KeyPackageRepository, server_config_repo::ServerConfigRepository,
-    user_repo::UserRepository,
+    commit_ledger::CommitLedger, device_repo::DeviceRepository, envelope_repo::EnvelopeRepository,
+    group_repo::GroupRepository, key_package_repo::KeyPackageRepository,
+    server_config_repo::ServerConfigRepository, user_repo::UserRepository,
 };
 use powehi_postgres::{
-    PgDeviceRepository, PgEnvelopeRepository, PgGroupRepository, PgKeyPackageRepository,
-    PgLeaderLock, PgServerConfigRepository, PgUserRepository,
+    PgCommitLedger, PgDeviceRepository, PgEnvelopeRepository, PgGroupRepository,
+    PgKeyPackageRepository, PgLeaderLock, PgServerConfigRepository, PgUserRepository,
 };
 use sqlx::PgPool;
 use testcontainers::{runners::AsyncRunner, ImageExt};
@@ -961,6 +961,179 @@ async fn advance_epoch_rejects_stale_expected_and_leaves_epoch_untouched() {
         stored.epoch,
         Epoch(0),
         "a rejected CAS must never mutate the stored epoch"
+    );
+}
+
+// ── CommitLedger: epoch CAS + Commit-envelope insert as ONE transaction ─────
+// (prd.md §4A.5). These can only be verified against real Postgres: the whole
+// point is that a failed envelope INSERT rolls the epoch UPDATE back, which no
+// in-memory fake can meaningfully model.
+
+/// Builds the Commit envelope a caller would hand to the ledger. `epoch` is
+/// set to a deliberately wrong value — the port contract says the ledger
+/// ignores it and stamps the epoch its own CAS won.
+fn commit_envelope_for(group_id: &GroupId, sender: &DeviceId) -> Envelope {
+    let mut envelope = Envelope::new(
+        group_id.clone(),
+        sender.clone(),
+        None,
+        MessageType::Commit,
+        vec![0x01, 0x02, 0x03],
+    );
+    envelope.epoch = Some(Epoch(9999));
+    envelope
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn commit_epoch_and_save_advances_epoch_and_persists_envelope_together() {
+    let (_c, pool) = setup().await;
+    let ledger = PgCommitLedger::new(pool.clone());
+    let group_repo = PgGroupRepository::new(pool.clone());
+    let envelope_repo = PgEnvelopeRepository::new(pool.clone());
+    let group_id = insert_group(&pool).await; // starts at Epoch(0)
+    let sender = DeviceId::new();
+    let envelope = commit_envelope_for(&group_id, &sender);
+
+    let accepted = ledger
+        .commit_epoch_and_save(&group_id, Epoch(0), &envelope)
+        .await
+        .expect("commit_epoch_and_save");
+    assert_eq!(accepted, Some(Epoch(1)));
+
+    let stored_group = group_repo
+        .find_by_id(&group_id)
+        .await
+        .expect("find_by_id")
+        .expect("group row must exist");
+    assert_eq!(stored_group.epoch, Epoch(1));
+
+    let stored_envelope = envelope_repo
+        .find_by_id(&envelope.id)
+        .await
+        .expect("find_by_id")
+        .expect("the Commit envelope must be persisted by the same transaction");
+    assert_eq!(
+        stored_envelope.epoch,
+        Some(Epoch(1)),
+        "the ledger must stamp the epoch its CAS won, ignoring the caller's value"
+    );
+    assert_eq!(stored_envelope.message_type, MessageType::Commit);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn commit_epoch_and_save_cas_loss_persists_no_envelope() {
+    let (_c, pool) = setup().await;
+    let ledger = PgCommitLedger::new(pool.clone());
+    let group_repo = PgGroupRepository::new(pool.clone());
+    let envelope_repo = PgEnvelopeRepository::new(pool.clone());
+    let group_id = insert_group(&pool).await; // starts at Epoch(0)
+    let sender = DeviceId::new();
+    let envelope = commit_envelope_for(&group_id, &sender);
+
+    let result = ledger
+        .commit_epoch_and_save(&group_id, Epoch(41), &envelope)
+        .await
+        .expect("commit_epoch_and_save");
+    assert_eq!(
+        result, None,
+        "a stale expected epoch must be rejected, same contract as advance_epoch"
+    );
+
+    let stored_group = group_repo
+        .find_by_id(&group_id)
+        .await
+        .expect("find_by_id")
+        .expect("group row must exist");
+    assert_eq!(
+        stored_group.epoch,
+        Epoch(0),
+        "a rejected CAS must never mutate the stored epoch"
+    );
+    assert!(
+        envelope_repo
+            .find_by_id(&envelope.id)
+            .await
+            .expect("find_by_id")
+            .is_none(),
+        "a rejected CAS must not persist the Commit envelope"
+    );
+}
+
+/// THE WEDGE FIX (prd.md §4A.5). Before this, the epoch CAS and the envelope
+/// insert were two separate writes: a failure in between durably consumed the
+/// epoch with no Commit envelope to deliver, permanently wedging the group.
+///
+/// `envelopes` has no FK constraints by design (a Welcome may precede group
+/// creation — see migration 0001), so the insert is forced to fail with a
+/// temporary CHECK constraint instead. Same technique-by-analogy as
+/// `create_with_creator_rolls_back_group_row_when_member_insert_fails`, which
+/// leans on a real FK.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn commit_epoch_and_save_rolls_back_the_epoch_when_the_envelope_insert_fails() {
+    let (_c, pool) = setup().await;
+    let ledger = PgCommitLedger::new(pool.clone());
+    let group_repo = PgGroupRepository::new(pool.clone());
+    let group_id = insert_group(&pool).await; // starts at Epoch(0)
+    let sender = DeviceId::new();
+
+    // Make any Commit-envelope INSERT fail, simulating the DB blip / pod kill
+    // that used to leave the epoch consumed and the envelope missing.
+    sqlx::query(
+        "ALTER TABLE envelopes
+         ADD CONSTRAINT test_forced_commit_insert_failure
+         CHECK (message_type <> 'commit')",
+    )
+    .execute(&pool)
+    .await
+    .expect("install forced-failure constraint");
+
+    let envelope = commit_envelope_for(&group_id, &sender);
+    ledger
+        .commit_epoch_and_save(&group_id, Epoch(0), &envelope)
+        .await
+        .expect_err("the envelope insert must fail its CHECK constraint");
+
+    let stored_group = group_repo
+        .find_by_id(&group_id)
+        .await
+        .expect("find_by_id")
+        .expect("group row must exist");
+    assert_eq!(
+        stored_group.epoch,
+        Epoch(0),
+        "the epoch advance must roll back with the failed envelope insert — \
+         a consumed epoch with no Commit envelope is the wedge this closes"
+    );
+
+    let envelope_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM envelopes WHERE group_id = $1")
+            .bind(group_id.as_uuid())
+            .fetch_one(&pool)
+            .await
+            .expect("count envelope rows");
+    assert_eq!(envelope_rows, 0, "no envelope row may survive the rollback");
+
+    // And the group must still be committable at its original epoch — i.e. the
+    // failure cost nothing, which is the whole point of the fix.
+    sqlx::query("ALTER TABLE envelopes DROP CONSTRAINT test_forced_commit_insert_failure")
+        .execute(&pool)
+        .await
+        .expect("drop forced-failure constraint");
+    let retry = ledger
+        .commit_epoch_and_save(
+            &group_id,
+            Epoch(0),
+            &commit_envelope_for(&group_id, &sender),
+        )
+        .await
+        .expect("retry after rollback");
+    assert_eq!(
+        retry,
+        Some(Epoch(1)),
+        "the group must remain committable at its original epoch after a rollback"
     );
 }
 

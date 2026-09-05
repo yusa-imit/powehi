@@ -15,7 +15,6 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
-metrics = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 # Ed25519 verification for §8.5 recovery-phrase login proof (verify-only path).

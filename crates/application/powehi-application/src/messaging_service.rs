@@ -12,8 +12,9 @@ use powehi_domain::{
 };
 use powehi_port_inbound::messaging::MessagingUseCase;
 use powehi_port_outbound::{
-    envelope_repo::EnvelopeRepository, event_bus::DomainEventBus, group_repo::GroupRepository,
-    push_subscription_repo::PushSubscriptionRepository, web_push::WebPushPort,
+    commit_ledger::CommitLedger, envelope_repo::EnvelopeRepository, event_bus::DomainEventBus,
+    group_repo::GroupRepository, push_subscription_repo::PushSubscriptionRepository,
+    web_push::WebPushPort,
 };
 use tracing::instrument;
 
@@ -84,6 +85,11 @@ pub const MAX_WELCOME_BYTES: usize = 256 * 1024;
 pub struct MessagingService {
     envelope_repo: Arc<dyn EnvelopeRepository>,
     group_repo: Arc<dyn GroupRepository>,
+    /// Single-transaction epoch-CAS + Commit-envelope persist (prd.md §4A.5).
+    /// Required, not optional like `web_push`: `send_commit`'s correctness
+    /// invariant depends on it, so there is no degraded mode where it is
+    /// absent and the two writes fall back to being separate.
+    commit_ledger: Arc<dyn CommitLedger>,
     event_bus: Arc<dyn DomainEventBus>,
     push_sub_repo: Option<Arc<dyn PushSubscriptionRepository>>,
     web_push: Option<Arc<dyn WebPushPort>>,
@@ -93,11 +99,13 @@ impl MessagingService {
     pub fn new(
         envelope_repo: Arc<dyn EnvelopeRepository>,
         group_repo: Arc<dyn GroupRepository>,
+        commit_ledger: Arc<dyn CommitLedger>,
         event_bus: Arc<dyn DomainEventBus>,
     ) -> Self {
         Self {
             envelope_repo,
             group_repo,
+            commit_ledger,
             event_bus,
             push_sub_repo: None,
             web_push: None,
@@ -305,33 +313,34 @@ impl MessagingUseCase for MessagingService {
         // against the CAS's precondition epoch). No retry-on-mismatch here:
         // the caller must rebuild its Commit against the fresh epoch and
         // resubmit, mirroring the cross-region `ForwardCommit` contract.
-        let new_epoch = self
-            .group_repo
-            .advance_epoch(group_id, expected_epoch)
-            .await?
-            .ok_or(DomainError::EpochMismatch {
-                expected: expected_epoch.0,
-                got: group.epoch.0,
-            })?;
-
-        let mut envelope = Envelope::new(
+        //
+        // The CAS and the Commit-envelope insert go through `CommitLedger` as
+        // ONE Postgres transaction, so they cannot half-apply: previously
+        // (cycle 438) a `save` failure after a successful CAS durably consumed
+        // the epoch with no Commit envelope to deliver, permanently wedging
+        // the group with no recovery path. That wedge is now structurally
+        // impossible — a failed insert rolls the epoch back, and the caller
+        // simply retries.
+        //
+        // `envelope.epoch` is intentionally left unset here: the ledger
+        // ignores it and stamps the epoch its own CAS just won, so this path
+        // cannot label an envelope with an epoch it did not actually consume.
+        let envelope = Envelope::new(
             group_id.clone(),
             sender.clone(),
             None,
             MessageType::Commit,
             commit.to_vec(),
         );
-        envelope.epoch = Some(new_epoch);
-        // The epoch CAS above and this save are not one transaction (accepted
-        // risk, prd.md §4A.5): a save failure here durably consumes the epoch
-        // with no Commit envelope to deliver, wedging the group. Emit a
-        // counter so this rare failure is alertable rather than silent —
-        // turns a silent wedge into a paged one (security-auditor follow-up,
-        // cycle 438).
-        if let Err(e) = self.envelope_repo.save(&envelope).await {
-            metrics::counter!("mls_commit_epoch_stall_total", "path" => "send_commit").increment(1);
-            return Err(e);
-        }
+        let new_epoch = self
+            .commit_ledger
+            .commit_epoch_and_save(group_id, expected_epoch, &envelope)
+            .await?
+            .ok_or(DomainError::EpochMismatch {
+                expected: expected_epoch.0,
+                got: group.epoch.0,
+            })?;
+
         let _ = self
             .event_bus
             .publish(DomainEvent::EpochAdvanced {
@@ -680,6 +689,102 @@ mod tests {
         }
     }
 
+    /// In-memory [`CommitLedger`] fake that delegates to whichever
+    /// `FakeGroupRepo`/`FakeEnvelopeRepo` a test already wired up, so the
+    /// ledger reads and mutates the same state those tests assert against.
+    ///
+    /// Deliberately NOT atomic: these unit tests only need the accept/reject
+    /// semantics of the CAS plus the epoch-stamping contract. Real
+    /// all-or-nothing behaviour is a property of `PgCommitLedger`'s Postgres
+    /// transaction and is covered by the adapter's integration suite.
+    struct FakeCommitLedger {
+        group_repo: Arc<dyn GroupRepository>,
+        envelope_repo: Arc<dyn EnvelopeRepository>,
+    }
+
+    impl FakeCommitLedger {
+        fn new(
+            group_repo: Arc<dyn GroupRepository>,
+            envelope_repo: Arc<dyn EnvelopeRepository>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                group_repo,
+                envelope_repo,
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CommitLedger for FakeCommitLedger {
+        async fn commit_epoch_and_save(
+            &self,
+            group_id: &GroupId,
+            expected: Epoch,
+            commit_envelope: &Envelope,
+        ) -> Result<Option<Epoch>, DomainError> {
+            let Some(new_epoch) = self.group_repo.advance_epoch(group_id, expected).await? else {
+                return Ok(None);
+            };
+            // Mirror the real adapter's contract: the caller's `epoch` field is
+            // ignored and the freshly-won epoch is stamped instead.
+            let mut envelope = commit_envelope.clone();
+            envelope.epoch = Some(new_epoch);
+            self.envelope_repo.save(&envelope).await?;
+            Ok(Some(new_epoch))
+        }
+    }
+
+    /// [`CommitLedger`] that always fails, without touching any state — stands
+    /// in for the DB blip / pod kill that used to wedge a group. Because the
+    /// real adapter runs the CAS and the envelope insert in one transaction, a
+    /// failure means NEITHER happened, which is what the caller must observe.
+    struct FailingCommitLedger;
+
+    #[async_trait::async_trait]
+    impl CommitLedger for FailingCommitLedger {
+        async fn commit_epoch_and_save(
+            &self,
+            _group_id: &GroupId,
+            _expected: Epoch,
+            _commit_envelope: &Envelope,
+        ) -> Result<Option<Epoch>, DomainError> {
+            Err(DomainError::Internal(
+                "simulated commit ledger failure".into(),
+            ))
+        }
+    }
+
+    /// [`CommitLedger`] that records the `epoch` field of the envelope it was
+    /// handed and reports a fixed winning epoch, so a test can prove
+    /// `send_commit` does not pre-stamp the envelope and adopts whatever epoch
+    /// the ledger's own CAS won.
+    struct RecordingCommitLedger {
+        seen_input_epoch: Mutex<Option<Option<Epoch>>>,
+        returns: Epoch,
+    }
+
+    impl RecordingCommitLedger {
+        fn new(returns: Epoch) -> Arc<Self> {
+            Arc::new(Self {
+                seen_input_epoch: Mutex::new(None),
+                returns,
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CommitLedger for RecordingCommitLedger {
+        async fn commit_epoch_and_save(
+            &self,
+            _group_id: &GroupId,
+            _expected: Epoch,
+            commit_envelope: &Envelope,
+        ) -> Result<Option<Epoch>, DomainError> {
+            *self.seen_input_epoch.lock().unwrap() = Some(commit_envelope.epoch);
+            Ok(Some(self.returns))
+        }
+    }
+
     struct FakeEventBus;
     #[async_trait::async_trait]
     impl DomainEventBus for FakeEventBus {
@@ -695,7 +800,8 @@ mod tests {
         env_repo: Arc<dyn EnvelopeRepository>,
         group_repo: Arc<dyn GroupRepository>,
     ) -> MessagingService {
-        MessagingService::new(env_repo, group_repo, Arc::new(FakeEventBus))
+        let commit_ledger = FakeCommitLedger::new(group_repo.clone(), env_repo.clone());
+        MessagingService::new(env_repo, group_repo, commit_ledger, Arc::new(FakeEventBus))
     }
 
     /// Helper: service where `sender` is already a member of `group_id`.
@@ -705,7 +811,7 @@ mod tests {
         sender: DeviceId,
     ) -> MessagingService {
         let group_repo = FakeGroupRepo::with_member_in(group_id, sender);
-        MessagingService::new(env_repo, group_repo, Arc::new(FakeEventBus))
+        make_service(env_repo, group_repo)
     }
 
     // ── Push support fakes ────────────────────────────────────────────────────
@@ -912,7 +1018,7 @@ mod tests {
         let group_id = group.id.clone();
         let env_repo = FakeEnvelopeRepo::new();
         let group_repo = FakeGroupRepo::with_group_and_member(group, sender.clone());
-        let svc = make_service(env_repo, group_repo.clone());
+        let svc = make_service(env_repo.clone(), group_repo.clone());
 
         // First commit at epoch 0 lands, advancing the group to epoch 1.
         svc.send_commit(&sender, &group_id, Bytes::from_static(b"c1"), Epoch(0))
@@ -935,6 +1041,89 @@ mod tests {
             updated.epoch,
             Epoch(1),
             "a rejected commit must not advance the epoch a second time"
+        );
+
+        // `CommitLedger`'s `Ok(None)` contract: on CAS loss the envelope is NOT
+        // persisted. Only the first (accepted) commit may have left one behind,
+        // so the rejected `c2` must not be readable by anyone.
+        let store = env_repo.store.lock().unwrap();
+        let commits: Vec<_> = store
+            .values()
+            .filter(|e| e.message_type == MessageType::Commit)
+            .collect();
+        assert_eq!(
+            commits.len(),
+            1,
+            "a rejected commit must not persist a Commit envelope"
+        );
+        assert_eq!(commits[0].ciphertext, b"c1".to_vec());
+    }
+
+    #[tokio::test]
+    async fn send_commit_ledger_failure_leaves_epoch_and_envelope_untouched() {
+        // The wedge this closes (prd.md §4A.5): previously a failure after the
+        // epoch CAS durably consumed the epoch with no Commit envelope to
+        // deliver, permanently wedging the group. The ledger is now one
+        // transaction, so a failure must leave BOTH the epoch and the envelope
+        // store untouched and the group must remain committable.
+        let sender = DeviceId::new();
+        let group = Group::new(GroupId::new(), RegionId::new("eu-central"));
+        let group_id = group.id.clone();
+        let env_repo = FakeEnvelopeRepo::new();
+        let group_repo = FakeGroupRepo::with_group_and_member(group, sender.clone());
+        let svc = MessagingService::new(
+            env_repo.clone(),
+            group_repo.clone(),
+            Arc::new(FailingCommitLedger),
+            Arc::new(FakeEventBus),
+        );
+
+        let err = svc
+            .send_commit(&sender, &group_id, Bytes::from_static(b"c1"), Epoch(0))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Internal(_)));
+
+        let after = group_repo.find_by_id(&group_id).await.unwrap().unwrap();
+        assert_eq!(
+            after.epoch,
+            Epoch(0),
+            "a failed commit must not consume the epoch — that was the wedge"
+        );
+        assert!(
+            env_repo.store.lock().unwrap().is_empty(),
+            "a failed commit must not leave an envelope behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_commit_does_not_pre_stamp_the_envelope_epoch() {
+        // `send_commit` must hand the ledger an unstamped envelope and adopt
+        // the epoch the ledger's own CAS won — it must never label an envelope
+        // with an epoch it computed itself, which could differ from the epoch
+        // actually consumed.
+        let sender = DeviceId::new();
+        let group = Group::new(GroupId::new(), RegionId::new("eu-central"));
+        let group_id = group.id.clone();
+        let group_repo = FakeGroupRepo::with_group_and_member(group, sender.clone());
+        let ledger = RecordingCommitLedger::new(Epoch(7));
+        let svc = MessagingService::new(
+            FakeEnvelopeRepo::new(),
+            group_repo,
+            ledger.clone(),
+            Arc::new(FakeEventBus),
+        );
+
+        let got = svc
+            .send_commit(&sender, &group_id, Bytes::from_static(b"c1"), Epoch(0))
+            .await
+            .unwrap();
+
+        assert_eq!(got, Epoch(7), "the ledger's epoch must be what is returned");
+        assert_eq!(
+            *ledger.seen_input_epoch.lock().unwrap(),
+            Some(None),
+            "the envelope handed to the ledger must have no epoch pre-stamped"
         );
     }
 
@@ -1118,7 +1307,7 @@ mod tests {
             (group_id.clone(), member_b.clone()),
             (group_id.clone(), member_c.clone()),
         ]);
-        let svc = MessagingService::new(env_repo.clone(), group_repo, Arc::new(FakeEventBus));
+        let svc = make_service(env_repo.clone(), group_repo);
         let id = svc
             .send_message(&sender, &group_id, Bytes::from_static(b"x"), None)
             .await
@@ -1239,8 +1428,7 @@ mod tests {
             (group_id.clone(), sender.clone()),
             (group_id.clone(), receiver.clone()),
         ]);
-        let svc = MessagingService::new(env_repo, group_repo, Arc::new(FakeEventBus))
-            .with_push(subs, push_ref);
+        let svc = make_service(env_repo, group_repo).with_push(subs, push_ref);
         svc.send_message(&sender, &group_id, Bytes::from_static(b"ct"), None)
             .await
             .unwrap();
@@ -1269,8 +1457,7 @@ mod tests {
             (group_id.clone(), sender.clone()),
             (group_id.clone(), receiver.clone()),
         ]);
-        let svc = MessagingService::new(env_repo, group_repo, Arc::new(FakeEventBus))
-            .with_push(subs, push_ref);
+        let svc = make_service(env_repo, group_repo).with_push(subs, push_ref);
         let result = svc
             .send_message(&sender, &group_id, Bytes::from_static(b"ct"), None)
             .await;
@@ -1404,8 +1591,7 @@ mod tests {
             (group_id.clone(), member_a.clone()),
             (group_id.clone(), member_b.clone()),
         ]);
-        let svc = MessagingService::new(env_repo, group_repo, Arc::new(FakeEventBus))
-            .with_push(subs, push_ref);
+        let svc = make_service(env_repo, group_repo).with_push(subs, push_ref);
         svc.send_message(&sender, &group_id, Bytes::from_static(b"ct"), None)
             .await
             .unwrap();
@@ -1427,8 +1613,7 @@ mod tests {
         let subs = FakePushSubRepo::with_subs(vec![make_sub(&sender)]);
         let env_repo = FakeEnvelopeRepo::with_memberships(vec![(group_id.clone(), sender.clone())]);
         let group_repo = FakeGroupRepo::with_member_in(group_id.clone(), sender.clone());
-        let svc = MessagingService::new(env_repo, group_repo, Arc::new(FakeEventBus))
-            .with_push(subs, push_ref);
+        let svc = make_service(env_repo, group_repo).with_push(subs, push_ref);
         svc.send_message(&sender, &group_id, Bytes::from_static(b"ct"), None)
             .await
             .unwrap();
@@ -1458,9 +1643,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let svc =
-            MessagingService::new(FakeEnvelopeRepo::new(), group_repo, Arc::new(FakeEventBus))
-                .with_push(subs, push_ref);
+        let svc = make_service(FakeEnvelopeRepo::new(), group_repo).with_push(subs, push_ref);
         svc.send_commit(
             &committer,
             &group_id,
@@ -1491,7 +1674,7 @@ mod tests {
             (group_id.clone(), sender.clone()),
             (group_id.clone(), member.clone()),
         ]);
-        let svc = MessagingService::new(env_repo, group_repo, Arc::new(FakeEventBus));
+        let svc = make_service(env_repo, group_repo);
         svc.send_message(&sender, &group_id, Bytes::from_static(b"ct"), None)
             .await
             .unwrap();
@@ -1524,8 +1707,7 @@ mod tests {
         let subs = FakePushSubRepo::with_subs(all_subs);
         let group_repo = FakeGroupRepo::with_member_list(all_pairs.clone());
         let env_repo = FakeEnvelopeRepo::with_memberships(all_pairs);
-        let svc = MessagingService::new(env_repo, group_repo, Arc::new(FakeEventBus))
-            .with_push(subs, push_ref);
+        let svc = make_service(env_repo, group_repo).with_push(subs, push_ref);
 
         svc.send_message(&sender, &group_id, Bytes::from_static(b"ct"), None)
             .await

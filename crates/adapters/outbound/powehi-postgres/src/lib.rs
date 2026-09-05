@@ -3,6 +3,7 @@
 //! Security invariant: none of the adapters log or inspect ciphertext, handle
 //! hashes, mls_credential bytes, or key-package data (rule: no-plaintext-logging).
 
+pub mod commit_ledger;
 pub mod device_repo;
 pub mod envelope_repo;
 pub mod group_repo;
@@ -12,6 +13,7 @@ pub mod push_subscription_repo;
 pub mod server_config_repo;
 pub mod user_repo;
 
+pub use commit_ledger::PgCommitLedger;
 pub use device_repo::PgDeviceRepository;
 pub use envelope_repo::PgEnvelopeRepository;
 pub use group_repo::PgGroupRepository;
