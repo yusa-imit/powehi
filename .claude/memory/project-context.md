@@ -24,7 +24,134 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-05, cycle 438 — FEATURE: atomic epoch CAS for MLS Commit acceptance (finished inherited cycle-437 work, found+fixed a blocker, committed), commit 7cfd244)
+## Current state (2026-09-05, cycle 440 — STABILIZATION: finished inherited cycle-439 work (CommitLedger unit-of-work closing the epoch wedge), verified+reviewed+committed, commit 1e78b81)
+
+- Mode selection: counter 439→440, 440 % 5 == 0 → STABILIZATION.
+- CI check: `gh run list --limit 5` green on `main` (cycle 438's push all
+  `success`, one `cancelled` run superseded by a rerun — not a real
+  failure). `gh issue list --state open`: empty.
+- **Session start found a large uncommitted working tree again** (same
+  recurring pattern as cycles 429/433/434/438 — a prior cycle's work was
+  never committed/its own memory entry never written, here likely
+  cycle 439): a fully-formed, well-documented, well-tested feature was
+  already implemented that closes exactly next-cycle candidate #6 from
+  cycle 438's memory (the CAS+envelope-save non-atomicity accepted
+  risk). New narrow outbound port `CommitLedger::commit_epoch_and_save`
+  (`powehi-port-outbound/src/commit_ledger.rs`) + Postgres adapter
+  `PgCommitLedger` (`powehi-postgres/src/commit_ledger.rs`) run the
+  epoch CAS UPDATE and the Commit-envelope INSERT in one `sqlx`
+  transaction, replacing the old two-separate-port-calls sequence at
+  both `messaging_service.rs::send_commit` and
+  `powehi-grpc/server.rs::forward_commit`. The old
+  `mls_commit_epoch_stall_total` counter (cycle 438's observability-only
+  mitigation) was removed since the failure mode it tracked is now
+  structurally impossible. Treated as real in-progress work to verify
+  and land per the standing "investigate unfamiliar state before
+  overwriting" discipline — this is finishing previously-started
+  architectural work, not starting a new feature, so doing it in a
+  STABILIZATION cycle is consistent with "no new features."
+- Verified from scratch (not trusting the diff's self-documentation):
+  read every changed/new file in full, confirmed the CAS SQL is
+  byte-identical to the already-reviewed `advance_epoch`, confirmed the
+  envelope's `epoch` field is always adapter-stamped from the CAS's own
+  return value (never caller-supplied), confirmed explicit
+  `tx.rollback()` on CAS-loss.
+- **All three required review agents run in-session** (MLS epoch/
+  concurrency logic + new architectural port + gRPC handler — all three
+  routing triggers apply):
+  - **crypto-reviewer: PASS.** CAS still atomic/race-free under Postgres
+    READ COMMITTED (EvalPlanQual re-checks `WHERE epoch=$2` against the
+    post-commit row on lock contention, so a loser correctly sees
+    `Ok(None)`, never double-advances). Wrapping the CAS in a longer-held
+    transaction is strictly safer, not racier. Error semantics correctly
+    changed so a client-visible failure now provably means the epoch is
+    untouched (safe to retry with the same `expected_epoch`), closing
+    the old ambiguous-retry class of bug. Envelope epoch-stamping
+    verified correct with both a unit test and a Postgres integration
+    test that deliberately sets a wrong input epoch. One non-blocking
+    style nit: insert-failure path relied on `Transaction::drop`'s
+    best-effort rollback instead of an explicit one (asymmetric with the
+    CAS-loss branch) — flagged as low-severity, not RFC 9420-breaking.
+  - **threat-model-checker: GREEN, no required fixes.** No new
+    plaintext/metadata exposure (§3.3 unaffected — pure write-atomicity
+    change). mTLS peer-region + membership checks in `forward_commit`
+    confirmed to still execute *before* the new port call, unmoved by
+    the refactor. Counter removal confirmed safe — grepped clean, no
+    Alertmanager/Grafana rule was ever wired to it (per cycle 438's own
+    "미착수" note), so no live detection control was lost. The
+    two-table `CommitLedger` port judged an acceptable narrow exception
+    to hexagonal port boundaries given its doc comment explicitly
+    disclaims generalizing beyond this one cross-aggregate invariant.
+    prd.md §4A.5's "epoch wedge — CLOSED (cycle 439)" text verified
+    accurate with no overstated guarantees.
+  - **security-auditor: PASS.** SQL parameter binding, the `u64→i64`
+    epoch range guard (`InvalidInput`/400, not `Internal`/500, checked
+    before any query), zero plaintext/PII logging introduced, zero
+    dangling `metrics::`/`mls_commit_epoch_stall_total` references after
+    the dependency removal (independently grepped + rebuilt), zero
+    `unwrap()`/`expect()` in non-test lib code, and the `forward_commit`
+    authz ordering (mTLS + membership before the ledger call) all
+    independently re-verified — not just trusted from the crypto-review
+    pass. Same non-blocking rollback-style nit as crypto-reviewer.
+  - **Fix applied for the shared nit** (both independent reviewers
+    flagged the same thing, cheap to fix): `commit_ledger.rs`'s
+    insert-failure path now calls `tx.rollback()` explicitly before
+    returning the mapped error, matching the CAS-loss branch's style —
+    functionally identical to the prior `Drop`-based rollback, purely an
+    auditability improvement.
+- Build/test gate (repeated after the nit-fix): `cargo build --workspace
+  --all-targets` (clean), `cargo test --workspace` (all green, 0
+  failures across every crate), `cargo clippy --workspace --all-targets
+  -- -D warnings` (clean), `cargo fmt --all --check` (clean), `cargo
+  deny check` (advisories/bans/licenses/sources all ok — `metrics`
+  removal from `powehi-grpc`/`powehi-application` `Cargo.toml`s is a
+  pure subtraction, no new external crate). `cargo audit`: 0 advisories
+  across 664 crates. `gh issue list --state open`: empty (checked
+  above).
+- Committed `1e78b81` (`feat(mls): make epoch CAS + Commit-envelope save
+  one atomic unit of work`), pushed. CI triggered on push, confirm green
+  before trusting this cycle's claim in a future session if not already
+  done by the time this is read.
+- Target dir hygiene: `target/` at 17G (below the 20G prune threshold,
+  no pruning needed this cycle) — pruned only 0-byte `.rmeta` stubs.
+  Host disk is still tight (6.9 GiB free / 97% full on the 228 GiB
+  volume) — same standing non-actionable-from-this-repo risk carried
+  since cycle 434 (other `~/codespace/*` projects dominate usage).
+- **Next cycle candidates (carried/updated):**
+  1. Carried: host disk risk from other `~/codespace/*` projects — not
+     actionable from this repo. Still at 97% full / 6.9 GiB free.
+  2. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  3. Carried: R2 orphan-sweep owner-mismatch/ratio-guard metrics
+     (cycle 436) still need an actual Alertmanager/Grafana rule wired —
+     infra-lead/ops task, not a routine backend cycle.
+  4. Carried, still explicitly BLOCKED: wiring
+     `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal` into a real
+     caller needs F3 (incl. the `IpHash` extension) and the
+     HMAC-vs-plain-SHA256 gate resolved first — do not wire without
+     re-reading both prd.md sections.
+  5. **Downgraded to done:** the epoch-CAS/envelope-save non-atomicity
+     (candidate #6 as of cycle 438) is now closed via `CommitLedger` —
+     no further action expected on this specific item. The
+     `mls_commit_epoch_stall_total` counter it required is correctly
+     removed (tracked failure mode is gone), so candidate #5 (wiring an
+     alert to that counter) is also moot/dropped.
+  6. **New, minor, optional:** the `PgCommitLedger` envelope INSERT
+     still uses `ON CONFLICT (id) DO NOTHING` (copied from the
+     pre-existing `PgEnvelopeRepository::save`) — inert today since both
+     callers always generate a fresh UUIDv4 per attempt, but
+     crypto-reviewer flagged that *if* `id` were ever client-supplied as
+     an idempotency key, a conflicting existing row would let the
+     transaction commit having advanced the epoch while silently NOT
+     inserting the intended envelope — structurally the same bug class
+     this cycle just closed, just via `ON CONFLICT DO NOTHING` instead of
+     a separate write. Not a regression (pre-existing pattern, not
+     introduced this cycle) and not urgent (no current caller does this)
+     — worth a one-line comment or `DO UPDATE ... WHERE false` swap if a
+     future cycle touches this file again, not worth a dedicated cycle
+     on its own.
+
+## Previous state (2026-09-05, cycle 438 — FEATURE: atomic epoch CAS for MLS Commit acceptance (finished inherited cycle-437 work, found+fixed a blocker, committed), commit 7cfd244)
 
 - Mode selection: counter 437→438, 438 % 5 != 0 → FEATURE.
 - **Session start found a large uncommitted working tree** (10 files),
