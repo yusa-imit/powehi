@@ -131,6 +131,30 @@
           }
         }
       }
+    },
+    "monitoring": {
+      "type": "object",
+      "properties": {
+        "serviceMonitor": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "interval": { "type": "string", "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$" },
+            "scrapeTimeout": { "type": "string", "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$" }
+          }
+        },
+        "prometheusRule": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "window": {
+              "type": "string",
+              "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$",
+              "description": "Prometheus duration literal for the increase() lookback window (e.g. \"1h\"). Malformed values make Prometheus reject the whole rule group, silently dropping both alerts."
+            }
+          }
+        }
+      }
     }
   }
 }

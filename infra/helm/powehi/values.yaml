@@ -91,6 +91,23 @@ monitoring:
     # Additional labels to attach to the ServiceMonitor (e.g. for Prometheus selector).
     additionalLabels: {}
 
+  # Prometheus Operator PrometheusRule alerting on the media-orphan-sweep
+  # owner-sentinel counters (prd.md §9.4.3) emitted by powehi-r2:
+  # media_orphan_sweep_owner_mismatch_total and media_orphan_sweep_ratio_guard_total.
+  # Both are permanent/pathological-condition counters (not routine noise) — every
+  # subsequent 6-hourly sweep re-triggers them once broken, so `increase(...) > 0`
+  # is a correct, low-noise alert condition; no `for:` debounce is used. Set
+  # monitoring.prometheusRule.enabled=true when kube-prometheus-stack is installed.
+  # Default false matches monitoring.serviceMonitor's precedent.
+  prometheusRule:
+    enabled: false
+    # Lookback window for the increase() queries. Wide enough to survive a missed
+    # scrape without losing the signal, narrow enough to stay a near-real-time alert
+    # given the underlying sweep only runs every 6 hours.
+    window: "1h"
+    # Additional labels to attach to the PrometheusRule (e.g. for Prometheus selector).
+    additionalLabels: {}
+
 # OpenTelemetry OTLP trace export (prd.md §13.3).
 # Set otlp.endpoint to the OTLP/gRPC collector address to enable trace export.
 # Leave blank to disable OTLP (Prometheus pull-only mode).

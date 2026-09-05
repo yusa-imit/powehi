@@ -1,0 +1,70 @@
+{{- if .Values.monitoring.prometheusRule.enabled }}
+# ---------------------------------------------------------------------------
+# PrometheusRule — alerts on the media-orphan-sweep owner-sentinel mechanism
+# (prd.md §9.4.3 "오너 센티널").
+#
+# Both counters below are already emitted by powehi-r2 (cycle 436) but had no
+# wired alert rule before this — the doc comment on `owner_matches()` in
+# crates/adapters/outbound/powehi-r2/src/lib.rs promises a "permanent, loud"
+# detection signal for the losing side of the owner-sentinel race, but that
+# was only actually loud if an operator had already built a log-based alert.
+# This resource closes that gap.
+#
+# Both alert on `increase(...) > 0` rather than the raw counter value or a
+# rate threshold: both underlying conditions are pathological and do not
+# self-resolve once triggered — the very next 6-hourly sweep re-triggers them
+# again, so "any increase in the last hour" is a correct, low-noise signal
+# with no need for a `for:` debounce. `region_id` is a small operator-set
+# Helm enum (values.schema.json: eu-frankfurt / ap-seoul / ap-tokyo / ""),
+# not user data — no cardinality/PII concern (rule: no-plaintext-logging).
+# Each expr is wrapped in `sum by (region_id)` so that multiple replicas in
+# the same region (each a distinct Prometheus target/instance) collapse into
+# one alert per region instead of one per pod for the same underlying event.
+# ---------------------------------------------------------------------------
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "powehi.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "powehi.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.prometheusRule.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: powehi.media-orphan-sweep
+      rules:
+        - alert: PowehiMediaOrphanSweepOwnerMismatch
+          expr: sum by (region_id) (increase(media_orphan_sweep_owner_mismatch_total[{{ .Values.monitoring.prometheusRule.window }}])) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Media orphan sweep owner-sentinel mismatch in region {{ "{{" }} $labels.region_id {{ "}}" }}"
+            description: >-
+              This environment lost the owner-sentinel race for its
+              region-prefix (prd.md §9.4.3, media_region_owner /
+              {region_prefix}.owner) in region {{ "{{" }} $labels.region_id {{ "}}" }}.
+              The orphan sweep is refusing to delete anything on this side —
+              this is the intended fail-safe, not data loss in progress — but
+              it indicates a bucket/region_id misconfiguration shared with
+              another environment that needs operator intervention. This
+              condition does not self-resolve: it will keep firing every
+              6-hourly sweep until the misconfiguration is fixed.
+        - alert: PowehiMediaOrphanSweepRatioGuard
+          expr: sum by (region_id) (increase(media_orphan_sweep_ratio_guard_total[{{ .Values.monitoring.prometheusRule.window }}])) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Media orphan sweep circuit breaker tripped in region {{ "{{" }} $labels.region_id {{ "}}" }}"
+            description: >-
+              The orphan sweep's ratio-guard circuit breaker aborted a sweep
+              tick in region {{ "{{" }} $labels.region_id {{ "}}" }} (prd.md
+              §9.4.3) because the cumulative orphan ratio crossed the
+              configured threshold before deleting further objects. This is a
+              defensive abort, not a confirmed misconfiguration — it can also
+              be a legitimate spike — but it warrants operator review of
+              media_blobs vs. bucket contents for this region.
+{{- end }}
