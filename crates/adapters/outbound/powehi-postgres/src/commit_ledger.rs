@@ -91,9 +91,27 @@ impl CommitLedger for PgCommitLedger {
         // rather than relying on `Transaction`'s best-effort `Drop` impl —
         // same auditability standard on both of this method's failure paths
         // (crypto-reviewer + security-auditor, cycle 439).
-        if let Err(e) = insert_result {
+        let rows_affected = match insert_result {
+            Err(e) => {
+                tx.rollback().await.map_err(map_err)?;
+                return Err(map_err(e));
+            }
+            Ok(res) => res.rows_affected(),
+        };
+
+        // Both current callers always mint a fresh UUIDv4 `commit_envelope.id`,
+        // so `ON CONFLICT (id) DO NOTHING` should never actually trigger. If it
+        // ever did (e.g. a future caller reusing an id as an idempotency key),
+        // silently committing here would durably consume the epoch this
+        // transaction just won while leaving the *intended* envelope
+        // unstored — the same non-atomicity bug class this ledger exists to
+        // close, just via a no-op insert instead of a separate statement
+        // (crypto-reviewer, cycle 439/441). Fail loudly instead: an id
+        // collision at this point means the caller's assumption was wrong,
+        // not that the write can be treated as already-done.
+        if rows_affected == 0 {
             tx.rollback().await.map_err(map_err)?;
-            return Err(map_err(e));
+            return Err(DomainError::AlreadyExists(commit_envelope.id.to_string()));
         }
 
         tx.commit().await.map_err(map_err)?;

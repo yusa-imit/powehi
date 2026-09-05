@@ -25,6 +25,16 @@ pub trait CommitLedger: Send + Sync {
     /// Returns `Ok(None)` on CAS loss (same rejection contract as
     /// `GroupRepository::advance_epoch`) — `commit_envelope` is NOT persisted
     /// in that case.
+    ///
+    /// Returns `Err(DomainError::AlreadyExists)` if `commit_envelope.id`
+    /// collides with an already-stored envelope. Every implementation MUST
+    /// treat this as a hard failure of the whole unit of work — roll back
+    /// the epoch advance too, never silently treat the pre-existing row as
+    /// "already done" and let the epoch consumption commit anyway. Both
+    /// current callers mint a fresh UUIDv4 per attempt, so this should never
+    /// trigger in practice; the contract exists so a future caller can't
+    /// reintroduce the "epoch consumed, envelope missing" wedge via an id
+    /// collision instead of a separate failed statement.
     async fn commit_epoch_and_save(
         &self,
         group_id: &GroupId,

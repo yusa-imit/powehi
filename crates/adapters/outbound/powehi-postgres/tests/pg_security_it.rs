@@ -21,6 +21,7 @@ use chrono::Utc;
 use powehi_domain::{
     device::{Device, DeviceId},
     envelope::{Envelope, EnvelopeId, MessageType},
+    error::DomainError,
     group::{Epoch, Group, GroupId, GroupMember},
     key_package::{ConsumeResult, KeyPackage, KeyPackageId},
     region::RegionId,
@@ -1134,6 +1135,72 @@ async fn commit_epoch_and_save_rolls_back_the_epoch_when_the_envelope_insert_fai
         retry,
         Some(Epoch(1)),
         "the group must remain committable at its original epoch after a rollback"
+    );
+}
+
+/// Guards against the id-collision bug class crypto-reviewer flagged in cycle
+/// 439: if `commit_envelope.id` ever collided with an existing row (both
+/// current callers always mint a fresh UUIDv4, so this only matters for a
+/// hypothetical future caller reusing an id as an idempotency key), the
+/// `ON CONFLICT (id) DO NOTHING` insert must not let the transaction commit
+/// having advanced the epoch while silently discarding the intended
+/// envelope. It must instead fail the whole unit of work and roll the epoch
+/// back — see `PgCommitLedger::commit_epoch_and_save` (cycle 441).
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn commit_epoch_and_save_rejects_and_rolls_back_on_envelope_id_collision() {
+    let (_c, pool) = setup().await;
+    let ledger = PgCommitLedger::new(pool.clone());
+    let group_repo = PgGroupRepository::new(pool.clone());
+    let group_id = insert_group(&pool).await; // starts at Epoch(0)
+    let sender = DeviceId::new();
+    let envelope = commit_envelope_for(&group_id, &sender);
+
+    // Pre-seed a row with the same id the ledger will try to insert, so the
+    // ledger's own INSERT hits the ON CONFLICT (id) DO NOTHING branch.
+    sqlx::query(
+        "INSERT INTO envelopes
+           (id, group_id, sender_device_id, recipient_device_id, message_type,
+            ciphertext, epoch, created_at, expires_at)
+         VALUES ($1, $2, $3, NULL, 'commit', $4, 0, now(), NULL)",
+    )
+    .bind(envelope.id.as_uuid())
+    .bind(group_id.as_uuid())
+    .bind(sender.as_uuid())
+    .bind(&envelope.ciphertext)
+    .execute(&pool)
+    .await
+    .expect("pre-seed colliding envelope row");
+
+    let err = ledger
+        .commit_epoch_and_save(&group_id, Epoch(0), &envelope)
+        .await
+        .expect_err("an id collision must be a hard error, not a silent no-op success");
+    assert!(
+        matches!(err, DomainError::AlreadyExists(_)),
+        "expected AlreadyExists, got {err:?}"
+    );
+
+    let stored_group = group_repo
+        .find_by_id(&group_id)
+        .await
+        .expect("find_by_id")
+        .expect("group row must exist");
+    assert_eq!(
+        stored_group.epoch,
+        Epoch(0),
+        "the epoch must roll back with the rejected insert — never consumed \
+         for an envelope write that didn't actually happen"
+    );
+
+    let envelope_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM envelopes WHERE id = $1")
+        .bind(envelope.id.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .expect("count envelope rows");
+    assert_eq!(
+        envelope_rows, 1,
+        "exactly the pre-seeded row must remain — no second row, no mutation"
     );
 }
 
