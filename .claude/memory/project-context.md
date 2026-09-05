@@ -24,7 +24,123 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-05, cycle 440 — STABILIZATION: finished inherited cycle-439 work (CommitLedger unit-of-work closing the epoch wedge), verified+reviewed+committed, commit 1e78b81)
+## Current state (2026-09-05, cycle 441 — FEATURE: close the CommitLedger id-collision hole (cycle 440's next-cycle candidate #6), commit 969a304)
+
+- Mode selection: counter 440→441, 441 % 5 != 0 → FEATURE.
+- CI check: `gh run list --limit 3` green on `main` (cycle 440's push both
+  `CI — Rust` and `CI — Live-backend E2E` `completed`/`success`).
+  `gh issue list --state open`: empty.
+- Clean working tree at session start (no inherited uncommitted work this
+  time). Picked cycle 440's next-cycle candidate #6 — the only genuinely
+  actionable item on the list (others are either not-actionable-from-this-repo
+  disk risk, a human/crypto-lead policy call, an infra-lead/ops alerting
+  task, or explicitly BLOCKED pending F3/HMAC gate).
+- **Fix** (`crates/adapters/outbound/powehi-postgres/src/commit_ledger.rs`):
+  `PgCommitLedger::commit_epoch_and_save`'s Commit-envelope INSERT used
+  `ON CONFLICT (id) DO NOTHING` inside the same transaction as the epoch
+  CAS. Both current callers always mint a fresh UUIDv4 id, so the conflict
+  branch is unreachable today — but if it ever fired (e.g. a future caller
+  reusing an id as an idempotency key), the transaction would still
+  `tx.commit()`, durably advancing the epoch while silently discarding the
+  intended envelope: the exact "epoch consumed, envelope missing" wedge
+  bug class this ledger exists to close, just via a no-op insert instead of
+  a separate failed statement. Now checks `insert_result.rows_affected()
+  == 0` after the insert and, if so, explicitly `tx.rollback()`s and
+  returns `Err(DomainError::AlreadyExists(commit_envelope.id.to_string()))`
+  instead of committing — a whole-unit-of-work rollback, not a partial fix.
+  Added `commit_epoch_and_save_rejects_and_rolls_back_on_envelope_id_collision`
+  (`crates/adapters/outbound/powehi-postgres/tests/pg_security_it.rs`,
+  `#[ignore]`'d like the rest of that file since Docker isn't available in
+  this environment — will run in CI's Docker job), pre-seeding a colliding
+  row and asserting both the epoch rollback and that exactly the
+  pre-existing envelope row (no second row, no mutation) survives.
+- **All three required review agents run in-session** (touches MLS
+  Commit-ledger/epoch logic, so all three routing triggers apply):
+  - **crypto-reviewer: PASS**, one required doc follow-up. Verified
+    `rows_affected() == 0` is a sound conflict signal by reading the
+    `envelopes` migration directly (`id UUID PRIMARY KEY` is the only
+    unique constraint, no trigger/rule/RLS/partitioning that could
+    otherwise suppress a row) — a single-row INSERT can only yield 0 rows
+    via the `ON CONFLICT (id)` arbiter; any other constraint violation
+    raises 23505 into the existing `Err` arm, not this one. Confirmed
+    rollback leaves zero partial writes (event-bus publish/fan-out only
+    happens after `Ok`, downstream of this call). Confirmed this
+    strengthens RFC 9420 §12.4's "exactly one valid Commit per epoch"
+    invariant rather than just fixing an availability bug — a wedge here
+    would have permanently blocked key-schedule ratcheting for the group.
+    Confirmed `AlreadyExists` (409/non-retryable) is the correct variant
+    vs. `Internal` (which is in gRPC's *retryable* set — would have caused
+    cross-region peers to retry a deterministically-failing CAS forever).
+  - **threat-model-checker: GREEN**, no required prd.md edit — confirmed
+    strictly hardening across all threat-model rows (T3 malicious-operator
+    row strengthened: the "epoch consumed ⟺ envelope stored" invariant in
+    §4A.5 now holds literally, not modulo the no-op-insert hole; all
+    others unchanged), confirmed no new server-visible metadata (the
+    `AlreadyExists(id)` payload is discarded by both inbound adapters
+    before reaching a client), confirmed non-retryable so no cross-region
+    retry amplification. Judged §4A.5's existing text doesn't need editing
+    since it never claimed the no-op path was safe and no caller contract
+    changed.
+  - **security-auditor: PASS**, no required fixes — independently
+    confirmed zero plaintext/PII/ciphertext in the new code path (error
+    carries only a server-minted UUID), zero new `unwrap()`/`expect()` in
+    lib code, correct 409/`AlreadyExists` mapping on both REST and gRPC
+    (not leaking as a generic 500), no new SQL-injection surface (INSERT
+    unchanged, still fully parameterized), and that this narrows rather
+    than widens the trust boundary (old code committed on the 0-rows case;
+    new code rejects it).
+  - **Shared required fix, applied**: all three reviewers independently
+    flagged the same gap — the `CommitLedger` port trait doc
+    (`crates/ports/powehi-port-outbound/src/commit_ledger.rs`) documented
+    only the `Ok(None)` CAS-loss contract, not the new
+    `Err(AlreadyExists)` id-collision contract, even though this is a
+    port-level behavioral contract binding every implementation and the
+    in-memory test fakes. Added a doc block spelling out the rule: id
+    collision = whole unit of work rolled back, epoch NOT consumed, never
+    treated as "already done".
+  - **Non-blocking nit, applied anyway (cheap)**: crypto-reviewer noted
+    the new test asserted epoch-rollback but not that no second `envelopes`
+    row was created — added a `COUNT(*) = 1` assertion (pre-seeded row
+    only) to pin the full invariant, not just half of it.
+- Build/test gate (repeated after the doc/test fixes): `cargo build
+  --workspace --all-targets` (clean), `cargo test --workspace` (all green,
+  0 failures — `cargo nextest` still not installed in this environment,
+  used the documented `cargo test --workspace` fallback), `cargo clippy
+  --workspace --all-targets -- -D warnings` (clean), `cargo fmt --all
+  --check` (clean), `cargo deny check` (advisories/bans/licenses/sources
+  all ok — zero dependency changes, pure code diff). New Postgres
+  integration test is `#[ignore]`'d — no Docker in this environment,
+  will run in CI's Docker job like its siblings in the same file.
+- Committed `969a304` (`fix(mls): reject commit envelope id collisions
+  instead of silently committing`), pushed. CI triggered on push, confirm
+  green before trusting this cycle's claim in a future session if not
+  already done by the time this is read.
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates (carried/updated):**
+  1. Carried: host disk risk from other `~/codespace/*` projects — not
+     actionable from this repo.
+  2. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  3. Carried: R2 orphan-sweep owner-mismatch/ratio-guard metrics
+     (cycle 436) still need an actual Alertmanager/Grafana rule wired —
+     infra-lead/ops task, not a routine backend cycle.
+  4. Carried, still explicitly BLOCKED: wiring
+     `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal` into a real
+     caller needs F3 (incl. the `IpHash` extension) and the
+     HMAC-vs-plain-SHA256 gate resolved first — do not wire without
+     re-reading both prd.md sections.
+  5. **Downgraded to done:** the `CommitLedger` id-collision hole (cycle
+     440's candidate #6) is now closed — id collision is a hard,
+     whole-transaction-rolled-back error, not a silent no-op success. No
+     further action expected on this specific item.
+  6. **New, minor, optional:** none of the three reviewers found anything
+     else outstanding on this file. The candidate pool is now thin — the
+     next FEATURE cycle may need to look beyond this cycle's carried list
+     (e.g. re-reading prd.md for drift, or scoping the PQ-hybrid/F3
+     prerequisites enough to unblock them) rather than finding another
+     quick follow-up.
+
+## Previous state (2026-09-05, cycle 440 — STABILIZATION: finished inherited cycle-439 work (CommitLedger unit-of-work closing the epoch wedge), verified+reviewed+committed, commit 1e78b81)
 
 - Mode selection: counter 439→440, 440 % 5 == 0 → STABILIZATION.
 - CI check: `gh run list --limit 5` green on `main` (cycle 438's push all
