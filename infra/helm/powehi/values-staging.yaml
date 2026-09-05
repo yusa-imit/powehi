@@ -43,6 +43,19 @@ monitoring:
     interval: "15s"
     additionalLabels:
       release: kube-prometheus-stack
+  # Enabled alongside serviceMonitor (cycle 443) — this is a real
+  # kube-prometheus-stack install, so the media-orphan-sweep alert rule
+  # (templates/prometheusrule.yaml, cycle 442) needs the same
+  # additionalLabels.release the operator's ruleSelector expects, or the
+  # rule renders but Prometheus never picks it up. Staging uses the same
+  # "1h" window as prod — the underlying sweep still runs every 6 hours
+  # here too, so a shorter window would only reduce lookback margin
+  # without adding real signal.
+  prometheusRule:
+    enabled: true
+    window: "1h"
+    additionalLabels:
+      release: kube-prometheus-stack
 
 otlp:
   endpoint: "http://otel-collector.monitoring.svc.cluster.local:4317"
