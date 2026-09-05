@@ -140,7 +140,12 @@
           "properties": {
             "enabled": { "type": "boolean" },
             "interval": { "type": "string", "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$" },
-            "scrapeTimeout": { "type": "string", "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$" }
+            "scrapeTimeout": { "type": "string", "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$" },
+            "additionalLabels": {
+              "type": "object",
+              "additionalProperties": { "type": "string" },
+              "description": "Labels copied onto the ServiceMonitor object so a Prometheus Operator selector (e.g. release: kube-prometheus-stack) picks it up. A typo here silently drops all scraping with no CI-visible failure."
+            }
           }
         },
         "prometheusRule": {
@@ -151,6 +156,11 @@
               "type": "string",
               "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$",
               "description": "Prometheus duration literal for the increase() lookback window (e.g. \"1h\"). Malformed values make Prometheus reject the whole rule group, silently dropping both alerts."
+            },
+            "additionalLabels": {
+              "type": "object",
+              "additionalProperties": { "type": "string" },
+              "description": "Labels copied onto the PrometheusRule object so a Prometheus Operator ruleSelector (e.g. release: kube-prometheus-stack) picks it up. A typo here silently drops both alerts with no CI-visible failure."
             }
           }
         }
