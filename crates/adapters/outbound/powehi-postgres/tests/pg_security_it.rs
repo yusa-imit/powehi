@@ -12,6 +12,9 @@
 //!   - `server_config` round-trip and first-boot race convergence (DO NOTHING).
 //!   - `PgLeaderLock` advisory-lock mutual exclusion, distinct-key independence,
 //!     and Drop-without-release still frees the lock (moved from powehi-r2 cycle 373).
+//!   - `PgDeviceRepository`: find/delete round-trip, `find_by_user` ownership
+//!     scoping, and that the upsert `save` path can never reassign a device's
+//!     `user_id` (cycle 445).
 //!
 //! Tests are `#[ignore]` because they require Docker (testcontainers).
 //! Run them in CI via: `cargo nextest run -p powehi-postgres --run-ignored all
@@ -1478,4 +1481,171 @@ async fn try_gc_lock_dropped_without_release_still_frees_the_lock() {
         .expect("dropping the guard without release() must eventually free the lock")
         .release()
         .await;
+}
+
+// ── Device repository (cycle 445) ───────────────────────────────────────────
+// `insert_device` above only ever exercises `PgDeviceRepository::save` as a
+// fixture helper for other repos' tests — `find_by_id`, `find_by_user`, and
+// `delete` had zero real-Postgres coverage, and the `ON CONFLICT (id) DO
+// UPDATE` upsert clause on `save` (which deliberately does NOT update
+// `user_id`) had never been exercised against actual SQL semantics either.
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn device_find_by_id_returns_none_for_unknown_id() {
+    let (_c, pool) = setup().await;
+    let repo = PgDeviceRepository::new(pool);
+    let found = repo.find_by_id(&DeviceId::new()).await.expect("find_by_id");
+    assert!(found.is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn device_save_and_find_by_id_round_trips() {
+    let (_c, pool) = setup().await;
+    let repo = PgDeviceRepository::new(pool.clone());
+    let user_id = insert_user(&pool).await;
+    let device = Device::new(DeviceId::new(), user_id.clone(), vec![7u8; 32]);
+    repo.save(&device).await.expect("save");
+
+    let found = repo
+        .find_by_id(&device.id)
+        .await
+        .expect("find_by_id")
+        .expect("device must be found after save");
+    assert_eq!(found.id, device.id);
+    assert_eq!(found.user_id, user_id);
+    assert_eq!(found.mls_credential, device.mls_credential);
+    assert!(found.last_seen_at.is_none());
+}
+
+/// SECURITY: `find_by_user` must only return devices owned by that user, and
+/// never leak another user's device into the result set.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn device_find_by_user_is_scoped_to_owner() {
+    let (_c, pool) = setup().await;
+    let repo = PgDeviceRepository::new(pool.clone());
+    let owner = insert_user(&pool).await;
+    let other = insert_user(&pool).await;
+
+    let d1 = Device::new(DeviceId::new(), owner.clone(), vec![1u8; 32]);
+    let d2 = Device::new(DeviceId::new(), owner.clone(), vec![2u8; 32]);
+    let d_other = Device::new(DeviceId::new(), other, vec![3u8; 32]);
+    repo.save(&d1).await.expect("save d1");
+    repo.save(&d2).await.expect("save d2");
+    repo.save(&d_other).await.expect("save d_other");
+
+    let found = repo.find_by_user(&owner).await.expect("find_by_user");
+    let found_ids: std::collections::HashSet<_> = found.iter().map(|d| d.id.clone()).collect();
+    assert_eq!(
+        found.len(),
+        2,
+        "must return exactly the owner's own devices"
+    );
+    assert!(found_ids.contains(&d1.id));
+    assert!(found_ids.contains(&d2.id));
+    assert!(
+        !found_ids.contains(&d_other.id),
+        "another user's device must never appear in find_by_user"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn device_delete_removes_the_row() {
+    let (_c, pool) = setup().await;
+    let repo = PgDeviceRepository::new(pool.clone());
+    let user_id = insert_user(&pool).await;
+    let device = Device::new(DeviceId::new(), user_id, vec![9u8; 32]);
+    repo.save(&device).await.expect("save");
+
+    repo.delete(&device.id).await.expect("delete");
+
+    assert!(
+        repo.find_by_id(&device.id)
+            .await
+            .expect("find_by_id after delete")
+            .is_none(),
+        "device must be gone after delete"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn device_delete_of_unknown_id_is_a_harmless_no_op() {
+    let (_c, pool) = setup().await;
+    let repo = PgDeviceRepository::new(pool);
+    // Must not error just because the row never existed (e.g. a retried
+    // client-initiated device revocation after the first attempt already
+    // succeeded server-side but the response was lost).
+    repo.delete(&DeviceId::new()).await.expect("delete");
+}
+
+/// SECURITY: re-`save`-ing an existing device id must update its credential
+/// and last-seen timestamp (the intended re-key/heartbeat path) but must
+/// NEVER reassign `user_id` — the `ON CONFLICT (id) DO UPDATE` clause in
+/// `PgDeviceRepository::save` deliberately omits `user_id` from its `SET`
+/// list so a device row can't be silently transferred to a different
+/// account's ownership by any caller that can reach `save` with a colliding
+/// id and a different `user_id`.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn device_save_upsert_updates_credential_but_never_reassigns_owner() {
+    let (_c, pool) = setup().await;
+    let repo = PgDeviceRepository::new(pool.clone());
+    let original_owner = insert_user(&pool).await;
+    let attacker_owner = insert_user(&pool).await;
+
+    let device = Device::new(DeviceId::new(), original_owner.clone(), vec![1u8; 32]);
+    repo.save(&device).await.expect("initial save");
+
+    let now = Utc::now();
+    let mut resaved = device.clone();
+    resaved.user_id = attacker_owner.clone();
+    resaved.mls_credential = vec![2u8; 32];
+    resaved.last_seen_at = Some(now);
+    // NOTE: a foreign-owner id collision is NOT rejected — `save` returns
+    // `Ok(())` and silently keeps the row under `original_owner` (first
+    // writer wins on `user_id`; only `mls_credential`/`last_seen_at`
+    // actually move). Callers must not treat a colliding-id `save` as proof
+    // that the id now belongs to their caller's account. Today's callers
+    // never hit this: registration always mints a fresh id
+    // (`auth_service.rs`'s registration path), and the recovery-mint path
+    // rejects a known id already owned by someone else before ever calling
+    // `save`. This test pins the adapter's actual behavior, not a claim that
+    // no caller could ever misuse it.
+    repo.save(&resaved).await.expect("upsert save");
+
+    let found = repo
+        .find_by_id(&device.id)
+        .await
+        .expect("find_by_id")
+        .expect("device must still exist");
+    assert_eq!(
+        found.user_id, original_owner,
+        "user_id must never change on an upsert save — ownership transfer via save() would be a privilege-escalation bug"
+    );
+    assert_eq!(
+        found.mls_credential,
+        vec![2u8; 32],
+        "mls_credential must update on upsert"
+    );
+    assert!(
+        found.last_seen_at.is_some(),
+        "last_seen_at must update on upsert"
+    );
+    assert_eq!(
+        found.created_at, device.created_at,
+        "created_at must also survive an upsert unchanged (excluded from the SET list, same as user_id)"
+    );
+
+    let attacker_devices = repo
+        .find_by_user(&attacker_owner)
+        .await
+        .expect("find_by_user attacker_owner");
+    assert!(
+        attacker_devices.is_empty(),
+        "the colliding save must not make this device visible under the attacker-supplied user_id"
+    );
 }
