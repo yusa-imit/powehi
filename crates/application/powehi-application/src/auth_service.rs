@@ -15,8 +15,8 @@ use powehi_port_inbound::auth::{
     RegistrationInitRequest, RegistrationInitResponse, SessionToken,
 };
 use powehi_port_outbound::{
-    cache::CachePort, device_repo::DeviceRepository, opaque::OpaqueServerPort,
-    user_repo::UserRepository,
+    cache::CachePort, device_repo::DeviceRepository, key_package_repo::KeyPackageRepository,
+    opaque::OpaqueServerPort, user_repo::UserRepository,
 };
 use sha2::Sha256;
 use tracing::instrument;
@@ -58,6 +58,7 @@ const DUMMY_RECOVERY_PUBKEY: [u8; 32] = [
 pub struct AuthService {
     user_repo: Arc<dyn UserRepository>,
     device_repo: Arc<dyn DeviceRepository>,
+    key_package_repo: Arc<dyn KeyPackageRepository>,
     opaque: Arc<dyn OpaqueServerPort>,
     cache: Arc<dyn CachePort>,
     /// Server-side secret for HMAC-SHA256 synthetic user_id derivation.
@@ -70,6 +71,7 @@ impl AuthService {
     pub fn new(
         user_repo: Arc<dyn UserRepository>,
         device_repo: Arc<dyn DeviceRepository>,
+        key_package_repo: Arc<dyn KeyPackageRepository>,
         opaque: Arc<dyn OpaqueServerPort>,
         cache: Arc<dyn CachePort>,
         handle_oracle_secret: [u8; 32],
@@ -77,6 +79,7 @@ impl AuthService {
         Self {
             user_repo,
             device_repo,
+            key_package_repo,
             opaque,
             cache,
             handle_oracle_secret,
@@ -451,6 +454,23 @@ impl AuthUseCase for AuthService {
         if &device.user_id != user_id {
             return Err(DomainError::Unauthorized);
         }
+        // Delete every KeyPackage (consumed or not) belonging to the device
+        // BEFORE deleting the device row itself. Without this cleanup, a
+        // stale unconsumed KeyPackage could still be handed out via
+        // fetch_one/gRPC ConsumeKeyPackage after revocation, letting a group
+        // add a credential for a device that no longer exists. Hard-fail
+        // like the session invalidation below: silently succeeding here
+        // would leave a usable stale credential behind.
+        //
+        // Order matters: both calls are idempotent (delete_by_device on a
+        // device with zero KeyPackages returns Ok(0); device_repo.delete on
+        // an unknown id is a no-op), so if this call fails the device row is
+        // still present and a client retry safely completes the whole
+        // revocation. Deleting the device row first would do the opposite:
+        // a failure there would leave the device unrevocable (find_by_id
+        // returns NotFound on retry) while its stale KeyPackages survive
+        // forever — exactly the state this cleanup exists to prevent.
+        self.key_package_repo.delete_by_device(device_id).await?;
         self.device_repo.delete(device_id).await?;
 
         // Immediately invalidate all active sessions for the revoked device (Y-1).
@@ -481,9 +501,10 @@ impl AuthUseCase for AuthService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use powehi_domain::key_package::{ConsumeResult, KeyPackage, KeyPackageId};
     use powehi_port_outbound::{
-        cache::CachePort, device_repo::DeviceRepository, opaque::OpaqueServerPort,
-        user_repo::UserRepository,
+        cache::CachePort, device_repo::DeviceRepository, key_package_repo::KeyPackageRepository,
+        opaque::OpaqueServerPort, user_repo::UserRepository,
     };
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -558,6 +579,97 @@ mod tests {
         async fn delete(&self, id: &DeviceId) -> Result<(), DomainError> {
             self.store.lock().unwrap().remove(id);
             Ok(())
+        }
+    }
+
+    struct FakeKeyPackageRepo {
+        store: Mutex<HashMap<KeyPackageId, KeyPackage>>,
+    }
+    impl FakeKeyPackageRepo {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                store: Mutex::new(HashMap::new()),
+            })
+        }
+    }
+    #[async_trait::async_trait]
+    impl KeyPackageRepository for FakeKeyPackageRepo {
+        async fn save(&self, kp: &KeyPackage) -> Result<(), DomainError> {
+            self.store.lock().unwrap().insert(kp.id.clone(), kp.clone());
+            Ok(())
+        }
+        async fn fetch_one(&self, device_id: &DeviceId) -> Result<Option<KeyPackage>, DomainError> {
+            let mut store = self.store.lock().unwrap();
+            let key = store
+                .values()
+                .find(|kp| &kp.device_id == device_id && !kp.consumed)
+                .map(|kp| kp.id.clone());
+            Ok(key.map(|k| {
+                let kp = store.get_mut(&k).unwrap();
+                kp.consumed = true;
+                kp.clone()
+            }))
+        }
+        async fn count_available(&self, device_id: &DeviceId) -> Result<u64, DomainError> {
+            Ok(self
+                .store
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|kp| &kp.device_id == device_id && !kp.consumed)
+                .count() as u64)
+        }
+        async fn delete(&self, id: &KeyPackageId) -> Result<(), DomainError> {
+            self.store.lock().unwrap().remove(id);
+            Ok(())
+        }
+        async fn mark_consumed(&self, id: &KeyPackageId) -> Result<ConsumeResult, DomainError> {
+            let mut store = self.store.lock().unwrap();
+            match store.get_mut(id) {
+                Some(kp) if kp.consumed => Ok(ConsumeResult::AlreadyConsumed),
+                Some(kp) => {
+                    kp.consumed = true;
+                    Ok(ConsumeResult::Consumed)
+                }
+                None => Ok(ConsumeResult::NotFound),
+            }
+        }
+        async fn delete_by_device(&self, device_id: &DeviceId) -> Result<u64, DomainError> {
+            let mut store = self.store.lock().unwrap();
+            let before = store.len();
+            store.retain(|_, kp| &kp.device_id != device_id);
+            Ok((before - store.len()) as u64)
+        }
+    }
+
+    /// A `KeyPackageRepository` whose `delete_by_device` always fails.
+    /// Used to test that `revoke_device` propagates the error and leaves the
+    /// device row retryable rather than committing a partial revocation.
+    struct FailingDeleteByDeviceKeyPackageRepo;
+    #[async_trait::async_trait]
+    impl KeyPackageRepository for FailingDeleteByDeviceKeyPackageRepo {
+        async fn save(&self, _kp: &KeyPackage) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn fetch_one(
+            &self,
+            _device_id: &DeviceId,
+        ) -> Result<Option<KeyPackage>, DomainError> {
+            Ok(None)
+        }
+        async fn count_available(&self, _device_id: &DeviceId) -> Result<u64, DomainError> {
+            Ok(0)
+        }
+        async fn delete(&self, _id: &KeyPackageId) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn mark_consumed(&self, _id: &KeyPackageId) -> Result<ConsumeResult, DomainError> {
+            Ok(ConsumeResult::NotFound)
+        }
+        async fn delete_by_device(&self, _device_id: &DeviceId) -> Result<u64, DomainError> {
+            Err(DomainError::Internal(
+                "injected delete_by_device failure".into(),
+            ))
         }
     }
 
@@ -797,18 +909,31 @@ mod tests {
         Arc<FakeDeviceRepo>,
         Arc<FakeCache>,
     ) {
+        let (svc, user_repo, device_repo, _kp_repo, cache) = make_svc_with_key_packages();
+        (svc, user_repo, device_repo, cache)
+    }
+
+    fn make_svc_with_key_packages() -> (
+        AuthService,
+        Arc<FakeUserRepo>,
+        Arc<FakeDeviceRepo>,
+        Arc<FakeKeyPackageRepo>,
+        Arc<FakeCache>,
+    ) {
         let user_repo = FakeUserRepo::new();
         let device_repo = FakeDeviceRepo::new();
+        let key_package_repo = FakeKeyPackageRepo::new();
         let opaque = Arc::new(FakeOpaque);
         let cache = FakeCache::new();
         let svc = AuthService::new(
             user_repo.clone(),
             device_repo.clone(),
+            key_package_repo.clone(),
             opaque,
             cache.clone(),
             TEST_ORACLE_SECRET,
         );
-        (svc, user_repo, device_repo, cache)
+        (svc, user_repo, device_repo, key_package_repo, cache)
     }
 
     #[tokio::test]
@@ -1207,11 +1332,13 @@ mod tests {
         // return Unauthorized and must NOT leave an orphan session in the cache.
         let user_repo = FakeUserRepo::new();
         let device_repo = FakeDeviceRepo::new();
+        let key_package_repo = FakeKeyPackageRepo::new();
         let opaque = Arc::new(FakeOpaque);
         let fail_cache = SetAddFailCache::new();
         let svc = AuthService::new(
             user_repo.clone(),
             device_repo.clone(),
+            key_package_repo,
             opaque,
             fail_cache.clone(),
             TEST_ORACLE_SECRET,
@@ -1389,6 +1516,89 @@ mod tests {
         assert!(device_repo.find_by_id(&device_id).await.unwrap().is_none());
     }
 
+    /// SECURITY: revoking a device must delete every KeyPackage (consumed or
+    /// not) it uploaded. Without this, a stale unconsumed KeyPackage could
+    /// still be handed out via fetch_one/ConsumeKeyPackage after revocation,
+    /// letting a group add a credential for a device that no longer exists.
+    /// A sibling device's KeyPackages must be untouched (scoping, not a
+    /// blanket wipe).
+    #[tokio::test]
+    async fn revoke_device_deletes_its_key_packages_but_not_a_sibling_devices() {
+        let (svc, _, _, key_package_repo, _) = make_svc_with_key_packages();
+        let owner = UserId::new();
+        let revoked_device = svc
+            .register_device(
+                &owner,
+                DeviceRegistrationRequest {
+                    mls_credential: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        let surviving_device = svc
+            .register_device(
+                &owner,
+                DeviceRegistrationRequest {
+                    mls_credential: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        let revoked_kp = KeyPackage {
+            id: KeyPackageId::new(),
+            device_id: revoked_device.clone(),
+            data: vec![0xaa; 16],
+            uploaded_at: chrono::Utc::now(),
+            consumed: false,
+        };
+        let revoked_kp_consumed = KeyPackage {
+            id: KeyPackageId::new(),
+            device_id: revoked_device.clone(),
+            data: vec![0xbb; 16],
+            uploaded_at: chrono::Utc::now(),
+            consumed: true,
+        };
+        let surviving_kp = KeyPackage {
+            id: KeyPackageId::new(),
+            device_id: surviving_device.clone(),
+            data: vec![0xcc; 16],
+            uploaded_at: chrono::Utc::now(),
+            consumed: false,
+        };
+        key_package_repo.save(&revoked_kp).await.unwrap();
+        key_package_repo.save(&revoked_kp_consumed).await.unwrap();
+        key_package_repo.save(&surviving_kp).await.unwrap();
+
+        svc.revoke_device(&owner, &revoked_device).await.unwrap();
+
+        assert_eq!(
+            key_package_repo
+                .count_available(&revoked_device)
+                .await
+                .unwrap(),
+            0,
+            "revoked device must have zero KeyPackages left, not just zero unconsumed ones"
+        );
+        assert!(
+            key_package_repo
+                .store
+                .lock()
+                .unwrap()
+                .values()
+                .all(|kp| kp.device_id != revoked_device),
+            "no KeyPackage row of any consumed-state may survive for the revoked device"
+        );
+        assert_eq!(
+            key_package_repo
+                .count_available(&surviving_device)
+                .await
+                .unwrap(),
+            1,
+            "a sibling device's KeyPackages must be untouched by another device's revocation"
+        );
+    }
+
     #[tokio::test]
     async fn revoke_device_not_found_returns_error() {
         let (svc, _, _, _) = make_svc();
@@ -1406,11 +1616,13 @@ mod tests {
         // Surviving tokens will expire after SESSION_TTL.
         let user_repo = FakeUserRepo::new();
         let device_repo = FakeDeviceRepo::new();
+        let key_package_repo = FakeKeyPackageRepo::new();
         let opaque = Arc::new(FakeOpaque);
         let fail_cache = SessionDeleteFailCache::new();
         let svc = AuthService::new(
             user_repo.clone(),
             device_repo.clone(),
+            key_package_repo,
             opaque,
             fail_cache.clone(),
             TEST_ORACLE_SECRET,
@@ -1513,11 +1725,13 @@ mod tests {
         // device will be gone even if this returns an error.
         let user_repo = FakeUserRepo::new();
         let device_repo = FakeDeviceRepo::new();
+        let key_package_repo = FakeKeyPackageRepo::new();
         let opaque = Arc::new(FakeOpaque);
         let fail_cache = SetMembersFailCache::new();
         let svc = AuthService::new(
             user_repo.clone(),
             device_repo.clone(),
+            key_package_repo,
             opaque,
             fail_cache.clone(),
             TEST_ORACLE_SECRET,
@@ -1542,6 +1756,54 @@ mod tests {
         assert!(
             matches!(err, DomainError::Internal(_)),
             "set_members failure must propagate"
+        );
+    }
+
+    /// SECURITY: if KeyPackage cleanup fails, `revoke_device` must propagate
+    /// the error and — critically — must NOT have already deleted the device
+    /// row. `delete_by_device` runs BEFORE `device_repo.delete` precisely so
+    /// a failure here leaves the device retryable rather than permanently
+    /// stuck (device gone, but its KeyPackages orphaned forever since a
+    /// retry would immediately hit `NotFound` on `find_by_id`).
+    #[tokio::test]
+    async fn revoke_device_key_package_cleanup_failure_propagates_and_device_survives() {
+        let user_repo = FakeUserRepo::new();
+        let device_repo = FakeDeviceRepo::new();
+        let key_package_repo = Arc::new(FailingDeleteByDeviceKeyPackageRepo);
+        let opaque = Arc::new(FakeOpaque);
+        let cache = FakeCache::new();
+        let svc = AuthService::new(
+            user_repo.clone(),
+            device_repo.clone(),
+            key_package_repo,
+            opaque,
+            cache,
+            TEST_ORACLE_SECRET,
+        );
+
+        let uid = UserId::new();
+        user_repo
+            .save(&User::new(uid.clone(), b"hash".to_vec()))
+            .await
+            .unwrap();
+        let device_id = svc
+            .register_device(
+                &uid,
+                DeviceRegistrationRequest {
+                    mls_credential: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        let err = svc.revoke_device(&uid, &device_id).await.unwrap_err();
+        assert!(
+            matches!(err, DomainError::Internal(_)),
+            "delete_by_device failure must propagate"
+        );
+        assert!(
+            device_repo.find_by_id(&device_id).await.unwrap().is_some(),
+            "device row must survive a failed KeyPackage cleanup so the caller can retry"
         );
     }
 

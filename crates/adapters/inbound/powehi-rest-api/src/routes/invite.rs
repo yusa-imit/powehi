@@ -371,6 +371,9 @@ mod tests {
                 key_package: vec![1, 2, 3, 4],
             })
         }
+        async fn revoke_invites_for_device(&self, _: &DeviceId) -> Result<(), DomainError> {
+            Ok(())
+        }
     }
 
     struct MockInviteNotFound;
@@ -387,6 +390,9 @@ mod tests {
 
         async fn redeem_invite(&self, _: &str) -> Result<RedeemedInvite, DomainError> {
             Err(DomainError::NotFound("invite code not found".into()))
+        }
+        async fn revoke_invites_for_device(&self, _: &DeviceId) -> Result<(), DomainError> {
+            Ok(())
         }
     }
 

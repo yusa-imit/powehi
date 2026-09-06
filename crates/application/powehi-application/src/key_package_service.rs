@@ -157,6 +157,12 @@ mod tests {
                 None => Ok(ConsumeResult::NotFound),
             }
         }
+        async fn delete_by_device(&self, device_id: &DeviceId) -> Result<u64, DomainError> {
+            let mut store = self.store.lock().unwrap();
+            let before = store.len();
+            store.retain(|_, kp| kp.device_id != *device_id);
+            Ok((before - store.len()) as u64)
+        }
     }
 
     #[tokio::test]

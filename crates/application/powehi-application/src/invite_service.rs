@@ -139,6 +139,16 @@ impl InviteUseCase for InviteService {
             key_package: key_package.to_vec(),
         })
     }
+
+    async fn revoke_invites_for_device(&self, device_id: &DeviceId) -> Result<(), DomainError> {
+        let device_key = device_invites_key(device_id);
+        let outstanding = self.cache.set_members(&device_key).await?;
+        for key in &outstanding {
+            self.cache.delete(key).await?;
+        }
+        self.cache.delete(&device_key).await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

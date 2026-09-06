@@ -187,6 +187,7 @@ async fn main() -> Result<()> {
     let auth: Arc<dyn powehi_port_inbound::auth::AuthUseCase> = Arc::new(AuthService::new(
         user_repo,
         Arc::clone(&device_repo),
+        key_package_repo.clone(),
         opaque,
         cache.clone(),
         handle_oracle_secret,

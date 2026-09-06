@@ -294,6 +294,9 @@ mod tests {
             ) -> Result<powehi_port_inbound::invite::RedeemedInvite, DomainError> {
                 unimplemented!()
             }
+            async fn revoke_invites_for_device(&self, _: &DeviceId) -> Result<(), DomainError> {
+                unimplemented!()
+            }
         }
 
         #[async_trait]

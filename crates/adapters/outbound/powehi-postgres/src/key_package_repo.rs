@@ -102,6 +102,16 @@ impl KeyPackageRepository for PgKeyPackageRepository {
         Ok(())
     }
 
+    async fn delete_by_device(&self, device_id: &DeviceId) -> Result<u64, DomainError> {
+        let rows = sqlx::query("DELETE FROM key_packages WHERE device_id = $1")
+            .bind(device_id.as_uuid())
+            .execute(&self.pool)
+            .await
+            .map_err(map_err)?
+            .rows_affected();
+        Ok(rows)
+    }
+
     async fn mark_consumed(&self, id: &KeyPackageId) -> Result<ConsumeResult, DomainError> {
         // Attempt to flip consumed = FALSE → TRUE atomically.
         let rows = sqlx::query(

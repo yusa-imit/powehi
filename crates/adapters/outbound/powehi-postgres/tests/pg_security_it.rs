@@ -15,6 +15,9 @@
 //!   - `PgDeviceRepository`: find/delete round-trip, `find_by_user` ownership
 //!     scoping, and that the upsert `save` path can never reassign a device's
 //!     `user_id` (cycle 445).
+//!   - `KeyPackageRepository::delete_by_device`: revoking a device deletes
+//!     every KeyPackage it uploaded (consumed or not), scoped so a sibling
+//!     device's KeyPackages survive (cycle 447).
 //!
 //! Tests are `#[ignore]` because they require Docker (testcontainers).
 //! Run them in CI via: `cargo nextest run -p powehi-postgres --run-ignored all
@@ -1548,6 +1551,85 @@ async fn device_find_by_user_is_scoped_to_owner() {
     assert!(
         !found_ids.contains(&d_other.id),
         "another user's device must never appear in find_by_user"
+    );
+}
+
+/// SECURITY: deleting a device must delete every KeyPackage it uploaded
+/// (consumed or not). A revoked device must never be able to hand out a
+/// stale KeyPackage via fetch_one/ConsumeKeyPackage after revocation.
+/// A sibling device's KeyPackages must be untouched by another device's
+/// cleanup (scoping, not a blanket wipe).
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn key_package_delete_by_device_removes_only_that_devices_packages() {
+    let (_c, pool) = setup().await;
+    let user_id = insert_user(&pool).await;
+    let target_device = insert_device(&pool, user_id.clone()).await;
+    let sibling_device = insert_device(&pool, user_id).await;
+    let repo = PgKeyPackageRepository::new(pool);
+
+    let unconsumed = KeyPackage {
+        id: KeyPackageId::new(),
+        device_id: target_device.clone(),
+        data: vec![0x11; 16],
+        uploaded_at: Utc::now(),
+        consumed: false,
+    };
+    let consumed = KeyPackage {
+        id: KeyPackageId::new(),
+        device_id: target_device.clone(),
+        data: vec![0x22; 16],
+        uploaded_at: Utc::now(),
+        consumed: true,
+    };
+    let sibling_kp = KeyPackage {
+        id: KeyPackageId::new(),
+        device_id: sibling_device.clone(),
+        data: vec![0x33; 16],
+        uploaded_at: Utc::now(),
+        consumed: false,
+    };
+    repo.save(&unconsumed).await.expect("save unconsumed");
+    repo.save(&consumed).await.expect("save consumed");
+    repo.save(&sibling_kp).await.expect("save sibling");
+
+    let deleted = repo
+        .delete_by_device(&target_device)
+        .await
+        .expect("delete_by_device");
+    assert_eq!(
+        deleted, 2,
+        "must delete both the consumed and unconsumed row"
+    );
+
+    assert_eq!(
+        repo.count_available(&target_device)
+            .await
+            .expect("count target after delete"),
+        0
+    );
+    assert!(
+        repo.fetch_one(&target_device)
+            .await
+            .expect("fetch_one target after delete")
+            .is_none(),
+        "no KeyPackage of any consumed-state may survive for the revoked device"
+    );
+    assert_eq!(
+        repo.count_available(&sibling_device)
+            .await
+            .expect("count sibling after delete"),
+        1,
+        "a sibling device's KeyPackages must be untouched"
+    );
+
+    let again = repo
+        .delete_by_device(&target_device)
+        .await
+        .expect("delete_by_device is idempotent");
+    assert_eq!(
+        again, 0,
+        "a device with zero KeyPackages returns Ok(0), not an error"
     );
 }
 

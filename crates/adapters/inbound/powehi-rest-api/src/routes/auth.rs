@@ -144,6 +144,12 @@ pub async fn revoke_device_handler(
             DomainError::NotFound(_) => ApiError::from(DomainError::Unauthorized),
             other => ApiError::from(other),
         })?;
+    // Also delete any outstanding invites this device created: an invite pins
+    // a copy of the device's KeyPackage bytes directly in Redis, independent
+    // of the shared KeyPackage pool `revoke_device` already cleaned up above.
+    // Without this, an already-issued invite code could still hand out the
+    // revoked device's credential for up to its 24h TTL.
+    state.invite.revoke_invites_for_device(&target_id).await?;
     tracing::info!("auth.revoke_device");
     Ok(StatusCode::NO_CONTENT)
 }

@@ -37,4 +37,17 @@ pub trait InviteUseCase: Send + Sync {
     /// Redeem an invite code atomically (one-time use). Returns the inviting
     /// device's ID and the KeyPackage pinned at creation time.
     async fn redeem_invite(&self, code: &str) -> Result<RedeemedInvite, DomainError>;
+
+    /// Delete every outstanding (unredeemed) invite created by `device_id`.
+    ///
+    /// Called on device revocation, alongside `KeyPackageRepository::delete_by_device`:
+    /// an invite pins a copy of the inviting device's KeyPackage bytes directly in
+    /// Redis (`create_invite`), entirely outside the shared KeyPackage pool table —
+    /// deleting the pool row does NOT stop an already-issued invite code from still
+    /// handing out that credential for up to its 24h TTL. Without this cleanup a
+    /// revoked device's credential could still be added to a group via a redeemed
+    /// invite, which is the exact class of gap `delete_by_device` exists to close for
+    /// the pool path. Idempotent: a device with zero outstanding invites returns
+    /// `Ok(())`, not an error.
+    async fn revoke_invites_for_device(&self, device_id: &DeviceId) -> Result<(), DomainError>;
 }

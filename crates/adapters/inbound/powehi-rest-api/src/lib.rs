@@ -316,6 +316,13 @@ mod tests {
         async fn redeem_invite(&self, _: &str) -> Result<RedeemedInvite, DomainError> {
             unimplemented!()
         }
+        async fn revoke_invites_for_device(&self, _: &DeviceId) -> Result<(), DomainError> {
+            // Unlike create_invite/redeem_invite (genuinely unexercised by the
+            // tests using this stub), revoke_device_handler unconditionally
+            // calls this on every successful revocation, so a true no-op is
+            // required here for those tests to reach their own assertions.
+            Ok(())
+        }
     }
 
     fn noop_invite() -> Arc<dyn InviteUseCase> {
@@ -2742,6 +2749,133 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    /// SECURITY: `revoke_device_handler` must also delete the target device's
+    /// outstanding invites, not just its KeyPackage pool rows — an invite
+    /// pins a copy of the KeyPackage bytes directly in Redis, entirely
+    /// outside the pool `AuthUseCase::revoke_device` already cleans up.
+    struct RecordingInvite {
+        revoked: std::sync::Mutex<Vec<DeviceId>>,
+    }
+    impl RecordingInvite {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                revoked: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+    }
+    #[async_trait]
+    impl InviteUseCase for RecordingInvite {
+        async fn create_invite(
+            &self,
+            _: &DeviceId,
+            _: Vec<u8>,
+        ) -> Result<CreatedInvite, DomainError> {
+            unimplemented!()
+        }
+        async fn redeem_invite(&self, _: &str) -> Result<RedeemedInvite, DomainError> {
+            unimplemented!()
+        }
+        async fn revoke_invites_for_device(&self, device_id: &DeviceId) -> Result<(), DomainError> {
+            self.revoked.lock().unwrap().push(device_id.clone());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn revoke_device_handler_also_revokes_outstanding_invites() {
+        let user_id = UserId::new();
+        let invite = RecordingInvite::new();
+        let target = DeviceId::new();
+        let router = router(AppState {
+            region_id: "eu-de-1-test".to_string(),
+            region_tier: powehi_domain::region::Tier::Tier1,
+            auth: Arc::new(MockAuthDeviceSuccess),
+            group: noop_group(),
+            messaging: Arc::new(MockMessaging),
+            key_package: Arc::new(MockKeyPackage),
+            media: Arc::new(MockMedia),
+            push_sub_repo: null_push_sub_repo(),
+            invite: invite.clone(),
+            device_repo: FakeDeviceRepo::new(user_id),
+            cache: test_session_cache(),
+            handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
+        });
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/auth/devices/{target}"))
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            invite.revoked.lock().unwrap().as_slice(),
+            &[target],
+            "revoking a device must also revoke its outstanding invites"
+        );
+    }
+
+    /// A `InviteUseCase` whose `revoke_invites_for_device` always fails, to
+    /// verify the handler propagates the error rather than returning success
+    /// while stale invites survive.
+    struct FailingRevokeInvite;
+    #[async_trait]
+    impl InviteUseCase for FailingRevokeInvite {
+        async fn create_invite(
+            &self,
+            _: &DeviceId,
+            _: Vec<u8>,
+        ) -> Result<CreatedInvite, DomainError> {
+            unimplemented!()
+        }
+        async fn redeem_invite(&self, _: &str) -> Result<RedeemedInvite, DomainError> {
+            unimplemented!()
+        }
+        async fn revoke_invites_for_device(&self, _: &DeviceId) -> Result<(), DomainError> {
+            Err(DomainError::Internal(
+                "injected invite cleanup failure".into(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn revoke_device_handler_propagates_invite_cleanup_failure() {
+        let user_id = UserId::new();
+        let target = DeviceId::new();
+        let router = router(AppState {
+            region_id: "eu-de-1-test".to_string(),
+            region_tier: powehi_domain::region::Tier::Tier1,
+            auth: Arc::new(MockAuthDeviceSuccess),
+            group: noop_group(),
+            messaging: Arc::new(MockMessaging),
+            key_package: Arc::new(MockKeyPackage),
+            media: Arc::new(MockMedia),
+            push_sub_repo: null_push_sub_repo(),
+            invite: Arc::new(FailingRevokeInvite),
+            device_repo: FakeDeviceRepo::new(user_id),
+            cache: test_session_cache(),
+            handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
+        });
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/auth/devices/{target}"))
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]
