@@ -24,7 +24,165 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-06, cycle 447 — FEATURE: close the device-revocation KeyPackage/invite orphan gap, commit 8ba43e4)
+## Current state (2026-09-07, cycle 450 — STABILIZATION: finish and land cycles 448/449's orphaned WIP closing the MLS-Remove-notification gap from cycle 447's candidate #8, commit 9796cba)
+
+- Mode selection: counter 449→450, 450 % 5 == 0 → STABILIZATION. `gh run
+  list --limit 5` green on `main` at session start, `gh issue list
+  --state open`: empty. **Working tree was NOT clean at session start**:
+  ~2100 uncommitted lines across 21 tracked files + 1 untracked migration
+  (`0020_pending_removals.sql`) already sitting there — cycles 448/449 had
+  clearly done substantial, coherent, well-tested work implementing cycle
+  447's candidate #8 (server-side MLS Remove notification on device
+  revocation) but never committed it (counter still advanced 447→448→449,
+  so those cycles ran and burned budget without producing the mandatory
+  commit — a process gap worth watching for, not just this cycle's fix).
+- Rather than discard or ignore this WIP, read the entire diff file-by-file
+  to verify it was coherent (it was: new `pending_removals` table +
+  `GroupRepository::create/delete/list_pending_removals` + new
+  `DomainEvent::RemovalRequired` fanned out over the WS hub + a new `GET
+  /v1/groups/:id/pending-removals` endpoint + `AuthService::revoke_device`
+  wired to capture group memberships before device deletion and fan out
+  the notification, with an incidental clean refactor moving
+  invite-revocation from the REST handler into `AuthService::revoke_device`
+  itself for correct ordering), confirmed `cargo build/test/fmt/clippy`
+  all green, then ran the three mandatory review gates on the *whole* diff
+  before committing any of it (treating "finish and land abandoned WIP" as
+  the stabilization action, not as new feature work).
+- **crypto-reviewer: needs-rework → fixed.** Real findings, not nitpicks:
+  (1) the epoch gate on `delete_pending_removal`
+  (`created_at_epoch < groups.epoch`) was documented in 3+ places as
+  proving "a real MLS Remove Commit was accepted" — false; the server
+  cannot see Commit contents (RFC 9420 §6/§12.4), so it only proves *some*
+  Commit landed, and an ordinary self-Update (routine, RFC 9420
+  §12.1.2/§12.4.3 recommends it for PCS) satisfies it — fixed by
+  correcting every overstated comment/port-doc/migration claim to state
+  the real, weaker guarantee ("costs one Commit", not "proof of this
+  device's Remove"), removing "SECURITY REGRESSION" test labels that
+  pinned a control that doesn't exist, and adding new tests
+  (`remove_member_erases_the_pending_removal_after_any_unrelated_epoch_advance`
+  in group_service.rs + `delete_pending_removal_is_satisfied_by_any_unrelated_epoch_advance`
+  in pg_security_it.rs) that lock in the limitation as documented, not
+  hidden; (2) `create_pending_removal` ran best-effort *after* the
+  irreversible KeyPackage/device deletes — a DB blip there would
+  permanently and silently lose the one notification this table exists
+  for, with no retry possible (`find_by_id` → `NotFound`) — fixed by
+  moving it before the deletes as a hard-fail (`?`) step, matching
+  `revoke_device`'s own already-stated ordering discipline (idempotent
+  hard-fail steps first, then irreversible deletes); had to rewrite the
+  now-stale test `revoke_device_still_succeeds_when_recording_a_pending_removal_fails`
+  into `revoke_device_propagates_pending_removal_failure_and_the_device_survives`
+  to match; (3) a live, connected revoked-device socket could receive its
+  own `RemovalRequired` (WS auth is checked once at upgrade, not
+  re-validated per-message, and session invalidation runs after the
+  publish) — fixed `filter_notification` in ws-hub/src/handler.rs to
+  suppress `RemovalRequired` when `device_id == recipient`, corrected the
+  handler's doc comment that had falsely claimed this was impossible, and
+  flipped the one test that had pinned the old (wrong) behavior.
+- **threat-model-checker: YELLOW → addressed.** Real trust-boundary
+  preserved (server still can't construct a Remove — no group state, no
+  keys) but this was NOT a pure internal fix: (a) new *permanent* metadata
+  category — `pending_removals` rows survive the device row's deletion and
+  have no retention cap yet; (b) new server→client "demand" channel that a
+  malicious operator could forge to trick honest clients into evicting a
+  legitimate device (availability/integrity risk, not confidentiality);
+  (c) the fix is currently region-local (not replicated via
+  `SyncGroupMembership`, `RemovalRequired` is pod-local-only dispatch), so
+  PCS recovery is incomplete across regions. Required prd.md updates before
+  merge, applied this cycle: §3.3 new bullet (permanent metadata + no TTL
+  yet), §5.4 new item 5 (server forwards a Remove *request*, never
+  constructs one, and clients must not blindly auto-execute it — a
+  trust-boundary note, not just a mechanism note), §3.5.1 new paragraph
+  (region-locality, not yet cross-region replicated).
+- **security-auditor: PASS-with-nits, no blockers.** Confirmed SQL
+  parameterization clean on all 3 new queries, `GET
+  /v1/groups/:id/pending-removals` fail-closed on both explicit
+  non-membership and repo-lookup errors (same `?`-propagation pattern as
+  `add_member`/`remove_member`), no-plaintext-logging compliant (every new
+  log site is UUIDs + fixed categories only), no new `unwrap()`/`expect()`
+  outside tests, all 9 non-production `GroupRepository`/`GroupUseCase`
+  test-fake implementers correctly updated (confirmed unreachable outside
+  `#[cfg(test)]`), and confirmed the invite-revocation test-coverage move
+  from routes/auth.rs to auth_service.rs is equivalent-or-better (the new
+  service-layer tests assert the ordering invariant, not just the call).
+  Ran as a background agent that hit its 30-turn limit before reporting —
+  had to `SendMessage` it to resume and force a final verdict; worth
+  budgeting review agents more turns or a tighter prompt next time a
+  diff is this large (~2100 lines).
+- Non-blocking follow-ups flagged by review (not applied this cycle,
+  candidates below): expose `created_at_epoch` in the REST response so
+  clients can actually reconcile against their own tree state (currently
+  UUID-only); add a retention cap/sweeper for `pending_removals` (no GC
+  path besides the `groups` cascade); `ORDER BY created_at ASC` in
+  `list_pending_removals` has no tiebreaker; a `GroupRepository::save`
+  hardening note (blind `ON CONFLICT DO UPDATE`, no production caller
+  today, but a future one could violate the "epoch only moves via CAS"
+  invariant the whole epoch-gate design depends on).
+- **Full gate, re-run after every fix round**: `cargo build --workspace
+  --all-targets` clean, `cargo test --workspace` all green (0 failures,
+  every crate; 49 ignored testcontainers tests, up from 48 — confirms the
+  new pg_security_it.rs test registered), `cargo fmt --all --check` clean,
+  `cargo clippy --workspace --all-targets -- -D warnings` clean (one
+  `cloned_ref_to_slice_refs` lint fixed in a test — `&[device_id.clone()]`
+  → `std::slice::from_ref(&device_id)`). `cargo nextest` still not
+  installed in this environment — used the documented `cargo test
+  --workspace` fallback.
+- Committed `9796cba` (`feat(security): notify group members of revoked
+  devices' pending MLS Remove`), 23 files changed, pushed. `gh run list`
+  showed both `CI — Rust` and `CI — Live-backend E2E` `in_progress`
+  immediately after push — confirm green in a future session if not
+  already done.
+- Target dir hygiene (stabilization mode): `target/` was 23GB (over the
+  20GB threshold) but the mtime+7 prune found nothing eligible — everything
+  in it is from this cycle's own active build/test work, so no artifacts
+  were actually removed. Not a concern yet; revisit if it keeps growing
+  past 30GB+ without aging out.
+- **Next cycle candidates (carried/updated):**
+  1. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  2. Carried, still explicitly BLOCKED: wiring
+     `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal` into a real
+     caller needs F3 (incl. the `IpHash` extension) and the
+     HMAC-vs-plain-SHA256 gate resolved first — do not wire without
+     re-reading both prd.md sections.
+  3. **New (crypto-reviewer/threat-model-checker, this cycle, real but
+     scoped out):** `pending_removals` has no retention cap or sweeper —
+     a group whose members never call `remove_member` (or never advance
+     the epoch again) accumulates rows forever. Model on the existing
+     media-orphan-sweep pattern, or add a TTL.
+  4. **New (crypto-reviewer, this cycle, scoped out):** `GET
+     /v1/groups/:id/pending-removals` returns device UUIDs only; exposing
+     `created_at_epoch` (and maybe `created_at`) would let a client
+     actually reconcile the reminder against its own ratchet-tree state,
+     which is the only real enforcement path per this cycle's threat
+     model finding (server-side epoch gate is a heuristic, not a proof).
+  5. **New (threat-model-checker, this cycle, needs a product/frontend
+     decision, not just a backend patch):** no frontend consumer of
+     `RemovalRequired`/`pending-removals` exists yet, and per prd.md §5.4's
+     new trust-boundary note, whatever client eventually consumes it must
+     NOT auto-execute a Remove without some verification/confirmation
+     step (since the signal is server-forgeable). Needs an ADR once
+     frontend wiring for this starts.
+  6. **New (crypto-reviewer, this cycle, low-priority hardening):**
+     `GroupRepository::save` is a blind `ON CONFLICT DO UPDATE` on
+     caller-supplied epoch with no production caller today, but the new
+     epoch-gate security reasoning now implicitly depends on "epoch only
+     ever moves via `advance_epoch`'s CAS" — worth a doc comment forbidding
+     `save` from ever being used to advance epoch, before any future
+     caller appears.
+  7. Carried: no `values-prod-*.yaml`/CI overlay actually flips
+     `monitoring.prometheusRule.enabled=true` yet in a real
+     kube-prometheus-stack install (ops/environment-config task).
+  8. Carried: CI has no job that renders the Helm chart with
+     `monitoring.prometheusRule.enabled=true`/`serviceMonitor.enabled=true`
+     (ci-pipeline-author follow-up, not urgent).
+  9. Carried, doc-sync only: prd.md:1373-area documents
+     `key_packages.device_id` as having `REFERENCES devices(id)`; the
+     actual schema never had this FK (cycle 447 fixed the gap at the
+     application layer instead, not the schema).
+  10. Carried, real but scoped out (needs a GC/lifecycle decision):
+      consumed `key_packages` rows are never garbage-collected.
+
+## Previous state (2026-09-06, cycle 447 — FEATURE: close the device-revocation KeyPackage/invite orphan gap, commit 8ba43e4)
 
 - Mode selection: counter 446→447, 447 % 5 != 0 → FEATURE. `gh run list
   --limit 3` green on `main` (cycle 446's push both jobs
