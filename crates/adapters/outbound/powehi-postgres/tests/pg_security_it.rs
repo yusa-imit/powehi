@@ -1636,7 +1636,8 @@ async fn device_save_upsert_updates_credential_but_never_reassigns_owner() {
         "last_seen_at must update on upsert"
     );
     assert_eq!(
-        found.created_at, device.created_at,
+        found.created_at.timestamp_micros(),
+        device.created_at.timestamp_micros(),
         "created_at must also survive an upsert unchanged (excluded from the SET list, same as user_id)"
     );
 
