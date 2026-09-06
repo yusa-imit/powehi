@@ -24,7 +24,115 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-06, cycle 444 — FEATURE: close cycle 443's candidate #5, declare `additionalLabels` in `monitoring.serviceMonitor`/`monitoring.prometheusRule` values.schema.json, commit 0ffca0f)
+## Current state (2026-09-06, cycle 445 — STABILIZATION: add testcontainers integration coverage for `PgDeviceRepository` (test-coverage gap, not a carried candidate), commit 0af42c7)
+
+- Mode selection: counter 444→445, 445 % 5 == 0 → STABILIZATION.
+- CI check: `gh run list --limit 3` green on `main` (cycle 444's push
+  `completed`/`success` on `CI — Rust`; the one `cancelled` run was
+  superseded by the immediate rerun, not a real failure).
+  `gh issue list --state open`: empty. Clean working tree at session start.
+- Full backend gate run first, before looking for work (stabilization
+  order: CI → issues → test gaps → security sweep): `cargo build
+  --workspace --all-targets` clean, `cargo test --workspace` all green
+  (0 failures across every crate's unit+doc tests), `cargo clippy
+  --workspace --all-targets -- -D warnings` clean, `cargo fmt --all
+  --check` clean, `cargo audit` 0 advisories (664 crates), `cargo deny
+  check` — advisories/bans/licenses/sources all ok. Host disk: 43 GiB
+  free / 29% full on the 228 GiB volume — the "97% full / 6.9 GiB free"
+  risk carried since cycle 434 has resolved itself (other
+  `~/codespace/*` projects presumably cleaned up); dropping that as a
+  standing carried candidate.
+- Everything green and the carried-candidates pool was already thin
+  (cycle 444 said so explicitly), so did a real test-gap sweep per
+  testing-conventions.md ("Outbound adapter → testcontainers integration
+  test required") instead of mining another security-auditor nit: grepped
+  every `powehi-postgres` repo module for `#[cfg(test)]`/testcontainers
+  presence and cross-checked against `pg_security_it.rs`'s actual test
+  bodies (not just import lines). Found `PgDeviceRepository`
+  (`src/device_repo.rs`) was the one repo in that crate with **zero** real
+  coverage of its own methods — `pg_security_it.rs`'s `insert_device`
+  fixture helper only ever calls `.save()` as setup for other tests;
+  `find_by_id`, `find_by_user`, `delete`, and the `ON CONFLICT (id) DO
+  UPDATE` upsert clause's `user_id`-exclusion invariant had never been
+  exercised against real Postgres. (Every other repo module — group,
+  key_package, server_config, user, push_subscription, commit_ledger,
+  leader_lock — already had dedicated real-SQL test coverage.)
+- **Fix**: added six tests to `pg_security_it.rs` (`#[ignore]`d like the
+  rest of the file — no Docker in this environment, run in CI's existing
+  `pg_security_it` job via `--run-ignored all`, confirmed that wiring is
+  still in place at `.github/workflows/ci-rust.yml:101`): find-by-id
+  hit/miss, find_by_user ownership scoping (asserts another user's device
+  never leaks into the result), delete + delete-of-unknown-id-is-a-no-op,
+  and a security-invariant test that a colliding-id upsert `save` can
+  never reassign `user_id` to an attacker-supplied owner.
+- **security-auditor: PASS-with-nits, both cheap nits applied in-session.**
+  Confirmed no plaintext/PII/secret logging (pure test code, none added),
+  fixtures use random/constant bytes not real-looking keys, no SQL
+  surface changed (adapter untouched), `expect()` in test code is
+  allowed per testing-conventions. Independently verified the
+  ownership-reassignment test's own logic is sound (genuinely collides on
+  the PK with a distinct `insert_user`-minted `attacker_owner`, and
+  `UserId: PartialEq` makes the assertion real) — not just trusting my
+  own claim. Two nits applied: (1) documented in a code comment that a
+  foreign-owner id collision returns `Ok(())` and silently keeps
+  first-writer-wins semantics rather than erroring, since callers must
+  not read "save succeeded" as proof of ownership, and noted why today's
+  two callers (registration mints a fresh id; recovery-mint rejects a
+  known id already owned by someone else) don't hit this; (2) added
+  assertions that `created_at` also survives the upsert unchanged and
+  that `find_by_user(attacker_owner)` stays empty. One nit intentionally
+  NOT applied this cycle (flagged as the one security-relevant gap beyond
+  nice-to-have, but out of scope for a test-only diff): `key_packages`/
+  `envelopes` have no FK cascade on `device_id`/`recipient_device_id`
+  (`migrations/0001_initial.sql`), so `delete` leaves unconsumed
+  KeyPackages behind for a revoked device while `push_subscriptions`/
+  `group_members` do cascade — a pre-existing schema property, not a
+  regression, and fixing/pinning it is a schema-and-behavior decision for
+  a future cycle, not a test-only one.
+- No `.rs` production code touched (test-file-only diff) — `crypto-reviewer`/
+  `threat-model-checker` correctly don't apply (no crypto, no new
+  server-visible metadata, no architectural change).
+- Re-ran the full gate after the nit-fixes: `cargo fmt --all` (one
+  reformat needed, reapplied and reverified `--check` clean), `cargo test
+  -p powehi-postgres --test pg_security_it --no-run` (compiles clean),
+  `cargo clippy -p powehi-postgres --all-targets -- -D warnings` (clean),
+  `cargo test --workspace` (45/45 test result blocks `ok`, 0 `FAILED`).
+- Committed `0af42c7` (`test(postgres): add testcontainers coverage for
+  PgDeviceRepository`), pushed. Confirm `CI — Rust`'s `pg_security_it`
+  Docker job actually runs and passes these six new tests in a future
+  session if not already done by the time this is read.
+- Target dir hygiene: `target/` at 17G (below the 20G prune threshold,
+  no pruning needed) — pruned 0-byte `.rmeta` stubs only.
+- **Next cycle candidates (carried/updated):**
+  1. **Dropped:** host disk risk (carried since cycle 434) — now 43 GiB
+     free / 29% full, no longer a live concern.
+  2. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  3. Carried, still explicitly BLOCKED: wiring
+     `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal` into a real
+     caller needs F3 (incl. the `IpHash` extension) and the
+     HMAC-vs-plain-SHA256 gate resolved first — do not wire without
+     re-reading both prd.md sections.
+  4. Carried, minor, optional (security-auditor nit from cycle 444, not
+     applied): `additionalLabels` schema doesn't constrain label-key/value
+     syntax (DNS-1123-ish pattern, 63-char max). Marginal payoff.
+  5. Carried, minor, optional: if staging and prod-eu (same
+     `region_id=eu-frankfurt`) ever get scraped by the same Prometheus
+     instance, `sum by (region_id)` can't distinguish their alerts.
+  6. **New, from this cycle's security-auditor review, real but scoped
+     out (schema/behavior decision, not a quick follow-up):**
+     `PgDeviceRepository::delete` doesn't cascade to `key_packages`
+     (`device_id` FK-less) — a revoked device's unconsumed KeyPackages
+     stay in the table forever (they're single-use and TTL'd at the
+     application layer already via `mark_consumed`/expiry, so this is a
+     storage-hygiene gap, not a security bypass, but worth a deliberate
+     decision: add an explicit cleanup call in the revoke-device flow, or
+     a FK cascade, or document why leaving them is fine).
+  7. The candidate pool is otherwise still thin — a future FEATURE cycle
+     should keep considering a fresh substantial item from prd.md rather
+     than only mining review-agent nits.
+
+## Previous state (2026-09-06, cycle 444 — FEATURE: close cycle 443's candidate #5, declare `additionalLabels` in `monitoring.serviceMonitor`/`monitoring.prometheusRule` values.schema.json, commit 0ffca0f)
 
 - Mode selection: counter 443→444, 444 % 5 != 0 → FEATURE.
 - CI check: `gh run list --limit 3` green on `main` (cycle 443's push
@@ -437,131 +545,4 @@ follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
      (e.g. re-reading prd.md for drift, or scoping the PQ-hybrid/F3
      prerequisites enough to unblock them) rather than finding another
      quick follow-up.
-
-## Previous state (2026-09-05, cycle 440 — STABILIZATION: finished inherited cycle-439 work (CommitLedger unit-of-work closing the epoch wedge), verified+reviewed+committed, commit 1e78b81)
-
-- Mode selection: counter 439→440, 440 % 5 == 0 → STABILIZATION.
-- CI check: `gh run list --limit 5` green on `main` (cycle 438's push all
-  `success`, one `cancelled` run superseded by a rerun — not a real
-  failure). `gh issue list --state open`: empty.
-- **Session start found a large uncommitted working tree again** (same
-  recurring pattern as cycles 429/433/434/438 — a prior cycle's work was
-  never committed/its own memory entry never written, here likely
-  cycle 439): a fully-formed, well-documented, well-tested feature was
-  already implemented that closes exactly next-cycle candidate #6 from
-  cycle 438's memory (the CAS+envelope-save non-atomicity accepted
-  risk). New narrow outbound port `CommitLedger::commit_epoch_and_save`
-  (`powehi-port-outbound/src/commit_ledger.rs`) + Postgres adapter
-  `PgCommitLedger` (`powehi-postgres/src/commit_ledger.rs`) run the
-  epoch CAS UPDATE and the Commit-envelope INSERT in one `sqlx`
-  transaction, replacing the old two-separate-port-calls sequence at
-  both `messaging_service.rs::send_commit` and
-  `powehi-grpc/server.rs::forward_commit`. The old
-  `mls_commit_epoch_stall_total` counter (cycle 438's observability-only
-  mitigation) was removed since the failure mode it tracked is now
-  structurally impossible. Treated as real in-progress work to verify
-  and land per the standing "investigate unfamiliar state before
-  overwriting" discipline — this is finishing previously-started
-  architectural work, not starting a new feature, so doing it in a
-  STABILIZATION cycle is consistent with "no new features."
-- Verified from scratch (not trusting the diff's self-documentation):
-  read every changed/new file in full, confirmed the CAS SQL is
-  byte-identical to the already-reviewed `advance_epoch`, confirmed the
-  envelope's `epoch` field is always adapter-stamped from the CAS's own
-  return value (never caller-supplied), confirmed explicit
-  `tx.rollback()` on CAS-loss.
-- **All three required review agents run in-session** (MLS epoch/
-  concurrency logic + new architectural port + gRPC handler — all three
-  routing triggers apply):
-  - **crypto-reviewer: PASS.** CAS still atomic/race-free under Postgres
-    READ COMMITTED (EvalPlanQual re-checks `WHERE epoch=$2` against the
-    post-commit row on lock contention, so a loser correctly sees
-    `Ok(None)`, never double-advances). Wrapping the CAS in a longer-held
-    transaction is strictly safer, not racier. Error semantics correctly
-    changed so a client-visible failure now provably means the epoch is
-    untouched (safe to retry with the same `expected_epoch`), closing
-    the old ambiguous-retry class of bug. Envelope epoch-stamping
-    verified correct with both a unit test and a Postgres integration
-    test that deliberately sets a wrong input epoch. One non-blocking
-    style nit: insert-failure path relied on `Transaction::drop`'s
-    best-effort rollback instead of an explicit one (asymmetric with the
-    CAS-loss branch) — flagged as low-severity, not RFC 9420-breaking.
-  - **threat-model-checker: GREEN, no required fixes.** No new
-    plaintext/metadata exposure (§3.3 unaffected — pure write-atomicity
-    change). mTLS peer-region + membership checks in `forward_commit`
-    confirmed to still execute *before* the new port call, unmoved by
-    the refactor. Counter removal confirmed safe — grepped clean, no
-    Alertmanager/Grafana rule was ever wired to it (per cycle 438's own
-    "미착수" note), so no live detection control was lost. The
-    two-table `CommitLedger` port judged an acceptable narrow exception
-    to hexagonal port boundaries given its doc comment explicitly
-    disclaims generalizing beyond this one cross-aggregate invariant.
-    prd.md §4A.5's "epoch wedge — CLOSED (cycle 439)" text verified
-    accurate with no overstated guarantees.
-  - **security-auditor: PASS.** SQL parameter binding, the `u64→i64`
-    epoch range guard (`InvalidInput`/400, not `Internal`/500, checked
-    before any query), zero plaintext/PII logging introduced, zero
-    dangling `metrics::`/`mls_commit_epoch_stall_total` references after
-    the dependency removal (independently grepped + rebuilt), zero
-    `unwrap()`/`expect()` in non-test lib code, and the `forward_commit`
-    authz ordering (mTLS + membership before the ledger call) all
-    independently re-verified — not just trusted from the crypto-review
-    pass. Same non-blocking rollback-style nit as crypto-reviewer.
-  - **Fix applied for the shared nit** (both independent reviewers
-    flagged the same thing, cheap to fix): `commit_ledger.rs`'s
-    insert-failure path now calls `tx.rollback()` explicitly before
-    returning the mapped error, matching the CAS-loss branch's style —
-    functionally identical to the prior `Drop`-based rollback, purely an
-    auditability improvement.
-- Build/test gate (repeated after the nit-fix): `cargo build --workspace
-  --all-targets` (clean), `cargo test --workspace` (all green, 0
-  failures across every crate), `cargo clippy --workspace --all-targets
-  -- -D warnings` (clean), `cargo fmt --all --check` (clean), `cargo
-  deny check` (advisories/bans/licenses/sources all ok — `metrics`
-  removal from `powehi-grpc`/`powehi-application` `Cargo.toml`s is a
-  pure subtraction, no new external crate). `cargo audit`: 0 advisories
-  across 664 crates. `gh issue list --state open`: empty (checked
-  above).
-- Committed `1e78b81` (`feat(mls): make epoch CAS + Commit-envelope save
-  one atomic unit of work`), pushed. CI triggered on push, confirm green
-  before trusting this cycle's claim in a future session if not already
-  done by the time this is read.
-- Target dir hygiene: `target/` at 17G (below the 20G prune threshold,
-  no pruning needed this cycle) — pruned only 0-byte `.rmeta` stubs.
-  Host disk is still tight (6.9 GiB free / 97% full on the 228 GiB
-  volume) — same standing non-actionable-from-this-repo risk carried
-  since cycle 434 (other `~/codespace/*` projects dominate usage).
-- **Next cycle candidates (carried/updated):**
-  1. Carried: host disk risk from other `~/codespace/*` projects — not
-     actionable from this repo. Still at 97% full / 6.9 GiB free.
-  2. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
-     libcrux/x-wing admissibility) — human/crypto-lead policy call.
-  3. Carried: R2 orphan-sweep owner-mismatch/ratio-guard metrics
-     (cycle 436) still need an actual Alertmanager/Grafana rule wired —
-     infra-lead/ops task, not a routine backend cycle.
-  4. Carried, still explicitly BLOCKED: wiring
-     `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal` into a real
-     caller needs F3 (incl. the `IpHash` extension) and the
-     HMAC-vs-plain-SHA256 gate resolved first — do not wire without
-     re-reading both prd.md sections.
-  5. **Downgraded to done:** the epoch-CAS/envelope-save non-atomicity
-     (candidate #6 as of cycle 438) is now closed via `CommitLedger` —
-     no further action expected on this specific item. The
-     `mls_commit_epoch_stall_total` counter it required is correctly
-     removed (tracked failure mode is gone), so candidate #5 (wiring an
-     alert to that counter) is also moot/dropped.
-  6. **New, minor, optional:** the `PgCommitLedger` envelope INSERT
-     still uses `ON CONFLICT (id) DO NOTHING` (copied from the
-     pre-existing `PgEnvelopeRepository::save`) — inert today since both
-     callers always generate a fresh UUIDv4 per attempt, but
-     crypto-reviewer flagged that *if* `id` were ever client-supplied as
-     an idempotency key, a conflicting existing row would let the
-     transaction commit having advanced the epoch while silently NOT
-     inserting the intended envelope — structurally the same bug class
-     this cycle just closed, just via `ON CONFLICT DO NOTHING` instead of
-     a separate write. Not a regression (pre-existing pattern, not
-     introduced this cycle) and not urgent (no current caller does this)
-     — worth a one-line comment or `DO UPDATE ... WHERE false` swap if a
-     future cycle touches this file again, not worth a dedicated cycle
-     on its own.
 
