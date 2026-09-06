@@ -24,7 +24,141 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-07, cycle 450 — STABILIZATION: finish and land cycles 448/449's orphaned WIP closing the MLS-Remove-notification gap from cycle 447's candidate #8, commit 9796cba)
+## Current state (2026-09-07, cycle 452 — FEATURE: finish and land cycle 451's orphaned WIP implementing cycle 450's candidate #3 (pending_removals retention sweep), commit ddfa5c8)
+
+- Mode selection: counter 451→452, 452 % 5 != 0 → FEATURE. `gh run list
+  --limit 3` green on `main`. `gh issue list --state open`: empty.
+  **Working tree was NOT clean at session start** — same process gap as
+  cycles 448/449: cycle 451 had done substantial, coherent, well-tested
+  work (a bounded daily retention sweep for `pending_removals`, closing
+  cycle 450's flagged "no retention cap or sweeper" gap, modeled on the
+  media-orphan-sweep pattern) but never committed it. Read the whole diff
+  file-by-file to verify coherence (new `GroupRepository::sweep_stale_
+  pending_removals` port+Postgres-impl, a background job in `main.rs`
+  offset from the other 3 GC jobs, new config knobs, index migration
+  0021, new pg_security_it.rs tests, Helm wiring, prd.md updates) before
+  treating "land the abandoned WIP" as this cycle's action.
+- `cargo build/test/fmt/clippy` all green on the WIP as found, `gh run
+  list`/`gh issue list` clean, `helm lint`/`conftest` clean on all three
+  overlays — then ran all three mandatory review gates on the whole diff
+  before committing any of it.
+- **crypto-reviewer: needs-rework → fixed.** Real findings: (1) the new
+  `MIN_DATABASE_MAX_CONNECTIONS=5` derivation was wrong — its own doc
+  comment claimed "at most one of the daily/6h jobs overlaps the hourly
+  job", but the actual `tokio::time::interval` schedules (confirmed by
+  reading `main.rs` directly, not trusting the comment) show media blob
+  GC (hourly, unskipped) + media ledger trim (24h, unskipped) + media
+  orphan sweep (6h, first tick skipped) all collide at t=24h, 48h, ... —
+  a real 3-job collision needing 6 connections, not 2 jobs needing 4;
+  fixed by raising the floor to 7 and correcting the doc/error-message
+  math (the new pending-removals job's own 3h+24h offset to t=27h, 51h
+  was already correctly designed to avoid adding a 4th job to that
+  collision — only that constant's justification was wrong); (2) the
+  epoch-gate doc claimed it "preserves the cost floor" of `delete_pending_
+  removal` (paraphrased: "erasing a reminder costs ≥1 Commit") — false,
+  since the gate is satisfied by *any* member's *any* Commit (e.g. a
+  routine self-Update), not an action by the party wanting to suppress
+  the reminder, so the real marginal cost to an adversary in a live group
+  is 0, not 1 — reworded in the port doc, `main.rs`, and prd.md to state
+  it's a *group liveness filter*, not an attacker-cost floor (only
+  protects fully dormant groups, which it does correctly per a dedicated
+  test); (3) required shipping `pending_removal_sweep_enabled` defaulted
+  to `false` (not `true`) since no frontend consumer of `pending_removals`/
+  `RemovalRequired` exists yet and there's no alternative reconciliation
+  channel — enabling by default would have silently discarded the one
+  durable signal cycle 448's feature exists to provide before any client
+  could act on it; (4) switched the sweep's `DELETE` from a `ctid`-based
+  plan to the natural key `(group_id, device_id)` — the `ctid` version's
+  safety relied on a prose-only "never UPDATEd in production" invariant
+  that the diff's own new test helper (`backdate_pending_removal`)
+  already violates (test-only, but fragile precedent), with zero
+  performance reason to prefer `ctid` since the PK is already indexed;
+  added the eligibility predicate redundantly to the outer `WHERE` for
+  fail-closed behavior; (5) added an `ORDER BY ..., group_id, device_id`
+  tie-breaker for a true total order (ties are common: one device
+  revoked across many groups shares one `now()`); (6) documented a
+  pre-existing (not new) epoch-read race in `create_pending_removal`
+  that this sweep is the first automatic path to act on.
+- **security-auditor: needs-rework → fixed.** Independently found the
+  same `MIN_DATABASE_MAX_CONNECTIONS` bug (F1, medium) — two reviewers
+  converging on identical math from separate diff reads was a strong
+  signal it was real. Also found: Helm `values.schema.json`'s
+  `pendingRemovalSweepTimeoutSecs` had `minimum: 1` while Rust's real
+  floor is 30 (schema would pass an operator value that then crash-loops
+  the pod at startup) — same gap existed for the raised
+  `databaseMaxConnections` floor — fixed both schema minimums to match
+  Rust's `validate()` exactly, and verified via `helm template --set` that
+  each now actually rejects the bad value CI would otherwise let through.
+  Confirmed clean on all other axes (SQL parameterization, no plaintext
+  logging, no new `unwrap()`/`expect()`, advisory lock uniqueness/release
+  paths, no new attack surface).
+- **threat-model-checker: YELLOW → addressed.** Required prd.md fixes,
+  all applied: (1) the diff's "다만 이제 최대 30일로 상한" line was wrong
+  in two ways simultaneously (30 days is a floor for active groups, not
+  a ceiling — actual deletion lags grace+tick+backlog — and dormant
+  groups are *never* swept, i.e. no ceiling at all for them) — rewritten
+  to state both facts correctly; (2) the diff already had `GET /v1/
+  groups/:group_id/pending-removals` live (from cycle 448/449) but its
+  own residual-risk paragraph didn't mention this, framing "no one reads
+  the reminder before it's swept" as a narrow edge case when it's
+  actually the default outcome for every active group until a frontend
+  policy consumes that endpoint — text now says so explicitly and ties it
+  to the default-`false` decision above; (3) added a new §3.5.1 paragraph
+  on a multi-region interaction the diff hadn't covered: `groups.epoch`
+  advances in a group's home region regardless of which region a member
+  is connected to, but the notification itself is region-local, so a
+  member who structurally can never receive the alert can still be the
+  one whose routine Commit satisfies the sweep's epoch gate.
+- **Full gate, re-run after every fix round**: `cargo build --workspace
+  --all-targets` clean, `cargo test --workspace` all green (0 failures),
+  `cargo fmt --all --check` clean, `cargo clippy --workspace --all-targets
+  -- -D warnings` clean. `helm lint` + `conftest test --combine` (7/7)
+  clean on all three overlays; `helm template --set
+  config.pendingRemovalSweepTimeoutSecs=5` and `--set
+  config.databaseMaxConnections=4` both now correctly rejected by schema
+  (previously would have passed CI and crashed at pod startup).
+- Committed `ddfa5c8` (`feat(security): add bounded retention sweep for
+  pending_removals`), 18 files changed (17 modified + new migration
+  0021), pushed clean (`1d6d5eb..ddfa5c8 main -> main`).
+- **Process note, same lesson as cycle 450**: this is the second time in
+  three stabilization/feature cycles that a prior cycle did real,
+  substantial work and burned its counter slot without committing.
+  Worth a future cycle explicitly checking `git status` for uncommitted
+  work as step 0, before mode-specific logic, rather than only
+  discovering it via the git-status system reminder.
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates (carried/updated):**
+  1. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  2. Carried, still explicitly BLOCKED: wiring
+     `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal` into a real
+     caller needs F3 (incl. the `IpHash` extension) and the
+     HMAC-vs-plain-SHA256 gate resolved first — do not wire without
+     re-reading both prd.md sections.
+  3. **New, real, needed before the sweep can ever be turned on:** wire a
+     frontend consumer of `GET /v1/groups/:id/pending-removals` /
+     `RemovalRequired` with a confirmation-gated policy (prd.md §5.4's
+     trust-boundary note — never auto-execute), and/or a group-scoped
+     device-list endpoint clients can reconcile against. Until one of
+     these exists, `pending_removal_sweep_enabled` must stay `false` in
+     every environment — do not flip it to `true` as a quick config
+     change without re-reading prd.md §3.3's residual-risk paragraph.
+  4. Carried: no `values-prod-*.yaml`/CI overlay actually flips
+     `monitoring.prometheusRule.enabled=true` yet in a real
+     kube-prometheus-stack install (ops/environment-config task).
+  5. Carried: CI has no job that renders the Helm chart with
+     `monitoring.prometheusRule.enabled=true`/`serviceMonitor.enabled=true`
+     (ci-pipeline-author follow-up, not urgent).
+  6. Carried, doc-sync only: prd.md documents `key_packages.device_id` as
+     having `REFERENCES devices(id)`; the actual schema never had this FK.
+  7. Carried, real but scoped out (needs a GC/lifecycle decision):
+     consumed `key_packages` rows are never garbage-collected.
+  8. Carried, low-priority hardening (crypto-reviewer, cycle 450):
+     `GroupRepository::save` is a blind `ON CONFLICT DO UPDATE` with no
+     production caller today; worth a doc comment forbidding it from ever
+     advancing epoch, before any future caller appears.
+
+## Previous state (2026-09-07, cycle 450 — STABILIZATION: finish and land cycles 448/449's orphaned WIP closing the MLS-Remove-notification gap from cycle 447's candidate #8, commit 9796cba)
 
 - Mode selection: counter 449→450, 450 % 5 == 0 → STABILIZATION. `gh run
   list --limit 5` green on `main` at session start, `gh issue list
