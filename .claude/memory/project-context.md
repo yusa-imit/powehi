@@ -24,7 +24,163 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-06, cycle 446 — FEATURE (redirected to a CI-red bug fix per core law "bugs/CI red before anything else"): fix flaky `created_at` nanosecond-vs-microsecond assertion in cycle 445's new device-upsert test, commit 81c22e2)
+## Current state (2026-09-06, cycle 447 — FEATURE: close the device-revocation KeyPackage/invite orphan gap, commit 8ba43e4)
+
+- Mode selection: counter 446→447, 447 % 5 != 0 → FEATURE. `gh run list
+  --limit 3` green on `main` (cycle 446's push both jobs
+  `completed`/`success`). `gh issue list --state open`: empty. Clean tree.
+- Carried-candidates pool was thin again (cycle 445's stabilization
+  sweep flagged one real, scoped-out item: cycle 445 stab note #6,
+  "`PgDeviceRepository::delete` doesn't cascade to `key_packages`").
+  Spawned an Explore-style research agent to map the actual device-
+  revocation call path before committing to a fix scope (paid off —
+  the real bug was bigger than the one-line summary suggested).
+- **Root finding**: `AuthService::revoke_device` deleted the `devices`
+  row and invalidated cached sessions but never touched the device's
+  `key_packages` rows. `KeyPackageRepository::fetch_one`/`count_available`
+  filter only on `consumed`, not device liveness, and `key_packages.device_id`
+  has no FK at all (unlike every other devices-referencing table). Net
+  effect: a revoked device's stale unconsumed KeyPackage could still be
+  fetched and used to add that (now-nonexistent) device's MLS credential
+  to a group after revocation — a PCS/device-compromise-response gap.
+- **Fix, part 1 (pool)**: added `KeyPackageRepository::delete_by_device`
+  (port + Postgres `DELETE FROM key_packages WHERE device_id = $1` impl +
+  a new non-partial `key_packages(device_id)` index migration
+  `0019_key_packages_device_id_idx.sql` — the existing index is partial
+  on `WHERE NOT consumed` and can't back a DELETE that must also match
+  consumed rows, so every revocation was doing a full seq scan). Wired
+  into `revoke_device`.
+- **Fix, part 2 (invite path — found by crypto-reviewer, not the
+  original scope)**: `InviteService::create_invite` pins a *separate*
+  copy of the KeyPackage bytes directly in Redis (`invite:<H(code)>`,
+  24h TTL), entirely outside the pool table — part 1 alone left this
+  channel still handing out a revoked device's credential for up to
+  24h. Added `InviteUseCase::revoke_invites_for_device` (walks the
+  existing `invite:device:<uuid>` index, deletes each member + the
+  index) and wired it into the REST `revoke_device_handler` (not into
+  `AuthService` itself — kept Auth and Invite bounded contexts
+  independent, orchestrated at the inbound-adapter composition layer,
+  matching this codebase's existing pattern of handlers coordinating
+  multiple use cases).
+- **Ordering bug caught independently by threat-model-checker AND
+  security-auditor AND crypto-reviewer (initial FAIL)**: first draft
+  deleted the device row, THEN deleted its KeyPackages — hard-failing
+  (`?`) on the KeyPackage step. All three reviewers flagged the same
+  failure mode: if KeyPackage deletion fails after the device is
+  already gone, the state is unrecoverable (retry hits `find_by_id` →
+  `NotFound` before ever reaching the KeyPackage call again), leaving
+  orphaned KeyPackages forever — exactly the bug this fix exists to
+  close. Fixed by reversing the order (KeyPackage delete → device
+  delete); both operations are idempotent, so a failure now leaves the
+  device row intact and the whole revocation safely retryable.
+- **crypto-reviewer: FAIL → fixed → clean.** Required changes, all
+  applied: (1) the ordering fix above; (2) a regression test locking in
+  hard-fail-with-device-survival (`FailingDeleteByDeviceKeyPackageRepo`
+  fake + `revoke_device_key_package_cleanup_failure_propagates_and_device_survives`);
+  (3) the invite-path fix (part 2) — offered as an alternative to
+  narrowing the port doc's "can never be handed out again" claim, chose
+  to actually close the gap instead. Also applied on top: a port-doc
+  note that cross-region `mark_consumed`'s `NotFound` must be treated
+  fail-closed identically to `AlreadyConsumed` (a previously-consumed
+  id now also reads back `NotFound` post-cleanup). Confirmed no RFC
+  9420 race: `fetch_one`'s atomic `UPDATE...RETURNING` means a
+  concurrent legitimate Add already has the KeyPackage bytes in hand
+  before any delete could matter; Welcome decryption uses the client-
+  held init private key, unaffected by the server row's deletion.
+  Confirmed zero KeyPackage bytes/credential material read or logged
+  by the new code (pure `DELETE`/Redis-key metadata operations).
+- **threat-model-checker: GREEN.** T3 (malicious operator) and T4
+  (device seizure) rows strengthened — T4 explicitly: revoke is the
+  user's only response to a seized device, and this is the first time
+  the code actually enforces prd.md's own "KeyPackage = one-time use,
+  deleted after" invariant end-to-end. No new server-visible metadata
+  (device_id was already stored/indexed). No prd.md edit or ADR needed
+  (closes a gap vs. the documented invariant, doesn't introduce a new
+  assumption/trade-off). Flagged a pre-existing, unrelated doc-sync gap
+  (prd.md:1373 says `key_packages.device_id` has a FK; the migration
+  never did) — noted as a future `doc-syncer` candidate, not blocking.
+  Also flagged (not blocking, carried below): if §4A.6 cross-region
+  KeyPackage replication is ever implemented, `delete_by_device` will
+  need mesh fan-out or the T7 gap reopens per-region.
+- **security-auditor: PASS-with-nits, addressed.** Confirmed ownership
+  check still gates both new deletion calls, fully parameterized SQL,
+  no new `unwrap()`/`expect()` in lib code, all 3+2 test-fake
+  `impl KeyPackageRepository`/`InviteUseCase` sites found and updated
+  (2 more `InviteUseCase` fakes than my own grep first caught —
+  `push_subscription.rs`/`region.rs`'s `Null`/`NullUseCase` stubs, only
+  surfaced by the compiler; grep alone had missed them). Independently
+  confirmed the new index closes a real seq-scan risk (agreed with
+  crypto-reviewer's F3). Consumed-KeyPackage-row accumulation (no GC)
+  flagged as a separate LOW follow-up, not blocking a test-only-adjacent
+  security fix.
+- **Full gate, re-run after every fix round**: `cargo build --workspace
+  --all-targets` clean, `cargo test --workspace` all green (0 failures,
+  every crate, including the two new REST-handler tests
+  `revoke_device_handler_also_revokes_outstanding_invites` and
+  `revoke_device_handler_propagates_invite_cleanup_failure`), `cargo
+  clippy --workspace --all-targets -- -D warnings` clean, `cargo fmt
+  --all --check` clean (`cargo nextest` still not installed in this
+  environment — used the documented `cargo test --workspace` fallback,
+  same as prior cycles). New Postgres integration test
+  (`key_package_delete_by_device_removes_only_that_devices_packages`)
+  is `#[ignore]`'d like its siblings — no Docker here, runs in CI's
+  Docker job.
+- Committed `8ba43e4` (`fix(security): delete a revoked device's
+  KeyPackages and outstanding invites`), pushed. 15 files changed
+  (5 test-fake update sites the compiler caught, not just the ones a
+  first grep found — re-confirm `cargo build --workspace --all-targets`
+  after ANY inbound-port trait method addition, don't trust a single
+  `grep -rln "impl X for"` pass to find every implementer, since
+  `impl Trait for Name { ... }` inside a nested test module can dodge a
+  loose grep pattern). Confirm `CI — Rust`'s Docker job actually runs
+  and passes the two new `pg_security_it.rs`/behavior-locking tests in
+  a future session if not already done by the time this is read.
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates (carried/updated):**
+  1. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  2. Carried, still explicitly BLOCKED: wiring
+     `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal` into a real
+     caller needs F3 (incl. the `IpHash` extension) and the
+     HMAC-vs-plain-SHA256 gate resolved first — do not wire without
+     re-reading both prd.md sections.
+  3. Carried: no `values-prod-*.yaml`/CI overlay actually flips
+     `monitoring.prometheusRule.enabled=true` yet in a real
+     kube-prometheus-stack install (ops/environment-config task).
+  4. Carried: CI has no job that renders the Helm chart with
+     `monitoring.prometheusRule.enabled=true`/`serviceMonitor.enabled=true`
+     (ci-pipeline-author follow-up, not urgent).
+  5. **New, from this cycle's threat-model-checker (doc-sync, not
+     code):** prd.md:1373 documents `key_packages.device_id` as having
+     `REFERENCES devices(id)`; the actual schema never had this FK (the
+     bug this cycle fixed at the application layer instead). A
+     `doc-syncer` pass should either fix the prd.md text or add the FK
+     for real (the latter needs an orphan-row backfill first).
+  6. **New, from this cycle's reviews, real but scoped out (needs a
+     GC/lifecycle decision, not a quick follow-up):** consumed
+     `key_packages` rows are never garbage-collected (only the
+     per-device *unconsumed* count is capped at 200). Combined with
+     device churn this grows unbounded — a Tiger Style "limit on
+     everything" violation. Would need either a periodic sweep (model
+     on the existing media-orphan-sweep pattern in
+     `bin/powehi-server/src/main.rs`) or a TTL/retention policy.
+  7. **New, from this cycle's threat-model-checker, not urgent:** if
+     §4A.6 cross-region KeyPackage replication is ever implemented,
+     `delete_by_device` needs mesh fan-out (or a `RevokeKeyPackages`
+     RPC) or the same T7 gap reopens per-region for replicated pool
+     rows.
+  8. **New, from this cycle's crypto-reviewer, real but explicitly
+     out of scope for this diff:** `revoke_device` never issues an MLS
+     Remove proposal/Commit — the server-side routing list (`group_members`
+     FK cascade) is cleared, but a revoked device's leaf stays live in
+     any existing group's ratchet tree until another member commits a
+     Remove. This fix closes "can a revoked device be newly Added"; it
+     does not close "is a revoked device still a current group member"
+     (RFC 9420 §12.1.3 PCS only recovers after that Remove commits).
+     Worth its own cycle: likely needs a server-initiated or client-
+     prompted Remove-proposal flow on revocation.
+
+## Previous state (2026-09-06, cycle 446 — FEATURE (redirected to a CI-red bug fix per core law "bugs/CI red before anything else"): fix flaky `created_at` nanosecond-vs-microsecond assertion in cycle 445's new device-upsert test, commit 81c22e2)
 
 - Mode selection: counter 445→446, 446 % 5 != 0 → FEATURE. But `gh run list
   --limit 5` showed the most recent push (cycle 445's memory-chore commit,
@@ -381,233 +537,4 @@ follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
      (region_id)` can't distinguish their alerts. Not urgent since they're
      currently separate clusters — would need an `env` label or
      `enforcedNamespaceLabel` only if that topology changes.
-
-## Previous state (2026-09-05, cycle 442 — FEATURE: wire the R2 orphan-sweep owner-mismatch/ratio-guard Prometheus counters to an actual PrometheusRule (closes cycle 436's carried candidate #3), commit pending)
-
-- Mode selection: counter 441→442, 442 % 5 != 0 → FEATURE.
-- CI check: `gh run list --limit 5` green on `main` (cycle 441's push
-  `completed`/`success` on both `CI — Rust` and `CI — Live-backend E2E`).
-  `gh issue list --state open`: empty. Clean working tree at session start.
-- Cycle 441's own "Next cycle candidates" list was explicitly thin (its
-  #6 said the pool needed looking beyond the carried list). Of the
-  carried candidates, #1 (host disk) and #2 (PQ hybrid) and #4 (F3-blocked
-  abuse-signal wiring) are non-actionable-from-this-repo/policy-gated as
-  before. #3 (R2 orphan-sweep owner-mismatch/ratio-guard metrics need an
-  actual alert rule, carried since cycle 436) turned out to be genuinely
-  actionable from this repo after all: `infra/helm/powehi/` already has a
-  `servicemonitor.yaml` template and Prometheus Operator wiring, but no
-  `PrometheusRule` template existed yet — this wasn't purely an
-  ops/infra-lead-external task, it was a missing Helm template in this
-  chart. Delegated to `infra-lead`.
-- **Fix**: new `infra/helm/powehi/templates/prometheusrule.yaml` (first
-  `PrometheusRule` in this chart), gated by
-  `.Values.monitoring.prometheusRule.enabled` (default `false`, same
-  precedent as `serviceMonitor`), using the existing
-  `powehi.fullname`/`powehi.labels` helpers. Two alerts, group
-  `powehi.media-orphan-sweep`:
-  - `PowehiMediaOrphanSweepOwnerMismatch` (severity `critical`) on
-    `sum by (region_id) (increase(media_orphan_sweep_owner_mismatch_total[1h])) > 0`.
-  - `PowehiMediaOrphanSweepRatioGuard` (severity `warning`) on
-    `sum by (region_id) (increase(media_orphan_sweep_ratio_guard_total[1h])) > 0`.
-  Both `for: 0m` — deliberate, not an oversight: both counters track
-  conditions that never self-resolve (every subsequent 6-hourly sweep
-  re-triggers them once broken per the cycle-436 doc comments), so
-  "any increase in the window" is already a low-noise, correct signal
-  with no need for alertmanager debounce. Annotations cite prd.md
-  §9.4.3 and use `{{ $labels.region_id }}` templating so on-call has
-  context without reading the source. Added
-  `monitoring.prometheusRule.{enabled,window,additionalLabels}` to
-  `values.yaml` (mirroring the `serviceMonitor` block's style/doc-comment
-  pattern) and declared `monitoring.serviceMonitor`/`monitoring.prometheusRule`
-  in `values.schema.json` (previously `monitoring` was entirely
-  undeclared there — also newly schema-enforced: `window` must match a
-  Prometheus duration pattern, since a malformed value makes Prometheus
-  reject the whole rule *group*, silently dropping both alerts).
-- **security-auditor: PASS-with-nits, addressed in-session** (infra
-  observability config, additive-only, no new server-visible metadata —
-  both counters already existed and were already reviewed in cycle 436,
-  so per routing rules only `security-auditor` applies here, not
-  `crypto-reviewer`/`threat-model-checker`). Confirmed no plaintext/PII/
-  secret leakage, `region_id` is the same bounded operator enum already
-  scraped elsewhere, confirmed the `{{ "{{" }}...{{ "}}" }}` Helm-escaping
-  renders a correct literal Alertmanager template var. Required fixes,
-  applied: (1) `window` needed the duration-pattern schema constraint
-  (malformed value → silent whole-group drop); (2) both `expr`s needed
-  `sum by (region_id)` — without it, multiple replicas in the same region
-  would each fire their own alert for the same underlying event instead
-  of one alert per region; (3) a stale region-enum comment (actual enum
-  is `eu-frankfurt`/`ap-seoul`/`ap-tokyo`/`""`, comment only listed two).
-  Left as explicitly out-of-scope for a future cycle (correctly, per this
-  cycle's chart-only mandate): (a) CI overlay files (`values-*.yaml`)
-  don't enable the rule yet, so `kubeconform` never exercises this
-  template in CI; (b) enabling in a real kube-prometheus-stack install
-  needs `additionalLabels.release: kube-prometheus-stack` (or whatever
-  that install's `ruleSelector` requires) set by the operator — chart
-  correctly leaves this to the environment's `values-prod-*.yaml`, not
-  hardcoded.
-- **Validation, re-run independently in this session** (not just
-  trusting the subagent's self-report): `helm lint infra/helm/powehi`
-  clean at both default and `--set monitoring.prometheusRule.enabled=true`;
-  `helm template ... --set region=eu-frankfurt` with the flag left
-  default-false renders **zero** `kind: PrometheusRule` occurrences
-  (correctly omitted); with the flag enabled, `helm template` output
-  parses cleanly via `yaml.safe_load_all` (16 docs) and
-  `--show-only templates/prometheusrule.yaml` shows both alert exprs
-  correctly wrapped in `sum by (region_id)(...)`; `values.schema.json`
-  is valid JSON (`json.load` clean); **`conftest test` against the full
-  rendered manifest with the flag enabled, using this repo's own
-  `infra/policy/` OPA suite: 112/112 tests passed, 0 failures** (deny-all
-  NetworkPolicy / resource-limits / no-`:latest`/ runAsNonRoot / no-literal-
-  secrets policies all still hold with the new resource present).
-  `kubeconform`/`tflint` not installed in this environment — same gap as
-  prior infra cycles, not newly introduced.
-- No `.rs` file touched — Helm-only change, so the backend build/test
-  gate (`cargo build`/`test`/`clippy`/`fmt`) doesn't apply; not re-run
-  this cycle since nothing in `crates/` changed.
-- Committing `infra/helm/powehi/templates/prometheusrule.yaml`,
-  `infra/helm/powehi/values.yaml`, `infra/helm/powehi/values.schema.json`
-  as a `feat(infra):` commit, pushing. Confirm CI green in a future
-  session if not already done by the time this is read (CI's Helm/infra
-  validation job, if any, is the relevant one to check — not the Rust job).
-- Target dir hygiene: not checked (FEATURE mode).
-- **Next cycle candidates (carried/updated):**
-  1. Carried: host disk risk from other `~/codespace/*` projects — not
-     actionable from this repo.
-  2. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
-     libcrux/x-wing admissibility) — human/crypto-lead policy call.
-  3. **Downgraded to done, with a documented residual:** the R2
-     orphan-sweep owner-mismatch/ratio-guard alert rule is now wired in
-     the chart itself. Residual (not urgent, correctly out of scope this
-     cycle): no `values-prod-*.yaml`/CI overlay actually flips
-     `monitoring.prometheusRule.enabled=true` yet, and a real
-     kube-prometheus-stack install will need `additionalLabels.release`
-     (or equivalent) set to match its `ruleSelector` — an ops/environment-
-     config task, not a further chart-code task.
-  4. Carried, still explicitly BLOCKED: wiring
-     `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal` into a real
-     caller needs F3 (incl. the `IpHash` extension) and the
-     HMAC-vs-plain-SHA256 gate resolved first — do not wire without
-     re-reading both prd.md sections.
-  5. **New, minor:** CI has no job that renders this chart with
-     `monitoring.prometheusRule.enabled=true` (or `serviceMonitor.enabled=true`
-     for that matter — same gap predates this cycle), so a future Helm
-     template regression in either optional resource wouldn't be caught
-     by CI until an operator actually flips the flag in a real
-     environment. A genuine `ci-pipeline-author` follow-up, not urgent.
-
-## Previous state (2026-09-05, cycle 441 — FEATURE: close the CommitLedger id-collision hole (cycle 440's next-cycle candidate #6), commit 969a304)
-
-- Mode selection: counter 440→441, 441 % 5 != 0 → FEATURE.
-- CI check: `gh run list --limit 3` green on `main` (cycle 440's push both
-  `CI — Rust` and `CI — Live-backend E2E` `completed`/`success`).
-  `gh issue list --state open`: empty.
-- Clean working tree at session start (no inherited uncommitted work this
-  time). Picked cycle 440's next-cycle candidate #6 — the only genuinely
-  actionable item on the list (others are either not-actionable-from-this-repo
-  disk risk, a human/crypto-lead policy call, an infra-lead/ops alerting
-  task, or explicitly BLOCKED pending F3/HMAC gate).
-- **Fix** (`crates/adapters/outbound/powehi-postgres/src/commit_ledger.rs`):
-  `PgCommitLedger::commit_epoch_and_save`'s Commit-envelope INSERT used
-  `ON CONFLICT (id) DO NOTHING` inside the same transaction as the epoch
-  CAS. Both current callers always mint a fresh UUIDv4 id, so the conflict
-  branch is unreachable today — but if it ever fired (e.g. a future caller
-  reusing an id as an idempotency key), the transaction would still
-  `tx.commit()`, durably advancing the epoch while silently discarding the
-  intended envelope: the exact "epoch consumed, envelope missing" wedge
-  bug class this ledger exists to close, just via a no-op insert instead of
-  a separate failed statement. Now checks `insert_result.rows_affected()
-  == 0` after the insert and, if so, explicitly `tx.rollback()`s and
-  returns `Err(DomainError::AlreadyExists(commit_envelope.id.to_string()))`
-  instead of committing — a whole-unit-of-work rollback, not a partial fix.
-  Added `commit_epoch_and_save_rejects_and_rolls_back_on_envelope_id_collision`
-  (`crates/adapters/outbound/powehi-postgres/tests/pg_security_it.rs`,
-  `#[ignore]`'d like the rest of that file since Docker isn't available in
-  this environment — will run in CI's Docker job), pre-seeding a colliding
-  row and asserting both the epoch rollback and that exactly the
-  pre-existing envelope row (no second row, no mutation) survives.
-- **All three required review agents run in-session** (touches MLS
-  Commit-ledger/epoch logic, so all three routing triggers apply):
-  - **crypto-reviewer: PASS**, one required doc follow-up. Verified
-    `rows_affected() == 0` is a sound conflict signal by reading the
-    `envelopes` migration directly (`id UUID PRIMARY KEY` is the only
-    unique constraint, no trigger/rule/RLS/partitioning that could
-    otherwise suppress a row) — a single-row INSERT can only yield 0 rows
-    via the `ON CONFLICT (id)` arbiter; any other constraint violation
-    raises 23505 into the existing `Err` arm, not this one. Confirmed
-    rollback leaves zero partial writes (event-bus publish/fan-out only
-    happens after `Ok`, downstream of this call). Confirmed this
-    strengthens RFC 9420 §12.4's "exactly one valid Commit per epoch"
-    invariant rather than just fixing an availability bug — a wedge here
-    would have permanently blocked key-schedule ratcheting for the group.
-    Confirmed `AlreadyExists` (409/non-retryable) is the correct variant
-    vs. `Internal` (which is in gRPC's *retryable* set — would have caused
-    cross-region peers to retry a deterministically-failing CAS forever).
-  - **threat-model-checker: GREEN**, no required prd.md edit — confirmed
-    strictly hardening across all threat-model rows (T3 malicious-operator
-    row strengthened: the "epoch consumed ⟺ envelope stored" invariant in
-    §4A.5 now holds literally, not modulo the no-op-insert hole; all
-    others unchanged), confirmed no new server-visible metadata (the
-    `AlreadyExists(id)` payload is discarded by both inbound adapters
-    before reaching a client), confirmed non-retryable so no cross-region
-    retry amplification. Judged §4A.5's existing text doesn't need editing
-    since it never claimed the no-op path was safe and no caller contract
-    changed.
-  - **security-auditor: PASS**, no required fixes — independently
-    confirmed zero plaintext/PII/ciphertext in the new code path (error
-    carries only a server-minted UUID), zero new `unwrap()`/`expect()` in
-    lib code, correct 409/`AlreadyExists` mapping on both REST and gRPC
-    (not leaking as a generic 500), no new SQL-injection surface (INSERT
-    unchanged, still fully parameterized), and that this narrows rather
-    than widens the trust boundary (old code committed on the 0-rows case;
-    new code rejects it).
-  - **Shared required fix, applied**: all three reviewers independently
-    flagged the same gap — the `CommitLedger` port trait doc
-    (`crates/ports/powehi-port-outbound/src/commit_ledger.rs`) documented
-    only the `Ok(None)` CAS-loss contract, not the new
-    `Err(AlreadyExists)` id-collision contract, even though this is a
-    port-level behavioral contract binding every implementation and the
-    in-memory test fakes. Added a doc block spelling out the rule: id
-    collision = whole unit of work rolled back, epoch NOT consumed, never
-    treated as "already done".
-  - **Non-blocking nit, applied anyway (cheap)**: crypto-reviewer noted
-    the new test asserted epoch-rollback but not that no second `envelopes`
-    row was created — added a `COUNT(*) = 1` assertion (pre-seeded row
-    only) to pin the full invariant, not just half of it.
-- Build/test gate (repeated after the doc/test fixes): `cargo build
-  --workspace --all-targets` (clean), `cargo test --workspace` (all green,
-  0 failures — `cargo nextest` still not installed in this environment,
-  used the documented `cargo test --workspace` fallback), `cargo clippy
-  --workspace --all-targets -- -D warnings` (clean), `cargo fmt --all
-  --check` (clean), `cargo deny check` (advisories/bans/licenses/sources
-  all ok — zero dependency changes, pure code diff). New Postgres
-  integration test is `#[ignore]`'d — no Docker in this environment,
-  will run in CI's Docker job like its siblings in the same file.
-- Committed `969a304` (`fix(mls): reject commit envelope id collisions
-  instead of silently committing`), pushed. CI triggered on push, confirm
-  green before trusting this cycle's claim in a future session if not
-  already done by the time this is read.
-- Target dir hygiene: not checked (FEATURE mode).
-- **Next cycle candidates (carried/updated):**
-  1. Carried: host disk risk from other `~/codespace/*` projects — not
-     actionable from this repo.
-  2. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
-     libcrux/x-wing admissibility) — human/crypto-lead policy call.
-  3. Carried: R2 orphan-sweep owner-mismatch/ratio-guard metrics
-     (cycle 436) still need an actual Alertmanager/Grafana rule wired —
-     infra-lead/ops task, not a routine backend cycle.
-  4. Carried, still explicitly BLOCKED: wiring
-     `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal` into a real
-     caller needs F3 (incl. the `IpHash` extension) and the
-     HMAC-vs-plain-SHA256 gate resolved first — do not wire without
-     re-reading both prd.md sections.
-  5. **Downgraded to done:** the `CommitLedger` id-collision hole (cycle
-     440's candidate #6) is now closed — id collision is a hard,
-     whole-transaction-rolled-back error, not a silent no-op success. No
-     further action expected on this specific item.
-  6. **New, minor, optional:** none of the three reviewers found anything
-     else outstanding on this file. The candidate pool is now thin — the
-     next FEATURE cycle may need to look beyond this cycle's carried list
-     (e.g. re-reading prd.md for drift, or scoping the PQ-hybrid/F3
-     prerequisites enough to unblock them) rather than finding another
-     quick follow-up.
 
