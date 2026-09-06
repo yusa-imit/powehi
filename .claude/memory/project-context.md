@@ -24,7 +24,72 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-06, cycle 445 — STABILIZATION: add testcontainers integration coverage for `PgDeviceRepository` (test-coverage gap, not a carried candidate), commit 0af42c7)
+## Current state (2026-09-06, cycle 446 — FEATURE (redirected to a CI-red bug fix per core law "bugs/CI red before anything else"): fix flaky `created_at` nanosecond-vs-microsecond assertion in cycle 445's new device-upsert test, commit 81c22e2)
+
+- Mode selection: counter 445→446, 446 % 5 != 0 → FEATURE. But `gh run list
+  --limit 5` showed the most recent push (cycle 445's memory-chore commit,
+  which re-ran cycle 445's own code commit's tests) had **`CI — Rust`:
+  failure** — per citadel core law ("Bugs and CI red are fixed before
+  anything else, plan or no plan") and this repo's own FEATURE-mode step 2,
+  dropped the feature-candidate hunt and fixed the break first instead.
+- Root cause (`gh run view <id> --log-failed`): cycle 445's new test
+  `device_save_upsert_updates_credential_but_never_reassigns_owner`
+  (`crates/adapters/outbound/powehi-postgres/tests/pg_security_it.rs:1638`)
+  asserted `found.created_at == device.created_at` — a straight `DateTime<Utc>`
+  equality between the in-memory `Device` (nanosecond precision from
+  `Utc::now()`) and the value read back from Postgres `TIMESTAMPTZ` (stored
+  at microsecond precision, non-lossless round trip). This is flaky, not
+  deterministically broken: it only fails when `Utc::now()`'s sub-microsecond
+  digits happen to be nonzero (CI hit `...361625Z` vs `...361625989Z`). Not a
+  production bug — the adapter/schema behavior is correct; the test's
+  assertion was too strict. The exact same pitfall was already solved
+  correctly elsewhere in the same file at line 903-905
+  (`after.created_at.timestamp_micros() == created_at.timestamp_micros()`),
+  cycle 445 just didn't reuse that pattern for its new test.
+- **Fix**: changed the one assertion to compare `.timestamp_micros()` on both
+  sides instead of the raw `DateTime<Utc>`, matching the established
+  in-file convention exactly. One line changed, no production code touched.
+- Review routing: test-only fix, zero crypto/architecture/backend-handler
+  diff — crypto-reviewer/threat-model-checker/security-auditor correctly
+  not invoked (same precedent as e.g. cycle 435's deny.toml-only chore).
+- Verification: `cargo build --workspace --all-targets` clean, `cargo test
+  --workspace` all green (0 failures across every crate — the fixed test
+  itself is `#[ignore]`'d locally, no Docker in this dev environment, same
+  standing limitation as every `pg_security_it.rs` test; will actually
+  exercise the fix in CI's Docker job), `cargo clippy --workspace
+  --all-targets -- -D warnings` clean, `cargo fmt --all --check` clean.
+- Committed `81c22e2` (`fix(test): compare created_at by microsecond
+  precision in device upsert test`), pushed, then **watched `gh run list`
+  to completion this cycle** (not just triggered-and-assumed): both
+  `CI — Rust` and `CI — Live-backend E2E` came back `completed`/`success`
+  on the new commit — confirmed green before closing the cycle, not
+  deferred to "a future session" like several recent entries had to.
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates (carried/updated):**
+  1. Carried: host disk risk from other `~/codespace/*` projects —
+     resolved as of cycle 445 (43 GiB free / 29% full), re-verify if it
+     regresses.
+  2. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  3. Carried, still explicitly BLOCKED: wiring
+     `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal` into a real
+     caller needs F3 (incl. the `IpHash` extension) and the
+     HMAC-vs-plain-SHA256 gate resolved first — do not wire without
+     re-reading both prd.md sections.
+  4. Carried: no `values-prod-*.yaml`/CI overlay actually flips
+     `monitoring.prometheusRule.enabled=true` yet in a real
+     kube-prometheus-stack install (ops/environment-config task, cycle 444).
+  5. Carried: CI has no job that renders the Helm chart with
+     `monitoring.prometheusRule.enabled=true`/`serviceMonitor.enabled=true`
+     (ci-pipeline-author follow-up, cycle 444, not urgent).
+  6. **New lesson, not a code candidate:** when adding a new
+     Postgres-round-trip timestamp assertion in `pg_security_it.rs`, always
+     compare via `.timestamp_micros()` (established at line 903-905, now
+     also at ~1638) — never assert raw `DateTime<Utc>` equality against a
+     value that passed through a `TIMESTAMPTZ` column, since Postgres
+     truncates to microsecond precision and `Utc::now()` doesn't.
+
+## Previous state (2026-09-06, cycle 445 — STABILIZATION: add testcontainers integration coverage for `PgDeviceRepository` (test-coverage gap, not a carried candidate), commit 0af42c7)
 
 - Mode selection: counter 444→445, 445 % 5 == 0 → STABILIZATION.
 - CI check: `gh run list --limit 3` green on `main` (cycle 444's push
