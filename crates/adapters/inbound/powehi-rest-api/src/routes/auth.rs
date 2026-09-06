@@ -119,9 +119,10 @@ pub async fn register_new_device(
 
 /// `DELETE /v1/auth/devices/:id` — revoke a device owned by the current user.
 ///
-/// Requires an active session (Bearer token). Invalidates all active sessions for
-/// the target device and removes it from the device store. Returns 401 if the
-/// target device does not belong to the authenticated user.
+/// Requires an active session (Bearer token). Returns 401 if the target device
+/// does not belong to the authenticated user. `AuthUseCase::revoke_device`
+/// performs invite revocation, KeyPackage cleanup, and session invalidation for
+/// the target device as one unit; this handler only translates the result.
 pub async fn revoke_device_handler(
     State(state): State<AppState>,
     AuthenticatedDevice(current_device_id): AuthenticatedDevice,
@@ -144,12 +145,6 @@ pub async fn revoke_device_handler(
             DomainError::NotFound(_) => ApiError::from(DomainError::Unauthorized),
             other => ApiError::from(other),
         })?;
-    // Also delete any outstanding invites this device created: an invite pins
-    // a copy of the device's KeyPackage bytes directly in Redis, independent
-    // of the shared KeyPackage pool `revoke_device` already cleaned up above.
-    // Without this, an already-issued invite code could still hand out the
-    // revoked device's credential for up to its 24h TTL.
-    state.invite.revoke_invites_for_device(&target_id).await?;
     tracing::info!("auth.revoke_device");
     Ok(StatusCode::NO_CONTENT)
 }

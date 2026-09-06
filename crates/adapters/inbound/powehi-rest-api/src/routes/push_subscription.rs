@@ -321,6 +321,13 @@ mod tests {
         ) -> Result<(), DomainError> {
             unimplemented!()
         }
+        async fn list_pending_removals(
+            &self,
+            _: &DeviceId,
+            _: &powehi_domain::group::GroupId,
+        ) -> Result<Vec<DeviceId>, DomainError> {
+            unimplemented!()
+        }
     }
 
     #[async_trait::async_trait]

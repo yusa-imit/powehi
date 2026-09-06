@@ -606,6 +606,26 @@ mod tests {
         ) -> Result<(), DomainError> {
             Ok(())
         }
+        async fn create_pending_removal(
+            &self,
+            _group_id: &GroupId,
+            _device_id: &DeviceId,
+        ) -> Result<(), DomainError> {
+            unimplemented!("media_service tests never touch pending removals")
+        }
+        async fn delete_pending_removal(
+            &self,
+            _group_id: &GroupId,
+            _device_id: &DeviceId,
+        ) -> Result<(), DomainError> {
+            unimplemented!("media_service tests never touch pending removals")
+        }
+        async fn list_pending_removals(
+            &self,
+            _group_id: &GroupId,
+        ) -> Result<Vec<DeviceId>, DomainError> {
+            unimplemented!("media_service tests never touch pending removals")
+        }
     }
 
     fn svc(repo: Arc<MockMediaRepo>) -> MediaService {

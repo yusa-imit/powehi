@@ -18,6 +18,19 @@
 //!   - `KeyPackageRepository::delete_by_device`: revoking a device deletes
 //!     every KeyPackage it uploaded (consumed or not), scoped so a sibling
 //!     device's KeyPackages survive (cycle 447).
+//!   - `pending_removals` (cycle 448): create/list/delete round-trip and
+//!     idempotency, group-scoping, and the entire point of the table — a
+//!     pending removal row survives the deletion of the `devices` row it
+//!     names (no FK), while `group_members` for that device is gone (FK
+//!     cascade fired), and a pending removal IS cascade-deleted when its
+//!     `groups` row goes away (FK cascade fires the other way). Also the
+//!     epoch gate: `create_pending_removal` records the group's epoch at
+//!     write time, and `delete_pending_removal` is a silent no-op until that
+//!     epoch has advanced at all, so a current member cannot erase the
+//!     reminder for free merely by calling `remove_member` with zero Commits
+//!     sent — but (documented limitation, not a bug, since the server cannot
+//!     see Commit contents) ANY Commit landing, not specifically the
+//!     requested device's Remove, satisfies the gate.
 //!
 //! Tests are `#[ignore]` because they require Docker (testcontainers).
 //! Run them in CI via: `cargo nextest run -p powehi-postgres --run-ignored all
@@ -1730,5 +1743,379 @@ async fn device_save_upsert_updates_credential_but_never_reassigns_owner() {
     assert!(
         attacker_devices.is_empty(),
         "the colliding save must not make this device visible under the attacker-supplied user_id"
+    );
+}
+
+// ── pending_removals (cycle 448) ────────────────────────────────────────────
+// A durable reminder row ("the remaining members of `group_id` still owe an
+// MLS Remove for `device_id`") that must OUTLIVE the `devices` row it names —
+// see 0020_pending_removals.sql for the full rationale on why `device_id`
+// deliberately has no foreign key.
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn create_pending_removal_then_list_returns_the_device() {
+    let (_c, pool) = setup().await;
+    let repo = PgGroupRepository::new(pool.clone());
+    let group_id = insert_group(&pool).await;
+    let device_id = DeviceId::new();
+
+    repo.create_pending_removal(&group_id, &device_id)
+        .await
+        .expect("create_pending_removal");
+
+    let pending = repo
+        .list_pending_removals(&group_id)
+        .await
+        .expect("list_pending_removals");
+    assert_eq!(
+        pending,
+        vec![device_id],
+        "the created pending removal must round-trip through list"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn create_pending_removal_is_idempotent() {
+    let (_c, pool) = setup().await;
+    let repo = PgGroupRepository::new(pool.clone());
+    let group_id = insert_group(&pool).await; // starts at Epoch(0)
+    let device_id = DeviceId::new();
+
+    repo.create_pending_removal(&group_id, &device_id)
+        .await
+        .expect("first create_pending_removal");
+
+    // A real epoch advance between the two create calls, mirroring a Commit
+    // landing for some unrelated reason in the meantime — the retry below
+    // must NOT reset `created_at_epoch` to this newer value.
+    repo.advance_epoch(&group_id, Epoch(0))
+        .await
+        .expect("advance_epoch")
+        .expect("advance_epoch must succeed");
+
+    repo.create_pending_removal(&group_id, &device_id)
+        .await
+        .expect("second create_pending_removal — must be idempotent");
+
+    let pending = repo
+        .list_pending_removals(&group_id)
+        .await
+        .expect("list_pending_removals");
+    assert_eq!(
+        pending.len(),
+        1,
+        "an idempotent retry must not create a duplicate pending-removal row"
+    );
+
+    let created_at_epoch: i64 = sqlx::query_scalar(
+        "SELECT created_at_epoch FROM pending_removals WHERE group_id = $1 AND device_id = $2",
+    )
+    .bind(group_id.as_uuid())
+    .bind(device_id.as_uuid())
+    .fetch_one(&pool)
+    .await
+    .expect("query created_at_epoch");
+    assert_eq!(
+        created_at_epoch, 0,
+        "a retried create must not reset created_at_epoch to a newer value, \
+         same reason it must not reset created_at"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn delete_pending_removal_is_a_noop_when_absent() {
+    let (_c, pool) = setup().await;
+    let repo = PgGroupRepository::new(pool.clone());
+    let group_id = insert_group(&pool).await;
+    let device_id = DeviceId::new();
+
+    // Never created — deleting it anyway must succeed, not error.
+    repo.delete_pending_removal(&group_id, &device_id)
+        .await
+        .expect("delete_pending_removal on an absent row must be Ok(())");
+
+    let pending = repo
+        .list_pending_removals(&group_id)
+        .await
+        .expect("list_pending_removals");
+    assert!(
+        pending.is_empty(),
+        "deleting an absent pending removal must not create one"
+    );
+}
+
+/// The epoch gate's floor: with NO epoch advance at all since the reminder
+/// was written, `delete_pending_removal` must be a silent no-op —
+/// `Ok(())`, but the row stays — because `group_members` (what
+/// `remove_member` alone touches) is server routing metadata and proves
+/// nothing about MLS state.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn delete_pending_removal_is_a_noop_before_the_group_epoch_advances() {
+    let (_c, pool) = setup().await;
+    let repo = PgGroupRepository::new(pool.clone());
+    let group_id = insert_group(&pool).await; // starts at Epoch(0)
+    let device_id = DeviceId::new();
+
+    repo.create_pending_removal(&group_id, &device_id)
+        .await
+        .expect("create_pending_removal");
+
+    // No epoch advance here — this is the attack: a delete attempt with no
+    // Commit at all having landed for this reminder.
+    repo.delete_pending_removal(&group_id, &device_id)
+        .await
+        .expect("delete_pending_removal before an epoch advance must be Ok(())");
+
+    let pending = repo
+        .list_pending_removals(&group_id)
+        .await
+        .expect("list_pending_removals");
+    assert_eq!(
+        pending,
+        vec![device_id],
+        "the pending removal must survive a delete attempt with no epoch \
+         advance at all — otherwise any current member could erase the \
+         durable reminder for free, with zero Commits sent"
+    );
+}
+
+/// KNOWN LIMITATION, not a regression: the epoch gate cannot distinguish
+/// "the Remove for THIS device landed" from "any unrelated Commit landed
+/// since this row was written" — the server never sees Commit contents (RFC
+/// 9420 §6, §12.4). Any Commit (e.g. an unrelated device's routine
+/// self-Update) advances the epoch and opens the gate for every row recorded
+/// at or below that epoch, including ones naming a different device. See
+/// `GroupRepository::delete_pending_removal`'s doc for the full reasoning.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn delete_pending_removal_is_satisfied_by_any_unrelated_epoch_advance() {
+    let (_c, pool) = setup().await;
+    let repo = PgGroupRepository::new(pool.clone());
+    let group_id = insert_group(&pool).await; // starts at Epoch(0)
+    let device_id = DeviceId::new();
+
+    repo.create_pending_removal(&group_id, &device_id)
+        .await
+        .expect("create_pending_removal");
+
+    // Any Commit at all — standing in for e.g. some other device's routine
+    // self-Update, unrelated to this device's revocation.
+    repo.advance_epoch(&group_id, Epoch(0))
+        .await
+        .expect("advance_epoch")
+        .expect("advance_epoch must succeed");
+
+    repo.delete_pending_removal(&group_id, &device_id)
+        .await
+        .expect("delete_pending_removal");
+
+    let pending = repo
+        .list_pending_removals(&group_id)
+        .await
+        .expect("list_pending_removals");
+    assert!(
+        pending.is_empty(),
+        "the gate opens on ANY epoch advance, not specifically this device's \
+         Remove — this is the documented limitation, not a bug"
+    );
+}
+
+/// The other side of the gate: once the group's epoch has genuinely advanced
+/// past the reminder's recorded epoch (standing in for a real MLS Remove
+/// Commit being accepted), `delete_pending_removal` must actually clear it.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn delete_pending_removal_clears_the_row_after_a_real_epoch_advance() {
+    let (_c, pool) = setup().await;
+    let repo = PgGroupRepository::new(pool.clone());
+    let group_id = insert_group(&pool).await; // starts at Epoch(0)
+    let device_id = DeviceId::new();
+
+    repo.create_pending_removal(&group_id, &device_id)
+        .await
+        .expect("create_pending_removal");
+
+    repo.advance_epoch(&group_id, Epoch(0))
+        .await
+        .expect("advance_epoch")
+        .expect("advance_epoch must succeed");
+
+    repo.delete_pending_removal(&group_id, &device_id)
+        .await
+        .expect("delete_pending_removal after a real epoch advance");
+
+    let pending = repo
+        .list_pending_removals(&group_id)
+        .await
+        .expect("list_pending_removals");
+    assert!(
+        pending.is_empty(),
+        "the pending removal must be cleared once a real epoch advance has \
+         landed since it was written"
+    );
+}
+
+/// `create_pending_removal` must capture the group's epoch AT THE TIME OF
+/// WRITING, not epoch 0 — advance the epoch a couple of times first, then
+/// confirm the recorded `created_at_epoch` reflects the current value.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn create_pending_removal_records_the_groups_current_epoch() {
+    let (_c, pool) = setup().await;
+    let repo = PgGroupRepository::new(pool.clone());
+    let group_id = insert_group(&pool).await; // starts at Epoch(0)
+    let device_id = DeviceId::new();
+
+    repo.advance_epoch(&group_id, Epoch(0))
+        .await
+        .expect("advance_epoch to 1")
+        .expect("advance_epoch to 1 must succeed");
+    repo.advance_epoch(&group_id, Epoch(1))
+        .await
+        .expect("advance_epoch to 2")
+        .expect("advance_epoch to 2 must succeed");
+
+    repo.create_pending_removal(&group_id, &device_id)
+        .await
+        .expect("create_pending_removal");
+
+    let created_at_epoch: i64 = sqlx::query_scalar(
+        "SELECT created_at_epoch FROM pending_removals WHERE group_id = $1 AND device_id = $2",
+    )
+    .bind(group_id.as_uuid())
+    .bind(device_id.as_uuid())
+    .fetch_one(&pool)
+    .await
+    .expect("query created_at_epoch");
+    assert_eq!(
+        created_at_epoch, 2,
+        "created_at_epoch must reflect the group's epoch at write time"
+    );
+}
+
+/// SECURITY: `list_pending_removals` must be scoped to its own group — a
+/// pending removal recorded for group A must never leak into group B's list.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn list_pending_removals_is_scoped_to_its_group() {
+    let (_c, pool) = setup().await;
+    let repo = PgGroupRepository::new(pool.clone());
+    let group_a = insert_group(&pool).await;
+    let group_b = insert_group(&pool).await;
+    let device_id = DeviceId::new();
+
+    repo.create_pending_removal(&group_a, &device_id)
+        .await
+        .expect("create_pending_removal for group_a");
+
+    let pending_a = repo
+        .list_pending_removals(&group_a)
+        .await
+        .expect("list_pending_removals group_a");
+    assert_eq!(pending_a, vec![device_id.clone()]);
+
+    let pending_b = repo
+        .list_pending_removals(&group_b)
+        .await
+        .expect("list_pending_removals group_b");
+    assert!(
+        pending_b.is_empty(),
+        "a pending removal recorded in group_a must not appear in group_b's list"
+    );
+}
+
+/// THE CRITICAL TEST — the entire point of the no-FK design (see
+/// 0020_pending_removals.sql). Revoking a device deletes its `devices` row,
+/// which CASCADEs and wipes the server's own `group_members` record of which
+/// groups that device was in. But the `pending_removals` reminder that the
+/// remaining members still owe an MLS Remove for that device MUST survive
+/// the very deletion that created it — an FK on `pending_removals.device_id`
+/// (CASCADE or RESTRICT) would either delete this row at exactly the moment
+/// it becomes necessary, or block the device deletion outright. This is what
+/// makes the revocation signal durable.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn pending_removal_survives_the_device_row_deletion() {
+    let (_c, pool) = setup().await;
+    let user_id = insert_user(&pool).await;
+    let device_id = insert_device(&pool, user_id).await;
+    let group_id = insert_group(&pool).await;
+    join_group(&pool, group_id.clone(), device_id.clone()).await;
+
+    let group_repo = PgGroupRepository::new(pool.clone());
+    group_repo
+        .create_pending_removal(&group_id, &device_id)
+        .await
+        .expect("create_pending_removal");
+
+    let device_repo = PgDeviceRepository::new(pool.clone());
+    device_repo
+        .delete(&device_id)
+        .await
+        .expect("delete revoked device");
+
+    // (a) the group_members CASCADE fired: the server has forgotten which
+    // groups this device belonged to.
+    let groups_for_device = group_repo
+        .list_groups_for_device(&device_id)
+        .await
+        .expect("list_groups_for_device after device delete");
+    assert!(
+        groups_for_device.is_empty(),
+        "group_members must be cascade-deleted along with the device row"
+    );
+
+    // (b) the pending_removals reminder is STILL there — this is what lets
+    // the remaining members eventually learn they owe an MLS Remove, even
+    // though the server itself no longer knows this device was ever a
+    // member of the group.
+    let pending = group_repo
+        .list_pending_removals(&group_id)
+        .await
+        .expect("list_pending_removals after device delete");
+    assert_eq!(
+        pending,
+        vec![device_id],
+        "a pending removal must survive the deletion of the device row it \
+         names — that durability is the entire reason device_id carries no \
+         foreign key to devices(id)"
+    );
+}
+
+/// The other half of the FK story: `pending_removals.group_id` DOES carry a
+/// real FK with ON DELETE CASCADE, because once the group itself is gone
+/// there is nobody left to perform the Remove and the reminder becomes
+/// meaningless — it must be garbage-collected along with its group.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn pending_removal_is_cascade_deleted_with_its_group() {
+    let (_c, pool) = setup().await;
+    let group_id = insert_group(&pool).await;
+    let device_id = DeviceId::new();
+
+    let repo = PgGroupRepository::new(pool.clone());
+    repo.create_pending_removal(&group_id, &device_id)
+        .await
+        .expect("create_pending_removal");
+
+    sqlx::query("DELETE FROM groups WHERE id = $1")
+        .bind(group_id.as_uuid())
+        .execute(&pool)
+        .await
+        .expect("delete group");
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pending_removals WHERE group_id = $1")
+            .bind(group_id.as_uuid())
+            .fetch_one(&pool)
+            .await
+            .expect("count pending_removals after group delete");
+    assert_eq!(
+        count, 0,
+        "pending_removals must be cascade-deleted when its group is deleted"
     );
 }

@@ -289,6 +289,99 @@ impl GroupRepository for PgGroupRepository {
         tx.commit().await.map_err(map_err)?;
         Ok(())
     }
+
+    async fn create_pending_removal(
+        &self,
+        group_id: &GroupId,
+        device_id: &DeviceId,
+    ) -> Result<(), DomainError> {
+        // DO NOTHING, not DO UPDATE: a retried device revocation must not
+        // reset `created_at` (or `created_at_epoch`), which would understate
+        // how long this removal has actually been outstanding.
+        //
+        // INSERT ... SELECT ... FROM groups, not a separate read-then-write:
+        // reading `groups.epoch` inside this same statement narrows (but does
+        // not fully close — this SELECT is a non-locking read under READ
+        // COMMITTED, so an in-flight Commit can still land between it and the
+        // INSERT) the window in which a concurrent Commit advances the epoch
+        // before this row is written. Even fully closed, this would only
+        // pick a tighter `created_at_epoch` baseline — see
+        // `delete_pending_removal` below for why that baseline can never
+        // prove the specific Remove this row asks for actually happened. A
+        // `group_id` with no matching `groups` row selects zero rows, so
+        // nothing is inserted and this still returns `Ok(())` — there is no
+        // group whose members could owe the Remove in the first place.
+        sqlx::query(
+            "INSERT INTO pending_removals (group_id, device_id, created_at_epoch)
+             SELECT $1, $2, epoch FROM groups WHERE id = $1
+             ON CONFLICT (group_id, device_id) DO NOTHING",
+        )
+        .bind(group_id.as_uuid())
+        .bind(device_id.as_uuid())
+        .execute(&self.pool)
+        .await
+        .map_err(map_err)?;
+        Ok(())
+    }
+
+    async fn delete_pending_removal(
+        &self,
+        group_id: &GroupId,
+        device_id: &DeviceId,
+    ) -> Result<(), DomainError> {
+        // EPOCH-GATED, BUT A HEURISTIC, NOT A PROOF: only clear the reminder
+        // once the group's current epoch has advanced strictly past the
+        // epoch recorded when it was written — i.e. once *some* Commit was
+        // accepted (`advance_epoch` CAS / `commit_epoch_and_save`) since this
+        // row was created. The server cannot see Commit contents (RFC 9420
+        // §6, §12.4 — proposals are inside the encrypted Commit), so this
+        // gate cannot distinguish the actual Remove this row is asking for
+        // from any unrelated Add/Update/Remove Commit that happens to land
+        // afterward (including an ordinary self-Update, which RFC 9420
+        // §12.1.2/§12.4.3 recommends clients send routinely for PCS). A
+        // malicious or compromised current member can therefore erase this
+        // reminder without the requested Remove ever landing, by sending any
+        // Commit at all and then calling `remove_member` — the cost is one
+        // Commit, not "impossible". `group_members` is pure server routing
+        // metadata; `remove_member` alone proves nothing about MLS state.
+        // This WHERE clause raises the cost of erasing the reminder above
+        // zero and suppresses the common case (a real Remove did land); it
+        // is a noise-reduction heuristic, not a security control. The only
+        // party that can actually verify a leaf was removed is a client
+        // reconciling its own ratchet tree against the device list.
+        sqlx::query(
+            "DELETE FROM pending_removals
+             WHERE group_id = $1 AND device_id = $2
+               AND created_at_epoch < (SELECT epoch FROM groups WHERE id = $1)",
+        )
+        .bind(group_id.as_uuid())
+        .bind(device_id.as_uuid())
+        .execute(&self.pool)
+        .await
+        .map_err(map_err)?;
+        // Zero rows affected is still `Ok(())` for two distinct reasons: (a)
+        // the row was already deleted or never existed — a retried or
+        // already-applied removal must not surface as an error; and (b) the
+        // group's epoch has not yet advanced past this reminder's
+        // `created_at_epoch`, meaning no Commit at all has landed since it
+        // was written, so the reminder legitimately must stay in place.
+        // Callers must not read `Ok(())` here as "the reminder is gone".
+        Ok(())
+    }
+
+    async fn list_pending_removals(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<Vec<DeviceId>, DomainError> {
+        let rows = sqlx::query_scalar::<_, Uuid>(
+            "SELECT device_id FROM pending_removals WHERE group_id = $1 ORDER BY created_at ASC",
+        )
+        .bind(group_id.as_uuid())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_err)?;
+        Ok(rows.into_iter().map(DeviceId::from).collect())
+    }
 }
 
 #[cfg(test)]

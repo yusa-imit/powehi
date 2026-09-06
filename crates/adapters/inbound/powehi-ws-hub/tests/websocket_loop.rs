@@ -145,6 +145,26 @@ impl GroupRepository for FakeGroupRepo {
     ) -> Result<(), DomainError> {
         unimplemented!()
     }
+    async fn create_pending_removal(
+        &self,
+        _group_id: &GroupId,
+        _device_id: &DeviceId,
+    ) -> Result<(), DomainError> {
+        unimplemented!()
+    }
+    async fn delete_pending_removal(
+        &self,
+        _group_id: &GroupId,
+        _device_id: &DeviceId,
+    ) -> Result<(), DomainError> {
+        unimplemented!()
+    }
+    async fn list_pending_removals(
+        &self,
+        _group_id: &GroupId,
+    ) -> Result<Vec<DeviceId>, DomainError> {
+        unimplemented!()
+    }
 }
 
 const TEST_TOKEN: &str = "ws-loop-test-token";

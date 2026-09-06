@@ -43,6 +43,26 @@ pub enum DomainEvent {
         epoch: Epoch,
         at: DateTime<Utc>,
     },
+    /// The device `device_id` was revoked while it was still a member of the
+    /// MLS group `group_id`. The server can NEVER construct the MLS Remove
+    /// itself — it holds no group state and no key material (prd.md §5.4,
+    /// §8.5) — so this event is the durable signal telling the group's
+    /// REMAINING members that they must issue a Remove proposal + Commit for
+    /// the revoked device's leaf. One event is published per affected group.
+    ///
+    /// Distinct from `MemberRemoved`, which reports that server-side routing
+    /// metadata has ALREADY been updated after a client landed the Commit.
+    /// `RemovalRequired` is the demand; `MemberRemoved` is the receipt.
+    ///
+    /// Deliberately a separate variant from `DeviceRevoked` (an
+    /// account-scoped fact with no group dimension): making `group_id`
+    /// mandatory on `DeviceRevoked` would make it unpublishable for a device
+    /// that belonged to zero groups.
+    RemovalRequired {
+        group_id: GroupId,
+        device_id: DeviceId,
+        at: DateTime<Utc>,
+    },
 }
 
 impl DomainEvent {
@@ -54,7 +74,8 @@ impl DomainEvent {
             | DomainEvent::EnvelopeReceived { at, .. }
             | DomainEvent::EpochAdvanced { at, .. }
             | DomainEvent::MemberAdded { at, .. }
-            | DomainEvent::MemberRemoved { at, .. } => *at,
+            | DomainEvent::MemberRemoved { at, .. }
+            | DomainEvent::RemovalRequired { at, .. } => *at,
         }
     }
 }
@@ -110,6 +131,11 @@ mod tests {
                 group_id: GroupId::new(),
                 device_id: DeviceId::new(),
                 epoch: Epoch(2),
+                at,
+            },
+            DomainEvent::RemovalRequired {
+                group_id: GroupId::new(),
+                device_id: DeviceId::new(),
                 at,
             },
         ]
@@ -176,6 +202,31 @@ mod tests {
         let restored: DomainEvent = serde_json::from_str(&json).unwrap();
         if let DomainEvent::MemberRemoved { epoch, .. } = restored {
             assert_eq!(epoch, Epoch(7));
+        } else {
+            panic!("wrong variant after round-trip");
+        }
+    }
+
+    #[test]
+    fn removal_required_preserves_group_and_device_through_serde() {
+        let at = fixed_ts();
+        let gid = GroupId::new();
+        let did = DeviceId::new();
+        let event = DomainEvent::RemovalRequired {
+            group_id: gid.clone(),
+            device_id: did.clone(),
+            at,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let restored: DomainEvent = serde_json::from_str(&json).unwrap();
+        if let DomainEvent::RemovalRequired {
+            group_id,
+            device_id,
+            ..
+        } = restored
+        {
+            assert_eq!(group_id, gid);
+            assert_eq!(device_id, did);
         } else {
             panic!("wrong variant after round-trip");
         }

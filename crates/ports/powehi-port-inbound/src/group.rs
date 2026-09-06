@@ -28,4 +28,15 @@ pub trait GroupUseCase: Send + Sync {
         device_id: &DeviceId,
         epoch: Epoch,
     ) -> Result<(), DomainError>;
+
+    /// Returns the devices in `group_id` for which the group's remaining
+    /// members still owe an MLS Remove proposal/Commit. `caller` must already
+    /// be a member of `group_id`; fails with `Unauthorized` otherwise
+    /// (fail-closed, same guard as `add_member`/`remove_member`). The
+    /// returned list is routing metadata only — device UUIDs, no key material.
+    async fn list_pending_removals(
+        &self,
+        caller: &DeviceId,
+        group_id: &GroupId,
+    ) -> Result<Vec<DeviceId>, DomainError>;
 }

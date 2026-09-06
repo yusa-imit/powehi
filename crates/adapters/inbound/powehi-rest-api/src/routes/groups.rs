@@ -18,7 +18,7 @@ use powehi_domain::{
     device::DeviceId,
     group::{Epoch, GroupId},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{error::ApiError, middleware::AuthenticatedDevice, AppState};
@@ -99,4 +99,38 @@ pub async fn remove_member(
         .remove_member(&caller, &group_id, &target_device_id, Epoch(0))
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Response body for `GET /v1/groups/:group_id/pending-removals`.
+///
+/// Device UUIDs only — routing metadata, never key material or ciphertext.
+#[derive(Serialize)]
+pub struct PendingRemovalsResponse {
+    pub device_ids: Vec<DeviceId>,
+}
+
+/// `GET /v1/groups/:group_id/pending-removals`
+///
+/// Returns the devices whose MLS Remove the group's remaining members still
+/// owe. The caller must already be a member of `group_id`; the application
+/// layer returns `Unauthorized` otherwise, which surfaces as `401
+/// Unauthorized` via `ApiError`. The server can never perform the Remove
+/// itself (no group state, no keys — prd.md §5.4, §8.5), so this endpoint
+/// exists purely so clients can discover the work they must do.
+pub async fn list_pending_removals(
+    State(state): State<AppState>,
+    AuthenticatedDevice(caller): AuthenticatedDevice,
+    Path(raw_group_id): Path<Uuid>,
+) -> Result<Json<PendingRemovalsResponse>, ApiError> {
+    let group_id = GroupId::from(raw_group_id);
+    tracing::info!(
+        caller = %caller,
+        group_id = %group_id,
+        "groups.list_pending_removals"
+    );
+    let device_ids = state
+        .group
+        .list_pending_removals(&caller, &group_id)
+        .await?;
+    Ok(Json(PendingRemovalsResponse { device_ids }))
 }

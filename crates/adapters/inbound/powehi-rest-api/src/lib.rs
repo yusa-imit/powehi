@@ -154,6 +154,10 @@ fn router_inner(
             post(routes::groups::add_member).delete(routes::groups::remove_member),
         )
         .route(
+            "/v1/groups/:group_id/pending-removals",
+            get(routes::groups::list_pending_removals),
+        )
+        .route(
             "/v1/messages",
             post(routes::messaging::send_message).get(routes::messaging::poll),
         )
@@ -579,6 +583,13 @@ mod tests {
         ) -> Result<(), DomainError> {
             Ok(())
         }
+        async fn list_pending_removals(
+            &self,
+            _caller: &DeviceId,
+            _group_id: &GroupId,
+        ) -> Result<Vec<DeviceId>, DomainError> {
+            Ok(vec![])
+        }
     }
 
     fn noop_group() -> Arc<dyn GroupUseCase> {
@@ -612,6 +623,13 @@ mod tests {
             _device_id: &DeviceId,
             _epoch: powehi_domain::group::Epoch,
         ) -> Result<(), DomainError> {
+            Err(DomainError::Unauthorized)
+        }
+        async fn list_pending_removals(
+            &self,
+            _caller: &DeviceId,
+            _group_id: &GroupId,
+        ) -> Result<Vec<DeviceId>, DomainError> {
             Err(DomainError::Unauthorized)
         }
     }
@@ -2547,6 +2565,80 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     }
 
+    // ── GET /v1/groups/:group_id/pending-removals tests ───────────────────────
+
+    /// Happy path: authenticated member gets the pending-removal list (empty is fine).
+    #[tokio::test]
+    async fn list_pending_removals_returns_ok_for_a_member() {
+        let group_id = uuid::Uuid::new_v4();
+        let resp = groups_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/groups/{group_id}/pending-removals"))
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert!(body["device_ids"].is_array());
+    }
+
+    /// Membership enforcement: non-member caller must receive 401 (fail-closed).
+    #[tokio::test]
+    async fn list_pending_removals_rejects_a_non_member() {
+        let group_id = uuid::Uuid::new_v4();
+        let resp = groups_router_unauthorized()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/groups/{group_id}/pending-removals"))
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Auth bypass invariant: unauthenticated request must be rejected before the handler.
+    #[tokio::test]
+    async fn list_pending_removals_requires_authentication() {
+        let group_id = uuid::Uuid::new_v4();
+        let resp = test_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/groups/{group_id}/pending-removals"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Path-param validation: a non-UUID group_id must be rejected by extraction.
+    #[tokio::test]
+    async fn list_pending_removals_rejects_a_malformed_group_id() {
+        let resp = groups_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/groups/not-a-uuid/pending-removals")
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
     // ── Device management endpoint tests ─────────────────────────────────────
 
     /// FakeDeviceRepo returns a fixed Device when `find_by_id` is called with
@@ -2749,133 +2841,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-    }
-
-    /// SECURITY: `revoke_device_handler` must also delete the target device's
-    /// outstanding invites, not just its KeyPackage pool rows — an invite
-    /// pins a copy of the KeyPackage bytes directly in Redis, entirely
-    /// outside the pool `AuthUseCase::revoke_device` already cleans up.
-    struct RecordingInvite {
-        revoked: std::sync::Mutex<Vec<DeviceId>>,
-    }
-    impl RecordingInvite {
-        fn new() -> Arc<Self> {
-            Arc::new(Self {
-                revoked: std::sync::Mutex::new(Vec::new()),
-            })
-        }
-    }
-    #[async_trait]
-    impl InviteUseCase for RecordingInvite {
-        async fn create_invite(
-            &self,
-            _: &DeviceId,
-            _: Vec<u8>,
-        ) -> Result<CreatedInvite, DomainError> {
-            unimplemented!()
-        }
-        async fn redeem_invite(&self, _: &str) -> Result<RedeemedInvite, DomainError> {
-            unimplemented!()
-        }
-        async fn revoke_invites_for_device(&self, device_id: &DeviceId) -> Result<(), DomainError> {
-            self.revoked.lock().unwrap().push(device_id.clone());
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn revoke_device_handler_also_revokes_outstanding_invites() {
-        let user_id = UserId::new();
-        let invite = RecordingInvite::new();
-        let target = DeviceId::new();
-        let router = router(AppState {
-            region_id: "eu-de-1-test".to_string(),
-            region_tier: powehi_domain::region::Tier::Tier1,
-            auth: Arc::new(MockAuthDeviceSuccess),
-            group: noop_group(),
-            messaging: Arc::new(MockMessaging),
-            key_package: Arc::new(MockKeyPackage),
-            media: Arc::new(MockMedia),
-            push_sub_repo: null_push_sub_repo(),
-            invite: invite.clone(),
-            device_repo: FakeDeviceRepo::new(user_id),
-            cache: test_session_cache(),
-            handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
-        });
-
-        let resp = router
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri(format!("/v1/auth/devices/{target}"))
-                    .header("authorization", bearer())
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-        assert_eq!(
-            invite.revoked.lock().unwrap().as_slice(),
-            &[target],
-            "revoking a device must also revoke its outstanding invites"
-        );
-    }
-
-    /// A `InviteUseCase` whose `revoke_invites_for_device` always fails, to
-    /// verify the handler propagates the error rather than returning success
-    /// while stale invites survive.
-    struct FailingRevokeInvite;
-    #[async_trait]
-    impl InviteUseCase for FailingRevokeInvite {
-        async fn create_invite(
-            &self,
-            _: &DeviceId,
-            _: Vec<u8>,
-        ) -> Result<CreatedInvite, DomainError> {
-            unimplemented!()
-        }
-        async fn redeem_invite(&self, _: &str) -> Result<RedeemedInvite, DomainError> {
-            unimplemented!()
-        }
-        async fn revoke_invites_for_device(&self, _: &DeviceId) -> Result<(), DomainError> {
-            Err(DomainError::Internal(
-                "injected invite cleanup failure".into(),
-            ))
-        }
-    }
-
-    #[tokio::test]
-    async fn revoke_device_handler_propagates_invite_cleanup_failure() {
-        let user_id = UserId::new();
-        let target = DeviceId::new();
-        let router = router(AppState {
-            region_id: "eu-de-1-test".to_string(),
-            region_tier: powehi_domain::region::Tier::Tier1,
-            auth: Arc::new(MockAuthDeviceSuccess),
-            group: noop_group(),
-            messaging: Arc::new(MockMessaging),
-            key_package: Arc::new(MockKeyPackage),
-            media: Arc::new(MockMedia),
-            push_sub_repo: null_push_sub_repo(),
-            invite: Arc::new(FailingRevokeInvite),
-            device_repo: FakeDeviceRepo::new(user_id),
-            cache: test_session_cache(),
-            handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
-        });
-
-        let resp = router
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri(format!("/v1/auth/devices/{target}"))
-                    .header("authorization", bearer())
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]

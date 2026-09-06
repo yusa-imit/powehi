@@ -32,6 +32,16 @@ const HUB_CAPACITY: usize = 512;
 /// Contains only group/envelope UUIDs and epoch numbers — never ciphertext.
 /// `MemberAdded`/`MemberRemoved` carry the affected `device_id` so each
 /// handler can update its local membership set without an extra DB round-trip.
+///
+/// `RemovalRequired` is different in kind from the other variants: it is a
+/// demand, not a receipt. When a device is revoked, the server cannot itself
+/// construct the MLS Remove — it holds no group state and no key material
+/// (prd.md §5.4, §8.5) — so it tells the remaining members of `group_id` that
+/// they must issue a Remove proposal + Commit for `device_id`'s leaf. Contrast
+/// with `MemberRemoved`, which reports that routing metadata was already
+/// updated after some client landed that Commit: `RemovalRequired` is the
+/// demand, `MemberRemoved` is the receipt. Still metadata-only: two UUIDs, no
+/// ciphertext.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WsNotification {
@@ -48,6 +58,10 @@ pub enum WsNotification {
         device_id: String,
     },
     MemberRemoved {
+        group_id: String,
+        device_id: String,
+    },
+    RemovalRequired {
         group_id: String,
         device_id: String,
     },
@@ -114,6 +128,14 @@ impl WsHub {
                 device_id,
                 ..
             } => Some(WsNotification::MemberRemoved {
+                group_id: group_id.to_string(),
+                device_id: device_id.to_string(),
+            }),
+            DomainEvent::RemovalRequired {
+                group_id,
+                device_id,
+                ..
+            } => Some(WsNotification::RemovalRequired {
                 group_id: group_id.to_string(),
                 device_id: device_id.to_string(),
             }),
@@ -251,6 +273,32 @@ mod tests {
         let notif = rx.try_recv().expect("notification sent");
         match notif {
             WsNotification::MemberRemoved {
+                group_id,
+                device_id,
+            } => {
+                assert_eq!(group_id, gid.to_string());
+                assert_eq!(device_id, did.to_string());
+            }
+            other => panic!("unexpected notification: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn dispatch_removal_required_produces_notification() {
+        let hub = WsHub::new();
+        let mut rx = hub.subscribe();
+
+        let gid = GroupId::new();
+        let did = DeviceId::new();
+        hub.dispatch(&DomainEvent::RemovalRequired {
+            group_id: gid.clone(),
+            device_id: did.clone(),
+            at: chrono::Utc::now(),
+        });
+
+        let notif = rx.try_recv().expect("notification sent");
+        match notif {
+            WsNotification::RemovalRequired {
                 group_id,
                 device_id,
             } => {

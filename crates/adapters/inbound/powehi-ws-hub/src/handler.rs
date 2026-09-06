@@ -221,6 +221,24 @@ async fn handle_socket(
 /// currently belongs to. `MemberAdded` for this device expands the set
 /// (so the device immediately receives subsequent group events), while
 /// `MemberRemoved` shrinks it (future events are suppressed).
+///
+/// `RemovalRequired` is membership-only, not membership-mutating, even though
+/// it carries a `device_id` like `MemberAdded`/`MemberRemoved` do. Its
+/// `device_id` names the device being REVOKED, not (necessarily) the
+/// recipient. WebSocket auth is checked once at upgrade time and the
+/// connection is not re-validated afterward, and session invalidation in
+/// `AuthService::revoke_device` runs strictly after this event is published —
+/// so the revoked device's own socket, if still open, CAN receive this filter
+/// call for its own revocation. Routing it through the same branch as
+/// `MemberRemoved` would additionally be a bug: it would let an
+/// attacker-controlled or spurious `device_id` value silently evict the
+/// *recipient* from its own `my_groups` set. So it is gated purely on "is the
+/// recipient currently a member of `group_id`", exactly like
+/// `EnvelopeReceived`/`EpochAdvanced`, and must never expand or shrink
+/// `my_groups`. It is additionally suppressed outright when `device_id`
+/// names the recipient itself: a device about to be revoked must not get
+/// early warning of its own removal before its session is actually
+/// invalidated.
 fn filter_notification(
     my_groups: &mut HashSet<GroupId>,
     notification: &WsNotification,
@@ -261,6 +279,16 @@ fn filter_notification(
         }
         WsNotification::EnvelopeReceived { group_id, .. }
         | WsNotification::EpochAdvanced { group_id, .. } => {
+            parse_group_id(group_id).is_some_and(|gid| my_groups.contains(&gid))
+        }
+        WsNotification::RemovalRequired {
+            group_id,
+            device_id: revoked_device,
+        } => {
+            if parse_device_id(revoked_device).as_ref() == Some(device_id) {
+                // Never warn a device that it is about to be revoked.
+                return false;
+            }
             parse_group_id(group_id).is_some_and(|gid| my_groups.contains(&gid))
         }
     }
@@ -689,6 +717,91 @@ mod tests {
         assert!(
             !filter_notification(&mut groups, &notif, &device),
             "spurious MemberRemoved for a group this device never joined must not be forwarded"
+        );
+    }
+
+    // --- RemovalRequired notification filtering ---
+
+    #[test]
+    fn removal_required_is_forwarded_to_a_group_member() {
+        let device = DeviceId::new();
+        let group = GroupId::new();
+        let revoked = DeviceId::new();
+        let mut groups = make_groups(std::slice::from_ref(&group));
+
+        let notif = WsNotification::RemovalRequired {
+            group_id: group.to_string(),
+            device_id: revoked.to_string(),
+        };
+        assert!(
+            filter_notification(&mut groups, &notif, &device),
+            "a member of the group must receive RemovalRequired"
+        );
+    }
+
+    #[test]
+    fn removal_required_is_not_forwarded_to_a_non_member() {
+        let device = DeviceId::new();
+        let group = GroupId::new();
+        let revoked = DeviceId::new();
+        let mut groups = make_groups(&[]); // device is not in this group
+
+        let notif = WsNotification::RemovalRequired {
+            group_id: group.to_string(),
+            device_id: revoked.to_string(),
+        };
+        assert!(
+            !filter_notification(&mut groups, &notif, &device),
+            "a non-member must not receive RemovalRequired for a foreign group"
+        );
+    }
+
+    #[test]
+    fn removal_required_is_suppressed_and_does_not_mutate_membership_when_self_targeted() {
+        // The RemovalRequired's device_id names the RECEIVING device's own
+        // id — i.e. this socket belongs to the device about to be revoked.
+        // It must not be forwarded (no early warning of its own removal),
+        // and — same invariant as the non-self-targeted case — must never be
+        // treated like MemberRemoved: the recipient's membership set stays
+        // untouched either way.
+        let device = DeviceId::new();
+        let group = GroupId::new();
+        let mut groups = make_groups(std::slice::from_ref(&group));
+        let groups_before_len = groups.len();
+
+        let notif = WsNotification::RemovalRequired {
+            group_id: group.to_string(),
+            device_id: device.to_string(),
+        };
+        let forwarded = filter_notification(&mut groups, &notif, &device);
+        assert!(
+            !forwarded,
+            "a device must never be forwarded a RemovalRequired naming itself"
+        );
+        assert_eq!(
+            groups.len(),
+            groups_before_len,
+            "RemovalRequired must never change the size of the membership set"
+        );
+        assert!(
+            groups.contains(&group),
+            "RemovalRequired must never drop the recipient out of its own group"
+        );
+    }
+
+    #[test]
+    fn removal_required_with_a_malformed_group_id_is_dropped() {
+        let device = DeviceId::new();
+        let revoked = DeviceId::new();
+        let mut groups = make_groups(&[]);
+
+        let notif = WsNotification::RemovalRequired {
+            group_id: "not-a-uuid".into(),
+            device_id: revoked.to_string(),
+        };
+        assert!(
+            !filter_notification(&mut groups, &notif, &device),
+            "RemovalRequired with unparseable group_id must be dropped"
         );
     }
 }

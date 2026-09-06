@@ -257,6 +257,7 @@ fn event_topic(event: &DomainEvent) -> &'static str {
         DomainEvent::EpochAdvanced { .. } => "epoch.advanced",
         DomainEvent::MemberAdded { .. } => "member.added",
         DomainEvent::MemberRemoved { .. } => "member.removed",
+        DomainEvent::RemovalRequired { .. } => "removal.required",
     }
 }
 
@@ -365,6 +366,16 @@ mod tests {
             at: Utc::now(),
         };
         assert_eq!(event_topic(&e), "member.removed");
+    }
+
+    #[test]
+    fn event_topic_removal_required() {
+        let e = DomainEvent::RemovalRequired {
+            group_id: GroupId::from(Uuid::new_v4()),
+            device_id: DeviceId::from(Uuid::new_v4()),
+            at: Utc::now(),
+        };
+        assert_eq!(event_topic(&e), "removal.required");
     }
 
     // ── DomainEvent serde round-trips ────────────────────────────────────────

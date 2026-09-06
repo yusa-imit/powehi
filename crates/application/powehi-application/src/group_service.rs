@@ -115,7 +115,56 @@ impl GroupUseCase for GroupService {
             tracing::warn!(caller = %caller, group_id = %group_id, "remove_member: caller is not a member");
             return Err(DomainError::Unauthorized);
         }
-        self.group_repo.remove_member(group_id, device_id).await
+        self.group_repo.remove_member(group_id, device_id).await?;
+        // This is a REQUEST to clear the pending-removal reminder, not a
+        // guarantee that it is cleared. The repository only honours it once
+        // the group's epoch has advanced strictly past the epoch recorded
+        // when the reminder was written — i.e. once *some* Commit landed
+        // since then (see `GroupRepository::delete_pending_removal` for why
+        // this is a heuristic, not proof that the Remove for THIS device
+        // specifically landed — the server cannot see Commit contents at
+        // all). Removing `device_id` from `group_members` is server routing
+        // metadata only; it is NOT evidence that any Commit ever landed, so
+        // a member who calls this endpoint with no epoch advance since the
+        // reminder was written leaves the reminder in place by design.
+        // Best-effort and idempotent: a device removed for reasons unrelated
+        // to revocation simply has no row, and a failure here must not fail
+        // the removal — a stale reminder is merely redundant noise for
+        // clients, never a loss of a guarantee (the reminder never was a
+        // guarantee, and grants no capability either way).
+        if self
+            .group_repo
+            .delete_pending_removal(group_id, device_id)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                group_id = %group_id,
+                error_kind = "db_error",
+                "remove_member: failed to clear pending removal; stale reminder may persist"
+            );
+        }
+        Ok(())
+    }
+
+    #[instrument(skip(self), fields(caller = %caller, group_id = %group_id))]
+    async fn list_pending_removals(
+        &self,
+        caller: &DeviceId,
+        group_id: &GroupId,
+    ) -> Result<Vec<DeviceId>, DomainError> {
+        // Same fail-closed guard and TOCTOU caveat as add_member above.
+        if !self
+            .group_repo
+            .list_members(group_id)
+            .await?
+            .iter()
+            .any(|m| &m.device_id == caller)
+        {
+            tracing::warn!(caller = %caller, group_id = %group_id, "list_pending_removals: caller is not a member");
+            return Err(DomainError::Unauthorized);
+        }
+        self.group_repo.list_pending_removals(group_id).await
     }
 }
 
@@ -130,12 +179,14 @@ mod tests {
     struct FakeGroupRepo {
         groups: Mutex<HashMap<GroupId, Group>>,
         members: Mutex<Vec<GroupMember>>,
+        pending: Mutex<Vec<(GroupId, DeviceId, Epoch)>>,
     }
     impl FakeGroupRepo {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 groups: Mutex::new(HashMap::new()),
                 members: Mutex::new(vec![]),
+                pending: Mutex::new(vec![]),
             })
         }
     }
@@ -150,10 +201,20 @@ mod tests {
         }
         async fn advance_epoch(
             &self,
-            _group_id: &GroupId,
-            _expected: Epoch,
+            group_id: &GroupId,
+            expected: Epoch,
         ) -> Result<Option<Epoch>, DomainError> {
-            unimplemented!("group_service tests never advance a group epoch")
+            // Mirrors the real adapter's CAS: only advance-and-persist when
+            // the caller's `expected` matches the stored epoch exactly.
+            let mut groups = self.groups.lock().unwrap();
+            match groups.get_mut(group_id) {
+                Some(group) if group.epoch == expected => {
+                    let new_epoch = Epoch(expected.0 + 1);
+                    group.epoch = new_epoch;
+                    Ok(Some(new_epoch))
+                }
+                _ => Ok(None),
+            }
         }
         async fn create_if_absent(&self, group: &Group) -> Result<bool, DomainError> {
             // Mirrors ON CONFLICT (id) DO NOTHING: an existing row is left intact.
@@ -238,6 +299,64 @@ mod tests {
                 self.add_member(m).await?;
             }
             Ok(())
+        }
+        async fn create_pending_removal(
+            &self,
+            group_id: &GroupId,
+            device_id: &DeviceId,
+        ) -> Result<(), DomainError> {
+            // Mirrors the real SQL's epoch gate: capture the group's current
+            // epoch atomically with the insert (an absent group records
+            // nothing, same as `INSERT ... SELECT ... FROM groups` selecting
+            // zero rows), and ON CONFLICT (group_id, device_id) DO NOTHING
+            // preserves whatever epoch the original insert recorded. Look up
+            // the group and release its lock before taking the `pending`
+            // lock, to avoid a lock-ordering deadlock with other methods.
+            let epoch = match self.groups.lock().unwrap().get(group_id) {
+                Some(group) => group.epoch,
+                None => return Ok(()),
+            };
+            let mut pending = self.pending.lock().unwrap();
+            if !pending
+                .iter()
+                .any(|(g, d, _)| g == group_id && d == device_id)
+            {
+                pending.push((group_id.clone(), device_id.clone(), epoch));
+            }
+            Ok(())
+        }
+        async fn delete_pending_removal(
+            &self,
+            group_id: &GroupId,
+            device_id: &DeviceId,
+        ) -> Result<(), DomainError> {
+            // Mirrors the real SQL's epoch gate: only clear entries whose
+            // recorded `created_at_epoch` is strictly less than the group's
+            // current epoch — i.e. only once a real epoch advance (standing
+            // in for a landed MLS Remove Commit) has happened since the
+            // reminder was written. An absent group leaves pending untouched.
+            let current_epoch = match self.groups.lock().unwrap().get(group_id) {
+                Some(group) => group.epoch,
+                None => return Ok(()),
+            };
+            self.pending
+                .lock()
+                .unwrap()
+                .retain(|(g, d, e)| !(g == group_id && d == device_id && *e < current_epoch));
+            Ok(())
+        }
+        async fn list_pending_removals(
+            &self,
+            group_id: &GroupId,
+        ) -> Result<Vec<DeviceId>, DomainError> {
+            Ok(self
+                .pending
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(g, _, _)| g == group_id)
+                .map(|(_, d, _)| d.clone())
+                .collect())
         }
     }
 
@@ -446,5 +565,187 @@ mod tests {
             .unwrap();
         let group = repo.find_by_id(&group_id).await.unwrap().unwrap();
         assert_eq!(group.home_region.as_str(), "eu-central");
+    }
+
+    #[tokio::test]
+    async fn remove_member_clears_a_pending_removal() {
+        let repo = FakeGroupRepo::new();
+        let svc = make_svc(repo.clone());
+        let device_a = DeviceId::new();
+        let device_b = DeviceId::new();
+        let group_id = GroupId::new();
+
+        svc.create_group(&device_a, group_id.clone()).await.unwrap();
+        svc.add_member(&device_a, &group_id, &device_b, Epoch(1))
+            .await
+            .unwrap();
+        repo.create_pending_removal(&group_id, &device_b)
+            .await
+            .unwrap();
+
+        // Stand in for a Commit landing (the gate can't tell which kind —
+        // see the "heuristic, not proof" test below): without an epoch
+        // advance at all, `delete_pending_removal` is gated shut (see the
+        // no-epoch-advance test below).
+        let advanced = repo.advance_epoch(&group_id, Epoch(0)).await.unwrap();
+        assert_eq!(advanced, Some(Epoch(1)));
+
+        svc.remove_member(&device_a, &group_id, &device_b, Epoch(2))
+            .await
+            .unwrap();
+
+        let pending = repo.list_pending_removals(&group_id).await.unwrap();
+        assert!(
+            !pending.contains(&device_b),
+            "pending removal must be cleared once the member is actually removed"
+        );
+    }
+
+    /// A current member must not be able to erase the durable
+    /// pending-removal reminder just by calling `remove_member` with no
+    /// epoch advance at all — that only touches `group_members` (server
+    /// routing metadata) and is no evidence whatsoever that any Commit
+    /// landed. Without any epoch advance since the reminder was written, the
+    /// reminder must survive the call. (This is the floor the gate
+    /// guarantees; see the next test for its ceiling — it does NOT prove the
+    /// specific Remove landed, only that *some* Commit did.)
+    #[tokio::test]
+    async fn remove_member_without_an_epoch_advance_leaves_the_pending_removal_in_place() {
+        let repo = FakeGroupRepo::new();
+        let svc = make_svc(repo.clone());
+        let device_a = DeviceId::new();
+        let device_b = DeviceId::new();
+        let group_id = GroupId::new();
+
+        svc.create_group(&device_a, group_id.clone()).await.unwrap();
+        svc.add_member(&device_a, &group_id, &device_b, Epoch(1))
+            .await
+            .unwrap();
+        repo.create_pending_removal(&group_id, &device_b)
+            .await
+            .unwrap();
+
+        // No epoch advance here — this is the attack: calling remove_member
+        // alone, with no Commit ever landing.
+        svc.remove_member(&device_a, &group_id, &device_b, Epoch(2))
+            .await
+            .unwrap();
+
+        let members = repo.list_members(&group_id).await.unwrap();
+        assert!(
+            !members.iter().any(|m| m.device_id == device_b),
+            "device_b must still be gone from server routing metadata"
+        );
+
+        let pending = repo.list_pending_removals(&group_id).await.unwrap();
+        assert!(
+            pending.contains(&device_b),
+            "the pending removal must survive a remove_member call with no \
+             epoch advance at all — otherwise any current member could \
+             erase the durable reminder for free, with zero Commits sent"
+        );
+    }
+
+    /// KNOWN LIMITATION, not a regression: the epoch gate cannot distinguish
+    /// "the Remove for THIS device landed" from "any unrelated Commit landed
+    /// since this row was written", because the server never sees Commit
+    /// contents (RFC 9420 §6, §12.4 — proposals are inside the encrypted
+    /// Commit). A member can send an ordinary self-Update Commit (routine,
+    /// RFC 9420 §12.1.2/§12.4.3 recommends it for PCS) and then call
+    /// `remove_member` to erase the reminder for an entirely different
+    /// device's revocation, without that device's Remove ever landing. This
+    /// test locks in that the gate is a noise-reduction heuristic ("costs
+    /// one Commit") and not a cryptographic guarantee — see
+    /// `GroupRepository::delete_pending_removal`'s doc for the full
+    /// reasoning and why real enforcement can only live client-side.
+    #[tokio::test]
+    async fn remove_member_erases_the_pending_removal_after_any_unrelated_epoch_advance() {
+        let repo = FakeGroupRepo::new();
+        let svc = make_svc(repo.clone());
+        let device_a = DeviceId::new();
+        let device_b = DeviceId::new();
+        let group_id = GroupId::new();
+
+        svc.create_group(&device_a, group_id.clone()).await.unwrap();
+        svc.add_member(&device_a, &group_id, &device_b, Epoch(1))
+            .await
+            .unwrap();
+        repo.create_pending_removal(&group_id, &device_b)
+            .await
+            .unwrap();
+
+        // Any Commit at all — standing in for e.g. device_a's routine
+        // self-Update, unrelated to device_b's revocation.
+        repo.advance_epoch(&group_id, Epoch(0)).await.unwrap();
+
+        svc.remove_member(&device_a, &group_id, &device_b, Epoch(2))
+            .await
+            .unwrap();
+
+        let pending = repo.list_pending_removals(&group_id).await.unwrap();
+        assert!(
+            !pending.contains(&device_b),
+            "the gate opens on ANY epoch advance, not specifically device_b's \
+             Remove — this is the documented limitation, not a bug"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_member_succeeds_when_there_is_no_pending_removal() {
+        let repo = FakeGroupRepo::new();
+        let svc = make_svc(repo.clone());
+        let device_a = DeviceId::new();
+        let device_b = DeviceId::new();
+        let group_id = GroupId::new();
+
+        svc.create_group(&device_a, group_id.clone()).await.unwrap();
+        svc.add_member(&device_a, &group_id, &device_b, Epoch(1))
+            .await
+            .unwrap();
+
+        svc.remove_member(&device_a, &group_id, &device_b, Epoch(2))
+            .await
+            .expect("clearing an absent pending removal must be a no-op, not an error");
+    }
+
+    #[tokio::test]
+    async fn list_pending_removals_rejects_a_non_member_caller() {
+        let repo = FakeGroupRepo::new();
+        let svc = make_svc(repo.clone());
+        let owner = DeviceId::new();
+        let outsider = DeviceId::new();
+        let group_id = GroupId::new();
+
+        svc.create_group(&owner, group_id.clone()).await.unwrap();
+
+        let err = svc
+            .list_pending_removals(&outsider, &group_id)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
+    }
+
+    #[tokio::test]
+    async fn list_pending_removals_returns_the_pending_devices_for_a_member() {
+        let repo = FakeGroupRepo::new();
+        let svc = make_svc(repo.clone());
+        let owner = DeviceId::new();
+        let revoked_a = DeviceId::new();
+        let revoked_b = DeviceId::new();
+        let group_id = GroupId::new();
+
+        svc.create_group(&owner, group_id.clone()).await.unwrap();
+        repo.create_pending_removal(&group_id, &revoked_a)
+            .await
+            .unwrap();
+        repo.create_pending_removal(&group_id, &revoked_b)
+            .await
+            .unwrap();
+
+        let mut pending = svc.list_pending_removals(&owner, &group_id).await.unwrap();
+        pending.sort_by_key(|d| d.as_uuid());
+        let mut expected = [revoked_a, revoked_b];
+        expected.sort_by_key(|d| d.as_uuid());
+        assert_eq!(pending, expected);
     }
 }

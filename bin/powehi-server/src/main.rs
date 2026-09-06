@@ -184,12 +184,22 @@ async fn main() -> Result<()> {
         }
     };
 
+    let group_repo_auth: Arc<dyn powehi_port_outbound::group_repo::GroupRepository> =
+        group_repo.clone();
+    // Constructed here because `AuthService::revoke_device` now performs invite
+    // revocation itself; `InviteService` only depends on `cache` (bound above),
+    // so there is no construction cycle.
+    let invite: Arc<dyn powehi_port_inbound::invite::InviteUseCase> =
+        Arc::new(InviteService::new(cache.clone()));
     let auth: Arc<dyn powehi_port_inbound::auth::AuthUseCase> = Arc::new(AuthService::new(
         user_repo,
         Arc::clone(&device_repo),
         key_package_repo.clone(),
+        group_repo_auth,
         opaque,
         cache.clone(),
+        event_bus.clone(),
+        invite.clone(),
         handle_oracle_secret,
     ));
 
@@ -244,9 +254,6 @@ async fn main() -> Result<()> {
         cfg.region_id.clone(),
     ));
     let media_gc = Arc::clone(&media);
-
-    let invite: Arc<dyn powehi_port_inbound::invite::InviteUseCase> =
-        Arc::new(InviteService::new(cache.clone()));
 
     // ── gRPC inter-region mesh server ──────────────────────────────────────
 

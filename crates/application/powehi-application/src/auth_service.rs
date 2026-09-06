@@ -7,6 +7,7 @@ use hmac::{Hmac, Mac};
 use powehi_domain::{
     device::{Device, DeviceId},
     error::DomainError,
+    event::DomainEvent,
     user::{User, UserId},
 };
 use powehi_port_inbound::auth::{
@@ -14,9 +15,11 @@ use powehi_port_inbound::auth::{
     LoginInitResponse, RecoveryProof, RegistrationFinishRequest, RegistrationFinishResponse,
     RegistrationInitRequest, RegistrationInitResponse, SessionToken,
 };
+use powehi_port_inbound::invite::InviteUseCase;
 use powehi_port_outbound::{
-    cache::CachePort, device_repo::DeviceRepository, key_package_repo::KeyPackageRepository,
-    opaque::OpaqueServerPort, user_repo::UserRepository,
+    cache::CachePort, device_repo::DeviceRepository, event_bus::DomainEventBus,
+    group_repo::GroupRepository, key_package_repo::KeyPackageRepository, opaque::OpaqueServerPort,
+    user_repo::UserRepository,
 };
 use sha2::Sha256;
 use tracing::instrument;
@@ -59,8 +62,14 @@ pub struct AuthService {
     user_repo: Arc<dyn UserRepository>,
     device_repo: Arc<dyn DeviceRepository>,
     key_package_repo: Arc<dyn KeyPackageRepository>,
+    group_repo: Arc<dyn GroupRepository>,
     opaque: Arc<dyn OpaqueServerPort>,
     cache: Arc<dyn CachePort>,
+    event_bus: Arc<dyn DomainEventBus>,
+    /// The inbound port `revoke_device` calls to delete a revoked device's
+    /// outstanding invite codes. Each invite pins its own copy of that
+    /// device's KeyPackage bytes in Redis, outside the KeyPackage pool.
+    invite: Arc<dyn InviteUseCase>,
     /// Server-side secret for HMAC-SHA256 synthetic user_id derivation.
     /// Prevents handle-existence timing oracle: unknown handles always map to the
     /// same deterministic UUID (per secret), indistinguishable from known handles.
@@ -68,20 +77,37 @@ pub struct AuthService {
 }
 
 impl AuthService {
+    // Nine collaborators, all of them ports this service genuinely needs:
+    // the four repositories/stores it reads and writes (user, device,
+    // key-package, group), the OPAQUE verifier, the session cache, the
+    // event bus it publishes revocation signals on, the invite use case
+    // whose outstanding invite codes `revoke_device` must delete (each pins
+    // its own copy of a device's KeyPackage bytes in Redis, outside the
+    // KeyPackage pool), and the handle-oracle secret. Bundling them into a
+    // params struct would add a type whose only purpose is to satisfy the
+    // lint, and this is a composition-root-only constructor called from
+    // exactly one production site.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         user_repo: Arc<dyn UserRepository>,
         device_repo: Arc<dyn DeviceRepository>,
         key_package_repo: Arc<dyn KeyPackageRepository>,
+        group_repo: Arc<dyn GroupRepository>,
         opaque: Arc<dyn OpaqueServerPort>,
         cache: Arc<dyn CachePort>,
+        event_bus: Arc<dyn DomainEventBus>,
+        invite: Arc<dyn InviteUseCase>,
         handle_oracle_secret: [u8; 32],
     ) -> Self {
         Self {
             user_repo,
             device_repo,
             key_package_repo,
+            group_repo,
             opaque,
             cache,
+            event_bus,
+            invite,
             handle_oracle_secret,
         }
     }
@@ -454,6 +480,70 @@ impl AuthUseCase for AuthService {
         if &device.user_id != user_id {
             return Err(DomainError::Unauthorized);
         }
+        // Delete this device's outstanding invite codes BEFORE anything
+        // irreversible. An invite pins a copy of this device's KeyPackage
+        // bytes directly in Redis with its own 24h TTL, entirely outside the
+        // shared KeyPackage pool `delete_by_device` cleans up below — so
+        // deleting the pool row alone does not stop an already-issued invite
+        // code from handing out the revoked credential.
+        //
+        // This step lives here — hard-fail (`?`), before anything
+        // irreversible — for exactly the reason `delete_by_device` runs
+        // before `device_repo.delete`: `revoke_invites_for_device` is
+        // documented idempotent (a device with zero outstanding invites is
+        // `Ok(())`), so a failure here leaves the device row fully intact
+        // and the whole revocation safely retryable. It must NOT sit
+        // downstream of the session invalidation at the end of this
+        // function, which hard-fails on a cache outage AFTER the device row
+        // is already gone — a Redis blip there would then permanently skip
+        // invite cleanup, since a retry can only hit NotFound. (This is the
+        // ordering discipline this function already follows: idempotent
+        // hard-fail steps first, then irreversible deletes, then the
+        // best-effort notification fan-out, then the final hard-fail
+        // session invalidation.)
+        self.invite.revoke_invites_for_device(device_id).await?;
+        // Capture the device's group memberships BEFORE deleting it.
+        // `group_members.device_id` is `ON DELETE CASCADE` to `devices(id)`
+        // (migration 0001), so once `device_repo.delete` runs the server has
+        // permanently lost its own record of which groups this device was in
+        // — and with it the ability to tell those groups' remaining members
+        // that they still owe an MLS Remove for the revoked leaf.
+        //
+        // Hard-fail (`?`) rather than log-and-continue: this read happens
+        // before anything irreversible, so a failure leaves the device fully
+        // intact and a client retry safely re-runs the whole revocation.
+        // The per-group writes AFTER the delete take the opposite posture,
+        // for the opposite reason — see below.
+        let affected_groups = self.group_repo.list_groups_for_device(device_id).await?;
+        // Record the durable backstop BEFORE anything irreversible. This
+        // write is idempotent (`ON CONFLICT (group_id, device_id) DO
+        // NOTHING`, see migration 0020) and `pending_removals.device_id` has
+        // no FK to `devices(id)` by design, so it does not depend on the
+        // device row still existing. Hard-fail (`?`) for the same reason as
+        // `revoke_invites_for_device`/`list_groups_for_device` above: if this
+        // write fails, the device row is still present and the whole
+        // revocation is safely retryable. Writing it AFTER the irreversible
+        // deletes below (as an earlier draft of this function did) traded a
+        // recoverable failure (retry) for an unrecoverable one (a DB blip
+        // here would permanently drop the one signal that a revoked leaf
+        // still needs removing from the group, with no way to reconstruct it
+        // since `find_by_id` on the already-deleted device returns
+        // `NotFound` on any retry).
+        //
+        // NOTE ON WHAT THIS ROW PROVES: `delete_pending_removal`'s epoch gate
+        // (see `GroupRepository::delete_pending_removal`) only proves that
+        // *some* Commit landed after this row was written — the server
+        // cannot see Commit contents (RFC 9420 §6, §12.4) and so cannot tell
+        // an unrelated Update/Add Commit from the actual Remove this row is
+        // asking for. This table is a best-effort heuristic reminder and
+        // discovery channel for clients, not a cryptographic guarantee that
+        // the Remove happened; the only party that can actually verify a
+        // leaf was removed is a client reconciling its own ratchet tree.
+        for group_id in &affected_groups {
+            self.group_repo
+                .create_pending_removal(group_id, device_id)
+                .await?;
+        }
         // Delete every KeyPackage (consumed or not) belonging to the device
         // BEFORE deleting the device row itself. Without this cleanup, a
         // stale unconsumed KeyPackage could still be handed out via
@@ -473,9 +563,42 @@ impl AuthUseCase for AuthService {
         self.key_package_repo.delete_by_device(device_id).await?;
         self.device_repo.delete(device_id).await?;
 
+        // Publish the live signal for each affected group. This is purely a
+        // latency optimization on top of the durable row already written
+        // above — a connected member acting on it now is strictly better
+        // than waiting to poll `GET .../pending-removals`, but the durable
+        // row is what actually survives if this publish is lost. Log-and-
+        // continue, never fail the revocation: by this point the device row
+        // and its KeyPackages are already gone and that deletion is
+        // irreversible, so returning Err here would report a completed
+        // revocation as failed and invite a retry that can only hit
+        // NotFound.
+        for group_id in &affected_groups {
+            if self
+                .event_bus
+                .publish(DomainEvent::RemovalRequired {
+                    group_id: group_id.clone(),
+                    device_id: device_id.clone(),
+                    at: chrono::Utc::now(),
+                })
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    group_id = %group_id,
+                    error_kind = "event_bus_error",
+                    "revoke_device: failed to publish removal-required signal"
+                );
+            }
+        }
+
         // Immediately invalidate all active sessions for the revoked device (Y-1).
         // Propagate set_members error — silently succeeding on cache failure
-        // would leave live session tokens for a revoked device (Y-5).
+        // would leave live session tokens for a revoked device (Y-5). This
+        // remains a hard-fail security control: it still runs after the
+        // fan-out above (not skipped, not weakened) and still returns `Err`
+        // from `revoke_device` on cache failure, same as before the fan-out
+        // was moved ahead of it.
         let device_sessions_key = format!("device_sessions:{}", device_id.as_uuid());
         let tokens = self.cache.set_members(&device_sessions_key).await?;
         for token in &tokens {
@@ -494,6 +617,7 @@ impl AuthUseCase for AuthService {
             }
         }
         let _ = self.cache.delete(&device_sessions_key).await;
+
         Ok(())
     }
 }
@@ -501,10 +625,19 @@ impl AuthUseCase for AuthService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use powehi_domain::key_package::{ConsumeResult, KeyPackage, KeyPackageId};
+    use powehi_domain::{
+        group::{Epoch, Group, GroupId, GroupMember},
+        key_package::{ConsumeResult, KeyPackage, KeyPackageId},
+    };
+    use powehi_port_inbound::invite::{CreatedInvite, InviteUseCase, RedeemedInvite};
     use powehi_port_outbound::{
-        cache::CachePort, device_repo::DeviceRepository, key_package_repo::KeyPackageRepository,
-        opaque::OpaqueServerPort, user_repo::UserRepository,
+        cache::CachePort,
+        device_repo::DeviceRepository,
+        event_bus::{DomainEventBus, EventStream},
+        group_repo::GroupRepository,
+        key_package_repo::KeyPackageRepository,
+        opaque::OpaqueServerPort,
+        user_repo::UserRepository,
     };
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -546,11 +679,23 @@ mod tests {
 
     struct FakeDeviceRepo {
         store: Mutex<HashMap<DeviceId, Device>>,
+        /// Simulates the real `group_members.device_id` `ON DELETE CASCADE`
+        /// (migration 0001): when set, `delete` also purges this device's rows
+        /// from the wired `FakeGroupRepo`, so a test can prove `revoke_device`
+        /// captures group membership BEFORE calling `device_repo.delete`.
+        cascade_group_repo: Option<Arc<FakeGroupRepo>>,
     }
     impl FakeDeviceRepo {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 store: Mutex::new(HashMap::new()),
+                cascade_group_repo: None,
+            })
+        }
+        fn with_cascade(group_repo: Arc<FakeGroupRepo>) -> Arc<Self> {
+            Arc::new(Self {
+                store: Mutex::new(HashMap::new()),
+                cascade_group_repo: Some(group_repo),
             })
         }
     }
@@ -578,6 +723,9 @@ mod tests {
         }
         async fn delete(&self, id: &DeviceId) -> Result<(), DomainError> {
             self.store.lock().unwrap().remove(id);
+            if let Some(group_repo) = &self.cascade_group_repo {
+                group_repo.cascade_delete_device(id);
+            }
             Ok(())
         }
     }
@@ -669,6 +817,314 @@ mod tests {
         async fn delete_by_device(&self, _device_id: &DeviceId) -> Result<u64, DomainError> {
             Err(DomainError::Internal(
                 "injected delete_by_device failure".into(),
+            ))
+        }
+    }
+
+    // ── fake group repo (revoke_device fan-out) ──────────────────────────────
+
+    struct FakeGroupRepo {
+        members: Mutex<Vec<GroupMember>>,
+        pending: Mutex<Vec<(GroupId, DeviceId)>>,
+    }
+    impl FakeGroupRepo {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                members: Mutex::new(vec![]),
+                pending: Mutex::new(vec![]),
+            })
+        }
+        fn with_memberships(pairs: Vec<(GroupId, DeviceId)>) -> Arc<Self> {
+            let members = pairs
+                .into_iter()
+                .map(|(group_id, device_id)| GroupMember {
+                    group_id,
+                    device_id,
+                    joined_at_epoch: Epoch(0),
+                })
+                .collect();
+            Arc::new(Self {
+                members: Mutex::new(members),
+                pending: Mutex::new(vec![]),
+            })
+        }
+        /// Test-only hook simulating `group_members.device_id`'s real
+        /// `ON DELETE CASCADE` to `devices(id)`: drains every membership row
+        /// for `device_id`, as Postgres would the instant `device_repo.delete`
+        /// runs. Wired via `FakeDeviceRepo::with_cascade`.
+        fn cascade_delete_device(&self, device_id: &DeviceId) {
+            self.members
+                .lock()
+                .unwrap()
+                .retain(|m| &m.device_id != device_id);
+        }
+    }
+    #[async_trait::async_trait]
+    impl GroupRepository for FakeGroupRepo {
+        async fn save(&self, _group: &Group) -> Result<(), DomainError> {
+            unimplemented!("auth_service tests never save a group")
+        }
+        async fn advance_epoch(
+            &self,
+            _group_id: &GroupId,
+            _expected: Epoch,
+        ) -> Result<Option<Epoch>, DomainError> {
+            unimplemented!("auth_service tests never advance a group epoch")
+        }
+        async fn create_if_absent(&self, _group: &Group) -> Result<bool, DomainError> {
+            unimplemented!("auth_service tests never create a group")
+        }
+        async fn create_with_creator(
+            &self,
+            _group: &Group,
+            _creator: &GroupMember,
+        ) -> Result<bool, DomainError> {
+            unimplemented!("auth_service tests never create a group")
+        }
+        async fn find_by_id(&self, _id: &GroupId) -> Result<Option<Group>, DomainError> {
+            unimplemented!("auth_service tests never look up a group entity")
+        }
+        async fn add_member(&self, _member: &GroupMember) -> Result<(), DomainError> {
+            unimplemented!("auth_service tests never add a group member directly")
+        }
+        async fn remove_member(
+            &self,
+            _group_id: &GroupId,
+            _device_id: &DeviceId,
+        ) -> Result<(), DomainError> {
+            unimplemented!("auth_service tests never remove a group member directly")
+        }
+        async fn list_members(&self, _group_id: &GroupId) -> Result<Vec<GroupMember>, DomainError> {
+            unimplemented!("auth_service tests never list group members")
+        }
+        async fn list_groups_for_device(
+            &self,
+            device_id: &DeviceId,
+        ) -> Result<Vec<GroupId>, DomainError> {
+            Ok(self
+                .members
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| &m.device_id == device_id)
+                .map(|m| m.group_id.clone())
+                .collect())
+        }
+        async fn upsert_members(
+            &self,
+            _group: &Group,
+            _members: &[GroupMember],
+        ) -> Result<(), DomainError> {
+            unimplemented!("auth_service tests never upsert group members")
+        }
+        async fn create_pending_removal(
+            &self,
+            group_id: &GroupId,
+            device_id: &DeviceId,
+        ) -> Result<(), DomainError> {
+            // Mirrors ON CONFLICT (group_id, device_id) DO NOTHING.
+            let mut pending = self.pending.lock().unwrap();
+            let pair = (group_id.clone(), device_id.clone());
+            if !pending.contains(&pair) {
+                pending.push(pair);
+            }
+            Ok(())
+        }
+        async fn delete_pending_removal(
+            &self,
+            _group_id: &GroupId,
+            _device_id: &DeviceId,
+        ) -> Result<(), DomainError> {
+            unimplemented!("auth_service tests never clear a pending removal")
+        }
+        async fn list_pending_removals(
+            &self,
+            group_id: &GroupId,
+        ) -> Result<Vec<DeviceId>, DomainError> {
+            Ok(self
+                .pending
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(g, _)| g == group_id)
+                .map(|(_, d)| d.clone())
+                .collect())
+        }
+    }
+
+    /// A `GroupRepository` wrapper whose `create_pending_removal` always fails,
+    /// delegating everything else to `inner`. Used to test that `revoke_device`
+    /// still succeeds (fail-safe posture) and still publishes the live signal
+    /// even when the durable pending-removal write fails.
+    struct FailingCreatePendingRemovalGroupRepo {
+        inner: Arc<FakeGroupRepo>,
+    }
+    #[async_trait::async_trait]
+    impl GroupRepository for FailingCreatePendingRemovalGroupRepo {
+        async fn save(&self, group: &Group) -> Result<(), DomainError> {
+            self.inner.save(group).await
+        }
+        async fn advance_epoch(
+            &self,
+            group_id: &GroupId,
+            expected: Epoch,
+        ) -> Result<Option<Epoch>, DomainError> {
+            self.inner.advance_epoch(group_id, expected).await
+        }
+        async fn create_if_absent(&self, group: &Group) -> Result<bool, DomainError> {
+            self.inner.create_if_absent(group).await
+        }
+        async fn create_with_creator(
+            &self,
+            group: &Group,
+            creator: &GroupMember,
+        ) -> Result<bool, DomainError> {
+            self.inner.create_with_creator(group, creator).await
+        }
+        async fn find_by_id(&self, id: &GroupId) -> Result<Option<Group>, DomainError> {
+            self.inner.find_by_id(id).await
+        }
+        async fn add_member(&self, member: &GroupMember) -> Result<(), DomainError> {
+            self.inner.add_member(member).await
+        }
+        async fn remove_member(
+            &self,
+            group_id: &GroupId,
+            device_id: &DeviceId,
+        ) -> Result<(), DomainError> {
+            self.inner.remove_member(group_id, device_id).await
+        }
+        async fn list_members(&self, group_id: &GroupId) -> Result<Vec<GroupMember>, DomainError> {
+            self.inner.list_members(group_id).await
+        }
+        async fn list_groups_for_device(
+            &self,
+            device_id: &DeviceId,
+        ) -> Result<Vec<GroupId>, DomainError> {
+            self.inner.list_groups_for_device(device_id).await
+        }
+        async fn upsert_members(
+            &self,
+            group: &Group,
+            members: &[GroupMember],
+        ) -> Result<(), DomainError> {
+            self.inner.upsert_members(group, members).await
+        }
+        async fn create_pending_removal(
+            &self,
+            _group_id: &GroupId,
+            _device_id: &DeviceId,
+        ) -> Result<(), DomainError> {
+            Err(DomainError::Internal(
+                "injected create_pending_removal failure".into(),
+            ))
+        }
+        async fn delete_pending_removal(
+            &self,
+            group_id: &GroupId,
+            device_id: &DeviceId,
+        ) -> Result<(), DomainError> {
+            self.inner.delete_pending_removal(group_id, device_id).await
+        }
+        async fn list_pending_removals(
+            &self,
+            group_id: &GroupId,
+        ) -> Result<Vec<DeviceId>, DomainError> {
+            self.inner.list_pending_removals(group_id).await
+        }
+    }
+
+    // ── fake event bus (records published events for assertions) ────────────
+
+    struct FakeEventBus {
+        published: Mutex<Vec<DomainEvent>>,
+    }
+    impl FakeEventBus {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                published: Mutex::new(vec![]),
+            })
+        }
+    }
+    #[async_trait::async_trait]
+    impl DomainEventBus for FakeEventBus {
+        async fn publish(&self, event: DomainEvent) -> Result<(), DomainError> {
+            self.published.lock().unwrap().push(event);
+            Ok(())
+        }
+        async fn subscribe(&self, _topic: &str) -> Result<EventStream, DomainError> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+    }
+
+    /// An event bus whose `publish` always fails. Used to test that
+    /// `revoke_device` still succeeds (fail-safe posture) and still records
+    /// the durable pending removal even when the live signal fails to publish.
+    struct FailingEventBus;
+    #[async_trait::async_trait]
+    impl DomainEventBus for FailingEventBus {
+        async fn publish(&self, _event: DomainEvent) -> Result<(), DomainError> {
+            Err(DomainError::Internal("injected publish failure".into()))
+        }
+        async fn subscribe(&self, _topic: &str) -> Result<EventStream, DomainError> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+    }
+
+    // ── fake invite use case (revoke_device's invite-cleanup collaborator) ───
+
+    /// An `InviteUseCase` that always succeeds, recording every device whose
+    /// invites were revoked so a test can assert `revoke_device` actually
+    /// called it.
+    struct FakeInvite {
+        revoked: Mutex<Vec<DeviceId>>,
+    }
+    impl FakeInvite {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                revoked: Mutex::new(vec![]),
+            })
+        }
+    }
+    #[async_trait::async_trait]
+    impl InviteUseCase for FakeInvite {
+        async fn create_invite(
+            &self,
+            _device_id: &DeviceId,
+            _key_package: Vec<u8>,
+        ) -> Result<CreatedInvite, DomainError> {
+            unimplemented!("auth_service tests never create/redeem an invite")
+        }
+        async fn redeem_invite(&self, _code: &str) -> Result<RedeemedInvite, DomainError> {
+            unimplemented!("auth_service tests never create/redeem an invite")
+        }
+        async fn revoke_invites_for_device(&self, device_id: &DeviceId) -> Result<(), DomainError> {
+            self.revoked.lock().unwrap().push(device_id.clone());
+            Ok(())
+        }
+    }
+
+    /// An `InviteUseCase` whose `revoke_invites_for_device` always fails, to
+    /// prove revoke_device propagates it BEFORE anything irreversible happens.
+    struct FailingInvite;
+    #[async_trait::async_trait]
+    impl InviteUseCase for FailingInvite {
+        async fn create_invite(
+            &self,
+            _device_id: &DeviceId,
+            _key_package: Vec<u8>,
+        ) -> Result<CreatedInvite, DomainError> {
+            unimplemented!("auth_service tests never create/redeem an invite")
+        }
+        async fn redeem_invite(&self, _code: &str) -> Result<RedeemedInvite, DomainError> {
+            unimplemented!("auth_service tests never create/redeem an invite")
+        }
+        async fn revoke_invites_for_device(
+            &self,
+            _device_id: &DeviceId,
+        ) -> Result<(), DomainError> {
+            Err(DomainError::Internal(
+                "injected revoke_invites_for_device failure".into(),
             ))
         }
     }
@@ -923,17 +1379,53 @@ mod tests {
         let user_repo = FakeUserRepo::new();
         let device_repo = FakeDeviceRepo::new();
         let key_package_repo = FakeKeyPackageRepo::new();
+        let group_repo = FakeGroupRepo::new();
         let opaque = Arc::new(FakeOpaque);
         let cache = FakeCache::new();
+        let event_bus = FakeEventBus::new();
+        let invite = FakeInvite::new();
         let svc = AuthService::new(
             user_repo.clone(),
             device_repo.clone(),
             key_package_repo.clone(),
+            group_repo,
             opaque,
             cache.clone(),
+            event_bus,
+            invite,
             TEST_ORACLE_SECRET,
         );
         (svc, user_repo, device_repo, key_package_repo, cache)
+    }
+
+    /// Wires an `AuthService` around caller-supplied `device_repo`, `group_repo`
+    /// and `event_bus`, for tests exercising `revoke_device`'s per-group
+    /// pending-removal / event-fan-out behavior. `user_repo` is unused by
+    /// `revoke_device` (ownership is checked against `device.user_id`
+    /// directly), so it is created fresh and returned only for symmetry with
+    /// the other `make_svc*` helpers.
+    fn make_svc_with_group_repo(
+        device_repo: Arc<FakeDeviceRepo>,
+        group_repo: Arc<dyn GroupRepository>,
+        event_bus: Arc<dyn DomainEventBus>,
+    ) -> (AuthService, Arc<FakeUserRepo>) {
+        let user_repo = FakeUserRepo::new();
+        let key_package_repo = FakeKeyPackageRepo::new();
+        let opaque = Arc::new(FakeOpaque);
+        let cache = FakeCache::new();
+        let invite = FakeInvite::new();
+        let svc = AuthService::new(
+            user_repo.clone(),
+            device_repo,
+            key_package_repo,
+            group_repo,
+            opaque,
+            cache,
+            event_bus,
+            invite,
+            TEST_ORACLE_SECRET,
+        );
+        (svc, user_repo)
     }
 
     #[tokio::test]
@@ -1333,14 +1825,20 @@ mod tests {
         let user_repo = FakeUserRepo::new();
         let device_repo = FakeDeviceRepo::new();
         let key_package_repo = FakeKeyPackageRepo::new();
+        let group_repo = FakeGroupRepo::new();
         let opaque = Arc::new(FakeOpaque);
         let fail_cache = SetAddFailCache::new();
+        let event_bus = FakeEventBus::new();
+        let invite = FakeInvite::new();
         let svc = AuthService::new(
             user_repo.clone(),
             device_repo.clone(),
             key_package_repo,
+            group_repo,
             opaque,
             fail_cache.clone(),
+            event_bus,
+            invite,
             TEST_ORACLE_SECRET,
         );
 
@@ -1617,14 +2115,20 @@ mod tests {
         let user_repo = FakeUserRepo::new();
         let device_repo = FakeDeviceRepo::new();
         let key_package_repo = FakeKeyPackageRepo::new();
+        let group_repo = FakeGroupRepo::new();
         let opaque = Arc::new(FakeOpaque);
         let fail_cache = SessionDeleteFailCache::new();
+        let event_bus = FakeEventBus::new();
+        let invite = FakeInvite::new();
         let svc = AuthService::new(
             user_repo.clone(),
             device_repo.clone(),
             key_package_repo,
+            group_repo,
             opaque,
             fail_cache.clone(),
+            event_bus,
+            invite,
             TEST_ORACLE_SECRET,
         );
 
@@ -1726,14 +2230,20 @@ mod tests {
         let user_repo = FakeUserRepo::new();
         let device_repo = FakeDeviceRepo::new();
         let key_package_repo = FakeKeyPackageRepo::new();
+        let group_repo = FakeGroupRepo::new();
         let opaque = Arc::new(FakeOpaque);
         let fail_cache = SetMembersFailCache::new();
+        let event_bus = FakeEventBus::new();
+        let invite = FakeInvite::new();
         let svc = AuthService::new(
             user_repo.clone(),
             device_repo.clone(),
             key_package_repo,
+            group_repo,
             opaque,
             fail_cache.clone(),
+            event_bus,
+            invite,
             TEST_ORACLE_SECRET,
         );
 
@@ -1759,6 +2269,121 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn revoke_device_records_pending_removals_even_when_session_invalidation_fails() {
+        // Regression guard for the fan-out ordering: the durable
+        // pending-removal write runs before the irreversible deletes (hard
+        // fail, see the ordering test above), and the live RemovalRequired
+        // publish runs after them but still BEFORE session invalidation,
+        // since session invalidation hard-fails (`?`) on a cache outage. If
+        // the publish were downstream of that `?`, this test would see no
+        // published event even though the durable row was already written.
+        let uid = UserId::new();
+        let device_id = DeviceId::new();
+        let device_repo = FakeDeviceRepo::new();
+        device_repo
+            .save(&Device::new(device_id.clone(), uid.clone(), vec![]))
+            .await
+            .unwrap();
+        let group_id = GroupId::new();
+        let group_repo: Arc<dyn GroupRepository> =
+            FakeGroupRepo::with_memberships(vec![(group_id.clone(), device_id.clone())]);
+        let key_package_repo = FakeKeyPackageRepo::new();
+        let opaque = Arc::new(FakeOpaque);
+        let fail_cache = SetMembersFailCache::new();
+        let event_bus = FakeEventBus::new();
+        let invite = FakeInvite::new();
+        let svc = AuthService::new(
+            FakeUserRepo::new(),
+            device_repo,
+            key_package_repo,
+            group_repo.clone(),
+            opaque,
+            fail_cache,
+            event_bus.clone(),
+            invite,
+            TEST_ORACLE_SECRET,
+        );
+
+        // Session invalidation is a hard-fail security control — that must
+        // NOT change: revoke_device still returns Err on cache failure.
+        let err = svc.revoke_device(&uid, &device_id).await.unwrap_err();
+        assert!(
+            matches!(err, DomainError::Internal(_)),
+            "set_members failure must still propagate as an error"
+        );
+
+        // Despite the Err, the fan-out (which runs before the failing cache
+        // call) must have already recorded the pending removal and published
+        // the live signal.
+        assert_eq!(
+            group_repo.list_pending_removals(&group_id).await.unwrap(),
+            vec![device_id.clone()],
+            "pending removal must be recorded even though session invalidation failed"
+        );
+        let published = event_bus.published.lock().unwrap();
+        assert!(
+            published.iter().any(|e| matches!(
+                e,
+                DomainEvent::RemovalRequired { group_id: g, device_id: d, .. }
+                    if *g == group_id && *d == device_id
+            )),
+            "RemovalRequired must be published even though session invalidation failed"
+        );
+    }
+
+    /// SECURITY: this encodes "the 24h stale-invite-credential window cannot
+    /// reopen due to a session-cache blip". Before the fix, the REST handler
+    /// orchestrated invite cleanup AFTER `AuthService::revoke_device`
+    /// returned, so a session-invalidation `Err` here short-circuited it
+    /// permanently — a client retry can only hit `NotFound` (device already
+    /// gone), so invite cleanup would be skipped forever. Invite revocation
+    /// now sits inside `revoke_device`, upstream of the failing cache call,
+    /// so it must run regardless of what happens downstream.
+    #[tokio::test]
+    async fn revoke_device_still_revokes_invites_even_when_session_invalidation_fails_afterward() {
+        let uid = UserId::new();
+        let device_id = DeviceId::new();
+        let device_repo = FakeDeviceRepo::new();
+        device_repo
+            .save(&Device::new(device_id.clone(), uid.clone(), vec![]))
+            .await
+            .unwrap();
+        let key_package_repo = FakeKeyPackageRepo::new();
+        let group_repo = FakeGroupRepo::new();
+        let opaque = Arc::new(FakeOpaque);
+        let fail_cache = SetMembersFailCache::new();
+        let event_bus = FakeEventBus::new();
+        let invite = FakeInvite::new();
+        let svc = AuthService::new(
+            FakeUserRepo::new(),
+            device_repo,
+            key_package_repo,
+            group_repo,
+            opaque,
+            fail_cache,
+            event_bus,
+            invite.clone(),
+            TEST_ORACLE_SECRET,
+        );
+
+        // Session invalidation is still a hard-fail security control — that
+        // must not change.
+        let err = svc.revoke_device(&uid, &device_id).await.unwrap_err();
+        assert!(
+            matches!(err, DomainError::Internal(_)),
+            "set_members failure must still propagate as an error"
+        );
+
+        // Invite revocation ran anyway, because it sits upstream of the
+        // failing cache call.
+        assert_eq!(
+            invite.revoked.lock().unwrap().as_slice(),
+            std::slice::from_ref(&device_id),
+            "invite revocation must have run even though session invalidation failed"
+        );
+    }
+
     /// SECURITY: if KeyPackage cleanup fails, `revoke_device` must propagate
     /// the error and — critically — must NOT have already deleted the device
     /// row. `delete_by_device` runs BEFORE `device_repo.delete` precisely so
@@ -1770,14 +2395,20 @@ mod tests {
         let user_repo = FakeUserRepo::new();
         let device_repo = FakeDeviceRepo::new();
         let key_package_repo = Arc::new(FailingDeleteByDeviceKeyPackageRepo);
+        let group_repo = FakeGroupRepo::new();
         let opaque = Arc::new(FakeOpaque);
         let cache = FakeCache::new();
+        let event_bus = FakeEventBus::new();
+        let invite = FakeInvite::new();
         let svc = AuthService::new(
             user_repo.clone(),
             device_repo.clone(),
             key_package_repo,
+            group_repo,
             opaque,
             cache,
+            event_bus,
+            invite,
             TEST_ORACLE_SECRET,
         );
 
@@ -1804,6 +2435,60 @@ mod tests {
         assert!(
             device_repo.find_by_id(&device_id).await.unwrap().is_some(),
             "device row must survive a failed KeyPackage cleanup so the caller can retry"
+        );
+    }
+
+    /// SECURITY: pins the ordering invariant that invite revocation runs
+    /// BEFORE anything irreversible in `revoke_device`. If
+    /// `revoke_invites_for_device` fails, the function must propagate the
+    /// error and — critically — must NOT have already deleted the device
+    /// row or its KeyPackages: it runs first precisely so a failure here
+    /// leaves the whole revocation safely retryable.
+    #[tokio::test]
+    async fn revoke_device_propagates_invite_revocation_failure_and_the_device_survives() {
+        let user_repo = FakeUserRepo::new();
+        let device_repo = FakeDeviceRepo::new();
+        let key_package_repo = FakeKeyPackageRepo::new();
+        let group_repo = FakeGroupRepo::new();
+        let opaque = Arc::new(FakeOpaque);
+        let cache = FakeCache::new();
+        let event_bus = FakeEventBus::new();
+        let invite = Arc::new(FailingInvite);
+        let svc = AuthService::new(
+            user_repo.clone(),
+            device_repo.clone(),
+            key_package_repo,
+            group_repo,
+            opaque,
+            cache,
+            event_bus,
+            invite,
+            TEST_ORACLE_SECRET,
+        );
+
+        let uid = UserId::new();
+        user_repo
+            .save(&User::new(uid.clone(), b"hash".to_vec()))
+            .await
+            .unwrap();
+        let device_id = svc
+            .register_device(
+                &uid,
+                DeviceRegistrationRequest {
+                    mls_credential: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        let err = svc.revoke_device(&uid, &device_id).await.unwrap_err();
+        assert!(
+            matches!(err, DomainError::Internal(_)),
+            "revoke_invites_for_device failure must propagate"
+        );
+        assert!(
+            device_repo.find_by_id(&device_id).await.unwrap().is_some(),
+            "device row must survive a failed invite-revocation so the caller can retry"
         );
     }
 
@@ -2213,5 +2898,209 @@ mod tests {
         svc.revoke_device(&uid, &new_device).await.unwrap();
         let after = svc.list_devices(&uid).await.unwrap();
         assert!(!after.iter().any(|d| d.device_id == new_device));
+    }
+
+    // ── revoke_device group-removal fan-out ──────────────────────────────────
+
+    #[tokio::test]
+    async fn revoke_device_records_a_pending_removal_for_every_group_the_device_was_in() {
+        let uid = UserId::new();
+        let device_id = DeviceId::new();
+        let device_repo = FakeDeviceRepo::new();
+        device_repo
+            .save(&Device::new(device_id.clone(), uid.clone(), vec![]))
+            .await
+            .unwrap();
+        let group_a = GroupId::new();
+        let group_b = GroupId::new();
+        let group_repo = FakeGroupRepo::with_memberships(vec![
+            (group_a.clone(), device_id.clone()),
+            (group_b.clone(), device_id.clone()),
+        ]);
+        let event_bus = FakeEventBus::new();
+        let (svc, _user_repo) =
+            make_svc_with_group_repo(device_repo, group_repo.clone(), event_bus);
+
+        svc.revoke_device(&uid, &device_id).await.unwrap();
+
+        assert_eq!(
+            group_repo.list_pending_removals(&group_a).await.unwrap(),
+            vec![device_id.clone()]
+        );
+        assert_eq!(
+            group_repo.list_pending_removals(&group_b).await.unwrap(),
+            vec![device_id]
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_device_captures_group_membership_before_deleting_the_device() {
+        // Regression guard: this test fails if `list_groups_for_device` is
+        // ever moved to run AFTER `device_repo.delete`. The cascade hook
+        // below mirrors the real `group_members.device_id` ON DELETE CASCADE
+        // (migration 0001): once `device_repo.delete` runs, it wipes this
+        // device's membership rows out of `group_repo` immediately. If
+        // `revoke_device` read memberships after the delete instead of
+        // before, `affected_groups` would already be empty and no pending
+        // removal would ever be recorded.
+        let uid = UserId::new();
+        let device_id = DeviceId::new();
+        let group_a = GroupId::new();
+        let group_b = GroupId::new();
+        let group_repo = FakeGroupRepo::with_memberships(vec![
+            (group_a.clone(), device_id.clone()),
+            (group_b.clone(), device_id.clone()),
+        ]);
+        let device_repo = FakeDeviceRepo::with_cascade(group_repo.clone());
+        device_repo
+            .save(&Device::new(device_id.clone(), uid.clone(), vec![]))
+            .await
+            .unwrap();
+        let event_bus = FakeEventBus::new();
+        let (svc, _user_repo) =
+            make_svc_with_group_repo(device_repo, group_repo.clone(), event_bus);
+
+        svc.revoke_device(&uid, &device_id).await.unwrap();
+
+        assert_eq!(
+            group_repo.list_pending_removals(&group_a).await.unwrap(),
+            vec![device_id.clone()],
+            "pending removal must survive even though cascade-delete already \
+             wiped the membership row by the time it was recorded"
+        );
+        assert_eq!(
+            group_repo.list_pending_removals(&group_b).await.unwrap(),
+            vec![device_id]
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_device_publishes_one_removal_required_event_per_group() {
+        let uid = UserId::new();
+        let device_id = DeviceId::new();
+        let device_repo = FakeDeviceRepo::new();
+        device_repo
+            .save(&Device::new(device_id.clone(), uid.clone(), vec![]))
+            .await
+            .unwrap();
+        let group_a = GroupId::new();
+        let group_b = GroupId::new();
+        let group_repo = FakeGroupRepo::with_memberships(vec![
+            (group_a.clone(), device_id.clone()),
+            (group_b.clone(), device_id.clone()),
+        ]);
+        let event_bus = FakeEventBus::new();
+        let (svc, _user_repo) =
+            make_svc_with_group_repo(device_repo, group_repo, event_bus.clone());
+
+        svc.revoke_device(&uid, &device_id).await.unwrap();
+
+        let published = event_bus.published.lock().unwrap();
+        let removals: Vec<(GroupId, DeviceId)> = published
+            .iter()
+            .filter_map(|e| match e {
+                DomainEvent::RemovalRequired {
+                    group_id,
+                    device_id,
+                    ..
+                } => Some((group_id.clone(), device_id.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(removals.len(), 2, "exactly one event per affected group");
+        assert!(removals.contains(&(group_a, device_id.clone())));
+        assert!(removals.contains(&(group_b, device_id)));
+    }
+
+    #[tokio::test]
+    async fn revoke_device_succeeds_when_the_device_was_in_no_groups() {
+        let uid = UserId::new();
+        let device_id = DeviceId::new();
+        let device_repo = FakeDeviceRepo::new();
+        device_repo
+            .save(&Device::new(device_id.clone(), uid.clone(), vec![]))
+            .await
+            .unwrap();
+        let group_repo = FakeGroupRepo::new();
+        let event_bus = FakeEventBus::new();
+        let (svc, _user_repo) =
+            make_svc_with_group_repo(device_repo, group_repo, event_bus.clone());
+
+        svc.revoke_device(&uid, &device_id).await.unwrap();
+
+        assert!(
+            event_bus.published.lock().unwrap().is_empty(),
+            "no groups affected means no removal-required events"
+        );
+    }
+
+    /// SECURITY: pins the ordering invariant that the durable pending-removal
+    /// write runs BEFORE anything irreversible in `revoke_device`, same
+    /// reasoning as invite revocation and KeyPackage cleanup above. If
+    /// `create_pending_removal` fails, the function must propagate the error
+    /// and must NOT have already deleted the device row or its KeyPackages —
+    /// a DB blip here is retryable, whereas losing this write silently after
+    /// the device is already gone (the earlier draft of this function) would
+    /// be unrecoverable.
+    #[tokio::test]
+    async fn revoke_device_propagates_pending_removal_failure_and_the_device_survives() {
+        let uid = UserId::new();
+        let device_id = DeviceId::new();
+        let device_repo = FakeDeviceRepo::new();
+        device_repo
+            .save(&Device::new(device_id.clone(), uid.clone(), vec![]))
+            .await
+            .unwrap();
+        let group_id = GroupId::new();
+        let inner = FakeGroupRepo::with_memberships(vec![(group_id.clone(), device_id.clone())]);
+        let group_repo: Arc<dyn GroupRepository> =
+            Arc::new(FailingCreatePendingRemovalGroupRepo { inner });
+        let event_bus = FakeEventBus::new();
+        let (svc, _user_repo) =
+            make_svc_with_group_repo(device_repo.clone(), group_repo, event_bus.clone());
+
+        let err = svc.revoke_device(&uid, &device_id).await.unwrap_err();
+        assert!(
+            matches!(err, DomainError::Internal(_)),
+            "create_pending_removal failure must propagate"
+        );
+        assert!(
+            device_repo.find_by_id(&device_id).await.unwrap().is_some(),
+            "device row must survive a failed pending-removal write so the caller can retry"
+        );
+        assert!(
+            event_bus.published.lock().unwrap().is_empty(),
+            "no live signal must be published when the durable write never completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_device_still_succeeds_when_publishing_the_signal_fails() {
+        // Fail-safe posture, mirrored: an event-bus failure must not fail the
+        // whole revocation, and the durable pending-removal row must still
+        // have been recorded so an offline member can pick it up later.
+        let uid = UserId::new();
+        let device_id = DeviceId::new();
+        let device_repo = FakeDeviceRepo::new();
+        device_repo
+            .save(&Device::new(device_id.clone(), uid.clone(), vec![]))
+            .await
+            .unwrap();
+        let group_id = GroupId::new();
+        let group_repo =
+            FakeGroupRepo::with_memberships(vec![(group_id.clone(), device_id.clone())]);
+        let event_bus: Arc<dyn DomainEventBus> = Arc::new(FailingEventBus);
+        let (svc, _user_repo) =
+            make_svc_with_group_repo(device_repo, group_repo.clone(), event_bus);
+
+        svc.revoke_device(&uid, &device_id)
+            .await
+            .expect("a failed event-bus publish must not fail revoke_device");
+
+        assert_eq!(
+            group_repo.list_pending_removals(&group_id).await.unwrap(),
+            vec![device_id],
+            "the durable pending removal must still be recorded when publish fails"
+        );
     }
 }

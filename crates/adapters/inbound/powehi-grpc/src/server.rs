@@ -1251,6 +1251,31 @@ mod tests {
             }
             Ok(())
         }
+        // The gRPC region server never touches pending-removal bookkeeping
+        // (that's an `AuthService`/device-revocation concern) — loud panic
+        // instead of a silent no-op so an accidental future dependency on
+        // this behaviour from a gRPC test fails immediately rather than
+        // passing against fake data nobody wrote.
+        async fn create_pending_removal(
+            &self,
+            _group_id: &GroupId,
+            _device_id: &DeviceId,
+        ) -> Result<(), DomainError> {
+            unimplemented!("grpc tests never touch pending removals")
+        }
+        async fn delete_pending_removal(
+            &self,
+            _group_id: &GroupId,
+            _device_id: &DeviceId,
+        ) -> Result<(), DomainError> {
+            unimplemented!("grpc tests never touch pending removals")
+        }
+        async fn list_pending_removals(
+            &self,
+            _group_id: &GroupId,
+        ) -> Result<Vec<DeviceId>, DomainError> {
+            unimplemented!("grpc tests never touch pending removals")
+        }
     }
 
     /// In-memory [`CommitLedger`] fake that delegates to whichever

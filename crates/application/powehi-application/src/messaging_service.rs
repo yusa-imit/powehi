@@ -687,6 +687,26 @@ mod tests {
             }
             Ok(())
         }
+        async fn create_pending_removal(
+            &self,
+            _group_id: &GroupId,
+            _device_id: &DeviceId,
+        ) -> Result<(), DomainError> {
+            unimplemented!("messaging_service tests never touch pending removals")
+        }
+        async fn delete_pending_removal(
+            &self,
+            _group_id: &GroupId,
+            _device_id: &DeviceId,
+        ) -> Result<(), DomainError> {
+            unimplemented!("messaging_service tests never touch pending removals")
+        }
+        async fn list_pending_removals(
+            &self,
+            _group_id: &GroupId,
+        ) -> Result<Vec<DeviceId>, DomainError> {
+            unimplemented!("messaging_service tests never touch pending removals")
+        }
     }
 
     /// In-memory [`CommitLedger`] fake that delegates to whichever
