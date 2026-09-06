@@ -65,6 +65,23 @@ config:
   # Blast-radius cap: max objects the orphan sweep may delete in a single 6-hourly tick.
   # Matches Rust compiled default (POWEHI__MEDIA_ORPHAN_SWEEP_MAX_DELETES_PER_RUN).
   mediaOrphanSweepMaxDeletesPerRun: 500
+  # Grace period, days, before a pending_removals row (device-revocation MLS-Remove
+  # reminder) becomes eligible for the daily retention sweep — subject to also clearing
+  # the sweep's epoch gate (see GroupRepository::sweep_stale_pending_removals's doc).
+  # Matches Rust compiled default (POWEHI__PENDING_REMOVAL_SWEEP_GRACE_DAYS).
+  pendingRemovalSweepGraceDays: 30
+  # Whole daily pending_removals sweep timeout, seconds. Matches Rust compiled default
+  # (POWEHI__PENDING_REMOVAL_SWEEP_TIMEOUT_SECS).
+  pendingRemovalSweepTimeoutSecs: 300
+  # Kill switch for the pending_removals sweep, default false: no frontend consumer of
+  # pending_removals/RemovalRequired exists yet and there is no alternative reconciliation
+  # channel (see docs/prd.md §3.3), so enabling this would silently destroy the one durable
+  # signal cycle 448's feature exists to provide before any client can act on it. Flip to true
+  # once a real consumer exists. Matches Rust compiled default (POWEHI__PENDING_REMOVAL_SWEEP_ENABLED).
+  pendingRemovalSweepEnabled: false
+  # Blast-radius cap: max pending_removals rows the sweep may delete in a single daily tick.
+  # Matches Rust compiled default (POWEHI__PENDING_REMOVAL_SWEEP_MAX_DELETES_PER_RUN).
+  pendingRemovalSweepMaxDeletesPerRun: 10000
   # Cloudflare R2 (S3-compatible) endpoint URL for media storage. Empty means the
   # Rust compiled dev-only default "http://localhost:9000" applies (AppConfig.r2_endpoint,
   # crates/infra/powehi-config/src/lib.rs) — operators MUST override with the real

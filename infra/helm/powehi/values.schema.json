@@ -39,7 +39,8 @@
         },
         "databaseMaxConnections": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 7,
+          "description": "Must clear the Rust-enforced floor (MIN_DATABASE_MAX_CONNECTIONS) or the pod crash-loops at startup validate() — 4 advisory-lock-guarded background jobs can have up to 3 running concurrently (2 connections each) plus request-handler headroom."
         },
         "r2RequestTimeoutSecs": {
           "type": "integer",
@@ -66,6 +67,26 @@
           "minimum": 1,
           "maximum": 100000,
           "description": "Blast-radius cap: max objects the orphan sweep may delete in a single 6-hourly tick."
+        },
+        "pendingRemovalSweepGraceDays": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1825
+        },
+        "pendingRemovalSweepTimeoutSecs": {
+          "type": "integer",
+          "minimum": 30,
+          "description": "Must clear sqlx's 30s default acquire_timeout (MIN_PENDING_REMOVAL_SWEEP_TIMEOUT_SECS) or the sweep aborts every tick during connection acquire alone."
+        },
+        "pendingRemovalSweepEnabled": {
+          "type": "boolean",
+          "description": "Kill switch for the pending_removals retention sweep background job. Flip to false to stop it without a code revert."
+        },
+        "pendingRemovalSweepMaxDeletesPerRun": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000,
+          "description": "Blast-radius cap: max pending_removals rows the sweep may delete in a single daily tick."
         },
         "r2Endpoint": {
           "type": "string"

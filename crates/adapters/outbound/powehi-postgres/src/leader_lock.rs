@@ -17,6 +17,7 @@ use crate::map_err;
 pub const GC_LOCK_MEDIA_BLOBS: i64 = 0x706f_7765_6869_0001;
 pub const GC_LOCK_MEDIA_LEDGER: i64 = 0x706f_7765_6869_0002;
 pub const GC_LOCK_MEDIA_ORPHANS: i64 = 0x706f_7765_6869_0003;
+pub const GC_LOCK_PENDING_REMOVALS: i64 = 0x706f_7765_6869_0004;
 
 /// Holds a session-scoped Postgres advisory lock acquired via
 /// `PgLeaderLock::try_lock`. `pg_advisory_lock`/`pg_advisory_unlock` are tied

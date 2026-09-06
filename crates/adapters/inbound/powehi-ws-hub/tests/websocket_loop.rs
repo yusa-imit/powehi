@@ -165,6 +165,15 @@ impl GroupRepository for FakeGroupRepo {
     ) -> Result<Vec<DeviceId>, DomainError> {
         unimplemented!()
     }
+    // No-op stub: this fake holds no timestamped pending-removal storage,
+    // and no ws-loop test asserts on retention sweeping.
+    async fn sweep_stale_pending_removals(
+        &self,
+        _older_than: chrono::DateTime<chrono::Utc>,
+        _limit: u32,
+    ) -> Result<u64, DomainError> {
+        Ok(0)
+    }
 }
 
 const TEST_TOKEN: &str = "ws-loop-test-token";

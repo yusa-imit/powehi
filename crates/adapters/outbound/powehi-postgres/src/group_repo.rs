@@ -382,6 +382,72 @@ impl GroupRepository for PgGroupRepository {
         .map_err(map_err)?;
         Ok(rows.into_iter().map(DeviceId::from).collect())
     }
+
+    async fn sweep_stale_pending_removals(
+        &self,
+        older_than: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<u64, DomainError> {
+        // Postgres has no `DELETE ... LIMIT`, so the per-call bound is
+        // expressed via a `USING` join against a bounded inner SELECT.
+        // Deletes by the natural key `(group_id, device_id)` — the table's
+        // actual primary key — rather than `ctid` (physical row identity):
+        // a natural-key delete is correct regardless of whether this table
+        // ever grows an `UPDATE` path in the future (crypto-reviewer, cycle
+        // 451 — the original `ctid` version relied on a prose-only, easily
+        // violated "never UPDATEd in production" invariant, and there is no
+        // performance reason to prefer `ctid` since the PK is already
+        // indexed). The outer `WHERE` re-states `p.created_at < $1 AND
+        // g.epoch > p.created_at_epoch` redundantly on top of the `JOIN
+        // ... USING (s.group_id, s.device_id)`: this makes the delete
+        // fail-closed on its own predicate rather than trusting the inner
+        // SELECT's row set alone.
+        //
+        // `ORDER BY p.created_at, p.group_id, p.device_id` makes the plan
+        // prefer `pending_removals_created_at_idx` (migration 0021) over a
+        // full scan under normal skew (few eligible rows among many), and
+        // gives a full, deterministic total order (not just chronological)
+        // so a truncated run's next tick makes forward progress on a
+        // well-defined, reproducible subset rather than an arbitrary one
+        // among same-timestamp ties (e.g. one device revoked across many
+        // groups in a single statement all share one `now()`).
+        //
+        // The `groups` join enforces the same epoch gate as
+        // `delete_pending_removal` — see that method's and this port
+        // method's doc for what this predicate actually buys (a group
+        // liveness filter, not a per-suppressor cost floor) and why a group
+        // that never advances its epoch again never has this row swept by
+        // age alone.
+        //
+        // `limit` is bound as i64 because Postgres has no unsigned integer
+        // type; a u32 always fits an i64 with no possibility of a sign flip
+        // (contrast the u64->i64 casts elsewhere in this crate that need a
+        // config-enforced ceiling to stay representable).
+        let result = sqlx::query(
+            "DELETE FROM pending_removals p
+             USING (
+                 SELECT p.group_id, p.device_id
+                 FROM pending_removals p
+                 JOIN groups g ON g.id = p.group_id
+                 WHERE p.created_at < $1 AND g.epoch > p.created_at_epoch
+                 ORDER BY p.created_at, p.group_id, p.device_id
+                 LIMIT $2
+             ) s
+             WHERE p.group_id = s.group_id
+               AND p.device_id = s.device_id
+               AND p.created_at < $1
+               AND EXISTS (
+                   SELECT 1 FROM groups g
+                   WHERE g.id = p.group_id AND g.epoch > p.created_at_epoch
+               )",
+        )
+        .bind(older_than)
+        .bind(limit as i64)
+        .execute(&self.pool)
+        .await
+        .map_err(map_err)?;
+        Ok(result.rows_affected())
+    }
 }
 
 #[cfg(test)]

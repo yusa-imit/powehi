@@ -31,6 +31,13 @@
 //!     sent — but (documented limitation, not a bug, since the server cannot
 //!     see Commit contents) ANY Commit landing, not specifically the
 //!     requested device's Remove, satisfies the gate.
+//!   - `GroupRepository::sweep_stale_pending_removals` (cycle 451): age AND
+//!     the same epoch gate as `delete_pending_removal` must both clear
+//!     (group-agnostic beyond that), the `limit` blast-radius cap is
+//!     respected and a truncated run resumes on the next call, a sweep with
+//!     nothing eligible deletes nothing and returns 0, and a row whose
+//!     group's epoch never advances past `created_at_epoch` is never swept
+//!     regardless of age.
 //!
 //! Tests are `#[ignore]` because they require Docker (testcontainers).
 //! Run them in CI via: `cargo nextest run -p powehi-postgres --run-ignored all
@@ -132,6 +139,26 @@ async fn join_group(pool: &PgPool, group_id: GroupId, device_id: DeviceId) {
         .add_member(&member)
         .await
         .expect("add member");
+}
+
+/// Force a `pending_removals` row's `created_at` to an arbitrary value via
+/// raw SQL, since `create_pending_removal` always writes `now()` and has no
+/// parameter for it — used to plant rows on either side of a sweep cutoff.
+async fn backdate_pending_removal(
+    pool: &PgPool,
+    group_id: &GroupId,
+    device_id: &DeviceId,
+    created_at: chrono::DateTime<Utc>,
+) {
+    sqlx::query(
+        "UPDATE pending_removals SET created_at = $1 WHERE group_id = $2 AND device_id = $3",
+    )
+    .bind(created_at)
+    .bind(group_id.as_uuid())
+    .bind(device_id.as_uuid())
+    .execute(pool)
+    .await
+    .expect("backdate pending_removal created_at");
 }
 
 // ── Security-invariant tests ──────────────────────────────────────────────────
@@ -2117,5 +2144,265 @@ async fn pending_removal_is_cascade_deleted_with_its_group() {
     assert_eq!(
         count, 0,
         "pending_removals must be cascade-deleted when its group is deleted"
+    );
+}
+
+// ── sweep_stale_pending_removals (cycle 451) ────────────────────────────────
+// The bounded retention sweep: like `delete_pending_removal`, this IS
+// epoch-gated (`groups.epoch > created_at_epoch`), on top of an age cutoff —
+// and it is still not a security control, since the epoch gate here is the
+// same heuristic cost-floor as `delete_pending_removal`'s, not a stronger
+// one. See `GroupRepository::sweep_stale_pending_removals`'s doc for the
+// full rationale, including why a group that never advances its epoch again
+// (the "device seized, everyone's offline" scenario) never has its rows
+// swept by age alone.
+
+/// AGE-SCOPED (once epoch-eligible), NOT GROUP-SCOPED: among rows whose
+/// group has already advanced past `created_at_epoch`, the sweep's age
+/// predicate `created_at < older_than` applies uniformly — which group a row
+/// belongs to plays no further part. Plant an old and a new row in TWO
+/// different groups, advance both groups' epochs so every row clears the
+/// epoch gate, and confirm both old rows (regardless of group) are swept
+/// while both new rows (regardless of group) survive, pinning that age is
+/// what distinguishes them once epoch-eligibility is equal.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn sweep_stale_pending_removals_is_age_scoped_not_group_scoped() {
+    let (_c, pool) = setup().await;
+    let repo = PgGroupRepository::new(pool.clone());
+
+    let group_a = insert_group(&pool).await;
+    let group_b = insert_group(&pool).await;
+    let old_device_a = DeviceId::new();
+    let new_device_a = DeviceId::new();
+    let old_device_b = DeviceId::new();
+    let new_device_b = DeviceId::new();
+
+    // `cutoff` is fixed an hour in the past BEFORE any row is written, so
+    // every row created below via `create_pending_removal` (which always
+    // writes `now()`) is unambiguously newer than `cutoff`, regardless of
+    // how long this test takes to run.
+    let cutoff = Utc::now() - chrono::Duration::hours(1);
+    let long_ago = cutoff - chrono::Duration::days(2);
+
+    repo.create_pending_removal(&group_a, &old_device_a)
+        .await
+        .expect("create old_device_a");
+    repo.create_pending_removal(&group_a, &new_device_a)
+        .await
+        .expect("create new_device_a");
+    repo.create_pending_removal(&group_b, &old_device_b)
+        .await
+        .expect("create old_device_b");
+    repo.create_pending_removal(&group_b, &new_device_b)
+        .await
+        .expect("create new_device_b");
+
+    backdate_pending_removal(&pool, &group_a, &old_device_a, long_ago).await;
+    backdate_pending_removal(&pool, &group_b, &old_device_b, long_ago).await;
+    // new_device_a / new_device_b are left with their real now()-written
+    // created_at, which is after `cutoff` and so must survive.
+
+    // Both rows were captured at epoch 0 (a freshly created group starts
+    // there); advance both groups to epoch 1 so every row here clears the
+    // sweep's epoch gate and age is the only remaining variable.
+    repo.advance_epoch(&group_a, Epoch(0))
+        .await
+        .expect("advance_epoch group_a");
+    repo.advance_epoch(&group_b, Epoch(0))
+        .await
+        .expect("advance_epoch group_b");
+
+    let deleted = repo
+        .sweep_stale_pending_removals(cutoff, 100)
+        .await
+        .expect("sweep");
+    assert_eq!(
+        deleted, 2,
+        "exactly the two backdated rows (one per group) must be swept"
+    );
+
+    let pending_a = repo
+        .list_pending_removals(&group_a)
+        .await
+        .expect("list_pending_removals group_a");
+    assert_eq!(
+        pending_a,
+        vec![new_device_a],
+        "the old row in group_a must be swept, the new row must survive"
+    );
+
+    let pending_b = repo
+        .list_pending_removals(&group_b)
+        .await
+        .expect("list_pending_removals group_b");
+    assert_eq!(
+        pending_b,
+        vec![new_device_b],
+        "an old row in a DIFFERENT group must also be swept, and its new \
+         sibling row must also survive — pinning that age, not group \
+         membership, is the sweep's only predicate"
+    );
+}
+
+/// The `limit` bound is respected: plant more eligible (backdated) rows than
+/// `limit`, confirm exactly `limit` are removed and the rest are left
+/// untouched on the first call, and that a second call sweeps the remainder
+/// — "a truncated run resumes on the next tick".
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn sweep_stale_pending_removals_respects_limit_and_resumes_next_tick() {
+    let (_c, pool) = setup().await;
+    let repo = PgGroupRepository::new(pool.clone());
+    let group_id = insert_group(&pool).await;
+
+    let cutoff = Utc::now() - chrono::Duration::hours(1);
+    let long_ago = cutoff - chrono::Duration::days(2);
+
+    let total: u32 = 5;
+    let mut device_ids = Vec::new();
+    for _ in 0..total {
+        let device_id = DeviceId::new();
+        repo.create_pending_removal(&group_id, &device_id)
+            .await
+            .expect("create eligible row");
+        backdate_pending_removal(&pool, &group_id, &device_id, long_ago).await;
+        device_ids.push(device_id);
+    }
+    // Clear the sweep's epoch gate for all five rows in one shot.
+    repo.advance_epoch(&group_id, Epoch(0))
+        .await
+        .expect("advance_epoch group_id");
+
+    let limit: u32 = 2;
+    let deleted_first = repo
+        .sweep_stale_pending_removals(cutoff, limit)
+        .await
+        .expect("first sweep");
+    assert_eq!(
+        deleted_first,
+        u64::from(limit),
+        "the first call must delete exactly `limit` rows, never more, even \
+         though {total} were eligible"
+    );
+
+    let remaining_first = repo
+        .list_pending_removals(&group_id)
+        .await
+        .expect("list_pending_removals after first sweep");
+    assert_eq!(
+        remaining_first.len(),
+        (total - limit) as usize,
+        "exactly `limit` rows must have been removed — the rest must remain \
+         untouched by the truncated first call"
+    );
+
+    let deleted_second = repo
+        .sweep_stale_pending_removals(cutoff, 100)
+        .await
+        .expect("second sweep");
+    assert_eq!(
+        deleted_second,
+        u64::from(total - limit),
+        "a second call with headroom must sweep everything the first, \
+         truncated call left behind — the truncated run resumes on the next \
+         tick, nothing is lost"
+    );
+
+    let remaining_second = repo
+        .list_pending_removals(&group_id)
+        .await
+        .expect("list_pending_removals after second sweep");
+    assert!(
+        remaining_second.is_empty(),
+        "all originally-eligible rows must be gone after the second call"
+    );
+}
+
+/// A sweep against a table with nothing eligible must return 0 and delete
+/// nothing — the just-created row's real `created_at` is nowhere close to
+/// the cutoff, so it must survive untouched.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn sweep_stale_pending_removals_with_nothing_eligible_deletes_nothing() {
+    let (_c, pool) = setup().await;
+    let repo = PgGroupRepository::new(pool.clone());
+    let group_id = insert_group(&pool).await;
+    let device_id = DeviceId::new();
+
+    repo.create_pending_removal(&group_id, &device_id)
+        .await
+        .expect("create_pending_removal");
+
+    // Cutoff a year in the past: nothing this test just created can possibly
+    // be older than it.
+    let cutoff = Utc::now() - chrono::Duration::days(365);
+    let deleted = repo
+        .sweep_stale_pending_removals(cutoff, 100)
+        .await
+        .expect("sweep with nothing eligible");
+    assert_eq!(
+        deleted, 0,
+        "no row is older than the cutoff, so nothing must be deleted"
+    );
+
+    let pending = repo
+        .list_pending_removals(&group_id)
+        .await
+        .expect("list_pending_removals");
+    assert_eq!(
+        pending,
+        vec![device_id],
+        "the row must survive a sweep it is not eligible for"
+    );
+}
+
+/// EPOCH GATE, THE KEY NEW BEHAVIOR: a row that clears the age cutoff but
+/// whose group's epoch has NEVER advanced past `created_at_epoch` must
+/// survive the sweep regardless of how old it is — this is the "device
+/// seized, every remaining member is offline and has sent zero Commits"
+/// scenario the reminder exists for, and it must never be swept out from
+/// under a group that genuinely never got a chance to act on it.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn sweep_stale_pending_removals_never_sweeps_a_row_whose_group_epoch_never_advanced() {
+    let (_c, pool) = setup().await;
+    let repo = PgGroupRepository::new(pool.clone());
+    let group_id = insert_group(&pool).await;
+    let device_id = DeviceId::new();
+
+    repo.create_pending_removal(&group_id, &device_id)
+        .await
+        .expect("create_pending_removal");
+
+    // Backdate it far past any plausible grace period, and use a cutoff
+    // that would sweep it on age alone.
+    let long_ago = Utc::now() - chrono::Duration::days(400);
+    backdate_pending_removal(&pool, &group_id, &device_id, long_ago).await;
+    let cutoff = Utc::now() - chrono::Duration::hours(1);
+
+    // Deliberately do NOT call advance_epoch — the group is still at the
+    // epoch 0 it was created with, equal to (not greater than)
+    // created_at_epoch, so the epoch gate must reject this row.
+    let deleted = repo
+        .sweep_stale_pending_removals(cutoff, 100)
+        .await
+        .expect("sweep");
+    assert_eq!(
+        deleted, 0,
+        "a row in a group whose epoch never advanced past created_at_epoch \
+         must never be swept, no matter how old — clearing the age cutoff \
+         alone must not be sufficient"
+    );
+
+    let pending = repo
+        .list_pending_removals(&group_id)
+        .await
+        .expect("list_pending_removals");
+    assert_eq!(
+        pending,
+        vec![device_id],
+        "the reminder must still be discoverable via list_pending_removals \
+         after a sweep it correctly declined to touch"
     );
 }

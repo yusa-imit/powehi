@@ -707,6 +707,15 @@ mod tests {
         ) -> Result<Vec<DeviceId>, DomainError> {
             unimplemented!("messaging_service tests never touch pending removals")
         }
+        // No-op stub: this fake holds no timestamped pending-removal storage,
+        // and no messaging_service test asserts on retention sweeping.
+        async fn sweep_stale_pending_removals(
+            &self,
+            _older_than: DateTime<Utc>,
+            _limit: u32,
+        ) -> Result<u64, DomainError> {
+            Ok(0)
+        }
     }
 
     /// In-memory [`CommitLedger`] fake that delegates to whichever

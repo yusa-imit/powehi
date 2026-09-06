@@ -358,6 +358,15 @@ mod tests {
                 .map(|(_, d, _)| d.clone())
                 .collect())
         }
+        // No-op stub: this fake's `pending` storage carries no timestamps,
+        // and no group_service test asserts on retention sweeping.
+        async fn sweep_stale_pending_removals(
+            &self,
+            _older_than: chrono::DateTime<chrono::Utc>,
+            _limit: u32,
+        ) -> Result<u64, DomainError> {
+            Ok(0)
+        }
     }
 
     fn make_svc(repo: Arc<FakeGroupRepo>) -> GroupService {

@@ -8,10 +8,18 @@ pub enum ConfigError {
     Load(#[from] config::ConfigError),
     #[error(
         "database_max_connections={0} is below the minimum safe value ({MIN_DATABASE_MAX_CONNECTIONS}): \
-         the media GC and ledger-trim background jobs each pin one dedicated connection for an \
-         advisory lock while the job's own query needs a second connection from the same pool, so \
-         fewer than {MIN_DATABASE_MAX_CONNECTIONS} connections can self-deadlock the job (and starve \
-         every request handler for the acquire-timeout duration if both jobs overlap)"
+         there are now 4 advisory-lock-guarded background jobs (media blob GC, media ledger trim, \
+         media orphan sweep, pending_removals sweep — cycle 451), each pinning one dedicated \
+         connection for its lock while its own query needs a second connection from the same pool, \
+         so 2 connections per concurrently-running job. The hourly media blob GC job (t=0,1h,2h,...) \
+         coincides with BOTH the un-skipped-first-tick 24h media-ledger-trim job (t=0,24h,48h,...) \
+         AND the 6h-grid media-orphan-sweep job (t=6h,12h,18h,24h,... — every 24h boundary is also a \
+         6h-grid tick) every single day at t=24h, 48h, ...: a real 3-job collision, not a pairwise \
+         one. The new pending_removals sweep is deliberately offset (3h initial delay + 24h grid, so \
+         t=27h, 51h, ...) specifically so it never becomes a 4th job in that same collision — it only \
+         ever coincides with the hourly blob GC job alone. So the realistic worst case is 3 \
+         concurrently-running jobs, needing 6 connections, plus headroom so request handlers are not \
+         fully starved for the acquire-timeout duration during that overlap"
     )]
     DatabaseMaxConnectionsTooLow(u32),
     #[error(
@@ -99,13 +107,47 @@ pub enum ConfigError {
          6-hourly tick"
     )]
     MediaOrphanSweepMaxDeletesOutOfRange(u64),
+    #[error(
+        "pending_removal_sweep_grace_days={0} is out of range: must be in \
+         [1, {MAX_PENDING_REMOVAL_SWEEP_GRACE_DAYS}]. Zero would let the very next tick sweep a \
+         `pending_removals` row created microseconds ago, i.e. no grace at all, defeating the \
+         reminder's entire purpose; a value above the ceiling risks overflowing the u64->i64 \
+         cast used to build the sweep's cutoff timestamp, which could silently invert the grace \
+         window and make the sweep treat every row in the table as eligible regardless of age"
+    )]
+    PendingRemovalSweepGraceDaysTooHigh(u64),
+    #[error(
+        "pending_removal_sweep_timeout_secs={0} is below the minimum safe value \
+         ({MIN_PENDING_REMOVAL_SWEEP_TIMEOUT_SECS}): sqlx's `PgPoolOptions` default \
+         `acquire_timeout` is 30s and this job's query is not exempt from it, so a timeout \
+         shorter than that can abort the sweep during connection acquire alone, before the \
+         (otherwise cheap, bounded, indexed) `DELETE` even starts — making the job hold its \
+         advisory lock every tick with zero net progress"
+    )]
+    PendingRemovalSweepTimeoutTooLow(u64),
+    #[error(
+        "pending_removal_sweep_max_deletes_per_run={0} is outside the safe range \
+         [{MIN_PENDING_REMOVAL_SWEEP_MAX_DELETES_PER_RUN}, \
+         {MAX_PENDING_REMOVAL_SWEEP_MAX_DELETES_PER_RUN}]: this value is the sweep's \
+         blast-radius cap — a config or clock issue that misidentifies rows as sweep-eligible \
+         can only ever destroy at most this many notification-metadata rows in a single tick"
+    )]
+    PendingRemovalSweepMaxDeletesOutOfRange(u64),
 }
 
-/// Below this, a GC/ledger-trim job's dedicated advisory-lock connection plus its own query
-/// connection can exhaust the pool and self-deadlock (see
-/// `powehi_postgres::leader_lock::PgLeaderLock::try_lock`); two concurrent jobs need one pair
-/// each, so 3 is the floor, not sqlx's per-connection minimum of 1.
-const MIN_DATABASE_MAX_CONNECTIONS: u32 = 3;
+/// Below this, a GC job's dedicated advisory-lock connection plus its own query connection can
+/// exhaust the pool and self-deadlock (see `powehi_postgres::leader_lock::PgLeaderLock::try_lock`).
+/// Each running job needs 2 connections (lock + query). The hourly media-blob-GC job (t=0,1h,...)
+/// coincides with BOTH the 24h media-ledger-trim job (unskipped first tick, t=0,24h,48h,...) AND
+/// the 6h media-orphan-sweep job (t=6h,12h,18h,24h,... — every 24h boundary is also a 6h tick)
+/// every day at t=24h, 48h, ... — a real 3-job collision, confirmed against the actual
+/// `tokio::time::interval` setup in `bin/powehi-server/src/main.rs`, not an assumed pairwise one.
+/// The `pending_removals` sweep (cycle 451) is deliberately offset (3h delay + 24h grid, landing
+/// at t=27h, 51h, ...) so it is never a 4th job in that collision — it only ever overlaps the
+/// hourly blob-GC job alone. So 3 concurrent jobs is the realistic worst case: 6 connections for
+/// those, plus 1 so request handlers are not fully starved during the overlap. 7 is the floor,
+/// not sqlx's per-connection minimum of 1.
+const MIN_DATABASE_MAX_CONNECTIONS: u32 = 7;
 
 /// The AWS SDK's own default connect timeout is ~3.1s (see
 /// `aws-smithy-runtime`'s `DEFAULT_CONNECT_TIMEOUT`); a configured operation
@@ -156,6 +198,31 @@ const MAX_MEDIA_ORPHAN_GRACE_HOURS: u64 = 24 * 365 * 5;
 /// a single tick's damage.
 const MIN_MEDIA_ORPHAN_SWEEP_MAX_DELETES_PER_RUN: u64 = 1;
 const MAX_MEDIA_ORPHAN_SWEEP_MAX_DELETES_PER_RUN: u64 = 100_000;
+
+/// Hard ceiling on `pending_removal_sweep_grace_days`. Comfortably below any value that could
+/// make `chrono::Duration::days()` misbehave when this `u64` is cast to `i64`
+/// (`bin/powehi-server/src/main.rs`), while still covering any operationally sane grace window —
+/// same overflow-safety rationale as `MAX_MEDIA_ORPHAN_GRACE_HOURS`. Above `i64::MAX` days the
+/// cast itself would wrap negative, flipping the cutoff to `now + N days`; in the (much larger)
+/// range between this ceiling and that wraparound point, `Duration::days()` panics outright
+/// instead — either way, `validate()` rejecting anything past this ceiling keeps both failure
+/// modes unreachable. 5 years.
+const MAX_PENDING_REMOVAL_SWEEP_GRACE_DAYS: u64 = 365 * 5;
+
+/// sqlx's `PgPoolOptions` default `acquire_timeout` is 30s and this job's query is not exempt
+/// from it (see `PendingRemovalSweepTimeoutTooLow`'s doc) — a floor here must clear that, not
+/// just "a normal query's latency", or the timeout can fire during connection acquire alone
+/// before the (cheap, bounded, indexed) `DELETE` itself ever runs. Matches
+/// `MIN_MEDIA_GC_SWEEP_TIMEOUT_SECS`/`MIN_MEDIA_ORPHAN_SWEEP_TIMEOUT_SECS` for the same reason,
+/// even though this sweep's own query is far cheaper than either of those jobs' work.
+const MIN_PENDING_REMOVAL_SWEEP_TIMEOUT_SECS: u64 = 30;
+
+/// Bounds on `pending_removal_sweep_max_deletes_per_run`, the sweep's blast-radius cap. Below
+/// the minimum the job could never make real progress; above the maximum the cap stops
+/// meaningfully bounding a single tick's damage. Unlike the media orphan sweep, a truncated run
+/// here is harmless (tiny metadata rows, not storage objects) and simply resumes next tick.
+const MIN_PENDING_REMOVAL_SWEEP_MAX_DELETES_PER_RUN: u64 = 1;
+const MAX_PENDING_REMOVAL_SWEEP_MAX_DELETES_PER_RUN: u64 = 1_000_000;
 
 /// The dev-only `r2_endpoint` default installed by `load()`'s `set_default`. Any deployed
 /// (non-`local`) region whose config still resolves to this literal at `validate()` time means
@@ -258,6 +325,35 @@ pub struct AppConfig {
     /// checks and is re-evaluated next tick. Default 500.
     #[serde(default = "default_media_orphan_sweep_max_deletes_per_run")]
     pub media_orphan_sweep_max_deletes_per_run: u64,
+    /// Grace period, in days, before a `pending_removals` row (a durable "the remaining
+    /// members of this group still owe an MLS Remove for this revoked device" reminder)
+    /// becomes sweep-eligible. Default 30 (days).
+    #[serde(default = "default_pending_removal_sweep_grace_days")]
+    pub pending_removal_sweep_grace_days: u64,
+    /// Bounds the whole `pending_removals` retention sweep, the same way
+    /// `media_orphan_sweep_timeout_secs` bounds the orphan sweep: it holds a cross-replica
+    /// advisory lock (`GC_LOCK_PENDING_REMOVALS`) for its duration. Much lower default than
+    /// that job's 1800 because this is one bounded, indexed `DELETE`, not a bucket-wide R2
+    /// LIST + per-object deletes. Default 300 (5 min).
+    #[serde(default = "default_pending_removal_sweep_timeout_secs")]
+    pub pending_removal_sweep_timeout_secs: u64,
+    /// Kill switch for the pending-removals sweep, same shape as `media_orphan_sweep_enabled`,
+    /// but **default `false`** (not `true`) for a reason specific to this job, not a low-stakes
+    /// convenience: no frontend consumer of `pending_removals`/`RemovalRequired` exists yet
+    /// (crypto-reviewer, cycle 451) — `GET /v1/groups/:id/pending-removals` is wired but nothing
+    /// polls it, and there is no alternative reconciliation channel (a group-scoped device-list
+    /// endpoint clients could diff against their own ratchet tree is not implemented either, see
+    /// docs/prd.md §3.3). Enabling this sweep by default today would silently destroy the one
+    /// durable signal this feature (cycle 448) exists to provide, for every group, well before
+    /// any client ever has a chance to act on it. Flip to `true` once a real consumer exists.
+    #[serde(default = "default_pending_removal_sweep_enabled")]
+    pub pending_removal_sweep_enabled: bool,
+    /// Hard cap on rows deleted by a single pending-removal-sweep tick — the sweep's
+    /// blast-radius limiter, same rationale as `media_orphan_sweep_max_deletes_per_run` but
+    /// with a much higher default because these are tiny metadata rows rather than storage
+    /// objects; a truncated run is harmless and resumes next tick. Default 10_000.
+    #[serde(default = "default_pending_removal_sweep_max_deletes_per_run")]
+    pub pending_removal_sweep_max_deletes_per_run: u64,
     /// Internal admin port for Prometheus metrics scraping.
     /// Bound to 127.0.0.1 only — MUST NOT be exposed via the public ingress.
     /// Prometheus scrapes from within the cluster (k8s pod-to-pod).
@@ -323,6 +419,18 @@ fn default_media_orphan_sweep_enabled() -> bool {
 }
 fn default_media_orphan_sweep_max_deletes_per_run() -> u64 {
     500
+}
+fn default_pending_removal_sweep_grace_days() -> u64 {
+    30
+}
+fn default_pending_removal_sweep_timeout_secs() -> u64 {
+    300
+}
+fn default_pending_removal_sweep_enabled() -> bool {
+    false
+}
+fn default_pending_removal_sweep_max_deletes_per_run() -> u64 {
+    10_000
 }
 fn default_admin_port() -> u16 {
     9090
@@ -403,6 +511,22 @@ impl std::fmt::Debug for AppConfig {
                 "media_orphan_sweep_max_deletes_per_run",
                 &self.media_orphan_sweep_max_deletes_per_run,
             )
+            .field(
+                "pending_removal_sweep_grace_days",
+                &self.pending_removal_sweep_grace_days,
+            )
+            .field(
+                "pending_removal_sweep_timeout_secs",
+                &self.pending_removal_sweep_timeout_secs,
+            )
+            .field(
+                "pending_removal_sweep_enabled",
+                &self.pending_removal_sweep_enabled,
+            )
+            .field(
+                "pending_removal_sweep_max_deletes_per_run",
+                &self.pending_removal_sweep_max_deletes_per_run,
+            )
             .field("admin_port", &self.admin_port)
             .field("grpc_port", &self.grpc_port)
             .field("grpc_peers", &self.grpc_peers)
@@ -434,6 +558,10 @@ pub fn load() -> Result<AppConfig, ConfigError> {
         .set_default("media_orphan_sweep_timeout_secs", 1800)?
         .set_default("media_orphan_sweep_enabled", true)?
         .set_default("media_orphan_sweep_max_deletes_per_run", 500)?
+        .set_default("pending_removal_sweep_grace_days", 30)?
+        .set_default("pending_removal_sweep_timeout_secs", 300)?
+        .set_default("pending_removal_sweep_enabled", false)?
+        .set_default("pending_removal_sweep_max_deletes_per_run", 10_000)?
         // No defaults for credentials — POWEHI__R2_ACCESS_KEY_ID and
         // POWEHI__R2_SECRET_ACCESS_KEY must be injected by the operator.
         .set_default("r2_access_key_id", "")?
@@ -516,6 +644,29 @@ fn validate(app: &AppConfig) -> Result<(), ConfigError> {
             app.media_orphan_sweep_max_deletes_per_run,
         ));
     }
+    // `== 0` is checked explicitly, in the same variant as the too-high case: a zero grace
+    // period would let the very next tick sweep a `pending_removals` row created microseconds
+    // ago, i.e. no grace at all, which would defeat the reminder's entire purpose.
+    if app.pending_removal_sweep_grace_days == 0
+        || app.pending_removal_sweep_grace_days > MAX_PENDING_REMOVAL_SWEEP_GRACE_DAYS
+    {
+        return Err(ConfigError::PendingRemovalSweepGraceDaysTooHigh(
+            app.pending_removal_sweep_grace_days,
+        ));
+    }
+    if app.pending_removal_sweep_timeout_secs < MIN_PENDING_REMOVAL_SWEEP_TIMEOUT_SECS {
+        return Err(ConfigError::PendingRemovalSweepTimeoutTooLow(
+            app.pending_removal_sweep_timeout_secs,
+        ));
+    }
+    if !(MIN_PENDING_REMOVAL_SWEEP_MAX_DELETES_PER_RUN
+        ..=MAX_PENDING_REMOVAL_SWEEP_MAX_DELETES_PER_RUN)
+        .contains(&app.pending_removal_sweep_max_deletes_per_run)
+    {
+        return Err(ConfigError::PendingRemovalSweepMaxDeletesOutOfRange(
+            app.pending_removal_sweep_max_deletes_per_run,
+        ));
+    }
     if app.region_id != "local" && app.r2_endpoint == DEV_R2_ENDPOINT_DEFAULT {
         return Err(ConfigError::R2DevDefaultEndpointInNonLocalRegion(
             app.region_id.clone(),
@@ -562,6 +713,10 @@ mod tests {
             media_orphan_sweep_timeout_secs: 1800,
             media_orphan_sweep_enabled: true,
             media_orphan_sweep_max_deletes_per_run: 500,
+            pending_removal_sweep_grace_days: 30,
+            pending_removal_sweep_timeout_secs: 300,
+            pending_removal_sweep_enabled: false,
+            pending_removal_sweep_max_deletes_per_run: 10_000,
             admin_port: 9090,
             grpc_port: 50051,
             grpc_peers: String::new(),
@@ -603,7 +758,7 @@ mod tests {
 
     #[test]
     fn database_max_connections_below_floor_is_rejected() {
-        for too_low in [0u32, 1, 2] {
+        for too_low in [0u32, 1, 2, MIN_DATABASE_MAX_CONNECTIONS - 1] {
             let cfg = AppConfig {
                 database_max_connections: too_low,
                 ..default_config()
@@ -902,6 +1057,123 @@ mod tests {
             assert!(
                 validate(&cfg).is_ok(),
                 "media_orphan_sweep_max_deletes_per_run={ok} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_removal_sweep_defaults_are_correct() {
+        assert_eq!(default_pending_removal_sweep_grace_days(), 30);
+        assert_eq!(default_pending_removal_sweep_timeout_secs(), 300);
+        assert!(!default_pending_removal_sweep_enabled());
+        assert_eq!(default_pending_removal_sweep_max_deletes_per_run(), 10_000);
+        assert_eq!(default_config().pending_removal_sweep_grace_days, 30);
+        assert_eq!(default_config().pending_removal_sweep_timeout_secs, 300);
+        assert!(!default_config().pending_removal_sweep_enabled);
+        assert_eq!(
+            default_config().pending_removal_sweep_max_deletes_per_run,
+            10_000
+        );
+    }
+
+    #[test]
+    fn pending_removal_sweep_grace_days_zero_or_above_ceiling_is_rejected() {
+        for bad in [0, MAX_PENDING_REMOVAL_SWEEP_GRACE_DAYS + 1] {
+            let cfg = AppConfig {
+                pending_removal_sweep_grace_days: bad,
+                ..default_config()
+            };
+            let err = validate(&cfg).expect_err(&format!(
+                "pending_removal_sweep_grace_days={bad} must be rejected"
+            ));
+            assert!(matches!(
+                err,
+                ConfigError::PendingRemovalSweepGraceDaysTooHigh(v) if v == bad
+            ));
+        }
+    }
+
+    #[test]
+    fn pending_removal_sweep_grace_days_in_range_is_accepted() {
+        for ok in [1, MAX_PENDING_REMOVAL_SWEEP_GRACE_DAYS] {
+            let cfg = AppConfig {
+                pending_removal_sweep_grace_days: ok,
+                ..default_config()
+            };
+            assert!(
+                validate(&cfg).is_ok(),
+                "pending_removal_sweep_grace_days={ok} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_removal_sweep_timeout_below_floor_is_rejected() {
+        for bad in [0, MIN_PENDING_REMOVAL_SWEEP_TIMEOUT_SECS - 1] {
+            let cfg = AppConfig {
+                pending_removal_sweep_timeout_secs: bad,
+                ..default_config()
+            };
+            let err = validate(&cfg).expect_err(&format!(
+                "pending_removal_sweep_timeout_secs={bad} must be rejected"
+            ));
+            assert!(matches!(err, ConfigError::PendingRemovalSweepTimeoutTooLow(v) if v == bad));
+        }
+    }
+
+    #[test]
+    fn pending_removal_sweep_timeout_at_or_above_floor_is_accepted() {
+        for ok in [
+            MIN_PENDING_REMOVAL_SWEEP_TIMEOUT_SECS,
+            MIN_PENDING_REMOVAL_SWEEP_TIMEOUT_SECS + 1,
+            300,
+        ] {
+            let cfg = AppConfig {
+                pending_removal_sweep_timeout_secs: ok,
+                ..default_config()
+            };
+            assert!(
+                validate(&cfg).is_ok(),
+                "pending_removal_sweep_timeout_secs={ok} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_removal_sweep_max_deletes_per_run_out_of_range_is_rejected() {
+        for bad in [
+            0,
+            MAX_PENDING_REMOVAL_SWEEP_MAX_DELETES_PER_RUN + 1,
+            u64::MAX,
+        ] {
+            let cfg = AppConfig {
+                pending_removal_sweep_max_deletes_per_run: bad,
+                ..default_config()
+            };
+            let err = validate(&cfg).expect_err(&format!(
+                "pending_removal_sweep_max_deletes_per_run={bad} must be rejected"
+            ));
+            assert!(matches!(
+                err,
+                ConfigError::PendingRemovalSweepMaxDeletesOutOfRange(v) if v == bad
+            ));
+        }
+    }
+
+    #[test]
+    fn pending_removal_sweep_max_deletes_per_run_in_range_is_accepted() {
+        for ok in [
+            MIN_PENDING_REMOVAL_SWEEP_MAX_DELETES_PER_RUN,
+            10_000,
+            MAX_PENDING_REMOVAL_SWEEP_MAX_DELETES_PER_RUN,
+        ] {
+            let cfg = AppConfig {
+                pending_removal_sweep_max_deletes_per_run: ok,
+                ..default_config()
+            };
+            assert!(
+                validate(&cfg).is_ok(),
+                "pending_removal_sweep_max_deletes_per_run={ok} must be accepted"
             );
         }
     }

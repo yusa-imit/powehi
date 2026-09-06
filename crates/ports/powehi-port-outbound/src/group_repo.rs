@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use powehi_domain::{
     device::DeviceId,
     error::DomainError,
@@ -169,4 +170,84 @@ pub trait GroupRepository: Send + Sync {
     /// currently being a member of `group_id` before exposing this list.
     async fn list_pending_removals(&self, group_id: &GroupId)
         -> Result<Vec<DeviceId>, DomainError>;
+    /// Delete `pending_removals` rows that are BOTH older than `older_than`
+    /// (by `created_at`) AND already eligible under the same epoch gate as
+    /// [`GroupRepository::delete_pending_removal`] (`groups.epoch >
+    /// created_at_epoch`), up to at most `limit` rows, returning the number
+    /// of rows actually deleted.
+    ///
+    /// BOUNDED, NOT EXHAUSTIVE: `limit` is a per-tick blast-radius cap on
+    /// this call, mirroring the media orphan sweep's
+    /// `media_orphan_sweep_max_deletes_per_run` — a single call is never
+    /// allowed to delete an unbounded number of rows ("limit on everything").
+    /// A truncated run (more eligible rows existed than `limit`) is harmless:
+    /// whatever wasn't reached this call resumes on the next scheduled tick,
+    /// because eligibility is recomputed fresh every time — nothing about a
+    /// row's position in a previous, truncated run is remembered or needs
+    /// to be.
+    ///
+    /// EPOCH-GATED, DELIBERATELY, ON TOP OF THE AGE CUTOFF — this is the one
+    /// difference from a plain age-based sweep. IMPORTANT — this is a GROUP
+    /// LIVENESS FILTER, NOT AN ATTACKER-COST FLOOR (crypto-reviewer, cycle
+    /// 451, correcting this doc's earlier claim): `delete_pending_removal`'s
+    /// own gate imposes a real cost specifically on the party invoking it
+    /// (they must have obtained an accepted Commit and call the authenticated
+    /// `remove_member` endpoint). This sweep's gate does NOT impose that same
+    /// cost on anyone trying to suppress a reminder — it only requires that
+    /// *some* member of the group has had *any* Commit accepted since the
+    /// reminder was written, including an ordinary, routine self-Update RFC
+    /// 9420 §12.4.3 recommends independent of this feature. So for an
+    /// adversarial or negligent member of an otherwise-live group, the
+    /// marginal cost of a reminder eventually aging out is effectively ZERO —
+    /// wait `pending_removal_sweep_grace_days`, let anyone else's routine
+    /// traffic clear the gate. What this predicate actually buys is narrower
+    /// and still real: it filters the sweep down to groups that have
+    /// demonstrably had a chance to notice and act on the reminder (the
+    /// server still cannot see Commit contents, RFC 9420 §6/§12.4, so this is
+    /// not proof the specific requested Remove landed, only that the group
+    /// wasn't dormant the whole time).
+    ///
+    /// This also has a deliberate, important side effect: a group whose
+    /// members are ALL offline and have sent zero Commits since the reminder
+    /// was written — the exact "device seized, everyone's asleep" scenario
+    /// this table exists for — never has its epoch advance, so its
+    /// `pending_removals` rows are NEVER swept by age alone. The reminder
+    /// survives indefinitely for a genuinely stuck/dormant group; only
+    /// groups that already had other MLS activity since the reminder was
+    /// written (and therefore plausibly already re-synced/reconciled some
+    /// state) become sweep-eligible once they also clear the age cutoff.
+    ///
+    /// NOT A SECURITY CONTROL — contrast with
+    /// [`GroupRepository::delete_pending_removal`] directly above, whose gate
+    /// exists precisely because erasing a reminder is security-relevant. This
+    /// method's added age condition narrows an already-heuristic reminder
+    /// further, it does not touch any enforced invariant: the actual
+    /// revocation controls (KeyPackage + invite deletion, session
+    /// invalidation) are enforced elsewhere at revoke time and are unaffected
+    /// by a row aging out here. Losing a stale, epoch-advanced row weakens no
+    /// enforced invariant; it only stops reminding remaining members about a
+    /// Remove that has been outstanding an unusually long time in a group
+    /// that has otherwise kept moving.
+    ///
+    /// This exists because, absent it, the table grows without bound for any
+    /// group whose members never call `remove_member` for a revoked device
+    /// but DO keep advancing the epoch (e.g. routine self-Updates) — there is
+    /// otherwise no other path that ever removes such a `pending_removals`
+    /// row short of the group itself being deleted (which cascades it away).
+    ///
+    /// PRE-EXISTING RACE, NOW REACHABLE UNATTENDED (crypto-reviewer, cycle
+    /// 451): `create_pending_removal`'s own `created_at_epoch` is read via a
+    /// non-locking `SELECT epoch FROM groups` (see that method's doc), so a
+    /// concurrent Commit landing at insert time can record one epoch lower
+    /// than the group's true epoch at that instant. Before this sweep
+    /// existed, a mis-recorded row only mattered once a human actually called
+    /// `remove_member`. Now such a row can also age out fully unattended —
+    /// zero member action after the reminder was written — once it clears
+    /// `older_than`. Not a new bug this method introduces, but this is the
+    /// first automatic path that can act on it.
+    async fn sweep_stale_pending_removals(
+        &self,
+        older_than: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<u64, DomainError>;
 }

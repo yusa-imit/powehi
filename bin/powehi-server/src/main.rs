@@ -28,7 +28,7 @@ use powehi_postgres::{
     connect as pg_connect, run_migrations, PgCommitLedger, PgDeviceRepository,
     PgEnvelopeRepository, PgGroupRepository, PgKeyPackageRepository, PgLeaderLock,
     PgPushSubscriptionRepository, PgServerConfigRepository, PgUserRepository, GC_LOCK_MEDIA_BLOBS,
-    GC_LOCK_MEDIA_LEDGER, GC_LOCK_MEDIA_ORPHANS,
+    GC_LOCK_MEDIA_LEDGER, GC_LOCK_MEDIA_ORPHANS, GC_LOCK_PENDING_REMOVALS,
 };
 use powehi_proto::region::region_service_server::RegionServiceServer;
 use powehi_r2::R2MediaAdapter;
@@ -210,6 +210,11 @@ async fn main() -> Result<()> {
     let group_repo_rest: Arc<dyn powehi_port_outbound::group_repo::GroupRepository> =
         group_repo.clone();
     let group_repo_ws: Arc<dyn powehi_port_outbound::group_repo::GroupRepository> =
+        group_repo.clone();
+    // For the pending-removals retention sweep background job below — a
+    // separate clone for the same reason `media_repo_orphans` is (`group_repo`
+    // itself is moved into `MessagingService::new` further down).
+    let group_repo_pending_removals: Arc<dyn powehi_port_outbound::group_repo::GroupRepository> =
         group_repo.clone();
     let group: Arc<dyn powehi_port_inbound::group::GroupUseCase> = Arc::new(GroupService::new(
         group_repo_rest,
@@ -525,6 +530,10 @@ async fn main() -> Result<()> {
     // Cloned before this job's `tokio::spawn` moves `leader_lock` itself —
     // the orphan-sweep job below needs its own handle.
     let leader_lock_orphans = leader_lock.clone();
+    // Same reason as `leader_lock_orphans` above — cloned before this job's
+    // `tokio::spawn` moves `leader_lock` itself, since the pending-removals
+    // sweep job below needs its own handle.
+    let leader_lock_pending_removals = leader_lock.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
         loop {
@@ -636,6 +645,117 @@ async fn main() -> Result<()> {
                     error_kind = "gc_lock",
                     error = %e,
                     "gc.media_orphans_lock_acquire_failed"
+                ),
+            }
+        }
+    });
+
+    // ── Background sweep: stale pending_removals ────────────────────────────
+    // A `pending_removals` row is a durable reminder written during device
+    // revocation; it is cleared only when a member calls `remove_member` AND
+    // the group's epoch has since advanced. A group whose members never do
+    // either (an abandoned group, a member who never re-opens the client)
+    // accumulates rows forever — no retention cap, flagged by
+    // crypto-reviewer/threat-model-checker in cycle 450, and a violation of
+    // "put a limit on everything" (tiger-style).
+    // Safe to sweep: the table is a notification/heuristic, not a security
+    // control — the actual revocation enforcement is KeyPackage/invite
+    // deletion and session invalidation, both already applied elsewhere at
+    // revocation time. `sweep_stale_pending_removals` itself ALSO applies
+    // `delete_pending_removal`'s own epoch gate (`groups.epoch >
+    // created_at_epoch`), not just an age cutoff — this is a GROUP LIVENESS
+    // FILTER, not a per-suppressor cost floor (crypto-reviewer, cycle 451,
+    // correcting this comment's earlier claim): ANY member's ordinary
+    // Commit satisfies it, so it does not cost an adversarial/negligent
+    // member anything to let a reminder age out in an otherwise-live group.
+    // What it does guarantee is that a group whose epoch never advances
+    // again (every remaining member offline, zero Commits sent — the exact
+    // "device seized, everyone's asleep" scenario this table exists for)
+    // never has this row swept regardless of age — see
+    // `GroupRepository::sweep_stale_pending_removals`'s doc,
+    // `delete_pending_removal`'s doc, and migration 0020.
+    // DEFAULT DISABLED (`pending_removal_sweep_enabled` defaults to
+    // `false`, cycle 451 crypto-reviewer finding): no frontend consumer of
+    // `pending_removals`/`RemovalRequired` exists yet and there is no
+    // alternative client-side reconciliation channel (docs/prd.md §3.3), so
+    // enabling this unconditionally would silently discard the one durable
+    // signal cycle 448's feature exists to provide before any client can
+    // ever act on it.
+    // ZK invariant preserved: this sweep only reads/writes opaque UUIDs and
+    // timestamps, never content, and logs carry only a count.
+    // Runs daily, not on the orphan sweep's 6h cadence, because this is
+    // low-urgency hygiene on rows that are already 30 days old by the time
+    // they're eligible — there is no cost or privacy pressure to run it more
+    // often.
+    // Starts after an initial 3h delay (not just a skip-first-tick like the
+    // orphan sweep above) so its daily grid lands at t=27h, 51h, ... instead
+    // of exactly t=24h, 48h, ... — the media-ledger-trim job above ticks on
+    // an un-skipped 24h grid (t=0, 24h, ...) and the orphan sweep above ticks
+    // on a 6h grid that also lands on every 24h boundary, so an unoffset
+    // daily job here would deterministically contend for
+    // `database_max_connections` alongside both of them every single day
+    // (cycle 451 security-auditor finding) instead of only by incidental
+    // overlap with the hourly blob-GC job, which is unavoidable at any
+    // offset and already tolerated.
+    // Per-run delete cap bounds the blast radius of a single sweep; a
+    // truncated run is harmless and simply resumes on the next tick.
+    // Advisory-lock-guarded on its own key (`GC_LOCK_PENDING_REMOVALS`) so N
+    // replicas don't each run this same sweep on the same tick, and so it
+    // neither blocks nor is blocked by the unrelated media GC/orphan jobs.
+    let pending_removal_sweep_enabled = cfg.pending_removal_sweep_enabled;
+    let pending_removal_sweep_timeout =
+        std::time::Duration::from_secs(cfg.pending_removal_sweep_timeout_secs);
+    let pending_removal_grace_days = cfg.pending_removal_sweep_grace_days;
+    // `validate()` already caps this at 1_000_000 (well inside u32); the clamp is
+    // defence in depth so a future ceiling raise can never silently wrap the cast.
+    let pending_removal_max_deletes: u32 = cfg
+        .pending_removal_sweep_max_deletes_per_run
+        .min(u32::MAX as u64) as u32;
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(3 * 3600)).await;
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if !pending_removal_sweep_enabled {
+                tracing::debug!("gc.pending_removals_sweep_disabled_skipping");
+                continue;
+            }
+            match leader_lock_pending_removals
+                .try_lock(GC_LOCK_PENDING_REMOVALS)
+                .await
+            {
+                Ok(Some(guard)) => {
+                    let cutoff = chrono::Utc::now()
+                        - chrono::Duration::days(pending_removal_grace_days as i64);
+                    match tokio::time::timeout(
+                        pending_removal_sweep_timeout,
+                        group_repo_pending_removals
+                            .sweep_stale_pending_removals(cutoff, pending_removal_max_deletes),
+                    )
+                    .await
+                    {
+                        Ok(Ok(n)) if n > 0 => {
+                            tracing::info!(deleted = n, "gc.pending_removals_swept")
+                        }
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => tracing::warn!(
+                            error_kind = "gc",
+                            error = %e,
+                            "gc.pending_removal_sweep_failed"
+                        ),
+                        Err(_) => tracing::warn!(
+                            error_kind = "gc_timeout",
+                            "gc.pending_removal_sweep_timed_out"
+                        ),
+                    }
+                    guard.release().await;
+                }
+                Ok(None) => tracing::debug!("gc.pending_removals_lock_held_elsewhere_skipping"),
+                Err(e) => tracing::warn!(
+                    error_kind = "gc_lock",
+                    error = %e,
+                    "gc.pending_removals_lock_acquire_failed"
                 ),
             }
         }

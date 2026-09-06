@@ -950,6 +950,15 @@ mod tests {
                 .map(|(_, d)| d.clone())
                 .collect())
         }
+        // No-op stub: this fake's `pending` storage carries no timestamps,
+        // and no auth_service test asserts on retention sweeping.
+        async fn sweep_stale_pending_removals(
+            &self,
+            _older_than: chrono::DateTime<chrono::Utc>,
+            _limit: u32,
+        ) -> Result<u64, DomainError> {
+            Ok(0)
+        }
     }
 
     /// A `GroupRepository` wrapper whose `create_pending_removal` always fails,
@@ -1031,6 +1040,15 @@ mod tests {
             group_id: &GroupId,
         ) -> Result<Vec<DeviceId>, DomainError> {
             self.inner.list_pending_removals(group_id).await
+        }
+        // No-op stub: this fake holds no timestamped pending-removal storage,
+        // and no auth_service test asserts on retention sweeping.
+        async fn sweep_stale_pending_removals(
+            &self,
+            _older_than: chrono::DateTime<chrono::Utc>,
+            _limit: u32,
+        ) -> Result<u64, DomainError> {
+            Ok(0)
         }
     }
 
