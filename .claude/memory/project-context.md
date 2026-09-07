@@ -24,7 +24,156 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-07, cycle 453 — FEATURE: wire frontend consumer of GET /v1/groups/:id/pending-removals, cycle 452 candidate #3, commit 60719d3)
+## Current state (2026-09-07, cycle 455 — STABILIZATION: finish and land cycle 454's orphaned WIP wiring GET /v1/groups/:group_id/members (cycle 453's candidate #3), commit e710df6)
+
+- Mode selection: counter 454→455, 455 % 5 == 0 → STABILIZATION. `gh run
+  list --limit 5` green on `main`, `gh issue list --state open` empty.
+  **Working tree was NOT clean at session start** — same recurring process
+  gap as cycles 448/449/451: cycle 454 had done substantial, coherent,
+  already-partially-self-reviewed work (its own code comments cited
+  "security-auditor finding, cycle 454") implementing cycle 453's
+  candidate #3, but never committed it. Read the whole diff file-by-file
+  to confirm coherence before treating "land the WIP" as this cycle's
+  action: new `GroupUseCase::list_members` (inbound port + application
+  fail-closed guard + 3 unit tests), new `GET /v1/groups/:group_id/members`
+  REST handler (`MembersResponse` capped at `MAX_MEMBERS_RESPONSE=512`,
+  `truncated` flag, canonical UUID re-sort before truncation,
+  `joined_at_epoch` deliberately not serialized), plus mechanical
+  test-fake updates in 3 other route test files. The outbound port
+  (`GroupRepository::list_members`) and its Postgres impl + testcontainers
+  coverage already existed pre-diff (unchanged).
+- `cargo build/test/fmt/clippy` all green on the WIP as found (0 test
+  failures across every crate), `cargo audit`/`cargo deny check` clean —
+  then ran both required review gates on the whole diff before committing
+  any of it (backend REST handler + new server-visible metadata surface
+  → `security-auditor` + `threat-model-checker`; no crypto/MLS code
+  touched so `crypto-reviewer` correctly not invoked).
+- **security-auditor: PASS-with-nits, one nit fixed in-session.** Verified
+  the fail-closed authz guard is sound (no path returns `Ok` without the
+  membership predicate holding; unknown group and non-member both hit
+  identical 401 at the response level) and actually has a *narrower*
+  TOCTOU window than its own comment claimed — the guard's read IS the
+  returned data, so there's no read-then-write gap at all (unlike
+  `add_member`/`remove_member`'s real gap). Fixed the stale comment
+  (`group_service.rs`) to state this correctly instead of copying the
+  sibling's caveat verbatim. Two real-but-non-blocking findings carried
+  to next-cycle candidates below (DoS cost-shape, operator-controlled
+  truncation evasion) — both explicitly "not new-in-kind" (same shape
+  pre-exists in `add_member`/`list_pending_removals`) and their fix is
+  scoped as a separate change, not a blocker for this diff. Confirmed no
+  new SQL (outbound impl unchanged), no plaintext/PII logging (UUID-only),
+  no new `unwrap()`/`expect()` outside tests, same rate-limit bucket
+  (`api_governor`) as sibling group routes.
+- **threat-model-checker: YELLOW → addressed via prd.md updates (no
+  redesign needed).** Hit its 20-turn limit mid-review once; resumed via
+  SendMessage to get a final verdict (same pattern that worked well in
+  cycle 453 — worth continuing to budget for a resume round rather than
+  treating a partial result as done). **Key finding, more significant
+  than the task assumed:** this endpoint does NOT yet close the §5.4
+  reconciliation gap — it's necessary but not sufficient. The client-side
+  half is still missing: `mls_group_members` (WASM,
+  `powehi-crypto-wasm/src/wasm_exports.rs`) returns only
+  `{leafIndex, sigKeyHex}`, no `device_id`, so there is no key to join the
+  new endpoint's `device_id` list against the client's own MLS ratchet
+  tree. Also found a real, undocumented region-locality gap:
+  `SyncGroupMembership`'s `upsert_members` is add-only (`ON CONFLICT DO
+  NOTHING`, never deletes members absent from a snapshot), so a non-home
+  region can serve a monotonically-growing stale superset of group
+  membership with no region/authoritativeness marker — a removed device
+  can appear "still a member" forever from a peer region's perspective.
+  Applied all 3 required prd.md edits verbatim as drafted by the reviewer
+  (§3.3 residual-risk paragraph at the `pending_removals` entry, §3.5.1
+  region-locality paragraph, §5.4 client-policy paragraph) plus the code-
+  doc nit qualifying "not a group-existence oracle" as response-level-only
+  in both `group.rs` (inbound port) and `groups.rs` (REST handler) doc
+  comments. `pending_removal_sweep_enabled` confirmed must stay `false`.
+  Did NOT apply the optional §10 API-list sync (already stale in other
+  ways too, e.g. missing `pending-removals`; out of scope for this diff,
+  carried below).
+- **Full gate, re-run after every fix round**: `cargo build --workspace
+  --all-targets` clean, `cargo test --workspace` all green (0 failures,
+  every crate), `cargo fmt --all --check` clean, `cargo clippy --workspace
+  --all-targets -- -D warnings` clean.
+- Committed `e710df6` (`feat(security): wire GET
+  /v1/groups/:group_id/members local cross-check endpoint`), 8 files
+  changed (7 code + `docs/prd.md`), pushed clean (`5210b3b..e710df6
+  main -> main`). Both `CI — Rust` and `CI — Live-backend E2E` were
+  `in_progress` immediately after push — confirm green in a future
+  session if not already done.
+- **Process note, now the fourth time** (cycles 448/449, 451, 454 →
+  this cycle): a FEATURE-mode cycle keeps doing real, reviewed-in-comments
+  work and burning its counter slot without committing. The counter
+  advances regardless (454 ran, produced this WIP, but 455 is the one
+  that had to land it) — this is a persistent pattern worth a dedicated
+  process fix (e.g. an explicit "commit before ending the turn" checklist
+  step), not just repeated manual recovery.
+- Target dir hygiene: `target/` at 24G (over the 20G threshold), but the
+  mtime+7 prune found nothing eligible — same as cycles 450/451, all
+  content is from active recent work. Not a concern yet.
+- **Next cycle candidates (carried/updated):**
+  1. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  2. Carried, still explicitly BLOCKED: wiring
+     `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal` — needs F3
+     + HMAC-vs-plain-SHA256 gate resolved first.
+  3. **New, real, needed before pending_removal_sweep_enabled can ever
+     flip to true (threat-model-checker, this cycle):** expose a
+     device_id-to-MLS-leaf mapping from the WASM crypto layer
+     (`powehi-crypto-wasm`'s `mls_group_members` currently returns only
+     `{leafIndex, sigKeyHex}`) so a client can actually join the new
+     `GET /v1/groups/:group_id/members` response against its own ratchet
+     tree. Without this, the endpoint landed this cycle is necessary but
+     not sufficient — reconciliation is still not possible end to end.
+  4. **New, real but scoped out (threat-model-checker, this cycle):**
+     cross-region member-list staleness — `SyncGroupMembership`'s
+     `upsert_members` is add-only and never propagates `remove_member`
+     deletes to peer regions; a non-home-region call to the new
+     `list_members` endpoint (or the existing gRPC replication path) can
+     return a stale superset with no region/authoritativeness marker.
+     Needs either delete-propagation in `SyncGroupMembership` or REST-layer
+     home-region proxying for this endpoint.
+  5. **New, real but non-blocking (security-auditor, this cycle):** the
+     new endpoint's 512-item response cap bounds egress only, not DB rows
+     read/sorted — a 100k-member group still costs a full fetch+sort per
+     request, including on the 401 (non-member) path since the guard reads
+     before rejecting. Same shape pre-exists in `add_member`/
+     `list_pending_removals`; a real fix needs a bounded/paginated outbound
+     query, not just a response-side truncation.
+  6. **New, real but non-blocking (security-auditor, this cycle):** the
+     new endpoint's threat model assumes a malicious *server* operator,
+     but that operator also controls `group_members` rows directly — they
+     can insert ≥512 low-UUID bogus members to force `truncated: true` and
+     deterministically push a target device out of the visible prefix,
+     disabling the cross-check exactly when it's needed. Not an escalation
+     (degrades to pre-diff status quo, never a false positive), but worth
+     a cursor-based or membership-probe (`?device_id=`) alternative in a
+     future cycle.
+  7. Carried, doc-sync only, low priority: prd.md §10's REST API list
+     (lines ~1015-1024 and around) is stale in general — missing
+     `pending-removals` and now `members` too. A dedicated `doc-syncer`
+     pass should reconcile the whole list against `lib.rs`'s actual router
+     rather than patching one endpoint at a time.
+  8. Carried: the `PendingRemovalBanner` confirm click is still the only
+     defense against a forged `pending_removals` signal (candidate #3 was
+     the first of two prerequisites; #3 above is the remaining piece).
+  9. Carried: no MLS Remove commit path exists in the frontend at all yet.
+  10. Carried, scoped out: the `RemovalRequired` WS event is still
+      unconsumed (no frontend WebSocket client exists at all).
+  11. Carried: no `values-prod-*.yaml`/CI overlay flips
+      `monitoring.prometheusRule.enabled=true` yet (ops task).
+  12. Carried: CI has no job rendering the Helm chart with
+      `monitoring.prometheusRule.enabled=true`/`serviceMonitor.enabled=true`.
+  13. Carried, doc-sync only: prd.md documents `key_packages.device_id` as
+      having `REFERENCES devices(id)`; the actual schema never had this FK.
+  14. Carried, real but scoped out: consumed `key_packages` rows are never
+      garbage-collected.
+  15. Carried, low-priority hardening: `GroupRepository::save` is a blind
+      `ON CONFLICT DO UPDATE` with no production caller today.
+  16. Carried, cosmetic: bare `var(--photon)` CSS custom property used
+      without a defined token in `LinkedDevicesPanel.tsx`/
+      `PendingRemovalBanner.tsx`.
+
+## Previous state (2026-09-07, cycle 453 — FEATURE: wire frontend consumer of GET /v1/groups/:id/pending-removals, cycle 452 candidate #3, commit 60719d3)
 
 - Mode selection: counter 452→453, 453 % 5 != 0 → FEATURE. `gh run list
   --limit 3` green on `main`, `gh issue list --state open` empty, working
