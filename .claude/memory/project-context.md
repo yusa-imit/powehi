@@ -24,7 +24,110 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-07, cycle 452 — FEATURE: finish and land cycle 451's orphaned WIP implementing cycle 450's candidate #3 (pending_removals retention sweep), commit ddfa5c8)
+## Current state (2026-09-07, cycle 453 — FEATURE: wire frontend consumer of GET /v1/groups/:id/pending-removals, cycle 452 candidate #3, commit 60719d3)
+
+- Mode selection: counter 452→453, 453 % 5 != 0 → FEATURE. `gh run list
+  --limit 3` green on `main`, `gh issue list --state open` empty, working
+  tree clean at session start (no orphaned WIP this time).
+- Backend has shipped `GET /v1/groups/:group_id/pending-removals` +
+  `RemovalRequired` WS event since cycles 448-452, but there was ZERO
+  frontend consumer. Delegated to `frontend-lead`: added
+  `listPendingRemovals()` to `app/src/api/groups.ts`, and a new
+  `PendingRemovalBanner.tsx` component mounted in `ChatLayout.tsx`'s
+  group `InfoPanel` (`groupId={chat.mlsGroupId ?? chat.id}`, matching
+  the existing `AddMemberModal` resolution pattern). REST-poll only —
+  explicitly did NOT build a WebSocket client (none exists yet in the
+  frontend at all); consuming the `RemovalRequired` WS event is still
+  open (see candidates).
+- **threat-model-checker: first pass RED, real findings, not nitpicks:**
+  (1) the initial UI ("Remove now" / optimistic list-drop) implied an
+  actual MLS Remove had happened; in reality `removeMember` is
+  server-side `group_members` bookkeeping only (stops future fan-out),
+  does NOT advance the group epoch, and does NOT heal PCS — the revoked
+  device keeps its existing group keys until a real MLS Remove Commit
+  lands in a client. False security assurance in a security-critical
+  UI element. (2) the confirm button rendered in the exact screen
+  position the arming "Remove now" button had occupied — a stray
+  double-click could fire the action, undermining the "two-step
+  confirm" property. (3) missing an inline warning that the signal is
+  server-reported and unverified (prd.md §3.5.1 T3: a malicious/
+  compromised server can forge arbitrary `(group_id, device_id)` pairs;
+  there's no local device-list cross-check yet, so the confirm click is
+  currently the *only* defense). (4) required prd.md §3.3/§5.4 updates
+  documenting the finalized client policy.
+- **Fixed all four, re-verified GREEN** (same agent instance, resumed
+  via SendMessage rather than a fresh review — worked well, kept full
+  context): relabeled to "Stop delivery" / "Confirm: stop delivery" +
+  added an inline sub-label "This does not perform an MLS Remove.";
+  added a `CONFIRM_ARM_DELAY_MS = 500` cooldown — the confirm control is
+  `disabled` until 500ms after arming, with a test asserting a click in
+  that window is a no-op; added a `data-testid="pending-removal-warning"`
+  banner line stating the signal is server-reported/unverified; updated
+  prd.md at both flagged locations (§3.3 line ~188, §5.4 line ~706) to
+  record the finalized 2-step-confirm-with-arm-delay policy, that it
+  still lacks a local cross-check, and that `pending_removal_sweep_enabled`
+  must stay `false` until one exists.
+- Full frontend suite: `pnpm vitest run` — 112 test files / 1595 tests
+  passed (up from 1594; net +7 new tests in `PendingRemovalBanner.test.tsx`
+  covering empty/fail-closed/per-device confirm-gate/arm-delay/error-scoping,
+  +4 new in `groups.test.ts` for `listPendingRemovals`). `biome check` and
+  `tsc --noEmit` clean on all changed files.
+- No `security-auditor` or `crypto-reviewer` pass run this cycle — no
+  Rust/backend/crypto code touched (frontend-only diff), and CLAUDE.md's
+  gate list ties those two specifically to backend handlers / crypto
+  code; `threat-model-checker` was the applicable gate here (new client
+  trust-boundary behavior consuming a previously-undocumented-in-practice
+  signal) and it ran to GREEN.
+- Committed `60719d3` (`feat(frontend): add confirmation-gated
+  pending-removal banner`), 6 files changed (2 new), pushed clean
+  (`e5b3960..60719d3 main -> main`).
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates (carried/updated):**
+  1. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  2. Carried, still explicitly BLOCKED: wiring
+     `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal` — needs F3
+     + HMAC-vs-plain-SHA256 gate resolved first.
+  3. **New, real (threat-model-checker, this cycle, residual/accepted
+     risk, explicitly written into prd.md as an open item):** the
+     `PendingRemovalBanner` confirm click is still the *only* defense
+     against a forged `pending_removals` signal — no local cross-check
+     exists. Wire a group-scoped device-list endpoint (`GET
+     /v1/groups/:group_id/members`, mentioned as the missing channel
+     in prd.md §3.3) and have the banner cross-check the reported
+     device_id against it before/alongside the confirm step.
+  4. **New, real (threat-model-checker, this cycle):** no MLS Remove
+     commit path exists in the frontend at all yet — `removeMember`
+     only stops server fan-out, PCS is never actually healed by this
+     UI. A real fix needs the crypto-worker to actually construct and
+     land an MLS Remove Commit when a device is confirmed for removal
+     (crypto-lead/mls-engineer scope, not a quick frontend patch).
+  5. **New, scoped out (this cycle):** the `RemovalRequired` WS event
+     is still unconsumed — frontend has no WebSocket client at all.
+     Building one (and wiring live push instead of REST-poll-on-mount)
+     is a separate, larger task.
+  6. Carried: no `values-prod-*.yaml`/CI overlay flips
+     `monitoring.prometheusRule.enabled=true` yet (ops task).
+  7. Carried: CI has no job rendering the Helm chart with
+     `monitoring.prometheusRule.enabled=true`/`serviceMonitor.enabled=true`
+     (ci-pipeline-author follow-up, not urgent).
+  8. Carried, doc-sync only: prd.md documents `key_packages.device_id` as
+     having `REFERENCES devices(id)`; the actual schema never had this FK.
+  9. Carried, real but scoped out: consumed `key_packages` rows are never
+     garbage-collected.
+  10. Carried, low-priority hardening: `GroupRepository::save` is a
+      blind `ON CONFLICT DO UPDATE` with no production caller today;
+      worth a doc comment forbidding it from ever advancing epoch.
+  11. Minor, noticed this cycle, not fixed (cosmetic, pre-existing):
+      `var(--photon)` is used as a bare CSS custom property in both
+      `LinkedDevicesPanel.tsx` (pre-existing) and the new
+      `PendingRemovalBanner.tsx`, but `app/src/index.css` only defines
+      scale tokens (`--photon-50` … `--photon-300` etc.), never a bare
+      `--photon`. Not a new bug (matches existing precedent) and
+      harmless (undefined var just no-ops the color), but worth adding
+      the missing token or fixing both call sites in a future cycle.
+
+## Previous state (2026-09-07, cycle 452 — FEATURE: finish and land cycle 451's orphaned WIP implementing cycle 450's candidate #3 (pending_removals retention sweep), commit ddfa5c8)
 
 - Mode selection: counter 451→452, 452 % 5 != 0 → FEATURE. `gh run list
   --limit 3` green on `main`. `gh issue list --state open`: empty.
