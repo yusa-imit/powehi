@@ -85,3 +85,24 @@ export async function removeMember(
 	);
 	await throwOnError(resp);
 }
+
+/**
+ * GET /v1/groups/:groupId/pending-removals — device UUIDs the group still
+ * "owes" an MLS Remove for (server-side revocation bookkeeping only).
+ *
+ * This is a REQUEST for the client to act, never a proof: the server holds no
+ * group state or keys and cannot construct or verify an MLS Remove (prd.md
+ * §5.4). Callers MUST treat the returned device IDs as candidates requiring
+ * explicit human confirmation before calling `removeMember` — never auto-execute.
+ * Caller must already be a group member (401 otherwise).
+ */
+export async function listPendingRemovals(token: string, groupId: string): Promise<string[]> {
+	assertOpaqueId(groupId, "group_id");
+	const resp = await fetch(`${API_BASE}/groups/${encodeURIComponent(groupId)}/pending-removals`, {
+		method: "GET",
+		headers: { Authorization: `Bearer ${token}` },
+	});
+	await throwOnError(resp);
+	const body = (await resp.json()) as { device_ids: string[] };
+	return body.device_ids;
+}

@@ -46,6 +46,7 @@ import { CreateGroupModal } from "./CreateGroupModal";
 import { Icon } from "./Icon";
 import { InviteModal } from "./InviteModal";
 import { MediaImage } from "./MediaImage";
+import { PendingRemovalBanner } from "./PendingRemovalBanner";
 import { SafetyNumbers } from "./SafetyNumbers";
 import { SettingsPanel } from "./SettingsPanel";
 
@@ -5548,6 +5549,11 @@ function InfoPanel({
 			)}
 			{chat.isGroup ? (
 				<>
+					{/* Pending device removals — server-tracked "owed" MLS Removes
+					    (prd.md §5.4). Requires human confirmation per device; never
+					    auto-executed. */}
+					<PendingRemovalBanner groupId={chat.mlsGroupId ?? chat.id} />
+
 					{/* Group member list */}
 					<InfoSection title={`Members (${chat.members?.length ?? chat.memberCount ?? 0})`}>
 						<div

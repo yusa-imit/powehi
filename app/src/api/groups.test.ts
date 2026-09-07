@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addMember, createGroup, removeMember } from "./groups";
+import { addMember, createGroup, listPendingRemovals, removeMember } from "./groups";
 
 const fetchMock = vi.fn<typeof fetch>();
 beforeEach(() => {
@@ -124,6 +124,44 @@ describe("removeMember", () => {
 		await expect(removeMember(TOKEN, GROUP_ID, "jordan?role=admin")).rejects.toThrow(
 			"invalid_device_id",
 		);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+});
+
+// ── listPendingRemovals ───────────────────────────────────────────────────────
+
+describe("listPendingRemovals", () => {
+	it("gets device_ids from correct path", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp({ device_ids: [DEVICE_ID] }, 200));
+
+		const result = await listPendingRemovals(TOKEN, GROUP_ID);
+
+		const [url, init] = fetchMock.mock.calls[0];
+		expect(url).toBe(`/v1/groups/${GROUP_ID}/pending-removals`);
+		expect(init?.method).toBe("GET");
+		expect(init?.headers).toMatchObject({ Authorization: `Bearer ${TOKEN}` });
+		expect(result).toEqual([DEVICE_ID]);
+	});
+
+	it("returns an empty array when there are no pending removals", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp({ device_ids: [] }, 200));
+		await expect(listPendingRemovals(TOKEN, GROUP_ID)).resolves.toEqual([]);
+	});
+
+	it("throws unauthorized when caller is not a member", async () => {
+		fetchMock.mockResolvedValueOnce(
+			new Response(JSON.stringify({ code: "unauthorized" }), { status: 401 }),
+		);
+		await expect(listPendingRemovals(TOKEN, GROUP_ID)).rejects.toThrow("unauthorized");
+	});
+
+	it("rejects non-UUID groupId without fetch", async () => {
+		await expect(listPendingRemovals(TOKEN, "not-a-uuid")).rejects.toThrow("invalid_group_id");
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("rejects path-traversal groupId without fetch", async () => {
+		await expect(listPendingRemovals(TOKEN, "../admin")).rejects.toThrow("invalid_group_id");
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 });
