@@ -24,7 +24,130 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-07, cycle 455 — STABILIZATION: finish and land cycle 454's orphaned WIP wiring GET /v1/groups/:group_id/members (cycle 453's candidate #3), commit e710df6)
+## Current state (2026-09-08, cycle 456 — FEATURE: found cycle 454/455's uncommitted WASM WIP (mlsGroupMembers "deviceIdHex") was semantically broken, fixed the naming instead of shipping it, commit 01f77b7)
+
+- Mode selection: counter 455→456, 456 % 5 != 0 → FEATURE. Working tree was
+  NOT clean at session start (same recurring gap as cycles 448/449/451/454):
+  `crates/client/powehi-crypto-wasm/src/wasm_exports.rs` and
+  `app/src/workers/crypto.worker.ts` had uncommitted WIP implementing cycle
+  455's candidate #3 (expose a device_id↔leaf mapping from WASM's
+  `mls_group_members`, tagged `deviceIdHex`), already unit-tested and
+  green on `cargo test -p powehi-crypto-wasm`.
+- Read the WIP, then went further: designed and built a full local
+  cross-check UI in `PendingRemovalBanner.tsx` (per-row "verified"/
+  "not-found"/"unavailable" badge, wired `chat.mlsIdentityId` through
+  `ChatLayout.tsx`, 6 new frontend tests, full `pnpm vitest run` green at
+  112 files/1601 tests) — this is what candidate #3 asked for.
+- **crypto-reviewer: NEEDS-REWORK, a real and serious finding, not a
+  nitpick.** `deviceIdHex` was rendered from the MLS `BasicCredential`
+  identity bytes, but in this codebase those bytes are
+  `SHA-256(recovery_phrase)[0..16]` (`mlsInitIdentityFromPhrase`,
+  `Login.tsx:112`) — an ACCOUNT-level label shared by every device restored
+  from the same recovery phrase — not the server's per-device `device_id`
+  (`crypto.randomUUID()` / `DeviceId::new()` in `auth_service.rs`), which is
+  generated completely independently. The two values have no relationship
+  at all: comparing them would make the cross-check report "not-found" for
+  nearly every legitimate removal (false alarms training users to distrust
+  the one real defense against T3), and the mapping isn't even injective
+  (all devices from one phrase share one label). Root cause: I built the UI
+  on top of a field whose *name* (from the prior cycle's WIP) implied it was
+  a device id, without independently verifying that claim against how MLS
+  identities are actually derived in this codebase's registration/restore
+  flow (`Login.tsx`) before wiring a security-relevant comparison on it.
+  **Lesson for future cycles:** when a carried candidate says "expose X so a
+  client can join list A against list B", verify both sides' actual value
+  semantics (not just their types) before building the join — a plausible
+  field name from a previous WIP is not evidence of a real 1:1 relationship.
+- **Fix, not abandonment:** reverted `PendingRemovalBanner.tsx` +
+  its test + `ChatLayout.tsx` + the `useCryptoWorker` mock back to their
+  pre-session state via `git checkout` (clean revert, `pnpm vitest run`
+  back to the prior 112 files/1595 tests baseline). Kept and corrected the
+  WASM/TS layer: renamed `deviceIdHex`/`device_id_hex`/`member_device_id_hex`
+  → `credentialIdentityHex`/`credential_identity_hex`/
+  `member_credential_identity_hex` throughout (Rust struct field, helper
+  fn, JS object key, all doc comments, all 3 test names AND their assertion
+  message strings — crypto-reviewer's re-verify pass caught 6 leftover
+  "device id" strings in test messages that a first rename pass missed),
+  and rewrote every doc comment to state plainly this is NOT a device_id and
+  why. Also applied a non-blocking nit: switched to
+  `BasicCredential::try_from(credential.clone()).ok().map(|b| ...)` instead
+  of reading `credential.serialized_content()` directly (typed accessor,
+  not an internal-representation-detail dependency).
+- **crypto-reviewer re-verify pass: PASS** after the 6-string test-message
+  fix (only remaining issue from the NEEDS-REWORK round). **threat-model-
+  checker: YELLOW → addressed** by NOT shipping the broken cross-check
+  (its independent finding: even the intended design — cross-checking two
+  *server*-reported signals like `pending-removals` vs `members` — proves
+  nothing for T3, since a malicious server can forge both; only a real
+  local ratchet-tree trust anchor works, and this diff didn't have one).
+  Updated `docs/prd.md` at both §3.3/§5.4 locations that previously said
+  the WASM half "doesn't exist yet" — now accurately says a naming-fixed
+  field exists but was deliberately NOT wired to the frontend because it
+  doesn't solve the join; `pending_removal_sweep_enabled` stays `false`;
+  the real reconciliation gap is now understood to be deeper than
+  previously scoped (see candidate #3 below, superseding the old one).
+- **Full gate, re-run after every fix round**: `cargo build --workspace
+  --all-targets` clean, `cargo test --workspace` all green (0 failures,
+  every crate; `powehi-crypto-wasm` alone: 184 passed, 2 ignored), `cargo
+  fmt --all --check` clean, `cargo clippy --workspace --all-targets -- -D
+  warnings` clean. Frontend: `pnpm exec tsc --noEmit` clean, `biome check`
+  clean, `pnpm vitest run` 112 files/1595 tests green (frontend diff was
+  fully reverted, so this is the pre-session baseline, confirmed
+  unregressed).
+- Committed `01f77b7` (`fix(crypto): correct WASM mls_group_members
+  identity field naming`), 3 files changed, pushed clean
+  (`da1bca5..01f77b7 main -> main`).
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates (carried/updated):**
+  1. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  2. Carried, still explicitly BLOCKED: wiring
+     `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal` — needs F3 +
+     HMAC-vs-plain-SHA256 gate resolved first.
+  3. **Supersedes old candidate #3 (threat-model-checker/crypto-reviewer,
+     this cycle):** the `PendingRemovalBanner`'s "local cross-check against
+     the server-forged-removal threat (T3)" is NOT achievable by exposing
+     any MLS-credential-derived value from WASM, because this codebase has
+     no authenticated binding between a device's MLS credential identity
+     and its server-assigned `device_id` (RFC 9420 §5.3 leaves that binding
+     to an external Authentication Service this codebase doesn't have).
+     Two real paths forward, both bigger than a quick follow-up and need a
+     plan + threat-model-checker before implementation: (a) change
+     registration/restore (`auth_service.rs` + `Login.tsx`) to actually
+     bind `device_id` into the MLS credential identity at creation time
+     (e.g. use the server-issued `device_id` bytes, or a hash including it,
+     as the `BasicCredential` identity instead of the current
+     phrase-derived account-level label — has knock-on effects on the
+     restore-from-phrase flow, since today's design deliberately makes
+     every restored device share one label); (b) give up on a WASM-exposed
+     cross-check entirely and instead lean on the already-shipped §5.6
+     safety-number verification as the real local trust anchor for T3,
+     updating `PendingRemovalBanner`'s copy to point users there instead of
+     implying a cross-check exists.
+  4. Carried, doc-sync only, low priority: prd.md §10's REST API list is
+     stale — missing `pending-removals` and `members`.
+  5. Carried: the `PendingRemovalBanner` confirm click is still the only
+     defense against a forged `pending_removals` signal — see candidate #3
+     above for why the local-cross-check half of the plan needs a redesign,
+     not just a WASM export.
+  6. Carried: no MLS Remove commit path exists in the frontend at all yet.
+  7. Carried, scoped out: the `RemovalRequired` WS event is still
+     unconsumed (no frontend WebSocket client exists at all).
+  8. Carried: no `values-prod-*.yaml`/CI overlay flips
+     `monitoring.prometheusRule.enabled=true` yet (ops task).
+  9. Carried: CI has no job rendering the Helm chart with
+     `monitoring.prometheusRule.enabled=true`/`serviceMonitor.enabled=true`.
+  10. Carried, doc-sync only: prd.md documents `key_packages.device_id` as
+      having `REFERENCES devices(id)`; the actual schema never had this FK.
+  11. Carried, real but scoped out: consumed `key_packages` rows are never
+      garbage-collected.
+  12. Carried, low-priority hardening: `GroupRepository::save` is a blind
+      `ON CONFLICT DO UPDATE` with no production caller today.
+  13. Carried, cosmetic: bare `var(--photon)` CSS custom property used
+      without a defined token in `LinkedDevicesPanel.tsx`/
+      `PendingRemovalBanner.tsx`.
+
+## Previous state (2026-09-07, cycle 455 — STABILIZATION: finish and land cycle 454's orphaned WIP wiring GET /v1/groups/:group_id/members (cycle 453's candidate #3), commit e710df6)
 
 - Mode selection: counter 454→455, 455 % 5 == 0 → STABILIZATION. `gh run
   list --limit 5` green on `main`, `gh issue list --state open` empty.
