@@ -134,3 +134,92 @@ pub async fn list_pending_removals(
         .await?;
     Ok(Json(PendingRemovalsResponse { device_ids }))
 }
+
+/// Maximum number of device ids returned by
+/// `GET /v1/groups/:group_id/members` in one response.
+///
+/// Group membership itself is uncapped in this codebase
+/// (`MAX_FAN_OUT_RECIPIENTS` bounds push fan-out, not membership — see
+/// `powehi_application::messaging_service`), so without a cap here a single
+/// authenticated member could pull O(group size) egress per request at the
+/// api_governor's sustained rate. Aligned with `MAX_FAN_OUT_RECIPIENTS`
+/// (512) for consistency with the other group-size amplification cap.
+/// security-auditor finding, cycle 454.
+pub(crate) const MAX_MEMBERS_RESPONSE: usize = 512;
+
+/// Response body for `GET /v1/groups/:group_id/members`.
+///
+/// Device UUIDs only — routing metadata, never key material or ciphertext.
+/// `joined_at_epoch` is deliberately NOT exposed: the domain layer carries
+/// it for future use, but no client needs it and it is one more piece of
+/// metadata surface (prd.md §3.3 minimalism, P5).
+///
+/// `device_ids` is sorted by device UUID, NOT by join order. The repository
+/// returns rows `ORDER BY joined_at_epoch ASC`; serving that order would
+/// leak a monotone function of the very field this response drops, so the
+/// handler re-sorts into a canonical, information-free order. It also makes
+/// truncation deterministic and stable across calls.
+///
+/// This "information-free" property holds ONLY because `DeviceId` wraps a
+/// random UUIDv4 (`DeviceId::new()` -> `Uuid::new_v4()`). If device-id
+/// generation ever moves to a time-sortable UUID (e.g. UUIDv7), sorting by
+/// UUID would silently become a monotone function of registration time and
+/// reopen the exact join-order channel this sort was added to close.
+///
+/// `truncated` is `true` when the group has more than
+/// `MAX_MEMBERS_RESPONSE` members and `device_ids` is therefore a PREFIX,
+/// not the full membership. This flag exists because this endpoint's whole
+/// purpose is letting a client reconcile its own MLS ratchet tree against
+/// the server's device list (prd.md §5.4): a silently truncated list would
+/// make legitimate, present devices look absent — turning the defence into
+/// the exact false-eviction attack it is meant to prevent. A client MUST
+/// NOT treat absence from a `truncated` response as evidence of anything.
+#[derive(Serialize)]
+pub struct MembersResponse {
+    pub device_ids: Vec<DeviceId>,
+    pub truncated: bool,
+}
+
+/// `GET /v1/groups/:group_id/members`
+///
+/// Returns the devices the server records as members of `group_id`. The
+/// caller must already be a member; the application layer returns
+/// `Unauthorized` otherwise, which surfaces as `401 Unauthorized` via
+/// `ApiError` — an unknown group id is answered identically at the response
+/// level, so this endpoint is not a group-existence oracle in its status,
+/// body, or error code (rejection latency still scales with the real
+/// group's size, a side channel shared with the sibling guards this is
+/// modeled on). This is intended as one half of the local cross-check for
+/// the server-reported `pending-removals` signal (prd.md §5.4): the other
+/// half — exposing a device_id-to-MLS-leaf mapping from the WASM crypto
+/// layer so a client can actually join this list against its own ratchet
+/// tree — does not exist yet, so reconciliation is not yet possible end to
+/// end. See `MembersResponse` for the ordering and truncation contract.
+pub async fn list_members(
+    State(state): State<AppState>,
+    AuthenticatedDevice(caller): AuthenticatedDevice,
+    Path(raw_group_id): Path<Uuid>,
+) -> Result<Json<MembersResponse>, ApiError> {
+    let group_id = GroupId::from(raw_group_id);
+    tracing::info!(
+        caller = %caller,
+        group_id = %group_id,
+        "groups.list_members"
+    );
+    let mut device_ids: Vec<DeviceId> = state
+        .group
+        .list_members(&caller, &group_id)
+        .await?
+        .into_iter()
+        .map(|m| m.device_id)
+        .collect();
+    // Canonical order first, then truncate: truncation must not depend on
+    // the repository's join-order sort (see `MembersResponse` doc).
+    device_ids.sort_by_key(|d| d.as_uuid());
+    let truncated = device_ids.len() > MAX_MEMBERS_RESPONSE;
+    device_ids.truncate(MAX_MEMBERS_RESPONSE);
+    Ok(Json(MembersResponse {
+        device_ids,
+        truncated,
+    }))
+}

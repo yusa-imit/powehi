@@ -316,6 +316,13 @@ mod tests {
         ) -> Result<Vec<DeviceId>, DomainError> {
             unimplemented!()
         }
+        async fn list_members(
+            &self,
+            _: &DeviceId,
+            _: &GroupId,
+        ) -> Result<Vec<powehi_domain::group::GroupMember>, DomainError> {
+            unimplemented!()
+        }
     }
 
     #[async_trait]

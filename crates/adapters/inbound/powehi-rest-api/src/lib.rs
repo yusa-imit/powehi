@@ -158,6 +158,10 @@ fn router_inner(
             get(routes::groups::list_pending_removals),
         )
         .route(
+            "/v1/groups/:group_id/members",
+            get(routes::groups::list_members),
+        )
+        .route(
             "/v1/messages",
             post(routes::messaging::send_message).get(routes::messaging::poll),
         )
@@ -554,6 +558,11 @@ mod tests {
         }
     }
 
+    /// Fixed device id returned by `NoopGroup::list_members`, so handler
+    /// tests can assert on the exact serialized shape.
+    const NOOP_GROUP_MEMBER_DEVICE_ID: uuid::Uuid =
+        uuid::uuid!("00000000-0000-4000-8000-0000000000aa");
+
     /// No-op group mock used in tests that don't exercise group creation.
     struct NoopGroup;
     #[async_trait]
@@ -589,6 +598,19 @@ mod tests {
             _group_id: &GroupId,
         ) -> Result<Vec<DeviceId>, DomainError> {
             Ok(vec![])
+        }
+        async fn list_members(
+            &self,
+            _caller: &DeviceId,
+            group_id: &GroupId,
+        ) -> Result<Vec<powehi_domain::group::GroupMember>, DomainError> {
+            // A non-empty, fixed member so the handler test's
+            // "joined_at_epoch is not serialized" assertion is not vacuous.
+            Ok(vec![powehi_domain::group::GroupMember {
+                group_id: group_id.clone(),
+                device_id: DeviceId::from(NOOP_GROUP_MEMBER_DEVICE_ID),
+                joined_at_epoch: powehi_domain::group::Epoch(424242),
+            }])
         }
     }
 
@@ -631,6 +653,132 @@ mod tests {
             _group_id: &GroupId,
         ) -> Result<Vec<DeviceId>, DomainError> {
             Err(DomainError::Unauthorized)
+        }
+        async fn list_members(
+            &self,
+            _caller: &DeviceId,
+            _group_id: &GroupId,
+        ) -> Result<Vec<powehi_domain::group::GroupMember>, DomainError> {
+            Err(DomainError::Unauthorized)
+        }
+    }
+
+    /// Group mock whose membership exceeds `MAX_MEMBERS_RESPONSE`, so
+    /// handler tests can pin the truncation and canonical-ordering
+    /// contract of `GET /v1/groups/:group_id/members`.
+    struct HugeGroup;
+    #[async_trait]
+    impl GroupUseCase for HugeGroup {
+        async fn create_group(
+            &self,
+            _creator: &DeviceId,
+            _group_id: GroupId,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn add_member(
+            &self,
+            _caller: &DeviceId,
+            _group_id: &GroupId,
+            _device_id: &DeviceId,
+            _epoch: powehi_domain::group::Epoch,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn remove_member(
+            &self,
+            _caller: &DeviceId,
+            _group_id: &GroupId,
+            _device_id: &DeviceId,
+            _epoch: powehi_domain::group::Epoch,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn list_pending_removals(
+            &self,
+            _caller: &DeviceId,
+            _group_id: &GroupId,
+        ) -> Result<Vec<DeviceId>, DomainError> {
+            Ok(vec![])
+        }
+        async fn list_members(
+            &self,
+            _caller: &DeviceId,
+            group_id: &GroupId,
+        ) -> Result<Vec<powehi_domain::group::GroupMember>, DomainError> {
+            // Deterministic ids, index 0..MAX_MEMBERS_RESPONSE+5, returned in
+            // DESCENDING order — the exact opposite of the canonical
+            // (ascending-by-uuid) order the handler is supposed to produce.
+            // This means the fake's own iteration order can never coincide
+            // with the expected response order, so a truncate-then-sort
+            // handler bug (dropping the last 5 members by *this* order
+            // instead of the smallest 5 by canonical order) is caught: it
+            // would return the 512 LARGEST ids instead of the 512 SMALLEST.
+            Ok((0..crate::routes::groups::MAX_MEMBERS_RESPONSE + 5)
+                .rev()
+                .map(|index| powehi_domain::group::GroupMember {
+                    group_id: group_id.clone(),
+                    device_id: DeviceId::from(uuid::Uuid::from_u128(index as u128)),
+                    joined_at_epoch: powehi_domain::group::Epoch(0),
+                })
+                .collect())
+        }
+    }
+
+    /// Group mock whose membership is EXACTLY `MAX_MEMBERS_RESPONSE`, so
+    /// handler tests can pin the `>` (not `>=`) boundary of the truncation
+    /// check: a group at the cap must NOT be flagged `truncated`.
+    struct ExactCapGroup;
+    #[async_trait]
+    impl GroupUseCase for ExactCapGroup {
+        async fn create_group(
+            &self,
+            _creator: &DeviceId,
+            _group_id: GroupId,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn add_member(
+            &self,
+            _caller: &DeviceId,
+            _group_id: &GroupId,
+            _device_id: &DeviceId,
+            _epoch: powehi_domain::group::Epoch,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn remove_member(
+            &self,
+            _caller: &DeviceId,
+            _group_id: &GroupId,
+            _device_id: &DeviceId,
+            _epoch: powehi_domain::group::Epoch,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn list_pending_removals(
+            &self,
+            _caller: &DeviceId,
+            _group_id: &GroupId,
+        ) -> Result<Vec<DeviceId>, DomainError> {
+            Ok(vec![])
+        }
+        async fn list_members(
+            &self,
+            _caller: &DeviceId,
+            group_id: &GroupId,
+        ) -> Result<Vec<powehi_domain::group::GroupMember>, DomainError> {
+            // Deterministic ids, index 0..MAX_MEMBERS_RESPONSE, returned in
+            // descending order (see `HugeGroup` for why: never coincides
+            // with the expected ascending response order).
+            Ok((0..crate::routes::groups::MAX_MEMBERS_RESPONSE)
+                .rev()
+                .map(|index| powehi_domain::group::GroupMember {
+                    group_id: group_id.clone(),
+                    device_id: DeviceId::from(uuid::Uuid::from_u128(index as u128)),
+                    joined_at_epoch: powehi_domain::group::Epoch(0),
+                })
+                .collect())
         }
     }
 
@@ -1071,6 +1219,40 @@ mod tests {
             region_tier: powehi_domain::region::Tier::Tier1,
             auth: Arc::new(MockAuth),
             group: noop_group(),
+            messaging: Arc::new(MockMessaging),
+            key_package: Arc::new(MockKeyPackage),
+            media: Arc::new(MockMedia),
+            push_sub_repo: null_push_sub_repo(),
+            invite: noop_invite(),
+            device_repo: null_device_repo(),
+            cache: test_session_cache(),
+            handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
+        })
+    }
+
+    fn huge_group_router() -> Router {
+        router(AppState {
+            region_id: "eu-de-1-test".to_string(),
+            region_tier: powehi_domain::region::Tier::Tier1,
+            auth: Arc::new(MockAuth),
+            group: Arc::new(HugeGroup),
+            messaging: Arc::new(MockMessaging),
+            key_package: Arc::new(MockKeyPackage),
+            media: Arc::new(MockMedia),
+            push_sub_repo: null_push_sub_repo(),
+            invite: noop_invite(),
+            device_repo: null_device_repo(),
+            cache: test_session_cache(),
+            handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
+        })
+    }
+
+    fn exact_cap_group_router() -> Router {
+        router(AppState {
+            region_id: "eu-de-1-test".to_string(),
+            region_tier: powehi_domain::region::Tier::Tier1,
+            auth: Arc::new(MockAuth),
+            group: Arc::new(ExactCapGroup),
             messaging: Arc::new(MockMessaging),
             key_package: Arc::new(MockKeyPackage),
             media: Arc::new(MockMedia),
@@ -2637,6 +2819,165 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ── GET /v1/groups/:group_id/members tests ─────────────────────────────────
+
+    /// Happy path: authenticated member gets the member list, and the
+    /// response is exactly the minimal shape the endpoint promises — no
+    /// `joined_at_epoch`, no `group_id`, and the epoch value does not leak
+    /// under any other field name either.
+    #[tokio::test]
+    async fn list_members_returns_ok_for_a_member() {
+        let group_id = uuid::Uuid::new_v4();
+        let resp = groups_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/groups/{group_id}/members"))
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body_str.contains("device_ids"));
+        assert!(!body_str.contains("joined_at_epoch"));
+        assert!(!body_str.contains("424242"));
+        assert!(!body_str.contains("group_id"));
+        let body: serde_json::Value = serde_json::from_str(&body_str).unwrap();
+        let device_ids = body["device_ids"].as_array().unwrap();
+        assert_eq!(device_ids.len(), 1);
+        assert_eq!(device_ids[0], "00000000-0000-4000-8000-0000000000aa");
+        assert_eq!(body["truncated"], false);
+    }
+
+    /// Membership enforcement: non-member caller must receive 401 (fail-closed).
+    #[tokio::test]
+    async fn list_members_rejects_a_non_member() {
+        let group_id = uuid::Uuid::new_v4();
+        let resp = groups_router_unauthorized()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/groups/{group_id}/members"))
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Auth bypass invariant: unauthenticated request must be rejected before the handler.
+    #[tokio::test]
+    async fn list_members_requires_authentication() {
+        let group_id = uuid::Uuid::new_v4();
+        let resp = test_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/groups/{group_id}/members"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Path-param validation: a non-UUID group_id must be rejected by extraction.
+    #[tokio::test]
+    async fn list_members_rejects_a_malformed_group_id() {
+        let resp = groups_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/groups/not-a-uuid/members")
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Amplification bound: a group larger than `MAX_MEMBERS_RESPONSE` must
+    /// be truncated, flagged via `truncated`, and returned in canonical
+    /// (sorted-by-uuid) order rather than join order.
+    ///
+    /// `HugeGroup` returns deterministic ids `0..MAX_MEMBERS_RESPONSE+5` in
+    /// DESCENDING order, so the response must be exactly the 512 SMALLEST
+    /// ids in ASCENDING order. A truncate-then-sort implementation (drop
+    /// the fake's last 5 by its own order, i.e. the 5 smallest, *then*
+    /// sort) would instead return the 512 LARGEST ids and fail this test.
+    #[tokio::test]
+    async fn list_members_truncates_and_flags_an_oversized_group() {
+        let group_id = uuid::Uuid::new_v4();
+        let resp = huge_group_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/groups/{group_id}/members"))
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let device_ids = body["device_ids"].as_array().unwrap();
+        assert_eq!(
+            device_ids.len(),
+            crate::routes::groups::MAX_MEMBERS_RESPONSE
+        );
+        assert_eq!(body["truncated"], true);
+        let ids: Vec<&str> = device_ids.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(ids.windows(2).all(|w| w[0] <= w[1]));
+
+        let mut expected: Vec<String> = (0..crate::routes::groups::MAX_MEMBERS_RESPONSE)
+            .map(|index| uuid::Uuid::from_u128(index as u128).to_string())
+            .collect();
+        expected.sort();
+        assert_eq!(ids, expected);
+    }
+
+    /// `>` vs `>=` boundary guard: a group at EXACTLY `MAX_MEMBERS_RESPONSE`
+    /// members must NOT be flagged `truncated`. If `groups.rs`'s
+    /// `device_ids.len() > MAX_MEMBERS_RESPONSE` were mutated to `>=`, this
+    /// test would fail where the len==1 and len==517 fixtures cannot catch
+    /// it — a `truncated: true` response tells clients to abandon
+    /// reconciliation, which is wrong for a group exactly at the cap.
+    #[tokio::test]
+    async fn list_members_does_not_flag_a_group_at_exactly_the_cap() {
+        let group_id = uuid::Uuid::new_v4();
+        let resp = exact_cap_group_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/groups/{group_id}/members"))
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let device_ids = body["device_ids"].as_array().unwrap();
+        assert_eq!(
+            device_ids.len(),
+            crate::routes::groups::MAX_MEMBERS_RESPONSE
+        );
+        assert_eq!(body["truncated"], false);
     }
 
     // ── Device management endpoint tests ─────────────────────────────────────

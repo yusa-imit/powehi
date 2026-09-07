@@ -166,6 +166,25 @@ impl GroupUseCase for GroupService {
         }
         self.group_repo.list_pending_removals(group_id).await
     }
+
+    #[instrument(skip(self), fields(caller = %caller, group_id = %group_id))]
+    async fn list_members(
+        &self,
+        caller: &DeviceId,
+        group_id: &GroupId,
+    ) -> Result<Vec<GroupMember>, DomainError> {
+        // Same fail-closed guard as add_member above, but with no TOCTOU
+        // window at all here (unlike add_member's read-then-write gap):
+        // the guard's own fetch IS the result, so a caller that passes the
+        // guard was a member in the exact snapshot that produced the rows
+        // being returned — there is no second round-trip to race against.
+        let members = self.group_repo.list_members(group_id).await?;
+        if !members.iter().any(|m| &m.device_id == caller) {
+            tracing::warn!(caller = %caller, group_id = %group_id, "list_members: caller is not a member");
+            return Err(DomainError::Unauthorized);
+        }
+        Ok(members)
+    }
 }
 
 #[cfg(test)]
@@ -756,5 +775,63 @@ mod tests {
         let mut expected = [revoked_a, revoked_b];
         expected.sort_by_key(|d| d.as_uuid());
         assert_eq!(pending, expected);
+    }
+
+    #[tokio::test]
+    async fn list_members_returns_the_full_member_list_for_a_member() {
+        let repo = FakeGroupRepo::new();
+        let svc = make_svc(repo.clone());
+        let owner = DeviceId::new();
+        let device_b = DeviceId::new();
+        let group_id = GroupId::new();
+
+        svc.create_group(&owner, group_id.clone()).await.unwrap();
+        svc.add_member(&owner, &group_id, &device_b, Epoch(1))
+            .await
+            .unwrap();
+
+        let mut members = svc.list_members(&owner, &group_id).await.unwrap();
+        members.sort_by_key(|m| m.device_id.as_uuid());
+        let mut expected = [owner.clone(), device_b.clone()];
+        expected.sort_by_key(|d| d.as_uuid());
+
+        assert_eq!(members.len(), 2);
+        assert_eq!(
+            members
+                .iter()
+                .map(|m| m.device_id.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(members.iter().all(|m| m.group_id == group_id));
+    }
+
+    #[tokio::test]
+    async fn list_members_rejects_a_non_member_caller() {
+        let repo = FakeGroupRepo::new();
+        let svc = make_svc(repo.clone());
+        let owner = DeviceId::new();
+        let outsider = DeviceId::new();
+        let group_id = GroupId::new();
+
+        svc.create_group(&owner, group_id.clone()).await.unwrap();
+
+        let err = svc.list_members(&outsider, &group_id).await.unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
+    }
+
+    #[tokio::test]
+    async fn list_members_on_an_unknown_group_is_unauthorized_not_empty() {
+        let repo = FakeGroupRepo::new();
+        let svc = make_svc(repo.clone());
+        let outsider = DeviceId::new();
+        let group_id = GroupId::new();
+
+        // No group is ever created here. The repo's `list_members` returns
+        // an empty Vec for an absent group, so the fail-closed guard turns
+        // "group does not exist" and "caller is not a member" into the same
+        // answer — deliberately no existence oracle.
+        let err = svc.list_members(&outsider, &group_id).await.unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
     }
 }
