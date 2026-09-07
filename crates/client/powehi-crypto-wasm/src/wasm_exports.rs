@@ -414,6 +414,37 @@ fn bytes_to_opaque_id_hex(bytes: &[u8]) -> String {
     }
 }
 
+/// Render a group member's `BasicCredential` identity bytes, if its credential
+/// is a `Basic` one.
+///
+/// IMPORTANT — this is NOT the server's `device_id` (crypto-reviewer finding,
+/// cycle 456): in this codebase, `mls_init_identity_from_phrase`'s identity
+/// bytes are `SHA-256(recovery phrase)[0..16]` (see `Login.tsx`), an
+/// ACCOUNT-level label shared by every device restored from the same
+/// recovery phrase — it is generated independently of, and has no bound
+/// relationship to, the server-assigned per-device `device_id`
+/// (`DeviceId::new()` in `auth_service.rs`). Do not use this value to look
+/// up or compare against a server-reported `device_id` list; there is
+/// currently no channel that authenticates such a binding (RFC 9420 §5.3
+/// leaves credential-identity authenticity to an external Authentication
+/// Service, which this codebase does not yet have). Named
+/// `credential_identity_hex`, not `device_id_hex`, specifically to avoid
+/// this confusion.
+///
+/// A peer's credential arrives through a Welcome / group state and is NOT
+/// validated by this crate to be Basic, so it is untrusted external data — a
+/// non-Basic credential type returns `None` rather than mis-decoding
+/// non-identity bytes (e.g. an X.509 DER chain) as an identity.
+fn member_credential_identity_hex(credential: &Credential) -> Option<String> {
+    // `BasicCredential::try_from` is the typed accessor for a Basic credential's
+    // identity bytes (crypto-reviewer nit, cycle 456) — preferred over reading
+    // `serialized_content()` directly, which happens to be bit-identical today
+    // only as an internal representation detail of openmls 0.8.1.
+    BasicCredential::try_from(credential.clone())
+        .ok()
+        .map(|basic| bytes_to_opaque_id_hex(basic.identity()))
+}
+
 // ── PQ extension helpers ───────────────────────────────────────────────────────
 
 /// Build the PQ KEM extension payload but do NOT commit the decap key yet.
@@ -1220,39 +1251,87 @@ fn compute_safety_number_inner(key_a: &[u8], key_b: &[u8]) -> Result<String, &'s
     Ok(groups.join(" "))
 }
 
+/// One row of `mls_group_members_inner` output: the public, per-member identity
+/// info surfaced to JS by `mls_group_members`.
+struct MlsMemberInfo {
+    leaf_index: u32,
+    sig_key_hex: String,
+    /// `None` when the member's credential is not a `Basic` credential — see
+    /// `member_credential_identity_hex`.
+    credential_identity_hex: Option<String>,
+}
+
+/// Native-testable core of `mls_group_members`. See the `#[wasm_bindgen]`
+/// wrapper for the public doc-comment.
+///
+/// Returns one `MlsMemberInfo` per member.
+fn mls_group_members_inner(
+    identity_id: &str,
+    group_id: &str,
+) -> Result<Vec<MlsMemberInfo>, &'static str> {
+    MLS_CTX.with(|ctx| -> Result<Vec<MlsMemberInfo>, &'static str> {
+        let ctx = ctx.borrow();
+        let c = ctx.get(identity_id).ok_or("unknown mls identity")?;
+        let group = c.groups.get(group_id).ok_or("unknown mls group")?;
+        Ok(group
+            .members()
+            .map(|member| {
+                let leaf_index = member.index.u32();
+                let sig_key_hex: String = member
+                    .signature_key
+                    .as_slice()
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                let credential_identity_hex = member_credential_identity_hex(&member.credential);
+                MlsMemberInfo {
+                    leaf_index,
+                    sig_key_hex,
+                    credential_identity_hex,
+                }
+            })
+            .collect())
+    })
+}
+
 /// Get public identity info for all current members of an MLS group.
 ///
-/// Returns a JS Array of `{ leafIndex: number, sigKeyHex: string }` objects.
-/// `sigKeyHex` is the member's Ed25519 signature public key as a lowercase hex string.
-/// All data here is public — signature public keys are distributed openly in MLS.
+/// Returns a JS Array of `{ leafIndex: number, sigKeyHex: string,
+/// credentialIdentityHex: string | null }` objects. `sigKeyHex` is the
+/// member's Ed25519 signature public key as a lowercase hex string.
+/// `credentialIdentityHex` is the member's `BasicCredential` identity
+/// rendered in the same canonical opaque-id form used by `group_id_hex`
+/// (dashed UUID form for 16-byte ids, plain hex otherwise); it is `null` for
+/// any non-Basic credential type — a peer's credential is untrusted external
+/// data arriving via a Welcome / group state, so a non-Basic type is never
+/// mis-decoded as an identity.
+///
+/// IMPORTANT — `credentialIdentityHex` is NOT a server `device_id` (see
+/// `member_credential_identity_hex`'s doc comment for why: in this
+/// codebase's current identity model it is an account-level, recovery-phrase
+/// derived label, not a per-device value, and there is no authenticated
+/// binding between the two). Do not use it to cross-check a server-reported
+/// device list without first establishing such a binding.
+///
+/// All data here is public — signature public keys and credential identities
+/// are distributed openly in MLS.
 #[wasm_bindgen]
 pub fn mls_group_members(identity_id: &str, group_id: &str) -> Result<JsValue, JsError> {
-    MLS_CTX.with(|ctx| -> Result<JsValue, JsError> {
-        let ctx = ctx.borrow();
-        let c = ctx
-            .get(identity_id)
-            .ok_or_else(|| js_err("unknown mls identity"))?;
-        let group = c
-            .groups
-            .get(group_id)
-            .ok_or_else(|| js_err("unknown mls group"))?;
-        let arr = js_sys::Array::new();
-        for member in group.members() {
-            let leaf_index = member.index.u32();
-            let sig_key_hex: String = member
-                .signature_key
-                .as_slice()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect();
-            let obj = js_obj(&[
-                ("leafIndex", JsValue::from_f64(leaf_index as f64)),
-                ("sigKeyHex", JsValue::from_str(&sig_key_hex)),
-            ])?;
-            arr.push(&obj);
-        }
-        Ok(arr.into())
-    })
+    let members = mls_group_members_inner(identity_id, group_id).map_err(js_err)?;
+    let arr = js_sys::Array::new();
+    for member in members {
+        let credential_identity_value = match member.credential_identity_hex {
+            Some(s) => JsValue::from_str(&s),
+            None => JsValue::NULL,
+        };
+        let obj = js_obj(&[
+            ("leafIndex", JsValue::from_f64(member.leaf_index as f64)),
+            ("sigKeyHex", JsValue::from_str(&member.sig_key_hex)),
+            ("credentialIdentityHex", credential_identity_value),
+        ])?;
+        arr.push(&obj);
+    }
+    Ok(arr.into())
 }
 
 /// Compute a Safety Number from two Ed25519 signature public keys.
@@ -2892,6 +2971,178 @@ mod tests {
         // And it must round-trip back to the original 16 raw GroupId bytes —
         // this is exactly what mls_export_state/mls_import_state rely on.
         assert_eq!(hex_decode(&id).unwrap(), group.group_id().as_slice());
+    }
+
+    // ── mls_group_members / member_credential_identity_hex ─────────────────────
+
+    /// `mls_group_members_inner` must render every member's
+    /// `credential_identity_hex` as a true round-trip of the exact 16 identity
+    /// bytes each `Identity` was created from — not merely "some hex string".
+    /// Also pins that the `_inner`/`#[wasm_bindgen]` wrapper split (cycle 455)
+    /// did not regress `leaf_index` / `sig_key_hex` population.
+    #[test]
+    fn test_mls_group_members_inner_credential_identity_round_trips_identity_bytes() {
+        let alice_bytes: [u8; 16] = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10,
+        ];
+        let bob_bytes: [u8; 16] = [
+            0xf0, 0xe0, 0xd0, 0xc0, 0xb0, 0xa0, 0x90, 0x80, 0x70, 0x60, 0x50, 0x40, 0x30, 0x20,
+            0x10, 0x00,
+        ];
+
+        let alice_provider = OpenMlsRustCrypto::default();
+        let alice = generate_identity(&alice_bytes, &alice_provider).unwrap();
+        let mut alice_group = create_group(&alice, &alice_provider).unwrap();
+
+        let bob_provider = OpenMlsRustCrypto::default();
+        let bob = generate_identity(&bob_bytes, &bob_provider).unwrap();
+        let bob_kp = generate_key_package(&bob, &bob_provider).unwrap();
+
+        add_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+
+        let group_id = group_id_hex(&alice_group);
+        let ctx_id = next_id();
+        MLS_CTX.with(|ctx| {
+            let mut groups = HashMap::new();
+            groups.insert(group_id.clone(), alice_group);
+            ctx.borrow_mut().insert(
+                ctx_id.clone(),
+                MlsContext {
+                    identity: alice,
+                    provider: alice_provider,
+                    groups,
+                },
+            );
+        });
+
+        let members = mls_group_members_inner(&ctx_id, &group_id).unwrap();
+        assert_eq!(members.len(), 2, "both alice and bob must be present");
+
+        let expected_alice = bytes_to_opaque_id_hex(&alice_bytes);
+        let expected_bob = bytes_to_opaque_id_hex(&bob_bytes);
+
+        // Positive space: each expected credential identity shows up exactly once, as a
+        // true round-trip of the raw identity bytes the identity was built from.
+        assert!(
+            members
+                .iter()
+                .any(|m| m.credential_identity_hex.as_deref() == Some(expected_alice.as_str())),
+            "alice's credential identity must round-trip to {expected_alice}"
+        );
+        assert!(
+            members
+                .iter()
+                .any(|m| m.credential_identity_hex.as_deref() == Some(expected_bob.as_str())),
+            "bob's credential identity must round-trip to {expected_bob}"
+        );
+
+        // Negative space: no member is None (both credentials are Basic).
+        assert!(
+            members.iter().all(|m| m.credential_identity_hex.is_some()),
+            "no member should have a None credential identity in this all-Basic-credential group"
+        );
+
+        // leaf_index / sig_key_hex must still be populated post-refactor.
+        for m in &members {
+            assert!(
+                m.leaf_index == 0 || m.leaf_index == 1,
+                "leaf_index must be one of the two known leaves, got {}",
+                m.leaf_index
+            );
+            assert_eq!(
+                m.sig_key_hex.len(),
+                64,
+                "sig_key_hex must be a 32-byte Ed25519 public key rendered as hex"
+            );
+            assert!(
+                m.sig_key_hex.chars().all(|c| c.is_ascii_hexdigit()),
+                "sig_key_hex {:?} must be hex-only",
+                m.sig_key_hex
+            );
+        }
+
+        mls_clear_session();
+    }
+
+    /// A non-`Basic` credential must never be mis-decoded as an identity:
+    /// `member_credential_identity_hex` returns `None` for `X509` and for an
+    /// arbitrary `Other` extension type. A `Basic` credential built from the
+    /// same 16-byte identity bytes is the positive control proving the
+    /// negative results are due to credential type, not a broken helper.
+    #[test]
+    fn test_member_credential_identity_hex_non_basic_credential_returns_none() {
+        let identity_bytes: [u8; 16] = [
+            0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+            0x88, 0x99,
+        ];
+
+        // Positive control: Basic credential from known 16 bytes decodes.
+        let basic = Credential::from(BasicCredential::new(identity_bytes.to_vec()));
+        assert_eq!(
+            member_credential_identity_hex(&basic),
+            Some(bytes_to_opaque_id_hex(&identity_bytes)),
+            "a Basic credential must decode to the dashed hex of its identity bytes"
+        );
+
+        // Negative space: X.509 DER-ish bytes must not be treated as an identity.
+        let x509 = Credential::new(CredentialType::X509, b"fake-der-cert-bytes".to_vec());
+        assert_eq!(
+            member_credential_identity_hex(&x509),
+            None,
+            "an X509 credential must never be mis-decoded as a credential identity"
+        );
+
+        // Negative space: an arbitrary unknown credential type is also rejected.
+        let other = Credential::new(CredentialType::Other(1234), identity_bytes.to_vec());
+        assert_eq!(
+            member_credential_identity_hex(&other),
+            None,
+            "a non-Basic Other(1234) credential must never be mis-decoded as a credential identity"
+        );
+    }
+
+    /// A `Basic` credential whose identity is NOT 16 bytes must still resolve
+    /// (never `None`, never an error) — it falls back to plain undashed hex,
+    /// per `bytes_to_opaque_id_hex`'s else-branch contract.
+    #[test]
+    fn test_member_credential_identity_hex_non_16_byte_basic_falls_back_to_plain_hex() {
+        let short_identity: &[u8] = b"short-id";
+        let short_basic = Credential::from(BasicCredential::new(short_identity.to_vec()));
+        let short_result = member_credential_identity_hex(&short_basic);
+        assert_eq!(
+            short_result,
+            Some(
+                short_identity
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            ),
+            "a non-16-byte Basic identity must fall back to plain undashed hex"
+        );
+        assert!(
+            short_result.as_deref().is_some_and(|s| !s.contains('-')),
+            "the plain-hex fallback must contain no dashes"
+        );
+
+        let long_identity: Vec<u8> = (0u8..20).collect();
+        let long_basic = Credential::from(BasicCredential::new(long_identity.clone()));
+        let long_result = member_credential_identity_hex(&long_basic);
+        assert_eq!(
+            long_result,
+            Some(bytes_to_opaque_id_hex(&long_identity)),
+            "a 20-byte Basic identity must also use the plain-hex fallback"
+        );
+        assert!(
+            long_result.as_deref().is_some_and(|s| !s.contains('-')),
+            "a non-16-byte fallback must never emit UUID-style dashes"
+        );
     }
 
     // ── Session clear ─────────────────────────────────────────────────────────

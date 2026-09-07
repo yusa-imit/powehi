@@ -60,7 +60,23 @@ export type MlsPqEncapKeyResult = { encapKey: Uint8Array; signature: Uint8Array 
 export type MlsWelcomeResult = { welcome: Uint8Array };
 export type MlsCiphertextResult = { ciphertext: Uint8Array };
 export type MlsPlaintextResult = { plaintext: Uint8Array };
-export type MlsGroupMember = { leafIndex: number; sigKeyHex: string };
+// credentialIdentityHex is the member's MLS BasicCredential identity bytes,
+// rendered as a dashed opaque-id-style hex string. null means the member's
+// credential is not a Basic credential.
+//
+// IMPORTANT — this is NOT the server's device_id (crypto-reviewer finding,
+// cycle 456): mlsInitIdentityFromPhrase's identity bytes are
+// SHA-256(recovery phrase)[0..16] (see Login.tsx), an ACCOUNT-level label
+// shared by every device restored from the same recovery phrase. It has no
+// authenticated binding to the server-assigned per-device device_id
+// (crypto.randomUUID() / server-issued at registration) — do not compare it
+// against a server-reported device_id list (e.g. pending-removals) as a
+// trust check; nothing here proves that binding.
+export type MlsGroupMember = {
+	leafIndex: number;
+	sigKeyHex: string;
+	credentialIdentityHex: string | null;
+};
 export type MlsSafetyNumberResult = { safetyNumber: string };
 // ADR-0003 Phase B: opaque-handle types — raw key bytes stay inside the worker.
 export type MlKemKeygenV2Result = { encapKey: Uint8Array; decapKeyHandle: string };
@@ -671,8 +687,11 @@ const api = {
 
 	/**
 	 * Get public identity info for all current members of an MLS group.
-	 * Returns an array of { leafIndex, sigKeyHex } objects.
+	 * Returns an array of { leafIndex, sigKeyHex, credentialIdentityHex } objects.
 	 * sigKeyHex is the Ed25519 signature public key as hex — public data only.
+	 * credentialIdentityHex is the member's MLS BasicCredential identity bytes
+	 * (dashed opaque-id-style hex), or null if their credential is not Basic.
+	 * See MlsGroupMember's doc comment — this is NOT the server's device_id.
 	 */
 	async mlsGroupMembers(identityId: string, groupId: string): Promise<MlsGroupMember[]> {
 		const wasm = await getWasm();
