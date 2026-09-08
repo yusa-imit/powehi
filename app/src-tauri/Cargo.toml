@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Powehi E2EE messenger — Tauri 2.x native shell (desktop + mobile)"
 license = "AGPL-3.0-only"
+publish = false
 
 [lib]
 name = "powehi_mobile_lib"
