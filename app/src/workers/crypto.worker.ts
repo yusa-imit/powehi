@@ -140,6 +140,7 @@ interface WasmModule {
 	mls_decrypt: (identityId: string, groupId: string, ciphertext: Uint8Array) => MlsPlaintextResult;
 	mls_group_members: (identityId: string, groupId: string) => MlsGroupMember[];
 	mls_compute_safety_number: (sigKeyA: Uint8Array, sigKeyB: Uint8Array) => MlsSafetyNumberResult;
+	mls_compute_group_safety_number: (identityId: string, groupId: string) => MlsSafetyNumberResult;
 	mls_clear_session: () => void;
 	// MLS full-context export/import (worker-reload persistence).
 	mls_export_state: (identityId: string, generation: number) => MlsExportStateResult;
@@ -709,6 +710,25 @@ const api = {
 	): Promise<MlsSafetyNumberResult> {
 		const wasm = await getWasm();
 		return wasm.mls_compute_safety_number(sigKeyA, sigKeyB);
+	},
+
+	/**
+	 * Compute a group Safety Number from every current member of an MLS group.
+	 * Returns { safetyNumber } in the same 12-group decimal format. Reads
+	 * member signature keys directly from live group state — no keys need to
+	 * cross the worker boundary. Order-independent; changes if and only if the
+	 * member set (join/leave/key rotation) changes.
+	 *
+	 * This is a whole-group tamper/MITM fingerprint, NOT a per-device
+	 * cross-check — see mls_compute_group_safety_number's doc comment. Do not
+	 * use it to validate a specific server-reported device_id claim.
+	 */
+	async mlsComputeGroupSafetyNumber(
+		identityId: string,
+		groupId: string,
+	): Promise<MlsSafetyNumberResult> {
+		const wasm = await getWasm();
+		return wasm.mls_compute_group_safety_number(identityId, groupId);
 	},
 
 	// ── IndexedDB field encryption ────────────────────────────────────────────

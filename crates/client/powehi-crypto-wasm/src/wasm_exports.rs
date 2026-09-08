@@ -1204,6 +1204,63 @@ pub fn mls_import_state(state_bytes: &[u8], min_generation: f64) -> Result<JsVal
 /// Pinning the construction version here makes any future format change detectable.
 const SAFETY_NUMBER_DOMAIN: &[u8] = b"powehi-safety-number-v1";
 
+/// Domain-separation prefix for the N-party group safety number (prd.md §5.6).
+/// Deliberately distinct from `SAFETY_NUMBER_DOMAIN`: this distinct string,
+/// not the member-count field below, is what makes a 2-member group's output
+/// unable to collide with (or be confused for) the pairwise construction's
+/// output on the same two keys — with fixed-length (32-byte), length-prefixed
+/// operands the pairwise encoding is already injective on its own, so two
+/// different domain strings alone are sufficient. The count field's actual
+/// job (see `compute_group_safety_number_inner`) is only to stop groups of
+/// *different* sizes from colliding with each other via key reordering or
+/// prefix extension — it is defense-in-depth for that case, not what
+/// separates the group construction from the pairwise one.
+const GROUP_SAFETY_NUMBER_DOMAIN: &[u8] = b"powehi-group-safety-number-v1";
+
+/// Upper bound on members a group safety number will hash over, enforced by
+/// bounding the *collection* from live MLS group state (see
+/// `mls_group_signature_keys_bounded`), not just by rejecting an
+/// already-collected oversized `Vec` — collecting unboundedly first and only
+/// then checking the length would make the claim "an unbounded loop can
+/// never happen" false for a value ultimately driven by group-state size
+/// (crypto-reviewer, cycle 458).
+///
+/// This bound is on the local MLS group state this client holds, not on any
+/// REST response — nothing server-reported feeds this construction (unlike
+/// e.g. `GET /v1/groups/:id/members`'s response cap, which is unrelated data
+/// this function never reads; crypto-reviewer, cycle 457, corrected an
+/// earlier doc version that conflated the two). It is still true, though,
+/// that group size is *remotely influenced*: members join via Commits/Welcome
+/// (RFC 9420 §12.1.1, §12.4) sent by other members, so a malicious-but-
+/// legitimate member can grow a group past this bound. A group that large has
+/// no practical human-verifiable fingerprint anyway, but the eventual UI
+/// consumer of this export MUST render that case ("too many members to
+/// verify") distinctly from "verification failed" — the two are not the same
+/// finding and must not be presented identically to a user.
+const MAX_GROUP_SAFETY_NUMBER_MEMBERS: usize = 512;
+
+/// Render a SHA-512 digest as the 12-group decimal safety number format
+/// (prd.md §5.6 "숫자 6자리 그룹"): 12 six-digit decimal groups, space-separated,
+/// 83 characters total. Shared by both the pairwise and group constructions.
+fn safety_number_digits_from_hash(hash: &[u8; 64]) -> String {
+    // 12 groups × 4 bytes = 48 bytes; SHA-512 provides 64 bytes, 16 bytes unused.
+    // Each u32 mod 1_000_000 → 6-digit group (prd.md §5.6).
+    // Bias: 2^32 mod 1_000_000 = 967_296; values 0-967_295 appear once more in a
+    // uniform 32-bit space — negligible (< 0.03%) for a human-verified fingerprint.
+    let groups: Vec<String> = (0..12)
+        .map(|i| {
+            let val = u32::from_be_bytes([
+                hash[4 * i],
+                hash[4 * i + 1],
+                hash[4 * i + 2],
+                hash[4 * i + 3],
+            ]);
+            format!("{:06}", val % 1_000_000)
+        })
+        .collect();
+    groups.join(" ")
+}
+
 /// Inner computation for safety numbers — testable without js_sys.
 ///
 /// Inputs are two Ed25519 signature public keys, each exactly 32 bytes.
@@ -1232,23 +1289,55 @@ fn compute_safety_number_inner(key_a: &[u8], key_b: &[u8]) -> Result<String, &'s
     h.update(first);
     h.update((second.len() as u32).to_be_bytes());
     h.update(second);
-    let hash = h.finalize(); // 64 bytes
-                             // 12 groups × 4 bytes = 48 bytes; SHA-512 provides 64 bytes, 16 bytes unused.
-                             // Each u32 mod 1_000_000 → 6-digit group (prd.md §5.6).
-                             // Bias: 2^32 mod 1_000_000 = 967_296; values 0-967_295 appear once more in a
-                             // uniform 32-bit space — negligible (< 0.03%) for a human-verified fingerprint.
-    let groups: Vec<String> = (0..12)
-        .map(|i| {
-            let val = u32::from_be_bytes([
-                hash[4 * i],
-                hash[4 * i + 1],
-                hash[4 * i + 2],
-                hash[4 * i + 3],
-            ]);
-            format!("{:06}", val % 1_000_000)
-        })
-        .collect();
-    Ok(groups.join(" "))
+    let hash: [u8; 64] = h.finalize().into();
+    Ok(safety_number_digits_from_hash(&hash))
+}
+
+/// Inner computation for an N-party group safety number — testable without js_sys.
+///
+/// Inputs are 2..=`MAX_GROUP_SAFETY_NUMBER_MEMBERS` Ed25519 signature public
+/// keys, each exactly 32 bytes. Order-independent: any permutation of the same
+/// key set produces the same output, so it does not depend on MLS leaf-index
+/// assignment (which can change across Commits).
+///
+/// Construction: SHA-512(DOMAIN || 0x00 || count || len(k)||k for each k,
+/// sorted lexicographically). The count is hashed in so that groups of
+/// different sizes cannot collide via key reordering or prefix extension
+/// (defense-in-depth on top of the domain string, which is what actually
+/// separates this construction from the pairwise one — see
+/// `GROUP_SAFETY_NUMBER_DOMAIN`'s doc comment).
+///
+/// A duplicate key in `keys` is not rejected here: RFC 9420 §7.8 requires
+/// `signature_key` uniqueness among a group's members, so a valid MLS group
+/// state can never produce one, and the length-prefixed count field means a
+/// duplicate could not silently collide with a same-size distinct-key group
+/// regardless. This function does not re-validate that MLS-layer invariant.
+fn compute_group_safety_number_inner(keys: &[Vec<u8>]) -> Result<String, &'static str> {
+    use sha2::{Digest, Sha512};
+    if keys.len() < 2 {
+        return Err("group safety number requires at least 2 members");
+    }
+    if keys.len() > MAX_GROUP_SAFETY_NUMBER_MEMBERS {
+        return Err("group safety number: too many members");
+    }
+    if keys.iter().any(|k| k.len() != 32) {
+        return Err("safety number keys must be exactly 32 bytes");
+    }
+    // Sort lexicographically for order-independence (any permutation of the
+    // same key set hashes identically). All operands are public keys — no
+    // timing side-channel concern, same as the pairwise construction above.
+    let mut sorted: Vec<&[u8]> = keys.iter().map(Vec::as_slice).collect();
+    sorted.sort_unstable();
+    let mut h = Sha512::new();
+    h.update(GROUP_SAFETY_NUMBER_DOMAIN);
+    h.update([0u8]);
+    h.update((sorted.len() as u32).to_be_bytes());
+    for k in &sorted {
+        h.update((k.len() as u32).to_be_bytes());
+        h.update(k);
+    }
+    let hash: [u8; 64] = h.finalize().into();
+    Ok(safety_number_digits_from_hash(&hash))
 }
 
 /// One row of `mls_group_members_inner` output: the public, per-member identity
@@ -1344,6 +1433,69 @@ pub fn mls_group_members(identity_id: &str, group_id: &str) -> Result<JsValue, J
 pub fn mls_compute_safety_number(sig_key_a: &[u8], sig_key_b: &[u8]) -> Result<JsValue, JsError> {
     let safety_number = compute_safety_number_inner(sig_key_a, sig_key_b).map_err(js_err)?;
     js_obj(&[("safetyNumber", JsValue::from_str(&safety_number))])
+}
+
+/// Compute a group Safety Number from all current members of an MLS group.
+///
+/// Unlike `mls_compute_safety_number` (exactly 2 keys, caller-supplied), this
+/// reads signature public keys directly from the live group state — the same
+/// data `mls_group_members` exposes — so it works for any group size from 2
+/// members up to `MAX_GROUP_SAFETY_NUMBER_MEMBERS`. Returns `{ safetyNumber:
+/// string }` in the same 12-group decimal format (prd.md §5.6).
+///
+/// Order-independent: unaffected by MLS leaf-index reassignment across
+/// Commits, so it changes if and only if the *set* of members' signature
+/// keys changes (a join, a leave/Remove, or a member's key rotation).
+///
+/// IMPORTANT — this is a whole-group tamper/MITM fingerprint, NOT a per-device
+/// cross-check: it says "group membership as MY client's MLS state sees it
+/// changed since I last verified", never WHICH device_id changed or whether a
+/// specific server-reported claim (e.g. `pending_removals`) is accurate. Do
+/// not present a match/mismatch against any server-reported device_id as
+/// proof about that specific device — see `mls_group_members`'s doc comment
+/// for why no authenticated device_id↔credential binding exists in this
+/// codebase to make that comparison meaningful (prd.md §3.3, §5.4).
+#[wasm_bindgen]
+pub fn mls_compute_group_safety_number(
+    identity_id: &str,
+    group_id: &str,
+) -> Result<JsValue, JsError> {
+    let keys =
+        mls_group_signature_keys_bounded(identity_id, group_id, MAX_GROUP_SAFETY_NUMBER_MEMBERS)
+            .map_err(js_err)?;
+    let safety_number = compute_group_safety_number_inner(&keys).map_err(js_err)?;
+    js_obj(&[("safetyNumber", JsValue::from_str(&safety_number))])
+}
+
+/// Read signature public keys from live MLS group state, bounding the
+/// *collection itself* at `max + 1` entries.
+///
+/// Deliberately does not reuse `mls_group_members_inner` (which allocates
+/// over the group's full, unbounded member set): that function backs the
+/// general-purpose `mls_group_members` listing export, where truncating
+/// would silently hide real members from a caller that expects a complete
+/// list. This helper exists only to feed `compute_group_safety_number_inner`,
+/// whose own `MAX_GROUP_SAFETY_NUMBER_MEMBERS` rejection is meaningless as a
+/// loop bound if the caller already built an arbitrarily large `Vec` before
+/// checking its length (crypto-reviewer, cycle 458). Collecting `max + 1`
+/// (not `max`) preserves the over-limit case: a group whose real size is
+/// `max + 1` or more always collects to a `Vec` of exactly `max + 1`, which
+/// `compute_group_safety_number_inner`'s length check still correctly rejects.
+fn mls_group_signature_keys_bounded(
+    identity_id: &str,
+    group_id: &str,
+    max: usize,
+) -> Result<Vec<Vec<u8>>, &'static str> {
+    MLS_CTX.with(|ctx| -> Result<Vec<Vec<u8>>, &'static str> {
+        let ctx = ctx.borrow();
+        let c = ctx.get(identity_id).ok_or("unknown mls identity")?;
+        let group = c.groups.get(group_id).ok_or("unknown mls group")?;
+        Ok(group
+            .members()
+            .take(max.saturating_add(1))
+            .map(|member| member.signature_key.as_slice().to_vec())
+            .collect())
+    })
 }
 
 // ── ML-KEM-768 exports (ADR-0003 Phase A: PQ KEM primitives) ──────────────────
@@ -3602,6 +3754,206 @@ mod tests {
             sn,
             "689053 337949 184798 288064 134849 362568 560227 765408 921198 315305 693006 807986",
             "safety number derivation must not change silently"
+        );
+    }
+
+    // ── §5.6 Group Safety Numbers ─────────────────────────────────────────────
+
+    /// Group safety numbers are order-independent: any permutation of the same
+    /// key set produces the same output. Uses a genuine shuffle (not just the
+    /// exact reverse) so a hypothetical bug that only handles 2-element swaps
+    /// or full-reversal correctly would still be caught.
+    #[test]
+    fn test_group_safety_number_order_independent() {
+        let k1 = vec![0x01u8; 32];
+        let k2 = vec![0x02u8; 32];
+        let k3 = vec![0x03u8; 32];
+        let k4 = vec![0x04u8; 32];
+        let forward =
+            compute_group_safety_number_inner(&[k1.clone(), k2.clone(), k3.clone(), k4.clone()])
+                .unwrap();
+        let shuffled =
+            compute_group_safety_number_inner(&[k3.clone(), k1.clone(), k4.clone(), k2.clone()])
+                .unwrap();
+        let reversed = compute_group_safety_number_inner(&[k4, k3, k2, k1]).unwrap();
+        assert_eq!(
+            forward, shuffled,
+            "must be independent of a genuine shuffle"
+        );
+        assert_eq!(forward, reversed, "must be independent of full reversal");
+    }
+
+    /// Known-answer test: a frozen SHA-512 domain-separated vector for a fixed
+    /// 3-key set. Locks in the exact byte layout (domain || 0x00 || count ||
+    /// len-prefixed sorted keys) so a future refactor that touches
+    /// `compute_group_safety_number_inner` or `safety_number_digits_from_hash`
+    /// cannot silently change every already-verified group safety number
+    /// while the other (behavioral, not byte-exact) tests stay green.
+    #[test]
+    fn test_group_safety_number_known_answer() {
+        let keys = vec![vec![0x11u8; 32], vec![0x22u8; 32], vec![0x33u8; 32]];
+        let sn = compute_group_safety_number_inner(&keys).unwrap();
+        assert_eq!(
+            sn,
+            "096245 143897 685064 159306 343313 225158 468638 270220 280240 781420 559783 744730"
+        );
+    }
+
+    /// Exactly `MAX_GROUP_SAFETY_NUMBER_MEMBERS` members is accepted (only
+    /// strictly *more* than the bound is rejected) — pins the `>` comparison
+    /// against a future `>=` regression that the "too many" test alone
+    /// (which only exercises `max + 1`) would not catch.
+    #[test]
+    fn test_group_safety_number_accepts_exactly_the_bound() {
+        let at_bound: Vec<Vec<u8>> = (0..MAX_GROUP_SAFETY_NUMBER_MEMBERS)
+            .map(|i| {
+                let mut k = vec![0u8; 32];
+                k[0] = (i % 256) as u8;
+                k[1] = (i / 256) as u8;
+                k
+            })
+            .collect();
+        assert!(
+            compute_group_safety_number_inner(&at_bound).is_ok(),
+            "exactly the bound must be accepted, not rejected"
+        );
+    }
+
+    /// `mls_group_signature_keys_bounded` must actually truncate the
+    /// collection at `max + 1` against a real, live 2-member MLS group state
+    /// — not just in theory. Uses `max = 0` (`take(1)`) against a 2-member
+    /// group so a true-size-2 collection down to exactly 1 entry can only
+    /// happen if `.take()` bounds the underlying `group.members()` iterator
+    /// itself, not merely a post-hoc length check (crypto-reviewer, cycle
+    /// 458: pins the fix against a future openmls upgrade whose `members()`
+    /// might stop being lazy and silently reintroduce unbounded collection).
+    #[test]
+    fn test_mls_group_signature_keys_bounded_truncates_a_real_group() {
+        let alice_bytes: [u8; 16] = [0xAA; 16];
+        let bob_bytes: [u8; 16] = [0xBB; 16];
+
+        let alice_provider = OpenMlsRustCrypto::default();
+        let alice = generate_identity(&alice_bytes, &alice_provider).unwrap();
+        let mut alice_group = create_group(&alice, &alice_provider).unwrap();
+
+        let bob_provider = OpenMlsRustCrypto::default();
+        let bob = generate_identity(&bob_bytes, &bob_provider).unwrap();
+        let bob_kp = generate_key_package(&bob, &bob_provider).unwrap();
+
+        add_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+
+        let group_id = group_id_hex(&alice_group);
+        let ctx_id = next_id();
+        MLS_CTX.with(|ctx| {
+            let mut groups = HashMap::new();
+            groups.insert(group_id.clone(), alice_group);
+            ctx.borrow_mut().insert(
+                ctx_id.clone(),
+                MlsContext {
+                    identity: alice,
+                    provider: alice_provider,
+                    groups,
+                },
+            );
+        });
+
+        // Positive space: the real group has 2 members, confirmed via the
+        // unbounded listing path.
+        let unbounded = mls_group_members_inner(&ctx_id, &group_id).unwrap();
+        assert_eq!(unbounded.len(), 2, "sanity: the real group has 2 members");
+
+        // Negative space: bounding at max=0 (take(1)) must still return
+        // exactly 1 entry, proving the 2-member group was truncated, not
+        // just checked-and-passed-through.
+        let bounded = mls_group_signature_keys_bounded(&ctx_id, &group_id, 0).unwrap();
+        assert_eq!(
+            bounded.len(),
+            1,
+            "max=0 must truncate a real 2-member group down to 1 entry"
+        );
+    }
+
+    /// Same format as the pairwise construction: 12 six-digit groups, 83 chars.
+    #[test]
+    fn test_group_safety_number_format() {
+        let keys = vec![vec![0x01u8; 32], vec![0x02u8; 32]];
+        let sn = compute_group_safety_number_inner(&keys).unwrap();
+        let groups: Vec<&str> = sn.split(' ').collect();
+        assert_eq!(groups.len(), 12, "must have exactly 12 groups");
+        for g in &groups {
+            assert_eq!(g.len(), 6, "each group must be exactly 6 characters");
+            assert!(
+                g.chars().all(|c| c.is_ascii_digit()),
+                "each group must be digits only"
+            );
+        }
+        assert_eq!(sn.len(), 83, "total string must be 83 characters");
+    }
+
+    /// A 2-member group safety number must NOT equal the pairwise construction
+    /// on the same keys — distinct domains/constructions, not interchangeable.
+    #[test]
+    fn test_group_safety_number_differs_from_pairwise() {
+        let key_a = [0x01u8; 32];
+        let key_b = [0x02u8; 32];
+        let pairwise = compute_safety_number_inner(&key_a, &key_b).unwrap();
+        let group = compute_group_safety_number_inner(&[key_a.to_vec(), key_b.to_vec()]).unwrap();
+        assert_ne!(
+            pairwise, group,
+            "2-member group safety number must differ from the pairwise construction"
+        );
+    }
+
+    /// Changing the member set (adding a member) changes the output.
+    #[test]
+    fn test_group_safety_number_changes_with_membership() {
+        let two = compute_group_safety_number_inner(&[vec![0x01u8; 32], vec![0x02u8; 32]]).unwrap();
+        let three = compute_group_safety_number_inner(&[
+            vec![0x01u8; 32],
+            vec![0x02u8; 32],
+            vec![0x03u8; 32],
+        ])
+        .unwrap();
+        assert_ne!(two, three, "adding a member must change the safety number");
+    }
+
+    /// Fewer than 2 or more than the bound is rejected.
+    #[test]
+    fn test_group_safety_number_rejects_out_of_bounds_membership() {
+        assert!(
+            compute_group_safety_number_inner(&[]).is_err(),
+            "0 members must error"
+        );
+        assert!(
+            compute_group_safety_number_inner(&[vec![0x01u8; 32]]).is_err(),
+            "1 member must error"
+        );
+        let too_many: Vec<Vec<u8>> = (0..=MAX_GROUP_SAFETY_NUMBER_MEMBERS)
+            .map(|i| {
+                let mut k = vec![0u8; 32];
+                k[0] = (i % 256) as u8;
+                k[1] = (i / 256) as u8;
+                k
+            })
+            .collect();
+        assert!(
+            compute_group_safety_number_inner(&too_many).is_err(),
+            "over the member bound must error"
+        );
+    }
+
+    /// A wrong-length key anywhere in the set is rejected.
+    #[test]
+    fn test_group_safety_number_rejects_wrong_length_key() {
+        assert!(
+            compute_group_safety_number_inner(&[vec![0x01u8; 32], vec![0x02u8; 31]]).is_err(),
+            "a 31-byte key must error"
         );
     }
 
