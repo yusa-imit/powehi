@@ -24,7 +24,148 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-08, cycle 456 — FEATURE: found cycle 454/455's uncommitted WASM WIP (mlsGroupMembers "deviceIdHex") was semantically broken, fixed the naming instead of shipping it, commit 01f77b7)
+## Current state (2026-09-08, cycle 458 — FEATURE: land cycle 457's orphaned WIP adding an N-party MLS group safety number WASM export, commit c62edf1)
+
+- Mode selection: counter 457→458, 458 % 5 != 0 → FEATURE. **Working tree
+  was NOT clean at session start** — same recurring process gap as cycles
+  448/449/451/454/455 (now the sixth occurrence): cycle 457 had done
+  substantial, coherent, already partially self-reviewed work (its own doc
+  comment cited "crypto-reviewer, cycle 457") adding
+  `mls_compute_group_safety_number` — an N-party generalization of the
+  existing 2-party `mls_compute_safety_number` (prd.md §5.6) — to
+  `powehi-crypto-wasm`, plus a thin worker wrapper
+  `mlsComputeGroupSafetyNumber` in `crypto.worker.ts`, with 6 new Rust
+  unit tests, but never committed it.
+- Read the whole diff, confirmed `cargo build/test/fmt/clippy` all green
+  on the WIP as found (0 failures across every crate), `pnpm exec tsc
+  --noEmit`/`biome check` clean, full `pnpm vitest run` unaffected
+  (112 files/1595 tests — the new export has no UI consumer yet, matching
+  the pattern of other WASM primitives landing ahead of their frontend
+  wiring). Confirmed via grep that `mlsComputeGroupSafetyNumber` is not
+  referenced anywhere outside the worker file itself — a pure primitive
+  addition, not a partial UI feature.
+- **crypto-reviewer (first pass): PASS-with-nits, real findings, not
+  nitpicks.** (1) `GROUP_SAFETY_NUMBER_DOMAIN`'s doc wrongly credited the
+  member-count field, not the distinct domain string, with preventing a
+  2-member group from colliding with the pairwise construction — with
+  fixed-32-byte length-prefixed operands the pairwise encoding is already
+  injective, so two different domain strings alone are what separates the
+  two; count is only defense-in-depth against different-*sized* groups
+  colliding with each other. (2) **The real bug**: the 512-member bound
+  was enforced by checking `keys.len()` *after* `mls_group_members_inner`
+  had already unboundedly collected every member into a `Vec` — so the
+  doc's "an unbounded loop can never happen" claim was false; only the
+  hashing loop was bounded, not the collection. Fixed by adding a
+  dedicated `mls_group_signature_keys_bounded(identity_id, group_id, max)`
+  helper that calls `group.members().take(max.saturating_add(1))`
+  directly — verified in the re-review (by tracing openmls 0.8.1's actual
+  call chain: `MlsGroup::members` → `PublicGroup::members` →
+  `TreeSync::full_leaf_members`, which is a lazy `filter_map().map()`
+  chain with no intermediate collect) that `.take()` genuinely bounds the
+  tree walk itself, not just a post-hoc check. This required removing the
+  now-dead `sig_key: Vec<u8>` field from `MlsMemberInfo` (only the new
+  helper needed raw key bytes; `mls_group_members`/`mls_group_members_inner`
+  — the pre-existing, unrelated export — only ever used `sig_key_hex`, and
+  the re-review confirmed that export's diff hunk is net-zero, fully
+  unaffected). (3) the "not server-reported data" bound justification
+  needed to also note group size is still remotely influenced (members
+  join via Commit/Welcome, RFC 9420 §12.1.1/§12.4), and that the eventual
+  UI consumer must render "too many members to verify" distinctly from
+  "verification failed" — added to the doc comment. (4) missing a
+  known-answer test for the group construction (the pairwise one has one;
+  without it a refactor could silently change every already-verified group
+  safety number with the other, behavior-only tests staying green) — added
+  `test_group_safety_number_known_answer` with a frozen 3-key vector,
+  cross-checked against an independent Python SHA-512 computation before
+  writing it into the test, then re-verified independently by the review
+  agent itself. (5) the out-of-bounds test only exercised `max+1` (513)
+  rejected, never `max` (512) itself accepted — a `>`→`>=` regression
+  would've gone undetected — added
+  `test_group_safety_number_accepts_exactly_the_bound`. (6) the
+  order-independence test only compared forward vs. exact full reversal of
+  a 3-key set — widened to a 4-key genuine shuffle (`[k3,k1,k4,k2]`, not a
+  reversal or single swap) plus a separate reversal assertion. (7) nit:
+  added an RFC 9420 §7.8 comment noting duplicate signature keys are
+  unreachable in valid MLS group state, and mirrored the pairwise
+  function's "no timing side-channel — both operands are public keys"
+  comment onto the group construction's sort step.
+- **crypto-reviewer (re-verify pass): PASS.** Confirmed all 7 findings
+  actually resolved (not just claimed) by re-reading the diff and
+  independently recomputing the new KAT vector. Flagged one further
+  non-blocking nit: `mls_group_signature_keys_bounded` itself had no
+  direct test proving truncation against a *real* MLS group (the openmls
+  laziness argument was correct but relied on reading library internals
+  by hand, not a test) — cheap to add, so added it this cycle rather than
+  carrying it: `test_mls_group_signature_keys_bounded_truncates_a_real_group`
+  builds a real 2-member group, confirms the unbounded path sees 2
+  members, then confirms `mls_group_signature_keys_bounded(..., max=0)`
+  (i.e. `take(1)`) truncates it down to exactly 1 — proving `.take()`
+  bounds the live iterator, not a post-hoc length check.
+- No `threat-model-checker` run: this is a pure client-side crypto
+  primitive with no server-visible metadata and no new trust boundary
+  (matches the pattern for prior standalone WASM export additions like
+  the original pairwise safety number). No `security-auditor` run: no
+  backend/handler/infra code touched.
+- **Full gate, re-run after every fix round**: `cargo build --workspace
+  --all-targets` clean, `cargo test --workspace` all green (0 failures,
+  every crate; `powehi-crypto-wasm` alone: 193 passed, 2 ignored, up from
+  184 pre-cycle — 9 net new tests), `cargo fmt --all --check` clean,
+  `cargo clippy --workspace --all-targets -- -D warnings` clean. Frontend:
+  `pnpm exec tsc --noEmit` clean, `biome check` clean on the touched file,
+  `pnpm vitest run` 112 files/1595 tests green (unaffected — no frontend
+  logic touched beyond the new pass-through worker method).
+- Committed `c62edf1` (`feat(crypto): add N-party MLS group safety number
+  export`), 2 files changed, pushed clean (`9fcdeb5..c62edf1 main ->
+  main`).
+- **Process note, now the sixth time** (cycles 448/449, 451, 454, 455,
+  457→458): a FEATURE-mode cycle does real, reviewed work and burns its
+  counter slot without committing, leaving the next cycle to land it.
+  This keeps happening across many different cycles/features — worth
+  treating as a structural pattern (e.g. a hard "commit before the turn
+  ends" checklist gate) rather than continuing to rely on the next
+  cycle's git-status check to catch it.
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates (carried/updated):**
+  1. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  2. Carried, still explicitly BLOCKED: wiring
+     `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal` — needs F3 +
+     HMAC-vs-plain-SHA256 gate resolved first.
+  3. Carried (superseded framing from cycle 456 still applies): the
+     `PendingRemovalBanner`'s local cross-check needs either (a) binding
+     `device_id` into the MLS credential identity at creation time, or (b)
+     leaning on §5.6 safety-number verification (now including this
+     cycle's new group variant) as the real local trust anchor for T3,
+     updating the banner's copy accordingly. Not attempted this cycle
+     (scope was landing cycle 457's WIP, not starting new UI work).
+  4. **New, real, natural next step for this cycle's export:** wire
+     `mlsComputeGroupSafetyNumber` into an actual UI surface — likely a
+     group-info panel action alongside the existing pairwise safety-number
+     verification flow (`computedSafetyNumber` state in `ChatLayout.tsx`
+     around line 5088) — since the WASM/worker layer now exists but has
+     zero consumers.
+  5. Carried, doc-sync only, low priority: prd.md §10's REST API list is
+     stale — missing `pending-removals` and `members`.
+  6. Carried: the `PendingRemovalBanner` confirm click is still the only
+     defense against a forged `pending_removals` signal.
+  7. Carried: no MLS Remove commit path exists in the frontend at all yet.
+  8. Carried, scoped out: the `RemovalRequired` WS event is still
+     unconsumed (no frontend WebSocket client exists at all).
+  9. Carried: no `values-prod-*.yaml`/CI overlay flips
+     `monitoring.prometheusRule.enabled=true` yet (ops task).
+  10. Carried: CI has no job rendering the Helm chart with
+      `monitoring.prometheusRule.enabled=true`/`serviceMonitor.enabled=true`.
+  11. Carried, doc-sync only: prd.md documents `key_packages.device_id` as
+      having `REFERENCES devices(id)`; the actual schema never had this FK.
+  12. Carried, real but scoped out: consumed `key_packages` rows are never
+      garbage-collected.
+  13. Carried, low-priority hardening: `GroupRepository::save` is a blind
+      `ON CONFLICT DO UPDATE` with no production caller today.
+  14. Carried, cosmetic: bare `var(--photon)` CSS custom property used
+      without a defined token in `LinkedDevicesPanel.tsx`/
+      `PendingRemovalBanner.tsx`.
+
+## Previous state (2026-09-08, cycle 456 — FEATURE: found cycle 454/455's uncommitted WASM WIP (mlsGroupMembers "deviceIdHex") was semantically broken, fixed the naming instead of shipping it, commit 01f77b7)
 
 - Mode selection: counter 455→456, 456 % 5 != 0 → FEATURE. Working tree was
   NOT clean at session start (same recurring gap as cycles 448/449/451/454):
