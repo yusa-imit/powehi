@@ -24,7 +24,151 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-09, cycle 464 — FEATURE: land cycles 462/463's orphaned WIP adding an MLS Remove commit stage/confirm/abort primitive (issue #2), fix 3 crypto-reviewer blockers before committing, commit b737b2c)
+## Current state (2026-09-09, cycle 465 — STABILIZATION: fix GitHub issue #7, Tauri shell Cargo.lock out of sync + no CI coverage, commit 3ee6bd6)
+
+- Mode selection: counter 464→465, 465 % 5 == 0 → STABILIZATION. `gh run
+  list --limit 5` green on `main`, working tree clean at session start
+  (no orphaned WIP this time). `gh issue list --state open` had 7 open
+  issues; per STABILIZATION's own instruction to fix bug-labeled issues
+  first, picked issue #7 (`bug`, P2) over the P0/P1 issues that carry
+  other labels (`security`, `infra`, `frontend`, `compliance` — none
+  labeled `bug`).
+- Issue #7: `app/src-tauri/Cargo.lock` (a standalone `[workspace]`, not a
+  root workspace member) had no entries for `tauri-plugin-deep-link`/
+  `tauri-plugin-notification` even though `Cargo.toml` declares both, so
+  any tool that touched the manifest silently rewrote ~1400 lines — no CI
+  job built the Tauri shell at all, so the drift went unnoticed, and the
+  issue's own evidence traced the rewrite to the local JetBrains Rust
+  indexer, not to any build command.
+- **Fix**: `cargo generate-lockfile` in `app/src-tauri/`, verified with
+  `cargo check --locked --all-targets` (0 errors; regenerated diff was
+  +1129/-318, expected size for a from-scratch re-resolve of an
+  out-of-date lock, not a red flag). Added a `tauri-check` job to
+  `.github/workflows/ci-rust.yml`: installs the Linux WebKit2GTK 4.1/
+  appindicator/rsvg/xdo/ssl apt deps + `patchelf`, then (1) `cargo check
+  --locked` against the manifest and (2) copies the committed lockfile,
+  runs `cargo generate-lockfile` fresh, and `diff -u`s the two — this
+  second step is the actual fix for the issue's root cause, since
+  `--locked` alone only rejects a lockfile *missing* a manifest
+  requirement, not a re-resolve that lands on a different-but-still-valid
+  graph (exactly what a repeated JetBrains rewrite would produce, and
+  `--locked` would stay silent on it). Also added `publish = false` to
+  the crate (it's an internal app shell, never meant for crates.io).
+- **security-auditor: PASS, 3 non-blocking findings.** Confirmed the new
+  apt-get step has zero `${{ }}` interpolation (no injection surface,
+  actually stricter than an existing precedent in `load-test.yml` that
+  does interpolate a version var into a shell string) and that action SHA
+  pins match every other job. Findings: (1) medium — `cargo audit`/
+  `cargo-deny` still don't scan this lockfile at all; `tauri-check` proves
+  it compiles, not that it's safe. Investigated: running `cargo audit
+  --file app/src-tauri/Cargo.lock` locally found only unmaintained
+  (non-vulnerability) warnings, exit 0. Running `cargo-deny check` against
+  it with the ROOT `deny.toml` FAILS (AGPL-3.0-only isn't in the root
+  license allow-list — it was never meant to cover this crate's own
+  license; and several `unic-*` crates pulled in via `tauri-utils` ->
+  `urlpattern` are flagged unmaintained with no safe upgrade available) —
+  giving this its own `deny.toml`/waiver file with the same rigor as the
+  root one is real follow-up work, explicitly NOT attempted this cycle
+  (would need per-advisory unreachability tracing like the existing
+  `deny.toml`/`.cargo/audit.toml` comments have, not a quick patch).
+  (2) low — the regenerated lockfile's dependency churn (111 bumps + 68
+  new packages, 379→446) is bigger than "only fixing the lockfile" framing
+  suggests; expected for a from-scratch re-resolve of a lock that was
+  already badly out of date, not evidence of an unreviewed manifest
+  change (Cargo.toml's only diff this cycle is the new `publish = false`
+  line). (3) low, fixed this cycle: `--locked` alone doesn't catch a
+  valid-but-different re-resolve — addressed by the `diff -u` step above,
+  verified locally to be silent (no diff) against the just-regenerated
+  lockfile before committing.
+- No `threat-model-checker` run: CI/build-tooling config only, no
+  server-visible metadata, no application code touched. No
+  `crypto-reviewer` run: no crypto/MLS/OPAQUE code touched (the Tauri
+  shell itself has none yet).
+- **Verified against real CI, not just locally**: pushed, then polled
+  `gh run list` until all 3 checks completed — `CI — Rust` (which now
+  includes the new `tauri-check` job), `CI — Frontend`, `CI — Live-backend
+  E2E` all `success`; confirmed via `gh run view --json jobs` that the
+  `Tauri shell (check, locked)` job specifically succeeded, not just the
+  workflow overall.
+- Closed GitHub issue #7 with a summary of the fix, the verification, and
+  an explicit note that the audit/deny coverage gap (finding 1 above) is
+  tracked separately, not silently dropped.
+- Committed `3ee6bd6` (`fix(ci): sync Tauri shell lockfile, add CI check
+  (issue #7)`), 3 files changed, pushed clean (`7d01555..3ee6bd6 main ->
+  main`).
+- Target dir hygiene: `target/` at 6.2G (well under the 20G threshold,
+  down from the 24-26G range cycles 450-460 were watching) — no prune
+  needed, ran the 0-byte `.rmeta` cleanup anyway per the standard steps.
+- **Next cycle candidates (carried/updated):**
+  1. **New, real, non-blocking, medium priority (security-auditor, this
+     cycle):** `app/src-tauri`'s `Cargo.lock` still has zero
+     `cargo audit`/`cargo-deny` coverage. Needs a dedicated `deny.toml`
+     (own license allow-list including AGPL-3.0-only, own advisory
+     waivers for the `unic-*` unmaintained crates pulled in via
+     `tauri-utils` -> `urlpattern` with no safe upgrade) with the same
+     unreachability-tracing rigor as the root `deny.toml`/
+     `.cargo/audit.toml` comments — not a quick patch, needs its own
+     cycle or plan.
+  2. Carried: the commit-processing consumer for issue #2's MLS Remove
+     primitive — `useMessages.ts`/`useWelcomePoller.ts` still ack-and-drop
+     any Commit-type envelope, which would fork the group if the
+     primitive were wired in as-is. Single largest remaining piece of
+     issue #2.
+  3. Carried: epoch reconciliation between the client's local MLS epoch
+     and the server's `groups.epoch` counter — needed before
+     `prior_epoch` can be used for anything; they diverge from the first
+     `mlsAddMember` since `group_service.rs::add_member` never advances
+     the server counter.
+  4. Carried, low-priority hardening: `wasm_exports.rs`'s `prior_epoch`
+     `u64 as f64` conversion is unguarded — must be fixed before
+     `prior_epoch` is used in a server-side precondition (candidate #3).
+  5. Carried, low-priority hardening: `mls_group_members`'s `isSelf` field
+     is derived by leaf *index*, not signature key — worth switching if
+     ever wired to a UI.
+  6. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  7. Carried, still explicitly BLOCKED: wiring
+     `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal` — needs F3 +
+     HMAC-vs-plain-SHA256 gate resolved first.
+  8. Carried: the `PendingRemovalBanner`'s local cross-check needs either
+     (a) binding `device_id` into the MLS credential identity at creation
+     time, or (b) leaning on §5.6 safety-number verification (now
+     including the group variant) as the real local trust anchor for T3,
+     updating the banner's copy accordingly.
+  9. Carried: GitHub issue #1, P0-blocker, infra: "Frontend SPA has no
+     deployment path (no Pages project, no deploy job)." Needs infra-lead
+     scoping.
+  10. Carried: GitHub issue #2, P0-blocker, security, frontend (see
+      candidates #2-#5 above for the concrete next steps).
+  11. Carried: GitHub issue #3, P1, frontend: "No WebSocket client:
+      delivery runs on 3s polling despite a working WS hub."
+  12. Carried: GitHub issue #4, P1, infra: "Load testing never run against
+      real infra (Phase 5 DoD still open)."
+  13. Carried: GitHub issue #5, P1, infra, compliance: "prod-ap-seoul is
+      Hetzner Singapore, not Korea — PIPA blocks KR-home PII."
+  14. Carried: GitHub issue #8, P2, documentation: "Stale doc comment:
+      handle_oracle_secret_token claims a per-restart random key."
+  15. Carried, doc-sync only, low priority: prd.md §10's REST API list is
+      stale — missing `pending-removals` and `members`.
+  16. Carried: the `PendingRemovalBanner` confirm click is still the only
+      defense against a forged `pending_removals` signal.
+  17. Carried, scoped out: the `RemovalRequired` WS event is still
+      unconsumed (no frontend WebSocket client exists at all).
+  18. Carried: no `values-prod-*.yaml`/CI overlay flips
+      `monitoring.prometheusRule.enabled=true` yet (ops task).
+  19. Carried: CI has no job rendering the Helm chart with
+      `monitoring.prometheusRule.enabled=true`/`serviceMonitor.enabled=true`.
+  20. Carried, doc-sync only: prd.md documents `key_packages.device_id` as
+      having `REFERENCES devices(id)`; the actual schema never had this FK.
+  21. Carried, real but scoped out: consumed `key_packages` rows are never
+      garbage-collected.
+  22. Carried, low-priority hardening: `GroupRepository::save` is a blind
+      `ON CONFLICT DO UPDATE` with no production caller today.
+  23. Carried, cosmetic: bare `var(--photon)` CSS custom property used
+      without a defined token in `LinkedDevicesPanel.tsx`/
+      `PendingRemovalBanner.tsx`.
+
+## Previous state (2026-09-09, cycle 464 — FEATURE: land cycles 462/463's orphaned WIP adding an MLS Remove commit stage/confirm/abort primitive (issue #2), fix 3 crypto-reviewer blockers before committing, commit b737b2c)
 
 - Mode selection: counter 463→464, 464 % 5 != 0 → FEATURE. **Working tree
   was NOT clean at session start** — the eighth+ occurrence of the
