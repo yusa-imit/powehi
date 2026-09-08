@@ -65,8 +65,9 @@ use crate::kem_credential;
 use crate::media;
 use crate::mls_group;
 use crate::mls_group::{
-    add_member, create_group, decrypt_message, encrypt_message, generate_identity,
-    generate_identity_from_keypair, generate_key_package_with_pq_ext, join_group, Identity,
+    abort_remove_member, add_member, confirm_remove_member, create_group, decrypt_message,
+    encrypt_message, generate_identity, generate_identity_from_keypair,
+    generate_key_package_with_pq_ext, join_group, stage_remove_member, Identity,
     POWEHI_PQ_KEM_EXT_TYPE, PQ_EXT_ENCAP_KEY_LEN, PQ_EXT_PAYLOAD_LEN,
 };
 use crate::opaque::{self, DefaultCipherSuite, EXPORT_KEY_LEN};
@@ -853,6 +854,110 @@ pub fn mls_add_member(
     js_obj(&[("welcome", bytes_js(&welcome))])
 }
 
+/// Stage a member removal by MLS leaf index. Does NOT advance the epoch yet —
+/// the commit is left pending in openmls until [`mls_remove_member_confirm`]
+/// or [`mls_remove_member_abort`] is called. See `stage_remove_member`'s doc
+/// comment in `mls_group.rs` for the full stage/confirm/abort contract and
+/// why the split exists (`max_past_epochs(0)` means merging a commit no peer
+/// ever accepted permanently wedges the group for this client).
+///
+/// Returns `{ commit: Uint8Array, priorEpoch: number }`. `priorEpoch` is the
+/// LOCAL MLS epoch before this call, for the caller's own bookkeeping only —
+/// it is **not** currently validated against the server's `groups.epoch`
+/// counter and **must not** be passed as `sendCommit`'s `expected_epoch` (the
+/// server epoch and the local MLS epoch diverge from the very first member
+/// add in this codebase today; reconciling them is a separate, out-of-scope
+/// follow-up).
+///
+/// STATUS: crypto primitive only. Nothing in this codebase currently consumes
+/// a Commit produced here — there is no `mls_process_commit` (or equivalent)
+/// export, `useMessages.ts` only handles Application envelopes, and
+/// `useWelcomePoller.ts` only handles Welcome messages. Do not wire this into
+/// any production UI or broadcast flow yet; see `stage_remove_member`'s doc
+/// comment in `mls_group.rs` for the full status note.
+///
+/// `leaf_index` MUST come from this identity's own live call to
+/// `mls_group_members` for this exact `group_id` (never from server-reported
+/// data such as a `device_id` — this codebase has no authenticated binding
+/// between an MLS leaf/credential and a server `device_id`, see
+/// `mls_group_members`'s doc comment). Removing the caller's own leaf index
+/// is rejected.
+///
+/// # Caller contract
+/// Every successful call MUST be followed by exactly one of
+/// [`mls_remove_member_confirm`] / [`mls_remove_member_abort`] for this
+/// `(identity_id, group_id)` before any other removal is staged.
+#[wasm_bindgen]
+pub fn mls_remove_member_stage(
+    identity_id: &str,
+    group_id: &str,
+    leaf_index: u32,
+) -> Result<JsValue, JsError> {
+    let (commit, prior_epoch) = MLS_CTX.with(|ctx| -> Result<(Vec<u8>, u64), JsError> {
+        let mut ctx = ctx.borrow_mut();
+        let c = ctx
+            .get_mut(identity_id)
+            .ok_or_else(|| js_err("unknown mls identity"))?;
+        let group = c
+            .groups
+            .get_mut(group_id)
+            .ok_or_else(|| js_err("unknown mls group"))?;
+        stage_remove_member(group, &c.identity.signer, leaf_index, &c.provider)
+            .map_err(|e| js_err(&e.to_string()))
+    })?;
+    js_obj(&[
+        ("commit", bytes_js(&commit)),
+        ("priorEpoch", JsValue::from_f64(prior_epoch as f64)),
+    ])
+}
+
+/// Merge the commit staged by [`mls_remove_member_stage`], advancing the
+/// group to the next epoch. Call this only after the Delivery Service has
+/// confirmed the staged commit was accepted — see `confirm_remove_member`'s
+/// doc comment in `mls_group.rs`.
+///
+/// STATUS: crypto primitive only — see [`mls_remove_member_stage`]'s doc
+/// comment; nothing in this codebase currently broadcasts or confirms a
+/// staged commit against a Delivery Service, so this export is not yet wired
+/// into any production flow.
+#[wasm_bindgen]
+pub fn mls_remove_member_confirm(identity_id: &str, group_id: &str) -> Result<(), JsError> {
+    MLS_CTX.with(|ctx| -> Result<(), JsError> {
+        let mut ctx = ctx.borrow_mut();
+        let c = ctx
+            .get_mut(identity_id)
+            .ok_or_else(|| js_err("unknown mls identity"))?;
+        let group = c
+            .groups
+            .get_mut(group_id)
+            .ok_or_else(|| js_err("unknown mls group"))?;
+        confirm_remove_member(group, &c.provider).map_err(|e| js_err(&e.to_string()))
+    })
+}
+
+/// Discard the commit staged by [`mls_remove_member_stage`] without merging
+/// it, returning the group to its pre-stage state (epoch unchanged, the
+/// targeted member still present). Call this when the Delivery Service
+/// rejects (or never confirms) the staged commit — see
+/// `abort_remove_member`'s doc comment in `mls_group.rs`.
+///
+/// STATUS: crypto primitive only — see [`mls_remove_member_stage`]'s doc
+/// comment.
+#[wasm_bindgen]
+pub fn mls_remove_member_abort(identity_id: &str, group_id: &str) -> Result<(), JsError> {
+    MLS_CTX.with(|ctx| -> Result<(), JsError> {
+        let mut ctx = ctx.borrow_mut();
+        let c = ctx
+            .get_mut(identity_id)
+            .ok_or_else(|| js_err("unknown mls identity"))?;
+        let group = c
+            .groups
+            .get_mut(group_id)
+            .ok_or_else(|| js_err("unknown mls group"))?;
+        abort_remove_member(group, &c.provider).map_err(|e| js_err(&e.to_string()))
+    })
+}
+
 /// Join a group from a Welcome message.
 ///
 /// Returns `{ groupId: string }`.
@@ -1348,6 +1453,15 @@ struct MlsMemberInfo {
     /// `None` when the member's credential is not a `Basic` credential — see
     /// `member_credential_identity_hex`.
     credential_identity_hex: Option<String>,
+    /// True iff this row is the calling identity's own leaf in this group.
+    ///
+    /// At most one row per call has this set — never "exactly one". It is
+    /// `true` for zero rows when the calling identity's own leaf has already
+    /// been removed from the group: a stale/evicted handle's `members()` no
+    /// longer yields its own leaf, while `own_leaf_index()` still reports the
+    /// index it used to occupy, so nothing matches. See
+    /// `test_mls_group_members_inner_evicted_caller_has_no_self_row`.
+    is_self: bool,
 }
 
 /// Native-testable core of `mls_group_members`. See the `#[wasm_bindgen]`
@@ -1362,6 +1476,7 @@ fn mls_group_members_inner(
         let ctx = ctx.borrow();
         let c = ctx.get(identity_id).ok_or("unknown mls identity")?;
         let group = c.groups.get(group_id).ok_or("unknown mls group")?;
+        let own_leaf = group.own_leaf_index().u32();
         Ok(group
             .members()
             .map(|member| {
@@ -1377,6 +1492,7 @@ fn mls_group_members_inner(
                     leaf_index,
                     sig_key_hex,
                     credential_identity_hex,
+                    is_self: leaf_index == own_leaf,
                 }
             })
             .collect())
@@ -1386,14 +1502,24 @@ fn mls_group_members_inner(
 /// Get public identity info for all current members of an MLS group.
 ///
 /// Returns a JS Array of `{ leafIndex: number, sigKeyHex: string,
-/// credentialIdentityHex: string | null }` objects. `sigKeyHex` is the
-/// member's Ed25519 signature public key as a lowercase hex string.
-/// `credentialIdentityHex` is the member's `BasicCredential` identity
-/// rendered in the same canonical opaque-id form used by `group_id_hex`
-/// (dashed UUID form for 16-byte ids, plain hex otherwise); it is `null` for
-/// any non-Basic credential type — a peer's credential is untrusted external
-/// data arriving via a Welcome / group state, so a non-Basic type is never
-/// mis-decoded as an identity.
+/// credentialIdentityHex: string | null, isSelf: boolean }` objects.
+/// `sigKeyHex` is the member's Ed25519 signature public key as a lowercase
+/// hex string. `credentialIdentityHex` is the member's `BasicCredential`
+/// identity rendered in the same canonical opaque-id form used by
+/// `group_id_hex` (dashed UUID form for 16-byte ids, plain hex otherwise); it
+/// is `null` for any non-Basic credential type — a peer's credential is
+/// untrusted external data arriving via a Welcome / group state, so a
+/// non-Basic type is never mis-decoded as an identity.
+///
+/// `isSelf` is `true` for **at most one** row — the calling identity's own
+/// leaf — so a UI can hide a self-remove action rather than relying on
+/// `mls_remove_member_stage` failing. It is deliberately NOT "exactly one":
+/// when the calling identity's own leaf has already been removed from the
+/// group (this handle was evicted by a peer and has processed/merged that
+/// removal commit), `members()` no longer yields its leaf at all, so ZERO
+/// rows have `isSelf` set. A caller must therefore never assume a self row
+/// exists — e.g. never `find(isSelf)` and unwrap the result. See
+/// `test_mls_group_members_inner_evicted_caller_has_no_self_row`.
 ///
 /// IMPORTANT — `credentialIdentityHex` is NOT a server `device_id` (see
 /// `member_credential_identity_hex`'s doc comment for why: in this
@@ -1417,6 +1543,7 @@ pub fn mls_group_members(identity_id: &str, group_id: &str) -> Result<JsValue, J
             ("leafIndex", JsValue::from_f64(member.leaf_index as f64)),
             ("sigKeyHex", JsValue::from_str(&member.sig_key_hex)),
             ("credentialIdentityHex", credential_identity_value),
+            ("isSelf", JsValue::from_bool(member.is_self)),
         ])?;
         arr.push(&obj);
     }
@@ -3219,6 +3346,161 @@ mod tests {
                 m.sig_key_hex
             );
         }
+
+        // In THIS scenario — the caller (alice) is still a member of the group
+        // — exactly one row is her own leaf (she created the group, so her leaf
+        // index is 0) and no other row is. This is a scenario-specific
+        // assertion, NOT the general contract: `is_self` is true for AT MOST
+        // one row, and for ZERO rows once the caller's own leaf has been
+        // removed from the group. That evicted-caller case is covered by
+        // `test_mls_group_members_inner_evicted_caller_has_no_self_row`.
+        let self_rows: Vec<&MlsMemberInfo> = members.iter().filter(|m| m.is_self).collect();
+        assert_eq!(
+            self_rows.len(),
+            1,
+            "with the caller still a member, exactly one row must have is_self == true"
+        );
+        assert_eq!(
+            self_rows[0].leaf_index, 0,
+            "the self row must be alice's own leaf index (0, the group creator)"
+        );
+
+        mls_clear_session();
+    }
+
+    /// `is_self` is true for **at most one** row, not exactly one — the
+    /// zero-row case. crypto-reviewer F8: the previous doc claimed "true for
+    /// exactly one row", which is false for a handle whose own leaf has been
+    /// removed from the group. `mls_group_members_inner` derives `is_self` by
+    /// matching `own_leaf_index()` against each row from `members()`; once the
+    /// caller's leaf is removed, `members()` stops yielding it while
+    /// `own_leaf_index()` still reports the index it used to occupy, so
+    /// NOTHING matches and there is no self row at all.
+    ///
+    /// This matters because a UI that does `members.find(m => m.isSelf)` and
+    /// unwraps the result would break exactly when a device has been evicted —
+    /// precisely the security-relevant moment (issue #2). Pinned here so the
+    /// corrected "at most one" doc cannot silently regress.
+    ///
+    /// The scenario is driven entirely through real MLS operations (no poking
+    /// at private state, per the `add-mls-test` skill): alice creates a group
+    /// and adds bob, alice stages+confirms bob's removal, and bob's own handle
+    /// processes and merges the very commit that evicts him — the same thing
+    /// that happens on a real network, since the DS broadcasts a removal commit
+    /// to the whole prior epoch's membership, the removed device included.
+    #[test]
+    fn test_mls_group_members_inner_evicted_caller_has_no_self_row() {
+        let alice_bytes: [u8; 16] = [0xa1; 16];
+        let bob_bytes: [u8; 16] = [0xb2; 16];
+
+        let alice_provider = OpenMlsRustCrypto::default();
+        let alice = generate_identity(&alice_bytes, &alice_provider).unwrap();
+        let mut alice_group = create_group(&alice, &alice_provider).unwrap();
+
+        let bob_provider = OpenMlsRustCrypto::default();
+        let bob = generate_identity(&bob_bytes, &bob_provider).unwrap();
+        let bob_kp = generate_key_package(&bob, &bob_provider).unwrap();
+
+        let welcome = add_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+        let bob_group = join_group(&welcome, &bob_provider).unwrap();
+
+        // Sanity / positive control: while bob IS a member, his own handle
+        // reports exactly one self row. This proves the zero-row result below
+        // is caused by the eviction, not by a broken fixture.
+        let bob_group_id = group_id_hex(&bob_group);
+        let bob_ctx_id = next_id();
+        MLS_CTX.with(|ctx| {
+            let mut groups = HashMap::new();
+            groups.insert(bob_group_id.clone(), bob_group);
+            ctx.borrow_mut().insert(
+                bob_ctx_id.clone(),
+                MlsContext {
+                    identity: bob,
+                    provider: bob_provider,
+                    groups,
+                },
+            );
+        });
+        let before = mls_group_members_inner(&bob_ctx_id, &bob_group_id).unwrap();
+        assert_eq!(before.len(), 2, "alice and bob must both be members here");
+        assert_eq!(
+            before.iter().filter(|m| m.is_self).count(),
+            1,
+            "positive control: a still-joined caller must have exactly one self row"
+        );
+
+        // Alice evicts bob. Read bob's leaf from alice's roster — never a literal.
+        let bob_leaf = alice_group
+            .members()
+            .find(|m| {
+                BasicCredential::try_from(m.credential.clone())
+                    .map(|basic| basic.identity() == bob_bytes)
+                    .unwrap_or(false)
+            })
+            .map(|m| m.index.u32())
+            .expect("bob must be in alice's roster before removal");
+        let (commit_bytes, _prior_epoch) =
+            stage_remove_member(&mut alice_group, &alice.signer, bob_leaf, &alice_provider)
+                .unwrap();
+        confirm_remove_member(&mut alice_group, &alice_provider).unwrap();
+
+        // Bob's own handle processes and merges the commit that evicts him.
+        MLS_CTX.with(|ctx| {
+            let mut ctx = ctx.borrow_mut();
+            let c = ctx.get_mut(&bob_ctx_id).expect("bob context must exist");
+            let group = c
+                .groups
+                .get_mut(&bob_group_id)
+                .expect("bob group must exist");
+            let commit_in = MlsMessageIn::tls_deserialize_exact(&commit_bytes).unwrap();
+            let commit_pm: ProtocolMessage = commit_in.try_into_protocol_message().unwrap();
+            let processed = group.process_message(&c.provider, commit_pm).unwrap();
+            match processed.into_content() {
+                ProcessedMessageContent::StagedCommitMessage(staged) => {
+                    group.merge_staged_commit(&c.provider, *staged).unwrap();
+                }
+                _ => panic!("expected a staged commit message"),
+            }
+            assert!(
+                !group.is_active(),
+                "bob's handle must be Inactive after merging the commit that removed his leaf"
+            );
+        });
+
+        // THE POINT: zero self rows, not one — and the call must still succeed
+        // rather than erroring, since a UI may legitimately render the roster of
+        // a group it was just evicted from.
+        let after = mls_group_members_inner(&bob_ctx_id, &bob_group_id).unwrap();
+        assert_eq!(
+            after.iter().filter(|m| m.is_self).count(),
+            0,
+            "an evicted caller's handle must report ZERO is_self rows — this is why the \
+             contract is 'at most one', not 'exactly one'"
+        );
+
+        // Negative space: bob's leaf is genuinely gone from the roster, and the
+        // remaining roster is alice alone (so the zero-self-row result is a real
+        // eviction, not an empty/garbage member list).
+        assert!(
+            after.iter().all(|m| m.leaf_index != bob_leaf),
+            "bob's leaf index must no longer appear in the roster after his eviction"
+        );
+        assert_eq!(
+            after.len(),
+            1,
+            "only alice must remain in the roster after bob's eviction"
+        );
+        assert_eq!(
+            after[0].credential_identity_hex.as_deref(),
+            Some(bytes_to_opaque_id_hex(&alice_bytes).as_str()),
+            "the sole remaining member must be alice"
+        );
 
         mls_clear_session();
     }

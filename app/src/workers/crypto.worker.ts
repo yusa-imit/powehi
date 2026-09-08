@@ -57,6 +57,46 @@ export class MlsImportRejectedError extends Error {
 
 // prd.md §5.3 Phase B — extract ML-KEM encap key from a peer's KeyPackage extension.
 export type MlsPqEncapKeyResult = { encapKey: Uint8Array; signature: Uint8Array };
+// MLS Remove Commit stage/confirm/abort trio (issue #2, reworked after a
+// crypto-reviewer NEEDS-REWORK). mls_remove_member_stage creates a Remove
+// commit WITHOUT merging it into local MLS state. openmls is configured with
+// max_past_epochs(0), so merging a commit locally before the Delivery
+// Service has actually accepted it is UNRECOVERABLE if the send is then
+// rejected or lost — the client would be permanently wedged in an epoch no
+// peer ever reached. The caller MUST follow a stage call with exactly ONE of
+// mlsRemoveMemberConfirm (the DS accepted the commit) or
+// mlsRemoveMemberAbort (the DS rejected it / the send failed). While a
+// commit is pending (between stage and confirm/abort), further MLS
+// operations on that group are blocked by openmls until one of the two is
+// called.
+//
+// priorEpoch is the LOCAL MLS group epoch immediately before this stage
+// call, returned for the caller's own bookkeeping and for potential future
+// use once a commit-broadcast / epoch-reconciliation design exists —
+// designing that reconciliation is explicitly OUT OF SCOPE for this pass,
+// tracked as a follow-up. It is NOT currently validated against the
+// server's `groups.epoch` counter and MUST NOT be passed as sendCommit's
+// `expectedEpoch`: the server counter (group.rs, starts at 0) is never
+// advanced by the member-add flow (group_service.rs::add_member only writes
+// group_members.joined_at_epoch) — the only thing that bumps it is
+// messaging_service.rs::send_commit's own compare-and-swap, and no
+// production frontend code calls sendCommit at all today (only
+// app/src/api/messages.ts's definition and messages.test.ts reference it).
+// A real caller's local MLS epoch and the server counter therefore diverge
+// from the very first mlsAddMember.
+//
+// STATUS — crypto PRIMITIVE ONLY, not wired to anything: there is no
+// peer-side commit-processing path anywhere in this codebase — no
+// mls_process_commit (or equivalent) WASM export, useMessages.ts handles
+// only Application-type envelopes, and useWelcomePoller.ts handles only
+// Welcome messages. Nothing consumes a Commit, so the Post-Compromise
+// Security property the Rust unit test proves holds inside that test only,
+// NOT yet for the running application. These methods MUST NOT be wired into
+// any production UI or broadcast flow until BOTH (a) the epoch-
+// reconciliation gap above is resolved AND (b) a commit-processing consumer
+// exists — building that pipeline is a separate, much larger follow-up
+// epic, out of scope here.
+export type MlsRemoveStageResult = { commit: Uint8Array; priorEpoch: number };
 export type MlsWelcomeResult = { welcome: Uint8Array };
 export type MlsCiphertextResult = { ciphertext: Uint8Array };
 export type MlsPlaintextResult = { plaintext: Uint8Array };
@@ -76,6 +116,14 @@ export type MlsGroupMember = {
 	leafIndex: number;
 	sigKeyHex: string;
 	credentialIdentityHex: string | null;
+	// At most one row has isSelf === true — the calling identity's own leaf in
+	// this group, if it still has one. Zero rows have isSelf === true once the
+	// caller's own leaf has already been removed from the group: a stale
+	// handle's member list then no longer includes their leaf at all, so
+	// there is nothing to mark. Lets a UI hide a self-remove action instead of
+	// relying on the WASM call failing (mlsRemoveMemberStage rejects removing
+	// your own leaf index).
+	isSelf: boolean;
 };
 export type MlsSafetyNumberResult = { safetyNumber: string };
 // ADR-0003 Phase B: opaque-handle types — raw key bytes stay inside the worker.
@@ -135,6 +183,13 @@ interface WasmModule {
 	mls_get_key_package: (identityId: string) => MlsKeyPackageResult;
 	mls_create_group: (identityId: string) => MlsGroupResult;
 	mls_add_member: (identityId: string, groupId: string, keyPackage: Uint8Array) => MlsWelcomeResult;
+	mls_remove_member_stage: (
+		identityId: string,
+		groupId: string,
+		leafIndex: number,
+	) => MlsRemoveStageResult;
+	mls_remove_member_confirm: (identityId: string, groupId: string) => void;
+	mls_remove_member_abort: (identityId: string, groupId: string) => void;
 	mls_join_group: (identityId: string, welcome: Uint8Array) => MlsGroupResult;
 	mls_encrypt: (identityId: string, groupId: string, plaintext: Uint8Array) => MlsCiphertextResult;
 	mls_decrypt: (identityId: string, groupId: string, ciphertext: Uint8Array) => MlsPlaintextResult;
@@ -584,6 +639,71 @@ const api = {
 	},
 
 	/**
+	 * Stage a Remove commit for a group member by leaf index, WITHOUT merging
+	 * it into local MLS state — this is the first step of what eventually
+	 * restores Post-Compromise Security for an evicted device, once a
+	 * commit-processing consumer exists (see STATUS below). The caller MUST
+	 * follow this call with exactly ONE of `mlsRemoveMemberConfirm` (the
+	 * Delivery Service accepted the commit) or `mlsRemoveMemberAbort` (the DS
+	 * rejected it, or the send otherwise failed) — see `MlsRemoveStageResult`'s
+	 * doc comment for why merging early is UNRECOVERABLE (openmls is
+	 * configured with `max_past_epochs(0)`: a client that merged into an
+	 * epoch no peer reached is permanently wedged). While a commit staged by
+	 * this call is pending (i.e. before confirm/abort is called), further MLS
+	 * operations on this group are blocked by openmls.
+	 *
+	 * `leafIndex` MUST come from this identity's own `mlsGroupMembers()` call
+	 * for this exact `groupId` — never from server-reported data such as a
+	 * device_id (there is no authenticated binding between an MLS
+	 * leaf/credential and a server device_id). Removing your own leaf index
+	 * is rejected by the WASM layer.
+	 *
+	 * Returns { commit, priorEpoch } — see `MlsRemoveStageResult`'s doc
+	 * comment for what `priorEpoch` is (and is NOT) currently good for.
+	 *
+	 * STATUS: crypto PRIMITIVE ONLY — see `MlsRemoveStageResult`'s doc
+	 * comment. MUST NOT be wired into any production UI or broadcast flow yet.
+	 */
+	async mlsRemoveMemberStage(
+		identityId: string,
+		groupId: string,
+		leafIndex: number,
+	): Promise<MlsRemoveStageResult> {
+		const wasm = await getWasm();
+		return wasm.mls_remove_member_stage(identityId, groupId, leafIndex);
+	},
+
+	/**
+	 * Confirm a previously staged Remove commit — call this once the
+	 * Delivery Service has ACCEPTED the commit. Merges the pending commit
+	 * into local MLS state (`merge_pending_commit`) and replaces/discards
+	 * the prior epoch's secrets. Calling this with no outstanding staged
+	 * commit for this group is rejected by the WASM layer.
+	 *
+	 * STATUS: crypto PRIMITIVE ONLY — see `MlsRemoveStageResult`'s doc
+	 * comment. MUST NOT be wired into any production UI or broadcast flow yet.
+	 */
+	async mlsRemoveMemberConfirm(identityId: string, groupId: string): Promise<void> {
+		const wasm = await getWasm();
+		wasm.mls_remove_member_confirm(identityId, groupId);
+	},
+
+	/**
+	 * Abort a previously staged Remove commit — call this if the Delivery
+	 * Service REJECTED the commit, or the send otherwise failed. Discards
+	 * the pending commit without merging it, leaving local MLS state at the
+	 * prior epoch. Calling this with no outstanding staged commit for this
+	 * group is rejected by the WASM layer.
+	 *
+	 * STATUS: crypto PRIMITIVE ONLY — see `MlsRemoveStageResult`'s doc
+	 * comment. MUST NOT be wired into any production UI or broadcast flow yet.
+	 */
+	async mlsRemoveMemberAbort(identityId: string, groupId: string): Promise<void> {
+		const wasm = await getWasm();
+		wasm.mls_remove_member_abort(identityId, groupId);
+	},
+
+	/**
 	 * Join an MLS group from a Welcome message.
 	 * Returns { groupId } — the same groupId used by the creator.
 	 */
@@ -688,11 +808,16 @@ const api = {
 
 	/**
 	 * Get public identity info for all current members of an MLS group.
-	 * Returns an array of { leafIndex, sigKeyHex, credentialIdentityHex } objects.
-	 * sigKeyHex is the Ed25519 signature public key as hex — public data only.
-	 * credentialIdentityHex is the member's MLS BasicCredential identity bytes
-	 * (dashed opaque-id-style hex), or null if their credential is not Basic.
-	 * See MlsGroupMember's doc comment — this is NOT the server's device_id.
+	 * Returns an array of { leafIndex, sigKeyHex, credentialIdentityHex, isSelf }
+	 * objects. sigKeyHex is the Ed25519 signature public key as hex — public
+	 * data only. credentialIdentityHex is the member's MLS BasicCredential
+	 * identity bytes (dashed opaque-id-style hex), or null if their credential
+	 * is not Basic. isSelf is true for AT MOST one row — the calling
+	 * identity's own leaf in this group, if it still has one. Zero rows have
+	 * isSelf === true once the caller's own leaf has already been removed
+	 * from the group (their stale handle's member list no longer includes
+	 * it). See MlsGroupMember's doc comment — this is NOT the server's
+	 * device_id.
 	 */
 	async mlsGroupMembers(identityId: string, groupId: string): Promise<MlsGroupMember[]> {
 		const wasm = await getWasm();

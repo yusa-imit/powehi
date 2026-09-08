@@ -232,6 +232,98 @@ describe("wrapWithPersistence — synchronous persist bookkeeping", () => {
 		const stored = await db.identity.get(1);
 		expect(stored?.mlsProviderStateB64).toBeDefined();
 	});
+
+	it("RED 2 (remove-confirm): a failed persist REJECTS mlsRemoveMemberConfirm rather than releasing the merged state unsaved", async () => {
+		await db.identity.put({ id: 1, deviceId: "dev-remove-confirm-persist-fail" });
+		const raw = fakeRaw({
+			clearSessionState: async () => {},
+			mlsRemoveMemberConfirm: async () => undefined,
+			mlsExportState: async () => {
+				throw new Error("quota_exceeded");
+			},
+		});
+		const proxy = wrapWithPersistence(raw);
+		await proxy.clearSessionState();
+
+		// The confirm's merged/advanced state must NOT be released as "done"
+		// while it failed to persist — same persist-before-release invariant as
+		// every other SYNC_FLUSH_ARG_METHODS entry (RED 2 above), pinned
+		// specifically for mlsRemoveMemberConfirm since a silently-swallowed
+		// failure here would let a later reload restore a pre-removal Dexie
+		// snapshot while the caller believes the removal is durably confirmed.
+		await expect(proxy.mlsRemoveMemberConfirm("id", "grp")).rejects.toThrow();
+	});
+});
+
+// crypto-reviewer finding F2 guard: EVERY ratchet-advancing / key-minting
+// worker method must be registered in SYNC_FLUSH_ARG_METHODS (useCryptoWorker.ts)
+// so its persist completes before its result is released to the caller. This
+// is a data-driven behavioral test, not an assertion on the set's literal
+// contents: for each method below we build a fakeRaw whose method records
+// "<name>:call" and whose mlsExportState records "mlsExportState:call", call
+// it through the wrapped proxy, and assert the call happened strictly BEFORE
+// the export/persist. If a new ratchet-advancing worker method is ever added
+// to crypto.worker.ts without also adding it here AND to
+// SYNC_FLUSH_ARG_METHODS, this test must fail — either because the new
+// method is missing from SYNC_FLUSH_METHODS_UNDER_TEST below (nothing
+// enforces that automatically — extend the list when you add a method) or,
+// if it's added here but not to the real SYNC_FLUSH_ARG_METHODS set, because
+// the wrapper won't call mlsExportState at all and the recorded order will be
+// just ["<name>:call"] instead of ["<name>:call", "mlsExportState:call"].
+describe("wrapWithPersistence — SYNC_FLUSH_ARG_METHODS completeness guard (crypto-reviewer F2)", () => {
+	beforeEach(async () => {
+		await db.identity.clear();
+		await db.identity.put({ id: 1, deviceId: "dev-flush-guard" });
+	});
+
+	function fakeRaw(overrides: Record<string, unknown>): Comlink.Remote<CryptoWorkerApi> {
+		return {
+			encryptDbField: async (v: string) => v,
+			decryptDbField: async (v: string) => v,
+			...overrides,
+		} as unknown as Comlink.Remote<CryptoWorkerApi>;
+	}
+
+	// Every current member of SYNC_FLUSH_ARG_METHODS, plus the args each needs
+	// to be called with `identityId` ("identity-x") as args[0] — the
+	// precondition SYNC_FLUSH_ARG_METHODS documents for all its entries.
+	const SYNC_FLUSH_METHODS_UNDER_TEST: ReadonlyArray<{
+		name: string;
+		args: unknown[];
+	}> = [
+		{ name: "mlsEncrypt", args: ["identity-x", "group-x", new Uint8Array([1])] },
+		{ name: "mlsDecrypt", args: ["identity-x", "group-x", new Uint8Array([1])] },
+		{ name: "mlsCreateGroup", args: ["identity-x"] },
+		{ name: "mlsAddMember", args: ["identity-x", "group-x", new Uint8Array([1])] },
+		{ name: "mlsJoinGroup", args: ["identity-x", new Uint8Array([1])] },
+		{ name: "mlsGetKeyPackage", args: ["identity-x"] },
+		{ name: "mlsRemoveMemberStage", args: ["identity-x", "group-x", 0] },
+		{ name: "mlsRemoveMemberConfirm", args: ["identity-x", "group-x"] },
+		{ name: "mlsRemoveMemberAbort", args: ["identity-x", "group-x"] },
+	];
+
+	for (const { name, args } of SYNC_FLUSH_METHODS_UNDER_TEST) {
+		it(`${name} flushes to Dexie (mlsExportState) before its result is released`, async () => {
+			const order: string[] = [];
+			const raw = fakeRaw({
+				[name]: async (..._callArgs: unknown[]) => {
+					order.push(`${name}:call`);
+					return {};
+				},
+				mlsExportState: async (_id: string, generation: number) => {
+					order.push("mlsExportState:call");
+					return { stateBytes: new Uint8Array([1]), generation };
+				},
+			});
+
+			const proxy = wrapWithPersistence(raw);
+			// biome-ignore lint/suspicious/noExplicitAny: dynamic dispatch by method name across a heterogeneous arg-shape table
+			await (proxy as any)[name](...args);
+			order.push("wrapper:resolved");
+
+			expect(order).toEqual([`${name}:call`, "mlsExportState:call", "wrapper:resolved"]);
+		});
+	}
 });
 
 // A wedged crypto-worker call must degrade to a diagnosable rejection rather

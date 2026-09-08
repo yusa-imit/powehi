@@ -43,16 +43,28 @@ const mockWorker = {
 		{
 			leafIndex: 0,
 			sigKeyHex: "aa".repeat(64),
+			credentialIdentityHex: "aa-bb-cc-dd",
+			isSelf: true,
 		},
 		{
 			leafIndex: 1,
 			sigKeyHex: "bb".repeat(64),
+			credentialIdentityHex: "11-22-33-44",
+			isSelf: false,
 		},
 	],
 	mlsComputeSafetyNumber: async () => ({
 		safetyNumber:
 			"689053 337949 184798 288064 134849 362568 560227 765408 921198 315305 693006 807986",
 	}),
+	// MLS Remove stage/confirm/abort trio — crypto PRIMITIVE ONLY, not wired to
+	// any UI yet (see crypto.worker.ts MlsRemoveStageResult doc comment).
+	mlsRemoveMemberStage: async (_identityId: string, _groupId: string, _leafIndex: number) => ({
+		commit: new Uint8Array(200),
+		priorEpoch: 1,
+	}),
+	mlsRemoveMemberConfirm: async (_identityId: string, _groupId: string) => undefined,
+	mlsRemoveMemberAbort: async (_identityId: string, _groupId: string) => undefined,
 	dropDbKey: async () => {},
 	clearSessionState: async () => {},
 	mlKem768Keygen: async () => ({ encapKey: new Uint8Array(1184), decapKey: new Uint8Array(2400) }),

@@ -78,6 +78,22 @@ let workerProxy: Comlink.Remote<CryptoWorkerApi> | null = null;
  * persist to Dexie before the wrapped call resolves — rejecting if that
  * persist fails. In every one of these methods, `identityId` is the first
  * argument (args[0]).
+ *
+ * mlsRemoveMemberStage / mlsRemoveMemberConfirm / mlsRemoveMemberAbort
+ * (crypto.worker.ts's stage/confirm/abort Remove trio) are included for the
+ * same persist-before-release reason as every other entry here, each for a
+ * distinct piece of durable MLS state it mutates:
+ *   - mlsRemoveMemberConfirm calls merge_pending_commit and replaces/
+ *     discards epoch secrets — omitting it would let a page refresh right
+ *     after a removal restore a pre-removal Dexie snapshot, silently
+ *     reviving the evicted device in the local roster and rolling the
+ *     client back to a stale epoch out of sync with every peer that did
+ *     receive the removal.
+ *   - mlsRemoveMemberStage creates a pending commit and persists new key
+ *     material into the openmls store; mlsRemoveMemberAbort clears that
+ *     pending commit. Both mutate durable MLS state, so both must flush too
+ *     — otherwise a reload between stage and confirm/abort could resurrect
+ *     or lose a pending commit.
  */
 const SYNC_FLUSH_ARG_METHODS: ReadonlySet<string> = new Set([
 	"mlsEncrypt",
@@ -86,6 +102,9 @@ const SYNC_FLUSH_ARG_METHODS: ReadonlySet<string> = new Set([
 	"mlsAddMember",
 	"mlsJoinGroup",
 	"mlsGetKeyPackage",
+	"mlsRemoveMemberStage",
+	"mlsRemoveMemberConfirm",
+	"mlsRemoveMemberAbort",
 ]);
 
 /**
