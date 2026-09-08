@@ -152,3 +152,10 @@ powehi-webpush = { path = "crates/adapters/outbound/powehi-webpush" }
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+[profile.dev]
+# Limit debug info to line tables. The macOS default (split-debuginfo="unpacked")
+# keeps full debug info in per-crate object files, which grows target/deps into the
+# tens of GB (measured 2026-09: 138,469 .o files, 16.7 GB). Line tables still give
+# panic backtraces their file and line numbers.
+debug = "line-tables-only"
