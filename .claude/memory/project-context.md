@@ -24,7 +24,146 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-08, cycle 460 — STABILIZATION: land cycle 459's orphaned WIP wiring the group safety number into ChatLayout's InfoPanel, fix a real crypto-reviewer NEEDS-REWORK finding, commit 13243fb)
+## Current state (2026-09-08, cycle 461 — FEATURE: fix GitHub issue #6, `pnpm build:wasm` wrote to the wrong out-dir and Vite silently substituted a no-op crypto stub, commit 86ccec7)
+
+- Mode selection: counter 460→461, 461 % 5 != 0 → FEATURE. `gh run list
+  --limit 5` green on `main`, working tree clean at session start (no
+  orphaned WIP — first clean start in a while). `gh issue list --state
+  open` was NOT empty this time (8 open issues, several P0/P1) — FEATURE
+  mode's own instructions don't mandate an issue sweep, but a P1 bug
+  titled "pnpm build:wasm writes to the wrong out-dir; Vite silently
+  substitutes a no-op crypto stub" (issue #6) was serious enough (crypto
+  silently disabled with zero signal) to pull instead of a project-context
+  candidate.
+- Root cause confirmed by reading the code directly: root `package.json`'s
+  `build:wasm` ran `wasm-pack build ... --out-dir pkg` (relative to the
+  crate → `crates/client/powehi-crypto-wasm/pkg/`), but `app/vite.config.ts`'s
+  `powehiWasmStub()` plugin looks for `app/src/wasm/powehi_crypto_wasm.js`
+  and silently resolves to a no-op stub module when that's missing/stale.
+  Only `.github/workflows/ci-e2e-live.yml` happened to build to the right
+  place (`--out-dir ../../../app/src/wasm`); the documented root script
+  never did. README.md and `opaqueWasmZeroize.node.test.ts`'s comment
+  already stated the correct `app/src/wasm` target, so only the script
+  itself needed fixing, not those docs.
+- **Fix**: (1) aligned `build:wasm`'s `--out-dir` with CI's, verified by
+  actually running it (`export PATH="$HOME/.cargo/bin:$PATH"` was needed —
+  cargo isn't on the session's default PATH) — produced real artifacts
+  directly in `app/src/wasm/`, confirmed `mls_compute_group_safety_number`
+  (cycle 458's export) is present in the `.d.ts`. (2) Added a `buildStart`
+  hook to `powehiWasmStub` that warns loudly (`console.warn`) when the real
+  artifact is missing OR older (mtime) than any `.rs`/`Cargo.toml` under
+  the crate (bounded walk, 2000-entry limit, excludes `target`/`pkg`/
+  `pkg-node`/`tests`). Manually verified both warning paths fire via a real
+  `vite build` (moved `app/src/wasm` aside; then `touch`ed a crate source
+  file against a rebuilt artifact).
+- **security-auditor: PASS-with-nits, both nits fixed before commit.**
+  Confirmed the out-dir math is correct (`../../../app/src/wasm` from the
+  crate climbs client→crates→root then descends), confirmed the staleness
+  walk's shared `visited` counter genuinely bounds a symlink-loop/
+  pathological tree (not just decorative), confirmed no secrets/PII in the
+  warning strings, confirmed `powehiWasmStub` having no `apply` restriction
+  (unlike `sriPlugin`'s `apply: "build"`) predates this diff (`git log -p`)
+  and is out of scope. **Real nit (moderate): CI's `vitest` job
+  (`ci-frontend.yml`) only builds `build:wasm:node` (nodejs target →
+  `pkg-node`), never `build:wasm` (web target → `app/src/wasm`) — since
+  unit tests intentionally mock the Comlink worker boundary per
+  testing-conventions.md and never need real wasm — so the new warning
+  would otherwise fire on every green CI run and train reviewers to ignore
+  it.** Fixed by skipping the warning when `process.env.VITEST` is set
+  (Vitest sets this itself); reverified silent under `pnpm vitest run`
+  afterward. **Nit (low): the walk didn't exclude `tests/`, so editing only
+  wasm-bindgen integration tests (which don't affect the shipped lib
+  artifact) could trip a false "stale" warning** — fixed by adding `tests`
+  to the directory-name skip list alongside `target`/`pkg`/`pkg-node`.
+- **Full gate, re-run after every fix round**: no Rust logic changed (only
+  the `wasm-pack` invocation's `--out-dir` flag), so no `cargo
+  build/test/fmt/clippy` re-run needed — confirmed by `git status --short`
+  showing only `app/vite.config.ts` and `package.json` touched. Frontend:
+  `pnpm exec tsc --noEmit` clean, `biome check` clean on `vite.config.ts`,
+  `pnpm vitest run` 112 files/1600 tests green both before and after the
+  `VITEST`-skip fix (unaffected either way — the warning was never part of
+  any assertion).
+- No `crypto-reviewer` run: no crypto/MLS/OPAQUE primitive logic touched,
+  only the build-tooling path that loads the already-reviewed WASM module
+  and a diagnostic `console.warn`. No `threat-model-checker` run: no new
+  server-visible metadata, no trust-boundary change — this is dev/build
+  tooling visibility, not an architectural change.
+- Closed GitHub issue #6 with a summary of the fix and verification
+  (`gh issue close 6 --comment ...`) — confirmed fixed, not just filed
+  away; the four suggested-work checklist items in the issue are now all
+  addressed (out-dir fixed; docs were already correct so nothing to
+  change there; stub is loud in dev; staleness check added).
+- Committed `86ccec7` (`fix(frontend): point build:wasm at app/src/wasm,
+  warn on stub fallback`), 2 files changed, pushed clean (`5089b7c..86ccec7
+  main -> main`). `gh run list` showed all 3 checks `in_progress`
+  immediately after push — confirm green in a future session if not
+  already done.
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates (carried/updated):**
+  1. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  2. Carried, still explicitly BLOCKED: wiring
+     `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal` — needs F3 +
+     HMAC-vs-plain-SHA256 gate resolved first.
+  3. Carried: the `PendingRemovalBanner`'s local cross-check needs either
+     (a) binding `device_id` into the MLS credential identity at creation
+     time, or (b) leaning on §5.6 safety-number verification (now including
+     the group variant) as the real local trust anchor for T3, updating the
+     banner's copy accordingly.
+  4. **New, from this cycle's open-issue sweep — GitHub issue #2, P0-blocker,
+     security, frontend:** "Client cannot evict a compromised device: no MLS
+     Remove commit path, PCS unattainable." Matches long-carried candidate
+     (frontend has never constructed/landed a real MLS Remove Commit — see
+     old candidates about `removeMember` being server-bookkeeping-only).
+     This is the single most-flagged remaining gap across many past cycles;
+     worth prioritizing as the next FEATURE-mode item — needs crypto-lead/
+     mls-engineer scope (constructing and landing an MLS Remove Commit from
+     the frontend crypto worker), not a quick patch.
+  5. **New, from this cycle's open-issue sweep — GitHub issue #1,
+     P0-blocker, infra:** "Frontend SPA has no deployment path (no Pages
+     project, no deploy job)." Needs infra-lead scoping.
+  6. **New, from this cycle's open-issue sweep — GitHub issue #3, P1,
+     frontend:** "No WebSocket client: delivery runs on 3s polling despite
+     a working WS hub." Matches long-carried candidate (the `RemovalRequired`
+     WS event has been "still unconsumed" for many cycles because no
+     frontend WS client exists at all). Building one would also let the
+     `PendingRemovalBanner` (candidate #3) go live-push instead of
+     REST-poll-on-mount.
+  7. **New, from this cycle's open-issue sweep — GitHub issue #4, P1,
+     infra:** "Load testing never run against real infra (Phase 5 DoD still
+     open)."
+  8. **New, from this cycle's open-issue sweep — GitHub issue #5, P1,
+     infra, compliance:** "prod-ap-seoul is Hetzner Singapore, not Korea —
+     PIPA blocks KR-home PII." Compliance-sensitive, needs infra-lead +
+     likely a real region migration, not a quick fix.
+  9. **New, from this cycle's open-issue sweep — GitHub issue #7, P2, bug:**
+     "app/src-tauri/Cargo.lock is out of sync with its Cargo.toml; no CI
+     builds the Tauri shell."
+  10. **New, from this cycle's open-issue sweep — GitHub issue #8, P2,
+      documentation:** "Stale doc comment: handle_oracle_secret_token
+      claims a per-restart random key."
+  11. Carried, doc-sync only, low priority: prd.md §10's REST API list is
+      stale — missing `pending-removals` and `members`.
+  12. Carried: the `PendingRemovalBanner` confirm click is still the only
+      defense against a forged `pending_removals` signal.
+  13. Carried, scoped out: the `RemovalRequired` WS event is still
+      unconsumed (no frontend WebSocket client exists at all) — see #6
+      above, same root cause.
+  14. Carried: no `values-prod-*.yaml`/CI overlay flips
+      `monitoring.prometheusRule.enabled=true` yet (ops task).
+  15. Carried: CI has no job rendering the Helm chart with
+      `monitoring.prometheusRule.enabled=true`/`serviceMonitor.enabled=true`.
+  16. Carried, doc-sync only: prd.md documents `key_packages.device_id` as
+      having `REFERENCES devices(id)`; the actual schema never had this FK.
+  17. Carried, real but scoped out: consumed `key_packages` rows are never
+      garbage-collected.
+  18. Carried, low-priority hardening: `GroupRepository::save` is a blind
+      `ON CONFLICT DO UPDATE` with no production caller today.
+  19. Carried, cosmetic: bare `var(--photon)` CSS custom property used
+      without a defined token in `LinkedDevicesPanel.tsx`/
+      `PendingRemovalBanner.tsx`.
+
+## Previous state (2026-09-08, cycle 460 — STABILIZATION: land cycle 459's orphaned WIP wiring the group safety number into ChatLayout's InfoPanel, fix a real crypto-reviewer NEEDS-REWORK finding, commit 13243fb)
 
 - Mode selection: counter 459→460, 460 % 5 == 0 → STABILIZATION. `gh run
   list --limit 5` green on `main`, `gh issue list --state open` empty.
