@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
@@ -9,7 +9,78 @@ import { defineConfig } from "vitest/config";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const WASM_REAL_PATH = join(__dirname, "src/wasm/powehi_crypto_wasm.js");
+const WASM_CRATE_DIR = join(__dirname, "../crates/client/powehi-crypto-wasm");
 const WASM_STUB_ID = "\0virtual:powehi-wasm-stub";
+// Bounds the staleness-check walk (issue #6) — the crate's own source tree is
+// two orders of magnitude smaller than this; a runaway walk here would mean a
+// symlink loop or a misconfigured WASM_CRATE_DIR, not real crate growth.
+const STALENESS_WALK_FILE_LIMIT = 2000;
+
+// Latest mtime (ms) across the crate's Cargo.toml/build.rs/src/** — the
+// inputs that determine whether a built WASM artifact is up to date. Returns
+// null if the crate dir is missing (shouldn't happen from a real checkout,
+// but this check must never itself crash `vite dev`/`vitest`).
+function latestWasmCrateSourceMtimeMs(): number | null {
+	if (!existsSync(WASM_CRATE_DIR)) return null;
+	let latest = 0;
+	let visited = 0;
+	function walk(dir: string): void {
+		for (const entry of readdirSync(dir, { withFileTypes: true })) {
+			if (visited >= STALENESS_WALK_FILE_LIMIT) return;
+			visited += 1;
+			const full = join(dir, entry.name);
+			if (entry.isDirectory()) {
+				// tests/ is a separate wasm-bindgen test target — editing it doesn't
+				// change the shipped lib artifact, so it's excluded from staleness.
+				if (
+					entry.name === "target" ||
+					entry.name === "pkg" ||
+					entry.name === "pkg-node" ||
+					entry.name === "tests"
+				)
+					continue;
+				walk(full);
+			} else if (entry.name.endsWith(".rs") || entry.name === "Cargo.toml") {
+				const mtime = statSync(full).mtimeMs;
+				if (mtime > latest) latest = mtime;
+			}
+		}
+	}
+	walk(WASM_CRATE_DIR);
+	return latest > 0 ? latest : null;
+}
+
+// Loud, once-per-process signal for the failure mode issue #6 documented:
+// a missing or stale WASM artifact makes every OPAQUE/MLS call silently
+// no-op via the stub below, with no build error and no other warning.
+//
+// Skipped under Vitest: per testing-conventions.md, unit tests mock the
+// Comlink worker boundary and never exercise the real WASM module, and CI's
+// `vitest` job (ci-frontend.yml) intentionally only builds the `--target
+// nodejs` artifact (for wasm-bindgen glue tests), never `app/src/wasm` — so
+// this warning would otherwise fire on every green CI run and train
+// reviewers to ignore it, defeating its purpose for the cases (dev server,
+// `vite build`) it actually matters for.
+function warnIfWasmArtifactMissingOrStale(): void {
+	if (process.env.VITEST) return;
+	if (!existsSync(WASM_REAL_PATH)) {
+		console.warn(
+			"[powehi-wasm-stub] app/src/wasm/powehi_crypto_wasm.js not found — " +
+				"every OPAQUE/MLS call will silently no-op. Run `pnpm build:wasm` " +
+				"from the repo root before testing real crypto flows.",
+		);
+		return;
+	}
+	const artifactMtime = statSync(WASM_REAL_PATH).mtimeMs;
+	const sourceMtime = latestWasmCrateSourceMtimeMs();
+	if (sourceMtime !== null && sourceMtime > artifactMtime) {
+		console.warn(
+			"[powehi-wasm-stub] app/src/wasm/powehi_crypto_wasm.js is older than " +
+				"crates/client/powehi-crypto-wasm's sources — the loaded WASM build " +
+				"may be missing recent exports. Run `pnpm build:wasm` to refresh it.",
+		);
+	}
+}
 
 // Resolves the wasm-pack JS glue to a no-op virtual module when the artifact
 // is absent (CI without the wasm-build step, or fresh checkout).
@@ -19,6 +90,9 @@ function powehiWasmStub(): Plugin {
 	return {
 		name: "powehi-wasm-stub",
 		enforce: "pre",
+		buildStart() {
+			warnIfWasmArtifactMissingOrStale();
+		},
 		resolveId(id: string) {
 			if (id.includes("powehi_crypto_wasm") && !existsSync(WASM_REAL_PATH)) {
 				return WASM_STUB_ID;
