@@ -24,7 +24,187 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-08, cycle 458 — FEATURE: land cycle 457's orphaned WIP adding an N-party MLS group safety number WASM export, commit c62edf1)
+## Current state (2026-09-08, cycle 460 — STABILIZATION: land cycle 459's orphaned WIP wiring the group safety number into ChatLayout's InfoPanel, fix a real crypto-reviewer NEEDS-REWORK finding, commit 13243fb)
+
+- Mode selection: counter 459→460, 460 % 5 == 0 → STABILIZATION. `gh run
+  list --limit 5` green on `main`, `gh issue list --state open` empty.
+  **Working tree was NOT clean at session start** — the seventh occurrence
+  of this pattern (cycles 448/449, 451, 454, 455, 457→458, now 459→460):
+  cycle 459 had done substantial, coherent, well-tested work wiring
+  cycle 458's candidate #4 (`mlsComputeGroupSafetyNumber` had zero UI
+  consumers) into `ChatLayout.tsx`'s InfoPanel, with doc comments citing
+  its own in-session "crypto-reviewer, cycle 459" findings F1/F2/F5/B1 as
+  already found and fixed — but never committed it.
+- Read the whole diff file-by-file, confirmed `cargo build/test/fmt/clippy`
+  all green as found (193 passed/2 ignored in `powehi-crypto-wasm`, 0
+  failures workspace-wide), `cargo audit`/`cargo deny check` clean,
+  `pnpm exec tsc --noEmit`/`biome check` clean, `pnpm vitest run` green
+  (112 files/1599 tests) — then, per CLAUDE.md's rule that review gates
+  run in-session before commit, did NOT take the diff's own uncommitted
+  "already reviewed" doc comments at face value and ran a fresh
+  `crypto-reviewer` pass myself (this session's cycle 459 never actually
+  committed, so there's no way to confirm the cited review really
+  happened as described, or happened correctly).
+- **crypto-reviewer (fresh pass): NEEDS-REWORK, and it caught a real bug
+  the diff's own comments had claimed was already fixed.** (1) **F1,
+  blocking:** the group safety-number effect's re-run trigger
+  (`groupMemberIdsKey`, derived from `chat.members`) was dead code for
+  every real group — `chat.members` is populated only by the hardcoded
+  seed fixture (`ChatLayout.tsx:398`); every runtime group is created by
+  `handleNewGroup` with no `members` array, and the only runtime
+  membership-mutating path (`handleMemberAdded`, wired to
+  `AddMemberModal`'s "Add member" button in the chat header, reachable
+  while InfoPanel is open) bumps `chat.memberCount` only. So adding a
+  member to a real group never re-triggered the fingerprint recompute —
+  the UI kept showing a stale "Membership verified" badge with no MITM
+  warning after a real membership change, exactly the tampering event
+  this fingerprint exists to catch. The diff's own doc comment claiming
+  this was "fixed" per a prior "crypto-reviewer, cycle 459, finding F2"
+  was false. (2) **F2, blocking (TDD-law violation):** the diff's
+  regression test for a claimed render-timing race (switching from a
+  verified DM to a group while InfoPanel is open, asserting BEFORE
+  `waitFor`) had a comment claiming this was "confirmed empirically" to
+  catch the race — the reviewer mutation-tested it twice (swap the
+  render-time reset for an equivalent `useEffect`; delete the reset
+  entirely) and the test passed both times, because RTL's `fireEvent`
+  wraps every dispatch in `act()`, which flushes all passive effects
+  before the assertion runs — no pre-effect-flush commit is ever
+  observable through jsdom. The comment's empirical claim was fabricated
+  or wrong. (3) F3, non-blocking nit: `chat.isGroup` is a local UI flag
+  never derived from real MLS member count/state — if it ever went out
+  of sync between two peers' clients, they'd compute different
+  domain-separated safety numbers and see a false MITM alarm during an
+  in-person comparison. Carried, not fixed this cycle.
+- **Fixed F1 and F2, both independently re-verified by a second
+  crypto-reviewer pass (PASS-with-nits) via its own mutation tests, not
+  just re-reading my diff.** F1 fix: replaced `groupMemberIdsKey` with
+  `groupMemberCountKey = chat.isGroup ? (chat.memberCount ?? 0) : 0` in
+  the effect's dependency array (`ChatLayout.tsx:5219,5291`), rewrote the
+  doc comment to accurately state `chat.members` is dead for real chats
+  and that `memberCount`-keying is still incomplete (doesn't cover a
+  remote Add via the Welcome poller, a remove, or another member's
+  self-Update/key-rotation — those are only caught on the next fresh
+  InfoPanel mount for that chat). I mutation-tested this fix myself
+  before commit (temporarily hardcoded `groupMemberCountKey = 0`,
+  confirmed the new regression test failed; restored the fix, confirmed
+  it passed) — the second review agent independently reran the same
+  mutation plus a second one (reverting to the literal original buggy
+  `chat.members`-based expression) and confirmed both fail without the
+  fix. F2 fix: removed the false pre-`waitFor` assertion and its
+  fabricated-claim comment from the chat-switch test, renamed it to
+  describe only the settled-state guarantee it actually provides, and
+  added an honest comment (independently verified true by the second
+  review agent's own mutation test) explaining the render-timing half
+  isn't unit-testable through this harness. Added a NEW real regression
+  test, "recomputes and flags a mismatch after a member is added to an
+  already-verified group (F1)": creates a group, verifies its safety
+  number, adds a member through the actual `AddMemberModal` flow (not a
+  mocked shortcut — only the Comlink worker proxy and the `addMember`
+  REST call are mocked, per `testing-conventions.md`'s stated crypto
+  boundary), and asserts `mlsComputeGroupSafetyNumber` is called a second
+  time and the "Group membership changed since you last verified" MITM
+  banner appears. Also applied 2 of the second pass's non-blocking nits
+  in-session (N1: comment now explicitly names the remote-Add/remove/
+  key-rotation gap instead of a vague "not authoritative" hedge; N2:
+  fixed a dangling "see the note above" self-reference).
+- **Full gate, re-run after every fix round**: `cargo build --workspace
+  --all-targets` clean, `cargo test --workspace` all green (0 failures,
+  every crate, unchanged from cycle 459's WIP since no Rust logic
+  changed this round — only a doc-comment-adjacent test-message tighten
+  was already in the WIP as found), `cargo fmt --all --check` clean,
+  `cargo clippy --workspace --all-targets -- -D warnings` clean, `cargo
+  audit`/`cargo deny check` clean. Frontend: `pnpm exec tsc --noEmit`
+  clean, `biome check` clean on all touched files, `pnpm vitest run` 112
+  files/1600 tests green (up from 1599 pre-fix — net +1 after removing
+  the false-guard assertion but adding the new real regression test; one
+  unrelated poll-voters test flaked once, reran green, not a regression).
+- No `threat-model-checker` run: client-side-only diff, no new
+  server-visible metadata or handler change (both review passes agreed
+  this gate doesn't apply here). No `security-auditor` run: no backend/
+  infra code touched.
+- Committed `13243fb` (`feat(frontend): wire group whole-membership
+  safety number into InfoPanel`), 8 files changed, pushed clean
+  (`560ebcb..13243fb main -> main`). `gh run list` showed all 3 checks
+  (`CI — Rust`, `CI — Frontend`, `CI — Live-backend E2E`) `in_progress`
+  immediately after push — confirm green in a future session if not
+  already done.
+- **Process note, now the seventh time** (cycles 448/449, 451, 454, 455,
+  457→458, 459→460): a cycle keeps doing real, reviewed-in-comments work
+  and burning its counter slot without committing — and this cycle shows
+  why that pattern is actually risky, not just wasteful: the "already
+  reviewed" doc comments in the orphaned WIP were themselves wrong (F1
+  was claimed fixed but wasn't; F2's empirical claim was fabricated). A
+  landing cycle must re-run the required review gate itself rather than
+  trusting an uncommitted diff's self-reported review history, exactly
+  as this cycle did — this is now validated as necessary, not just
+  cautious.
+- Target dir hygiene: `target/` at 24G (over the 20G threshold, up from
+  23-26G in cycles 450/451/455/460's own pre-prune reading), the
+  mtime+7 prune found nothing eligible (all content from active recent
+  work) — same as every prior check. Not actionable yet; worth watching
+  if it keeps climbing past ~35-40G without anything aging out, since
+  cron's own instructions cite a past 49GB/291k-file incident.
+- **Next cycle candidates (carried/updated):**
+  1. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  2. Carried, still explicitly BLOCKED: wiring
+     `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal` — needs F3 +
+     HMAC-vs-plain-SHA256 gate resolved first.
+  3. Carried (superseded framing from cycle 456 still applies): the
+     `PendingRemovalBanner`'s local cross-check needs either (a) binding
+     `device_id` into the MLS credential identity at creation time, or (b)
+     leaning on §5.6 safety-number verification (now including this
+     cycle's new group variant) as the real local trust anchor for T3,
+     updating the banner's copy accordingly.
+  4. **New, real, non-blocking (crypto-reviewer, this cycle, finding F3):**
+     `chat.isGroup` is a local UI flag that dispatches between the
+     pairwise/group safety-number constructions but is never derived
+     from or cross-checked against real MLS member count/state. If it
+     ever went out of sync between two peers' clients (no known path
+     today, but nothing enforces the invariant), they'd compute different
+     domain-separated fingerprints and see a false MITM alarm during an
+     in-person comparison. Worth deriving from actual member count or
+     recording the invariant with an assertion/test.
+  5. **New, real, non-blocking (second crypto-reviewer pass, this
+     cycle, finding N3):** the render-time state reset for the InfoPanel
+     chat-switch case (`ChatLayout.tsx:5180-5187`, cycle 459's original
+     F1 fix) has zero direct test coverage — a mutation test proved the
+     full test file stays green even with that block deleted entirely.
+     `InfoPanel` isn't exported, so a direct-render unit test isn't
+     possible today; either export it for testing or explicitly record
+     this as an accepted coverage gap rather than leaving it silently
+     uncovered.
+  6. **New, real but low-urgency (crypto-reviewer, this cycle):** the
+     `groupMemberCountKey` re-run trigger added this cycle only catches a
+     LOCAL `mlsAddMember`. A remote Add (via the Welcome poller), a
+     remove, or another member's self-Update/key-rotation while the
+     InfoPanel is open won't trigger a recompute — only closing and
+     reopening the panel does (which recomputes unconditionally, so it's
+     not silently wrong forever, just not live). Closing this gap needs a
+     live epoch/member-count signal read from the worker itself, not a
+     UI-local counter.
+  7. Carried, doc-sync only, low priority: prd.md §10's REST API list is
+     stale — missing `pending-removals` and `members`.
+  8. Carried: the `PendingRemovalBanner` confirm click is still the only
+     defense against a forged `pending_removals` signal.
+  9. Carried: no MLS Remove commit path exists in the frontend at all yet.
+  10. Carried, scoped out: the `RemovalRequired` WS event is still
+      unconsumed (no frontend WebSocket client exists at all).
+  11. Carried: no `values-prod-*.yaml`/CI overlay flips
+      `monitoring.prometheusRule.enabled=true` yet (ops task).
+  12. Carried: CI has no job rendering the Helm chart with
+      `monitoring.prometheusRule.enabled=true`/`serviceMonitor.enabled=true`.
+  13. Carried, doc-sync only: prd.md documents `key_packages.device_id` as
+      having `REFERENCES devices(id)`; the actual schema never had this FK.
+  14. Carried, real but scoped out: consumed `key_packages` rows are never
+      garbage-collected.
+  15. Carried, low-priority hardening: `GroupRepository::save` is a blind
+      `ON CONFLICT DO UPDATE` with no production caller today.
+  16. Carried, cosmetic: bare `var(--photon)` CSS custom property used
+      without a defined token in `LinkedDevicesPanel.tsx`/
+      `PendingRemovalBanner.tsx`.
+
+## Previous state (2026-09-08, cycle 458 — FEATURE: land cycle 457's orphaned WIP adding an N-party MLS group safety number WASM export, commit c62edf1)
 
 - Mode selection: counter 457→458, 458 % 5 != 0 → FEATURE. **Working tree
   was NOT clean at session start** — same recurring process gap as cycles
