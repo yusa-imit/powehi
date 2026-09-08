@@ -24,6 +24,10 @@ const MOCK_WORKER = {
 		safetyNumber:
 			"689053 337949 184798 288064 134849 362568 560227 765408 921198 315305 693006 807986",
 	})),
+	mlsComputeGroupSafetyNumber: vi.fn(async () => ({
+		safetyNumber:
+			"111222 333444 555666 777888 999000 121212 343434 565656 787878 909090 111213 141516",
+	})),
 	mlsEncrypt: vi.fn(async () => ({ ciphertext: new Uint8Array([0xde, 0xad]) })),
 	mlsDecrypt: vi.fn(async () => ({ plaintext: new Uint8Array() })),
 	// Passthrough encryption for tests — EncryptedPowehiDb interface satisfaction.
@@ -35,6 +39,8 @@ const MOCK_WORKER = {
 // KAT safety number (same value — used in test assertions after the mock is hoisted).
 const KAT_SN =
 	"689053 337949 184798 288064 134849 362568 560227 765408 921198 315305 693006 807986";
+const KAT_GROUP_SN =
+	"111222 333444 555666 777888 999000 121212 343434 565656 787878 909090 111213 141516";
 
 describe("ChatLayout", () => {
 	beforeEach(async () => {
@@ -2299,7 +2305,7 @@ describe("ChatLayout", () => {
 			expect(screen.queryByText(/·\s*typing/i)).not.toBeInTheDocument();
 		});
 
-		it("safety numbers useEffect skipped for group chat", async () => {
+		it("group chat computes its safety number via mlsComputeGroupSafetyNumber, not mlsGroupMembers", async () => {
 			vi.spyOn(GroupsApiModule, "createGroup").mockResolvedValue(undefined);
 			const groupWorker = {
 				...MOCK_WORKER,
@@ -2328,11 +2334,289 @@ describe("ChatLayout", () => {
 			await waitFor(() => {
 				expect(screen.getByTestId("group-status")).toBeInTheDocument();
 			});
-			// Open info panel — safety numbers should not be computed for group chats
+			// Open info panel — the pairwise DM path (mlsGroupMembers) must never run
+			// for a group chat; the group's whole-membership fingerprint reads live
+			// group state directly via mlsComputeGroupSafetyNumber instead.
 			fireEvent.click(screen.getByRole("button", { name: /info/i }));
 			await waitFor(() => {
-				// mlsGroupMembers should NOT have been called for the group chat
 				expect(groupWorker.mlsGroupMembers).not.toHaveBeenCalled();
+				expect(groupWorker.mlsComputeGroupSafetyNumber).toHaveBeenCalledWith(
+					"id-test3",
+					"group-safety-skip",
+				);
+			});
+			expect(
+				await screen.findByRole("button", { name: /verify safety numbers/i }),
+			).toBeInTheDocument();
+		});
+
+		it("persists verification to DB for a group chat's whole-membership safety number", async () => {
+			vi.spyOn(GroupsApiModule, "createGroup").mockResolvedValue(undefined);
+			const groupWorker = {
+				...MOCK_WORKER,
+				mlsCreateGroup: vi.fn(async () => ({ groupId: "group-safety-verify" })),
+			};
+			vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
+				groupWorker as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
+			);
+			useAuthStore.setState({
+				sessionToken: "tok-test4",
+				identityId: "id-test4",
+				deviceId: "dev-4",
+			});
+
+			render(<ChatLayout />);
+			fireEvent.click(screen.getByRole("button", { name: /new group/i }));
+			fireEvent.change(screen.getByTestId("group-name-input"), {
+				target: { value: "Verify Group" },
+			});
+			fireEvent.click(screen.getByTestId("create-group-submit"));
+			await waitFor(() => {
+				expect(screen.getByText("Verify Group")).toBeInTheDocument();
+			});
+			fireEvent.click(screen.getByRole("button", { name: /verify group/i }));
+			await waitFor(() => {
+				expect(screen.getByTestId("group-status")).toBeInTheDocument();
+			});
+			fireEvent.click(screen.getByRole("button", { name: /info/i }));
+			await act(async () => {});
+			const verifyBtn = await screen.findByRole("button", { name: /verify safety numbers/i });
+			fireEvent.click(verifyBtn);
+			const confirmBtn = await screen.findByRole("button", { name: /confirm match/i });
+			fireEvent.click(confirmBtn);
+			await waitFor(async () => {
+				const allRecords = await db.verifiedContacts.toArray();
+				expect(allRecords).toHaveLength(1);
+				expect(allRecords[0].safetyNumber).toBe(KAT_GROUP_SN);
+			});
+		});
+
+		it("shows a distinct message when a group exceeds the safety number member bound", async () => {
+			vi.spyOn(GroupsApiModule, "createGroup").mockResolvedValue(undefined);
+			const groupWorker = {
+				...MOCK_WORKER,
+				mlsCreateGroup: vi.fn(async () => ({ groupId: "group-too-large" })),
+				mlsComputeGroupSafetyNumber: vi.fn(async () => {
+					throw new Error("group safety number: too many members");
+				}),
+			};
+			vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
+				groupWorker as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
+			);
+			useAuthStore.setState({
+				sessionToken: "tok-test5",
+				identityId: "id-test5",
+				deviceId: "dev-5",
+			});
+
+			render(<ChatLayout />);
+			fireEvent.click(screen.getByRole("button", { name: /new group/i }));
+			fireEvent.change(screen.getByTestId("group-name-input"), {
+				target: { value: "Huge Group" },
+			});
+			fireEvent.click(screen.getByTestId("create-group-submit"));
+			await waitFor(() => {
+				expect(screen.getByText("Huge Group")).toBeInTheDocument();
+			});
+			fireEvent.click(screen.getByRole("button", { name: /huge group/i }));
+			await waitFor(() => {
+				expect(screen.getByTestId("group-status")).toBeInTheDocument();
+			});
+			fireEvent.click(screen.getByRole("button", { name: /info/i }));
+			await waitFor(() => {
+				expect(screen.getByText(/too many members to verify/i)).toBeInTheDocument();
+			});
+			// Never render the generic "not available" message for this case —
+			// it must read as "group too large", not "verification failed".
+			expect(screen.queryByText(/safety number not available/i)).not.toBeInTheDocument();
+		});
+
+		it("an unrelated group safety number error shows the generic message, not 'too many members'", async () => {
+			// Guards the exact-match fix (crypto-reviewer, cycle 459, finding F5): a
+			// WASM/network failure unrelated to the member-count bound must never be
+			// misclassified as "group too large" via a loose substring match.
+			vi.spyOn(GroupsApiModule, "createGroup").mockResolvedValue(undefined);
+			const groupWorker = {
+				...MOCK_WORKER,
+				mlsCreateGroup: vi.fn(async () => ({ groupId: "group-unrelated-error" })),
+				mlsComputeGroupSafetyNumber: vi.fn(async () => {
+					throw new Error("group not found");
+				}),
+			};
+			vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
+				groupWorker as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
+			);
+			useAuthStore.setState({
+				sessionToken: "tok-test6",
+				identityId: "id-test6",
+				deviceId: "dev-6",
+			});
+
+			render(<ChatLayout />);
+			fireEvent.click(screen.getByRole("button", { name: /new group/i }));
+			fireEvent.change(screen.getByTestId("group-name-input"), {
+				target: { value: "Unrelated Error Group" },
+			});
+			fireEvent.click(screen.getByTestId("create-group-submit"));
+			await waitFor(() => {
+				expect(screen.getByText("Unrelated Error Group")).toBeInTheDocument();
+			});
+			fireEvent.click(screen.getByRole("button", { name: /unrelated error group/i }));
+			await waitFor(() => {
+				expect(screen.getByTestId("group-status")).toBeInTheDocument();
+			});
+			fireEvent.click(screen.getByRole("button", { name: /info/i }));
+			await waitFor(() => {
+				expect(screen.getByText(/safety number not available/i)).toBeInTheDocument();
+			});
+			expect(screen.queryByText(/too many members to verify/i)).not.toBeInTheDocument();
+		});
+
+		it("switching from a verified DM to a group chat while the panel is open never leaves the DM's fingerprint showing at settled state (F1)", async () => {
+			// InfoPanel has no key={active.id} (deliberately — see the blockConfirm
+			// comment near its useState declarations), so it stays mounted across a
+			// chat switch. Regression guard for the settled-state half of
+			// crypto-reviewer cycle 459 finding F1: the DM's pairwise safety
+			// number/verified badge must never render for the group, since the two
+			// use different domain-separated constructions.
+			//
+			// This does NOT test the render-timing half of F1 (that the very first
+			// commit after the chat switch, before any effect flushes, must not
+			// paint the DM's stale state). `fireEvent` wraps every dispatch in
+			// `act()`, which flushes all passive effects before control returns to
+			// the test, so no pre-effect-flush commit is ever observable through
+			// jsdom/RTL — an earlier version of this test asserted "before
+			// `waitFor`" and claimed that proved the race was covered, but a
+			// mutation test (removing the render-time reset in
+			// ChatLayout.tsx:5179-5187 entirely) showed the assertion still passed
+			// either way (crypto-reviewer, cycle 460, finding F2 — that empirical
+			// claim was false). The render-time `setState`-during-render reset is
+			// still correct and kept (it protects the real browser, where a paint
+			// can land between commit and passive-effect flush); it just isn't
+			// unit-testable through this harness. This test only asserts the
+			// reachable, real guarantee: eventual correctness after everything
+			// settles.
+			await db.verifiedContacts.put({
+				contactId: "maya", // matches SEED_CHATS[0].id
+				safetyNumber: KAT_SN,
+				verifiedAt: Date.now() - 86_400_000,
+			});
+			vi.spyOn(GroupsApiModule, "createGroup").mockResolvedValue(undefined);
+			const groupWorker = {
+				...MOCK_WORKER,
+				mlsCreateGroup: vi.fn(async () => ({ groupId: "group-switch-check" })),
+			};
+			vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
+				groupWorker as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
+			);
+			useAuthStore.setState({
+				sessionToken: "tok-test7",
+				identityId: "id-test7",
+				deviceId: "dev-7",
+			});
+
+			render(<ChatLayout />);
+			// Open Maya's DM info panel and let the stored verification settle in.
+			fireEvent.click(screen.getByRole("button", { name: /maya akana/i }));
+			fireEvent.click(screen.getByRole("button", { name: /info/i }));
+			await waitFor(() => {
+				expect(screen.getByRole("button", { name: /re-verify/i })).toBeInTheDocument();
+			});
+
+			// Create a new group, then switch the active chat to it WITHOUT closing
+			// the still-open info panel — this is the exact transition F1 covers.
+			fireEvent.click(screen.getByRole("button", { name: /new group/i }));
+			fireEvent.change(screen.getByTestId("group-name-input"), {
+				target: { value: "Switch Check Group" },
+			});
+			fireEvent.click(screen.getByTestId("create-group-submit"));
+			await waitFor(() => {
+				expect(screen.getByText("Switch Check Group")).toBeInTheDocument();
+			});
+			fireEvent.click(screen.getByRole("button", { name: /switch check group/i }));
+
+			await waitFor(() => {
+				expect(screen.getByTestId("group-status")).toBeInTheDocument();
+			});
+			// Panel should still be showing (never auto-closed by the chat switch).
+			await waitFor(() => {
+				expect(screen.getByText("Safety Numbers")).toBeInTheDocument();
+			});
+			// Never Maya's pairwise "verified" state or fingerprint on the group card,
+			// at settled state either.
+			expect(screen.queryByText("Membership verified")).not.toBeInTheDocument();
+			expect(screen.queryByText("Identity verified")).not.toBeInTheDocument();
+			expect(screen.queryByText(KAT_SN.split(" ")[0])).not.toBeInTheDocument();
+		});
+
+		it("recomputes and flags a mismatch after a member is added to an already-verified group (F1)", async () => {
+			// Regression guard for crypto-reviewer cycle 460 finding F1: the group
+			// safety-number effect must re-fire on a real membership change, not
+			// just on chat.mlsGroupId (which never changes for a group's lifetime,
+			// RFC 9420 §8.1). Before the fix, this effect keyed off chat.members,
+			// which is never populated for a real (non-seed) group — so an add-member
+			// event never triggered a recompute, and the UI kept showing the stale
+			// pre-add fingerprint as verified with no MITM warning at all.
+			const secondGroupSN =
+				"222333 444555 666777 888999 000111 232323 454545 676767 898989 010203 040506 070809";
+			vi.spyOn(GroupsApiModule, "createGroup").mockResolvedValue(undefined);
+			vi.spyOn(GroupsApiModule, "addMember").mockResolvedValue(undefined);
+			const mlsComputeGroupSafetyNumber = vi
+				.fn()
+				.mockResolvedValueOnce({ safetyNumber: KAT_GROUP_SN })
+				.mockResolvedValue({ safetyNumber: secondGroupSN });
+			const groupWorker = {
+				...MOCK_WORKER,
+				mlsCreateGroup: vi.fn(async () => ({ groupId: "group-add-member-refresh" })),
+				mlsComputeGroupSafetyNumber,
+			};
+			vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
+				groupWorker as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
+			);
+			useAuthStore.setState({
+				sessionToken: "tok-test8",
+				identityId: "id-test8",
+				deviceId: "dev-8",
+			});
+
+			render(<ChatLayout />);
+			fireEvent.click(screen.getByRole("button", { name: /new group/i }));
+			fireEvent.change(screen.getByTestId("group-name-input"), {
+				target: { value: "Refresh Group" },
+			});
+			fireEvent.click(screen.getByTestId("create-group-submit"));
+			await waitFor(() => {
+				expect(screen.getByText("Refresh Group")).toBeInTheDocument();
+			});
+			fireEvent.click(screen.getByRole("button", { name: /refresh group/i }));
+			await waitFor(() => {
+				expect(screen.getByTestId("group-status")).toBeInTheDocument();
+			});
+			fireEvent.click(screen.getByRole("button", { name: /info/i }));
+			const verifyBtn = await screen.findByRole("button", { name: /verify safety numbers/i });
+			fireEvent.click(verifyBtn);
+			const confirmBtn = await screen.findByRole("button", { name: /confirm match/i });
+			fireEvent.click(confirmBtn);
+			await waitFor(() => {
+				expect(screen.getByText("Membership verified")).toBeInTheDocument();
+			});
+			expect(mlsComputeGroupSafetyNumber).toHaveBeenCalledTimes(1);
+
+			// Add a member via the header's "Add member" action — this is the live,
+			// reachable path (AddMemberModal stays available while InfoPanel is open).
+			fireEvent.click(screen.getByRole("button", { name: /add member/i }));
+			const contactOptions = await screen.findAllByTestId("contact-option");
+			fireEvent.click(contactOptions[0]);
+
+			await waitFor(() => {
+				expect(mlsComputeGroupSafetyNumber).toHaveBeenCalledTimes(2);
+			});
+			// The stale-fingerprint-shown-as-verified bug: without the fix, neither
+			// of these ever appears because the effect never re-ran.
+			await waitFor(() => {
+				expect(
+					screen.getByText("Group membership changed since you last verified"),
+				).toBeInTheDocument();
 			});
 		});
 

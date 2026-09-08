@@ -233,11 +233,23 @@ export interface LocalIdentity {
 }
 
 // VerifiedContact — Safety Numbers verification state.
-// Stores the safety number for a peer at the time the user verified it.
-// When the MLS identity key changes (device re-registration) the stored
-// safety number will no longer match the current one — alerting the user.
+// Stores the safety number for a chat at the time the user verified it. One
+// row per chat.id, covering BOTH constructions (prd.md §5.6):
+//   - DM chats: a per-device pairwise fingerprint of the two parties' keys.
+//     When the peer's MLS identity key changes (device re-registration) the
+//     stored value no longer matches the current one — alerting the user.
+//   - Group chats: a whole-group membership fingerprint (every current
+//     member's key), NOT a per-device claim — see
+//     mls_compute_group_safety_number's doc comment in wasm_exports.rs. It
+//     changes on any join/leave/key-rotation, so a mismatch means "the
+//     member set changed", never "which member changed". The two
+//     constructions use distinct domain-separated hashes, so rows from one
+//     kind can never collide with or be mistaken for the other, but nothing
+//     in this row's shape records which kind produced it — a future
+//     consumer of this table directly (bypassing ChatLayout's chat.isGroup
+//     check) must not assume either.
 export interface VerifiedContact {
-	contactId: string; // peer device ID or handle (opaque identifier)
+	contactId: string; // chat.id — a DM peer's opaque id, or a group chat's id
 	safetyNumber: string; // 12 six-digit groups: "689053 337949 ..." (prd.md §5.6)
 	verifiedAt: number; // Date.now() timestamp in ms
 }

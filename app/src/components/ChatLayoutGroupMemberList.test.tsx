@@ -15,6 +15,10 @@ const MOCK_WORKER = {
 		safetyNumber:
 			"689053 337949 184798 288064 134849 362568 560227 765408 921198 315305 693006 807986",
 	})),
+	mlsComputeGroupSafetyNumber: vi.fn(async () => ({
+		safetyNumber:
+			"111222 333444 555666 777888 999000 121212 343434 565656 787878 909090 111213 141516",
+	})),
 	mlsEncrypt: vi.fn(async () => ({ ciphertext: new Uint8Array([0xde, 0xad]) })),
 	mlsDecrypt: vi.fn(async () => ({ plaintext: new Uint8Array() })),
 	encryptDbField: vi.fn(async (v: string) => v),
@@ -149,11 +153,16 @@ describe("ChatLayout — group member list", () => {
 		await waitFor(() => expect(screen.queryByTestId("member-you-badge")).not.toBeInTheDocument());
 	});
 
-	it("Safety number card does NOT appear for group chats", async () => {
+	it("Safety number card appears for group chats (fails closed: the seed fixture has no mlsIdentityId)", async () => {
 		render(<ChatLayout />);
 		openGroupInfoPanel();
 		await waitFor(() => {
-			expect(screen.queryByText("Safety Numbers")).not.toBeInTheDocument();
+			expect(screen.getByText("Safety Numbers")).toBeInTheDocument();
+			// The Design Team seed chat has mlsGroupId but no mlsIdentityId — the
+			// computation effect fails closed rather than calling either worker method.
+			expect(screen.getByText(/safety number not available/i)).toBeInTheDocument();
+			expect(MOCK_WORKER.mlsGroupMembers).not.toHaveBeenCalled();
+			expect(MOCK_WORKER.mlsComputeGroupSafetyNumber).not.toHaveBeenCalled();
 		});
 	});
 

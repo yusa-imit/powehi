@@ -4969,6 +4969,117 @@ function InfoRow({
 	);
 }
 
+// Shared "Safety Numbers" verification card — used for both the DM pairwise
+// fingerprint and the group whole-membership fingerprint (prd.md §5.6).
+function SafetyNumberCard({
+	safetyNumber,
+	tooLarge,
+	mitmAlert,
+	peerName,
+	subtitle,
+	verified,
+	verifiedAt,
+	onVerify,
+	onReset,
+	kind = "dm",
+}: {
+	safetyNumber: string | null;
+	tooLarge: boolean;
+	mitmAlert: boolean;
+	peerName: string;
+	subtitle?: string;
+	verified: boolean;
+	verifiedAt?: number;
+	onVerify: () => void;
+	onReset: () => void;
+	kind?: "dm" | "group";
+}) {
+	return (
+		<div style={{ padding: "0 14px 16px" }}>
+			<div
+				style={{
+					background: "rgba(168,200,255,0.05)",
+					border: "1px solid rgba(168,200,255,0.22)",
+					borderRadius: 14,
+					padding: 16,
+				}}
+			>
+				<div
+					style={{
+						display: "flex",
+						alignItems: "center",
+						gap: 8,
+						marginBottom: subtitle ? 4 : 12,
+					}}
+				>
+					<Icon name="lock" size={14} color="#A8C8FF" />
+					<span
+						style={{
+							fontSize: 11,
+							fontWeight: 600,
+							letterSpacing: "0.1em",
+							textTransform: "uppercase",
+							color: "#A8C8FF",
+						}}
+					>
+						Safety Numbers
+					</span>
+				</div>
+				{subtitle && (
+					<div style={{ fontSize: 11, color: "var(--fg-3)", marginBottom: 12 }}>{subtitle}</div>
+				)}
+				{mitmAlert && (
+					<div
+						style={{
+							display: "flex",
+							alignItems: "center",
+							gap: 8,
+							background: "rgba(255,100,100,0.08)",
+							border: "1px solid rgba(255,100,100,0.3)",
+							borderRadius: 9,
+							padding: "8px 10px",
+							marginBottom: 10,
+						}}
+					>
+						<Icon name="alert" size={14} color="#FF9999" />
+						<span style={{ fontSize: 12, color: "#FF9999" }}>
+							{kind === "group"
+								? "Group membership changed since you last verified"
+								: "Safety number changed — verify again to confirm identity"}
+						</span>
+					</div>
+				)}
+				{safetyNumber !== null ? (
+					<SafetyNumbers
+						safetyNumber={safetyNumber}
+						peerName={peerName}
+						verified={verified}
+						verifiedAt={verifiedAt}
+						onVerify={onVerify}
+						onReset={onReset}
+						kind={kind}
+					/>
+				) : (
+					<div
+						style={{
+							padding: "12px 0 4px",
+							fontSize: 12,
+							color: "var(--fg-3)",
+							textAlign: "center",
+						}}
+					>
+						{tooLarge
+							? // Distinct from "verification failed" (crypto-reviewer, cycle 458) —
+								// this group is too large to fingerprint, not tampered with.
+								"Too many members to verify"
+							: "Safety number not available"}
+					</div>
+				)}
+			</div>
+		</div>
+	);
+}
+
 function InfoPanel({
 	chat,
 	onClose,
@@ -5051,6 +5162,29 @@ function InfoPanel({
 	const [verifiedAt, setVerifiedAt] = useState<number | undefined>(undefined);
 	const [mitmAlert, setMitmAlert] = useState(false);
 	const [computedSafetyNumber, setComputedSafetyNumber] = useState<string | null>(null);
+	// Set only for the group case when the member count exceeds
+	// MAX_GROUP_SAFETY_NUMBER_MEMBERS — rendered as a distinct message from
+	// "not available" so it never looks like a tampered/failed verification.
+	const [groupSafetyTooLarge, setGroupSafetyTooLarge] = useState(false);
+	// Reset all safety-number state SYNCHRONOUSLY during render (not in a
+	// useEffect) when the chat changes. InfoPanel has no key={chat.id}, so an
+	// effect-only reset leaves at least one committed/painted frame where the
+	// PREVIOUS chat's safety number — computed under a different construction
+	// for a DM (pairwise) vs. a group (whole-membership) — renders as
+	// "verified" for the NEW chat before the effect corrects it. Calling
+	// setState during render (React's documented "adjusting state" pattern)
+	// makes React redo the render with the reset values before committing, so
+	// the stale cross-construction frame is never painted (crypto-reviewer,
+	// cycle 459, finding F1).
+	const [safetyNumberChatId, setSafetyNumberChatId] = useState(chat.id);
+	if (safetyNumberChatId !== chat.id) {
+		setSafetyNumberChatId(chat.id);
+		setComputedSafetyNumber(null);
+		setGroupSafetyTooLarge(false);
+		setSafetyVerified(false);
+		setVerifiedAt(undefined);
+		setMitmAlert(false);
+	}
 	// useCryptoWorker() returns a module-level singleton — stable across re-renders.
 	const cryptoWorker = useCryptoWorker();
 	// EncryptedPowehiDb wraps the raw Dexie instance with AES-GCM-256 field encryption.
@@ -5061,17 +5195,71 @@ function InfoPanel({
 		[cryptoWorker],
 	);
 
+	// A group's MLS group_id never changes for the group's lifetime (RFC 9420
+	// §8.1) — joins/removes happen via Commit (§12.1.1/§12.1.3) without
+	// touching it. So the group safety number effect below must key off
+	// something that changes on membership, or a membership change while the
+	// panel is open would leave a stale fingerprint showing "verified" against
+	// the OLD member set — exactly the tampering event this fingerprint exists
+	// to catch. `chat.members` is NOT usable for this: it is a UI-local roster
+	// populated only by the hardcoded seed fixture, never by any real chat
+	// (`handleNewGroup` creates chats with no `members` array, and the only
+	// runtime membership-mutating path, `handleMemberAdded`, updates
+	// `memberCount` only) — keying off it here would make this effect dead
+	// code for every real group (crypto-reviewer, cycle 460, finding F1).
+	// `chat.memberCount` is the one local signal that actually changes on a
+	// LOCAL `mlsAddMember`, so use that instead. This is a best-effort trigger,
+	// not a complete one: it does not fire for a remote Add landing via the
+	// Welcome poller (RFC 9420 §12.1.1 — that path never touches
+	// `memberCount`), nor for a remove or a self-Update/key-rotation by
+	// another member. Those cases are only caught the next time InfoPanel
+	// mounts fresh for this chat, which recomputes unconditionally. Closing
+	// that gap needs a live epoch/member-count signal from the worker itself,
+	// not a UI-local counter (crypto-reviewer, cycle 460, findings F1/N1).
+	const groupMemberCountKey = chat.isGroup ? (chat.memberCount ?? 0) : 0;
+
 	// Compute the safety number from the MLS group members' Ed25519 signature keys.
 	// Fails closed: if WASM unavailable or group not yet established, stays null.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: groupMemberCountKey is a re-run trigger only (membership changed), not read in the body — mlsComputeGroupSafetyNumber re-reads live group state itself
 	useEffect(() => {
 		const worker = cryptoWorker;
 		// Reset immediately so a stale value from a previous chat never triggers a
 		// false MITM alarm during the async WASM call for the new chat (Y2).
 		setComputedSafetyNumber(null);
-		if (!worker || !chat.mlsGroupId || !chat.mlsIdentityId || chat.isGroup) {
+		setGroupSafetyTooLarge(false);
+		if (!worker || !chat.mlsGroupId || !chat.mlsIdentityId) {
 			return;
 		}
 		let cancelled = false;
+		if (chat.isGroup) {
+			// Group whole-membership fingerprint — reads live group state directly,
+			// no keys need to cross the worker boundary (mls_compute_group_safety_number).
+			worker
+				.mlsComputeGroupSafetyNumber(chat.mlsIdentityId, chat.mlsGroupId)
+				.then((result) => {
+					if (cancelled) return;
+					setComputedSafetyNumber(result.safetyNumber);
+				})
+				.catch((err: unknown) => {
+					// Fail closed — WASM error or group absent (no-plaintext-logging
+					// invariant). Surface the "over the size bound" case distinctly so
+					// it never reads as a failed/tampered verification. Exact match (not
+					// substring) against the Rust literal locked by
+					// test_group_safety_number_rejects_out_of_bounds_membership — an
+					// unrelated error must never be misclassified as "too large"
+					// (crypto-reviewer, cycle 459).
+					if (
+						!cancelled &&
+						err instanceof Error &&
+						err.message === "group safety number: too many members"
+					) {
+						setGroupSafetyTooLarge(true);
+					}
+				});
+			return () => {
+				cancelled = true;
+			};
+		}
 		const hexToBytes = (hex: string): Uint8Array => {
 			if (hex.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(hex)) throw new Error("invalid hex");
 			const bytes = new Uint8Array(hex.length / 2);
@@ -5100,7 +5288,7 @@ function InfoPanel({
 		return () => {
 			cancelled = true;
 		};
-	}, [cryptoWorker, chat.mlsGroupId, chat.mlsIdentityId, chat.isGroup]);
+	}, [cryptoWorker, chat.mlsGroupId, chat.mlsIdentityId, chat.isGroup, groupMemberCountKey]);
 
 	// Load stored verification state; re-runs when computedSafetyNumber arrives so
 	// MITM detection works even when WASM loads after the DB read completes.
@@ -5642,6 +5830,21 @@ function InfoPanel({
 							})}
 						</div>
 					</InfoSection>
+					{/* Group whole-membership Safety Number — a tamper/MITM fingerprint
+					    over every current member's signature key, distinct from the
+					    per-device PendingRemovalBanner cross-check above (prd.md §5.6). */}
+					<SafetyNumberCard
+						safetyNumber={computedSafetyNumber}
+						tooLarge={groupSafetyTooLarge}
+						mitmAlert={mitmAlert}
+						peerName={chat.name}
+						subtitle="Fingerprint of the whole group's membership — changes if anyone joins, leaves, or rotates keys."
+						verified={safetyVerified}
+						verifiedAt={verifiedAt}
+						onVerify={handleVerify}
+						onReset={handleReset}
+						kind="group"
+					/>
 					{/* Contact card overlay — appears when a member row is tapped */}
 					{contactCard !== null && (
 						<dialog
@@ -5795,78 +5998,16 @@ function InfoPanel({
 				</>
 			) : (
 				/* Safety Numbers — photon blue encryption verification card */
-				<div style={{ padding: "0 14px 16px" }}>
-					<div
-						style={{
-							background: "rgba(168,200,255,0.05)",
-							border: "1px solid rgba(168,200,255,0.22)",
-							borderRadius: 14,
-							padding: 16,
-						}}
-					>
-						<div
-							style={{
-								display: "flex",
-								alignItems: "center",
-								gap: 8,
-								marginBottom: 12,
-							}}
-						>
-							<Icon name="lock" size={14} color="#A8C8FF" />
-							<span
-								style={{
-									fontSize: 11,
-									fontWeight: 600,
-									letterSpacing: "0.1em",
-									textTransform: "uppercase",
-									color: "#A8C8FF",
-								}}
-							>
-								Safety Numbers
-							</span>
-						</div>
-						{mitmAlert && (
-							<div
-								style={{
-									display: "flex",
-									alignItems: "center",
-									gap: 8,
-									background: "rgba(255,100,100,0.08)",
-									border: "1px solid rgba(255,100,100,0.3)",
-									borderRadius: 9,
-									padding: "8px 10px",
-									marginBottom: 10,
-								}}
-							>
-								<Icon name="alert" size={14} color="#FF9999" />
-								<span style={{ fontSize: 12, color: "#FF9999" }}>
-									Safety number changed — verify again to confirm identity
-								</span>
-							</div>
-						)}
-						{computedSafetyNumber !== null ? (
-							<SafetyNumbers
-								safetyNumber={computedSafetyNumber}
-								peerName={chat.name}
-								verified={safetyVerified}
-								verifiedAt={verifiedAt}
-								onVerify={handleVerify}
-								onReset={handleReset}
-							/>
-						) : (
-							<div
-								style={{
-									padding: "12px 0 4px",
-									fontSize: 12,
-									color: "var(--fg-3)",
-									textAlign: "center",
-								}}
-							>
-								Safety number not available
-							</div>
-						)}
-					</div>
-				</div>
+				<SafetyNumberCard
+					safetyNumber={computedSafetyNumber}
+					tooLarge={false}
+					mitmAlert={mitmAlert}
+					peerName={chat.name}
+					verified={safetyVerified}
+					verifiedAt={verifiedAt}
+					onVerify={handleVerify}
+					onReset={handleReset}
+				/>
 			)}
 
 			<InfoSection title="Chat theme">

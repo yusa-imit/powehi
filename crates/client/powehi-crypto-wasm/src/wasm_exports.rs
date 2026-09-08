@@ -3942,9 +3942,15 @@ mod tests {
                 k
             })
             .collect();
-        assert!(
-            compute_group_safety_number_inner(&too_many).is_err(),
-            "over the member bound must error"
+        // Exact message match, not just is_err(): the frontend UI (ChatLayout.tsx)
+        // pattern-matches this literal to render a distinct "too many members to
+        // verify" message instead of the generic "not available" one (crypto-reviewer,
+        // cycle 459) — a wording change here would silently break that without this
+        // assertion, since the TS-side mock would stay green independently.
+        assert_eq!(
+            compute_group_safety_number_inner(&too_many),
+            Err("group safety number: too many members"),
+            "over the member bound must error with the exact message the frontend matches on"
         );
     }
 

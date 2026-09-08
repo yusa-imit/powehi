@@ -18,6 +18,12 @@ interface SafetyNumbersProps {
 	verifiedAt?: number; // ms timestamp — shown as relative date when verified
 	onVerify: () => void;
 	onReset?: () => void; // allow re-verification after key change
+	// "dm": a per-device pairwise identity fingerprint (default).
+	// "group": a whole-group membership fingerprint — NOT a per-device or
+	// per-person identity claim (see mls_compute_group_safety_number's doc
+	// comment in wasm_exports.rs). Copy differs so it never implies the
+	// stronger claim the group construction does not make.
+	kind?: "dm" | "group";
 }
 
 function relativeDate(ms: number): string {
@@ -37,6 +43,7 @@ export function SafetyNumbers({
 	verifiedAt,
 	onVerify,
 	onReset,
+	kind = "dm",
 }: SafetyNumbersProps) {
 	const [confirmVisible, setConfirmVisible] = useState(false);
 	const groups = safetyNumber.split(" ");
@@ -80,7 +87,11 @@ export function SafetyNumbers({
 				</div>
 				<div>
 					<div style={{ fontSize: 12, fontWeight: 500, color: "var(--fg-1)" }}>
-						{verified ? "Identity verified" : "Not yet verified"}
+						{verified
+							? kind === "group"
+								? "Membership verified"
+								: "Identity verified"
+							: "Not yet verified"}
 					</div>
 					{verified && verifiedAt != null && (
 						<div style={{ fontSize: 10, color: "var(--fg-3)", marginTop: 1 }}>
@@ -92,7 +103,11 @@ export function SafetyNumbers({
 
 			{/* Safety number grid — 4 columns × 3 rows */}
 			<fieldset
-				aria-label={`Safety number with ${peerName}`}
+				aria-label={
+					kind === "group"
+						? `Group safety number for ${peerName}`
+						: `Safety number with ${peerName}`
+				}
 				style={{
 					display: "grid",
 					gridTemplateColumns: "repeat(4, 1fr)",
@@ -136,7 +151,9 @@ export function SafetyNumbers({
 					}}
 				>
 					<div style={{ fontSize: 12, color: "var(--fg-1)", marginBottom: 8 }}>
-						Compare the numbers with {peerName} in person or over a call. Match?
+						{kind === "group"
+							? `Compare this number with other members of ${peerName} in person or over a call — it verifies the whole group's membership, not any single person's identity. Match?`
+							: `Compare the numbers with ${peerName} in person or over a call. Match?`}
 					</div>
 					<div style={{ display: "flex", gap: 6 }}>
 						<button
