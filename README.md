@@ -21,7 +21,7 @@ design: `docs/orchestration.md`. Working conventions for the autonomous dev loop
 
 | Tool | Version | Notes |
 |---|---|---|
-| Rust | `1.96.0` | pinned in `rust-toolchain.toml`; installs `rustfmt`/`clippy` + the `wasm32-unknown-unknown` target automatically via rustup |
+| Rust | `1.98.1` | pinned in `rust-toolchain.toml`; installs `rustfmt`/`clippy` + the `wasm32-unknown-unknown` target automatically via rustup |
 | Node.js | 20+ | any version compatible with pnpm 10 |
 | pnpm | `10.28.2` | pinned via `packageManager` in `package.json`; use `corepack enable` to get the exact version |
 | wasm-pack | `0.13.1` | CI installs a SHA-256-pinned binary (`.github/actions/install-wasm-pack`); install the same version locally, or run `pnpm build:wasm` after installing any wasm-pack that supports `--target web` |

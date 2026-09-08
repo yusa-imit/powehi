@@ -1,8 +1,8 @@
 # ── build stage ───────────────────────────────────────────────────────────────
 # Pin the toolchain so every build uses the same compiler (reproducibility).
-# Matches rust-toolchain.toml channel (1.96.0 is the minimum with all transitive
+# Matches rust-toolchain.toml channel (1.98.1 is the minimum with all transitive
 # deps; Cargo.toml rust-version = "1.87" covers the core domain crates only).
-FROM rust:1.96.0-bookworm AS builder
+FROM rust:1.98.1-bookworm AS builder
 
 WORKDIR /app
 

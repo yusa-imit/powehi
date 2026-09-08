@@ -996,7 +996,7 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, &'static str> {
         return Err("odd-length hex string");
     }
     let mut out = Vec::with_capacity(bytes.len() / 2);
-    for chunk in bytes.chunks_exact(2) {
+    for chunk in bytes.as_chunks::<2>().0 {
         let byte_str = std::str::from_utf8(chunk).map_err(|_| "invalid hex string")?;
         let byte = u8::from_str_radix(byte_str, 16).map_err(|_| "invalid hex string")?;
         out.push(byte);
