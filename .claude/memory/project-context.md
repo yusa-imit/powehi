@@ -24,7 +24,182 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-08, cycle 461 — FEATURE: fix GitHub issue #6, `pnpm build:wasm` wrote to the wrong out-dir and Vite silently substituted a no-op crypto stub, commit 86ccec7)
+## Current state (2026-09-09, cycle 464 — FEATURE: land cycles 462/463's orphaned WIP adding an MLS Remove commit stage/confirm/abort primitive (issue #2), fix 3 crypto-reviewer blockers before committing, commit b737b2c)
+
+- Mode selection: counter 463→464, 464 % 5 != 0 → FEATURE. **Working tree
+  was NOT clean at session start** — the eighth+ occurrence of the
+  now-familiar pattern: substantial, well-documented, well-tested WIP in
+  `crates/client/powehi-crypto-wasm/src/{mls_group,wasm_exports}.rs` +
+  4 frontend files (`crypto.worker.ts`, `useCryptoWorker.ts` + its test +
+  mock) implementing `mls_remove_member_stage/confirm/abort` — the crypto
+  primitive layer for the long-carried P0-blocker candidate (GitHub issue
+  #2: "Client cannot evict a compromised device: no MLS Remove commit
+  path, PCS unattainable") — but never committed.
+- Read the whole diff file-by-file before treating "land it" as the
+  cycle's action. `cargo build/test/fmt/clippy` all green as found
+  (200 passed/2 ignored in `powehi-crypto-wasm`, +7 new tests), `pnpm exec
+  tsc --noEmit`/`biome check` clean, `pnpm vitest run` 112 files/1610
+  tests green (+10 from the 1600 baseline). Per CLAUDE.md's rule and the
+  cycle-460 lesson (an uncommitted diff's own "already reviewed" doc
+  comments are not evidence a review actually happened), ran a **fresh**
+  `crypto-reviewer` pass myself rather than trusting the WIP's embedded
+  claims.
+- **crypto-reviewer (fresh pass): NEEDS-REWORK, 3 real blockers, not
+  nitpicks.** (1) **F1:** `confirm_remove_member`/`abort_remove_member`
+  called `merge_pending_commit`/`clear_pending_commit` unconditionally,
+  both of which silently return `Ok(())` when there's nothing staged
+  (openmls's own documented no-op-on-`Operational` behavior) — so
+  confirm/abort-without-a-stage, AND a second confirm retried after a
+  failed merge (the merge transitions state to `Operational` *before*
+  attempting the merge, destroying the staged commit either way), both
+  silently "succeeded" having done nothing. A TS doc comment in
+  `crypto.worker.ts` asserted the opposite ("rejected by the WASM layer"),
+  which was false. Fail-open on exactly the operation whose purpose is
+  restoring PCS. (2) **F2:** `stage_remove_member` had no guard against a
+  non-empty proposal store — `remove_members`'s `commit_builder()` folds
+  in *every* queued proposal by default (confirmed against vendored
+  openmls 0.8.1 `commit_builder.rs`), not just Adds, so a queued Remove/
+  Update/GroupContextExtensions proposal (fed by a future
+  `store_pending_proposal` call once a commit-processing consumer exists)
+  would silently ride along with what the caller believes is a
+  single-target eviction. (3) **F3:** the PCS doc comment cited RFC 9420
+  §12.1.3 backwards — claimed removal requires the leaf to end up
+  "non-blank" in the tree; actually non-blank is the *precondition on the
+  target before* the proposal applies, and the leaf is *blanked* as the
+  post-state (confirmed against vendored `public_group/validation.rs` +
+  `apply_proposals.rs`). Also flagged 5 non-blocking nits (F4 §12.4 path-
+  required-set over-generalization, F5 self-removal-guard doc undersold
+  as the *only* protection, F9 all failures collapsing to one
+  `MlsError::Membership` string, F10 debug_assert framing, F11 a PCS test
+  assertion over-claiming what it proves past openmls's `is_active()`
+  guard) plus 2 deferred-to-follow-up items (F6 `isSelf` is index- not
+  key-derived; F7 unguarded `u64→f64` on `prior_epoch`).
+- **Fixed F1/F2/F3 plus F4/F5/F8/F9/F10/F11**, re-verified by a **second,
+  independent crypto-reviewer pass: PASS-with-nits, no blockers.** F1 fix:
+  gated both functions on `group.pending_commit().is_none()` →  new
+  content-free `MlsError::NoPendingCommit` variant (removed the now-dead
+  best-effort `clear_pending_commit` cleanup branch this uncovered). F2
+  fix: reject on `group.pending_proposals().next().is_some()` → new
+  `MlsError::PendingProposals` variant, before calling `remove_members`.
+  F3/F4: rewrote the RFC citations correctly. F5: reframed the
+  self-removal check's doc as the function's *only* protection (openmls
+  doesn't independently reject self-removal). F8: documented two more
+  wiring preconditions the reviewer surfaced (reload wedges a group with
+  no JS-side record a stage was outstanding; a failed Dexie persist after
+  a successful in-memory stage has no rollback). Added 5 new Rust tests
+  (`confirm_without_stage_rejected`, `abort_without_stage_rejected`,
+  `confirm_twice_second_call_rejected`,
+  `rejects_when_proposals_are_pending` — which also discovered and pins
+  that `encrypt_message` itself refuses to run while a proposal is queued,
+  confirmed correct by the reviewer against openmls `application.rs`).
+  Second pass additionally confirmed F6/F7's deferral is acceptable (both
+  unreachable today; F7 must close before `prior_epoch` is ever used
+  server-side) and flagged one more cheap nit (`abort_remove_member`'s new
+  gate still reports success on an unreachable
+  `PendingCommitState::External` no-op) which I folded in as a doc-only
+  caveat before committing, since no `external_commit` call exists
+  anywhere in this codebase today.
+- **Full gate, re-run after every fix round**: `cargo build --workspace
+  --all-targets` clean, `cargo test --workspace` all green (0 failures,
+  every crate; `powehi-crypto-wasm` alone: 204 passed, 2 ignored, up from
+  200 pre-fix), `cargo fmt --all --check` clean, `cargo clippy --workspace
+  --all-targets -- -D warnings` clean. Frontend files were untouched by
+  the fix round (confirmed by the second review pass: byte-identical to
+  the first pass), so the earlier `tsc`/`biome`/`vitest` green run still
+  applies unchanged.
+- No `threat-model-checker` run: matches the established pattern for
+  standalone WASM crypto-primitive additions with no server-visible
+  metadata and explicitly not wired to any UI/broadcast flow (same
+  reasoning as cycles 458/461's primitive-only additions). No
+  `security-auditor` run: no backend/infra code touched.
+- Committed `b737b2c` (`feat(crypto): add MLS Remove commit stage/confirm/
+  abort primitive (issue #2)`), 6 files changed, pushed clean (`f4176bb..
+  b737b2c main -> main`). `gh run list` showed all 3 checks `queued`
+  immediately after push. Posted a progress comment on issue #2
+  explaining what landed and what's still needed to actually close it
+  (commit-processing consumer, removing the `useMessages.ts`/
+  `useWelcomePoller.ts` ack-and-drop of Commit envelopes, epoch
+  reconciliation, then UI wiring) — did NOT close the issue, since the
+  primitive alone doesn't let a user evict a device yet.
+- **Process note, continuing** (now well past double digits of prior
+  occurrences): a cycle keeps doing real, reviewed-in-comments work and
+  burning its counter slot without committing. This cycle is another data
+  point that a landing cycle re-running the review gate fresh is
+  necessary, not just cautious — the WIP's own embedded doc comments this
+  time didn't claim a prior review had happened (unlike cycle 459's false
+  claims), but the code still had 3 real blockers a fresh pass caught.
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates (carried/updated):**
+  1. **New, real, the natural next step for this cycle's primitive
+     (crypto-reviewer + issue #2 comment, this cycle):** build the
+     commit-processing consumer — nothing in the app currently handles a
+     Commit-type envelope; `useMessages.ts`/`useWelcomePoller.ts` both
+     ack-and-drop it today, which would fork the group if this primitive
+     were wired in as-is. This is the single largest remaining piece of
+     issue #2, needs crypto-lead/mls-engineer scope.
+  2. **New, real, needed before `prior_epoch` can be used for anything
+     (carried from stage_remove_member's doc comment):** design epoch
+     reconciliation between the client's local MLS epoch and the server's
+     `groups.epoch` counter — they diverge from the very first
+     `mlsAddMember` today since nothing in `group_service.rs::add_member`
+     advances the server counter.
+  3. Carried, low-priority hardening (crypto-reviewer, this cycle, F7):
+     `wasm_exports.rs`'s `prior_epoch` `u64 as f64` conversion is
+     unguarded (unlike the existing `f64_to_u64_checked` used for inbound
+     values) — must be fixed before `prior_epoch` is ever used in a
+     server-side precondition, per candidate #2 above.
+  4. Carried, low-priority hardening (crypto-reviewer, this cycle, F6):
+     `mls_group_members`'s new `isSelf` field is derived by comparing leaf
+     *index*, not signature key, against `own_leaf_index()` — MLS reuses
+     blanked leaf indices for new joiners, so this holds "at most one
+     `isSelf`" by state-machine accident (openmls's `Inactive` guard on an
+     evicted handle), not by construction. Worth switching to a
+     signature-key comparison against `own_leaf_node()` if this is ever
+     wired to a UI.
+  5. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  6. Carried, still explicitly BLOCKED: wiring
+     `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal` — needs F3 +
+     HMAC-vs-plain-SHA256 gate resolved first.
+  7. Carried: the `PendingRemovalBanner`'s local cross-check needs either
+     (a) binding `device_id` into the MLS credential identity at creation
+     time, or (b) leaning on §5.6 safety-number verification (now including
+     the group variant) as the real local trust anchor for T3, updating the
+     banner's copy accordingly.
+  8. Carried: GitHub issue #1, P0-blocker, infra: "Frontend SPA has no
+     deployment path (no Pages project, no deploy job)." Needs infra-lead
+     scoping.
+  9. Carried: GitHub issue #3, P1, frontend: "No WebSocket client: delivery
+     runs on 3s polling despite a working WS hub."
+  10. Carried: GitHub issue #4, P1, infra: "Load testing never run against
+      real infra (Phase 5 DoD still open)."
+  11. Carried: GitHub issue #5, P1, infra, compliance: "prod-ap-seoul is
+      Hetzner Singapore, not Korea — PIPA blocks KR-home PII."
+  12. Carried: GitHub issue #7, P2, bug: "app/src-tauri/Cargo.lock is out of
+      sync with its Cargo.toml; no CI builds the Tauri shell."
+  13. Carried: GitHub issue #8, P2, documentation: "Stale doc comment:
+      handle_oracle_secret_token claims a per-restart random key."
+  14. Carried, doc-sync only, low priority: prd.md §10's REST API list is
+      stale — missing `pending-removals` and `members`.
+  15. Carried: the `PendingRemovalBanner` confirm click is still the only
+      defense against a forged `pending_removals` signal.
+  16. Carried, scoped out: the `RemovalRequired` WS event is still
+      unconsumed (no frontend WebSocket client exists at all).
+  17. Carried: no `values-prod-*.yaml`/CI overlay flips
+      `monitoring.prometheusRule.enabled=true` yet (ops task).
+  18. Carried: CI has no job rendering the Helm chart with
+      `monitoring.prometheusRule.enabled=true`/`serviceMonitor.enabled=true`.
+  19. Carried, doc-sync only: prd.md documents `key_packages.device_id` as
+      having `REFERENCES devices(id)`; the actual schema never had this FK.
+  20. Carried, real but scoped out: consumed `key_packages` rows are never
+      garbage-collected.
+  21. Carried, low-priority hardening: `GroupRepository::save` is a blind
+      `ON CONFLICT DO UPDATE` with no production caller today.
+  22. Carried, cosmetic: bare `var(--photon)` CSS custom property used
+      without a defined token in `LinkedDevicesPanel.tsx`/
+      `PendingRemovalBanner.tsx`.
+
+## Previous state (2026-09-08, cycle 461 — FEATURE: fix GitHub issue #6, `pnpm build:wasm` wrote to the wrong out-dir and Vite silently substituted a no-op crypto stub, commit 86ccec7)
 
 - Mode selection: counter 460→461, 461 % 5 != 0 → FEATURE. `gh run list
   --limit 5` green on `main`, working tree clean at session start (no
