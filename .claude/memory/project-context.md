@@ -24,7 +24,133 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-09, cycle 470 — STABILIZATION: close the long-carried Tauri-shell cargo-deny/cargo-audit coverage gap (cycle 465 follow-up), commit 59b3e0a)
+## Current state (2026-09-10, cycle 472 — FEATURE: land orphaned WIP adding the MLS two-phase inspect/confirm/discard commit API (issue #2), fix a HIGH-severity crypto-reviewer finding before committing, commit bd7ddde)
+
+- Mode selection: counter 471→472, 472 % 5 != 0 → FEATURE. `gh run list
+  --limit 3` green on `main`. **Working tree was NOT clean at session
+  start** — another occurrence of the established pattern (see cycles
+  458/460/464/466 process notes): substantial, well-documented, well-tested
+  WIP in `crates/client/powehi-crypto-wasm/src/{mls_group,wasm_exports}.rs`
+  + 4 frontend files (`crypto.worker.ts`, `useCryptoWorker.ts` + test +
+  mock) implementing own-commit recognition (`MlsError::OwnCommit`) and a
+  pre-merge policy-inspection point (`inspect_incoming_commit`/
+  `merge_inspected_commit`, `mls_inspect_commit`/`mls_confirm_incoming_commit`/
+  `mls_discard_incoming_commit`) — exactly cycle 466's carried candidate #1
+  (the two preconditions blocking a commit-processing consumer loop) — but
+  never committed.
+- Read the whole diff file-by-file before treating "land it" as the cycle's
+  action. `cargo build/test/fmt/clippy` all green as found (218 passed/2
+  ignored in `powehi-crypto-wasm`, +7 from the 211 baseline), `pnpm exec
+  tsc --noEmit`/`biome check` clean (4 pre-existing, unrelated biome errors
+  in `app/src-tauri/gen/schemas/*.json`, confirmed untouched by this diff),
+  `pnpm vitest run` 112 files/1614 tests green (+3 from 1611).
+- **crypto-reviewer (fresh pass): NEEDS-REWORK, one real HIGH-severity
+  finding, not a nitpick.** **F1:** `merge_inspected_commit` had NO guard
+  against merging a STALE `StagedCommit` — reachable path: inspect commit A
+  (staging it), then merge a DIFFERENT commit B via the one-shot
+  `process_incoming_commit` (advancing the epoch), then confirm the
+  now-stale A. Verified against vendored openmls-0.8.1
+  (`processing.rs`/`staged_commit.rs`): `merge_staged_commit` performs NO
+  epoch or group-id check before mutating `group_epoch_secrets`,
+  `message_secrets`, and the tree/context diff — it would have silently
+  rolled the group back onto the wrong branch instead of erroring. The
+  diff's own doc comment falsely claimed openmls handles this ("passing one
+  from a different group is a caller-contract violation that surfaces as
+  `MlsError::Membership`") — it does not. Also 3 medium findings: **F2**
+  `mls_import_state` orphaned outstanding `INSPECTED_COMMITS` entries
+  (unresolvable, still holding key material, consumes a cap slot
+  indefinitely); **F3** `mlsInspectCommit` was excluded from
+  `SYNC_FLUSH_ARG_METHODS` in `useCryptoWorker.ts` despite durably consuming
+  a forward-secrecy secret at staging time (same category as `mlsDecrypt`,
+  which IS in the flush set) — the diff's "strictly weaker" claim was
+  unsupported; **F4** (doc-only) comments understated that losing an
+  inspected-but-unresolved commit handle to a worker restart is NOT benign
+  (the ratchet secret is already gone the moment staging succeeded).
+- **Fixed all 4.** F1: added `MlsError::StaleStagedCommit`; `merge_inspected_commit`
+  now checks `staged.group_context().group_id() != group.group_id()` and
+  `staged.epoch().as_u64() != group.epoch().as_u64() + 1` before calling into
+  openmls, plus a new regression test
+  (`test_merge_inspected_commit_rejects_stale_staged_commit`) pinning the
+  exact inspect-A/merge-B/confirm-A scenario. F2: `INSPECTED_COMMITS.clear()`
+  added to `import_mls_context_inner`'s success path. F3: added
+  `mlsInspectCommit` to `SYNC_FLUSH_ARG_METHODS`; rewrote its test from
+  "resolves even when persist fails" to "RED 3: a failed persist REJECTS
+  mlsInspectCommit", added it to the completeness-guard table. F4: rewrote
+  both doc comments (Rust + TS) to state the real consequence.
+- **Second, independent crypto-reviewer pass: caught a real process defect
+  before it could ship — the fixes existed only in the working tree, `git
+  diff --cached` still showed the vulnerable code (forgot to re-`git add`
+  after editing already-staged files).** Also flagged that F2's fix
+  comment's rationale was itself factually wrong (claimed a pre-import
+  inspection "can never be resolved" by the old identity_id — false, since
+  `import_mls_context_inner` never removes the OLD identity's `MlsContext`
+  from `MLS_CTX`; only `mls_clear_session` does). Re-staged all 6 files,
+  rewrote the F2 comment to state the real rationale (deliberate
+  discontinuity policy, not orphan reclamation), reverified `git diff
+  --cached` actually contains `StaleStagedCommit`/`mlsInspectCommit`/the
+  `INSPECTED_COMMITS.clear()` call before committing. **Final verdict:
+  PASS-with-nits** (2 non-blocking nits: the new test's second assertion
+  isn't fully load-bearing — cosmetic; `mls_confirm_incoming_commit`
+  consumes the handle before resolving `MLS_CTX`, so an
+  unknown-identity/group error after a valid binding check would destroy an
+  otherwise-recoverable commit — not reachable today, carried below).
+- No `threat-model-checker` run: matches the established pattern for
+  standalone WASM crypto-primitive additions with no server-visible metadata
+  and explicitly not wired to any UI/broadcast flow. No `security-auditor`
+  run: no backend/infra code touched.
+- **Full gate, re-run after every fix round**: `cargo build --workspace
+  --all-targets` clean, `cargo test --workspace` all green (0 failures,
+  every crate; `powehi-crypto-wasm` alone: 219 passed, 2 ignored, up from
+  218 pre-fix), `cargo fmt --all --check` clean, `cargo clippy --workspace
+  --all-targets -- -D warnings` clean. Frontend: `pnpm exec tsc --noEmit`
+  clean, `biome check` clean (same 4 pre-existing unrelated errors), `pnpm
+  vitest run` 112 files/1615 tests green (+1 from 1614).
+- Committed `bd7ddde` (`feat(crypto): add MLS two-phase inspect/confirm/
+  discard commit API (issue #2)`), 6 files changed, pushed clean (`0188f2a..
+  bd7ddde main -> main`). `gh run list` showed all 3 checks `queued`
+  immediately after push — confirm green in a future session if not already
+  done. Posted a progress comment on issue #2 explaining what landed, the
+  HIGH-severity finding and its fix, and what's still needed to wire this
+  into the consumer loop — did NOT close the issue.
+- Target dir hygiene: not checked in depth (FEATURE mode), spot-checked
+  `target/` at 8.5G — well under the 20G threshold.
+- **Next cycle candidates (carried/updated):**
+  1. **New, real, non-blocking (crypto-reviewer second pass, this cycle):**
+     `mls_confirm_incoming_commit` consumes the `INSPECTED_COMMITS` handle
+     BEFORE resolving `MLS_CTX` — an `unknown mls identity`/`unknown mls
+     group` error (as opposed to a genuine merge failure) after a valid
+     `(identity_id, group_id)` binding check would still permanently destroy
+     an otherwise-recoverable staged commit. Not reachable today (the
+     binding check already requires the same identity/group that was live
+     at inspect time), but worth moving the take-after-resolve if this is
+     ever wired to a real consumer loop.
+  2. Carried, still the natural next step for issue #2: the consumer-loop
+     wiring itself into `useMessages.ts`/`useWelcomePoller.ts`, now that both
+     of its previously-blocking preconditions (own-commit recognition,
+     pre-merge policy-inspection point) are built. What remains is (a) the
+     epoch-reconciliation design between the client's local MLS epoch and
+     the server's `groups.epoch` counter, and (b) actually calling
+     `mlsInspectCommit`/`mlsConfirmIncomingCommit`/`mlsDiscardIncomingCommit`
+     from the poller with a real application-level policy check (e.g. only
+     accept adds/removes from a recognized admin identity).
+  3. Carried, low-priority hardening: RUSTSEC-2024-0429 (glib unsound) isn't
+     enforced by cargo-deny's default policy.
+  4. Carried (unchanged from cycle 466's list — see that section for full
+     text): epoch reconciliation between client MLS epoch and server
+     `groups.epoch`; `mls_group_members` `isSelf` leaf-index vs
+     signature-key hardening; PQ hybrid Phase A prerequisite;
+     `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal` wiring
+     (BLOCKED on F3 + HMAC gate); `PendingRemovalBanner` local cross-check
+     hardening; GitHub issues #1 (SPA deployment path), #3 (no WebSocket
+     client), #4 (load testing never run), #5 (prod-ap-seoul region/PIPA
+     compliance), #8 (stale doc comment); prd.md §10 REST API doc drift;
+     `pending_removals` forged-signal defense; unconsumed `RemovalRequired`
+     WS event; Helm `monitoring.prometheusRule`/`serviceMonitor` overlay +
+     CI render job; `key_packages.device_id` FK doc drift; consumed
+     `key_packages` rows never garbage-collected; `GroupRepository::save`
+     blind `ON CONFLICT DO UPDATE`; bare `var(--photon)` CSS token.
+
+## Previous state (2026-09-09, cycle 470 — STABILIZATION: close the long-carried Tauri-shell cargo-deny/cargo-audit coverage gap (cycle 465 follow-up), commit 59b3e0a)
 
 - Mode selection: counter 469→470, 470 % 5 == 0 → STABILIZATION. `gh run
   list --limit 5` green on `main`, working tree clean at session start.
