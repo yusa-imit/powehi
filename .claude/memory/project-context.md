@@ -24,7 +24,153 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-09, cycle 465 — STABILIZATION: fix GitHub issue #7, Tauri shell Cargo.lock out of sync + no CI coverage, commit 3ee6bd6)
+## Current state (2026-09-09, cycle 466 — FEATURE: land orphaned WIP adding the MLS commit-processing consumer primitive (issue #2), fresh crypto-reviewer PASS, commit 7570b3b)
+
+- Mode selection: counter 465→466, 466 % 5 != 0 → FEATURE. `gh run list
+  --limit 5` green on `main`. **Working tree was NOT clean at session
+  start** — another occurrence of the established pattern (see cycles
+  458/460/464 process notes): substantial, well-documented, well-tested
+  WIP in `crates/client/powehi-crypto-wasm/src/{mls_group,wasm_exports}.rs`
+  + 4 frontend files (`crypto.worker.ts`, `useCryptoWorker.ts` + test +
+  mock) implementing `process_incoming_commit` / `mls_process_commit` /
+  `mlsProcessCommit` — exactly candidate #1 carried since cycle 464
+  ("build the commit-processing consumer... the single largest remaining
+  piece of issue #2") — but never committed.
+- This is the peer/bystander-side counterpart to the already-landed
+  committer-side `stage_remove_member`/`confirm_remove_member`/
+  `abort_remove_member` trio (b737b2c): it processes a Commit sent by
+  ANOTHER group member and merges it via openmls's `merge_staged_commit`,
+  advancing the local epoch so the group doesn't fork. Also fixes the
+  carried candidate #3/#4 (`prior_epoch`'s unguarded `u64 as f64` cast) by
+  adding a new `u64_to_f64_checked` helper (mirror of the existing
+  `f64_to_u64_checked`, JS_MAX_SAFE_INTEGER = 2^53-1 boundary, content-free
+  error) used by both `mls_remove_member_stage`'s `priorEpoch` and the new
+  `mls_process_commit`'s `newEpoch`.
+- Read the whole diff file-by-file before treating "land it" as the
+  cycle's action. `cargo build/test/fmt/clippy` all green as found
+  (211 passed/2 ignored in `powehi-crypto-wasm`, +7 tests from the 204
+  baseline), `pnpm exec tsc --noEmit`/`biome check` clean, `pnpm vitest
+  run` 112 files/1611 tests green (+1 from the 1610 baseline).
+- **crypto-reviewer (fresh pass): PASS, no blocking findings.** Per
+  CLAUDE.md's rule and the now well-established lesson (cycles 459/460's
+  orphaned WIP had doc comments that falsely claimed prior review/fixes),
+  did NOT trust the diff's own extensive embedded RFC/openmls-internals
+  claims — ran a fresh review that independently re-verified every one
+  against the vendored openmls 0.8.1 source rather than the diff's
+  comments: (1) RFC 9420 §6.3.2 `content_type`-before-decrypt ordering
+  confirmed correct in both directions (the new guard in `decrypt_message`
+  rejecting a misrouted Commit, and `process_incoming_commit` rejecting a
+  misrouted Application message), including that `content_type` is bound
+  into the sender-data AAD so a spoofed cleartext field can't be misused —
+  it's authenticated, not just trusted. (2) `is_active()` vs
+  `is_operational()` gating, `merge_staged_commit`'s internal
+  `clear_pending_commit` call, and self-eviction via
+  `RemoveOperation::WeWereRemovedBy` all confirmed against
+  `processing.rs`/`membership.rs`. (3) Confirmed the diff's own
+  self-identified deferred gaps are real and honestly flagged, not
+  soft-pedaled: no pre-merge policy-inspection point (any member's Commit
+  merges unconditionally, no application-level veto) and
+  `StageCommitError::OwnCommit` (openmls's own self-commit detection)
+  being collapsed into a generic `MlsError::Decrypt` are both correctly
+  called out as blocking for a *future* wiring pass, not for this
+  primitive-only change. (4) All 7 new Rust tests confirmed to exercise
+  real 3-party `MlsGroup`/`OpenMlsRustCrypto` instances (no mocking) with
+  genuine assertions (epoch match, `epoch_authenticator()` cryptographic
+  agreement, roster exclusion, end-to-end encrypt/decrypt round-trip,
+  and — notably — the own-staged-commit-silently-dropped race actually
+  reproduced by execution, not asserted by comment). (5) `mlsProcessCommit`
+  correctly added to `SYNC_FLUSH_ARG_METHODS` (mutates durable MLS state
+  via merge; a reload right after must not roll back). (6) No plaintext/
+  ciphertext/epoch logging introduced. One non-blocking nit (an
+  unreachable wildcard match arm could use a clarifying comment) — not
+  fixed, purely cosmetic.
+- No `threat-model-checker` run: matches the established pattern for
+  standalone WASM crypto-primitive additions with no server-visible
+  metadata and explicitly not wired to any UI/broadcast flow (same
+  reasoning as cycles 458/461/464's primitive-only additions). No
+  `security-auditor` run: no backend/infra code touched.
+- **Full gate, re-run after review**: `cargo build --workspace
+  --all-targets` clean, `cargo test --workspace` all green (0 failures,
+  every crate), `cargo fmt --all --check` clean, `cargo clippy --workspace
+  --all-targets -- -D warnings` clean. Frontend: `pnpm exec tsc --noEmit`
+  clean, `biome check` clean, `pnpm vitest run` 112 files/1611 tests green.
+- Committed `7570b3b` (`feat(crypto): add MLS commit-processing consumer
+  primitive (issue #2)`), 6 files changed, pushed clean (`427a9b0..7570b3b
+  main -> main`). `gh run list` showed all 3 checks `in_progress`/`queued`
+  immediately after push — confirm green in a future session if not
+  already done. Posted a progress comment on issue #2 explaining what
+  landed, what's verified, and the 3 concrete gaps (policy-inspection
+  point, self-commit recognition, epoch reconciliation) still blocking
+  wiring into the consumer loop — did NOT close the issue.
+- Target dir hygiene: not checked in depth (FEATURE mode), spot-checked
+  `target/` at 8.4G — well under the 20G threshold.
+- **Next cycle candidates (carried/updated):**
+  1. **New, real, the natural next step for this cycle's primitive
+     (crypto-reviewer + issue #2 comment, this cycle):** build the
+     consumer-loop wiring itself into `useMessages.ts`/
+     `useWelcomePoller.ts` — needs (a) a pre-merge policy-inspection point
+     (expose the `StagedCommit`'s proposals/committer identity before
+     calling `merge_staged_commit`, since right now any member's Commit
+     merges unconditionally with zero application-level veto) and (b)
+     self-commit recognition (surface openmls's own
+     `StageCommitError::OwnCommit` distinctly instead of collapsing it
+     into generic `MlsError::Decrypt`, so the consumer loop can skip a
+     commit this device itself sent without misreading a real fork as a
+     no-op). This is now the single largest remaining piece of issue #2 —
+     needs crypto-lead/mls-engineer scope, not a quick patch.
+  2. Carried: epoch reconciliation between the client's local MLS epoch
+     and the server's `groups.epoch` counter — still needed before
+     `prior_epoch`/`newEpoch` can be used for anything server-side; they
+     diverge from the first `mlsAddMember` since `group_service.rs::add_member`
+     never advances the server counter. Unchanged this cycle (out of scope
+     for a primitive-only addition).
+  3. Carried, low-priority hardening: `mls_group_members`'s `isSelf` field
+     is derived by leaf *index*, not signature key — worth switching if
+     ever wired to a UI.
+  4. Carried: PQ hybrid Phase A prerequisite (ml-kem 0.2.3→0.3.2 +
+     libcrux/x-wing admissibility) — human/crypto-lead policy call.
+  5. Carried, still explicitly BLOCKED: wiring
+     `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal` — needs F3 +
+     HMAC-vs-plain-SHA256 gate resolved first.
+  6. Carried: the `PendingRemovalBanner`'s local cross-check needs either
+     (a) binding `device_id` into the MLS credential identity at creation
+     time, or (b) leaning on §5.6 safety-number verification (now
+     including the group variant) as the real local trust anchor for T3,
+     updating the banner's copy accordingly.
+  7. Carried: GitHub issue #1, P0-blocker, infra: "Frontend SPA has no
+     deployment path (no Pages project, no deploy job)." Needs infra-lead
+     scoping.
+  8. Carried: GitHub issue #2, P0-blocker, security, frontend — progressed
+     this cycle (see candidate #1 above for the concrete next step).
+  9. Carried: GitHub issue #3, P1, frontend: "No WebSocket client:
+     delivery runs on 3s polling despite a working WS hub."
+  10. Carried: GitHub issue #4, P1, infra: "Load testing never run against
+      real infra (Phase 5 DoD still open)."
+  11. Carried: GitHub issue #5, P1, infra, compliance: "prod-ap-seoul is
+      Hetzner Singapore, not Korea — PIPA blocks KR-home PII."
+  12. Carried: GitHub issue #8, P2, documentation: "Stale doc comment:
+      handle_oracle_secret_token claims a per-restart random key."
+  13. Carried, doc-sync only, low priority: prd.md §10's REST API list is
+      stale — missing `pending-removals` and `members`.
+  14. Carried: the `PendingRemovalBanner` confirm click is still the only
+      defense against a forged `pending_removals` signal.
+  15. Carried, scoped out: the `RemovalRequired` WS event is still
+      unconsumed (no frontend WebSocket client exists at all).
+  16. Carried: no `values-prod-*.yaml`/CI overlay flips
+      `monitoring.prometheusRule.enabled=true` yet (ops task).
+  17. Carried: CI has no job rendering the Helm chart with
+      `monitoring.prometheusRule.enabled=true`/`serviceMonitor.enabled=true`.
+  18. Carried, doc-sync only: prd.md documents `key_packages.device_id` as
+      having `REFERENCES devices(id)`; the actual schema never had this FK.
+  19. Carried, real but scoped out: consumed `key_packages` rows are never
+      garbage-collected.
+  20. Carried, low-priority hardening: `GroupRepository::save` is a blind
+      `ON CONFLICT DO UPDATE` with no production caller today.
+  21. Carried, cosmetic: bare `var(--photon)` CSS custom property used
+      without a defined token in `LinkedDevicesPanel.tsx`/
+      `PendingRemovalBanner.tsx`.
+
+## Previous state (2026-09-09, cycle 465 — STABILIZATION: fix GitHub issue #7, Tauri shell Cargo.lock out of sync + no CI coverage, commit 3ee6bd6)
 
 - Mode selection: counter 464→465, 465 % 5 == 0 → STABILIZATION. `gh run
   list --limit 5` green on `main`, working tree clean at session start
