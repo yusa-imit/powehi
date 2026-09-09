@@ -103,6 +103,27 @@ let workerProxy: Comlink.Remote<CryptoWorkerApi> | null = null;
  * right after processing a peer's commit would restore a pre-merge Dexie
  * snapshot and roll this client back to a stale epoch that every peer has
  * already left.
+ *
+ * mlsConfirmIncomingCommit (crypto.worker.ts, the "confirm" half of the
+ * inspect/confirm/discard trio) is included for the same reason as
+ * mlsProcessCommit above: it merges a previously-staged commit and advances
+ * the epoch, so it must flush before its result is released.
+ *
+ * mlsInspectCommit (the "inspect" half of that trio) is ALSO included, per
+ * crypto-reviewer finding F3 — it does not advance the epoch or merge
+ * anything, but staging a Commit still durably consumes a handshake-ratchet
+ * secret in openmls's persisted store, under the exact same forward-secrecy
+ * deletion schedule that makes mlsDecrypt a flush-before-release method
+ * above. An earlier version of this comment claimed the crash window was
+ * "strictly weaker" than mlsDecrypt's case and left it unflushed; that claim
+ * did not hold up under review, so it now flushes like every other durable
+ * mutation here.
+ *
+ * mlsDiscardIncomingCommit (the remaining member of the trio) is still
+ * DELIBERATELY EXCLUDED: it touches no MLS group state at all, only the
+ * worker-side handle registry that holds the staged commit (openmls keeps a
+ * staged commit in that value, not in the group), so there is nothing
+ * durable for it to persist.
  */
 const SYNC_FLUSH_ARG_METHODS: ReadonlySet<string> = new Set([
 	"mlsEncrypt",
@@ -115,6 +136,8 @@ const SYNC_FLUSH_ARG_METHODS: ReadonlySet<string> = new Set([
 	"mlsRemoveMemberConfirm",
 	"mlsRemoveMemberAbort",
 	"mlsProcessCommit",
+	"mlsInspectCommit",
+	"mlsConfirmIncomingCommit",
 ]);
 
 /**

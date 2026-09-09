@@ -75,6 +75,57 @@ pub enum MlsError {
     /// asked to remove — see `stage_remove_member`'s doc comment.
     #[error("mls pending proposals error")]
     PendingProposals,
+    /// The Commit passed to [`process_incoming_commit`] /
+    /// [`inspect_incoming_commit`] was produced by THIS device's own leaf, and
+    /// openmls said so explicitly. Distinct from [`MlsError::Decrypt`] so a
+    /// consumer loop can tell "this is my own commit, already applied locally,
+    /// skip it" apart from "this merge genuinely failed, the group has
+    /// forked" — conflating the two would silently turn a real fork into an
+    /// ignored message, which is the exact failure `process_incoming_commit`
+    /// exists to prevent.
+    ///
+    /// # Which openmls signal produces this, and its precise limits
+    /// Two distinct openmls-0.8.1 signals map here; which one fires depends on
+    /// the group's wire-format policy, and BOTH are the library's own
+    /// detection, never a comparison written in this crate:
+    /// - `ValidationError::CannotDecryptOwnMessage` — the signal that actually
+    ///   fires for this codebase. [`create_group`] / [`join_group`] leave
+    ///   openmls's default wire-format policy in place, so handshake messages
+    ///   are `PrivateMessage`-framed, and openmls compares the *authenticated*
+    ///   `sender_data.leaf_index` against `own_leaf_index()` in
+    ///   `framing/validation.rs` before decrypting the content.
+    /// - `StageCommitError::OwnCommit` — the equivalent check in
+    ///   `mls_group/staged_commit.rs`, reachable only under a plaintext
+    ///   (`PublicMessage`) handshake policy, which this codebase never
+    ///   configures today. Mapped anyway so a future wire-format-policy change
+    ///   cannot silently downgrade this variant back to [`MlsError::Decrypt`].
+    ///
+    /// LIMIT — this only fires for an own Commit that is still at the group's
+    /// CURRENT epoch (i.e. not yet merged locally). Once this device has merged
+    /// its own commit, a re-delivery of those same bytes is rejected as a
+    /// wrong-epoch message and surfaces as [`MlsError::Decrypt`], exactly like
+    /// any other stale commit — openmls cannot distinguish the two at that
+    /// point, and neither can this crate. A consumer loop must therefore not
+    /// treat "not `OwnCommit`" as proof that a commit was authored by a peer.
+    #[error("mls own commit error")]
+    OwnCommit,
+    /// [`merge_inspected_commit`] was asked to merge a [`StagedCommit`] that
+    /// does not belong to `group`'s CURRENT epoch, or belongs to a different
+    /// group entirely.
+    ///
+    /// This is NOT redundant with openmls's own error handling: verified
+    /// against vendored openmls-0.8.1
+    /// (`group/mls_group/processing.rs::merge_staged_commit`,
+    /// `group/mls_group/staged_commit.rs::merge_commit`), `merge_staged_commit`
+    /// performs no epoch or group-id check of its own before mutating state —
+    /// it overwrites `group_epoch_secrets`, swaps in the new
+    /// `message_secrets`, and merges the tree/context diff unconditionally,
+    /// persisting `group_state` along the way. A stale or foreign
+    /// `StagedCommit` would therefore silently roll the group back onto the
+    /// wrong branch rather than fail loudly. This check exists in THIS crate
+    /// specifically because openmls does not provide it.
+    #[error("mls stale staged commit error")]
+    StaleStagedCommit,
 }
 
 /// A freshly generated MLS identity: the public credential bound to a signature
@@ -383,9 +434,10 @@ pub fn add_member(
 /// export into any production UI or broadcast flow until BOTH (a) a real
 /// epoch-reconciliation design exists (see `prior_epoch` below) AND (b) a
 /// commit-processing **consumer loop** is wired into the poller — the
-/// primitive half of (b) is done; what remains is the wiring, which
-/// additionally needs a way to recognise and SKIP a Commit the caller's OWN
-/// device sent. (This `(a)/(b)` pair is this section's own list, naming what
+/// primitive half of (b) is done, including own-commit recognition
+/// ([`MlsError::OwnCommit`]) and a pre-merge policy point
+/// ([`inspect_incoming_commit`]); what remains is the wiring itself.
+/// (This `(a)/(b)` pair is this section's own list, naming what
 /// blocks wiring [`stage_remove_member`] into production; it is distinct from
 /// the `(a)/(b)/(c)` list in [`process_incoming_commit`]'s own doc comment,
 /// which enumerates what that primitive itself still leaves open.) Note that
@@ -650,10 +702,11 @@ pub fn abort_remove_member(
 /// (b) **Not wired into any poller/consumer loop.** `app/src/hooks/useMessages.ts`
 ///     and `app/src/hooks/useWelcomePoller.ts` still ack-and-drop every Commit
 ///     envelope today — nothing calls this function in the running
-///     application. Wiring it in is a deliberate separate follow-up, in part
-///     because the consumer loop needs a way to recognise and SKIP a Commit
-///     the caller's OWN device produced (re-processing an already-merged
-///     commit), which this primitive has no opinion on either.
+///     application. Wiring it in is a deliberate separate follow-up. The two
+///     preconditions that used to block it are now built (own-commit
+///     recognition via [`MlsError::OwnCommit`], see item (f); a pre-merge
+///     policy point via [`inspect_incoming_commit`], see item (d)); what
+///     remains before wiring is the epoch-reconciliation design of item (a).
 /// (c) **Interaction with a locally staged-but-unconfirmed commit — verified,
 ///     not guessed.** Per the vendored openmls-0.8.1 source
 ///     (`src/group/mls_group/processing.rs`), `merge_staged_commit` ends by
@@ -674,20 +727,23 @@ pub fn abort_remove_member(
 ///     (only one Commit per epoch can ever win); detecting the loss and
 ///     re-staging the caller's own operation is the consumer loop's job, not
 ///     this primitive's.
-/// (d) **No policy-inspection point before merge — this is a blocking gap for
-///     wiring, not a nice-to-have.** This function unconditionally merges ANY
-///     validly-framed Commit: it never exposes the `StagedCommit`'s add/remove
-///     proposals or the committer's identity to the caller before calling
-///     [`MlsGroup::merge_staged_commit`]. There is no point in this call chain
-///     where a caller could implement an authorization check (e.g. "only an
-///     admin may remove members") before the merge happens. Concretely: wiring
-///     this primitive into a real consumer loop AS-IS means any authenticated
-///     group member can silently evict or add members from every bystander's
-///     perspective, with no application-level veto point anywhere in the path.
-///     Safe wiring requires changing this function's signature/contract to
-///     expose the staged-commit contents for inspection before the merge is
-///     performed — wiring this primitive into a consumer loop requires that
-///     inspection point to exist first, which is not yet done.
+/// (d) **No policy-inspection point IN THIS FUNCTION — RESOLVED elsewhere; use
+///     the two-phase API for wiring.** This function still unconditionally
+///     merges ANY validly-framed Commit: it never exposes the `StagedCommit`'s
+///     add/remove proposals or the committer's identity before calling
+///     [`MlsGroup::merge_staged_commit`], so there is no veto point in THIS
+///     call chain. That is now a deliberate property of the one-shot path,
+///     kept unchanged for its existing callers and tests — not an open gap.
+///     The inspection point that item (d) demanded now exists as the
+///     [`inspect_incoming_commit`] / [`merge_inspected_commit`] pair, which
+///     surfaces the committer leaf index, the add/remove proposals, and
+///     `self_removed` BEFORE any merge (see [`StagedCommitInfo`]). A consumer
+///     loop MUST wire the two-phase API, not this function: wiring THIS
+///     function as-is would still mean any authenticated group member can
+///     silently evict or add members from every bystander's perspective with
+///     no application-level veto anywhere in the path. Note also that refusing
+///     a Commit is terminal for these bytes — see
+///     [`inspect_incoming_commit`]'s "discard is quarantine, not undo" section.
 /// (e) **No support for proposal-by-reference (RFC 9420 §12.4).** This
 ///     function treats `ProcessedMessageContent::ProposalMessage` as
 ///     [`MlsError::UnexpectedMessage`] rather than calling
@@ -701,25 +757,54 @@ pub fn abort_remove_member(
 ///     proposals (`ProposalOrRef::Proposal`), never references — a peer or a
 ///     future proposal-queueing feature that uses references would break
 ///     against this function as written.
-/// (f) **[`MlsError::Decrypt`] collapses distinct openmls signals into one
-///     opaque error — a blocking precondition for wiring.** The `_ =>` /
-///     `.map_err(|_| MlsError::Decrypt)` on `process_message` above discards
-///     which of several distinct openmls-internal signals actually occurred,
-///     including `StageCommitError::OwnCommit` (openmls's own, already-built-
-///     in detection that a commit was produced by the caller's own leaf),
-///     genuine validation failures, wrong-epoch commits, and
-///     `NoPastEpochData` (a direct consequence of this group's
-///     `max_past_epochs(0)` setting). A future consumer-loop wiring pass MUST
-///     be able to distinguish "this was my own commit, skip it" from "this is
-///     a genuine merge failure, that's a group fork" — silently treating a
-///     real merge failure as an ignorable own-commit would BE the permanent
-///     fork this primitive exists to prevent. This error-variant granularity
-///     is therefore a blocking precondition for wiring, not a nice-to-have.
+/// (f) **Own-commit granularity — RESOLVED; the remaining collapse is
+///     deliberate.** The own-commit case is no longer swallowed: both paths
+///     now route `process_message` failures through
+///     `classify_process_message_error`, which maps openmls's own own-leaf
+///     detection (`ValidationError::CannotDecryptOwnMessage` under this
+///     codebase's `PrivateMessage` handshake framing, and
+///     `StageCommitError::OwnCommit` under a plaintext framing this codebase
+///     never configures) to the distinct [`MlsError::OwnCommit`], so a
+///     consumer loop can tell "my own commit, skip it" from "the merge failed,
+///     we have forked". Read [`MlsError::OwnCommit`]'s doc comment before
+///     relying on it: the detection only holds while the own commit is still
+///     at the CURRENT epoch — an own commit re-delivered AFTER this device
+///     merged it is a wrong-epoch message that openmls cannot distinguish from
+///     any other stale commit, and it therefore still reports
+///     [`MlsError::Decrypt`]. Every other signal (genuine validation failures,
+///     wrong-epoch commits, `NoPastEpochData` from this group's
+///     `max_past_epochs(0)` setting, secret-reuse rejections) deliberately
+///     remains [`MlsError::Decrypt`]: those are all "do not treat this as
+///     applied", and giving each its own variant without a caller that acts on
+///     the difference would only invite mistaking one for an ignorable case.
 pub fn process_incoming_commit(
     group: &mut MlsGroup,
     commit_bytes: &[u8],
     provider: &impl OpenMlsProvider,
 ) -> Result<u64, MlsError> {
+    let (staged, _committer_leaf_index) = stage_incoming_commit(group, commit_bytes, provider)?;
+    merge_inspected_commit(group, staged, provider)
+}
+
+/// Shared front half of [`process_incoming_commit`] and
+/// [`inspect_incoming_commit`]: deserialize, apply the `content_type` guard,
+/// run openmls's `process_message`, and hand back the resulting
+/// [`StagedCommit`] together with the committer's leaf index — WITHOUT
+/// merging anything.
+///
+/// Both public entry points route through this single function so the
+/// framing/guard/error-classification behaviour can never drift between the
+/// one-shot and two-phase paths (rule: one construction path).
+///
+/// The committer's leaf index is read from the message's `Sender` BEFORE
+/// [`ProcessedMessage::into_content`] consumes the message. It is `None` for a
+/// non-member sender (`Sender::External` / `NewMemberCommit` / …), which this
+/// codebase never produces but a peer or DS could deliver.
+fn stage_incoming_commit(
+    group: &mut MlsGroup,
+    commit_bytes: &[u8],
+    provider: &impl OpenMlsProvider,
+) -> Result<(StagedCommit, Option<u32>), MlsError> {
     let message = MlsMessageIn::tls_deserialize_exact(commit_bytes).map_err(|_| MlsError::Codec)?;
     let protocol_message: ProtocolMessage = message
         .try_into_protocol_message()
@@ -735,16 +820,216 @@ pub fn process_incoming_commit(
     }
     let processed = group
         .process_message(provider, protocol_message)
-        .map_err(|_| MlsError::Decrypt)?;
+        .map_err(classify_process_message_error)?;
+    let committer_leaf_index = match processed.sender() {
+        Sender::Member(index) => Some(index.u32()),
+        _ => None,
+    };
     match processed.into_content() {
-        ProcessedMessageContent::StagedCommitMessage(staged) => {
-            group
-                .merge_staged_commit(provider, *staged)
-                .map_err(|_| MlsError::Membership)?;
-            Ok(group.epoch().as_u64())
-        }
+        ProcessedMessageContent::StagedCommitMessage(staged) => Ok((*staged, committer_leaf_index)),
         _ => Err(MlsError::UnexpectedMessage),
     }
+}
+
+/// Map an openmls `process_message` failure onto this module's coarse error
+/// enum, singling out the library's own "this Commit came from my own leaf"
+/// detection so a consumer loop can skip it instead of mistaking it for a
+/// fork. See [`MlsError::OwnCommit`] for why BOTH openmls signals are matched
+/// and for the limit of the detection.
+///
+/// Every other failure — genuine validation failures, wrong-epoch commits,
+/// `NoPastEpochData`, secret reuse, storage errors — deliberately stays
+/// [`MlsError::Decrypt`], preserving the pre-existing behaviour of every
+/// caller. The error itself is dropped rather than embedded: openmls error
+/// values can carry message-derived detail, and this crate's errors are
+/// content-free by construction (rule: no-plaintext-logging).
+fn classify_process_message_error<StorageError>(
+    err: ProcessMessageError<StorageError>,
+) -> MlsError {
+    match err {
+        ProcessMessageError::ValidationError(ValidationError::CannotDecryptOwnMessage)
+        | ProcessMessageError::InvalidCommit(StageCommitError::OwnCommit) => MlsError::OwnCommit,
+        _ => MlsError::Decrypt,
+    }
+}
+
+/// The application-visible contents of a Commit that has been staged but NOT
+/// merged — the input to an application-level policy check.
+///
+/// Everything here is PUBLIC MLS data (leaf indices and credentials are
+/// distributed openly in the ratchet tree); no key material, ciphertext, or
+/// plaintext is exposed.
+pub struct StagedCommitInfo {
+    /// Leaf index of the member who authored this Commit, or `None` when the
+    /// sender is not a group member.
+    ///
+    /// Leaf index only, matching this codebase's existing `isSelf`-by-leaf-index
+    /// precedent in `mls_group_members`. It is a position in the ratchet tree,
+    /// NOT a stable identity: leaf indices are reassigned as members join and
+    /// leave. A policy that must survive membership churn has to resolve this
+    /// index against the roster (`MlsGroup::members()`) at the same epoch —
+    /// binding a policy decision to a signature key is a separate, larger
+    /// design and is deliberately not attempted here.
+    pub committer_leaf_index: Option<u32>,
+    /// Credentials of the members this Commit ADDS, in proposal order.
+    ///
+    /// Taken from each Add proposal's KeyPackage leaf node. The added members
+    /// have no leaf index yet — leaves are assigned when the commit is applied
+    /// — so the credential is the only identifier available before the merge.
+    pub added_credentials: Vec<Credential>,
+    /// Leaf indices this Commit REMOVES, in proposal order. Indices are valid
+    /// in the CURRENT (pre-merge) epoch's tree, so they can be resolved
+    /// against `MlsGroup::members()` before deciding.
+    pub removed_leaf_indices: Vec<u32>,
+    /// `true` iff this Commit removes the CALLER's own leaf — openmls's own
+    /// `StagedCommit::self_removed()`. Lets a caller see its own eviction
+    /// BEFORE merging it (merging is what flips the group to inactive).
+    pub self_removed: bool,
+    /// The group's LOCAL MLS epoch at inspection time, i.e. before any merge.
+    /// Same caveat as [`stage_remove_member`]'s `prior_epoch`: this is not the
+    /// server's `groups.epoch` counter and must not be used as a server-side
+    /// precondition.
+    pub prior_epoch: u64,
+}
+
+/// Phase 1 of the two-phase incoming-Commit flow: stage a peer's Commit and
+/// return what it would do, WITHOUT merging it — the policy-inspection point
+/// that item (d) of [`process_incoming_commit`]'s doc comment called a
+/// blocking precondition for wiring a consumer loop.
+///
+/// # Shape
+/// This is the receiver-side mirror of the committer-side
+/// [`stage_remove_member`] / [`confirm_remove_member`] / [`abort_remove_member`]
+/// trio. Phase 2 is either [`merge_inspected_commit`] (apply it) or simply
+/// dropping the returned [`StagedCommit`] (refuse it). There is no separate
+/// `discard` function because discarding is exactly `drop`: openmls holds the
+/// staged commit in the returned value, not in the group, so letting it fall
+/// out of scope is the complete operation. (The WASM layer's
+/// `mls_discard_incoming_commit` exists only because the handle registry there
+/// has to be told to release its entry.)
+///
+/// # What is and is not mutated
+/// The group's epoch, membership, and ratchet tree are untouched — those only
+/// change in [`merge_inspected_commit`]. What DOES change, unavoidably, is the
+/// secret tree: openmls's `process_message` decrypts the message and, per its
+/// forward-secrecy deletion schedule, consumes the committer's handshake-ratchet
+/// secret for that generation (openmls persists the message-secrets store at
+/// that point — see `unprotect_message` in the vendored
+/// `group/mls_group/processing.rs`).
+///
+/// # Inspecting is IRREVERSIBLE for these exact bytes — discard is quarantine, not undo
+/// Because of that ratchet consumption, once a Commit has been inspected it can
+/// NEVER be processed again by this device, whether the caller then merges it
+/// or drops it, and whether the retry goes through this function or
+/// [`process_incoming_commit`]: openmls rejects the replay with
+/// `ValidationError(UnableToDecrypt(SecretTreeError(SecretReuseError)))`, which
+/// surfaces here as [`MlsError::Decrypt`]. Dropping a staged commit therefore
+/// means this client will never apply that Commit — i.e. it deliberately forks
+/// itself off the group's history unless some OTHER commit at the same epoch
+/// arrives. (Verified against openmls 0.8.1 and pinned by
+/// `test_discard_after_inspect_leaves_group_usable_but_commit_unreplayable`;
+/// this replay rejection is pre-existing openmls behaviour that already applied
+/// to calling [`process_incoming_commit`] twice — the two-phase API does not
+/// introduce it.) A policy that rejects a Commit must therefore treat that as a
+/// terminal decision for this device, not as a retry point.
+///
+/// # What this does NOT do
+/// It performs no authorization itself. It has no notion of an admin, a role,
+/// or an allowed proposal set; it only surfaces the facts (who committed, what
+/// they add/remove, whether the caller is being evicted) so that a caller CAN
+/// implement such a policy. Nothing here prevents a merge — a caller that
+/// inspects and then unconditionally merges gets exactly today's
+/// [`process_incoming_commit`] behaviour.
+///
+/// # Errors
+/// Identical classification to [`process_incoming_commit`]: [`MlsError::Codec`]
+/// for malformed wire bytes, [`MlsError::UnexpectedMessage`] for a non-Commit
+/// (rejected by the same cleartext `content_type` guard, before any decrypt),
+/// [`MlsError::OwnCommit`] for a Commit this device authored, and
+/// [`MlsError::Decrypt`] for everything else.
+pub fn inspect_incoming_commit(
+    group: &mut MlsGroup,
+    commit_bytes: &[u8],
+    provider: &impl OpenMlsProvider,
+) -> Result<(StagedCommit, StagedCommitInfo), MlsError> {
+    let prior_epoch = group.epoch().as_u64();
+    let (staged, committer_leaf_index) = stage_incoming_commit(group, commit_bytes, provider)?;
+    let added_credentials: Vec<Credential> = staged
+        .add_proposals()
+        .map(|queued| {
+            queued
+                .add_proposal()
+                .key_package()
+                .leaf_node()
+                .credential()
+                .clone()
+        })
+        .collect();
+    let removed_leaf_indices: Vec<u32> = staged
+        .remove_proposals()
+        .map(|queued| queued.remove_proposal().removed().u32())
+        .collect();
+    let info = StagedCommitInfo {
+        committer_leaf_index,
+        added_credentials,
+        removed_leaf_indices,
+        self_removed: staged.self_removed(),
+        prior_epoch,
+    };
+    Ok((staged, info))
+}
+
+/// Phase 2 of the two-phase flow: merge a [`StagedCommit`] returned by
+/// [`inspect_incoming_commit`], advancing the local epoch. Returns the new
+/// post-merge local epoch, identical in every respect to what
+/// [`process_incoming_commit`] returns for the same Commit — the one-shot path
+/// is literally implemented as inspect-then-merge (pinned by
+/// `test_confirm_after_inspect_matches_process_incoming_commit_epoch`).
+///
+/// # Caller contract
+/// `staged` MUST be the value returned by an [`inspect_incoming_commit`] call
+/// on THIS `group` with THIS `provider`, and `group` MUST NOT have merged any
+/// other commit in the meantime. openmls does **not** enforce this on its
+/// own — verified against vendored openmls-0.8.1's `merge_staged_commit` /
+/// `merge_commit`, which perform no epoch or group-id check before mutating
+/// `group_epoch_secrets`, `message_secrets`, and the tree/context diff, so a
+/// stale or foreign `StagedCommit` would otherwise silently roll the group
+/// back onto the wrong branch instead of failing loudly. This function
+/// therefore checks `staged`'s group id and epoch against `group` itself
+/// before calling into openmls, rejecting a mismatch as
+/// [`MlsError::StaleStagedCommit`] rather than corrupting state. The WASM
+/// layer adds a second, independent layer of defense-in-depth by storing the
+/// originating `(identity_id, group_id)` alongside the handle, which blocks
+/// the cross-identity/cross-group case before this function is ever called —
+/// but does not by itself catch a same-group stale commit (e.g. inspect A,
+/// merge B via [`process_incoming_commit`], confirm A), which is exactly what
+/// this function's own check exists to catch.
+///
+/// # Self-eviction: `Ok` does not mean "still in the group"
+/// Exactly as in [`process_incoming_commit`]: merging a Commit that removes the
+/// caller's own leaf returns `Ok(new_epoch)` and flips the group to inactive
+/// internally. Unlike the one-shot path, a caller here has already been told
+/// this would happen — [`StagedCommitInfo::self_removed`] — and can decline the
+/// merge. Callers that merge anyway MUST still check `group.is_active()`.
+pub fn merge_inspected_commit(
+    group: &mut MlsGroup,
+    staged: StagedCommit,
+    provider: &impl OpenMlsProvider,
+) -> Result<u64, MlsError> {
+    // See MlsError::StaleStagedCommit: openmls's own merge_staged_commit does
+    // NOT perform this check, so it must happen here before any mutation.
+    // staged.epoch() is "the epoch this commit moves the group into" (its own
+    // doc comment), i.e. group's current epoch + 1 at staging time.
+    let expected_epoch = group.epoch().as_u64().checked_add(1);
+    if staged.group_context().group_id() != group.group_id()
+        || expected_epoch != Some(staged.epoch().as_u64())
+    {
+        return Err(MlsError::StaleStagedCommit);
+    }
+    group
+        .merge_staged_commit(provider, staged)
+        .map_err(|_| MlsError::Membership)?;
+    Ok(group.epoch().as_u64())
 }
 
 /// Join a group from a serialized `Welcome` message produced by [`add_member`].
@@ -2489,6 +2774,551 @@ mod tests {
             matches!(confirm_result, Err(MlsError::NoPendingCommit)),
             "confirming charlie's silently-dropped staged commit must fail as \
              NoPendingCommit — proving the staged removal evaporated with no other signal"
+        );
+    }
+
+    // ── Own-commit detection + the two-phase inspect/confirm/discard API ──────
+    //
+    // These five tests cover the two gaps `process_incoming_commit`'s doc
+    // comment flagged as BLOCKING preconditions for wiring a consumer loop:
+    // item (f) (own-commit granularity) and item (d) (a policy-inspection
+    // point before the merge).
+
+    /// Item (f): a device that processes a Commit IT ITSELF PRODUCED must get
+    /// the distinct [`MlsError::OwnCommit`], not the catch-all
+    /// [`MlsError::Decrypt`] — otherwise a consumer loop cannot tell "already
+    /// applied locally, skip" from "the merge failed, we have forked".
+    ///
+    /// Deliberately distinct from
+    /// [`test_process_incoming_commit_silently_drops_receivers_own_staged_commit`],
+    /// which is a different codepath: there the receiver's own *staged
+    /// proposal* is dropped while merging SOMEONE ELSE's commit. Here the
+    /// device processes the very commit IT sent, and never merges anything.
+    ///
+    /// Also pins the LIMIT documented on [`MlsError::OwnCommit`]: the signal
+    /// only exists while the own commit is still at the current epoch. Once
+    /// merged, a re-delivery of the same bytes is indistinguishable from any
+    /// other stale commit and falls back to [`MlsError::Decrypt`].
+    #[test]
+    fn test_process_incoming_commit_reports_own_commit_distinctly() {
+        let alice_provider = OpenMlsRustCrypto::default();
+        let bob_provider = OpenMlsRustCrypto::default();
+        let charlie_provider = OpenMlsRustCrypto::default();
+        let alice = generate_identity(b"alice", &alice_provider).unwrap();
+        let bob = generate_identity(b"bob", &bob_provider).unwrap();
+        let charlie = generate_identity(b"charlie", &charlie_provider).unwrap();
+        let bob_kp = generate_key_package(&bob, &bob_provider).unwrap();
+        let charlie_kp = generate_key_package(&charlie, &charlie_provider).unwrap();
+
+        let mut alice_group = create_group(&alice, &alice_provider).unwrap();
+        let welcome = add_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+        let mut bob_group = join_group(&welcome, &bob_provider).unwrap();
+
+        // Alice authors a Commit (adding charlie) and does NOT merge it yet.
+        let (commit, _welcome, _gi) = alice_group
+            .add_members(
+                &alice_provider,
+                &alice.signer,
+                &[charlie_kp.key_package().clone()],
+            )
+            .unwrap();
+        let commit_bytes = commit.to_bytes().unwrap();
+        let alice_epoch_before = alice_group.epoch().as_u64();
+
+        // Alice feeds her OWN commit back in — the shape a consumer loop sees
+        // when the Delivery Service echoes a device's own commit back to it.
+        let own = process_incoming_commit(&mut alice_group, &commit_bytes, &alice_provider);
+        assert!(
+            matches!(own, Err(MlsError::OwnCommit)),
+            "a device processing its own Commit must get the distinct OwnCommit error, \
+             not the catch-all Decrypt: got {own:?}"
+        );
+        assert_eq!(
+            alice_group.epoch().as_u64(),
+            alice_epoch_before,
+            "rejecting an own commit must not advance alice's epoch"
+        );
+        assert!(
+            alice_group.pending_commit().is_some(),
+            "rejecting an own commit must leave alice's own pending commit intact"
+        );
+
+        // Negative space: the SAME bytes reaching a genuine peer are NOT an
+        // own commit — bob merges them normally.
+        let bob_epoch = process_incoming_commit(&mut bob_group, &commit_bytes, &bob_provider)
+            .expect("a peer must still merge the same commit normally");
+
+        // The documented LIMIT: once alice has merged her own commit, a
+        // re-delivery of the identical bytes is a wrong-epoch message and is
+        // no longer distinguishable from any other stale commit.
+        alice_group.merge_pending_commit(&alice_provider).unwrap();
+        assert_eq!(bob_epoch, alice_group.epoch().as_u64());
+        let after_merge = process_incoming_commit(&mut alice_group, &commit_bytes, &alice_provider);
+        assert!(
+            matches!(after_merge, Err(MlsError::Decrypt)),
+            "an ALREADY-MERGED own commit is a wrong-epoch message, not OwnCommit — \
+             this limit is documented on MlsError::OwnCommit: got {after_merge:?}"
+        );
+    }
+
+    /// Item (d), the policy-inspection point: [`inspect_incoming_commit`] must
+    /// expose the committer's leaf index and the commit's add/remove proposals
+    /// WITHOUT mutating group state (no epoch advance, no membership change),
+    /// and the commit it returns must still merge afterwards.
+    #[test]
+    fn test_inspect_incoming_commit_exposes_proposals_without_mutating_group() {
+        let alice_provider = OpenMlsRustCrypto::default();
+        let bob_provider = OpenMlsRustCrypto::default();
+        let charlie_provider = OpenMlsRustCrypto::default();
+        let alice = generate_identity(b"alice", &alice_provider).unwrap();
+        let bob = generate_identity(b"bob", &bob_provider).unwrap();
+        let charlie = generate_identity(b"charlie", &charlie_provider).unwrap();
+        let bob_kp = generate_key_package(&bob, &bob_provider).unwrap();
+        let charlie_kp = generate_key_package(&charlie, &charlie_provider).unwrap();
+
+        let mut alice_group = create_group(&alice, &alice_provider).unwrap();
+        let welcome = add_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+        let mut bob_group = join_group(&welcome, &bob_provider).unwrap();
+
+        let (commit, _welcome, _gi) = alice_group
+            .add_members(
+                &alice_provider,
+                &alice.signer,
+                &[charlie_kp.key_package().clone()],
+            )
+            .unwrap();
+        alice_group.merge_pending_commit(&alice_provider).unwrap();
+        let commit_bytes = commit.to_bytes().unwrap();
+
+        let alice_leaf_for_bob = bob_group
+            .members()
+            .find(|m| {
+                BasicCredential::try_from(m.credential.clone())
+                    .map(|basic| basic.identity() == b"alice")
+                    .unwrap_or(false)
+            })
+            .map(|m| m.index.u32())
+            .expect("alice must be in bob's roster");
+        let bob_epoch_before = bob_group.epoch().as_u64();
+        let bob_roster_before: Vec<u32> = bob_group.members().map(|m| m.index.u32()).collect();
+
+        let (staged, info) = inspect_incoming_commit(&mut bob_group, &commit_bytes, &bob_provider)
+            .expect("inspecting a well-formed peer commit must succeed");
+
+        assert_eq!(
+            info.committer_leaf_index,
+            Some(alice_leaf_for_bob),
+            "the committer must be reported by leaf index"
+        );
+        assert!(
+            info.removed_leaf_indices.is_empty(),
+            "an add-only commit must report no Remove proposals"
+        );
+        assert!(!info.self_removed, "this commit does not evict bob");
+        assert_eq!(info.prior_epoch, bob_epoch_before);
+        let added: Vec<Vec<u8>> = info
+            .added_credentials
+            .iter()
+            .filter_map(|c| {
+                BasicCredential::try_from(c.clone())
+                    .ok()
+                    .map(|b| b.identity().to_vec())
+            })
+            .collect();
+        assert_eq!(
+            added,
+            vec![b"charlie".to_vec()],
+            "the Add proposal's credential identity must be exposed for a policy check"
+        );
+
+        // No mutation: epoch and roster are untouched by the inspection.
+        assert_eq!(
+            bob_group.epoch().as_u64(),
+            bob_epoch_before,
+            "inspect must NOT advance the epoch"
+        );
+        assert_eq!(
+            bob_group
+                .members()
+                .map(|m| m.index.u32())
+                .collect::<Vec<_>>(),
+            bob_roster_before,
+            "inspect must NOT change group membership"
+        );
+
+        // The inspected commit still merges, and lands bob on alice's epoch.
+        let new_epoch = merge_inspected_commit(&mut bob_group, staged, &bob_provider)
+            .expect("merging the inspected commit must succeed");
+        assert_eq!(new_epoch, alice_group.epoch().as_u64());
+        assert_eq!(bob_group.epoch().as_u64(), alice_group.epoch().as_u64());
+    }
+
+    /// Item (d): a Remove commit must surface its target leaf index and, for
+    /// the device being evicted, `self_removed` — the signal an application
+    /// policy check needs before merging its own eviction (issue #2's P0 case:
+    /// evicting a compromised device).
+    #[test]
+    fn test_inspect_incoming_commit_reports_remove_proposal_and_self_eviction() {
+        let alice_provider = OpenMlsRustCrypto::default();
+        let bob_provider = OpenMlsRustCrypto::default();
+        let charlie_provider = OpenMlsRustCrypto::default();
+        let alice = generate_identity(b"alice", &alice_provider).unwrap();
+        let bob = generate_identity(b"bob", &bob_provider).unwrap();
+        let charlie = generate_identity(b"charlie", &charlie_provider).unwrap();
+        let bob_kp = generate_key_package(&bob, &bob_provider).unwrap();
+        let charlie_kp = generate_key_package(&charlie, &charlie_provider).unwrap();
+
+        let mut alice_group = create_group(&alice, &alice_provider).unwrap();
+        let welcome1 = add_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+        let mut bob_group = join_group(&welcome1, &bob_provider).unwrap();
+        let (commit2, welcome2, _gi) = alice_group
+            .add_members(
+                &alice_provider,
+                &alice.signer,
+                &[charlie_kp.key_package().clone()],
+            )
+            .unwrap();
+        alice_group.merge_pending_commit(&alice_provider).unwrap();
+        let mut charlie_group =
+            join_group(&welcome2.to_bytes().unwrap(), &charlie_provider).unwrap();
+        process_incoming_commit(&mut bob_group, &commit2.to_bytes().unwrap(), &bob_provider)
+            .unwrap();
+
+        // Alice evicts bob.
+        let bob_leaf = alice_group
+            .members()
+            .find(|m| {
+                BasicCredential::try_from(m.credential.clone())
+                    .map(|basic| basic.identity() == b"bob")
+                    .unwrap_or(false)
+            })
+            .map(|m| m.index.u32())
+            .expect("bob must be in alice's roster");
+        let (remove_commit, _prior) =
+            stage_remove_member(&mut alice_group, &alice.signer, bob_leaf, &alice_provider)
+                .unwrap();
+        confirm_remove_member(&mut alice_group, &alice_provider).unwrap();
+
+        // Charlie (a bystander) sees the Remove target but is not evicted.
+        let (charlie_staged, charlie_info) =
+            inspect_incoming_commit(&mut charlie_group, &remove_commit, &charlie_provider)
+                .expect("charlie must be able to inspect the remove commit");
+        assert_eq!(
+            charlie_info.removed_leaf_indices,
+            vec![bob_leaf],
+            "the Remove proposal's target leaf must be exposed for a policy check"
+        );
+        assert!(
+            charlie_info.added_credentials.is_empty(),
+            "a remove-only commit must report no Add proposals"
+        );
+        assert!(
+            !charlie_info.self_removed,
+            "charlie is a bystander, not the evicted member"
+        );
+        merge_inspected_commit(&mut charlie_group, charlie_staged, &charlie_provider).unwrap();
+
+        // Bob, the evicted device, sees self_removed BEFORE merging.
+        let (bob_staged, bob_info) =
+            inspect_incoming_commit(&mut bob_group, &remove_commit, &bob_provider)
+                .expect("bob must be able to inspect his own eviction");
+        assert!(
+            bob_info.self_removed,
+            "the evicted device must learn it is the Remove target BEFORE merging"
+        );
+        assert!(
+            bob_group.is_active(),
+            "inspect alone must not deactivate bob's group"
+        );
+        merge_inspected_commit(&mut bob_group, bob_staged, &bob_provider).unwrap();
+        assert!(
+            !bob_group.is_active(),
+            "merging his own eviction must deactivate bob's group"
+        );
+    }
+
+    /// Item (d): confirm-after-inspect must be epoch-identical to today's
+    /// one-shot [`process_incoming_commit`] on the same bytes. Bob takes the
+    /// two-phase path, charlie takes the one-shot path, on the same commit.
+    #[test]
+    fn test_confirm_after_inspect_matches_process_incoming_commit_epoch() {
+        let alice_provider = OpenMlsRustCrypto::default();
+        let bob_provider = OpenMlsRustCrypto::default();
+        let charlie_provider = OpenMlsRustCrypto::default();
+        let dave_provider = OpenMlsRustCrypto::default();
+        let alice = generate_identity(b"alice", &alice_provider).unwrap();
+        let bob = generate_identity(b"bob", &bob_provider).unwrap();
+        let charlie = generate_identity(b"charlie", &charlie_provider).unwrap();
+        let dave = generate_identity(b"dave", &dave_provider).unwrap();
+        let bob_kp = generate_key_package(&bob, &bob_provider).unwrap();
+        let charlie_kp = generate_key_package(&charlie, &charlie_provider).unwrap();
+        let dave_kp = generate_key_package(&dave, &dave_provider).unwrap();
+
+        let mut alice_group = create_group(&alice, &alice_provider).unwrap();
+        let welcome1 = add_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+        let mut bob_group = join_group(&welcome1, &bob_provider).unwrap();
+        let (commit2, welcome2, _gi) = alice_group
+            .add_members(
+                &alice_provider,
+                &alice.signer,
+                &[charlie_kp.key_package().clone()],
+            )
+            .unwrap();
+        alice_group.merge_pending_commit(&alice_provider).unwrap();
+        let mut charlie_group =
+            join_group(&welcome2.to_bytes().unwrap(), &charlie_provider).unwrap();
+        process_incoming_commit(&mut bob_group, &commit2.to_bytes().unwrap(), &bob_provider)
+            .unwrap();
+        assert_eq!(bob_group.epoch().as_u64(), charlie_group.epoch().as_u64());
+
+        // Alice commits an Add of dave; bob and charlie take different paths.
+        let (commit3, _welcome3, _gi3) = alice_group
+            .add_members(
+                &alice_provider,
+                &alice.signer,
+                &[dave_kp.key_package().clone()],
+            )
+            .unwrap();
+        alice_group.merge_pending_commit(&alice_provider).unwrap();
+        let commit3_bytes = commit3.to_bytes().unwrap();
+
+        let (staged, _info) =
+            inspect_incoming_commit(&mut bob_group, &commit3_bytes, &bob_provider)
+                .expect("bob inspects");
+        let bob_epoch = merge_inspected_commit(&mut bob_group, staged, &bob_provider)
+            .expect("bob confirms the inspected commit");
+        let charlie_epoch =
+            process_incoming_commit(&mut charlie_group, &commit3_bytes, &charlie_provider)
+                .expect("charlie takes the one-shot path");
+
+        assert_eq!(
+            bob_epoch, charlie_epoch,
+            "inspect+confirm must land on the same epoch as the one-shot path"
+        );
+        assert_eq!(bob_epoch, alice_group.epoch().as_u64());
+        assert_eq!(
+            bob_group.epoch_authenticator().as_slice(),
+            charlie_group.epoch_authenticator().as_slice(),
+            "both paths must produce identical epoch state, not just an equal epoch number"
+        );
+    }
+
+    /// Item (d), discard: after discarding an inspected commit the group is
+    /// still fully usable and a DIFFERENT commit at the same epoch merges
+    /// normally.
+    ///
+    /// This test also pins the sharp edge that makes discard a QUARANTINE, not
+    /// an undo: the inspection itself irreversibly consumes the committer's
+    /// handshake-ratchet secret for that message (openmls's forward-secrecy
+    /// deletion schedule), so the SAME commit bytes can never be processed
+    /// again by this device — via either entry point. Verified against openmls
+    /// 0.8.1, which rejects the replay with
+    /// `ValidationError(UnableToDecrypt(SecretTreeError(SecretReuseError)))`.
+    /// This is pre-existing openmls behaviour that already applied to a
+    /// double-call of [`process_incoming_commit`]; inspect/discard does not
+    /// introduce it, but a caller MUST NOT treat discard as a retry point.
+    #[test]
+    fn test_discard_after_inspect_leaves_group_usable_but_commit_unreplayable() {
+        let alice_provider = OpenMlsRustCrypto::default();
+        let bob_provider = OpenMlsRustCrypto::default();
+        let charlie_provider = OpenMlsRustCrypto::default();
+        let dave_provider = OpenMlsRustCrypto::default();
+        let alice = generate_identity(b"alice", &alice_provider).unwrap();
+        let bob = generate_identity(b"bob", &bob_provider).unwrap();
+        let charlie = generate_identity(b"charlie", &charlie_provider).unwrap();
+        let dave = generate_identity(b"dave", &dave_provider).unwrap();
+        let bob_kp = generate_key_package(&bob, &bob_provider).unwrap();
+        let charlie_kp = generate_key_package(&charlie, &charlie_provider).unwrap();
+        let dave_kp = generate_key_package(&dave, &dave_provider).unwrap();
+
+        let mut alice_group = create_group(&alice, &alice_provider).unwrap();
+        let welcome = add_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+        let mut bob_group = join_group(&welcome, &bob_provider).unwrap();
+
+        // Commit A (add charlie), abandoned by alice so commit B lands at the
+        // same epoch — two distinct commits bob could legitimately receive.
+        let (commit_a, _wa, _gia) = alice_group
+            .add_members(
+                &alice_provider,
+                &alice.signer,
+                &[charlie_kp.key_package().clone()],
+            )
+            .unwrap();
+        let commit_a_bytes = commit_a.to_bytes().unwrap();
+        alice_group
+            .clear_pending_commit(alice_provider.storage())
+            .unwrap();
+        let (commit_b, _wb, _gib) = alice_group
+            .add_members(
+                &alice_provider,
+                &alice.signer,
+                &[dave_kp.key_package().clone()],
+            )
+            .unwrap();
+        let commit_b_bytes = commit_b.to_bytes().unwrap();
+        alice_group.merge_pending_commit(&alice_provider).unwrap();
+
+        let bob_epoch_before = bob_group.epoch().as_u64();
+        let bob_roster_before: Vec<u32> = bob_group.members().map(|m| m.index.u32()).collect();
+
+        // Bob inspects commit A and DISCARDS it (drops the StagedCommit).
+        let (staged, _info) =
+            inspect_incoming_commit(&mut bob_group, &commit_a_bytes, &bob_provider)
+                .expect("bob inspects commit A");
+        drop(staged);
+
+        assert_eq!(
+            bob_group.epoch().as_u64(),
+            bob_epoch_before,
+            "discarding must leave the epoch where it was"
+        );
+        assert_eq!(
+            bob_group
+                .members()
+                .map(|m| m.index.u32())
+                .collect::<Vec<_>>(),
+            bob_roster_before,
+            "discarding must leave membership unchanged"
+        );
+        assert!(
+            bob_group.is_active(),
+            "discarding must leave the group usable"
+        );
+        assert!(
+            bob_group.pending_commit().is_none(),
+            "inspecting a peer commit must not leave a local pending commit behind"
+        );
+
+        // The discarded commit is NOT replayable — by either entry point.
+        let reinspect = inspect_incoming_commit(&mut bob_group, &commit_a_bytes, &bob_provider);
+        assert!(
+            matches!(reinspect, Err(MlsError::Decrypt)),
+            "openmls rejects the replay of an already-inspected commit (secret reuse): \
+             got {:?}",
+            reinspect.map(|_| "unexpected Ok")
+        );
+        let reprocess = process_incoming_commit(&mut bob_group, &commit_a_bytes, &bob_provider);
+        assert!(
+            matches!(reprocess, Err(MlsError::Decrypt)),
+            "the one-shot path rejects the same replay: got {reprocess:?}"
+        );
+
+        // A DIFFERENT commit at the same epoch still merges normally.
+        let new_epoch = process_incoming_commit(&mut bob_group, &commit_b_bytes, &bob_provider)
+            .expect("a different commit at the same epoch must still merge after a discard");
+        assert_eq!(new_epoch, alice_group.epoch().as_u64());
+    }
+
+    /// crypto-reviewer F1 (this cycle): [`merge_inspected_commit`] must reject
+    /// a [`StagedCommit`] that is no longer at the group's CURRENT epoch.
+    /// openmls's own `merge_staged_commit` performs NO such check (verified
+    /// against vendored openmls-0.8.1's `processing.rs`/`staged_commit.rs`) —
+    /// it would otherwise silently roll the group back onto the wrong branch.
+    ///
+    /// Reachable path: bob inspects commit A (staging it, which — per the
+    /// tests above — irreversibly consumes A's handshake-ratchet secret), but
+    /// then merges a DIFFERENT commit B at the same starting epoch via the
+    /// one-shot [`process_incoming_commit`], advancing his epoch. Confirming
+    /// the now-stale `staged` from A must be rejected, not silently applied.
+    #[test]
+    fn test_merge_inspected_commit_rejects_stale_staged_commit() {
+        let alice_provider = OpenMlsRustCrypto::default();
+        let bob_provider = OpenMlsRustCrypto::default();
+        let charlie_provider = OpenMlsRustCrypto::default();
+        let dave_provider = OpenMlsRustCrypto::default();
+        let alice = generate_identity(b"alice", &alice_provider).unwrap();
+        let bob = generate_identity(b"bob", &bob_provider).unwrap();
+        let charlie = generate_identity(b"charlie", &charlie_provider).unwrap();
+        let dave = generate_identity(b"dave", &dave_provider).unwrap();
+        let bob_kp = generate_key_package(&bob, &bob_provider).unwrap();
+        let charlie_kp = generate_key_package(&charlie, &charlie_provider).unwrap();
+        let dave_kp = generate_key_package(&dave, &dave_provider).unwrap();
+
+        let mut alice_group = create_group(&alice, &alice_provider).unwrap();
+        let welcome = add_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+        let mut bob_group = join_group(&welcome, &bob_provider).unwrap();
+
+        // Two alternative commits at the SAME starting epoch: A adds charlie;
+        // B (after alice abandons A) adds dave instead.
+        let (commit_a, _wa, _gia) = alice_group
+            .add_members(
+                &alice_provider,
+                &alice.signer,
+                &[charlie_kp.key_package().clone()],
+            )
+            .unwrap();
+        let commit_a_bytes = commit_a.to_bytes().unwrap();
+        alice_group
+            .clear_pending_commit(alice_provider.storage())
+            .unwrap();
+        let (commit_b, _wb, _gib) = alice_group
+            .add_members(
+                &alice_provider,
+                &alice.signer,
+                &[dave_kp.key_package().clone()],
+            )
+            .unwrap();
+        let commit_b_bytes = commit_b.to_bytes().unwrap();
+        alice_group.merge_pending_commit(&alice_provider).unwrap();
+
+        // Bob inspects A first, staging (and irreversibly consuming) it ...
+        let (stale_staged, _info) =
+            inspect_incoming_commit(&mut bob_group, &commit_a_bytes, &bob_provider)
+                .expect("bob inspects commit A");
+
+        // ... but merges B instead via the one-shot path, advancing his epoch.
+        let epoch_after_b = process_incoming_commit(&mut bob_group, &commit_b_bytes, &bob_provider)
+            .expect("bob merges commit B normally");
+        assert_eq!(epoch_after_b, alice_group.epoch().as_u64());
+
+        // Confirming the now-stale A must be rejected, not silently merged.
+        let result = merge_inspected_commit(&mut bob_group, stale_staged, &bob_provider);
+        assert!(
+            matches!(result, Err(MlsError::StaleStagedCommit)),
+            "merging a stale StagedCommit (superseded by a different commit at \
+             the same epoch) must be rejected, not silently roll the group \
+             back onto the wrong branch: got {result:?}"
+        );
+        assert_eq!(
+            bob_group.epoch().as_u64(),
+            epoch_after_b,
+            "a rejected stale merge must not disturb the group's current epoch"
         );
     }
 

@@ -67,8 +67,9 @@ use crate::mls_group;
 use crate::mls_group::{
     abort_remove_member, add_member, confirm_remove_member, create_group, decrypt_message,
     encrypt_message, generate_identity, generate_identity_from_keypair,
-    generate_key_package_with_pq_ext, join_group, process_incoming_commit, stage_remove_member,
-    Identity, POWEHI_PQ_KEM_EXT_TYPE, PQ_EXT_ENCAP_KEY_LEN, PQ_EXT_PAYLOAD_LEN,
+    generate_key_package_with_pq_ext, inspect_incoming_commit, join_group, merge_inspected_commit,
+    process_incoming_commit, stage_remove_member, Identity, POWEHI_PQ_KEM_EXT_TYPE,
+    PQ_EXT_ENCAP_KEY_LEN, PQ_EXT_PAYLOAD_LEN,
 };
 use crate::opaque::{self, DefaultCipherSuite, EXPORT_KEY_LEN};
 
@@ -108,6 +109,30 @@ struct MlsContext {
     groups: HashMap<String, MlsGroup>,
 }
 
+/// One incoming Commit staged by [`mls_inspect_commit`] but not yet resolved
+/// by [`mls_confirm_incoming_commit`] / [`mls_discard_incoming_commit`].
+///
+/// The `StagedCommit` cannot cross the WASM/JS boundary — it is a Rust-owned
+/// openmls value holding the PROVISIONAL next-epoch group state (including
+/// epoch secrets). So it is held here, Rust-side, behind an opaque string
+/// handle, exactly like `KEM_DECAP_KEYS` / `MEDIA_KEYS` / `THUMBNAIL_HANDLES`
+/// hold key material that must never be handed to JS.
+struct InspectedCommit {
+    /// The identity the commit was staged against.
+    identity_id: String,
+    /// The group the commit was staged against.
+    ///
+    /// Recording BOTH ids makes the "confirm the commit you actually
+    /// inspected, into the group you inspected it from" precondition an
+    /// explicit, checked gate rather than something the caller is trusted to
+    /// get right. openmls binds a `StagedCommit` to the group state it came
+    /// from, so a cross-group merge would fail anyway — this turns that
+    /// implicit failure into a named, deterministic rejection.
+    group_id: String,
+    /// The openmls staged commit itself, awaiting merge or drop.
+    staged: StagedCommit,
+}
+
 thread_local! {
     static OPAQUE_REG:   RefCell<HashMap<String, OpaqueRegSession>>   = RefCell::new(HashMap::new());
     static OPAQUE_LOGIN: RefCell<HashMap<String, OpaqueLoginSession>> = RefCell::new(HashMap::new());
@@ -131,6 +156,11 @@ thread_local! {
     // On the receiver path the thumbnail key is imported into MEDIA_KEYS (above) via
     // media_import_key, same as the main media key (cycle 311).
     static THUMBNAIL_HANDLES: RefCell<HashMap<String, ThumbnailEntry>> = RefCell::new(HashMap::new());
+    // Issue #2: incoming Commits staged by `mls_inspect_commit` and awaiting an
+    // application-level policy decision. Each entry holds a `StagedCommit`
+    // (provisional next-epoch group state, i.e. key material), so entries are
+    // capped (MAX_INSPECTED_COMMITS) and wiped by `mls_clear_session` on logout.
+    static INSPECTED_COMMITS: RefCell<HashMap<String, InspectedCommit>> = RefCell::new(HashMap::new());
 }
 
 /// Maximum simultaneous KEM handles per session (per map: decap keys or shared secrets).
@@ -143,6 +173,15 @@ const MAX_MEDIA_HANDLES: usize = 256;
 
 /// Maximum simultaneous thumbnail handles per session (§9.4.1 thumbnail encryption).
 const MAX_THUMBNAIL_HANDLES: usize = 256;
+
+/// Maximum simultaneously inspected-but-unresolved incoming Commits.
+///
+/// Deliberately far lower than the 256-entry key-handle caps: a `StagedCommit`
+/// pins a provisional copy of the group's next-epoch state, and a correct
+/// caller resolves each inspection (confirm or discard) before inspecting the
+/// next Commit for that group, so anything approaching this bound already
+/// indicates a caller that is leaking inspections.
+const MAX_INSPECTED_COMMITS: usize = 64;
 
 /// Maximum thumbnail plaintext size (16 KB). Prevents oversized inline thumbnails
 /// from bloating MLS application messages. A 64×64 JPEG at quality 0.6 is ~1–3 KB.
@@ -869,12 +908,15 @@ pub fn mls_add_member(
 /// add in this codebase today; reconciling them is a separate, out-of-scope
 /// follow-up).
 ///
-/// STATUS: the peer-side export [`mls_process_commit`] now exists, but no
-/// consumer loop calls it — `useMessages.ts` and `useWelcomePoller.ts` still
-/// ack-and-drop every Commit envelope, so nothing in the running application
-/// consumes a Commit produced here yet. Do not wire this into any production
-/// UI or broadcast flow yet; see `stage_remove_member`'s doc comment in
-/// `mls_group.rs` for the full status note.
+/// STATUS: the peer-side exports now exist — [`mls_process_commit`]
+/// (one-shot) and the [`mls_inspect_commit`] / [`mls_confirm_incoming_commit`]
+/// / [`mls_discard_incoming_commit`] two-phase trio (with a pre-merge policy
+/// point) — but no consumer loop calls any of them: `useMessages.ts` and
+/// `useWelcomePoller.ts` still ack-and-drop every Commit envelope, so nothing
+/// in the running application consumes a Commit produced here yet. Do not
+/// wire this into any production UI or broadcast flow yet; see
+/// `stage_remove_member`'s doc comment in `mls_group.rs` for the full status
+/// note.
 ///
 /// `leaf_index` MUST come from this identity's own live call to
 /// `mls_group_members` for this exact `group_id` (never from server-reported
@@ -982,10 +1024,25 @@ pub fn mls_remove_member_abort(identity_id: &str, group_id: &str) -> Result<(), 
 /// Nothing in this codebase currently calls this export from a live
 /// consumer loop: `app/src/hooks/useMessages.ts` and
 /// `app/src/hooks/useWelcomePoller.ts` still ack-and-drop every Commit
-/// envelope today. Wiring this in is a deliberate separate follow-up — the
-/// wiring layer will need a way to recognise and SKIP a Commit the caller's
-/// OWN device produced (re-processing an already-merged commit), which this
-/// export has no opinion on and does not attempt to detect.
+/// envelope today. Wiring this in is a deliberate separate follow-up.
+///
+/// # Use [`mls_inspect_commit`] instead when wiring a consumer loop
+/// This export merges unconditionally: it has no point at which an
+/// application-level policy check (e.g. "only an admin may remove members")
+/// could run. The two-phase [`mls_inspect_commit`] /
+/// [`mls_confirm_incoming_commit`] / [`mls_discard_incoming_commit`] trio
+/// exists for exactly that and should be preferred by any new caller; this
+/// one-shot export is kept unchanged for its existing callers and tests.
+///
+/// # Own commits are now reported distinctly
+/// A Commit this device itself authored no longer collapses into the generic
+/// decrypt error: it rejects with the `mls own commit error` message
+/// (`MlsError::OwnCommit`), so a consumer loop can skip it instead of
+/// mistaking it for a fork. Read `MlsError::OwnCommit`'s doc comment in
+/// `mls_group.rs` for the limit — the signal only holds while the own commit
+/// is still at the CURRENT epoch; an own commit re-delivered AFTER this
+/// device merged it is a wrong-epoch message that openmls cannot tell apart
+/// from any other stale commit.
 ///
 /// # Self-eviction
 /// If `commit` is the Commit that removes the CALLER'S OWN leaf, this still
@@ -1026,6 +1083,256 @@ pub fn mls_process_commit(
     })?;
     let epoch_f64 = u64_to_f64_checked(new_epoch).map_err(js_err)?;
     js_obj(&[("newEpoch", JsValue::from_f64(epoch_f64))])
+}
+
+/// Remove and return the [`InspectedCommit`] registered under `handle`,
+/// rejecting a handle that belongs to a different `(identity_id, group_id)`.
+///
+/// Pure of `js_sys` (returns `&'static str`) so it is callable in native unit
+/// tests, matching this module's `*_inner` convention.
+///
+/// A binding mismatch does NOT consume the entry: a call naming the wrong
+/// identity/group is a caller bug, and destroying an unrelated, legitimately
+/// outstanding inspection as a side effect of that bug would silently lose a
+/// Commit that can never be re-processed (see `inspect_incoming_commit`'s
+/// "discard is quarantine, not undo" section in `mls_group.rs`).
+fn take_inspected_commit(
+    handle: &str,
+    identity_id: &str,
+    group_id: &str,
+) -> Result<InspectedCommit, &'static str> {
+    INSPECTED_COMMITS.with(|m| {
+        let mut map = m.borrow_mut();
+        let entry = map.get(handle).ok_or("unknown inspected commit handle")?;
+        if entry.identity_id != identity_id || entry.group_id != group_id {
+            return Err("inspected commit handle belongs to a different identity or group");
+        }
+        map.remove(handle).ok_or("unknown inspected commit handle")
+    })
+}
+
+/// Stage an incoming peer Commit and report what it would do, WITHOUT merging
+/// it — the application-level policy-inspection point for the receiver side of
+/// issue #2. Phase 1 of two; phase 2 is [`mls_confirm_incoming_commit`] (apply
+/// it) or [`mls_discard_incoming_commit`] (refuse it).
+///
+/// Returns `{ commitHandle, committerLeafIndex, addedIdentityHexes,
+/// removedLeafIndices, selfRemoved, priorEpoch }`:
+/// - `commitHandle` — opaque string naming the staged Commit held inside the
+///   worker. The `StagedCommit` itself is provisional next-epoch group state
+///   (key material) and never crosses the WASM/JS boundary, exactly like the
+///   ML-KEM decap keys and media keys behind `KEM_DECAP_KEYS` / `MEDIA_KEYS`.
+/// - `committerLeafIndex` — the committer's MLS leaf index, or `null` when the
+///   Commit's sender is not a group member. A leaf index is a POSITION in the
+///   ratchet tree, not a stable identity: it is reassigned as members join and
+///   leave, so resolve it against `mls_group_members` at the same epoch before
+///   using it in a policy decision.
+/// - `addedIdentityHexes` — one entry per Add proposal, in proposal order,
+///   rendered exactly like `mls_group_members`'s `credentialIdentityHex`
+///   (`null` for a non-Basic credential). The SAME caveat applies and is
+///   load-bearing here: this is NOT a server `device_id`, and no authenticated
+///   binding between an MLS credential and a `device_id` exists in this
+///   codebase — do not build an authorization rule that assumes one.
+/// - `removedLeafIndices` — leaf indices this Commit removes, valid in the
+///   CURRENT (pre-merge) epoch's tree, so they resolve against a
+///   `mls_group_members` call made before confirming.
+/// - `selfRemoved` — `true` iff this Commit evicts THIS device. Surfaced
+///   before the merge because merging is what deactivates the local group.
+/// - `priorEpoch` — the LOCAL MLS epoch before any merge. Same caveat as
+///   `mls_remove_member_stage`'s `priorEpoch`: NOT the server's `groups.epoch`
+///   counter, and not usable as a server-side precondition.
+///
+/// # Caller contract
+/// Every successful call MUST be followed by exactly ONE of
+/// [`mls_confirm_incoming_commit`] / [`mls_discard_incoming_commit`] for the
+/// returned `commitHandle`. The handle lives in worker `thread_local!` memory
+/// only: a worker restart or `mls_clear_session` drops it — but this is NOT
+/// benign the way it may read. Because this device's copy of the
+/// handshake-ratchet secret for the Commit is already gone the moment
+/// staging succeeds (see "Inspecting is IRREVERSIBLE" below), losing the
+/// handle to a restart has the exact same effect as an explicit discard: the
+/// Commit becomes permanently unprocessable by this device, silently and
+/// with no record anywhere that it happened. A caller MUST resolve every
+/// [`mls_inspect_commit`] call (confirm or discard) before yielding control
+/// back to any code path that could restart the worker or call
+/// `mls_clear_session`.
+///
+/// # This function performs NO authorization
+/// It reports facts; it enforces nothing. A caller that inspects and then
+/// unconditionally confirms gets exactly [`mls_process_commit`]'s behaviour.
+///
+/// # Inspecting is IRREVERSIBLE for these exact bytes
+/// Staging decrypts the message, which consumes the committer's
+/// handshake-ratchet secret for that generation under openmls's
+/// forward-secrecy deletion schedule. The SAME Commit bytes can therefore
+/// never be processed again by this device — not by a second
+/// `mls_inspect_commit`, not by `mls_process_commit` — regardless of whether
+/// the caller confirms or discards. Discarding means this device will never
+/// apply that Commit and has deliberately forked itself off the group's
+/// history unless a DIFFERENT commit at the same epoch arrives. See
+/// `inspect_incoming_commit`'s doc comment in `mls_group.rs` for the verified
+/// openmls behaviour behind this (it is pre-existing replay rejection that
+/// already applied to calling `mls_process_commit` twice — the two-phase API
+/// does not introduce it).
+///
+/// # STATUS: crypto primitive only
+/// Nothing in this codebase calls this from a live consumer loop;
+/// `app/src/hooks/useMessages.ts` and `app/src/hooks/useWelcomePoller.ts`
+/// still ack-and-drop every Commit envelope. Wiring remains blocked on the
+/// epoch-reconciliation design (see `mls_remove_member_stage`'s doc comment).
+#[wasm_bindgen]
+pub fn mls_inspect_commit(
+    identity_id: &str,
+    group_id: &str,
+    commit: &[u8],
+) -> Result<JsValue, JsError> {
+    // Cap check BEFORE staging: staging is irreversible for these bytes (see
+    // above), so refusing at the cap must happen before the commit is consumed.
+    let at_cap = INSPECTED_COMMITS.with(|m| m.borrow().len() >= MAX_INSPECTED_COMMITS);
+    if at_cap {
+        return Err(js_err(
+            "inspected commit cap exceeded — confirm or discard outstanding inspections first",
+        ));
+    }
+    let (staged, info) = MLS_CTX.with(|ctx| -> Result<_, JsError> {
+        let mut ctx = ctx.borrow_mut();
+        let c = ctx
+            .get_mut(identity_id)
+            .ok_or_else(|| js_err("unknown mls identity"))?;
+        let group = c
+            .groups
+            .get_mut(group_id)
+            .ok_or_else(|| js_err("unknown mls group"))?;
+        inspect_incoming_commit(group, commit, &c.provider).map_err(|e| js_err(&e.to_string()))
+    })?;
+    // Atomicity (same invariant as `pq_build_payload` / `commit_pq_decap_key`):
+    // build the entire JS result first, and only insert the handle once every
+    // fallible step has succeeded — a failure here drops the StagedCommit
+    // rather than leaving an orphaned entry that no caller can ever resolve
+    // and that would hold next-epoch key material for the worker's lifetime.
+    let prior_epoch_f64 = u64_to_f64_checked(info.prior_epoch).map_err(js_err)?;
+    let added_identity_hexes = js_sys::Array::new();
+    for credential in &info.added_credentials {
+        let value = match member_credential_identity_hex(credential) {
+            Some(hex) => JsValue::from_str(&hex),
+            None => JsValue::NULL,
+        };
+        added_identity_hexes.push(&value);
+    }
+    let removed_leaf_indices = js_sys::Array::new();
+    for leaf_index in &info.removed_leaf_indices {
+        removed_leaf_indices.push(&JsValue::from_f64(f64::from(*leaf_index)));
+    }
+    let committer_leaf_index = match info.committer_leaf_index {
+        Some(leaf_index) => JsValue::from_f64(f64::from(leaf_index)),
+        None => JsValue::NULL,
+    };
+    let handle = next_id();
+    let result = js_obj(&[
+        ("commitHandle", JsValue::from_str(&handle)),
+        ("committerLeafIndex", committer_leaf_index),
+        ("addedIdentityHexes", added_identity_hexes.into()),
+        ("removedLeafIndices", removed_leaf_indices.into()),
+        ("selfRemoved", JsValue::from_bool(info.self_removed)),
+        ("priorEpoch", JsValue::from_f64(prior_epoch_f64)),
+    ])?;
+    INSPECTED_COMMITS.with(|m| {
+        m.borrow_mut().insert(
+            handle,
+            InspectedCommit {
+                identity_id: identity_id.to_string(),
+                group_id: group_id.to_string(),
+                staged,
+            },
+        )
+    });
+    Ok(result)
+}
+
+/// Merge the Commit previously staged by [`mls_inspect_commit`] under
+/// `commit_handle`, advancing this identity's local epoch for `group_id`.
+///
+/// Returns `{ newEpoch }` — identical in every respect to what
+/// [`mls_process_commit`] returns for the same Commit bytes (the one-shot path
+/// is implemented as inspect-then-merge). The same `newEpoch` caveat applies:
+/// it is the LOCAL MLS epoch, not the server's `groups.epoch` counter.
+///
+/// `identity_id` / `group_id` MUST match the ones the handle was inspected
+/// against; a mismatch is rejected without consuming the handle.
+///
+/// # The handle is consumed even if the merge fails
+/// Deliberate, and the same reasoning as `confirm_remove_member`'s
+/// no-retry-path gate in `mls_group.rs`: a merge that failed has already
+/// advanced openmls's internal state past the point where re-merging the same
+/// staged commit is meaningful, so leaving the handle alive would offer a
+/// retry that could only ever produce a false success for the exact operation
+/// whose purpose is restoring Post-Compromise Security. A caller that sees
+/// this reject must treat the Commit as unapplied AND unrecoverable (see
+/// [`mls_inspect_commit`]'s irreversibility section) — i.e. as a fork.
+///
+/// # Self-eviction: success does not mean "still in the group"
+/// If the Commit removes this device's own leaf, this returns `Ok({ newEpoch })`
+/// and openmls flips the local group to inactive. Unlike [`mls_process_commit`],
+/// the caller was already told this would happen by `selfRemoved` and could
+/// have declined; a caller that confirms anyway must still detect the eviction
+/// itself (e.g. via `mls_group_members` no longer reporting a self row).
+///
+/// # STATUS: crypto primitive only — see [`mls_inspect_commit`].
+#[wasm_bindgen]
+pub fn mls_confirm_incoming_commit(
+    identity_id: &str,
+    group_id: &str,
+    commit_handle: &str,
+) -> Result<JsValue, JsError> {
+    let entry = take_inspected_commit(commit_handle, identity_id, group_id).map_err(js_err)?;
+    let new_epoch = MLS_CTX.with(|ctx| -> Result<u64, JsError> {
+        let mut ctx = ctx.borrow_mut();
+        let c = ctx
+            .get_mut(identity_id)
+            .ok_or_else(|| js_err("unknown mls identity"))?;
+        let group = c
+            .groups
+            .get_mut(group_id)
+            .ok_or_else(|| js_err("unknown mls group"))?;
+        merge_inspected_commit(group, entry.staged, &c.provider).map_err(|e| js_err(&e.to_string()))
+    })?;
+    let epoch_f64 = u64_to_f64_checked(new_epoch).map_err(js_err)?;
+    js_obj(&[("newEpoch", JsValue::from_f64(epoch_f64))])
+}
+
+/// Drop the Commit previously staged by [`mls_inspect_commit`] under
+/// `commit_handle` WITHOUT merging it — the "refuse this Commit" half of the
+/// policy decision. The local epoch, membership, and pending-commit slot are
+/// left exactly as they were before the inspection.
+///
+/// `identity_id` / `group_id` MUST match the ones the handle was inspected
+/// against; a mismatch is rejected without consuming the handle.
+///
+/// Rejects an unknown handle rather than returning a silent success, matching
+/// how `abort_remove_member` treats "nothing to do" as caller-visible (see its
+/// doc comment in `mls_group.rs`).
+///
+/// # This is a QUARANTINE, not an undo
+/// Discarding does not restore the ability to process this Commit later: the
+/// inspection already consumed the committer's handshake-ratchet secret for
+/// these bytes, so both [`mls_inspect_commit`] and [`mls_process_commit`] will
+/// reject a replay of them from now on. Discarding therefore means this device
+/// has permanently declined that Commit and is forked off the group's history
+/// unless a DIFFERENT commit at the same epoch arrives. See
+/// [`mls_inspect_commit`]'s irreversibility section.
+///
+/// # STATUS: crypto primitive only — see [`mls_inspect_commit`].
+#[wasm_bindgen]
+pub fn mls_discard_incoming_commit(
+    identity_id: &str,
+    group_id: &str,
+    commit_handle: &str,
+) -> Result<(), JsError> {
+    // Dropping the entry drops its `StagedCommit`, which is the whole
+    // operation — openmls holds the staged commit in this value, not in the
+    // group, so there is nothing to un-stage on the group itself.
+    drop(take_inspected_commit(commit_handle, identity_id, group_id).map_err(js_err)?);
+    Ok(())
 }
 
 /// Join a group from a Welcome message.
@@ -1276,6 +1583,20 @@ fn import_mls_context_inner(
             },
         );
     });
+    // A pre-import outstanding inspection would actually still be resolvable
+    // after this call: `identity_id` is freshly minted, but the OLD
+    // identity_id's MlsContext is not removed from MLS_CTX by this function
+    // (only `mls_clear_session` does that), so a caller that kept the old
+    // identity_id could still confirm/discard it against the old, still-live
+    // group object. This clear is a deliberate policy choice, not orphan
+    // reclamation: reconstructing a context from an export is the same kind
+    // of discontinuity as a worker restart (see mls_inspect_commit's caller
+    // contract), and a caller has no business resolving an inspection made
+    // against a session that import is in the middle of superseding. Every
+    // entry still holds provisional next-epoch key material regardless of
+    // whether it remains technically resolvable, so dropping it here is
+    // strictly safer than leaving it live across the transition.
+    INSPECTED_COMMITS.with(|m| m.borrow_mut().clear());
 
     Ok((identity_id, group_ids, generation))
 }
@@ -2861,6 +3182,9 @@ pub fn mls_clear_session() {
     KEM_SHARED_SECRETS.with(|m| m.borrow_mut().clear());
     MEDIA_KEYS.with(|m| m.borrow_mut().clear());
     THUMBNAIL_HANDLES.with(|h| h.borrow_mut().clear());
+    // Each entry holds a StagedCommit (provisional next-epoch group state), so
+    // an outstanding inspection must not survive a logout.
+    INSPECTED_COMMITS.with(|m| m.borrow_mut().clear());
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -3084,6 +3408,100 @@ mod tests {
         // Trying to retrieve a non-existent MLS context returns None.
         let missing = MLS_CTX.with(|ctx| ctx.borrow().get("no-such-id").map(|_| ()));
         assert!(missing.is_none(), "unknown identity must not be found");
+    }
+
+    // ── Inspected-commit handle registry (issue #2) ───────────────────────────
+
+    /// Negative space: a handle that was never issued is rejected by name,
+    /// never silently treated as "nothing to do".
+    #[test]
+    fn test_take_inspected_commit_unknown_handle_rejected() {
+        let result = take_inspected_commit("no-such-handle", "identity-x", "group-x");
+        assert!(
+            matches!(result, Err("unknown inspected commit handle")),
+            "an unissued handle must be rejected by name"
+        );
+    }
+
+    /// A handle may only be resolved by the `(identity_id, group_id)` it was
+    /// inspected against — and a mismatched attempt must NOT consume it, since
+    /// destroying an outstanding inspection is unrecoverable (the commit bytes
+    /// can never be re-processed; see `mls_inspect_commit`'s doc comment).
+    #[test]
+    fn test_take_inspected_commit_rejects_wrong_identity_or_group_binding() {
+        let alice_provider = OpenMlsRustCrypto::default();
+        let bob_provider = OpenMlsRustCrypto::default();
+        let charlie_provider = OpenMlsRustCrypto::default();
+        let alice = generate_identity(b"alice", &alice_provider).unwrap();
+        let bob = generate_identity(b"bob", &bob_provider).unwrap();
+        let charlie = generate_identity(b"charlie", &charlie_provider).unwrap();
+        let bob_kp = generate_key_package(&bob, &bob_provider).unwrap();
+        let charlie_kp = generate_key_package(&charlie, &charlie_provider).unwrap();
+
+        let mut alice_group = create_group(&alice, &alice_provider).unwrap();
+        let welcome = add_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+        let mut bob_group = join_group(&welcome, &bob_provider).unwrap();
+        let (commit, _welcome, _gi) = alice_group
+            .add_members(
+                &alice_provider,
+                &alice.signer,
+                &[charlie_kp.key_package().clone()],
+            )
+            .unwrap();
+        alice_group.merge_pending_commit(&alice_provider).unwrap();
+        let (staged, _info) =
+            inspect_incoming_commit(&mut bob_group, &commit.to_bytes().unwrap(), &bob_provider)
+                .unwrap();
+
+        let handle = next_id();
+        INSPECTED_COMMITS.with(|m| {
+            m.borrow_mut().insert(
+                handle.clone(),
+                InspectedCommit {
+                    identity_id: "identity-a".to_string(),
+                    group_id: "group-a".to_string(),
+                    staged,
+                },
+            )
+        });
+
+        let wrong_identity = take_inspected_commit(&handle, "identity-b", "group-a");
+        assert!(
+            matches!(
+                wrong_identity,
+                Err("inspected commit handle belongs to a different identity or group")
+            ),
+            "a handle must not resolve under a different identity"
+        );
+        let wrong_group = take_inspected_commit(&handle, "identity-a", "group-b");
+        assert!(
+            matches!(
+                wrong_group,
+                Err("inspected commit handle belongs to a different identity or group")
+            ),
+            "a handle must not resolve under a different group"
+        );
+        assert!(
+            INSPECTED_COMMITS.with(|m| m.borrow().contains_key(&handle)),
+            "a mismatched attempt must NOT consume the outstanding inspection — losing it \
+             would permanently forfeit a commit that can never be re-processed"
+        );
+
+        // The correct binding resolves it, exactly once.
+        assert!(take_inspected_commit(&handle, "identity-a", "group-a").is_ok());
+        assert!(
+            matches!(
+                take_inspected_commit(&handle, "identity-a", "group-a"),
+                Err("unknown inspected commit handle")
+            ),
+            "a handle must be single-use — confirm and discard cannot both run"
+        );
     }
 
     /// next_id generates unique IDs.

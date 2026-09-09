@@ -253,6 +253,48 @@ describe("wrapWithPersistence — synchronous persist bookkeeping", () => {
 		// snapshot while the caller believes the removal is durably confirmed.
 		await expect(proxy.mlsRemoveMemberConfirm("id", "grp")).rejects.toThrow();
 	});
+
+	it("RED 3 (inspect): a failed persist REJECTS mlsInspectCommit rather than releasing the staged commit unsaved", async () => {
+		await db.identity.put({ id: 1, deviceId: "dev-inspect-persist-fail" });
+		const raw = fakeRaw({
+			clearSessionState: async () => {},
+			mlsInspectCommit: async () => ({
+				commitHandle: "handle-1",
+				committerLeafIndex: 1,
+				addedIdentityHexes: [],
+				removedLeafIndices: [],
+				selfRemoved: false,
+				priorEpoch: 3,
+			}),
+			mlsExportState: async () => {
+				throw new Error("quota_exceeded");
+			},
+		});
+		const proxy = wrapWithPersistence(raw);
+		await proxy.clearSessionState();
+
+		// mlsInspectCommit consumes a handshake-ratchet secret in openmls's
+		// durable store (its own forward-secrecy deletion schedule) even though
+		// it does not merge or advance the epoch — the same category of durable
+		// mutation mlsDecrypt flushes for, per crypto-reviewer F3. It must
+		// therefore be in SYNC_FLUSH_ARG_METHODS, same as every other entry.
+		await expect(proxy.mlsInspectCommit("id", "grp", new Uint8Array([1]))).rejects.toThrow();
+	});
+
+	it("mlsDiscardIncomingCommit is NOT a sync-flush method — resolves even when the persist path would fail", async () => {
+		await db.identity.put({ id: 1, deviceId: "dev-discard-no-flush" });
+		const raw = fakeRaw({
+			clearSessionState: async () => {},
+			mlsDiscardIncomingCommit: async () => undefined,
+			mlsExportState: async () => {
+				throw new Error("quota_exceeded");
+			},
+		});
+		const proxy = wrapWithPersistence(raw);
+		await proxy.clearSessionState();
+
+		await expect(proxy.mlsDiscardIncomingCommit("id", "grp", "handle-1")).resolves.toBeUndefined();
+	});
 });
 
 // crypto-reviewer finding F2 guard: EVERY ratchet-advancing / key-minting
@@ -301,6 +343,8 @@ describe("wrapWithPersistence — SYNC_FLUSH_ARG_METHODS completeness guard (cry
 		{ name: "mlsRemoveMemberConfirm", args: ["identity-x", "group-x"] },
 		{ name: "mlsRemoveMemberAbort", args: ["identity-x", "group-x"] },
 		{ name: "mlsProcessCommit", args: ["identity-x", "group-x", new Uint8Array([1])] },
+		{ name: "mlsInspectCommit", args: ["identity-x", "group-x", new Uint8Array([1])] },
+		{ name: "mlsConfirmIncomingCommit", args: ["identity-x", "group-x", "handle-x"] },
 	];
 
 	for (const { name, args } of SYNC_FLUSH_METHODS_UNDER_TEST) {

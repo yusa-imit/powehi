@@ -68,6 +68,25 @@ const mockWorker = {
 	mlsProcessCommit: async (_identityId: string, _groupId: string, _commitBytes: Uint8Array) => ({
 		newEpoch: 2,
 	}),
+	// MLS inspect/confirm/discard trio — crypto PRIMITIVE ONLY, not wired to
+	// any UI yet (see crypto.worker.ts MlsInspectCommitResult doc comment).
+	mlsInspectCommit: async (_identityId: string, _groupId: string, _commit: Uint8Array) => ({
+		commitHandle: "mock-commit-handle-0",
+		committerLeafIndex: 1,
+		addedIdentityHexes: [],
+		removedLeafIndices: [],
+		selfRemoved: false,
+		priorEpoch: 1,
+	}),
+	mlsConfirmIncomingCommit: async (
+		_identityId: string,
+		_groupId: string,
+		_commitHandle: string,
+	) => ({
+		newEpoch: 2,
+	}),
+	mlsDiscardIncomingCommit: async (_identityId: string, _groupId: string, _commitHandle: string) =>
+		undefined,
 	dropDbKey: async () => {},
 	clearSessionState: async () => {},
 	mlKem768Keygen: async () => ({ encapKey: new Uint8Array(1184), decapKey: new Uint8Array(2400) }),

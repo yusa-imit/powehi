@@ -106,6 +106,48 @@ export type MlsRemoveStageResult = { commit: Uint8Array; priorEpoch: number };
 // `groups.epoch` counter — the two diverge from the first member add, see
 // the block above.
 export type MlsProcessCommitResult = { newEpoch: number };
+// Inspect/confirm/discard trio (peer/bystander side) — lets the caller run an
+// application-level policy check (e.g. "only an admin may remove members")
+// on an incoming Commit BEFORE deciding whether to merge it, unlike
+// `mlsProcessCommit` above which merges unconditionally. mls_inspect_commit
+// stages the Commit WITHOUT merging it and does NOT advance the epoch; the
+// caller MUST follow every successful call with exactly ONE of
+// `mlsConfirmIncomingCommit` (merge) or `mlsDiscardIncomingCommit` (drop) —
+// the handle lives in worker thread-local memory only, so a page reload /
+// worker restart loses it. This is NOT a benign loss: the handshake-ratchet
+// secret for that Commit is already gone the moment staging succeeded (see
+// below), so an unresolved handle lost to a restart is silently equivalent
+// to an explicit discard — the Commit becomes permanently unprocessable by
+// this device, with no record anywhere that it happened.
+//
+// DISCARD IS NOT A FREE UNDO: `mlsInspectCommit` irreversibly consumes the
+// committer's handshake-ratchet secret for that message (openmls's
+// forward-secrecy deletion schedule). After a discard, RE-processing the
+// SAME commit bytes — via `mlsInspectCommit` OR `mlsProcessCommit` — always
+// fails (openmls returns a secret-reuse error). Discarding therefore means
+// this device can NEVER merge that particular Commit: it is a deliberate
+// quarantine/fork of this client, not a retry. A DIFFERENT Commit at the
+// same epoch still processes normally. This replay-rejection is pre-existing
+// openmls behaviour that also applies to `mlsProcessCommit` — inspect/
+// discard does not introduce it.
+//
+// committerLeafIndex is null when the Commit's sender is not a group member
+// (external sender). addedIdentityHexes entries are null when the added
+// member's credential is not a Basic credential (same convention — and same
+// caveats — as `MlsGroupMember.credentialIdentityHex`: NOT a server
+// device_id, no authenticated binding exists). removedLeafIndices are the
+// leaf indices this Commit removes. selfRemoved is true iff this Commit
+// evicts THIS device. priorEpoch is the LOCAL MLS epoch before the merge —
+// same caveats as `MlsRemoveStageResult`'s priorEpoch (NOT the server's
+// `groups.epoch`).
+export type MlsInspectCommitResult = {
+	commitHandle: string;
+	committerLeafIndex: number | null;
+	addedIdentityHexes: (string | null)[];
+	removedLeafIndices: number[];
+	selfRemoved: boolean;
+	priorEpoch: number;
+};
 export type MlsWelcomeResult = { welcome: Uint8Array };
 export type MlsCiphertextResult = { ciphertext: Uint8Array };
 export type MlsPlaintextResult = { plaintext: Uint8Array };
@@ -204,6 +246,17 @@ interface WasmModule {
 		groupId: string,
 		commit: Uint8Array,
 	) => MlsProcessCommitResult;
+	mls_inspect_commit: (
+		identityId: string,
+		groupId: string,
+		commit: Uint8Array,
+	) => MlsInspectCommitResult;
+	mls_confirm_incoming_commit: (
+		identityId: string,
+		groupId: string,
+		commitHandle: string,
+	) => MlsProcessCommitResult;
+	mls_discard_incoming_commit: (identityId: string, groupId: string, commitHandle: string) => void;
 	mls_join_group: (identityId: string, welcome: Uint8Array) => MlsGroupResult;
 	mls_encrypt: (identityId: string, groupId: string, plaintext: Uint8Array) => MlsCiphertextResult;
 	mls_decrypt: (identityId: string, groupId: string, ciphertext: Uint8Array) => MlsPlaintextResult;
@@ -762,6 +815,66 @@ const api = {
 	): Promise<MlsProcessCommitResult> {
 		const wasm = await getWasm();
 		return wasm.mls_process_commit(identityId, groupId, commitBytes);
+	},
+
+	/**
+	 * Stage an incoming peer Commit WITHOUT merging it, so the caller can run
+	 * an application-level policy check (e.g. "only an admin may remove
+	 * members") before deciding whether to merge or drop it — see
+	 * `MlsInspectCommitResult`'s doc comment for the full caller contract,
+	 * including why discard is NOT a free undo. Does NOT advance the epoch.
+	 * The caller MUST follow this call with exactly ONE of
+	 * `mlsConfirmIncomingCommit` or `mlsDiscardIncomingCommit`.
+	 *
+	 * STATUS: crypto PRIMITIVE ONLY, exactly like `mlsProcessCommit` — see
+	 * the `MlsRemoveStageResult` doc comment above. Not wired into
+	 * `useMessages.ts` or `useWelcomePoller.ts`.
+	 */
+	async mlsInspectCommit(
+		identityId: string,
+		groupId: string,
+		commit: Uint8Array,
+	): Promise<MlsInspectCommitResult> {
+		const wasm = await getWasm();
+		return wasm.mls_inspect_commit(identityId, groupId, commit);
+	},
+
+	/**
+	 * Merge a previously-inspected commit (see `mlsInspectCommit`) — advances
+	 * the epoch and consumes `commitHandle`. See `MlsInspectCommitResult`'s
+	 * doc comment for the full caller contract.
+	 *
+	 * STATUS: crypto PRIMITIVE ONLY, exactly like `mlsProcessCommit` — see
+	 * the `MlsRemoveStageResult` doc comment above. Not wired into
+	 * `useMessages.ts` or `useWelcomePoller.ts`.
+	 */
+	async mlsConfirmIncomingCommit(
+		identityId: string,
+		groupId: string,
+		commitHandle: string,
+	): Promise<MlsProcessCommitResult> {
+		const wasm = await getWasm();
+		return wasm.mls_confirm_incoming_commit(identityId, groupId, commitHandle);
+	},
+
+	/**
+	 * Drop a previously-inspected commit (see `mlsInspectCommit`) WITHOUT
+	 * merging it, and consumes `commitHandle`. Throws if the handle is
+	 * unknown or was inspected against a different (identityId, groupId).
+	 * See `MlsInspectCommitResult`'s doc comment for why this is NOT a free
+	 * undo.
+	 *
+	 * STATUS: crypto PRIMITIVE ONLY, exactly like `mlsProcessCommit` — see
+	 * the `MlsRemoveStageResult` doc comment above. Not wired into
+	 * `useMessages.ts` or `useWelcomePoller.ts`.
+	 */
+	async mlsDiscardIncomingCommit(
+		identityId: string,
+		groupId: string,
+		commitHandle: string,
+	): Promise<void> {
+		const wasm = await getWasm();
+		wasm.mls_discard_incoming_commit(identityId, groupId, commitHandle);
 	},
 
 	/**
