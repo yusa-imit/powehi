@@ -85,18 +85,27 @@ export type MlsPqEncapKeyResult = { encapKey: Uint8Array; signature: Uint8Array 
 // A real caller's local MLS epoch and the server counter therefore diverge
 // from the very first mlsAddMember.
 //
-// STATUS — crypto PRIMITIVE ONLY, not wired to anything: there is no
-// peer-side commit-processing path anywhere in this codebase — no
-// mls_process_commit (or equivalent) WASM export, useMessages.ts handles
-// only Application-type envelopes, and useWelcomePoller.ts handles only
-// Welcome messages. Nothing consumes a Commit, so the Post-Compromise
-// Security property the Rust unit test proves holds inside that test only,
-// NOT yet for the running application. These methods MUST NOT be wired into
-// any production UI or broadcast flow until BOTH (a) the epoch-
-// reconciliation gap above is resolved AND (b) a commit-processing consumer
-// exists — building that pipeline is a separate, much larger follow-up
-// epic, out of scope here.
+// STATUS — the peer-side commit-processing primitive NOW EXISTS:
+// mlsProcessCommit (WASM mls_process_commit) has landed as a primitive (see
+// its doc comment below). It is still NOT wired into any consumer loop —
+// useMessages.ts and useWelcomePoller.ts still ack-and-drop every Commit
+// envelope, so nothing in the running application consumes a Commit yet.
+// Two gaps still block that wiring: (1) self-commit recognition — a
+// consumer loop needs a way to recognise and SKIP a Commit this device
+// itself sent, which the primitive has no opinion on; (2) the epoch-
+// reconciliation gap described in the paragraphs above (local MLS epoch vs
+// the server's `groups.epoch` counter) is still open. Therefore the
+// Post-Compromise Security property the Rust unit tests prove still holds
+// in those tests only, NOT yet for the running application, and these
+// methods MUST NOT be wired into a production UI or broadcast flow until
+// BOTH gaps are resolved.
 export type MlsRemoveStageResult = { commit: Uint8Array; priorEpoch: number };
+// Peer/bystander-side counterpart: the result of processing an incoming MLS
+// Commit sent by ANOTHER member (a Remove or Add that member committed).
+// newEpoch is the receiver's LOCAL post-merge MLS epoch, NOT the server's
+// `groups.epoch` counter — the two diverge from the first member add, see
+// the block above.
+export type MlsProcessCommitResult = { newEpoch: number };
 export type MlsWelcomeResult = { welcome: Uint8Array };
 export type MlsCiphertextResult = { ciphertext: Uint8Array };
 export type MlsPlaintextResult = { plaintext: Uint8Array };
@@ -190,6 +199,11 @@ interface WasmModule {
 	) => MlsRemoveStageResult;
 	mls_remove_member_confirm: (identityId: string, groupId: string) => void;
 	mls_remove_member_abort: (identityId: string, groupId: string) => void;
+	mls_process_commit: (
+		identityId: string,
+		groupId: string,
+		commit: Uint8Array,
+	) => MlsProcessCommitResult;
 	mls_join_group: (identityId: string, welcome: Uint8Array) => MlsGroupResult;
 	mls_encrypt: (identityId: string, groupId: string, plaintext: Uint8Array) => MlsCiphertextResult;
 	mls_decrypt: (identityId: string, groupId: string, ciphertext: Uint8Array) => MlsPlaintextResult;
@@ -701,6 +715,53 @@ const api = {
 	async mlsRemoveMemberAbort(identityId: string, groupId: string): Promise<void> {
 		const wasm = await getWasm();
 		wasm.mls_remove_member_abort(identityId, groupId);
+	},
+
+	/**
+	 * Process an incoming MLS Commit sent by ANOTHER group member (a Remove or
+	 * Add that member committed) — the RECEIVER/bystander counterpart to the
+	 * mlsRemoveMemberStage/Confirm/Abort trio above, which is the COMMITTER
+	 * side. Every other group member must call this on each received Commit
+	 * or the group forks: the committer's local epoch advances while every
+	 * bystander's stays behind, and traffic at the new epoch stops decrypting
+	 * for them.
+	 *
+	 * Returns { newEpoch } — the receiver's LOCAL post-merge MLS epoch, see
+	 * `MlsProcessCommitResult`'s doc comment for what it is (and is NOT)
+	 * relative to the server's `groups.epoch` counter. Rejects on malformed
+	 * commit bytes, a non-Commit message (e.g. an application-message
+	 * ciphertext), a failed merge, or an epoch beyond
+	 * `Number.MAX_SAFE_INTEGER`.
+	 *
+	 * Misrouting a non-Commit envelope here (e.g. an Application-type
+	 * ciphertext) is rejected cleanly, before any decryption happens: the
+	 * underlying Rust primitive checks the message's cleartext
+	 * `content_type` field (RFC 9420 §6.3.2) and rejects anything that is
+	 * not a Commit before ever calling into openmls's decrypt path, so the
+	 * sender-ratchet secret for that message is never touched. The SAME
+	 * bytes still decrypt correctly via a subsequent, correctly-routed
+	 * `mlsDecrypt` call. See `process_incoming_commit`'s doc comment in
+	 * `mls_group.rs` (Rust) for the full argument and the test that pins
+	 * this non-destructive behaviour
+	 * (`test_process_incoming_commit_rejects_application_message`).
+	 *
+	 * Processing a Commit that evicts THIS device resolves successfully while
+	 * leaving the local group inactive — eviction is not reported as an
+	 * error, so callers must detect it separately (e.g. via
+	 * `mlsGroupMembers` no longer containing a self leaf).
+	 *
+	 * STATUS: crypto PRIMITIVE ONLY — see the `MlsRemoveStageResult` doc
+	 * comment above. Not wired into `useMessages.ts` or
+	 * `useWelcomePoller.ts`; self-commit recognition (skipping a Commit this
+	 * device itself sent) is still an open gap.
+	 */
+	async mlsProcessCommit(
+		identityId: string,
+		groupId: string,
+		commitBytes: Uint8Array,
+	): Promise<MlsProcessCommitResult> {
+		const wasm = await getWasm();
+		return wasm.mls_process_commit(identityId, groupId, commitBytes);
 	},
 
 	/**

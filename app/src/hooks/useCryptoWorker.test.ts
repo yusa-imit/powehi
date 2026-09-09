@@ -300,6 +300,7 @@ describe("wrapWithPersistence — SYNC_FLUSH_ARG_METHODS completeness guard (cry
 		{ name: "mlsRemoveMemberStage", args: ["identity-x", "group-x", 0] },
 		{ name: "mlsRemoveMemberConfirm", args: ["identity-x", "group-x"] },
 		{ name: "mlsRemoveMemberAbort", args: ["identity-x", "group-x"] },
+		{ name: "mlsProcessCommit", args: ["identity-x", "group-x", new Uint8Array([1])] },
 	];
 
 	for (const { name, args } of SYNC_FLUSH_METHODS_UNDER_TEST) {

@@ -94,6 +94,15 @@ let workerProxy: Comlink.Remote<CryptoWorkerApi> | null = null;
  *     pending commit. Both mutate durable MLS state, so both must flush too
  *     — otherwise a reload between stage and confirm/abort could resurrect
  *     or lose a pending commit.
+ *
+ * mlsProcessCommit (crypto.worker.ts, the receiver/bystander counterpart to
+ * the stage/confirm/abort trio) is included for the same reason, from the
+ * receiving side: it calls openmls's merge_staged_commit, advancing the
+ * epoch and replacing/discarding epoch secrets in durable MLS state exactly
+ * like mlsRemoveMemberConfirm does. Without the synchronous flush, a reload
+ * right after processing a peer's commit would restore a pre-merge Dexie
+ * snapshot and roll this client back to a stale epoch that every peer has
+ * already left.
  */
 const SYNC_FLUSH_ARG_METHODS: ReadonlySet<string> = new Set([
 	"mlsEncrypt",
@@ -105,6 +114,7 @@ const SYNC_FLUSH_ARG_METHODS: ReadonlySet<string> = new Set([
 	"mlsRemoveMemberStage",
 	"mlsRemoveMemberConfirm",
 	"mlsRemoveMemberAbort",
+	"mlsProcessCommit",
 ]);
 
 /**

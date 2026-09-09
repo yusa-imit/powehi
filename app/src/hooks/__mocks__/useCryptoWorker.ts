@@ -65,6 +65,9 @@ const mockWorker = {
 	}),
 	mlsRemoveMemberConfirm: async (_identityId: string, _groupId: string) => undefined,
 	mlsRemoveMemberAbort: async (_identityId: string, _groupId: string) => undefined,
+	mlsProcessCommit: async (_identityId: string, _groupId: string, _commitBytes: Uint8Array) => ({
+		newEpoch: 2,
+	}),
 	dropDbKey: async () => {},
 	clearSessionState: async () => {},
 	mlKem768Keygen: async () => ({ encapKey: new Uint8Array(1184), decapKey: new Uint8Array(2400) }),

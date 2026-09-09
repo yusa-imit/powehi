@@ -67,8 +67,8 @@ use crate::mls_group;
 use crate::mls_group::{
     abort_remove_member, add_member, confirm_remove_member, create_group, decrypt_message,
     encrypt_message, generate_identity, generate_identity_from_keypair,
-    generate_key_package_with_pq_ext, join_group, stage_remove_member, Identity,
-    POWEHI_PQ_KEM_EXT_TYPE, PQ_EXT_ENCAP_KEY_LEN, PQ_EXT_PAYLOAD_LEN,
+    generate_key_package_with_pq_ext, join_group, process_incoming_commit, stage_remove_member,
+    Identity, POWEHI_PQ_KEM_EXT_TYPE, PQ_EXT_ENCAP_KEY_LEN, PQ_EXT_PAYLOAD_LEN,
 };
 use crate::opaque::{self, DefaultCipherSuite, EXPORT_KEY_LEN};
 
@@ -869,12 +869,12 @@ pub fn mls_add_member(
 /// add in this codebase today; reconciling them is a separate, out-of-scope
 /// follow-up).
 ///
-/// STATUS: crypto primitive only. Nothing in this codebase currently consumes
-/// a Commit produced here — there is no `mls_process_commit` (or equivalent)
-/// export, `useMessages.ts` only handles Application envelopes, and
-/// `useWelcomePoller.ts` only handles Welcome messages. Do not wire this into
-/// any production UI or broadcast flow yet; see `stage_remove_member`'s doc
-/// comment in `mls_group.rs` for the full status note.
+/// STATUS: the peer-side export [`mls_process_commit`] now exists, but no
+/// consumer loop calls it — `useMessages.ts` and `useWelcomePoller.ts` still
+/// ack-and-drop every Commit envelope, so nothing in the running application
+/// consumes a Commit produced here yet. Do not wire this into any production
+/// UI or broadcast flow yet; see `stage_remove_member`'s doc comment in
+/// `mls_group.rs` for the full status note.
 ///
 /// `leaf_index` MUST come from this identity's own live call to
 /// `mls_group_members` for this exact `group_id` (never from server-reported
@@ -905,9 +905,10 @@ pub fn mls_remove_member_stage(
         stage_remove_member(group, &c.identity.signer, leaf_index, &c.provider)
             .map_err(|e| js_err(&e.to_string()))
     })?;
+    let prior_epoch_f64 = u64_to_f64_checked(prior_epoch).map_err(js_err)?;
     js_obj(&[
         ("commit", bytes_js(&commit)),
-        ("priorEpoch", JsValue::from_f64(prior_epoch as f64)),
+        ("priorEpoch", JsValue::from_f64(prior_epoch_f64)),
     ])
 }
 
@@ -956,6 +957,75 @@ pub fn mls_remove_member_abort(identity_id: &str, group_id: &str) -> Result<(), 
             .ok_or_else(|| js_err("unknown mls group"))?;
         abort_remove_member(group, &c.provider).map_err(|e| js_err(&e.to_string()))
     })
+}
+
+/// Process an incoming Commit produced by a peer and merge it into this
+/// identity's local group state, advancing the local epoch.
+///
+/// Returns `{ newEpoch: number }` — the NEW local epoch after the merge.
+/// `newEpoch` is the LOCAL MLS epoch, exactly as returned by
+/// `process_incoming_commit` in `mls_group.rs` — it is **not** the server's
+/// `groups.epoch` counter, which diverges from the local MLS epoch starting
+/// from the very first member add in this codebase today (see
+/// `mls_remove_member_stage`'s doc comment for the full divergence analysis;
+/// reconciling the two is a separate, out-of-scope follow-up).
+///
+/// # Why this primitive exists
+/// Without every peer calling this on every Commit it receives, the group
+/// FORKS: the committer (e.g. via [`mls_remove_member_confirm`]) advances its
+/// own local epoch while every other member's local epoch stays behind, and
+/// group traffic permanently stops decrypting between them. See
+/// `process_incoming_commit`'s doc comment in `mls_group.rs` for the full
+/// argument, including why this cannot be recovered from after the fact.
+///
+/// # STATUS: crypto primitive only — not yet wired into any poller
+/// Nothing in this codebase currently calls this export from a live
+/// consumer loop: `app/src/hooks/useMessages.ts` and
+/// `app/src/hooks/useWelcomePoller.ts` still ack-and-drop every Commit
+/// envelope today. Wiring this in is a deliberate separate follow-up — the
+/// wiring layer will need a way to recognise and SKIP a Commit the caller's
+/// OWN device produced (re-processing an already-merged commit), which this
+/// export has no opinion on and does not attempt to detect.
+///
+/// # Self-eviction
+/// If `commit` is the Commit that removes the CALLER'S OWN leaf, this still
+/// returns `Ok({ newEpoch })` — it does not report the eviction. openmls
+/// internally flips the group to its `Inactive` state in that case; the
+/// caller is responsible for separately detecting that (e.g. via the
+/// existing `mls_group_members` export — the caller's own leaf will no
+/// longer appear in the returned roster) and handling it, since this
+/// primitive reports only the epoch.
+///
+/// # Misrouting a non-Commit message: rejected cleanly, before any decrypt
+/// This calls `process_incoming_commit` in `mls_group.rs`, which checks
+/// `ProtocolMessage::content_type()` (a cleartext field per RFC 9420 §6.3.2)
+/// and rejects anything that is not a Commit with `UnexpectedMessage` BEFORE
+/// ever decrypting it. So routing a non-Commit envelope (e.g. an
+/// Application-type ciphertext) to this export is a normal, non-destructive
+/// rejection: the same bytes still decrypt correctly via a subsequent,
+/// correctly-routed `mls_decrypt` call. See `process_incoming_commit`'s doc
+/// comment in `mls_group.rs` for the full argument and the test that pins
+/// this non-destructive behaviour
+/// (`test_process_incoming_commit_rejects_application_message`).
+#[wasm_bindgen]
+pub fn mls_process_commit(
+    identity_id: &str,
+    group_id: &str,
+    commit: &[u8],
+) -> Result<JsValue, JsError> {
+    let new_epoch = MLS_CTX.with(|ctx| -> Result<u64, JsError> {
+        let mut ctx = ctx.borrow_mut();
+        let c = ctx
+            .get_mut(identity_id)
+            .ok_or_else(|| js_err("unknown mls identity"))?;
+        let group = c
+            .groups
+            .get_mut(group_id)
+            .ok_or_else(|| js_err("unknown mls group"))?;
+        process_incoming_commit(group, commit, &c.provider).map_err(|e| js_err(&e.to_string()))
+    })?;
+    let epoch_f64 = u64_to_f64_checked(new_epoch).map_err(js_err)?;
+    js_obj(&[("newEpoch", JsValue::from_f64(epoch_f64))])
 }
 
 /// Join a group from a Welcome message.
@@ -1230,6 +1300,37 @@ fn f64_to_u64_checked(value: f64) -> Result<u64, &'static str> {
         return Err("invalid numeric value");
     }
     Ok(value as u64)
+}
+
+/// Largest integer exactly representable as an IEEE-754 double — JS's
+/// `Number.MAX_SAFE_INTEGER` (2^53 - 1).
+const JS_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+/// Convert a Rust-side `u64` to a JS-boundary `f64` (a plain JS `number`),
+/// rejecting any value above [`JS_MAX_SAFE_INTEGER`]. Content-free error: the
+/// caller only ever sees a static string, never the offending value (rule:
+/// no-plaintext-logging).
+///
+/// This is the mirror of [`f64_to_u64_checked`] for the opposite direction.
+/// An unguarded `value as f64` cast does NOT truncate above 2^53 — it
+/// silently ROUNDS to the nearest exactly-representable double, so a caller
+/// would receive a wrong-but-plausible-looking number with no error anywhere.
+/// For a counter like an MLS epoch that drives group-state decisions
+/// (`mls_process_commit`'s `newEpoch`), a silently wrong value is strictly
+/// worse than a loud error: the caller has no way to tell a rounded epoch
+/// from a genuine one, and could make a membership/security decision against
+/// the wrong epoch number. Guarding the conversion turns that failure mode
+/// into an explicit, caller-visible error instead.
+///
+/// `mls_remove_member_stage`'s `priorEpoch` conversion also routes through
+/// this helper, for the same reason: it is the same kind of MLS-epoch
+/// quantity as `mls_process_commit`'s `newEpoch`, so both call sites are
+/// guarded identically rather than leaving one as an unguarded raw cast.
+fn u64_to_f64_checked(value: u64) -> Result<f64, &'static str> {
+    if value > JS_MAX_SAFE_INTEGER {
+        return Err("value exceeds javascript safe integer range");
+    }
+    Ok(value as f64)
 }
 
 /// Export the full MLS context (identity + provider key store + every group
@@ -2824,6 +2925,40 @@ mod tests {
         // The error must be a static string, never echoing the offending value.
         let err = f64_to_u64_checked(-42.0).unwrap_err();
         assert!(!err.contains("42"));
+    }
+
+    /// [`u64_to_f64_checked`] round-trips every value up to and including
+    /// `JS_MAX_SAFE_INTEGER`, and rejects (rather than silently rounding)
+    /// anything past that boundary. The error string must never echo the
+    /// offending value (rule: no-plaintext-logging).
+    #[test]
+    fn test_u64_to_f64_checked_rejects_above_js_safe_integer() {
+        for input in [0u64, 1u64, JS_MAX_SAFE_INTEGER] {
+            let result = u64_to_f64_checked(input).unwrap_or_else(|_| {
+                panic!("value {input} must be within the JS safe integer range")
+            });
+            assert_eq!(
+                result as u64, input,
+                "round-trip through f64 must be exact at or below JS_MAX_SAFE_INTEGER"
+            );
+        }
+
+        for input in [
+            JS_MAX_SAFE_INTEGER + 1,
+            u64::MAX,
+            JS_MAX_SAFE_INTEGER + 1_000_000,
+        ] {
+            assert!(
+                u64_to_f64_checked(input).is_err(),
+                "value {input} is above JS_MAX_SAFE_INTEGER and must be rejected, not rounded"
+            );
+        }
+
+        let err = u64_to_f64_checked(u64::MAX).unwrap_err();
+        assert!(
+            !err.chars().any(|c| c.is_ascii_digit()),
+            "the error string must never echo the offending value"
+        );
     }
 
     // ── OPAQUE session state ──────────────────────────────────────────────────
