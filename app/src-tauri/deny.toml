@@ -1,0 +1,75 @@
+# cargo-deny configuration for the Tauri desktop/mobile shell (app/src-tauri).
+#
+# This is a standalone `[workspace]`, not a member of the root Cargo.toml (see the comment
+# in Cargo.toml) — cargo-deny resolves its config relative to the manifest path, so the root
+# deny.toml is NOT picked up here; without this file cargo-deny silently falls back to its
+# default config (empty license allow-list), which rejects every third-party license in this
+# graph. This file exists to close that gap (GitHub issue #7 follow-up, cycle 465).
+#
+# [licenses] mirrors the root deny.toml's allow-list verbatim — every license expression in
+# this graph (checked via `cargo deny --manifest-path Cargo.toml check licenses` on 2026-09-09)
+# is already satisfiable by it (mostly MIT/Apache-2.0 dual-licensed crates, plus a few
+# BSD-3-Clause/CC0-1.0/Unicode-3.0/MPL-2.0/Zlib singles pulled in by the GTK/WebKit toolchain
+# on Linux). Kept in sync with the root file's list; re-diff on any `cargo update` here.
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "MPL-2.0",
+    "Zlib",
+    "CDLA-Permissive-2.0",
+]
+
+[licenses.private]
+# powehi-mobile itself is unpublished (publish = false) and AGPL-3.0-only (this project's own
+# license, matching the root workspace's [workspace.package]) — not a third-party dependency,
+# so it must not be checked against the allow list above. Same reasoning as the root deny.toml.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+deny = []
+
+[advisories]
+# All six ignores below are RustSec "unmaintained" advisories (no CVE, no disclosed
+# vulnerability), confirmed via `cargo deny --manifest-path Cargo.toml check advisories` on
+# 2026-09-09. None have a safe upgrade path today. Re-run the check above on any `cargo
+# update` in this directory and re-open any entry whose reachability changes.
+#
+# RUSTSEC-2024-0370: proc-macro-error 1.0.4 — unmaintained. This ONE is compile-time-only
+# (glib-macros -> glib's proc-macro dependency, Linux GTK backend only, `cargo tree --target
+# all -i proc-macro-error` confirms no runtime edge); not present in the shipped binary.
+#
+# RUSTSEC-2025-0075/-0080/-0081/-0098/-0100: unic-char-range, unic-common, unic-char-property,
+# unic-ucd-version, unic-ucd-ident 0.9.0 — all part of the abandoned open-i18n/rust-unic
+# project. Unlike proc-macro-error above, these ARE a normal (runtime) dependency edge on
+# every target, not Linux-only: urlpattern -> tauri-utils -> tauri resolves the same way on
+# macOS/Windows/iOS/Android (`cargo tree --target aarch64-apple-darwin -i unic-ucd-ident`
+# confirms it). `urlpattern` backs Tauri's isolation-pattern / remote-URL capability matching,
+# which is part of the app's origin-authorization surface, not purely cosmetic — so these are
+# a real (if low-severity: unmaintained Unicode tables, no disclosed vulnerability) supply-chain
+# risk, not inert dead code. No safe upgrade exists upstream; tracked for removal if/when
+# tauri-utils migrates off `urlpattern` or `urlpattern` migrates off `unic-*`.
+#
+# NOT listed here (cargo-deny's default policy doesn't enforce it, matching the root
+# deny.toml's own documented blind spot on `unsound`-category advisories): RUSTSEC-2024-0429,
+# glib 0.18.5's `VariantStrIter` iterator unsoundness (UB / possible NULL deref on some inputs;
+# fixed in glib >=0.20.0). `cargo audit --file Cargo.lock` still reports it as a 7th warning —
+# gtk-rs 0.18.x (pulled in by tauri's Linux `wry`/`webkit2gtk` backend) pins glib 0.18, so no
+# upgrade is available without a gtk-rs major bump. Linux-desktop-runtime-only, no access to
+# key material or message content. Re-open (add `[advisories] unsound = "deny"` plus an
+# explicit ignore, or fix the version pin) if gtk-rs ever ships a compatible glib >=0.20.
+ignore = [
+    "RUSTSEC-2024-0370",
+    "RUSTSEC-2025-0075",
+    "RUSTSEC-2025-0080",
+    "RUSTSEC-2025-0081",
+    "RUSTSEC-2025-0098",
+    "RUSTSEC-2025-0100",
+]

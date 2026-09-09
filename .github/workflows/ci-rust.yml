@@ -191,3 +191,28 @@ jobs:
           cp Cargo.lock /tmp/tauri-cargo-lock-committed
           cargo generate-lockfile
           diff -u /tmp/tauri-cargo-lock-committed Cargo.lock
+
+      # Deliberately NOT SHA-pinned: taiki-e/install-action's own docs say
+      # pinning @<tool_name> tags by hash is "strongly discouraged" (see the
+      # nextest install above for the full rationale).
+      - uses: taiki-e/install-action@cargo-audit
+      - uses: taiki-e/install-action@cargo-deny
+
+      - name: cargo audit (Tauri shell)
+        # This lockfile previously had zero audit/deny coverage (issue #7 follow-up).
+        # working-directory (not --file from repo root) is deliberate: cargo-audit loads
+        # `<CWD>/.cargo/audit.toml`, and running from repo root would silently apply the
+        # ROOT workspace's own waivers to this unrelated graph. No ignore file needed here:
+        # cargo-audit's default policy only fails on disclosed vulnerabilities, and this
+        # graph currently has none (only unmaintained/unsound warnings — the 6 unmaintained
+        # ones are inventoried in app/src-tauri/deny.toml's advisories section; the 7th,
+        # glib's RUSTSEC-2024-0429 unsound advisory, is documented there too but not
+        # enforced by cargo-deny's default policy, same blind spot as the root deny.toml).
+        working-directory: app/src-tauri
+        run: cargo audit --file Cargo.lock
+
+      - name: cargo deny check (Tauri shell)
+        # Waivers + rationale live in app/src-tauri/deny.toml — a separate file from the
+        # root deny.toml because this is a standalone workspace with its own dependency
+        # graph and its own AGPL-3.0-only crate license.
+        run: cargo deny --manifest-path app/src-tauri/Cargo.toml check
