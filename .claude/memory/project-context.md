@@ -24,6 +24,121 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
+## Current state (2026-09-09, cycle 470 — STABILIZATION: close the long-carried Tauri-shell cargo-deny/cargo-audit coverage gap (cycle 465 follow-up), commit 59b3e0a)
+
+- Mode selection: counter 469→470, 470 % 5 == 0 → STABILIZATION. `gh run
+  list --limit 5` green on `main`, working tree clean at session start.
+  `gh issue list --state open` had 6 open issues, none labeled `bug`
+  (issue #8 is `documentation`) — per STABILIZATION's own instruction to
+  fix bug-labeled issues first only when one exists, moved to step 3
+  (test/coverage gaps) and picked the top carried candidate from cycles
+  465-469: `app/src-tauri/Cargo.lock` (the standalone Tauri `[workspace]`,
+  not part of the root Cargo.toml) had zero `cargo audit`/`cargo deny`
+  coverage anywhere, locally or in CI.
+- Root cause (confirmed by running `cargo deny --manifest-path
+  app/src-tauri/Cargo.toml check` directly): cargo-deny resolves its
+  config relative to the manifest path, so the root `deny.toml` is never
+  discovered for this standalone workspace — it silently fell back to
+  cargo-deny's default config (an EMPTY license allow-list), which
+  rejected every third-party license in the graph (456 rejection lines).
+  `cargo audit --file app/src-tauri/Cargo.lock` by contrast already
+  exited 0 (cargo-audit's default policy doesn't fail on non-vulnerability
+  warnings) — 7 unmaintained/unsound warnings, no disclosed CVEs.
+- **Fix**: added `app/src-tauri/deny.toml` — `[licenses]` allow-list
+  copied verbatim from the root file (verified sufficient: every license
+  expression in this graph, e.g. `0BSD OR MIT OR Apache-2.0`, `BSD-3-Clause
+  AND MIT`, `(MIT OR Apache-2.0) AND Unicode-3.0`, is already satisfiable
+  by root's existing MIT/Apache-2.0/BSD-3-Clause/Unicode-3.0/CC0-1.0/etc.
+  list — no new license strings needed), `[licenses.private] ignore =
+  true` for the crate's own AGPL-3.0-only license (mirrors root's
+  precedent), and an `[advisories] ignore` list of the 6 cargo-deny-flagged
+  unmaintained IDs (RUSTSEC-2024-0370 proc-macro-error, RUSTSEC-2025-0075/
+  -0080/-0081/-0098/-0100 the abandoned `unic-*` family via
+  `urlpattern -> tauri-utils`). Wired `cargo-deny` + `cargo-audit` into
+  the existing `tauri-check` CI job via `taiki-e/install-action` (same
+  unpinned-by-design convention as the existing `nextest` install).
+- **security-auditor: PASS-with-nits, all 3 real findings fixed before
+  commit.** (1) The deny.toml's advisories comment falsely claimed the
+  5 `unic-*` ignores were "Linux desktop toolchain"/"compile-time or
+  desktop-shell-only" — the reviewer proved via `cargo tree --target
+  aarch64-apple-darwin -i unic-ucd-ident` that `urlpattern -> tauri-utils
+  -> tauri` is a normal RUNTIME dependency edge on every target
+  (macOS/Windows/iOS/Android too), and that `urlpattern` backs Tauri's
+  isolation-pattern/remote-URL capability matching (an origin-authorization
+  surface), not inert code — fixed by rewriting the comment to state this
+  accurately and separate proc-macro-error's genuinely build-time-only
+  case from the unic-* runtime case. (2) `cargo audit` actually reports
+  **7** warnings, not 6 — RUSTSEC-2024-0429 (glib 0.18.5 `VariantStrIter`
+  unsoundness, UB/possible NULL deref, fixed upstream in glib >=0.20.0 but
+  gtk-rs 0.18.x pins the older glib) is real and was undocumented; the CI
+  step's comment falsely claimed "all inventoried in deny.toml". Fixed:
+  documented RUSTSEC-2024-0429 in deny.toml's advisories comment as a
+  known-but-not-cargo-deny-enforced entry (matching the root deny.toml's
+  own documented blind spot on `unsound`-category advisories, which
+  aren't denied by cargo-deny's default policy) — deliberately did NOT
+  add it to the `ignore` list since cargo-deny doesn't flag it (same
+  "don't list what isn't actually flagged" convention the root file
+  uses), and corrected the CI comment. (3) Cross-workspace waiver leak:
+  running `cargo audit --file app/src-tauri/Cargo.lock` from repo ROOT
+  cwd would silently apply the ROOT `.cargo/audit.toml`'s 12 ignores to
+  this unrelated graph (reviewer verified by testing that injecting a
+  config ignoring RUSTSEC-2024-0370 dropped the count 7→6) — no actual
+  overlap exists today (verified: repo-root and `app/src-tauri`-cwd runs
+  both report the same 7 crates), but it's a live footgun for any future
+  root waiver. Fixed by adding `working-directory: app/src-tauri` to the
+  CI step and changing the arg to a relative `--file Cargo.lock`, which
+  makes cargo-audit look for `app/src-tauri/.cargo/audit.toml` (absent)
+  instead of the root one. Re-verified locally after all 3 fixes: `cargo
+  deny --manifest-path app/src-tauri/Cargo.toml check` → `advisories ok,
+  bans ok, licenses ok, sources ok`; `cd app/src-tauri && cargo audit
+  --file Cargo.lock` → exit 0, still 7 (unchanged, correctly scoped) warnings.
+- **Full gate**: no Rust source or Cargo.toml/Cargo.lock changed in
+  either workspace (only new `deny.toml` + CI YAML), so `cargo build/test`
+  were unaffected — reconfirmed anyway: `cargo test --workspace` all
+  green (0 failures, every crate, docker-gated testcontainers tests
+  correctly `ignored` — no docker daemon in this sandbox), `cargo fmt
+  --all --check` clean. `cargo check --locked --all-targets
+  --manifest-path app/src-tauri/Cargo.toml` clean. Root `cargo audit`/
+  `cargo deny check` (unrelated to this change) also reconfirmed clean.
+  Frontend untouched this cycle, not re-run.
+- No `crypto-reviewer` run: no crypto/MLS/OPAQUE code touched. No
+  `threat-model-checker` run: CI/build-tooling config only, no
+  server-visible metadata, no application code touched.
+- Committed `59b3e0a` (`fix(ci): add cargo-deny/cargo-audit coverage for
+  the Tauri shell lockfile`), 2 files changed, pushed clean (`649057f..
+  59b3e0a main -> main`). CI verification for this push is tracked via a
+  background monitor started this session — check `gh run list --commit
+  59b3e0a` in a future session if this wasn't already confirmed green.
+- Target dir hygiene: `target/` at 8.4G (well under the 20G threshold),
+  0-byte `.rmeta` prune ran, no further pruning needed.
+- **Next cycle candidates (carried/updated):**
+  1. **Resolved this cycle** (was cycle 465 candidate #1): Tauri shell
+     audit/deny coverage. No longer a gap.
+  2. Carried, low-priority hardening (this cycle's review, not fixed —
+     accepted as a documented blind spot matching root deny.toml's
+     precedent): RUSTSEC-2024-0429 (glib unsound) isn't enforced by
+     cargo-deny's default policy; would need `[advisories] unsound =
+     "deny"` plus an explicit ignore (or waiting for gtk-rs to ship a
+     glib >=0.20-compatible release) to actually gate on it.
+  3. Carried (all items below are unchanged from cycle 466's list —
+     see that section for full text): the MLS commit-processing
+     consumer-loop wiring into `useMessages.ts`/`useWelcomePoller.ts`
+     (needs pre-merge policy-inspection point + self-commit recognition,
+     GitHub issue #2's largest remaining piece); epoch reconciliation
+     between client MLS epoch and server `groups.epoch`; `mls_group_members`
+     `isSelf` leaf-index vs signature-key hardening; PQ hybrid Phase A
+     prerequisite; `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal`
+     wiring (BLOCKED on F3 + HMAC gate); `PendingRemovalBanner` local
+     cross-check hardening; GitHub issues #1 (SPA deployment path), #3
+     (no WebSocket client), #4 (load testing never run), #5 (prod-ap-seoul
+     region/PIPA compliance), #8 (stale doc comment); prd.md §10 REST API
+     doc drift; `pending_removals` forged-signal defense; unconsumed
+     `RemovalRequired` WS event; Helm `monitoring.prometheusRule`/
+     `serviceMonitor` overlay + CI render job; `key_packages.device_id`
+     FK doc drift; consumed `key_packages` rows never garbage-collected;
+     `GroupRepository::save` blind `ON CONFLICT DO UPDATE`; bare
+     `var(--photon)` CSS token.
+
 ## Current state (2026-09-09, cycle 466 — FEATURE: land orphaned WIP adding the MLS commit-processing consumer primitive (issue #2), fresh crypto-reviewer PASS, commit 7570b3b)
 
 - Mode selection: counter 465→466, 466 % 5 != 0 → FEATURE. `gh run list
