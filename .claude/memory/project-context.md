@@ -24,7 +24,168 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-10, cycle 472 — FEATURE: land orphaned WIP adding the MLS two-phase inspect/confirm/discard commit API (issue #2), fix a HIGH-severity crypto-reviewer finding before committing, commit bd7ddde)
+## Current state (2026-09-10, cycle 478 — FEATURE: land orphaned WIP adding MLS post-merge own-commit recognition, "Case 2" of MlsError::OwnCommit (issue #2), fix a real crypto-reviewer finding before committing, commit d23c2a4)
+
+- Mode selection: counter 477→478, 478 % 5 != 0 → FEATURE. `gh run list
+  --limit 6` green on `main`. **Working tree was NOT clean at session
+  start** — another occurrence of the established pattern (cycles
+  458/460/464/466/472): substantial, well-documented, well-tested WIP in
+  `crates/client/powehi-crypto-wasm/src/{mls_group,wasm_exports}.rs` + 2
+  frontend files (`crypto.worker.ts` doc-only, `useCryptoWorker.test.ts`
+  a mock-arity fix) closing the LIMIT cycle 472's landed inspect/confirm/
+  discard API explicitly carried: openmls's own own-commit signal
+  (`CannotDecryptOwnMessage`/`StageCommitError::OwnCommit`) only fires
+  while an own Commit is still at the group's CURRENT epoch, so a
+  Delivery Service echo of a commit this device already merged fell
+  through to the generic `MlsError::Decrypt`, indistinguishable from a
+  real fork.
+- Mechanism: `mls_remove_member_stage` hashes (SHA-256) the exact commit
+  bytes it returns into a new `pending_own_commit_hashes` map;
+  `mls_remove_member_confirm` promotes the entry to `own_commit_hashes`
+  on a successful merge; `mls_remove_member_abort` drops it.
+  `mls_process_commit`/`mls_inspect_commit` pass the recorded hash into
+  `stage_incoming_commit`, which checks it (plain `==`, not
+  constant-time — deliberate, both operands are public content hashes)
+  BEFORE any deserialization. Neither map is part of the exported
+  `MlsContextState` snapshot — deliberately worker-local, lost on
+  reload/restart (documented as a real, not-yet-closed limit).
+- Read the whole diff file-by-file before treating "land it" as the
+  cycle's action. `cargo build/test/fmt/clippy` all green as found (224
+  passed/2 ignored in `powehi-crypto-wasm`, +5 from the 219 baseline),
+  `pnpm exec tsc --noEmit` clean, `biome check` clean (4 pre-existing
+  unrelated errors in `app/src-tauri/gen/schemas/*.json`), `pnpm vitest
+  run` 112 files/1615 tests green (unchanged — the TS diff was doc-only
+  plus a test mock arity fix).
+- **crypto-reviewer (fresh pass): PASS-with-nits, no blocking finding,
+  one real (non-nit) bug.** Verified all 4 requested security properties
+  against openmls-0.8.1 source directly (not the diff's own claims):
+  (1) the plain `==` hash compare is safe — the attacker controls
+  `commit_bytes`, not the recorded hash, so extracting the hash via
+  comparison timing would require breaking SHA-256 preimage resistance,
+  not just observing timing; (2) checking before deserialization
+  introduces no bypass (it only ever rejects, never accepts); actually an
+  improvement over the existing `content_type` guard's own justification,
+  since `framing/validation.rs` proved `CannotDecryptOwnMessage` itself
+  fires BEFORE touching the sender ratchet; (3) the stage→pending→
+  confirm/abort→promote state machine is sound in the normal path (only
+  `stage_remove_member` ever creates an openmls pending commit in this
+  crate's production code, so a promotion can never target the wrong
+  commit) with one real gap (next point); (4) misclassification is
+  airtight under SHA-256 second-preimage resistance, verified the empty-
+  input and zero-length edge cases can't produce a false match.
+  **Real bug (F1):** `mls_remove_member_abort` called
+  `abort_remove_member(...)?` BEFORE removing the pending hash, so a
+  failed abort (e.g. a race where a peer's commit got merged first,
+  clearing the openmls-level pending commit via its internal
+  `clear_pending_commit`) left a stale pending-hash entry that a later
+  successful stage+confirm could wrongly promote — misreporting a
+  genuine, never-merged commit's later delivery as `OwnCommit` and
+  silently dropping it. Also flagged doc-accuracy nits (the "avoids
+  consuming a ratchet secret" justification was correct for the
+  `content_type` guard but wrong for the own-commit check specifically;
+  "exact byte match" language should say "hash match", reducing to
+  second-preimage not collision resistance) and test-coverage nits (the
+  new wiring test hand-reproduced the stage-time insert instead of
+  calling real code; no adversarial-input test for the hash check).
+- **Fixed all of it.** F1: `mls_remove_member_abort` now captures the
+  abort result in a binding, unconditionally removes the pending hash,
+  then returns the captured result. Docs: rewrote the `stage_incoming_commit`
+  rationale to correctly attribute the ratchet-secret-avoidance argument
+  only to the `content_type` guard, and added the second-preimage-
+  resistance framing everywhere "exact byte match" language appeared
+  (`MlsError::OwnCommit`'s variant doc, `stage_incoming_commit`,
+  `inspect_incoming_commit`, and a test comment) — also restored
+  `crypto.worker.ts`'s "BOTH gaps... must be resolved" framing after the
+  original WIP had narrowed it to "that gap" (a real regression: the
+  reload-loses-recognition-state gap is still open, not just epoch
+  reconciliation). Tests: extracted `mls_remove_member_stage_inner`
+  (matching this file's existing `_inner` split pattern) so
+  `mls_remove_member_stage`'s real stage-time insert is now exercised by
+  a native test instead of a hand-copied reproduction; added
+  `test_process_incoming_commit_case2_rejects_non_matching_inputs`
+  (empty bytes → `Codec`; single-bit-corrupted own commit → `Decrypt`,
+  not `OwnCommit`, with an epoch-unchanged assertion so it can't pass for
+  the wrong reason).
+- **Second, independent crypto-reviewer pass: PASS-with-nits, confirmed
+  all fixes correct, no blocking finding remaining.** Re-verified the F1
+  fix closes the gap without introducing a new one (traced every
+  producer of an openmls pending commit in this crate's production code —
+  only `stage_remove_member` — so a stale pending hash can never be
+  promoted against the wrong commit), confirmed the `_inner` extraction
+  is behavior-preserving (identical error surface via `js_err`), and
+  independently re-derived the corrupted-commit test's actual result
+  (`Err(Decrypt)`) rather than trusting the assertion. Left 4 small nits,
+  none blocking: (1) the corrupted-input test's assertion was `!matches!
+  (_, Err(OwnCommit))` rather than pinned to the exact `Decrypt` variant
+  — **fixed** before commit (pinned to `Err(Decrypt)` + an epoch-unchanged
+  assert); (2) three more stray "exact byte match"/"byte-equality"
+  phrases the first fix round missed — **fixed** before commit (all now
+  say "hash match"/"hash-equality"); (3)/(4) two low-value informational
+  nits (a fail-safe-direction edge case in the u64→f64 epoch guard
+  ordering, a slightly-indirect test assertion) — carried, not fixed,
+  genuinely cosmetic.
+- **Full gate, re-run after every fix round**: `cargo build --workspace
+  --all-targets` clean, `cargo test --workspace` all green (0 failures,
+  every crate; `powehi-crypto-wasm` alone: 225 passed, 2 ignored, up from
+  224 pre-fix), `cargo fmt --all --check` clean, `cargo clippy --workspace
+  --all-targets -- -D warnings` clean. Frontend: `pnpm exec tsc --noEmit`
+  clean, `biome check` clean (same 4 pre-existing unrelated errors), `pnpm
+  vitest run` 112 files/1615 tests green (unchanged).
+- No `threat-model-checker` run: matches the established pattern for
+  standalone WASM crypto-primitive additions with no server-visible
+  metadata and explicitly not wired to any UI/broadcast flow. No
+  `security-auditor` run: no backend/infra code touched.
+- **Verified `git diff --cached` actually contained the fixes** before
+  committing (the cycle-472 lesson: a prior cycle forgot to re-`git add`
+  after editing already-staged files) — confirmed `pending_own_commit_hashes.remove(group_id);`
+  present unconditionally and `mls_remove_member_stage_inner` present in
+  the staged diff.
+- Committed `d23c2a4` (`feat(crypto): add MLS post-merge own-commit
+  recognition (issue #2)`), 4 files changed, pushed clean (`fa339b8..
+  d23c2a4 main -> main`). `gh run list` showed all 3 checks `in_progress`
+  immediately after push — confirm green in a future session if not
+  already done. Posted a progress comment on issue #2 explaining what
+  landed, the crypto-reviewer findings/fixes, and the 2 gaps still
+  blocking consumer-loop wiring — did NOT close the issue.
+- Target dir hygiene: not checked in depth (FEATURE mode), spot-checked
+  `target/` at 8.9G — well under the 20G threshold.
+- **Next cycle candidates (carried/updated):**
+  1. Carried, still the natural next step for issue #2: the consumer-loop
+     wiring itself into `useMessages.ts`/`useWelcomePoller.ts`. Both of
+     its previously-blocking preconditions (own-commit recognition — now
+     covering BOTH pre-merge and post-merge — and pre-merge
+     policy-inspection point) are built, but wiring still needs (a) the
+     epoch-reconciliation design between the client's local MLS epoch and
+     the server's `groups.epoch` counter, (b) a plan for the
+     reload-loses-own-commit-recognition gap (own_commit_hashes/
+     pending_own_commit_hashes are worker-local only — making this
+     durable needs both maps added to `MlsContextState`, an
+     `MLS_CONTEXT_STATE_VERSION` bump), and (c) actually calling
+     `mlsInspectCommit`/`mlsConfirmIncomingCommit`/`mlsDiscardIncomingCommit`
+     from the poller with a real application-level policy check.
+  2. Carried, low-priority hardening (this cycle's second review pass):
+     `wasm_exports.rs`'s `mls_remove_member_stage_inner` records the
+     pending hash before the export's `u64_to_f64_checked(prior_epoch)`
+     guard; if that guard ever rejected (unreachable in practice, epoch
+     ≥ 2^53), the commit would be staged and hashed but never returned to
+     the caller/broadcast. Fail-safe direction (missed recognition, not a
+     false one), low priority.
+  3. Carried, low-priority hardening: RUSTSEC-2024-0429 (glib unsound)
+     isn't enforced by cargo-deny's default policy.
+  4. Carried (unchanged from cycle 472's list — see that section for full
+     text): `mls_confirm_incoming_commit` consumes the `INSPECTED_COMMITS`
+     handle before resolving `MLS_CTX`; epoch reconciliation; `mls_group_members`
+     `isSelf` leaf-index vs signature-key hardening; PQ hybrid Phase A
+     prerequisite; `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal`
+     wiring (BLOCKED); `PendingRemovalBanner` local cross-check hardening;
+     GitHub issues #1, #3, #4, #5, #8; prd.md §10 REST API doc drift;
+     `pending_removals` forged-signal defense; unconsumed `RemovalRequired`
+     WS event; Helm `monitoring.prometheusRule`/`serviceMonitor` overlay +
+     CI render job; `key_packages.device_id` FK doc drift; consumed
+     `key_packages` rows never garbage-collected; `GroupRepository::save`
+     blind `ON CONFLICT DO UPDATE`; bare `var(--photon)` CSS token.
+
+## Previous state (2026-09-10, cycle 472 — FEATURE: land orphaned WIP adding the MLS two-phase inspect/confirm/discard commit API (issue #2), fix a HIGH-severity crypto-reviewer finding before committing, commit bd7ddde)
 
 - Mode selection: counter 471→472, 472 % 5 != 0 → FEATURE. `gh run list
   --limit 3` green on `main`. **Working tree was NOT clean at session
