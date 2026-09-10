@@ -107,6 +107,53 @@ struct MlsContext {
     identity: Identity,
     provider: OpenMlsRustCrypto,
     groups: HashMap<String, MlsGroup>,
+    /// Per-group [`mls_group::OwnCommitHash`] of the most recently
+    /// confirmed/merged own Commit — see [`mls_group::MlsError::OwnCommit`]'s
+    /// "Case 2" section. Keyed by `group_id`; exactly ONE entry per group is
+    /// ever kept — the latest, never a history (same "bounded, not a
+    /// history" posture as the type itself documents). Inserted only by
+    /// [`mls_remove_member_confirm`] (promoting the matching entry out of
+    /// `pending_own_commit_hashes` below on a successful merge), and only for
+    /// a `group_id` already present in `groups`, so
+    /// `own_commit_hashes.len() <= groups.len()` always — it needs no
+    /// separate cap of its own, unlike `KEM_DECAP_KEYS`/`KEM_SHARED_SECRETS`
+    /// (`MAX_KEM_HANDLES`) or `INSPECTED_COMMITS` (`MAX_INSPECTED_COMMITS`),
+    /// whose entry counts are not tied to an already-bounded collection.
+    /// Correction: `groups` itself is bounded by `MAX_IMPORT_GROUPS` only on
+    /// the IMPORT path (`import_mls_context_inner`) — the runtime
+    /// `create_group`/`join_group` insertion path this crate otherwise uses
+    /// has no such cap today, so "bounded by `groups`" is a subset
+    /// relationship, not a hard numeric bound. `groups` is never removed from
+    /// except wholesale via `mls_clear_session` (which drops this entire
+    /// `MlsContext`, taking `own_commit_hashes` with it), so no leak is
+    /// introduced here beyond whatever bound (or lack of one) already applies
+    /// to `groups`. Holds NO key material — a SHA-256 hash of PUBLIC,
+    /// already-authenticated wire bytes — unlike the handle maps above, so it
+    /// is not zeroized.
+    ///
+    /// Deliberate scope limit: [`add_member`] merges its own Add commit
+    /// internally and discards the commit bytes
+    /// (`let (_commit, welcome, _group_info) = ...` in `mls_group.rs`), so no
+    /// caller ever receives — and therefore never broadcasts — an own Add
+    /// commit's wire bytes. There is nothing for the Delivery Service to
+    /// re-deliver in that case, so only Remove commits (whose bytes ARE
+    /// returned to the caller for broadcast, via `stage_remove_member`) need
+    /// a recorded hash today. If `add_member` is ever changed to surface its
+    /// commit bytes to the caller, it must record a hash here too.
+    own_commit_hashes: HashMap<String, mls_group::OwnCommitHash>,
+    /// Per-group [`mls_group::OwnCommitHash`] of a STAGED-but-not-yet-confirmed
+    /// Remove commit, computed by [`mls_remove_member_stage`] directly from
+    /// its own retained `commit_bytes` the moment it stages them — never from
+    /// a caller-supplied byte string. [`mls_remove_member_confirm`] removes
+    /// (promotes) the entry for a group into `own_commit_hashes` above on a
+    /// successful merge; [`mls_remove_member_abort`] removes it without
+    /// promoting on a discard. This is the mechanism that lets
+    /// `confirm_remove_member` in `mls_group.rs` take no `commit_bytes`
+    /// parameter at all — see its doc comment for why accepting
+    /// caller-supplied bytes at confirm time would be a caller-trust hazard
+    /// this design avoids entirely. Same bound and zeroize posture as
+    /// `own_commit_hashes` (one entry per group, no key material).
+    pending_own_commit_hashes: HashMap<String, mls_group::OwnCommitHash>,
 }
 
 /// One incoming Commit staged by [`mls_inspect_commit`] but not yet resolved
@@ -555,6 +602,8 @@ pub fn mls_init_identity(identity_bytes: &[u8]) -> Result<JsValue, JsError> {
                 identity,
                 provider,
                 groups: HashMap::new(),
+                own_commit_hashes: HashMap::new(),
+                pending_own_commit_hashes: HashMap::new(),
             },
         );
     });
@@ -646,6 +695,8 @@ pub fn mls_init_identity_from_phrase(
                 identity,
                 provider,
                 groups: HashMap::new(),
+                own_commit_hashes: HashMap::new(),
+                pending_own_commit_hashes: HashMap::new(),
             },
         );
     });
@@ -849,6 +900,13 @@ pub fn mls_create_group(identity_id: &str) -> Result<JsValue, JsError> {
             .get_mut(identity_id)
             .ok_or_else(|| js_err("unknown mls identity"))?;
         c.groups.insert(group_id.clone(), group);
+        // Defense-in-depth, same reasoning as `mls_join_group`'s identical
+        // cleanup below: a fresh group creation should start with no
+        // own-commit recognition state, even though a `group_id` collision
+        // with a prior, since-cleared group is not realistically reachable
+        // (openmls derives it from a random 16-byte value).
+        c.own_commit_hashes.remove(&group_id);
+        c.pending_own_commit_hashes.remove(&group_id);
         Ok::<_, JsError>(())
     })?;
     js_obj(&[("groupId", JsValue::from_str(&group_id))])
@@ -929,24 +987,28 @@ pub fn mls_add_member(
 /// Every successful call MUST be followed by exactly one of
 /// [`mls_remove_member_confirm`] / [`mls_remove_member_abort`] for this
 /// `(identity_id, group_id)` before any other removal is staged.
+///
+/// # Own-commit hash recorded HERE, at stage time — not at confirm time
+/// The instant this function has the exact `commit` bytes back from
+/// [`stage_remove_member`], it hashes THAT retained copy and records it in
+/// `pending_own_commit_hashes` for `group_id`. [`mls_remove_member_confirm`]
+/// promotes this pending hash to `own_commit_hashes` on a successful merge;
+/// [`mls_remove_member_abort`] drops it unpromoted on a discard. This is
+/// deliberate: nothing outside this crate ever gets to choose what bytes are
+/// hashed as "this device's own commit" for [`mls_group::MlsError::OwnCommit`]'s
+/// "Case 2" recognition — see `confirm_remove_member`'s doc comment in
+/// `mls_group.rs` for why accepting a caller-supplied byte string at confirm
+/// time instead would be a caller-trust hazard. A second stage for the same
+/// `group_id` (after an abort) overwrites any still-pending entry, matching
+/// [`mls_remove_member_stage`]'s existing single-outstanding-stage contract.
 #[wasm_bindgen]
 pub fn mls_remove_member_stage(
     identity_id: &str,
     group_id: &str,
     leaf_index: u32,
 ) -> Result<JsValue, JsError> {
-    let (commit, prior_epoch) = MLS_CTX.with(|ctx| -> Result<(Vec<u8>, u64), JsError> {
-        let mut ctx = ctx.borrow_mut();
-        let c = ctx
-            .get_mut(identity_id)
-            .ok_or_else(|| js_err("unknown mls identity"))?;
-        let group = c
-            .groups
-            .get_mut(group_id)
-            .ok_or_else(|| js_err("unknown mls group"))?;
-        stage_remove_member(group, &c.identity.signer, leaf_index, &c.provider)
-            .map_err(|e| js_err(&e.to_string()))
-    })?;
+    let (commit, prior_epoch) =
+        mls_remove_member_stage_inner(identity_id, group_id, leaf_index).map_err(|e| js_err(&e))?;
     let prior_epoch_f64 = u64_to_f64_checked(prior_epoch).map_err(js_err)?;
     js_obj(&[
         ("commit", bytes_js(&commit)),
@@ -954,10 +1016,51 @@ pub fn mls_remove_member_stage(
     ])
 }
 
+/// `mls_remove_member_stage`'s body, split out (rule: one construction path,
+/// same "_inner" pattern as `export_mls_context_inner` /
+/// `mls_group_members_inner` / `pq_derive_binding_inner`) so a native
+/// (non-wasm32) test can exercise the REAL stage-time
+/// `pending_own_commit_hashes` insert directly, instead of a hand-copied
+/// reproduction of it — the wasm export itself can't be called from a native
+/// test since its success path constructs a `JsValue`, which needs a real JS
+/// engine. Returns `String` (not `&'static str`, unlike the simpler `_inner`
+/// helpers above) because it must also carry `MlsError`'s formatted message
+/// through `stage_remove_member`.
+fn mls_remove_member_stage_inner(
+    identity_id: &str,
+    group_id: &str,
+    leaf_index: u32,
+) -> Result<(Vec<u8>, u64), String> {
+    MLS_CTX.with(|ctx| -> Result<(Vec<u8>, u64), String> {
+        let mut ctx = ctx.borrow_mut();
+        let c = ctx
+            .get_mut(identity_id)
+            .ok_or_else(|| "unknown mls identity".to_string())?;
+        let group = c
+            .groups
+            .get_mut(group_id)
+            .ok_or_else(|| "unknown mls group".to_string())?;
+        let (commit, prior_epoch) =
+            stage_remove_member(group, &c.identity.signer, leaf_index, &c.provider)
+                .map_err(|e| e.to_string())?;
+        c.pending_own_commit_hashes
+            .insert(group_id.to_string(), mls_group::hash_own_commit(&commit));
+        Ok((commit, prior_epoch))
+    })
+}
+
 /// Merge the commit staged by [`mls_remove_member_stage`], advancing the
 /// group to the next epoch. Call this only after the Delivery Service has
 /// confirmed the staged commit was accepted — see `confirm_remove_member`'s
 /// doc comment in `mls_group.rs`.
+///
+/// Takes no commit bytes: the own-commit hash needed for
+/// [`mls_group::MlsError::OwnCommit`]'s "Case 2" recognition was already
+/// recorded at stage time by [`mls_remove_member_stage`], from that
+/// function's own retained copy of the commit bytes. On a successful merge,
+/// this promotes that pending hash (if one is still recorded for
+/// `group_id` — see the "not persisted across reload" limit on
+/// [`mls_group::MlsError::OwnCommit`]) into `own_commit_hashes`.
 ///
 /// STATUS: crypto primitive only — see [`mls_remove_member_stage`]'s doc
 /// comment; nothing in this codebase currently broadcasts or confirms a
@@ -974,7 +1077,11 @@ pub fn mls_remove_member_confirm(identity_id: &str, group_id: &str) -> Result<()
             .groups
             .get_mut(group_id)
             .ok_or_else(|| js_err("unknown mls group"))?;
-        confirm_remove_member(group, &c.provider).map_err(|e| js_err(&e.to_string()))
+        confirm_remove_member(group, &c.provider).map_err(|e| js_err(&e.to_string()))?;
+        if let Some(hash) = c.pending_own_commit_hashes.remove(group_id) {
+            c.own_commit_hashes.insert(group_id.to_string(), hash);
+        }
+        Ok(())
     })
 }
 
@@ -983,6 +1090,29 @@ pub fn mls_remove_member_confirm(identity_id: &str, group_id: &str) -> Result<()
 /// targeted member still present). Call this when the Delivery Service
 /// rejects (or never confirms) the staged commit — see
 /// `abort_remove_member`'s doc comment in `mls_group.rs`.
+///
+/// Also drops the pending own-commit hash [`mls_remove_member_stage`]
+/// recorded for `group_id`, without promoting it — an aborted commit was
+/// never merged and never broadcast, so there is nothing for a future
+/// [`mls_process_commit`] / [`mls_inspect_commit`] call to recognize it
+/// against.
+///
+/// # The pending-hash cleanup runs even when the underlying abort fails
+/// `abort_remove_member` itself can fail (e.g. [`mls_group::MlsError::NoPendingCommit`]
+/// if the openmls-level pending commit was already cleared by something
+/// else — for instance a racing [`mls_process_commit`] call that merged a
+/// peer's commit first, which internally clears any pending commit as a
+/// side effect). Deliberately does NOT use `?` before the removal: if it
+/// did, a failed abort would leave a stale `pending_own_commit_hashes`
+/// entry for this Remove commit that was broadcast but never merged. A
+/// later successful stage+confirm for the SAME group would then wrongly
+/// promote that stale entry (or, if a fresh stage overwrote it first,
+/// silently lose the leak only by coincidence) — a Delivery Service replay
+/// of the never-merged commit would then be misreported as
+/// [`mls_group::MlsError::OwnCommit`] and silently dropped instead of
+/// correctly falling through as an ordinary (never applied) commit. The
+/// pending entry belongs to THIS abort call's stage regardless of whether
+/// the openmls-level abort succeeded, so it is always cleared.
 ///
 /// STATUS: crypto primitive only — see [`mls_remove_member_stage`]'s doc
 /// comment.
@@ -997,7 +1127,9 @@ pub fn mls_remove_member_abort(identity_id: &str, group_id: &str) -> Result<(), 
             .groups
             .get_mut(group_id)
             .ok_or_else(|| js_err("unknown mls group"))?;
-        abort_remove_member(group, &c.provider).map_err(|e| js_err(&e.to_string()))
+        let result = abort_remove_member(group, &c.provider).map_err(|e| js_err(&e.to_string()));
+        c.pending_own_commit_hashes.remove(group_id);
+        result
     })
 }
 
@@ -1075,11 +1207,13 @@ pub fn mls_process_commit(
         let c = ctx
             .get_mut(identity_id)
             .ok_or_else(|| js_err("unknown mls identity"))?;
+        let last_own_commit = c.own_commit_hashes.get(group_id).copied();
         let group = c
             .groups
             .get_mut(group_id)
             .ok_or_else(|| js_err("unknown mls group"))?;
-        process_incoming_commit(group, commit, &c.provider).map_err(|e| js_err(&e.to_string()))
+        process_incoming_commit(group, commit, &c.provider, last_own_commit)
+            .map_err(|e| js_err(&e.to_string()))
     })?;
     let epoch_f64 = u64_to_f64_checked(new_epoch).map_err(js_err)?;
     js_obj(&[("newEpoch", JsValue::from_f64(epoch_f64))])
@@ -1199,11 +1333,13 @@ pub fn mls_inspect_commit(
         let c = ctx
             .get_mut(identity_id)
             .ok_or_else(|| js_err("unknown mls identity"))?;
+        let last_own_commit = c.own_commit_hashes.get(group_id).copied();
         let group = c
             .groups
             .get_mut(group_id)
             .ok_or_else(|| js_err("unknown mls group"))?;
-        inspect_incoming_commit(group, commit, &c.provider).map_err(|e| js_err(&e.to_string()))
+        inspect_incoming_commit(group, commit, &c.provider, last_own_commit)
+            .map_err(|e| js_err(&e.to_string()))
     })?;
     // Atomicity (same invariant as `pq_build_payload` / `commit_pq_decap_key`):
     // build the entire JS result first, and only insert the handle once every
@@ -1357,6 +1493,17 @@ pub fn mls_join_group(identity_id: &str, welcome_bytes: &[u8]) -> Result<JsValue
             .get_mut(identity_id)
             .ok_or_else(|| js_err("unknown mls identity"))?;
         c.groups.insert(group_id.clone(), group);
+        // Defense-in-depth: an MLS group_id is fixed for the group's entire
+        // lifetime, so re-joining the SAME group_id after this device was
+        // previously evicted and removed (or after a session was cleared and
+        // rebuilt) could otherwise leave a stale entry from the prior
+        // membership. A stale entry here is not exploitable on its own (it
+        // can only ever match bytes that really are this device's own past
+        // commit, which would legitimately be stale anyway — see
+        // `MlsError::OwnCommit`'s "Bounded, not a history" section) but a
+        // fresh membership should start with no recognition state.
+        c.own_commit_hashes.remove(&group_id);
+        c.pending_own_commit_hashes.remove(&group_id);
         Ok::<_, JsError>(())
     })?;
     js_obj(&[("groupId", JsValue::from_str(&group_id))])
@@ -1580,6 +1727,8 @@ fn import_mls_context_inner(
                 identity,
                 provider,
                 groups,
+                own_commit_hashes: HashMap::new(),
+                pending_own_commit_hashes: HashMap::new(),
             },
         );
     });
@@ -3375,6 +3524,8 @@ mod tests {
                     identity,
                     provider,
                     groups: HashMap::new(),
+                    own_commit_hashes: HashMap::new(),
+                    pending_own_commit_hashes: HashMap::new(),
                 },
             );
         });
@@ -3455,9 +3606,13 @@ mod tests {
             )
             .unwrap();
         alice_group.merge_pending_commit(&alice_provider).unwrap();
-        let (staged, _info) =
-            inspect_incoming_commit(&mut bob_group, &commit.to_bytes().unwrap(), &bob_provider)
-                .unwrap();
+        let (staged, _info) = inspect_incoming_commit(
+            &mut bob_group,
+            &commit.to_bytes().unwrap(),
+            &bob_provider,
+            None,
+        )
+        .unwrap();
 
         let handle = next_id();
         INSPECTED_COMMITS.with(|m| {
@@ -3603,6 +3758,8 @@ mod tests {
                     identity: alice,
                     provider: alice_provider,
                     groups: alice_groups,
+                    own_commit_hashes: HashMap::new(),
+                    pending_own_commit_hashes: HashMap::new(),
                 },
             );
         });
@@ -3671,6 +3828,8 @@ mod tests {
                     identity,
                     provider,
                     groups: HashMap::new(),
+                    own_commit_hashes: HashMap::new(),
+                    pending_own_commit_hashes: HashMap::new(),
                 },
             );
         });
@@ -3850,6 +4009,8 @@ mod tests {
                     identity: alice,
                     provider: alice_provider,
                     groups,
+                    own_commit_hashes: HashMap::new(),
+                    pending_own_commit_hashes: HashMap::new(),
                 },
             );
         });
@@ -3977,6 +4138,8 @@ mod tests {
                     identity: bob,
                     provider: bob_provider,
                     groups,
+                    own_commit_hashes: HashMap::new(),
+                    pending_own_commit_hashes: HashMap::new(),
                 },
             );
         });
@@ -4053,6 +4216,330 @@ mod tests {
             after[0].credential_identity_hex.as_deref(),
             Some(bytes_to_opaque_id_hex(&alice_bytes).as_str()),
             "the sole remaining member must be alice"
+        );
+
+        mls_clear_session();
+    }
+
+    /// End-to-end coverage of the `own_commit_hashes` / `pending_own_commit_hashes`
+    /// wiring. The stage half calls `mls_remove_member_stage_inner` directly
+    /// — the exact body `#[wasm_bindgen] mls_remove_member_stage` wraps, so
+    /// this exercises the REAL stage-time `pending_own_commit_hashes` insert,
+    /// not a hand-copied reproduction of it. The confirm half calls the REAL
+    /// `#[wasm_bindgen] mls_remove_member_confirm` export directly, on its
+    /// success path: unlike most exports in this module, it returns
+    /// `Result<(), JsError>` and constructs no `JsValue` at all when it
+    /// succeeds (no `js_obj`/`Object::new`/`Uint8Array::from`), so it is safe
+    /// to call from a native (non-wasm32) test — the same reasoning that
+    /// already lets this module call `mls_clear_session()` directly. Between
+    /// the two, this test exercises BOTH halves of the export-level
+    /// promotion logic (stage's insert AND confirm's promote), not just the
+    /// underlying `mls_group` primitives (which
+    /// `test_process_incoming_commit_reports_own_commit_case2_post_merge` in
+    /// `mls_group.rs` already covers in isolation). Only `mls_remove_member_stage`
+    /// ITSELF (the `#[wasm_bindgen]` wrapper, not `_inner`) still can't be
+    /// called here, since its success path constructs a `JsValue` (`{
+    /// commit, priorEpoch }`), which needs a real JS engine — same reason
+    /// `mls_process_commit` isn't called directly for the re-delivery half
+    /// below, which instead drives `MLS_CTX` and `process_incoming_commit`
+    /// directly, reading the SAME `own_commit_hashes` field the real export
+    /// reads.
+    #[test]
+    fn test_own_commit_hashes_wiring_records_and_recognizes_post_merge_redelivery() {
+        let alice_bytes: [u8; 16] = [0xa1; 16];
+        let bob_bytes: [u8; 16] = [0xb2; 16];
+
+        let alice_provider = OpenMlsRustCrypto::default();
+        let alice = generate_identity(&alice_bytes, &alice_provider).unwrap();
+        let mut alice_group = create_group(&alice, &alice_provider).unwrap();
+
+        let bob_provider = OpenMlsRustCrypto::default();
+        let bob = generate_identity(&bob_bytes, &bob_provider).unwrap();
+        let bob_kp = generate_key_package(&bob, &bob_provider).unwrap();
+        add_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+
+        let alice_group_id = group_id_hex(&alice_group);
+        let alice_ctx_id = next_id();
+        MLS_CTX.with(|ctx| {
+            let mut groups = HashMap::new();
+            groups.insert(alice_group_id.clone(), alice_group);
+            ctx.borrow_mut().insert(
+                alice_ctx_id.clone(),
+                MlsContext {
+                    identity: alice,
+                    provider: alice_provider,
+                    groups,
+                    own_commit_hashes: HashMap::new(),
+                    pending_own_commit_hashes: HashMap::new(),
+                },
+            );
+        });
+
+        // No hash recorded yet — mirrors `mls_process_commit`'s lookup before
+        // any confirm has ever run for this group.
+        let hash_before = MLS_CTX.with(|ctx| {
+            ctx.borrow()
+                .get(&alice_ctx_id)
+                .unwrap()
+                .own_commit_hashes
+                .get(&alice_group_id)
+                .copied()
+        });
+        assert_eq!(
+            hash_before, None,
+            "own_commit_hashes must start empty for a freshly created group"
+        );
+
+        // Stage a Remove of bob through `mls_remove_member_stage_inner` — the
+        // REAL body `mls_remove_member_stage` wraps, including its own
+        // stage-time `pending_own_commit_hashes` insert (see this test's doc
+        // comment for why the `#[wasm_bindgen]` wrapper itself can't be
+        // called here).
+        let bob_leaf = MLS_CTX.with(|ctx| {
+            let ctx = ctx.borrow();
+            let c = ctx.get(&alice_ctx_id).unwrap();
+            let group = c.groups.get(&alice_group_id).unwrap();
+            let leaf = group
+                .members()
+                .find(|m| {
+                    BasicCredential::try_from(m.credential.clone())
+                        .map(|basic| basic.identity() == bob_bytes)
+                        .unwrap_or(false)
+                })
+                .map(|m| m.index.u32())
+                .expect("bob must be present before removal");
+            leaf
+        });
+        let (commit_bytes, _prior_epoch) =
+            mls_remove_member_stage_inner(&alice_ctx_id, &alice_group_id, bob_leaf)
+                .expect("mls_remove_member_stage_inner must succeed for a freshly staged removal");
+
+        // Confirm through the REAL wasm-bindgen export — this is what
+        // actually exercises the pending-to-confirmed promotion inside
+        // `mls_remove_member_confirm`'s own body, not a copy of it.
+        mls_remove_member_confirm(&alice_ctx_id, &alice_group_id)
+            .expect("mls_remove_member_confirm must succeed for a freshly staged removal");
+
+        // The hash is now recorded — mirrors what `mls_process_commit` would
+        // read on a subsequent call for this same group.
+        let hash_after = MLS_CTX.with(|ctx| {
+            ctx.borrow()
+                .get(&alice_ctx_id)
+                .unwrap()
+                .own_commit_hashes
+                .get(&alice_group_id)
+                .copied()
+        });
+        assert!(
+            hash_after.is_some(),
+            "confirming a removal must record an own_commit_hash for this group"
+        );
+
+        // Re-deliver alice's own (already-merged) commit through the same
+        // lookup-then-process path `mls_process_commit` uses: this is the
+        // exact scenario a Delivery Service echo produces.
+        let redelivered = MLS_CTX.with(|ctx| {
+            let mut ctx = ctx.borrow_mut();
+            let c = ctx.get_mut(&alice_ctx_id).unwrap();
+            let last_own_commit = c.own_commit_hashes.get(&alice_group_id).copied();
+            let group = c.groups.get_mut(&alice_group_id).unwrap();
+            process_incoming_commit(group, &commit_bytes, &c.provider, last_own_commit)
+        });
+        assert!(
+            matches!(redelivered, Err(mls_group::MlsError::OwnCommit)),
+            "the own_commit_hashes wiring must let a post-merge re-delivery of alice's own \
+             commit be recognized as OwnCommit through the same field the wasm exports use: \
+             got {:?}",
+            redelivered.map(|_| "unexpected Ok")
+        );
+
+        mls_clear_session();
+    }
+
+    /// Fail-safe direction of the stage/confirm split: if `mls_remove_member_confirm`
+    /// runs with NO pending hash recorded for `group_id` (the "reload between
+    /// stage and confirm" gap [`mls_group::MlsError::OwnCommit`]'s doc
+    /// comment documents), the merge still succeeds — the pending-hash
+    /// promotion is best-effort, never a precondition for the merge itself —
+    /// but `own_commit_hashes` stays empty for this group, so a later
+    /// re-delivery of these exact bytes falls back to
+    /// [`mls_group::MlsError::Decrypt`], NOT a false [`mls_group::MlsError::OwnCommit`].
+    #[test]
+    fn test_mls_remove_member_confirm_with_no_pending_hash_still_merges_but_records_nothing() {
+        let alice_bytes: [u8; 16] = [0xc3; 16];
+        let bob_bytes: [u8; 16] = [0xd4; 16];
+
+        let alice_provider = OpenMlsRustCrypto::default();
+        let alice = generate_identity(&alice_bytes, &alice_provider).unwrap();
+        let mut alice_group = create_group(&alice, &alice_provider).unwrap();
+
+        let bob_provider = OpenMlsRustCrypto::default();
+        let bob = generate_identity(&bob_bytes, &bob_provider).unwrap();
+        let bob_kp = generate_key_package(&bob, &bob_provider).unwrap();
+        add_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+
+        let alice_group_id = group_id_hex(&alice_group);
+        let alice_ctx_id = next_id();
+        MLS_CTX.with(|ctx| {
+            let mut groups = HashMap::new();
+            groups.insert(alice_group_id.clone(), alice_group);
+            ctx.borrow_mut().insert(
+                alice_ctx_id.clone(),
+                MlsContext {
+                    identity: alice,
+                    provider: alice_provider,
+                    groups,
+                    own_commit_hashes: HashMap::new(),
+                    pending_own_commit_hashes: HashMap::new(),
+                },
+            );
+        });
+
+        // Stage via the pure primitive WITHOUT reproducing the stage-time
+        // `pending_own_commit_hashes` insert this time — simulating a reload
+        // that dropped the in-memory pending record between stage and
+        // confirm, while the openmls-level pending commit itself (persisted
+        // independently) survives.
+        MLS_CTX.with(|ctx| {
+            let mut ctx = ctx.borrow_mut();
+            let c = ctx.get_mut(&alice_ctx_id).unwrap();
+            let group = c.groups.get_mut(&alice_group_id).unwrap();
+            let bob_leaf = group
+                .members()
+                .find(|m| {
+                    BasicCredential::try_from(m.credential.clone())
+                        .map(|basic| basic.identity() == bob_bytes)
+                        .unwrap_or(false)
+                })
+                .map(|m| m.index.u32())
+                .expect("bob must be present before removal");
+            stage_remove_member(group, &c.identity.signer, bob_leaf, &c.provider).unwrap();
+        });
+
+        mls_remove_member_confirm(&alice_ctx_id, &alice_group_id)
+            .expect("confirm must still succeed even with no pending hash recorded");
+
+        let hash_after = MLS_CTX.with(|ctx| {
+            ctx.borrow()
+                .get(&alice_ctx_id)
+                .unwrap()
+                .own_commit_hashes
+                .get(&alice_group_id)
+                .copied()
+        });
+        assert_eq!(
+            hash_after, None,
+            "confirming with no pending hash recorded must not fabricate one — \
+             own_commit_hashes must stay empty for this group"
+        );
+
+        mls_clear_session();
+    }
+
+    /// [`mls_remove_member_abort`] must drop the pending hash
+    /// [`mls_remove_member_stage`] recorded, WITHOUT promoting it into
+    /// `own_commit_hashes` — an aborted commit was never merged, so there is
+    /// nothing to recognize a re-delivery of.
+    #[test]
+    fn test_mls_remove_member_abort_clears_pending_hash_without_promoting() {
+        let alice_bytes: [u8; 16] = [0xe5; 16];
+        let bob_bytes: [u8; 16] = [0xf6; 16];
+
+        let alice_provider = OpenMlsRustCrypto::default();
+        let alice = generate_identity(&alice_bytes, &alice_provider).unwrap();
+        let mut alice_group = create_group(&alice, &alice_provider).unwrap();
+
+        let bob_provider = OpenMlsRustCrypto::default();
+        let bob = generate_identity(&bob_bytes, &bob_provider).unwrap();
+        let bob_kp = generate_key_package(&bob, &bob_provider).unwrap();
+        add_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+
+        let alice_group_id = group_id_hex(&alice_group);
+        let alice_ctx_id = next_id();
+        MLS_CTX.with(|ctx| {
+            let mut groups = HashMap::new();
+            groups.insert(alice_group_id.clone(), alice_group);
+            ctx.borrow_mut().insert(
+                alice_ctx_id.clone(),
+                MlsContext {
+                    identity: alice,
+                    provider: alice_provider,
+                    groups,
+                    own_commit_hashes: HashMap::new(),
+                    pending_own_commit_hashes: HashMap::new(),
+                },
+            );
+        });
+
+        MLS_CTX.with(|ctx| {
+            let mut ctx = ctx.borrow_mut();
+            let c = ctx.get_mut(&alice_ctx_id).unwrap();
+            let group = c.groups.get_mut(&alice_group_id).unwrap();
+            let bob_leaf = group
+                .members()
+                .find(|m| {
+                    BasicCredential::try_from(m.credential.clone())
+                        .map(|basic| basic.identity() == bob_bytes)
+                        .unwrap_or(false)
+                })
+                .map(|m| m.index.u32())
+                .expect("bob must be present before removal");
+            let (commit_bytes, _prior_epoch) =
+                stage_remove_member(group, &c.identity.signer, bob_leaf, &c.provider).unwrap();
+            c.pending_own_commit_hashes.insert(
+                alice_group_id.clone(),
+                mls_group::hash_own_commit(&commit_bytes),
+            );
+        });
+        let pending_before = MLS_CTX.with(|ctx| {
+            ctx.borrow()
+                .get(&alice_ctx_id)
+                .unwrap()
+                .pending_own_commit_hashes
+                .get(&alice_group_id)
+                .copied()
+        });
+        assert!(
+            pending_before.is_some(),
+            "setup must have a pending hash recorded before the abort under test"
+        );
+
+        mls_remove_member_abort(&alice_ctx_id, &alice_group_id)
+            .expect("abort must succeed for a freshly staged removal");
+
+        let (pending_after, confirmed_after) = MLS_CTX.with(|ctx| {
+            let ctx = ctx.borrow();
+            let c = ctx.get(&alice_ctx_id).unwrap();
+            (
+                c.pending_own_commit_hashes.get(&alice_group_id).copied(),
+                c.own_commit_hashes.get(&alice_group_id).copied(),
+            )
+        });
+        assert_eq!(
+            pending_after, None,
+            "abort must drop the pending hash, not leave it dangling"
+        );
+        assert_eq!(
+            confirmed_after, None,
+            "abort must never promote a pending hash into own_commit_hashes"
         );
 
         mls_clear_session();
@@ -4147,6 +4634,8 @@ mod tests {
                     identity,
                     provider,
                     groups: HashMap::new(),
+                    own_commit_hashes: HashMap::new(),
+                    pending_own_commit_hashes: HashMap::new(),
                 },
             );
         });
@@ -4694,6 +5183,8 @@ mod tests {
                     identity: alice,
                     provider: alice_provider,
                     groups,
+                    own_commit_hashes: HashMap::new(),
+                    pending_own_commit_hashes: HashMap::new(),
                 },
             );
         });

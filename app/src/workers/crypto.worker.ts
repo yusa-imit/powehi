@@ -90,15 +90,27 @@ export type MlsPqEncapKeyResult = { encapKey: Uint8Array; signature: Uint8Array 
 // its doc comment below). It is still NOT wired into any consumer loop —
 // useMessages.ts and useWelcomePoller.ts still ack-and-drop every Commit
 // envelope, so nothing in the running application consumes a Commit yet.
-// Two gaps still block that wiring: (1) self-commit recognition — a
-// consumer loop needs a way to recognise and SKIP a Commit this device
-// itself sent, which the primitive has no opinion on; (2) the epoch-
-// reconciliation gap described in the paragraphs above (local MLS epoch vs
-// the server's `groups.epoch` counter) is still open. Therefore the
-// Post-Compromise Security property the Rust unit tests prove still holds
-// in those tests only, NOT yet for the running application, and these
-// methods MUST NOT be wired into a production UI or broadcast flow until
-// BOTH gaps are resolved.
+// Self-commit recognition is now built: a Commit this device itself sent is
+// reported as the distinct `MlsError::OwnCommit` (surfaced as a rejected
+// promise whose message is `"mls own commit error"` — there is no separate
+// error-code field; a consumer loop must match on that literal string, e.g.
+// `err.message === "mls own commit error"`, not just "rejected") — see
+// `MlsError::OwnCommit`'s doc comment in `mls_group.rs` for the full
+// pre-merge/post-merge split. This does NOT close all the gaps blocking
+// wiring — TWO remain open: (1) post-merge recognition
+// (`mlsRemoveMemberStage`/`mlsRemoveMemberConfirm`'s `own_commit_hashes`
+// bookkeeping) lives in worker thread-local memory only and is LOST on a
+// page reload / worker restart — the most likely time to hit this is
+// immediately after confirming a Remove, while the Delivery Service's echo
+// of that exact commit is often still in flight; a re-delivery that would
+// have hit OwnCommit before the reload instead falls back to the generic
+// "mls decrypt error" afterward, which a consumer loop must not treat as a
+// fork signal on its own; (2) the epoch-reconciliation gap described in the
+// paragraphs above (local MLS epoch vs the server's `groups.epoch` counter)
+// is still open. Therefore the Post-Compromise Security property the Rust
+// unit tests prove still holds in those tests only, NOT yet for the running
+// application, and these methods MUST NOT be wired into a production UI or
+// broadcast flow until BOTH gaps are resolved.
 export type MlsRemoveStageResult = { commit: Uint8Array; priorEpoch: number };
 // Peer/bystander-side counterpart: the result of processing an incoming MLS
 // Commit sent by ANOTHER member (a Remove or Add that member committed).
@@ -746,6 +758,14 @@ const api = {
 	 * into local MLS state (`merge_pending_commit`) and replaces/discards
 	 * the prior epoch's secrets. Calling this with no outstanding staged
 	 * commit for this group is rejected by the WASM layer.
+	 *
+	 * Takes no commit bytes — the WASM layer already hashed its own retained
+	 * copy of the staged commit at `mlsRemoveMemberStage` time (so that a
+	 * later re-delivery of this device's own commit can be recognised as
+	 * already-applied instead of surfacing as a generic decrypt error; see
+	 * `mls_group::MlsError::OwnCommit`'s doc comment). Nothing on this side
+	 * of the WASM boundary — including this function's own caller — ever
+	 * gets to choose what bytes that recognition is based on.
 	 *
 	 * STATUS: crypto PRIMITIVE ONLY — see `MlsRemoveStageResult`'s doc
 	 * comment. MUST NOT be wired into any production UI or broadcast flow yet.

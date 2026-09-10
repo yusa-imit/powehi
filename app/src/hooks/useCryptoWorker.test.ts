@@ -237,7 +237,7 @@ describe("wrapWithPersistence — synchronous persist bookkeeping", () => {
 		await db.identity.put({ id: 1, deviceId: "dev-remove-confirm-persist-fail" });
 		const raw = fakeRaw({
 			clearSessionState: async () => {},
-			mlsRemoveMemberConfirm: async () => undefined,
+			mlsRemoveMemberConfirm: async (_identityId: string, _groupId: string) => undefined,
 			mlsExportState: async () => {
 				throw new Error("quota_exceeded");
 			},
