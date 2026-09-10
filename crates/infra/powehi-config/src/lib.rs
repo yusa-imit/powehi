@@ -386,9 +386,13 @@ pub struct AppConfig {
     pub vapid_contact: Option<String>,
     /// Arbitrary secret token used to derive the HMAC-SHA256 key for the
     /// login_init handle-existence anti-oracle (deterministic synthetic user_id).
-    /// Set to any high-entropy string (e.g. a UUID) and keep it stable across
-    /// restarts. If empty, a random key is generated at startup (per-restart only).
-    /// `POWEHI__HANDLE_ORACLE_SECRET_TOKEN`.
+    /// If empty (the default), the key is instead generated once and persisted
+    /// in the `server_config` table, so it stays stable across restarts and
+    /// converges across concurrently-booting replicas without this var being
+    /// set. Setting it is optional — useful for operator-controlled key
+    /// rotation or pinning the key outside the database — but not required
+    /// for correctness. When set, use a high-entropy string (e.g. a UUID) and
+    /// keep it stable across restarts. `POWEHI__HANDLE_ORACLE_SECRET_TOKEN`.
     #[serde(default)]
     pub handle_oracle_secret_token: String,
 }
