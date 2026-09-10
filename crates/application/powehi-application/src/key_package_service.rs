@@ -163,6 +163,24 @@ mod tests {
             store.retain(|_, kp| kp.device_id != *device_id);
             Ok((before - store.len()) as u64)
         }
+        async fn delete_consumed_older_than(
+            &self,
+            older_than: chrono::DateTime<chrono::Utc>,
+            limit: u32,
+        ) -> Result<u64, DomainError> {
+            let mut store = self.store.lock().unwrap();
+            let before = store.len();
+            let mut removed = 0u32;
+            store.retain(|_, kp| {
+                if removed < limit && kp.consumed && kp.uploaded_at < older_than {
+                    removed += 1;
+                    false
+                } else {
+                    true
+                }
+            });
+            Ok((before - store.len()) as u64)
+        }
     }
 
     #[tokio::test]

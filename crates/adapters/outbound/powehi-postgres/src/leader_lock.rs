@@ -12,12 +12,17 @@ use sqlx::postgres::PgPool;
 use crate::map_err;
 
 /// Advisory-lock keys guarding GC/trim background jobs (cycle 368). One key
-/// per job so the two jobs never block each other, only concurrent runs of
-/// the *same* job across server replicas.
+/// per job (five today — media blob GC, media ledger trim, media orphan
+/// sweep, pending_removals sweep, and the consumed-key_packages sweep) so no
+/// two distinct jobs ever block each other, only concurrent runs of the
+/// *same* job across server replicas.
 pub const GC_LOCK_MEDIA_BLOBS: i64 = 0x706f_7765_6869_0001;
 pub const GC_LOCK_MEDIA_LEDGER: i64 = 0x706f_7765_6869_0002;
 pub const GC_LOCK_MEDIA_ORPHANS: i64 = 0x706f_7765_6869_0003;
 pub const GC_LOCK_PENDING_REMOVALS: i64 = 0x706f_7765_6869_0004;
+/// Guards the consumed-`key_packages` retention sweep (long-carried Tiger
+/// Style "put a limit on everything" gap — see `bin/powehi-server/src/main.rs`).
+pub const GC_LOCK_KEY_PACKAGES: i64 = 0x706f_7765_6869_0005;
 
 /// Holds a session-scoped Postgres advisory lock acquired via
 /// `PgLeaderLock::try_lock`. `pg_advisory_lock`/`pg_advisory_unlock` are tied

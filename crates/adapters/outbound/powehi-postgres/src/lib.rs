@@ -19,8 +19,8 @@ pub use envelope_repo::PgEnvelopeRepository;
 pub use group_repo::PgGroupRepository;
 pub use key_package_repo::PgKeyPackageRepository;
 pub use leader_lock::{
-    GcLockGuard, PgLeaderLock, GC_LOCK_MEDIA_BLOBS, GC_LOCK_MEDIA_LEDGER, GC_LOCK_MEDIA_ORPHANS,
-    GC_LOCK_PENDING_REMOVALS,
+    GcLockGuard, PgLeaderLock, GC_LOCK_KEY_PACKAGES, GC_LOCK_MEDIA_BLOBS, GC_LOCK_MEDIA_LEDGER,
+    GC_LOCK_MEDIA_ORPHANS, GC_LOCK_PENDING_REMOVALS,
 };
 pub use push_subscription_repo::PgPushSubscriptionRepository;
 pub use server_config_repo::PgServerConfigRepository;

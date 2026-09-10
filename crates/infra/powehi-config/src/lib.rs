@@ -8,18 +8,22 @@ pub enum ConfigError {
     Load(#[from] config::ConfigError),
     #[error(
         "database_max_connections={0} is below the minimum safe value ({MIN_DATABASE_MAX_CONNECTIONS}): \
-         there are now 4 advisory-lock-guarded background jobs (media blob GC, media ledger trim, \
-         media orphan sweep, pending_removals sweep — cycle 451), each pinning one dedicated \
-         connection for its lock while its own query needs a second connection from the same pool, \
-         so 2 connections per concurrently-running job. The hourly media blob GC job (t=0,1h,2h,...) \
-         coincides with BOTH the un-skipped-first-tick 24h media-ledger-trim job (t=0,24h,48h,...) \
-         AND the 6h-grid media-orphan-sweep job (t=6h,12h,18h,24h,... — every 24h boundary is also a \
-         6h-grid tick) every single day at t=24h, 48h, ...: a real 3-job collision, not a pairwise \
-         one. The new pending_removals sweep is deliberately offset (3h initial delay + 24h grid, so \
-         t=27h, 51h, ...) specifically so it never becomes a 4th job in that same collision — it only \
-         ever coincides with the hourly blob GC job alone. So the realistic worst case is 3 \
-         concurrently-running jobs, needing 6 connections, plus headroom so request handlers are not \
-         fully starved for the acquire-timeout duration during that overlap"
+         there are now 5 advisory-lock-guarded background jobs (media blob GC, media ledger trim, \
+         media orphan sweep, pending_removals sweep — cycle 451, and the consumed-key_packages \
+         sweep), each pinning one dedicated connection for its lock while its own query needs a \
+         second connection from the same pool, so 2 connections per concurrently-running job. The \
+         hourly media blob GC job (t=0,1h,2h,...) coincides with BOTH the un-skipped-first-tick 24h \
+         media-ledger-trim job (t=0,24h,48h,...) AND the 6h-grid media-orphan-sweep job \
+         (t=6h,12h,18h,24h,... — every 24h boundary is also a 6h-grid tick) every single day at \
+         t=24h, 48h, ...: a real 3-job collision, not a pairwise one. The pending_removals sweep is \
+         deliberately offset (3h initial delay + 24h grid, so t=27h, 51h, ...) and the \
+         consumed-key_packages sweep is deliberately offset differently again (9h initial delay + \
+         24h grid, so t=33h, 57h, ...) specifically so neither ever becomes a 4th job in that same \
+         collision — each only ever coincides with the hourly blob GC job alone (and, in principle, \
+         with each other, which would still only be a 3-way collision, no worse than the existing \
+         one). So the realistic worst case remains 3 concurrently-running jobs, needing 6 \
+         connections, plus headroom so request handlers are not fully starved for the \
+         acquire-timeout duration during that overlap"
     )]
     DatabaseMaxConnectionsTooLow(u32),
     #[error(
@@ -133,6 +137,32 @@ pub enum ConfigError {
          can only ever destroy at most this many notification-metadata rows in a single tick"
     )]
     PendingRemovalSweepMaxDeletesOutOfRange(u64),
+    #[error(
+        "key_package_gc_grace_days={0} is out of range: must be in \
+         [1, {MAX_KEY_PACKAGE_GC_GRACE_DAYS}]. Zero would let the very next tick sweep a \
+         KeyPackage consumed microseconds ago; a value above the ceiling risks overflowing the \
+         u64->i64 cast used to build the sweep's cutoff timestamp, which could silently invert the \
+         grace window and make the sweep treat every consumed row in the table as eligible \
+         regardless of age"
+    )]
+    KeyPackageGcGraceDaysTooHigh(u64),
+    #[error(
+        "key_package_gc_timeout_secs={0} is below the minimum safe value \
+         ({MIN_KEY_PACKAGE_GC_TIMEOUT_SECS}): sqlx's `PgPoolOptions` default `acquire_timeout` is \
+         30s and this job's query is not exempt from it, so a timeout shorter than that can abort \
+         the sweep during connection acquire alone, before the (otherwise cheap, bounded, indexed) \
+         `DELETE` even starts — making the job hold its advisory lock every tick with zero net \
+         progress"
+    )]
+    KeyPackageGcTimeoutTooLow(u64),
+    #[error(
+        "key_package_gc_max_deletes_per_run={0} is outside the safe range \
+         [{MIN_KEY_PACKAGE_GC_MAX_DELETES_PER_RUN}, {MAX_KEY_PACKAGE_GC_MAX_DELETES_PER_RUN}]: \
+         this value is the sweep's blast-radius cap — a config or clock issue that misidentifies \
+         rows as sweep-eligible can only ever destroy at most this many consumed KeyPackage rows \
+         in a single tick"
+    )]
+    KeyPackageGcMaxDeletesOutOfRange(u64),
 }
 
 /// Below this, a GC job's dedicated advisory-lock connection plus its own query connection can
@@ -143,10 +173,13 @@ pub enum ConfigError {
 /// every day at t=24h, 48h, ... — a real 3-job collision, confirmed against the actual
 /// `tokio::time::interval` setup in `bin/powehi-server/src/main.rs`, not an assumed pairwise one.
 /// The `pending_removals` sweep (cycle 451) is deliberately offset (3h delay + 24h grid, landing
-/// at t=27h, 51h, ...) so it is never a 4th job in that collision — it only ever overlaps the
-/// hourly blob-GC job alone. So 3 concurrent jobs is the realistic worst case: 6 connections for
-/// those, plus 1 so request handlers are not fully starved during the overlap. 7 is the floor,
-/// not sqlx's per-connection minimum of 1.
+/// at t=27h, 51h, ...) and the consumed-`key_packages` sweep is deliberately offset differently
+/// again (9h delay + 24h grid, landing at t=33h, 57h, ...) so neither is ever a 4th job in that
+/// collision — each only ever overlaps the hourly blob-GC job alone (the two of them can in
+/// principle overlap each other too, but that is still only a 3-way collision with blob-GC, no
+/// worse than the existing one). So 3 concurrent jobs remains the realistic worst case: 6
+/// connections for those, plus 1 so request handlers are not fully starved during the overlap. 7
+/// is the floor, not sqlx's per-connection minimum of 1.
 const MIN_DATABASE_MAX_CONNECTIONS: u32 = 7;
 
 /// The AWS SDK's own default connect timeout is ~3.1s (see
@@ -223,6 +256,36 @@ const MIN_PENDING_REMOVAL_SWEEP_TIMEOUT_SECS: u64 = 30;
 /// here is harmless (tiny metadata rows, not storage objects) and simply resumes next tick.
 const MIN_PENDING_REMOVAL_SWEEP_MAX_DELETES_PER_RUN: u64 = 1;
 const MAX_PENDING_REMOVAL_SWEEP_MAX_DELETES_PER_RUN: u64 = 1_000_000;
+
+/// Default grace period, in days, before a consumed KeyPackage becomes sweep-eligible. Chosen to
+/// match `powehi_application::media_service::GC_RETENTION_DAYS` (30) — the same 30-day retention
+/// precedent already established for media blob GC — but defined as its own named constant here
+/// rather than imported: `powehi-config` is a foundational infra crate and must not depend on the
+/// application layer just to read one integer literal.
+const DEFAULT_KEY_PACKAGE_GC_GRACE_DAYS: u64 = 30;
+
+/// Hard ceiling on `key_package_gc_grace_days`. Same overflow-safety rationale as
+/// `MAX_PENDING_REMOVAL_SWEEP_GRACE_DAYS`: comfortably below any value that could make
+/// `chrono::Duration::days()` misbehave when this `u64` is cast to `i64`
+/// (`bin/powehi-server/src/main.rs`), while still covering any operationally sane grace window.
+/// 5 years.
+const MAX_KEY_PACKAGE_GC_GRACE_DAYS: u64 = 365 * 5;
+
+/// sqlx's `PgPoolOptions` default `acquire_timeout` is 30s and this job's query is not exempt
+/// from it (see `KeyPackageGcTimeoutTooLow`'s doc) — a floor here must clear that, not just "a
+/// normal query's latency", or the timeout can fire during connection acquire alone before the
+/// (cheap, bounded, indexed) `DELETE` itself ever runs. Matches
+/// `MIN_PENDING_REMOVAL_SWEEP_TIMEOUT_SECS` for the same reason.
+const MIN_KEY_PACKAGE_GC_TIMEOUT_SECS: u64 = 30;
+
+/// Bounds on `key_package_gc_max_deletes_per_run`, the sweep's blast-radius cap. Below the
+/// minimum the job could never make real progress; above the maximum the cap stops meaningfully
+/// bounding a single tick's damage. Same rationale and range as
+/// `MIN_PENDING_REMOVAL_SWEEP_MAX_DELETES_PER_RUN`/`MAX_PENDING_REMOVAL_SWEEP_MAX_DELETES_PER_RUN`
+/// — a truncated run here is harmless (tiny metadata rows, not storage objects) and simply
+/// resumes next tick.
+const MIN_KEY_PACKAGE_GC_MAX_DELETES_PER_RUN: u64 = 1;
+const MAX_KEY_PACKAGE_GC_MAX_DELETES_PER_RUN: u64 = 1_000_000;
 
 /// The dev-only `r2_endpoint` default installed by `load()`'s `set_default`. Any deployed
 /// (non-`local`) region whose config still resolves to this literal at `validate()` time means
@@ -354,6 +417,33 @@ pub struct AppConfig {
     /// objects; a truncated run is harmless and resumes next tick. Default 10_000.
     #[serde(default = "default_pending_removal_sweep_max_deletes_per_run")]
     pub pending_removal_sweep_max_deletes_per_run: u64,
+    /// Grace period, in days, before a CONSUMED KeyPackage row (single-use, RFC 9420 §10, already
+    /// handed to a recipient) becomes sweep-eligible. Default 30 (days), matching the precedent
+    /// set by `powehi_application::media_service::GC_RETENTION_DAYS`. Never applies to unconsumed
+    /// rows regardless of age — see `KeyPackageRepository::delete_consumed_older_than`.
+    #[serde(default = "default_key_package_gc_grace_days")]
+    pub key_package_gc_grace_days: u64,
+    /// Bounds the whole consumed-`key_packages` retention sweep, the same way
+    /// `pending_removal_sweep_timeout_secs` bounds that sweep: it holds a cross-replica advisory
+    /// lock (`GC_LOCK_KEY_PACKAGES`) for its duration. Default 300 (5 min) — this is one bounded,
+    /// indexed `DELETE`, not a bucket-wide R2 walk.
+    #[serde(default = "default_key_package_gc_timeout_secs")]
+    pub key_package_gc_timeout_secs: u64,
+    /// Kill switch for the consumed-`key_packages` sweep, same shape as
+    /// `pending_removal_sweep_enabled`, but **default `true`** (not `false`) for a reason specific
+    /// to this job: unlike the `pending_removals` sweep, which defaults off because no consumer of
+    /// its signal exists yet, a consumed KeyPackage row is DEFINITIONALLY done — single-use,
+    /// already handed to a recipient (RFC 9420 §10) — and there is no future consumer that could
+    /// ever need to read a stale consumed row again. Deleting it destroys no signal any client
+    /// could still be waiting on, so default-enabled is safe. The flag still exists as an explicit
+    /// operational kill switch, same rationale as `media_orphan_sweep_enabled`.
+    #[serde(default = "default_key_package_gc_enabled")]
+    pub key_package_gc_enabled: bool,
+    /// Hard cap on rows deleted by a single consumed-`key_packages`-sweep tick — the sweep's
+    /// blast-radius limiter, same rationale as `pending_removal_sweep_max_deletes_per_run`; a
+    /// truncated run is harmless and resumes next tick. Default 10_000.
+    #[serde(default = "default_key_package_gc_max_deletes_per_run")]
+    pub key_package_gc_max_deletes_per_run: u64,
     /// Internal admin port for Prometheus metrics scraping.
     /// Bound to 127.0.0.1 only — MUST NOT be exposed via the public ingress.
     /// Prometheus scrapes from within the cluster (k8s pod-to-pod).
@@ -434,6 +524,18 @@ fn default_pending_removal_sweep_enabled() -> bool {
     false
 }
 fn default_pending_removal_sweep_max_deletes_per_run() -> u64 {
+    10_000
+}
+fn default_key_package_gc_grace_days() -> u64 {
+    DEFAULT_KEY_PACKAGE_GC_GRACE_DAYS
+}
+fn default_key_package_gc_timeout_secs() -> u64 {
+    300
+}
+fn default_key_package_gc_enabled() -> bool {
+    true
+}
+fn default_key_package_gc_max_deletes_per_run() -> u64 {
     10_000
 }
 fn default_admin_port() -> u16 {
@@ -531,6 +633,16 @@ impl std::fmt::Debug for AppConfig {
                 "pending_removal_sweep_max_deletes_per_run",
                 &self.pending_removal_sweep_max_deletes_per_run,
             )
+            .field("key_package_gc_grace_days", &self.key_package_gc_grace_days)
+            .field(
+                "key_package_gc_timeout_secs",
+                &self.key_package_gc_timeout_secs,
+            )
+            .field("key_package_gc_enabled", &self.key_package_gc_enabled)
+            .field(
+                "key_package_gc_max_deletes_per_run",
+                &self.key_package_gc_max_deletes_per_run,
+            )
             .field("admin_port", &self.admin_port)
             .field("grpc_port", &self.grpc_port)
             .field("grpc_peers", &self.grpc_peers)
@@ -566,6 +678,13 @@ pub fn load() -> Result<AppConfig, ConfigError> {
         .set_default("pending_removal_sweep_timeout_secs", 300)?
         .set_default("pending_removal_sweep_enabled", false)?
         .set_default("pending_removal_sweep_max_deletes_per_run", 10_000)?
+        .set_default(
+            "key_package_gc_grace_days",
+            DEFAULT_KEY_PACKAGE_GC_GRACE_DAYS,
+        )?
+        .set_default("key_package_gc_timeout_secs", 300)?
+        .set_default("key_package_gc_enabled", true)?
+        .set_default("key_package_gc_max_deletes_per_run", 10_000)?
         // No defaults for credentials — POWEHI__R2_ACCESS_KEY_ID and
         // POWEHI__R2_SECRET_ACCESS_KEY must be injected by the operator.
         .set_default("r2_access_key_id", "")?
@@ -671,6 +790,27 @@ fn validate(app: &AppConfig) -> Result<(), ConfigError> {
             app.pending_removal_sweep_max_deletes_per_run,
         ));
     }
+    // `== 0` is checked explicitly, in the same variant as the too-high case, same rationale as
+    // `pending_removal_sweep_grace_days`'s zero guard above.
+    if app.key_package_gc_grace_days == 0
+        || app.key_package_gc_grace_days > MAX_KEY_PACKAGE_GC_GRACE_DAYS
+    {
+        return Err(ConfigError::KeyPackageGcGraceDaysTooHigh(
+            app.key_package_gc_grace_days,
+        ));
+    }
+    if app.key_package_gc_timeout_secs < MIN_KEY_PACKAGE_GC_TIMEOUT_SECS {
+        return Err(ConfigError::KeyPackageGcTimeoutTooLow(
+            app.key_package_gc_timeout_secs,
+        ));
+    }
+    if !(MIN_KEY_PACKAGE_GC_MAX_DELETES_PER_RUN..=MAX_KEY_PACKAGE_GC_MAX_DELETES_PER_RUN)
+        .contains(&app.key_package_gc_max_deletes_per_run)
+    {
+        return Err(ConfigError::KeyPackageGcMaxDeletesOutOfRange(
+            app.key_package_gc_max_deletes_per_run,
+        ));
+    }
     if app.region_id != "local" && app.r2_endpoint == DEV_R2_ENDPOINT_DEFAULT {
         return Err(ConfigError::R2DevDefaultEndpointInNonLocalRegion(
             app.region_id.clone(),
@@ -721,6 +861,10 @@ mod tests {
             pending_removal_sweep_timeout_secs: 300,
             pending_removal_sweep_enabled: false,
             pending_removal_sweep_max_deletes_per_run: 10_000,
+            key_package_gc_grace_days: 30,
+            key_package_gc_timeout_secs: 300,
+            key_package_gc_enabled: true,
+            key_package_gc_max_deletes_per_run: 10_000,
             admin_port: 9090,
             grpc_port: 50051,
             grpc_peers: String::new(),
@@ -1183,6 +1327,119 @@ mod tests {
     }
 
     #[test]
+    fn key_package_gc_defaults_are_correct() {
+        assert_eq!(default_key_package_gc_grace_days(), 30);
+        assert_eq!(default_key_package_gc_timeout_secs(), 300);
+        assert!(default_key_package_gc_enabled());
+        assert_eq!(default_key_package_gc_max_deletes_per_run(), 10_000);
+        assert_eq!(default_config().key_package_gc_grace_days, 30);
+        assert_eq!(default_config().key_package_gc_timeout_secs, 300);
+        assert!(
+            default_config().key_package_gc_enabled,
+            "unlike pending_removal_sweep_enabled, this must default true — a consumed \
+             KeyPackage row is definitionally done and has no future consumer"
+        );
+        assert_eq!(default_config().key_package_gc_max_deletes_per_run, 10_000);
+    }
+
+    #[test]
+    fn key_package_gc_grace_days_zero_or_above_ceiling_is_rejected() {
+        for bad in [0, MAX_KEY_PACKAGE_GC_GRACE_DAYS + 1] {
+            let cfg = AppConfig {
+                key_package_gc_grace_days: bad,
+                ..default_config()
+            };
+            let err = validate(&cfg)
+                .expect_err(&format!("key_package_gc_grace_days={bad} must be rejected"));
+            assert!(matches!(
+                err,
+                ConfigError::KeyPackageGcGraceDaysTooHigh(v) if v == bad
+            ));
+        }
+    }
+
+    #[test]
+    fn key_package_gc_grace_days_in_range_is_accepted() {
+        for ok in [1, MAX_KEY_PACKAGE_GC_GRACE_DAYS] {
+            let cfg = AppConfig {
+                key_package_gc_grace_days: ok,
+                ..default_config()
+            };
+            assert!(
+                validate(&cfg).is_ok(),
+                "key_package_gc_grace_days={ok} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn key_package_gc_timeout_below_floor_is_rejected() {
+        for bad in [0, MIN_KEY_PACKAGE_GC_TIMEOUT_SECS - 1] {
+            let cfg = AppConfig {
+                key_package_gc_timeout_secs: bad,
+                ..default_config()
+            };
+            let err = validate(&cfg).expect_err(&format!(
+                "key_package_gc_timeout_secs={bad} must be rejected"
+            ));
+            assert!(matches!(err, ConfigError::KeyPackageGcTimeoutTooLow(v) if v == bad));
+        }
+    }
+
+    #[test]
+    fn key_package_gc_timeout_at_or_above_floor_is_accepted() {
+        for ok in [
+            MIN_KEY_PACKAGE_GC_TIMEOUT_SECS,
+            MIN_KEY_PACKAGE_GC_TIMEOUT_SECS + 1,
+            300,
+        ] {
+            let cfg = AppConfig {
+                key_package_gc_timeout_secs: ok,
+                ..default_config()
+            };
+            assert!(
+                validate(&cfg).is_ok(),
+                "key_package_gc_timeout_secs={ok} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn key_package_gc_max_deletes_per_run_out_of_range_is_rejected() {
+        for bad in [0, MAX_KEY_PACKAGE_GC_MAX_DELETES_PER_RUN + 1, u64::MAX] {
+            let cfg = AppConfig {
+                key_package_gc_max_deletes_per_run: bad,
+                ..default_config()
+            };
+            let err = validate(&cfg).expect_err(&format!(
+                "key_package_gc_max_deletes_per_run={bad} must be rejected"
+            ));
+            assert!(matches!(
+                err,
+                ConfigError::KeyPackageGcMaxDeletesOutOfRange(v) if v == bad
+            ));
+        }
+    }
+
+    #[test]
+    fn key_package_gc_max_deletes_per_run_in_range_is_accepted() {
+        for ok in [
+            MIN_KEY_PACKAGE_GC_MAX_DELETES_PER_RUN,
+            10_000,
+            MAX_KEY_PACKAGE_GC_MAX_DELETES_PER_RUN,
+        ] {
+            let cfg = AppConfig {
+                key_package_gc_max_deletes_per_run: ok,
+                ..default_config()
+            };
+            assert!(
+                validate(&cfg).is_ok(),
+                "key_package_gc_max_deletes_per_run={ok} must be accepted"
+            );
+        }
+    }
+
+    #[test]
     fn dev_default_r2_endpoint_in_non_local_region_is_rejected() {
         for region in ["eu-central-1", "ap-seoul-1", "us-east-1"] {
             let cfg = AppConfig {
@@ -1494,6 +1751,10 @@ mod tests {
         assert_eq!(app.media_gc_sweep_timeout_secs, 1800);
         assert_eq!(app.media_orphan_sweep_grace_hours, 24);
         assert_eq!(app.media_orphan_sweep_timeout_secs, 1800);
+        assert_eq!(app.key_package_gc_grace_days, 30);
+        assert_eq!(app.key_package_gc_timeout_secs, 300);
+        assert!(app.key_package_gc_enabled);
+        assert_eq!(app.key_package_gc_max_deletes_per_run, 10_000);
         assert!(
             app.r2_access_key_id.is_empty(),
             "credentials must be injected by operator"

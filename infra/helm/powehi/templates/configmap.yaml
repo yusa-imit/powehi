@@ -42,6 +42,16 @@ data:
   # real default (`true`) for this key, so no template-level default here.
   POWEHI__PENDING_REMOVAL_SWEEP_ENABLED: {{ .Values.config.pendingRemovalSweepEnabled | quote }}
   POWEHI__PENDING_REMOVAL_SWEEP_MAX_DELETES_PER_RUN: {{ .Values.config.pendingRemovalSweepMaxDeletesPerRun | default 10000 | quote }}
+  POWEHI__KEY_PACKAGE_GC_GRACE_DAYS: {{ .Values.config.keyPackageGcGraceDays | default 30 | quote }}
+  POWEHI__KEY_PACKAGE_GC_TIMEOUT_SECS: {{ .Values.config.keyPackageGcTimeoutSecs | default 300 | quote }}
+  # NOT `| default true` — same Sprig boolean-false-is-empty trap as
+  # mediaOrphanSweepEnabled/pendingRemovalSweepEnabled above (cycle 424
+  # finding): `default true` would silently override an operator's
+  # `keyPackageGcEnabled: false` back to `"true"`, breaking this job's kill
+  # switch. values.yaml already sets a real default (`true`) for this key, so
+  # no template-level default here.
+  POWEHI__KEY_PACKAGE_GC_ENABLED: {{ .Values.config.keyPackageGcEnabled | quote }}
+  POWEHI__KEY_PACKAGE_GC_MAX_DELETES_PER_RUN: {{ .Values.config.keyPackageGcMaxDeletesPerRun | default 10000 | quote }}
   {{- if .Values.config.r2Endpoint }}
   POWEHI__R2_ENDPOINT: {{ .Values.config.r2Endpoint | quote }}
   {{- end }}

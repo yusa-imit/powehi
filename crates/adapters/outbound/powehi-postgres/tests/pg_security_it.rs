@@ -38,6 +38,12 @@
 //!     nothing eligible deletes nothing and returns 0, and a row whose
 //!     group's epoch never advances past `created_at_epoch` is never swept
 //!     regardless of age.
+//!   - `KeyPackageRepository::delete_consumed_older_than` (consumed
+//!     key_packages retention sweep): an old CONSUMED row is swept, a new
+//!     CONSUMED row survives (grace period), and an old UNCONSUMED row
+//!     survives regardless of age — proving the `consumed = TRUE` filter is
+//!     enforced, not just an age cutoff — and the `limit` blast-radius cap is
+//!     respected with a truncated run resuming on the next call.
 //!
 //! Tests are `#[ignore]` because they require Docker (testcontainers).
 //! Run them in CI via: `cargo nextest run -p powehi-postgres --run-ignored all
@@ -577,6 +583,150 @@ async fn mark_consumed_not_found_for_unknown_id() {
         repo.mark_consumed(&unknown).await.expect("query"),
         ConsumeResult::NotFound
     );
+}
+
+// ── delete_consumed_older_than (consumed key_packages retention sweep) ─────
+// Closes a long-carried Tiger Style "put a limit on everything" gap: a
+// KeyPackage is single-use (RFC 9420 §10) — once `consumed = TRUE`, no code
+// path ever reads the row again — but nothing ever deleted it. Unlike
+// `sweep_stale_pending_removals`, there is no liveness/epoch gate: `consumed
+// = TRUE` alone is definitional proof the row is done, so age is the only
+// predicate, and it MUST NEVER touch an unconsumed row regardless of age.
+
+async fn insert_key_package(pool: &PgPool, device_id: DeviceId, consumed: bool) -> KeyPackageId {
+    let kp = KeyPackage {
+        id: KeyPackageId::new(),
+        device_id,
+        data: vec![0x5au8; 64],
+        uploaded_at: Utc::now(),
+        consumed,
+    };
+    PgKeyPackageRepository::new(pool.clone())
+        .save(&kp)
+        .await
+        .expect("insert key_package");
+    if consumed {
+        // `save` always writes `consumed` as given, but drive it through the
+        // real state machine (mark_consumed) rather than hand-writing
+        // `consumed = TRUE` at insert time, so this fixture can't drift from
+        // how a KeyPackage actually becomes consumed in production.
+        sqlx::query("UPDATE key_packages SET consumed = TRUE WHERE id = $1")
+            .bind(kp.id.as_uuid())
+            .execute(pool)
+            .await
+            .expect("mark key_package consumed");
+    }
+    kp.id
+}
+
+/// Force a `key_packages` row's `uploaded_at` to an arbitrary value via raw
+/// SQL, since neither `save` nor `mark_consumed` exposes a parameter for
+/// it — used to plant rows on either side of a sweep cutoff.
+async fn backdate_key_package(
+    pool: &PgPool,
+    id: &KeyPackageId,
+    uploaded_at: chrono::DateTime<Utc>,
+) {
+    sqlx::query("UPDATE key_packages SET uploaded_at = $1 WHERE id = $2")
+        .bind(uploaded_at)
+        .bind(id.as_uuid())
+        .execute(pool)
+        .await
+        .expect("backdate key_package uploaded_at");
+}
+
+/// The core invariant: an old CONSUMED row is swept, a new CONSUMED row
+/// survives (grace period), and an old UNCONSUMED row survives regardless of
+/// age — proving the `consumed = TRUE` filter is enforced, not just an age
+/// cutoff, so a device's still-available inventory can never be deleted out
+/// from under it.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn delete_consumed_older_than_only_sweeps_old_consumed_rows() {
+    let (_c, pool) = setup().await;
+    let device = insert_device(&pool, insert_user(&pool).await).await;
+    let repo = PgKeyPackageRepository::new(pool.clone());
+
+    let cutoff = Utc::now() - chrono::Duration::days(1);
+    let long_ago = cutoff - chrono::Duration::days(2);
+
+    let old_consumed = insert_key_package(&pool, device.clone(), true).await;
+    backdate_key_package(&pool, &old_consumed, long_ago).await;
+
+    let new_consumed = insert_key_package(&pool, device.clone(), true).await;
+    // Left with its real now()-written uploaded_at, which is after `cutoff`.
+
+    let old_unconsumed = insert_key_package(&pool, device.clone(), false).await;
+    backdate_key_package(&pool, &old_unconsumed, long_ago).await;
+
+    let deleted = repo
+        .delete_consumed_older_than(cutoff, 100)
+        .await
+        .expect("sweep");
+    assert_eq!(deleted, 1, "exactly the old consumed row must be swept");
+
+    let remaining: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM key_packages ORDER BY id")
+        .fetch_all(&pool)
+        .await
+        .expect("list remaining key_packages");
+    let mut expected = vec![new_consumed.as_uuid(), old_unconsumed.as_uuid()];
+    expected.sort();
+    let mut remaining_sorted = remaining;
+    remaining_sorted.sort();
+    assert_eq!(
+        remaining_sorted, expected,
+        "the new consumed row and the old UNCONSUMED row must both survive; \
+         only the old consumed row may be gone"
+    );
+}
+
+/// The `limit` bound is respected, mirroring
+/// `sweep_stale_pending_removals_respects_limit_and_resumes_next_tick`: plant
+/// more eligible (old, consumed) rows than `limit`, confirm exactly `limit`
+/// are removed on the first call, and the rest are swept on a second call.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn delete_consumed_older_than_respects_limit_and_resumes_next_tick() {
+    let (_c, pool) = setup().await;
+    let device = insert_device(&pool, insert_user(&pool).await).await;
+    let repo = PgKeyPackageRepository::new(pool.clone());
+
+    let cutoff = Utc::now() - chrono::Duration::days(1);
+    let long_ago = cutoff - chrono::Duration::days(2);
+
+    let total: u32 = 5;
+    for _ in 0..total {
+        let id = insert_key_package(&pool, device.clone(), true).await;
+        backdate_key_package(&pool, &id, long_ago).await;
+    }
+
+    let limit: u32 = 2;
+    let deleted_first = repo
+        .delete_consumed_older_than(cutoff, limit)
+        .await
+        .expect("first sweep");
+    assert_eq!(
+        deleted_first,
+        u64::from(limit),
+        "the first call must delete exactly `limit` rows, never more"
+    );
+
+    let deleted_second = repo
+        .delete_consumed_older_than(cutoff, 100)
+        .await
+        .expect("second sweep");
+    assert_eq!(
+        deleted_second,
+        u64::from(total - limit),
+        "a second call with headroom must sweep everything the truncated \
+         first call left behind"
+    );
+
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM key_packages")
+        .fetch_one(&pool)
+        .await
+        .expect("count remaining key_packages");
+    assert_eq!(remaining, 0, "all originally-eligible rows must be gone");
 }
 
 /// `add_member` is idempotent — inserting the same (group, device) pair twice

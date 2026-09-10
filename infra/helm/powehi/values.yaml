@@ -82,6 +82,28 @@ config:
   # Blast-radius cap: max pending_removals rows the sweep may delete in a single daily tick.
   # Matches Rust compiled default (POWEHI__PENDING_REMOVAL_SWEEP_MAX_DELETES_PER_RUN).
   pendingRemovalSweepMaxDeletesPerRun: 10000
+  # Grace period, days, before a CONSUMED KeyPackage row (single-use, RFC 9420 §10,
+  # already handed to a recipient) becomes eligible for the daily retention sweep.
+  # Measured from upload time, not consumption time (no consumed_at column exists).
+  # Matches Rust compiled default (POWEHI__KEY_PACKAGE_GC_GRACE_DAYS).
+  keyPackageGcGraceDays: 30
+  # Whole daily consumed-key_packages sweep timeout, seconds (the sweep loops
+  # calling its bounded per-call delete until caught up, so this bounds total
+  # per-tick wall-clock, not just one batch). Matches Rust compiled default
+  # (POWEHI__KEY_PACKAGE_GC_TIMEOUT_SECS).
+  keyPackageGcTimeoutSecs: 300
+  # Kill switch for the consumed-key_packages sweep, default true: unlike
+  # pendingRemovalSweepEnabled, a consumed KeyPackage row is definitionally done
+  # (single-use, already handed to a recipient) and deleting it destroys no
+  # signal any future consumer could need — see the sweep's doc in
+  # bin/powehi-server/src/main.rs. Still an explicit operational kill switch,
+  # same reasoning as mediaOrphanSweepEnabled. Matches Rust compiled default
+  # (POWEHI__KEY_PACKAGE_GC_ENABLED).
+  keyPackageGcEnabled: true
+  # Blast-radius cap: max consumed key_packages rows deleted per bounded DELETE
+  # call within a single daily tick's catch-up loop. Matches Rust compiled
+  # default (POWEHI__KEY_PACKAGE_GC_MAX_DELETES_PER_RUN).
+  keyPackageGcMaxDeletesPerRun: 10000
   # Cloudflare R2 (S3-compatible) endpoint URL for media storage. Empty means the
   # Rust compiled dev-only default "http://localhost:9000" applies (AppConfig.r2_endpoint,
   # crates/infra/powehi-config/src/lib.rs) — operators MUST override with the real

@@ -1,0 +1,23 @@
+-- no-transaction
+-- Backs the new `KeyPackageRepository::delete_consumed_older_than`'s
+-- `WHERE consumed = TRUE AND uploaded_at < $1` bound-scan (paired with the
+-- inner `SELECT ... LIMIT $2` per-tick cap — see the adapter impl), invoked
+-- by a daily background sweep job closing a long-carried Tiger Style "put a
+-- limit on everything" gap: consumed KeyPackage rows were never deleted, so
+-- this is exactly the table the sweep exists to shrink, and therefore the
+-- one most likely to be large by the time this index is needed.
+--
+-- Neither existing index can serve this predicate: the primary key `id` and
+-- `key_packages_device_id_idx` (0019) both lead with an unrelated column,
+-- and the original `key_packages_device_unconsumed_idx` is partial on
+-- `WHERE NOT consumed` — the exact opposite of what this sweep needs.
+--
+-- CREATE INDEX CONCURRENTLY cannot run inside sqlx's default migration
+-- transaction (Postgres forbids CONCURRENTLY in a transaction block
+-- outright), hence `-- no-transaction` above, matching the 0011/0014/0016/
+-- 0017/0019 precedent. OPERATIONAL NOTE: if this build is interrupted,
+-- `IF NOT EXISTS` makes a migration retry no-op past a resulting INVALID
+-- index — run `DROP INDEX CONCURRENTLY key_packages_consumed_uploaded_at_idx`
+-- manually, then re-run migrations, to actually rebuild it.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS key_packages_consumed_uploaded_at_idx
+    ON key_packages(uploaded_at) WHERE consumed;

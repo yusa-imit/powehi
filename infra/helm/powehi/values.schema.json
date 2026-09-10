@@ -88,6 +88,26 @@
           "maximum": 1000000,
           "description": "Blast-radius cap: max pending_removals rows the sweep may delete in a single daily tick."
         },
+        "keyPackageGcGraceDays": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1825
+        },
+        "keyPackageGcTimeoutSecs": {
+          "type": "integer",
+          "minimum": 30,
+          "description": "Must clear sqlx's 30s default acquire_timeout (MIN_KEY_PACKAGE_GC_TIMEOUT_SECS) or the sweep aborts every tick during connection acquire alone."
+        },
+        "keyPackageGcEnabled": {
+          "type": "boolean",
+          "description": "Kill switch for the consumed-key_packages retention sweep background job. Flip to false to stop it without a code revert."
+        },
+        "keyPackageGcMaxDeletesPerRun": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000,
+          "description": "Blast-radius cap: max consumed key_packages rows deleted per bounded DELETE call within a single daily tick's catch-up loop."
+        },
         "r2Endpoint": {
           "type": "string"
         },

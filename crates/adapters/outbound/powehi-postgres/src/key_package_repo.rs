@@ -112,6 +112,49 @@ impl KeyPackageRepository for PgKeyPackageRepository {
         Ok(rows)
     }
 
+    async fn delete_consumed_older_than(
+        &self,
+        older_than: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<u64, DomainError> {
+        // Same bounded-batch shape as
+        // `PgGroupRepository::sweep_stale_pending_removals` (a `DELETE ...
+        // USING` join against a bounded inner `SELECT ... LIMIT`, since
+        // Postgres has no `DELETE ... LIMIT`), minus that method's epoch
+        // join — `consumed = TRUE` alone is definitional proof this row is
+        // done, so there is no liveness gate to re-check here.
+        //
+        // The outer `WHERE` re-states `consumed = TRUE AND uploaded_at < $1`
+        // redundantly on top of the `id` join so the delete is fail-closed
+        // on its own predicate rather than trusting the inner SELECT's row
+        // set alone — same defence-in-depth as the pending-removals sweep.
+        // `ORDER BY uploaded_at, id` gives a full, deterministic total order
+        // so a truncated run's next call makes forward progress on a
+        // well-defined, reproducible subset rather than an arbitrary one
+        // among same-timestamp ties.
+        //
+        // `limit` is bound as i64 because Postgres has no unsigned integer
+        // type; a u32 always fits an i64 with no possibility of a sign flip.
+        let result = sqlx::query(
+            "DELETE FROM key_packages k
+             USING (
+                 SELECT id FROM key_packages
+                 WHERE consumed = TRUE AND uploaded_at < $1
+                 ORDER BY uploaded_at, id
+                 LIMIT $2
+             ) s
+             WHERE k.id = s.id
+               AND k.consumed = TRUE
+               AND k.uploaded_at < $1",
+        )
+        .bind(older_than)
+        .bind(limit as i64)
+        .execute(&self.pool)
+        .await
+        .map_err(map_err)?;
+        Ok(result.rows_affected())
+    }
+
     async fn mark_consumed(&self, id: &KeyPackageId) -> Result<ConsumeResult, DomainError> {
         // Attempt to flip consumed = FALSE → TRUE atomically.
         let rows = sqlx::query(

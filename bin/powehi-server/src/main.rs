@@ -27,8 +27,8 @@ use powehi_opaque::OpaqueServer;
 use powehi_postgres::{
     connect as pg_connect, run_migrations, PgCommitLedger, PgDeviceRepository,
     PgEnvelopeRepository, PgGroupRepository, PgKeyPackageRepository, PgLeaderLock,
-    PgPushSubscriptionRepository, PgServerConfigRepository, PgUserRepository, GC_LOCK_MEDIA_BLOBS,
-    GC_LOCK_MEDIA_LEDGER, GC_LOCK_MEDIA_ORPHANS, GC_LOCK_PENDING_REMOVALS,
+    PgPushSubscriptionRepository, PgServerConfigRepository, PgUserRepository, GC_LOCK_KEY_PACKAGES,
+    GC_LOCK_MEDIA_BLOBS, GC_LOCK_MEDIA_LEDGER, GC_LOCK_MEDIA_ORPHANS, GC_LOCK_PENDING_REMOVALS,
 };
 use powehi_proto::region::region_service_server::RegionServiceServer;
 use powehi_r2::R2MediaAdapter;
@@ -232,6 +232,13 @@ async fn main() -> Result<()> {
 
     let key_package: Arc<dyn powehi_port_inbound::key_package::KeyPackageUseCase> =
         Arc::new(KeyPackageService::new(key_package_repo.clone()));
+
+    // For the consumed-KeyPackage retention sweep background job below — a
+    // separate clone for the same reason `group_repo_pending_removals` is
+    // (`key_package_repo` itself is moved into `RegionGrpcServer::new`
+    // further down).
+    let key_package_repo_gc: Arc<dyn powehi_port_outbound::key_package_repo::KeyPackageRepository> =
+        key_package_repo.clone();
 
     let media_r2 = Arc::new(R2MediaAdapter::new(
         pool.clone(),
@@ -534,6 +541,9 @@ async fn main() -> Result<()> {
     // `tokio::spawn` moves `leader_lock` itself, since the pending-removals
     // sweep job below needs its own handle.
     let leader_lock_pending_removals = leader_lock.clone();
+    // Same reason again — the consumed-key_packages sweep job further below
+    // also needs its own handle before `leader_lock` is moved.
+    let leader_lock_key_packages = leader_lock.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
         loop {
@@ -756,6 +766,138 @@ async fn main() -> Result<()> {
                     error_kind = "gc_lock",
                     error = %e,
                     "gc.pending_removals_lock_acquire_failed"
+                ),
+            }
+        }
+    });
+
+    // ── Background sweep: consumed key_packages (long-carried Tiger Style gap) ─
+    // A KeyPackage is a one-time-use MLS credential (RFC 9420 §10) — once
+    // `fetch_one`/`mark_consumed` flips `consumed = TRUE`, the row can never
+    // be handed out again (single-use is enforced by `consumed`, not by row
+    // presence). The only remaining reader is `mark_consumed`'s own
+    // `NotFound`-vs-`AlreadyConsumed` existence check, and the port contract
+    // (`KeyPackageRepository::mark_consumed`'s doc) already requires callers
+    // to treat both outcomes identically (fail-closed) — so deleting the row
+    // just turns one fail-closed result into another, not a new one. Despite
+    // that, nothing ever deleted it: `delete_by_device` only fires on device
+    // revocation (cycle 447), and `MAX_KEY_PACKAGES_PER_DEVICE` only caps the
+    // *unconsumed* count per device. Every KeyPackage a device has ever
+    // uploaded and had consumed sits in the table forever — unbounded growth
+    // under normal device churn, a "put a limit on everything" (tiger-style)
+    // violation carried across multiple cycles (`.claude/memory/project-context.md`).
+    //
+    // Unlike the `pending_removals` sweep above, this GC is safe to enable by
+    // default: deleting a stale consumed KeyPackage destroys no signal any
+    // future consumer needs (see the fail-closed argument above) — contrast
+    // `pending_removals`, which stays a live notification until some future
+    // client actually acts on it. `key_package_gc_enabled` still exists as an
+    // explicit kill switch (same operational reasoning as
+    // `media_orphan_sweep_enabled`), it is just defaulted `true` here.
+    //
+    // ZK invariant preserved: this sweep only reads/writes opaque UUIDs and
+    // timestamps — it never touches the KeyPackage `data` column — and logs
+    // carry only a deleted-row count.
+    //
+    // Advisory-lock-guarded on its own key (`GC_LOCK_KEY_PACKAGES`) so N
+    // replicas don't each run this same sweep on the same tick, and so it
+    // neither blocks nor is blocked by the unrelated media/pending-removals
+    // jobs.
+    //
+    // Runs daily, offset 9h + 24h grid — the first tick fires at t=33h (the
+    // 9h `sleep` plus the interval's own first, pre-loop tick consumed below
+    // before entering the loop, same shape as the `pending_removals` sweep
+    // above), then t=57h, 81h, ... — deliberately distinct from BOTH the
+    // un-offset 24h media-ledger-trim grid (t=0, 24h, ...) / 6h
+    // media-orphan-sweep grid (t=6h,12h,18h,24h,... — every 24h boundary is
+    // also a 6h tick), which already collide 3-way with the hourly blob-GC
+    // job at t=24h, 48h, ..., AND the `pending_removals` sweep's own 3h+24h
+    // grid (t=27h, 51h, ...) — so this job never becomes a 4th participant in
+    // either existing collision, and only ever overlaps the hourly blob-GC
+    // job alone, same as the `pending_removals` sweep (see
+    // `powehi_config::MIN_DATABASE_MAX_CONNECTIONS`'s doc for the connection-
+    // count math this preserves).
+    //
+    // Grace is measured from `uploaded_at`, not from the moment a row became
+    // consumed (there is no `consumed_at` column) — a KeyPackage consumed the
+    // instant before its grace period elapses is swept immediately, not held
+    // for a further grace window past consumption. Harmless: see the
+    // fail-closed argument above for why sweeping a consumed row at any age
+    // is safe.
+    //
+    // Per-call delete cap bounds the blast radius of a single DELETE; a tick
+    // loops calling it (same shape as `MediaService::run_gc_batched`) until a
+    // short return signals the eligible set is exhausted, so throughput is
+    // not artificially capped at one batch per day regardless of backlog
+    // size. The loop is still bounded: each full-batch iteration makes
+    // irreversible forward progress (deletes `key_package_gc_max_deletes`
+    // rows), so the iteration count is finite (total eligible rows / batch
+    // size) even without an explicit counter, and the whole loop is wrapped
+    // in `key_package_gc_timeout` below so a pathologically large backlog
+    // yields a bounded partial sweep, not a run that never finishes.
+    let key_package_gc_enabled = cfg.key_package_gc_enabled;
+    let key_package_gc_timeout = std::time::Duration::from_secs(cfg.key_package_gc_timeout_secs);
+    let key_package_gc_grace_days = cfg.key_package_gc_grace_days;
+    // `validate()` already caps this at 1_000_000 (well inside u32); the clamp is
+    // defence in depth so a future ceiling raise can never silently wrap the cast.
+    let key_package_gc_max_deletes: u32 =
+        cfg.key_package_gc_max_deletes_per_run.min(u32::MAX as u64) as u32;
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(9 * 3600)).await;
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if !key_package_gc_enabled {
+                tracing::debug!("gc.key_packages_consumed_sweep_disabled_skipping");
+                continue;
+            }
+            match leader_lock_key_packages
+                .try_lock(GC_LOCK_KEY_PACKAGES)
+                .await
+            {
+                Ok(Some(guard)) => {
+                    let cutoff = chrono::Utc::now()
+                        - chrono::Duration::days(key_package_gc_grace_days as i64);
+                    // Loops calling the bounded per-call delete (same shape
+                    // as `MediaService::run_gc_batched`) until a short return
+                    // signals the eligible set is exhausted, so a large
+                    // backlog isn't artificially limited to one batch per
+                    // day; the whole loop shares the single per-tick timeout.
+                    let sweep = async {
+                        let mut total: u64 = 0;
+                        loop {
+                            let n = key_package_repo_gc
+                                .delete_consumed_older_than(cutoff, key_package_gc_max_deletes)
+                                .await?;
+                            total += n;
+                            if n < u64::from(key_package_gc_max_deletes) {
+                                return Ok::<u64, powehi_domain::error::DomainError>(total);
+                            }
+                        }
+                    };
+                    match tokio::time::timeout(key_package_gc_timeout, sweep).await {
+                        Ok(Ok(n)) if n > 0 => {
+                            tracing::info!(deleted = n, "gc.key_packages_consumed_swept")
+                        }
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => tracing::warn!(
+                            error_kind = "gc",
+                            error = %e,
+                            "gc.key_packages_consumed_sweep_failed"
+                        ),
+                        Err(_) => tracing::warn!(
+                            error_kind = "gc_timeout",
+                            "gc.key_packages_consumed_sweep_timed_out"
+                        ),
+                    }
+                    guard.release().await;
+                }
+                Ok(None) => tracing::debug!("gc.key_packages_lock_held_elsewhere_skipping"),
+                Err(e) => tracing::warn!(
+                    error_kind = "gc_lock",
+                    error = %e,
+                    "gc.key_packages_lock_acquire_failed"
                 ),
             }
         }

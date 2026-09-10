@@ -788,6 +788,24 @@ mod tests {
             store.retain(|_, kp| &kp.device_id != device_id);
             Ok((before - store.len()) as u64)
         }
+        async fn delete_consumed_older_than(
+            &self,
+            older_than: chrono::DateTime<chrono::Utc>,
+            limit: u32,
+        ) -> Result<u64, DomainError> {
+            let mut store = self.store.lock().unwrap();
+            let before = store.len();
+            let mut removed = 0u32;
+            store.retain(|_, kp| {
+                if removed < limit && kp.consumed && kp.uploaded_at < older_than {
+                    removed += 1;
+                    false
+                } else {
+                    true
+                }
+            });
+            Ok((before - store.len()) as u64)
+        }
     }
 
     /// A `KeyPackageRepository` whose `delete_by_device` always fails.
@@ -818,6 +836,13 @@ mod tests {
             Err(DomainError::Internal(
                 "injected delete_by_device failure".into(),
             ))
+        }
+        async fn delete_consumed_older_than(
+            &self,
+            _older_than: chrono::DateTime<chrono::Utc>,
+            _limit: u32,
+        ) -> Result<u64, DomainError> {
+            Ok(0)
         }
     }
 
