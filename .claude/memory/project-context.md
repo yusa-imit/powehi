@@ -24,7 +24,132 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-11, cycle 479 — STABILIZATION (forced early by red CI, counter said FEATURE): fix Tauri-shell Cargo.lock drift breaking `CI — Rust` on main, plus close GitHub issue #8 (stale doc comment), commit a78cee5)
+## Current state (2026-09-11, cycle 480 — STABILIZATION: land orphaned WIP adding the consumed-`key_packages` retention sweep, fix 2 security-auditor required findings before committing, commit 8d7e5b0)
+
+- Mode selection: counter 479→480, 480 % 5 == 0 → STABILIZATION.
+- `gh run list --limit 5` green on main (cycle 479's push). `gh issue
+  list --state open`: 5 open (#1 SPA deploy path, #2 MLS Remove/PCS —
+  large multi-cycle FEATURE work in progress since cycle 464, #3 WS
+  client, #4 load testing, #5 prod-ap-seoul PIPA) — none labeled `bug`,
+  none stabilization-cycle-sized, so none picked this cycle.
+- Session opened with a large uncommitted diff already in the working
+  tree — no memory entry referenced it, so it predates this pointer's
+  last update and was never recorded (same "orphaned WIP" pattern as
+  cycles 299/464/470/472/478). Traced it fully before acting on it (the
+  cycle-299 lesson: verify the actual data flow, don't just discard):
+  it was a complete, well-reasoned consumed-`key_packages` retention
+  sweep — closes exactly the "consumed `key_packages` rows never
+  garbage-collected" gap this pointer had carried since at least cycle
+  478's list (line ~140 above). Same shape as the existing media-blob/
+  media-ledger/media-orphan/pending_removals GC jobs: a new
+  `GC_LOCK_KEY_PACKAGES` advisory-lock key (0x...0005, distinct from the
+  existing 4), `KeyPackageRepository::delete_consumed_older_than`
+  (bounded `DELETE ... USING (SELECT ... LIMIT $2)` batch, partial index
+  migration `0022` on `(uploaded_at) WHERE consumed`), 4 new `AppConfig`
+  fields with bounds validation + tests, and a `tokio::spawn`'d daily
+  sweep in `main.rs`. Defaults `key_package_gc_enabled = true` (unlike
+  `pending_removal_sweep_enabled`) since a consumed row's only remaining
+  reader (`mark_consumed`'s existence check) already treats absence as
+  fail-closed, identically to `AlreadyConsumed`.
+- Full local gate before delegating review: `cargo build --workspace`
+  clean; `cargo clippy --workspace --all-targets -- -D warnings` first
+  FAILED — a third fake `KeyPackageRepository` impl
+  (`key_package_service.rs`'s `FakeKpRepo`, not touched by whoever wrote
+  the orphaned diff) was missing the new trait method, `cargo build`
+  alone hadn't caught it since it's test-only code; added the same
+  bounded-`retain` fake impl the other two fakes already used, then
+  clippy/fmt clean. `cargo test --workspace`: 100% green (no `#[ignore]`
+  test regressions; new Docker-gated `pg_security_it.rs` tests compile
+  but don't run here, same as every prior cycle touching that file).
+  `cargo audit`/`cargo deny check` both clean (664 crates).
+- **security-auditor: PASS, with 2 required-before-merge findings, both
+  fixed in-cycle** (backend/DB change with a new background job — not
+  crypto/architectural, so `crypto-reviewer`/`threat-model-checker`
+  correctly not invoked):
+  1. The 4 new config fields weren't wired into the Helm chart
+     (`configmap.yaml`/`values.yaml`/`values.schema.json`) — for a
+     default-`true` destructive job, the kill switch was unreachable in
+     any deployed environment without a code revert. Fixed: added all 4,
+     following the exact `mediaOrphanSweepEnabled`/
+     `pendingRemovalSweepEnabled` precedent (cycle 424's Sprig
+     `| default true` boolean-trap avoidance — NOT applied to the
+     enabled flag). Verified by rendering: `--set
+     config.keyPackageGcEnabled=false` actually propagates `"false"`,
+     not silently reverting to `"true"`. `helm lint`/`conftest
+     test/verify` all green on all 3 overlays (prod-eu/prod-ap/staging);
+     no `kubeconform` locally (same standing gap as every prior infra
+     cycle) and no live cluster for `--dry-run=server` (expected, this
+     sandbox has none).
+  2. Throughput: one 10k-row batch per **daily** tick can't keep up with
+     realistic KeyPackage consumption rates (an Add-commit consumes one
+     per group-add, several orders of magnitude more frequent than
+     `pending_removals`' device-revocation trigger) — the sweep as
+     originally written would never close the backlog. Fixed: the
+     per-tick handler now loops calling the bounded per-call delete
+     (same shape as `MediaService::run_gc_batched`'s keyset-pagination
+     loop) until a short return signals the eligible set is exhausted,
+     the whole loop sharing the single existing per-tick timeout — so a
+     large backlog gets a bounded partial sweep instead of an
+     artificially-capped one, and iteration count stays finite because
+     every full-batch iteration makes irreversible forward progress.
+  Also fixed 2 of the auditor's non-blocking LOW notes since they were
+  cheap and the rationale was actively being cited to justify
+  default-`true`: (a) both `main.rs`'s job comment and the port trait's
+  doc claimed "no code path ever reads it again" — false,
+  `mark_consumed`'s `EXISTS` check does; corrected to the accurate
+  argument (that read's fail-closed contract is what makes the sweep
+  safe, not the absence of any reader). (b) documented that the grace
+  period is measured from `uploaded_at`, not from consumption time (no
+  `consumed_at` column exists) — harmless per (a), but the original
+  wording overstated the guarantee. Left as non-blocking/optional per
+  the auditor's own call: fake-repo `retain()` non-determinism vs the
+  real SQL's `ORDER BY` (INFO, no real test currently depends on order),
+  prd.md §3.3-style documentation of the new retention window (INFO),
+  and the pre-existing no-upper-bound gap on `*_timeout_secs` configs
+  (not a regression, same as 3 prior sweeps).
+- Committed `8d7e5b0` (`feat(backend,infra): add consumed key_packages
+  retention sweep`), 14 files (13 modified + migration `0022` new),
+  pushed clean (`7ca6319..8d7e5b0 main -> main`). CI (`CI — Rust`/
+  `CI — Infra`/`CI — Live-backend E2E`) was in_progress at push time —
+  confirm green in a future session if not already done by the time
+  this is read.
+- Target dir hygiene: `target/` at 9.7G (well under the 20G threshold),
+  no pruning needed. Host disk: 43Gi free / 78% full.
+- **Next cycle candidates (carried/updated):**
+  1. **Resolved this cycle**: "consumed `key_packages` rows never
+     garbage-collected" (carried since ≥cycle 478). Closed.
+  2. Carried, unchanged, the single largest remaining piece of issue #2
+     (P0-blocker, security, frontend): MLS commit-processing
+     consumer-loop wiring into `useMessages.ts`/`useWelcomePoller.ts` —
+     genuinely FEATURE-mode-scale (crypto-lead/mls-engineer + fresh
+     crypto-reviewer pass), not a stabilization-sized fix.
+  3. Carried: PQ hybrid Phase A prerequisite (human/crypto-lead policy
+     call, still blocked on openmls upstream).
+  4. Carried, still explicitly BLOCKED: `AbuseSignalStore`/
+     `RegionRouter::broadcast_abuse_signal` wiring needs F3 + the
+     HMAC-vs-plain-SHA256 gate resolved first.
+  5. New, optional (security-auditor INFO note, not applied): prd.md
+     §3.3 doesn't yet document the new consumed-`key_packages` retention
+     window the way it documents `pending_removals`' — same precedent as
+     cycle 289's media-GC doc addition; privacy-positive (shortens
+     server-held metadata lifetime), cheap if a future cycle touches
+     this area again.
+  6. New, minor, optional: this file is back up to 2771 lines / 184K,
+     approaching the ~192K/2385-line point where cycle 360 last archived
+     (cycles 320-339 → `.claude/memory/archive/`). Good STABILIZATION
+     candidate for a future cycle with no more pressing fix on hand —
+     same pattern, keep the last ~20 cycles inline.
+  7. Carried (unchanged from cycle 478's list): `mls_confirm_incoming_commit`
+     handle-consumption-before-`MLS_CTX`-resolution ordering; epoch
+     reconciliation; `mls_group_members` `isSelf` leaf-index vs
+     signature-key hardening; `PendingRemovalBanner` local cross-check
+     hardening; GitHub issues #1/#3/#4/#5; prd.md §10 REST API doc
+     drift; `pending_removals` forged-signal defense; unconsumed
+     `RemovalRequired` WS event; `key_packages.device_id` FK doc drift;
+     `GroupRepository::save` blind `ON CONFLICT DO UPDATE`; bare
+     `var(--photon)` CSS token.
+
+## Previous state (2026-09-11, cycle 479 — STABILIZATION (forced early by red CI, counter said FEATURE): fix Tauri-shell Cargo.lock drift breaking `CI — Rust` on main, plus close GitHub issue #8 (stale doc comment), commit a78cee5)
 
 - Mode selection: counter 478→479, 479 % 5 != 0 → nominally FEATURE, but
   `gh run list --limit 5` showed `CI — Rust` failing on the very last push
