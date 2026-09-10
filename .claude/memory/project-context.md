@@ -24,7 +24,124 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-10, cycle 478 — FEATURE: land orphaned WIP adding MLS post-merge own-commit recognition, "Case 2" of MlsError::OwnCommit (issue #2), fix a real crypto-reviewer finding before committing, commit d23c2a4)
+## Current state (2026-09-11, cycle 479 — STABILIZATION (forced early by red CI, counter said FEATURE): fix Tauri-shell Cargo.lock drift breaking `CI — Rust` on main, plus close GitHub issue #8 (stale doc comment), commit a78cee5)
+
+- Mode selection: counter 478→479, 479 % 5 != 0 → nominally FEATURE, but
+  `gh run list --limit 5` showed `CI — Rust` failing on the very last push
+  to main (cycle 478's `chore:` commit) — FEATURE mode's own step 2
+  ("if red on main, switch to STABILIZATION this cycle") applied, so this
+  cycle ran as STABILIZATION despite the counter. Working tree was clean
+  at session start (unlike several recent cycles — no orphaned WIP this
+  time).
+- Root cause (`gh run view <id> --log-failed`): the `tauri-check` job's
+  "Verify Cargo.lock has no unresolved drift" step (added cycle 465,
+  `.github/workflows/ci-rust.yml:188-193`) regenerates
+  `app/src-tauri/Cargo.lock` fresh via `cargo generate-lockfile` and
+  diffs it byte-for-byte against the committed one. `bitflags` 2.13.1→
+  2.13.2 and `uuid` 1.26.0→1.26.1 were published upstream between the
+  last lockfile refresh and this run, so the fresh resolve no longer
+  matched — not a manifest change, not a real regression, just the lock
+  going stale as upstream ships patch releases. `cargo check --locked`
+  itself (the step before) had already passed.
+- **Fix**: no local `cargo`/`rustc` on PATH by default — found via
+  `~/.cargo/bin` (rustup-managed toolchain). Ran `cargo generate-lockfile`
+  from `app/src-tauri/`, producing a 27-line bump/add diff (bitflags,
+  uuid, plus a few `available: vX.Y.Z` notices for crates not actually
+  bumped — normal `cargo generate-lockfile` chatter, not evidence of a
+  wider re-resolve). Verified both CI steps locally before committing:
+  `cargo check --locked --manifest-path app/src-tauri/Cargo.toml
+  --all-targets` clean, and the exact drift-check recipe (copy committed
+  lock → `cargo generate-lockfile` → `diff -u`) produced NO diff against
+  the freshly-regenerated file.
+- Also fixed GitHub issue #8 (P2, documentation, carried since cycle 465):
+  `AppConfig::handle_oracle_secret_token`'s doc comment
+  (`crates/infra/powehi-config/src/lib.rs`) still claimed "if empty, a
+  random key is generated at startup (per-restart only)" — stale since
+  the YELLOW-2 fix landed a `server_config`-table-backed persistent
+  fallback (`bin/powehi-server/src/main.rs:122-183`: env var → SHA-256
+  derive; else DB read; else generate+`INSERT ON CONFLICT DO NOTHING`+
+  re-read-the-winner for concurrent-replica convergence). Read at face
+  value the stale comment implied a `replicaCount: 3`+ prod deployment
+  would derive a different HMAC key per pod, turning `login_init` into a
+  handle-enumeration oracle — a described vulnerability that no longer
+  exists in the code. Rewrote the comment to describe the actual
+  DB-backed fallback and note the env var is now optional
+  (operator-controlled rotation/pinning), not required for correctness.
+  Left the issue's optional Helm/README suggestion out: no
+  `infra/helm/powehi/README.md` exists yet, and the ExternalSecret
+  template's omission of this var is already the intended (safe)
+  behavior, not an oversight worth flagging in a template comment.
+- No `crypto-reviewer`/`threat-model-checker` run: neither change
+  touches crypto/MLS/OPAQUE code or shifts the security posture (a
+  dependency-lockfile refresh and a doc-comment-only fix). No
+  `security-auditor` run: the config doc-comment edit has zero code
+  behavior change; not treated as a "backend handler" change.
+- **Full gate**: `cargo build --workspace` and `cargo check -p
+  powehi-config` both clean. `cargo test --workspace` all green (0
+  failures across every crate; only doc-tests and docker-gated
+  testcontainers tests show 0-run/ignored, expected — no docker daemon
+  in this sandbox). `cargo fmt --check` clean (both workspace-wide and
+  scoped to `powehi-config`). `cargo audit` clean (664 crates scanned,
+  no advisories). `cargo deny check` clean (`advisories ok, bans ok,
+  licenses ok, sources ok`). Frontend untouched this cycle, not re-run.
+- Committed `a78cee5` (`fix(ci): refresh stale Tauri Cargo.lock; fix(docs):
+  correct handle_oracle_secret_token comment (issue #8)`), 2 files
+  changed, pushed clean (`5732e77..a78cee5 main -> main`). Closed issue
+  #8 with a summary comment. Started a background CI watch after push to
+  confirm `CI — Rust` actually goes green on the fix commit (not just
+  "looks right locally") — check `gh run list --commit a78cee5` in a
+  future session if this wasn't already confirmed.
+- Target dir hygiene: `target/` at 8.9G (well under the 20G threshold),
+  0-byte `.rmeta` prune ran, no further pruning needed.
+- **Next cycle candidates (carried/updated):**
+  1. **Resolved this cycle**: CI red on main (Tauri Cargo.lock drift).
+     No longer a gap. This class of failure (upstream patch releases
+     making a byte-for-byte lockfile diff check fail) will very likely
+     recur periodically — not a one-time fix, just periodic maintenance;
+     don't be surprised to see it again in a future cycle.
+  2. **Resolved this cycle**: GitHub issue #8 (stale doc comment). Closed.
+  3. Carried, the single largest remaining piece of issue #2 (P0-blocker,
+     security, frontend): the MLS commit-processing consumer-loop wiring
+     into `useMessages.ts`/`useWelcomePoller.ts`. This is genuinely
+     FEATURE-mode-scale work (needs crypto-lead/mls-engineer + a fresh
+     crypto-reviewer pass), not a stabilization-cycle-sized fix — do not
+     attempt to cram it into a STABILIZATION cycle. Both previously-
+     blocking primitive-layer preconditions (own-commit recognition
+     covering both pre- and post-merge, pre-merge policy-inspection
+     point) are already built (cycles 466-478); what remains is (a) the
+     epoch-reconciliation design between the client's local MLS epoch and
+     the server's `groups.epoch` counter, (b) a plan for the
+     reload-loses-own-commit-recognition gap (the relevant maps are
+     worker-local only — needs both added to `MlsContextState` +
+     `MLS_CONTEXT_STATE_VERSION` bump), and (c) actually calling
+     `mlsInspectCommit`/`mlsConfirmIncomingCommit`/`mlsDiscardIncomingCommit`
+     from the poller with a real application-level policy check.
+  4. Carried, low-priority hardening: `wasm_exports.rs`'s
+     `mls_remove_member_stage_inner` records the pending own-commit hash
+     before the export's `u64_to_f64_checked(prior_epoch)` guard; if that
+     guard ever rejected (unreachable in practice, epoch ≥ 2^53), the
+     commit would be staged and hashed but never returned to the
+     caller/broadcast. Fail-safe direction, low priority.
+  5. Carried, low-priority hardening: RUSTSEC-2024-0429 (glib unsound)
+     isn't enforced by cargo-deny's default policy (root workspace; the
+     Tauri shell's own `deny.toml` already documents this class of gap).
+  6. Carried (unchanged from cycle 478's list — see that section for full
+     text): `mls_confirm_incoming_commit` consumes the `INSPECTED_COMMITS`
+     handle before resolving `MLS_CTX`; epoch reconciliation;
+     `mls_group_members` `isSelf` leaf-index vs signature-key hardening;
+     PQ hybrid Phase A prerequisite; `AbuseSignalStore`/
+     `RegionRouter::broadcast_abuse_signal` wiring (BLOCKED);
+     `PendingRemovalBanner` local cross-check hardening; GitHub issues #1
+     (P0-blocker, SPA deployment path), #3 (WebSocket client), #4 (load
+     testing), #5 (prod-ap-seoul region/PIPA compliance); prd.md §10 REST
+     API doc drift; `pending_removals` forged-signal defense; unconsumed
+     `RemovalRequired` WS event; Helm `monitoring.prometheusRule`/
+     `serviceMonitor` overlay + CI render job; `key_packages.device_id`
+     FK doc drift; consumed `key_packages` rows never garbage-collected;
+     `GroupRepository::save` blind `ON CONFLICT DO UPDATE`; bare
+     `var(--photon)` CSS token.
+
+## Previous state (2026-09-10, cycle 478 — FEATURE: land orphaned WIP adding MLS post-merge own-commit recognition, "Case 2" of MlsError::OwnCommit (issue #2), fix a real crypto-reviewer finding before committing, commit d23c2a4)
 
 - Mode selection: counter 477→478, 478 % 5 != 0 → FEATURE. `gh run list
   --limit 6` green on `main`. **Working tree was NOT clean at session
