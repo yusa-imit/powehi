@@ -115,10 +115,22 @@ struct MlsContext {
     /// [`mls_remove_member_confirm`] (promoting the matching entry out of
     /// `pending_own_commit_hashes` below on a successful merge), and only for
     /// a `group_id` already present in `groups`, so
-    /// `own_commit_hashes.len() <= groups.len()` always — it needs no
-    /// separate cap of its own, unlike `KEM_DECAP_KEYS`/`KEM_SHARED_SECRETS`
-    /// (`MAX_KEM_HANDLES`) or `INSPECTED_COMMITS` (`MAX_INSPECTED_COMMITS`),
-    /// whose entry counts are not tied to an already-bounded collection.
+    /// `own_commit_hashes.len() <= groups.len()` always on the RUNTIME
+    /// insertion path (`create_group`/`join_group` + `mls_remove_member_confirm`)
+    /// — it needs no separate cap of its own there, unlike
+    /// `KEM_DECAP_KEYS`/`KEM_SHARED_SECRETS` (`MAX_KEM_HANDLES`) or
+    /// `INSPECTED_COMMITS` (`MAX_INSPECTED_COMMITS`), whose entry counts are
+    /// not tied to an already-bounded collection.
+    /// The IMPORT path (`import_mls_context_inner`) is a separate
+    /// construction path with its own explicit bound and validation, since
+    /// unlike every other `MlsContextState` field this map is not
+    /// self-authenticating: it caps `state.own_commit_hashes.len()` at
+    /// `MAX_IMPORT_GROUPS` directly (an attacker/corruption-supplied blob
+    /// cannot claim an unbounded map regardless of `group_ids.len()`), AND
+    /// drops any entry whose key is not present in the imported `group_ids`
+    /// before it ever reaches this field — closing the gap where a foreign or
+    /// injected `group_id` could otherwise dictate which future incoming
+    /// commit gets misclassified as `MlsError::OwnCommit`.
     /// Correction: `groups` itself is bounded by `MAX_IMPORT_GROUPS` only on
     /// the IMPORT path (`import_mls_context_inner`) — the runtime
     /// `create_group`/`join_group` insertion path this crate otherwise uses
@@ -151,9 +163,24 @@ struct MlsContext {
     /// `confirm_remove_member` in `mls_group.rs` take no `commit_bytes`
     /// parameter at all — see its doc comment for why accepting
     /// caller-supplied bytes at confirm time would be a caller-trust hazard
-    /// this design avoids entirely. Same bound and zeroize posture as
-    /// `own_commit_hashes` (one entry per group, no key material).
-    pending_own_commit_hashes: HashMap<String, mls_group::OwnCommitHash>,
+    /// this design avoids entirely. Same runtime bound and zeroize posture as
+    /// `own_commit_hashes` (one entry per group, no key material). On the
+    /// IMPORT path, `import_mls_context_inner` applies a STRICTER validation
+    /// to this map than to `own_commit_hashes`: beyond the same
+    /// `MAX_IMPORT_GROUPS` cap and `group_ids`-membership filter, it also
+    /// drops any surviving entry whose group has no real openmls pending
+    /// commit, OR whose recorded [`mls_group::PendingOwnCommit::epoch`]
+    /// doesn't match the group's current epoch, once that group has
+    /// actually loaded — see [`mls_group::MlsError::OwnCommit`]'s "Persisted
+    /// across a worker reload" section and [`mls_group::PendingOwnCommit`]'s
+    /// doc comment for why a stale entry can otherwise arise (a peer's
+    /// commit merging first clears this device's own pending commit, and a
+    /// later unrelated stage on the same group can leave a NEW pending
+    /// commit in place that an existence-only check couldn't distinguish
+    /// from the original) and why re-validating both the existence AND the
+    /// epoch of the real openmls state, not just `group_ids` membership, is
+    /// required to rule it out.
+    pending_own_commit_hashes: HashMap<String, mls_group::PendingOwnCommit>,
 }
 
 /// One incoming Commit staged by [`mls_inspect_commit`] but not yet resolved
@@ -1043,8 +1070,13 @@ fn mls_remove_member_stage_inner(
         let (commit, prior_epoch) =
             stage_remove_member(group, &c.identity.signer, leaf_index, &c.provider)
                 .map_err(|e| e.to_string())?;
-        c.pending_own_commit_hashes
-            .insert(group_id.to_string(), mls_group::hash_own_commit(&commit));
+        c.pending_own_commit_hashes.insert(
+            group_id.to_string(),
+            mls_group::PendingOwnCommit {
+                epoch: prior_epoch,
+                hash: mls_group::hash_own_commit(&commit),
+            },
+        );
         Ok((commit, prior_epoch))
     })
 }
@@ -1059,8 +1091,9 @@ fn mls_remove_member_stage_inner(
 /// recorded at stage time by [`mls_remove_member_stage`], from that
 /// function's own retained copy of the commit bytes. On a successful merge,
 /// this promotes that pending hash (if one is still recorded for
-/// `group_id` — see the "not persisted across reload" limit on
-/// [`mls_group::MlsError::OwnCommit`]) into `own_commit_hashes`.
+/// `group_id` — both this pending map and `own_commit_hashes` now survive an
+/// export/import round trip, see [`mls_group::MlsError::OwnCommit`]'s
+/// "Persisted across a worker reload" section) into `own_commit_hashes`.
 ///
 /// STATUS: crypto primitive only — see [`mls_remove_member_stage`]'s doc
 /// comment; nothing in this codebase currently broadcasts or confirms a
@@ -1077,9 +1110,22 @@ pub fn mls_remove_member_confirm(identity_id: &str, group_id: &str) -> Result<()
             .groups
             .get_mut(group_id)
             .ok_or_else(|| js_err("unknown mls group"))?;
+        // Captured BEFORE the merge (which advances the epoch): the same
+        // epoch-binding argument `import_mls_context_inner` applies to a
+        // restored entry also applies here, defense-in-depth. Not currently
+        // reachable in-process (`mls_remove_member_stage_inner` is the only
+        // producer of a pending commit and always overwrites this map entry
+        // on every call — see [`mls_group::PendingOwnCommit`]'s doc comment),
+        // but this keeps the invariant enforced at every promotion site, not
+        // just import, so a future stage path bypassing `_inner` can't
+        // silently reopen it.
+        let pre_merge_epoch = group.epoch().as_u64();
         confirm_remove_member(group, &c.provider).map_err(|e| js_err(&e.to_string()))?;
-        if let Some(hash) = c.pending_own_commit_hashes.remove(group_id) {
-            c.own_commit_hashes.insert(group_id.to_string(), hash);
+        if let Some(pending) = c.pending_own_commit_hashes.remove(group_id) {
+            if pending.epoch == pre_merge_epoch {
+                c.own_commit_hashes
+                    .insert(group_id.to_string(), pending.hash);
+            }
         }
         Ok(())
     })
@@ -1595,7 +1641,7 @@ const MAX_IMPORT_GROUPS: usize = 4096;
 /// wasm/JS-shaped types).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct MlsContextState {
-    /// Format version. Only `1` is currently accepted.
+    /// Format version. Only `2` is currently accepted.
     version: u16,
     /// Raw `BasicCredential` identity bytes (`credential.serialized_content()`).
     identity_bytes: Vec<u8>,
@@ -1607,10 +1653,30 @@ struct MlsContextState {
     /// Output of `mls_group::export_provider_state` — carries its own bundled
     /// generation counter for the freshness gate on import.
     provider_state: Vec<u8>,
+    /// `MlsContext::own_commit_hashes` — see [`mls_group::MlsError::OwnCommit`]'s
+    /// "Persisted across a worker reload" section for why this is durable and
+    /// safe: entries are content-hashes of already-authenticated wire bytes
+    /// this device itself produced, no key material. Added in version 2
+    /// (`MLS_CONTEXT_STATE_VERSION` bump from 1).
+    own_commit_hashes: HashMap<String, mls_group::OwnCommitHash>,
+    /// `MlsContext::pending_own_commit_hashes` — see the same doc section:
+    /// persisted rather than reset because openmls's own pending-commit state
+    /// (the `StagedCommit` this entry corresponds to) is itself already
+    /// durable across export/import via `provider_state`. Each entry's
+    /// [`mls_group::PendingOwnCommit::epoch`] is what lets import distinguish
+    /// a restored entry that still corresponds to a real, still-mergeable
+    /// pending commit from a stale one left behind by an intervening peer
+    /// merge — see that type's doc comment. Added in version 2.
+    pending_own_commit_hashes: HashMap<String, mls_group::PendingOwnCommit>,
 }
 
 /// Current [`MlsContextState::version`].
-const MLS_CONTEXT_STATE_VERSION: u16 = 1;
+///
+/// Bumped 1 -> 2 to add `own_commit_hashes` / `pending_own_commit_hashes`
+/// (issue #2 gap 1). No migration path exists or is needed: an old-version
+/// blob is a hard reject on import (see the version check below), the
+/// accepted flag-day-cutover precedent already used for this envelope.
+const MLS_CONTEXT_STATE_VERSION: u16 = 2;
 
 /// Hex-decode a lowercase hex string (inverse of `group_id_hex` /
 /// `bytes_to_opaque_id_hex`) — `-` separators (the UUID-layout dashes
@@ -1649,12 +1715,16 @@ fn export_mls_context_inner(identity_id: &str, generation: u64) -> Result<Vec<u8
         let group_ids: Vec<String> = c.groups.keys().cloned().collect();
         let provider_state = mls_group::export_provider_state(&c.provider, generation)
             .map_err(|_| "provider state export failed")?;
+        let own_commit_hashes = c.own_commit_hashes.clone();
+        let pending_own_commit_hashes = c.pending_own_commit_hashes.clone();
         let state = MlsContextState {
             version: MLS_CONTEXT_STATE_VERSION,
             identity_bytes,
             sig_public_key,
             group_ids,
             provider_state,
+            own_commit_hashes,
+            pending_own_commit_hashes,
         };
         serde_json::to_vec(&state).map_err(|_| "context state serialization failed")
     })
@@ -1684,6 +1754,48 @@ fn import_mls_context_inner(
     if state.group_ids.len() > MAX_IMPORT_GROUPS {
         return Err("too many groups in context state");
     }
+    // Same unbounded-input concern as `group_ids` above applies to these two
+    // maps independently: unlike `group_ids` (whose entries are validated by
+    // the `MlsGroup::load` loop below), a HashMap's own serialized length is
+    // never implicitly bounded by anything else, so it needs its own cap here
+    // even though every surviving entry is additionally filtered against
+    // `group_ids` membership just below.
+    if state.own_commit_hashes.len() > MAX_IMPORT_GROUPS {
+        return Err("too many own_commit_hashes entries in context state");
+    }
+    if state.pending_own_commit_hashes.len() > MAX_IMPORT_GROUPS {
+        return Err("too many pending_own_commit_hashes entries in context state");
+    }
+    // Taken out of `state` up front (before `state.identity_bytes` etc. are
+    // moved below) so both maps carry forward into the reconstructed
+    // `MlsContext` — see `MlsContextState::own_commit_hashes` /
+    // `::pending_own_commit_hashes` doc comments and
+    // `mls_group::MlsError::OwnCommit`'s "Persisted across a worker reload"
+    // section for why restoring them is safe in principle. Unlike every other
+    // field of `MlsContextState`, these two maps are NOT self-authenticating —
+    // `MlsGroup::load` / `SignatureKeyPair::read` reject a garbage
+    // `identity_bytes`/`provider_state`/group id on their own, but a
+    // `group_id -> hash` entry for a group_id that doesn't correspond to a
+    // real loaded group would otherwise let whoever controls this blob
+    // dictate which future incoming commit gets misclassified as
+    // `MlsError::OwnCommit` and silently dropped (the exact PCS/eviction
+    // failure issue #2 exists to close). So both maps are filtered here
+    // against `state.group_ids` membership before being threaded any
+    // further; `pending_own_commit_hashes` is filtered AGAIN below, against
+    // each group's real openmls pending-commit state, once every group has
+    // actually loaded.
+    let group_id_set: std::collections::HashSet<&str> =
+        state.group_ids.iter().map(String::as_str).collect();
+    let own_commit_hashes: HashMap<String, mls_group::OwnCommitHash> = state
+        .own_commit_hashes
+        .into_iter()
+        .filter(|(group_id, _)| group_id_set.contains(group_id.as_str()))
+        .collect();
+    let mut pending_own_commit_hashes: HashMap<String, mls_group::PendingOwnCommit> = state
+        .pending_own_commit_hashes
+        .into_iter()
+        .filter(|(group_id, _)| group_id_set.contains(group_id.as_str()))
+        .collect();
 
     // Freshness gate enforced inside import_provider_state via min_generation.
     let (provider, generation) =
@@ -1715,6 +1827,33 @@ fn import_mls_context_inner(
         let group = MlsGroup::load(provider.storage(), &gid)
             .map_err(|_| "group load failed")?
             .ok_or("group not present in imported provider state")?;
+        // F2 (issue #2 gap 1 follow-up): a `pending_own_commit_hashes` entry
+        // is only meaningful if this group actually has a real openmls
+        // pending commit right now, AND that pending commit is the SAME one
+        // the entry's hash was recorded for. Existence alone is not enough:
+        // if a peer's commit merged first (which internally clears any
+        // pending commit as a side effect — see `mls_remove_member_abort`'s
+        // doc comment for this exact race) after this device staged its own
+        // Remove but before this export was taken, the recorded pending hash
+        // would otherwise survive import as a dangling entry — and if this
+        // device (or a reconciliation flow) later stages an UNRELATED commit
+        // on the same group before the next export, `pending_commit()` would
+        // be `Some` again, masking the staleness from an existence-only
+        // check (previously the entry would vanish for free on every worker
+        // reload; now that it's persisted, it never would without this
+        // check). `PendingOwnCommit::epoch` closes this: staging never
+        // advances the group's epoch, only merging does, so a genuine
+        // still-pending entry's epoch always equals the group's current
+        // epoch, while a stale one that survived an intervening peer merge
+        // does not — see that type's doc comment for the full argument.
+        let pending_matches_real_commit = pending_own_commit_hashes
+            .get(group_id_hex_str)
+            .is_some_and(|pending| {
+                group.pending_commit().is_some() && pending.epoch == group.epoch().as_u64()
+            });
+        if !pending_matches_real_commit {
+            pending_own_commit_hashes.remove(group_id_hex_str);
+        }
         groups.insert(group_id_hex_str.clone(), group);
     }
 
@@ -1727,8 +1866,8 @@ fn import_mls_context_inner(
                 identity,
                 provider,
                 groups,
-                own_commit_hashes: HashMap::new(),
-                pending_own_commit_hashes: HashMap::new(),
+                own_commit_hashes,
+                pending_own_commit_hashes,
             },
         );
     });
@@ -3746,6 +3885,39 @@ mod tests {
             msg_b
         );
 
+        // Issue #2 gap 1: populate BOTH own-commit-hash maps before export, so
+        // this test also proves they round-trip through the full
+        // `MlsContextState` envelope, not just the provider/group state. A
+        // confirmed hash for group A (as `mls_remove_member_confirm` would
+        // record on a successful merge) — see `mls_group::MlsError::OwnCommit`'s
+        // "Persisted across a worker reload" section for why this is safe to
+        // carry forward unchanged.
+        //
+        // The pending-map entry for group B here is DELIBERATELY synthetic
+        // and does NOT correspond to any real openmls pending commit on group
+        // B (group B has no staged commit at all at this point) — this is
+        // exactly the dangling-entry shape F2 (`import_mls_context_inner`)
+        // now guards against: on import it must be dropped, not restored, see
+        // the assertion below. The positive case — a GENUINE pending hash
+        // that DOES survive import and then correctly promotes on confirm —
+        // is covered separately by
+        // `test_pending_own_commit_hash_survives_import_and_promotes_on_confirm`,
+        // which exercises the real `mls_remove_member_stage_inner` /
+        // `mls_remove_member_confirm` path end to end.
+        let confirmed_hash_a: mls_group::OwnCommitHash = [0xAAu8; 32];
+        // Epoch value is irrelevant to this test's assertion: group B has NO
+        // real openmls pending commit at all, so the entry is dropped on the
+        // `group.pending_commit().is_some()` half of the check alone,
+        // regardless of what epoch it claims.
+        let pending_hash_b = mls_group::PendingOwnCommit {
+            epoch: 0,
+            hash: [0xBBu8; 32],
+        };
+        let mut own_commit_hashes = HashMap::new();
+        own_commit_hashes.insert(group_a_id.clone(), confirmed_hash_a);
+        let mut pending_own_commit_hashes = HashMap::new();
+        pending_own_commit_hashes.insert(group_b_id.clone(), pending_hash_b);
+
         // Install alice's full context (both groups) into MLS_CTX.
         let mut alice_groups = HashMap::new();
         alice_groups.insert(group_a_id.clone(), alice_group_a);
@@ -3758,8 +3930,8 @@ mod tests {
                     identity: alice,
                     provider: alice_provider,
                     groups: alice_groups,
-                    own_commit_hashes: HashMap::new(),
-                    pending_own_commit_hashes: HashMap::new(),
+                    own_commit_hashes,
+                    pending_own_commit_hashes,
                 },
             );
         });
@@ -3783,6 +3955,47 @@ mod tests {
             new_id, ctx_id,
             "import must mint a fresh identity_id, never reuse the pre-reload one"
         );
+
+        // `own_commit_hashes` (self-authenticating only via `group_ids`
+        // membership, which group A satisfies) must have survived the
+        // export/import round trip intact (issue #2 gap 1).
+        //
+        // `pending_own_commit_hashes`, by contrast, must NOT have survived
+        // for group B: F2 (`import_mls_context_inner`) re-validates every
+        // surviving pending entry against that group's REAL openmls
+        // pending-commit state after `MlsGroup::load`, and group B has none
+        // (this test never staged a real commit on it) — this synthetic
+        // entry is exactly the dangling shape that check exists to drop, so
+        // asserting it is gone is the correct behavior here, not a
+        // regression. See `pending_hash_b`'s doc comment above and
+        // `test_pending_own_commit_hash_survives_import_and_promotes_on_confirm`
+        // for the corresponding positive case (a genuine pending commit DOES
+        // survive import).
+        MLS_CTX.with(|ctx| {
+            let ctx = ctx.borrow();
+            let c = ctx.get(&new_id).unwrap();
+            assert_eq!(
+                c.own_commit_hashes.get(&group_a_id).copied(),
+                Some(confirmed_hash_a),
+                "own_commit_hashes must survive export/import"
+            );
+            assert_eq!(
+                c.own_commit_hashes.len(),
+                1,
+                "no extra own_commit_hashes entries must appear"
+            );
+            assert_eq!(
+                c.pending_own_commit_hashes.get(&group_b_id).copied(),
+                None,
+                "a pending hash with no corresponding real openmls pending commit \
+                 must be dropped on import, not restored"
+            );
+            assert_eq!(
+                c.pending_own_commit_hashes.len(),
+                0,
+                "no dangling pending_own_commit_hashes entries must survive import"
+            );
+        });
 
         // A NEW message from EACH reloaded group must still decrypt correctly
         // for bob (who was never cleared) — proving epoch/ratchet state
@@ -3887,6 +4100,8 @@ mod tests {
             // A syntactically valid hex group id that was never created.
             group_ids: vec!["00".repeat(16)],
             provider_state,
+            own_commit_hashes: HashMap::new(),
+            pending_own_commit_hashes: HashMap::new(),
         };
         let blob = serde_json::to_vec(&state).unwrap();
 
@@ -3899,6 +4114,369 @@ mod tests {
             MLS_CTX.with(|ctx| ctx.borrow().len()),
             0,
             "MLS_CTX must remain untouched when any group fails to load"
+        );
+
+        mls_clear_session();
+    }
+
+    /// F3: the load-bearing positive case a synthetic-hash test cannot cover
+    /// — a GENUINE pending commit, staged through the real
+    /// `mls_remove_member_stage_inner` path (not a hand-copied insert),
+    /// survives a full export / `mls_clear_session` / import round trip and
+    /// then successfully confirms, promoting the SAME hash into
+    /// `own_commit_hashes`. This is what actually pins the core design claim
+    /// this cycle's persistence change rests on (openmls's own pending-commit
+    /// state is durable across this crate's provider-state export/import),
+    /// as opposed to `test_full_context_export_import_roundtrip_two_groups`,
+    /// which deliberately uses a synthetic, non-real pending hash to prove
+    /// the OPPOSITE (dangling-entry rejection) case instead.
+    #[test]
+    fn test_pending_own_commit_hash_survives_import_and_promotes_on_confirm() {
+        let alice_bytes: [u8; 16] = [0x51; 16];
+        let bob_bytes: [u8; 16] = [0x52; 16];
+
+        let alice_provider = OpenMlsRustCrypto::default();
+        let alice = generate_identity(&alice_bytes, &alice_provider).unwrap();
+        let mut alice_group = create_group(&alice, &alice_provider).unwrap();
+
+        let bob_provider = OpenMlsRustCrypto::default();
+        let bob = generate_identity(&bob_bytes, &bob_provider).unwrap();
+        let bob_kp = generate_key_package(&bob, &bob_provider).unwrap();
+        add_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+
+        let alice_group_id = group_id_hex(&alice_group);
+        let alice_ctx_id = next_id();
+        MLS_CTX.with(|ctx| {
+            let mut groups = HashMap::new();
+            groups.insert(alice_group_id.clone(), alice_group);
+            ctx.borrow_mut().insert(
+                alice_ctx_id.clone(),
+                MlsContext {
+                    identity: alice,
+                    provider: alice_provider,
+                    groups,
+                    own_commit_hashes: HashMap::new(),
+                    pending_own_commit_hashes: HashMap::new(),
+                },
+            );
+        });
+
+        let bob_leaf = MLS_CTX.with(|ctx| {
+            let ctx = ctx.borrow();
+            let c = ctx.get(&alice_ctx_id).unwrap();
+            let group = c.groups.get(&alice_group_id).unwrap();
+            let leaf = group
+                .members()
+                .find(|m| {
+                    BasicCredential::try_from(m.credential.clone())
+                        .map(|basic| basic.identity() == bob_bytes)
+                        .unwrap_or(false)
+                })
+                .map(|m| m.index.u32())
+                .expect("bob must be present before removal");
+            leaf
+        });
+
+        // Real stage-time path — the exact body `mls_remove_member_stage`
+        // wraps, including its stage-time `pending_own_commit_hashes` insert.
+        let (commit_bytes, prior_epoch) =
+            mls_remove_member_stage_inner(&alice_ctx_id, &alice_group_id, bob_leaf)
+                .expect("mls_remove_member_stage_inner must succeed for a freshly staged removal");
+        let expected_hash = mls_group::hash_own_commit(&commit_bytes);
+        let expected_pending = mls_group::PendingOwnCommit {
+            epoch: prior_epoch,
+            hash: expected_hash,
+        };
+
+        let pending_before_export = MLS_CTX.with(|ctx| {
+            ctx.borrow()
+                .get(&alice_ctx_id)
+                .unwrap()
+                .pending_own_commit_hashes
+                .get(&alice_group_id)
+                .copied()
+        });
+        assert_eq!(
+            pending_before_export,
+            Some(expected_pending),
+            "setup must have recorded the real stage-time pending hash before export"
+        );
+
+        // Export the full context, wipe MLS_CTX (simulating a worker
+        // reload), then import it back.
+        let blob = export_mls_context_inner(&alice_ctx_id, 1).unwrap();
+        mls_clear_session();
+        assert_eq!(
+            MLS_CTX.with(|ctx| ctx.borrow().len()),
+            0,
+            "mls_clear_session must fully wipe MLS_CTX before import"
+        );
+
+        let (new_id, group_ids, _generation) = import_mls_context_inner(&blob, 1)
+            .expect("a genuine pending commit must not be treated as a dangling entry");
+        assert_eq!(group_ids, vec![alice_group_id.clone()]);
+
+        // The genuine pending hash must have survived import intact (F2:
+        // only entries with NO real openmls pending commit are dropped).
+        let pending_after_import = MLS_CTX.with(|ctx| {
+            ctx.borrow()
+                .get(&new_id)
+                .unwrap()
+                .pending_own_commit_hashes
+                .get(&alice_group_id)
+                .copied()
+        });
+        assert_eq!(
+            pending_after_import,
+            Some(expected_pending),
+            "a genuine pending hash (real openmls pending commit) must survive import"
+        );
+
+        // Confirm through the REAL wasm-bindgen export, against the
+        // reconstructed post-import context — this is the actual claim under
+        // test: openmls's own pending-commit state survived export/import,
+        // so the merge succeeds exactly as it would have pre-reload.
+        mls_remove_member_confirm(&new_id, &alice_group_id)
+            .expect("confirm must succeed against a pending commit restored via import");
+
+        let (pending_final, confirmed_final) = MLS_CTX.with(|ctx| {
+            let ctx = ctx.borrow();
+            let c = ctx.get(&new_id).unwrap();
+            (
+                c.pending_own_commit_hashes.get(&alice_group_id).copied(),
+                c.own_commit_hashes.get(&alice_group_id).copied(),
+            )
+        });
+        assert_eq!(
+            pending_final, None,
+            "confirm must remove the promoted entry from pending_own_commit_hashes"
+        );
+        assert_eq!(
+            confirmed_final,
+            Some(expected_hash),
+            "confirm must promote the SAME stage-time hash into own_commit_hashes \
+             after surviving a full export/import round trip"
+        );
+
+        mls_clear_session();
+    }
+
+    /// Regression test for a real MEDIUM finding from the crypto-reviewer
+    /// pass on the epoch-persistence change itself: an existence-only check
+    /// (`group.pending_commit().is_some()`) is NOT enough to prove a restored
+    /// `pending_own_commit_hashes` entry still corresponds to the commit it
+    /// was recorded for. Reproduces the exact race: this device stages
+    /// Remove(bob) (recording a pending hash at epoch 1), a DIFFERENT commit
+    /// then merges first — simulated here the same way
+    /// `test_discard_after_inspect_leaves_group_usable_but_commit_unreplayable`
+    /// (`mls_group.rs`) simulates an abandoned-and-superseded commit, via
+    /// `clear_pending_commit` + a real merge — advancing the epoch to 2 and
+    /// clearing the stale entry's corresponding openmls state as a side
+    /// effect, and finally this device stages a SECOND, unrelated Remove
+    /// (of charlie) directly via `stage_remove_member` (bypassing the wasm
+    /// export's insert, so the map is NOT updated) — leaving a REAL pending
+    /// commit at epoch 2 that an existence-only check cannot distinguish
+    /// from the original. `PendingOwnCommit::epoch` must catch this: the
+    /// stale entry (epoch 1) does not match the group's current epoch (2),
+    /// so it must be dropped on import even though `pending_commit()` is
+    /// `Some`.
+    #[test]
+    fn test_import_drops_pending_hash_stale_from_a_different_merged_commit() {
+        let alice_bytes: [u8; 16] = [0x61; 16];
+        let bob_bytes: [u8; 16] = [0x62; 16];
+        let charlie_bytes: [u8; 16] = [0x63; 16];
+
+        let alice_provider = OpenMlsRustCrypto::default();
+        let alice = generate_identity(&alice_bytes, &alice_provider).unwrap();
+        let mut alice_group = create_group(&alice, &alice_provider).unwrap();
+
+        let bob_provider = OpenMlsRustCrypto::default();
+        let bob = generate_identity(&bob_bytes, &bob_provider).unwrap();
+        let bob_kp = generate_key_package(&bob, &bob_provider).unwrap();
+        add_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+        assert_eq!(alice_group.epoch().as_u64(), 1, "epoch 1 after adding bob");
+
+        let bob_leaf = alice_group
+            .members()
+            .find(|m| {
+                BasicCredential::try_from(m.credential.clone())
+                    .map(|basic| basic.identity() == bob_bytes)
+                    .unwrap_or(false)
+            })
+            .map(|m| m.index.u32())
+            .expect("bob must be present");
+
+        // Stage Remove(bob) at epoch 1 — the entry this test proves must NOT
+        // survive import once it goes stale.
+        let (stale_commit_bytes, stale_epoch) =
+            stage_remove_member(&mut alice_group, &alice.signer, bob_leaf, &alice_provider)
+                .unwrap();
+        assert_eq!(stale_epoch, 1);
+        let stale_pending = mls_group::PendingOwnCommit {
+            epoch: stale_epoch,
+            hash: mls_group::hash_own_commit(&stale_commit_bytes),
+        };
+
+        // Simulate a DIFFERENT commit merging first (the Delivery Service
+        // accepted something else): abandon the staged Remove, then merge a
+        // real commit that advances the epoch — same `clear_pending_commit`
+        // technique `mls_group.rs`'s own abandoned-commit tests already use.
+        alice_group
+            .clear_pending_commit(alice_provider.storage())
+            .unwrap();
+        let charlie_provider = OpenMlsRustCrypto::default();
+        let charlie = generate_identity(&charlie_bytes, &charlie_provider).unwrap();
+        let charlie_kp = generate_key_package(&charlie, &charlie_provider).unwrap();
+        add_member(
+            &mut alice_group,
+            &alice.signer,
+            charlie_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+        assert_eq!(
+            alice_group.epoch().as_u64(),
+            2,
+            "epoch 2 after the superseding commit merges"
+        );
+
+        // Stage a SECOND, unrelated Remove (of charlie) directly — bypassing
+        // `mls_remove_member_stage_inner`'s map insert, so the map keeps the
+        // STALE epoch-1 entry while the REAL openmls pending commit is now
+        // this epoch-2 one.
+        let charlie_leaf = alice_group
+            .members()
+            .find(|m| {
+                BasicCredential::try_from(m.credential.clone())
+                    .map(|basic| basic.identity() == charlie_bytes)
+                    .unwrap_or(false)
+            })
+            .map(|m| m.index.u32())
+            .expect("charlie must be present");
+        let (_fresh_commit_bytes, fresh_epoch) = stage_remove_member(
+            &mut alice_group,
+            &alice.signer,
+            charlie_leaf,
+            &alice_provider,
+        )
+        .unwrap();
+        assert_eq!(fresh_epoch, 2);
+        assert!(
+            alice_group.pending_commit().is_some(),
+            "a real (different) pending commit must exist at this point"
+        );
+
+        let alice_group_id = group_id_hex(&alice_group);
+        let alice_ctx_id = next_id();
+        MLS_CTX.with(|ctx| {
+            let mut groups = HashMap::new();
+            groups.insert(alice_group_id.clone(), alice_group);
+            let mut pending_own_commit_hashes = HashMap::new();
+            pending_own_commit_hashes.insert(alice_group_id.clone(), stale_pending);
+            ctx.borrow_mut().insert(
+                alice_ctx_id.clone(),
+                MlsContext {
+                    identity: alice,
+                    provider: alice_provider,
+                    groups,
+                    own_commit_hashes: HashMap::new(),
+                    pending_own_commit_hashes,
+                },
+            );
+        });
+
+        let blob = export_mls_context_inner(&alice_ctx_id, 1).unwrap();
+        mls_clear_session();
+        let (new_id, _group_ids, _generation) = import_mls_context_inner(&blob, 1)
+            .expect("import must succeed even though the stale entry is dropped");
+
+        // Pin the "existence" half of the check too — this test's whole
+        // premise is that the group DOES have a real pending commit after
+        // import (the fresh epoch-2 one), so an existence-only check alone
+        // would have wrongly accepted the stale entry. Without this
+        // assertion the test would also pass if `MlsGroup::load` restored no
+        // pending commit at all, which would trivially satisfy the fix for
+        // the wrong reason.
+        let (pending_after_import, group_has_real_pending_commit) = MLS_CTX.with(|ctx| {
+            let ctx = ctx.borrow();
+            let c = ctx.get(&new_id).unwrap();
+            (
+                c.pending_own_commit_hashes.get(&alice_group_id).copied(),
+                c.groups
+                    .get(&alice_group_id)
+                    .unwrap()
+                    .pending_commit()
+                    .is_some(),
+            )
+        });
+        assert!(
+            group_has_real_pending_commit,
+            "setup must restore a REAL (different, epoch-2) pending commit after import — \
+             otherwise this test would pass for the wrong reason (no pending commit at all)"
+        );
+        assert_eq!(
+            pending_after_import, None,
+            "an entry recorded at a stale epoch must be dropped on import even when the \
+             group has a DIFFERENT real pending commit at the current epoch — existence \
+             alone (`pending_commit().is_some()`) is not sufficient"
+        );
+
+        mls_clear_session();
+    }
+
+    /// F4: a context-state blob whose `version` field is a bare literal `1`
+    /// (not a reference to `MLS_CONTEXT_STATE_VERSION`, so a future bump of
+    /// that constant cannot silently make this test meaningless) is hard
+    /// rejected by `import_mls_context_inner`, and leaves no partial
+    /// `MLS_CTX` entry behind.
+    #[test]
+    fn test_import_mls_context_rejects_literal_version_1() {
+        mls_clear_session();
+
+        let provider = OpenMlsRustCrypto::default();
+        let identity = generate_identity(b"alice@version-reject-test", &provider).unwrap();
+        let provider_state = mls_group::export_provider_state(&provider, 1).unwrap();
+        let state = MlsContextState {
+            version: 1, // deliberately a bare literal, not `MLS_CONTEXT_STATE_VERSION`
+            identity_bytes: identity
+                .credential_with_key
+                .credential
+                .serialized_content()
+                .to_vec(),
+            sig_public_key: identity.signer.to_public_vec(),
+            group_ids: Vec::new(),
+            provider_state,
+            own_commit_hashes: HashMap::new(),
+            pending_own_commit_hashes: HashMap::new(),
+        };
+        let blob = serde_json::to_vec(&state).unwrap();
+
+        let result = import_mls_context_inner(&blob, 0);
+        assert!(
+            result.is_err(),
+            "a version-1 context state blob must be hard-rejected, never migrated"
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            "unsupported context state version",
+            "the rejection must be the version-check error specifically"
+        );
+        assert_eq!(
+            MLS_CTX.with(|ctx| ctx.borrow().len()),
+            0,
+            "a rejected version-1 import must not create any MLS_CTX entry"
         );
 
         mls_clear_session();
@@ -4502,11 +5080,14 @@ mod tests {
                 })
                 .map(|m| m.index.u32())
                 .expect("bob must be present before removal");
-            let (commit_bytes, _prior_epoch) =
+            let (commit_bytes, prior_epoch) =
                 stage_remove_member(group, &c.identity.signer, bob_leaf, &c.provider).unwrap();
             c.pending_own_commit_hashes.insert(
                 alice_group_id.clone(),
-                mls_group::hash_own_commit(&commit_bytes),
+                mls_group::PendingOwnCommit {
+                    epoch: prior_epoch,
+                    hash: mls_group::hash_own_commit(&commit_bytes),
+                },
             );
         });
         let pending_before = MLS_CTX.with(|ctx| {

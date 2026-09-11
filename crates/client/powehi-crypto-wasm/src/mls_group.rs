@@ -144,33 +144,51 @@ pub enum MlsError {
     /// commit was authored by a peer: [`MlsError::Decrypt`] remains the
     /// catch-all for every other rejection.
     ///
-    /// # NOT persisted across a worker reload — a real, undocumented-until-now LIMIT
+    /// # Persisted across a worker reload (issue #2 gap 1, closed)
     /// Both the confirmed [`OwnCommitHash`] map this check reads
     /// (`own_commit_hashes`) AND the pending, not-yet-confirmed one
     /// (`pending_own_commit_hashes`, populated at stage time — see
-    /// [`confirm_remove_member`]'s doc comment) live in worker
-    /// `thread_local!` memory only, in `wasm_exports.rs`'s `MlsContext`.
-    /// Neither is part of `MlsContextState` (`export_mls_context_inner` /
-    /// `import_mls_context_inner`), so a page reload, worker restart, or
-    /// `mls_clear_session` silently drops both — after which this device's
-    /// own local MLS epoch is still correctly restored (that part IS
-    /// persisted), but Case 2 recognition for any commit staged or confirmed
-    /// before the reload is gone. A reload between stage and confirm still
-    /// lets the confirm itself succeed (the openmls-level pending commit
-    /// state is independently persisted and reloaded); it simply confirms
-    /// with no stage-time hash to promote, recording nothing. A re-delivery
-    /// that would have hit `OwnCommit` before the reload falls back to
-    /// [`MlsError::Decrypt`] afterward — the SAME safe fail-closed direction
-    /// as every other Case-2 miss (see "Bounded, not a history" above), so no
-    /// group state is corrupted. But a consumer loop that treats
-    /// `MlsError::Decrypt` as a fork signal would raise a spurious fork alarm
-    /// on an ordinary tab reload immediately after confirming a Remove — the
-    /// most likely time for a real caller to hit this, since the Delivery
-    /// Service echo of that exact commit is often still in flight. Making
-    /// this durable would need both maps added to `MlsContextState` (an
-    /// `MLS_CONTEXT_STATE_VERSION` bump) — deliberately NOT done in this
-    /// change; a consumer loop wiring must account for this gap until that
-    /// follow-up lands.
+    /// [`confirm_remove_member`]'s doc comment) are now part of
+    /// `MlsContextState` (`wasm_exports.rs`'s `export_mls_context_inner` /
+    /// `import_mls_context_inner`, `MLS_CONTEXT_STATE_VERSION` 2), so a page
+    /// reload, worker restart, or export/import round trip carries both
+    /// forward.
+    ///
+    /// Persisting `pending_own_commit_hashes` too (not just the confirmed map)
+    /// is safe, not merely convenient: verified directly against vendored
+    /// openmls-0.8.1 (`group/mls_group/commit_builder.rs::stage_commit`,
+    /// `group/mls_group/mod.rs::load`), staging a commit sets
+    /// `group_state = MlsGroupState::PendingCommit(Box::new(StagedCommit))`
+    /// and immediately calls `storage.write_group_state(..)` — the SAME
+    /// `MemoryStorage` key/value map (`openmls_memory_storage::MemoryStorage`'s
+    /// `values`) that [`export_provider_state`] / [`import_provider_state`]
+    /// serialize and restore wholesale. `MlsGroup::load` reads that same
+    /// `group_state` entry back out on import. So openmls's own
+    /// pending-commit state — the actual `StagedCommit`
+    /// [`confirm_remove_member`] later merges — is itself already durable
+    /// across export/import; it was never worker-local-only.
+    ///
+    /// This does NOT mean a restored `pending_own_commit_hashes` entry can
+    /// never go dangling: if a peer's commit merges first — which internally
+    /// clears any pending commit as a side effect, see
+    /// [`abort_remove_member`]'s doc comment for this exact race — between
+    /// this device staging its own Remove and an export being taken, the
+    /// recorded pending hash would have nothing left to correspond to. The
+    /// race is real and unchanged by persistence; what persistence changes is
+    /// only that a dangling entry no longer vanishes for free on the next
+    /// worker reload. `import_mls_context_inner` (`wasm_exports.rs`) is what
+    /// actually closes this: after loading each group, it re-checks that
+    /// group's REAL openmls pending-commit state and drops any surviving
+    /// `pending_own_commit_hashes` entry whose group has none. So the
+    /// structural guarantee is "no dangling entry survives an import", not
+    /// "the race that could create one cannot happen".
+    ///
+    /// A reload between stage and confirm still lets the confirm itself
+    /// succeed, and now also correctly promotes the SAME stage-time hash it
+    /// would have pre-reload (previously this recorded nothing). A
+    /// re-delivery that would have hit `OwnCommit` before the reload
+    /// continues to hit `OwnCommit` after it, for both the confirmed and the
+    /// still-pending case.
     #[error("mls own commit error")]
     OwnCommit,
     /// [`merge_inspected_commit`] was asked to merge a [`StagedCommit`] that
@@ -221,6 +239,49 @@ pub type OwnCommitHash = [u8; 32];
 /// this crate's own confirm/merge step — see [`OwnCommitHash`]'s doc comment.
 pub(crate) fn hash_own_commit(commit_bytes: &[u8]) -> OwnCommitHash {
     Sha256::digest(commit_bytes).into()
+}
+
+/// A not-yet-confirmed [`OwnCommitHash`], bound to the group epoch it was
+/// staged at (`stage_remove_member`'s `prior_epoch` — see that function's
+/// doc comment on why this is local bookkeeping, not a server epoch).
+///
+/// The epoch binding exists because a bare hash surviving
+/// `import_mls_context_inner`'s `group.pending_commit().is_none()` check is
+/// NOT enough on its own to prove the entry still corresponds to the SAME
+/// staged commit it was recorded for: if a peer's commit merged first
+/// (clearing this device's pending commit as a side effect — the race
+/// `MlsError::OwnCommit`'s doc comment already documents), then a later,
+/// unrelated stage call on the same group leaves `pending_commit()` non-empty
+/// again, but for a DIFFERENT commit than the one the surviving hash was
+/// hashed from. Comparing the recorded `epoch` against the group's current
+/// epoch after `MlsGroup::load` (staging never advances the epoch, only
+/// merging does) rules this out: a genuine, still-pending entry's `epoch`
+/// always equals the group's current epoch, while a stale one that survived
+/// an intervening peer merge does not, because that merge advanced the
+/// group's epoch past it.
+///
+/// # Not a MAC — the import path trusts, it does not authenticate
+/// `import_mls_context_inner`'s epoch check (see `wasm_exports.rs`) confirms
+/// a restored entry's `epoch` matches a REAL pending commit's epoch, but
+/// nothing binds `hash` itself to that commit's actual bytes — a blob whose
+/// `epoch`/`hash` pair was minted to match an unrelated pending commit would
+/// pass the same check. This is not a new capability the persistence change
+/// introduces: `own_commit_hashes` (the confirmed map) has always been
+/// restored with only a `group_ids`-membership filter, no content binding
+/// either. What actually protects this blob is that it is never transmitted
+/// or attacker-reachable in the first place — it is encrypted at rest
+/// (`SENSITIVE.identity`, AES-GCM) before this crate ever sees it again, so a
+/// forged pair would require breaking that envelope first. The blast radius
+/// of a hypothetical forged entry is also bounded to fail-closed: at worst a
+/// legitimate future commit matching the forged hash is misclassified as
+/// [`MlsError::OwnCommit`] and dropped (fork-blindness / delayed recovery),
+/// never key compromise or message decryption.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingOwnCommit {
+    /// The group's epoch at the moment this commit was staged.
+    pub epoch: u64,
+    /// Content hash of the staged commit's exact wire bytes.
+    pub hash: OwnCommitHash,
 }
 
 /// A freshly generated MLS identity: the public credential bound to a signature
