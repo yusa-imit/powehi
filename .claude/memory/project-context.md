@@ -24,7 +24,147 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-11, cycle 481 — STABILIZATION (forced by red CI, counter said FEATURE): stop the Tauri Cargo.lock drift check from blocking main on routine upstream churn, fix a security-auditor-caught lockfile-mutation bug in the same script, commit 85d8603)
+## Current state (2026-09-11, cycle 484 — FEATURE: land orphaned WIP persisting MLS own-commit recognition across worker reload (issue #2 gap), fix a real crypto-reviewer MEDIUM finding with an epoch-binding redesign before committing, commit 40e3960)
+
+- Mode selection: counter 483→484, 484 % 5 != 0 → FEATURE. Working tree
+  was NOT clean at session start — another occurrence of the established
+  "orphaned WIP" pattern (cycles 299/458/460/464/466/470/472/478/480):
+  substantial, well-documented, well-tested WIP already sitting in
+  `crates/client/powehi-crypto-wasm/src/{mls_group,wasm_exports}.rs`, no
+  memory entry referenced it (predates this pointer's last update).
+- Traced the whole diff before acting: it closed exactly the
+  "reload-loses-own-commit-recognition gap" carried since cycle 478's
+  list — `own_commit_hashes`/`pending_own_commit_hashes` (used for
+  `MlsError::OwnCommit` "Case 2" recognition, i.e. telling a Delivery
+  Service re-echo of this device's own already-merged commit apart from
+  a real fork) lived only in worker-local `thread_local!` memory, lost on
+  every page reload/worker restart. The WIP added both maps to
+  `MlsContextState` (`MLS_CONTEXT_STATE_VERSION` 1→2, hard-reject on
+  mismatch, no migration path) so they now round-trip through
+  export/import, plus an import-time validation dropping any entry whose
+  group has no real openmls pending commit.
+- `cargo build/test/fmt/clippy` all green as found (227 passed in
+  `powehi-crypto-wasm`, +2 from the 225 baseline).
+- **crypto-reviewer (fresh pass): PASS-with-nits, one real MEDIUM
+  finding, not a nitpick.** Verified against vendored openmls-0.8.1 that
+  persisting `own_commit_hashes` is safe (public content hashes, no key
+  material, same blob already carries far more sensitive state via
+  `provider_state`) and that the version-gate is fail-closed. **The real
+  finding**: the import-time validation (`group.pending_commit().is_none()`
+  → drop) is EXISTENCE-only, not binding — it can't tell a genuine
+  still-pending entry apart from a DIFFERENT, unrelated one. Concrete
+  reachable sequence: peer's commit merges first (clears this device's
+  original pending commit as a side effect, a pre-existing documented
+  race), leaving a stale hash entry; a LATER, unrelated re-stage on the
+  same group leaves a NEW real pending commit in place; existence-only
+  checking can't distinguish the stale entry from the fresh one, so it
+  survives import and could later be wrongly promoted into
+  `own_commit_hashes` — misclassifying some future legitimate commit
+  (one that happens to match the stale hash) as `MlsError::OwnCommit`
+  and silently dropping it.
+- **Fixed with an epoch-binding redesign, not a patch.** Added
+  `mls_group::PendingOwnCommit { epoch: u64, hash: OwnCommitHash }`,
+  replacing the bare hash as `pending_own_commit_hashes`'s value type
+  everywhere (`MlsContext` + `MlsContextState`). Stage time
+  (`mls_remove_member_stage_inner`) now records the group's `prior_epoch`
+  alongside the hash. Import now requires BOTH
+  `group.pending_commit().is_some()` AND `pending.epoch ==
+  group.epoch().as_u64()` before keeping an entry — sound because
+  staging never advances a group's epoch (only merging does), so a
+  genuine still-pending entry's epoch always equals the group's current
+  epoch, while a stale one that survived an intervening peer merge does
+  not (the merge advanced the epoch past it). Also added the same check
+  at `mls_remove_member_confirm`'s promotion site as defense-in-depth
+  (not currently reachable in-process — `mls_remove_member_stage_inner`
+  is the only producer of a pending commit and always overwrites the map
+  entry on every call — but keeps the invariant enforced at every
+  promotion site, not just import). Added a regression test
+  (`test_import_drops_pending_hash_stale_from_a_different_merged_commit`)
+  reproducing the exact race via `clear_pending_commit` + a real merge
+  (same technique `mls_group.rs`'s existing abandoned-commit tests use)
+  — **manually verified it FAILS against the old existence-only check**
+  (temporarily reverted, confirmed the assertion fails with the exact
+  stale entry surviving, then restored the fix) before treating it as a
+  real regression test, not a tautology.
+- **Second, independent crypto-reviewer pass: PASS-with-nits, confirmed
+  the epoch-binding fix closes the finding correctly, no new gap.**
+  Verified against openmls 0.8.1 source directly (not the diff's own
+  claims) that `stage_commit` never touches the epoch and
+  `merge_staged_commit` clears the pending commit only AFTER advancing
+  it — so epochs are monotone and a stale entry's epoch is permanently
+  behind the group's current one. Also independently reasoned that the
+  in-process version of this race is NOT actually reachable (the only
+  local producer of a pending commit always overwrites the map entry),
+  confirming the confirm-time check is genuine defense-in-depth, not
+  covering a real live gap. Left 3 non-blocking nits, all cheap and
+  fixed before commit: (1) documented explicitly in `PendingOwnCommit`'s
+  doc comment that the import check authenticates epoch-match but not
+  hash-content — a blob-forging attacker isn't newly enabled by this
+  change (the confirmed map already had the same gap), and the blob is
+  encrypted at rest before this crate ever sees it again, with a
+  fail-closed blast radius (dropped legitimate commit, never key
+  compromise); (2) added the epoch check at the confirm-time promotion
+  site (described above); (3) strengthened the regression test to also
+  assert the imported group DOES have a real pending commit post-import,
+  so the test can't trivially pass for the wrong reason (no pending
+  commit at all).
+- **Full gate, re-run after every fix round**: `cargo build --workspace`
+  clean, `cargo test --workspace` all green (0 failures, every crate;
+  `powehi-crypto-wasm` alone: 228 passed, 2 ignored, up from 227
+  pre-fix), `cargo fmt --all --check` clean, `cargo clippy --workspace
+  --all-targets -- -D warnings` clean. Frontend untouched this cycle,
+  not re-run (Rust-only WASM crate change, no JS-visible API change).
+- No `threat-model-checker` run: matches the established pattern for
+  standalone WASM crypto-primitive additions with no server-visible
+  metadata and explicitly not wired to any UI/broadcast flow. No
+  `security-auditor` run: no backend/infra code touched.
+- Committed `40e3960` (`feat(crypto): persist MLS own-commit recognition
+  across worker reload (issue #2)`), 2 files changed, pushed clean
+  (`0e1fae6..40e3960 main -> main`). `gh run list` showed all 3 checks
+  `queued`/`in_progress` immediately after push — confirm green in a
+  future session if not already done. Posted a progress comment on issue
+  #2 explaining what landed, the MEDIUM finding and its fix, and that
+  the consumer-loop wiring itself remains the largest open piece — did
+  NOT close the issue.
+- Target dir hygiene: not checked in depth (FEATURE mode), spot-checked
+  `target/` at 9.9G — well under the 20G threshold.
+- **Next cycle candidates (carried/updated):**
+  1. **Resolved this cycle** (was carried since ≥cycle 466's list):
+     reload-loses-own-commit-recognition gap for `MlsError::OwnCommit`.
+     Both maps now durable across export/import.
+  2. Carried, unchanged, still the single largest remaining piece of
+     issue #2 (P0-blocker, security, frontend): the MLS commit-processing
+     consumer-loop wiring into `useMessages.ts`/`useWelcomePoller.ts` —
+     genuinely FEATURE-mode-scale (crypto-lead/mls-engineer + fresh
+     crypto-reviewer pass), not a stabilization-sized fix. What remains:
+     (a) the epoch-reconciliation design between the client's local MLS
+     epoch and the server's `groups.epoch` counter (still separate from
+     today's fix — `PendingOwnCommit.epoch` is purely local bookkeeping,
+     not a server-epoch concept), and (b) actually calling
+     `mlsInspectCommit`/`mlsConfirmIncomingCommit`/`mlsDiscardIncomingCommit`
+     from the poller with a real application-level policy check.
+  3. Carried: PQ hybrid Phase A prerequisite (human/crypto-lead policy
+     call, still blocked on openmls upstream).
+  4. Carried, still explicitly BLOCKED: `AbuseSignalStore`/
+     `RegionRouter::broadcast_abuse_signal` wiring needs F3 + the
+     HMAC-vs-plain-SHA256 gate resolved first.
+  5. Carried (unchanged): prd.md §3.3 doesn't yet document the
+     consumed-`key_packages` retention window.
+  6. Carried, growing: this file is well past the ~192K/2385-line point
+     cycle 360 last archived at — good STABILIZATION candidate for a
+     future cycle with no more pressing fix on hand (cycles 320-339
+     precedent → `.claude/memory/archive/`).
+  7. Carried (unchanged from cycle 480's list): `mls_confirm_incoming_commit`
+     handle-consumption-before-`MLS_CTX`-resolution ordering; epoch
+     reconciliation; `mls_group_members` `isSelf` leaf-index vs
+     signature-key hardening; `PendingRemovalBanner` local cross-check
+     hardening; GitHub issues #1/#3/#4/#5; prd.md §10 REST API doc
+     drift; `pending_removals` forged-signal defense; unconsumed
+     `RemovalRequired` WS event; `key_packages.device_id` FK doc drift;
+     `GroupRepository::save` blind `ON CONFLICT DO UPDATE`; bare
+     `var(--photon)` CSS token.
+
+## Previous state (2026-09-11, cycle 481 — STABILIZATION (forced by red CI, counter said FEATURE): stop the Tauri Cargo.lock drift check from blocking main on routine upstream churn, fix a security-auditor-caught lockfile-mutation bug in the same script, commit 85d8603)
 
 - Mode selection: counter 480→481, 481 % 5 != 0 → nominally FEATURE, but
   `gh run list --limit 5` showed `CI — Rust` failing on the last push to
