@@ -79,3 +79,11 @@ ignore = true
 # Deny duplicate versions of security-critical crates to keep the dependency graph tight.
 multiple-versions = "warn"
 deny = []
+
+[sources]
+# Every dependency in this graph resolves from crates.io — no git dependencies, no
+# alternate registries. Hard-deny anything else so a lockfile entry silently repointed
+# at an attacker-controlled git URL or unofficial registry fails closed instead of the
+# default "warn".
+unknown-registry = "deny"
+unknown-git = "deny"

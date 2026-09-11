@@ -36,6 +36,13 @@ ignore = true
 multiple-versions = "warn"
 deny = []
 
+[sources]
+# Every dependency in this standalone workspace resolves from crates.io — no git
+# dependencies, no alternate registries. Hard-deny anything else, same policy and
+# rationale as the root deny.toml.
+unknown-registry = "deny"
+unknown-git = "deny"
+
 [advisories]
 # All six ignores below are RustSec "unmaintained" advisories (no CVE, no disclosed
 # vulnerability), confirmed via `cargo deny --manifest-path Cargo.toml check advisories` on

@@ -180,17 +180,49 @@ jobs:
         run: cargo check --locked --manifest-path app/src-tauri/Cargo.toml --all-targets
 
       # --locked alone only catches a manifest requirement missing from the
-      # lockfile (issue #7's exact bug). It does NOT catch a re-resolve that
-      # picks a different but still-valid graph (e.g. the local JetBrains Rust
-      # indexer regenerating the file against the same manifest) — that kind
-      # of rewrite is self-consistent, so --locked has nothing to reject. This
-      # diff catches that class too by regenerating and comparing byte-for-byte.
+      # lockfile (issue #7's exact bug) — it's satisfied by ANY version in the
+      # lock that meets the manifest's semver constraints, so it's immune to
+      # upstream publishing new compatible versions between commit and CI run.
+      # It does NOT catch a re-resolve that picks a different but still-valid
+      # graph (e.g. the local JetBrains Rust indexer regenerating the file
+      # against the same manifest) — that kind of rewrite is self-consistent,
+      # so --locked has nothing to reject. This diff step catches that class
+      # by regenerating and comparing byte-for-byte, but `cargo generate-lockfile`
+      # (unlike --locked) always re-resolves to the CURRENTLY latest compatible
+      # graph, not the graph at commit time — so it necessarily reports "drift"
+      # whenever any transitive dep has shipped a new semver-compatible release
+      # since the lockfile was committed, with zero relation to any actual bug
+      # in this repo (confirmed recurring: cycles 479 and 481, both plain
+      # upstream patch bumps, e.g. toml/toml_edit). continue-on-error keeps the
+      # step's own outcome from blocking main on routine upstream churn — the
+      # deterministic guarantee against the bug this was written for stays
+      # fully enforced by --locked above. The diff is written to the job
+      # summary (not just step output) so it's visible from the run's summary
+      # page without opening this step's log. The committed Cargo.lock is
+      # restored unconditionally after the diff (even on failure) so the
+      # cargo-audit/cargo-deny steps below always scan the actual committed
+      # lockfile, never a runner-local re-resolved one.
       - name: Verify Cargo.lock has no unresolved drift
         working-directory: app/src-tauri
+        continue-on-error: true
         run: |
           cp Cargo.lock /tmp/tauri-cargo-lock-committed
           cargo generate-lockfile
-          diff -u /tmp/tauri-cargo-lock-committed Cargo.lock
+          set +e
+          diff -u /tmp/tauri-cargo-lock-committed Cargo.lock > /tmp/tauri-cargo-lock-diff
+          status=$?
+          set -e
+          cat /tmp/tauri-cargo-lock-diff
+          if [ -s /tmp/tauri-cargo-lock-diff ]; then
+            {
+              echo '### Tauri `Cargo.lock` drift detected (likely routine upstream patch churn, non-blocking)'
+              echo '```diff'
+              cat /tmp/tauri-cargo-lock-diff
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          cp /tmp/tauri-cargo-lock-committed Cargo.lock
+          exit "$status"
 
       # Deliberately NOT SHA-pinned: taiki-e/install-action's own docs say
       # pinning @<tool_name> tags by hash is "strongly discouraged" (see the
