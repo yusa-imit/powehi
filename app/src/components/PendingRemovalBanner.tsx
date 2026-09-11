@@ -143,7 +143,7 @@ export function PendingRemovalBanner({ groupId }: PendingRemovalBannerProps) {
 			}}
 		>
 			<div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-				<Icon name="shield" size={14} color="var(--photon)" />
+				<Icon name="shield" size={14} color="var(--photon-300)" />
 				<span style={{ fontSize: 12, color: "#C8DCFF", lineHeight: 1.45 }}>
 					{pending.length === 1
 						? "The server reports 1 device revoked from this group."

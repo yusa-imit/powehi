@@ -180,7 +180,11 @@ export function LinkedDevicesPanel({ onClose }: LinkedDevicesPanelProps) {
 								}}
 							>
 								{/* Lock icon — photon blue per design system */}
-								<Icon name="lock" size={16} color={isCurrent ? "var(--photon)" : "var(--fg-4)"} />
+								<Icon
+									name="lock"
+									size={16}
+									color={isCurrent ? "var(--photon-300)" : "var(--fg-4)"}
+								/>
 
 								{/* Device info */}
 								<div style={{ flex: 1, minWidth: 0 }}>
