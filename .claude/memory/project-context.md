@@ -24,7 +24,126 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-11, cycle 480 — STABILIZATION: land orphaned WIP adding the consumed-`key_packages` retention sweep, fix 2 security-auditor required findings before committing, commit 8d7e5b0)
+## Current state (2026-09-11, cycle 481 — STABILIZATION (forced by red CI, counter said FEATURE): stop the Tauri Cargo.lock drift check from blocking main on routine upstream churn, fix a security-auditor-caught lockfile-mutation bug in the same script, commit 85d8603)
+
+- Mode selection: counter 480→481, 481 % 5 != 0 → nominally FEATURE, but
+  `gh run list --limit 5` showed `CI — Rust` failing on the last push to
+  main (cycle 480's `chore:` commit) — FEATURE mode's own step 2 applied,
+  ran as STABILIZATION. Working tree clean at session start.
+- Root cause: **the exact same failure class cycle 479 predicted would
+  recur** — `bitflags`/`uuid` that time, `toml` 1.1.5→1.1.6 and
+  `toml_edit` 0.25.13→0.25.15 this time. Went further than "refresh the
+  lockfile again" (a treadmill fix, not a root cause): confirmed by local
+  experiment that `cargo generate-lockfile` does NOT preserve
+  already-valid pinned versions — it always re-resolves to the CURRENTLY
+  latest compatible graph — so the byte-for-byte "Verify Cargo.lock has no
+  unresolved drift" CI step is fundamentally time-sensitive and
+  **guaranteed** to periodically false-fail purely from upstream
+  publishing, unrelated to any real defect. `cargo check --locked`
+  (the preceding step) by contrast only requires the lock to satisfy the
+  manifest's semver constraints with ANY already-present version — proven
+  time-invariant by pinning `bitflags` to an old version and confirming
+  `--locked` accepted it while `generate-lockfile` silently bumped it.
+- **Fix**: refreshed `app/src-tauri/Cargo.lock` (unblocks CI immediately),
+  then added `continue-on-error: true` to the drift-check step so routine
+  upstream patch churn can no longer block main, while leaving `cargo
+  check --locked`/`cargo audit`/`cargo deny check` fully blocking (the
+  deterministic guarantees stay intact). Diff written to
+  `$GITHUB_STEP_SUMMARY` for visibility since a continue-on-error step's
+  failure doesn't otherwise surface anywhere in the PR checks list.
+- **security-auditor: NEEDS-REWORK on the first draft, PASS after fixing
+  the 1 blocking finding.** Caught a real, pre-existing bug in the
+  original script (not introduced this cycle, but converted from harmless
+  to load-bearing by the fix): `cp Cargo.lock /tmp/...; cargo
+  generate-lockfile; diff ...` overwrites `Cargo.lock` in place and never
+  restores it, so the `cargo audit`/`cargo deny check` steps immediately
+  after were reading the runner-local RE-RESOLVED graph, not the committed
+  lockfile. Before this cycle that only mattered on the (rare) drift-fail
+  path, where the whole job went red anyway; with `continue-on-error`
+  making drift routine, this would have made audit/deny **permanently**
+  scan a never-committed graph while reporting green — a committed lock
+  pinning a vulnerable version could be silently "healed" by
+  `generate-lockfile` before audit ever saw it. Fixed: the script now
+  restores the committed `Cargo.lock` unconditionally (via `set +e`/`set
+  -e` around the diff so the restore always runs, exit code still
+  reflects whether drift was found) before falling through to the
+  audit/deny steps. Verified end-to-end with a deliberately-corrupted
+  lockfile: script exits 1, writes the diff to a fake `$GITHUB_STEP_SUMMARY`,
+  and restores the exact pre-run (corrupted, i.e. "as it would be
+  committed") content — confirmed byte-for-byte via `grep -c`. Also fixed
+  the reviewer's LOW finding: neither `deny.toml` (root or Tauri) had an
+  explicit `[sources]` policy, so `unknown-registry`/`unknown-git` sat at
+  cargo-deny's default `"warn"` — a lockfile entry repointed at an
+  attacker-controlled git URL wouldn't hard-fail. Added `unknown-registry
+  = "deny"` / `unknown-git = "deny"` to both files (verified first that
+  neither graph has any git dependency today, so this can't spuriously
+  break anything). Re-ran `cargo deny check` on both workspaces after:
+  `sources ok` on both.
+- Also independently caught and fixed my own bug before the reviewer even
+  ran: piping `diff -u ... | tee ...` then reading `$?` captures `tee`'s
+  exit status, not `diff`'s, unless `pipefail` is set (not guaranteed
+  across bash invocations) — rewrote to redirect to a file and capture
+  `$?` directly inside a `set +e`/`set -e` bracket instead.
+- **Full gate**: `cargo build --workspace`/`cargo test --workspace` all
+  green (0 failures, every crate). `cargo fmt --all --check` clean (both
+  workspaces). `cargo check --locked --manifest-path
+  app/src-tauri/Cargo.toml --all-targets` clean. `cargo deny check`
+  (root) and `cargo deny --manifest-path app/src-tauri/Cargo.toml check`
+  both `advisories ok, bans ok, licenses ok, sources ok`. Workflow YAML
+  syntax validated with `python3 -c 'import yaml; yaml.safe_load(...)'`.
+  The full drift-check script manually simulated under `bash -e` for both
+  the no-drift and drift-found paths (see above). Frontend untouched, not
+  re-run.
+- No `crypto-reviewer`/`threat-model-checker` run: CI-config and
+  dependency-policy only, no crypto/MLS/OPAQUE code, no server-visible
+  metadata, no application-code architecture change.
+- Committed `85d8603` (`fix(ci): stop Tauri lockfile drift check from
+  blocking main on upstream churn`), 4 files changed
+  (`.github/workflows/ci-rust.yml`, `app/src-tauri/Cargo.lock`,
+  `app/src-tauri/deny.toml`, `deny.toml`), pushed clean (`3099a70..85d8603
+  main -> main`). Watched all 3 checks (`CI — Rust`, `CI — Frontend`, `CI —
+  Live-backend E2E`) to completion this session — **all green**, confirmed
+  before ending the cycle (not deferred to a future session, unlike most
+  prior cycles' CI-verification notes).
+- Target dir hygiene: `target/` at 9.9G (well under the 20G threshold), no
+  pruning needed.
+- **Next cycle candidates (carried/updated):**
+  1. **Resolved this cycle**: CI red on main (Tauri Cargo.lock drift,
+     2nd occurrence). The recurring FAILURE MODE is now structurally
+     closed (non-blocking + restore-after-diff), not just this instance
+     patched — future upstream patch bumps will show as an orange
+     step + job summary note, not red CI. Don't expect to see this class
+     again; if it recurs anyway, something deeper changed (e.g. a real
+     manifest/lock mismatch) and deserves fresh investigation, not another
+     lockfile refresh.
+  2. Carried, unchanged, the single largest remaining piece of issue #2
+     (P0-blocker, security, frontend): MLS commit-processing
+     consumer-loop wiring into `useMessages.ts`/`useWelcomePoller.ts` —
+     genuinely FEATURE-mode-scale (crypto-lead/mls-engineer + fresh
+     crypto-reviewer pass), not a stabilization-sized fix.
+  3. Carried: PQ hybrid Phase A prerequisite (human/crypto-lead policy
+     call, still blocked on openmls upstream).
+  4. Carried, still explicitly BLOCKED: `AbuseSignalStore`/
+     `RegionRouter::broadcast_abuse_signal` wiring needs F3 + the
+     HMAC-vs-plain-SHA256 gate resolved first.
+  5. Carried (cycle 480's optional note, unchanged): prd.md §3.3 doesn't
+     yet document the consumed-`key_packages` retention window.
+  6. Carried (cycle 480's optional note, unchanged): this file is now
+     well past the ~192K/2385-line point cycle 360 last archived at —
+     good STABILIZATION candidate for a future cycle with no more
+     pressing fix on hand (cycles 320-339 precedent →
+     `.claude/memory/archive/`).
+  7. Carried (unchanged from cycle 480's list): `mls_confirm_incoming_commit`
+     handle-consumption-before-`MLS_CTX`-resolution ordering; epoch
+     reconciliation; `mls_group_members` `isSelf` leaf-index vs
+     signature-key hardening; `PendingRemovalBanner` local cross-check
+     hardening; GitHub issues #1/#3/#4/#5; prd.md §10 REST API doc
+     drift; `pending_removals` forged-signal defense; unconsumed
+     `RemovalRequired` WS event; `key_packages.device_id` FK doc drift;
+     `GroupRepository::save` blind `ON CONFLICT DO UPDATE`; bare
+     `var(--photon)` CSS token.
+
+## Previous state (2026-09-11, cycle 480 — STABILIZATION: land orphaned WIP adding the consumed-`key_packages` retention sweep, fix 2 security-auditor required findings before committing, commit 8d7e5b0)
 
 - Mode selection: counter 479→480, 480 % 5 == 0 → STABILIZATION.
 - `gh run list --limit 5` green on main (cycle 479's push). `gh issue
