@@ -77,36 +77,19 @@ pub enum MlsError {
     #[error("mls pending proposals error")]
     PendingProposals,
     /// The Commit passed to [`process_incoming_commit`] /
-    /// [`inspect_incoming_commit`] was produced by THIS device — either
-    /// openmls said so explicitly (pre-merge case), or the bytes hash to the
-    /// same value as the Commit this device most recently confirmed/merged
-    /// itself (post-merge case, this crate's own detection — see the "Case 2"
-    /// section below for why a hash match, not a byte compare, is what's
-    /// actually checked). Distinct from
+    /// [`inspect_incoming_commit`] hashes to the same value as the Commit
+    /// this device most recently confirmed/merged itself — this crate's own
+    /// exact-bytes tracking, described in full below. Distinct from
+    /// [`MlsError::OwnCommitPending`] (openmls's OWN pre-merge signal,
+    /// unverified and forgeable — see that variant's doc comment for why the
+    /// two must not be conflated) and from
     /// [`MlsError::Decrypt`] so a consumer loop can tell "this is my own
     /// commit, already applied locally, skip it" apart from "this merge
     /// genuinely failed, the group has forked" — conflating the two would
     /// silently turn a real fork into an ignored message, which is the exact
     /// failure `process_incoming_commit` exists to prevent.
     ///
-    /// # Case 1 — pre-merge: openmls's own signal
-    /// Fires while the own Commit is still at the group's CURRENT epoch (i.e.
-    /// not yet merged locally). Two distinct openmls-0.8.1 signals map here;
-    /// which one fires depends on the group's wire-format policy, and BOTH are
-    /// the library's own detection, never a comparison written in this crate:
-    /// - `ValidationError::CannotDecryptOwnMessage` — the signal that actually
-    ///   fires for this codebase. [`create_group`] / [`join_group`] leave
-    ///   openmls's default wire-format policy in place, so handshake messages
-    ///   are `PrivateMessage`-framed, and openmls compares the *authenticated*
-    ///   `sender_data.leaf_index` against `own_leaf_index()` in
-    ///   `framing/validation.rs` before decrypting the content.
-    /// - `StageCommitError::OwnCommit` — the equivalent check in
-    ///   `mls_group/staged_commit.rs`, reachable only under a plaintext
-    ///   (`PublicMessage`) handshake policy, which this codebase never
-    ///   configures today. Mapped anyway so a future wire-format-policy change
-    ///   cannot silently downgrade this variant back to [`MlsError::Decrypt`].
-    ///
-    /// # Case 2 — post-merge: this crate's own exact-bytes tracking
+    /// # Post-merge: this crate's own exact-bytes tracking
     /// Once this device has merged its own Commit, openmls itself can no
     /// longer tell a re-delivery of those same bytes apart from a genuinely
     /// stale/forked commit — both land at "wrong epoch" inside openmls. This
@@ -186,11 +169,71 @@ pub enum MlsError {
     /// A reload between stage and confirm still lets the confirm itself
     /// succeed, and now also correctly promotes the SAME stage-time hash it
     /// would have pre-reload (previously this recorded nothing). A
-    /// re-delivery that would have hit `OwnCommit` before the reload
-    /// continues to hit `OwnCommit` after it, for both the confirmed and the
-    /// still-pending case.
+    /// re-delivery that would have hit this variant before the reload
+    /// continues to hit it after it, for the already-confirmed case; a
+    /// re-delivery arriving in the still-pending window (staged but not yet
+    /// confirmed, before or after a reload) is instead recognized via
+    /// [`MlsError::OwnCommitPending`] — still correctly identified as "this
+    /// device's own", just via openmls's own signal rather than this crate's
+    /// hash tracking, since there is nothing confirmed yet to hash-match
+    /// against.
     #[error("mls own commit error")]
     OwnCommit,
+    /// The Commit passed to [`process_incoming_commit`] /
+    /// [`inspect_incoming_commit`] carries openmls's OWN pre-merge signal
+    /// that its sender is this device's own current leaf — fired while the
+    /// own Commit is still at the group's CURRENT epoch (i.e. not yet merged
+    /// locally). Two distinct openmls-0.8.1 signals map here; which one fires
+    /// depends on the group's wire-format policy, and BOTH are the library's
+    /// own detection, never a comparison written in this crate:
+    /// - `ValidationError::CannotDecryptOwnMessage` — the signal that actually
+    ///   fires for this codebase. [`create_group`] / [`join_group`] leave
+    ///   openmls's default wire-format policy in place, so handshake messages
+    ///   are `PrivateMessage`-framed, and openmls compares `sender_data`'s
+    ///   `leaf_index` against `own_leaf_index()` in `framing/validation.rs`
+    ///   before decrypting the content.
+    /// - `StageCommitError::OwnCommit` — the equivalent check in
+    ///   `mls_group/staged_commit.rs`, reachable only under a plaintext
+    ///   (`PublicMessage`) handshake policy, which this codebase never
+    ///   configures today. Mapped anyway so a future wire-format-policy change
+    ///   cannot silently downgrade this variant back to [`MlsError::Decrypt`].
+    ///
+    /// # NOT authenticated — forgeable by any current group member
+    /// Verified directly against vendored openmls-0.8.1
+    /// (`framing/validation.rs`'s `from_inbound_ciphertext`): `sender_data` is
+    /// decrypted with `sender_data_secret`, a value shared by every member of
+    /// the CURRENT epoch, not a value unique to the claimed sender — the
+    /// `leaf_index` this check compares is authenticated only by that
+    /// epoch-wide AEAD tag, not by the claimed sender's own signature key.
+    /// This check runs BEFORE `process_message` verifies the Commit's actual
+    /// signature. So any current group member (including a device this
+    /// Commit is about to remove) can construct a `PrivateMessage` whose
+    /// `sender_data.leaf_index` equals THIS device's own leaf index,
+    /// triggering this same variant, without that message having anything to
+    /// do with a commit this device actually authored. A prior version of
+    /// this doc comment incorrectly called `sender_data.leaf_index`
+    /// "authenticated" without qualifying which key authenticates it — this
+    /// is the correction.
+    ///
+    /// # Do NOT auto-ack on this variant alone
+    /// Unlike [`MlsError::OwnCommit`] (a positive hash match against a value
+    /// only this crate could have produced), this variant proves nothing by
+    /// itself: it is consistent with (a) a genuine pre-confirm echo of a
+    /// commit this device really did stage — see [`PendingOwnCommit`] — OR
+    /// (b) the forged message described above. A consumer loop MUST NOT
+    /// treat this variant as "already applied, safe to ack" the way it may
+    /// treat [`MlsError::OwnCommit`]: in case (a) the commit is NOT yet
+    /// applied locally (the group is still in `PendingCommit` state, not
+    /// merged), so acking would delete the Delivery Service's only copy
+    /// before this device has actually merged it; in case (b) acking would
+    /// delete a message that was never this device's own commit at all. The
+    /// safe action is to treat this the same as any other rejection: do not
+    /// ack, log a content-free diagnostic, and let the existing unacked-
+    /// envelope retry path (a future poll, remount, or chat switch) handle
+    /// it. This is a strictly more conservative posture than
+    /// [`MlsError::Decrypt`]'s existing "do not ack" handling — never less.
+    #[error("mls own commit pending error")]
+    OwnCommitPending,
     /// [`merge_inspected_commit`] was asked to merge a [`StagedCommit`] that
     /// does not belong to `group`'s CURRENT epoch, or belongs to a different
     /// group entirely.
@@ -839,7 +882,7 @@ pub fn abort_remove_member(
 /// eviction assertions for the sibling behaviour from the committer side of
 /// this exact codepath). This function still returns `Ok(new_epoch)` in that
 /// case — it does **not** special-case or report the eviction. Callers MUST
-/// separately check `group.is_active()` (or otherwise detect eviction) after
+/// separately check [`group_is_active`] (or otherwise detect eviction) after
 /// calling this; this primitive has no opinion on what a caller does with
 /// that information.
 ///
@@ -873,14 +916,18 @@ pub fn abort_remove_member(
 ///     `app/src/workers/crypto.worker.ts`). Reconciling the two remains a
 ///     separate follow-up; do not treat this return value as authoritative
 ///     against any server-side epoch.
-/// (b) **Not wired into any poller/consumer loop.** `app/src/hooks/useMessages.ts`
-///     and `app/src/hooks/useWelcomePoller.ts` still ack-and-drop every Commit
-///     envelope today — nothing calls this function in the running
-///     application. Wiring it in is a deliberate separate follow-up. The two
-///     preconditions that used to block it are now built (own-commit
-///     recognition via [`MlsError::OwnCommit`], see item (f); a pre-merge
-///     policy point via [`inspect_incoming_commit`], see item (d)); what
-///     remains before wiring is the epoch-reconciliation design of item (a).
+/// (b) **Wired into `app/src/hooks/useMessages.ts`'s per-group poll loop** —
+///     no longer an open gap. `useWelcomePoller.ts` (the global,
+///     once-per-identity poller) does NOT call this function; an earlier
+///     attempt wired it there instead and crypto-reviewer flagged that the
+///     resulting two-independent-poll-cursor split (Commit on one timer,
+///     Application decrypt for the same group on another) could merge a
+///     Commit ahead of a same-epoch Application message still queued on the
+///     other cursor, permanently stranding it under `max_past_epochs(0)` —
+///     see `useMessages.ts`'s top-of-module doc comment for the full
+///     argument. This function is called unconditionally (see item (d) for
+///     why that remains a deliberate, accepted risk rather than a gap); the
+///     epoch-reconciliation gap of item (a) is orthogonal and still open.
 /// (c) **Interaction with a locally staged-but-unconfirmed commit — verified,
 ///     not guessed.** Per the vendored openmls-0.8.1 source
 ///     (`src/group/mls_group/processing.rs`), `merge_staged_commit` ends by
@@ -901,22 +948,30 @@ pub fn abort_remove_member(
 ///     (only one Commit per epoch can ever win); detecting the loss and
 ///     re-staging the caller's own operation is the consumer loop's job, not
 ///     this primitive's.
-/// (d) **No policy-inspection point IN THIS FUNCTION — RESOLVED elsewhere; use
-///     the two-phase API for wiring.** This function still unconditionally
-///     merges ANY validly-framed Commit: it never exposes the `StagedCommit`'s
-///     add/remove proposals or the committer's identity before calling
-///     [`MlsGroup::merge_staged_commit`], so there is no veto point in THIS
-///     call chain. That is now a deliberate property of the one-shot path,
-///     kept unchanged for its existing callers and tests — not an open gap.
-///     The inspection point that item (d) demanded now exists as the
-///     [`inspect_incoming_commit`] / [`merge_inspected_commit`] pair, which
-///     surfaces the committer leaf index, the add/remove proposals, and
-///     `self_removed` BEFORE any merge (see [`StagedCommitInfo`]). A consumer
-///     loop MUST wire the two-phase API, not this function: wiring THIS
-///     function as-is would still mean any authenticated group member can
-///     silently evict or add members from every bystander's perspective with
-///     no application-level veto anywhere in the path. Note also that refusing
-///     a Commit is terminal for these bytes — see
+/// (d) **No policy-inspection point IN THIS FUNCTION — accepted risk, wired
+///     as-is.** This function still unconditionally merges ANY validly-framed
+///     Commit: it never exposes the `StagedCommit`'s add/remove proposals or
+///     the committer's identity before calling [`MlsGroup::merge_staged_commit`],
+///     so there is no veto point in THIS call chain. The inspection point
+///     that would enable one exists as the [`inspect_incoming_commit`] /
+///     [`merge_inspected_commit`] pair, which surfaces the committer leaf
+///     index, the add/remove proposals, and `self_removed` BEFORE any merge
+///     (see [`StagedCommitInfo`]) — but it remains UNUSED: no
+///     application-level policy is designed yet to gate on (e.g. "only an
+///     admin may remove members"), so a two-phase caller today would just be
+///     "inspect, then unconditionally confirm" with an added
+///     orphaned-handle-on-crash window (item (c) applies identically there)
+///     and no other benefit. `app/src/hooks/useMessages.ts` therefore wires
+///     THIS one-shot function directly — a deliberate, signed-off accepted
+///     risk (see `mls_process_commit`'s "Accepted risk" doc comment in
+///     `wasm_exports.rs` for the full reasoning and the bound on it: MLS's
+///     own membership/signature authentication, symmetric with every other
+///     client of the same protocol), not an oversight. Any authenticated
+///     group member CAN silently evict or add members from every bystander's
+///     perspective with no application-level veto anywhere in the path, for
+///     as long as no such policy exists; revisit this note — and switch the
+///     wiring to the two-phase pair — the day one is designed. Note also that
+///     refusing a Commit is terminal for these bytes — see
 ///     [`inspect_incoming_commit`]'s "discard is quarantine, not undo" section.
 /// (e) **No support for proposal-by-reference (RFC 9420 §12.4).** This
 ///     function treats `ProcessedMessageContent::ProposalMessage` as
@@ -931,21 +986,26 @@ pub fn abort_remove_member(
 ///     proposals (`ProposalOrRef::Proposal`), never references — a peer or a
 ///     future proposal-queueing feature that uses references would break
 ///     against this function as written.
-/// (f) **Own-commit granularity — RESOLVED, pre-merge AND post-merge.** The
-///     own-commit case is no longer swallowed in either shape: `process_message`
-///     failures route through `classify_process_message_error`, which maps
-///     openmls's own own-leaf detection (`ValidationError::CannotDecryptOwnMessage`
-///     under this codebase's `PrivateMessage` handshake framing, and
+/// (f) **Own-commit granularity — RESOLVED, pre-merge AND post-merge, as TWO
+///     DISTINCT variants.** The own-commit case is no longer swallowed in
+///     either shape: `process_message` failures route through
+///     `classify_process_message_error`, which maps openmls's own own-leaf
+///     detection (`ValidationError::CannotDecryptOwnMessage` under this
+///     codebase's `PrivateMessage` handshake framing, and
 ///     `StageCommitError::OwnCommit` under a plaintext framing this codebase
-///     never configures) to the distinct [`MlsError::OwnCommit`] for a commit
-///     still at the CURRENT epoch; AND [`stage_incoming_commit`] separately
-///     checks `commit_bytes` against `last_own_commit` BEFORE any of that —
-///     the [`OwnCommitHash`] of the most recently confirmed/merged own
-///     commit for this group, hashed by the WASM layer at stage time and
-///     promoted on a successful [`confirm_remove_member`] merge (see
-///     [`confirm_remove_member`]'s doc comment) — so a redelivery AFTER this
-///     device merged its own commit is caught too. Read [`MlsError::OwnCommit`]'s doc
-///     comment for the full split and the (now much narrower) remaining bound.
+///     never configures) to [`MlsError::OwnCommitPending`] for a commit still
+///     at the CURRENT epoch — this signal is openmls's own, unverified by
+///     this crate, and forgeable (see that variant's doc comment); AND
+///     [`stage_incoming_commit`] separately checks `commit_bytes` against
+///     `last_own_commit` BEFORE any of that — the [`OwnCommitHash`] of the
+///     most recently confirmed/merged own commit for this group, hashed by
+///     the WASM layer at stage time and promoted on a successful
+///     [`confirm_remove_member`] merge (see [`confirm_remove_member`]'s doc
+///     comment) — so a redelivery AFTER this device merged its own commit is
+///     caught too, as the distinct, hash-verified [`MlsError::OwnCommit`].
+///     Read both variants' doc comments for the full split, why they must
+///     not be treated the same by a consumer loop, and the (now much
+///     narrower) remaining bound.
 ///     Every other signal (genuine validation failures, wrong-epoch commits,
 ///     `NoPastEpochData` from this group's `max_past_epochs(0)` setting,
 ///     secret-reuse rejections) deliberately remains [`MlsError::Decrypt`]:
@@ -961,6 +1021,37 @@ pub fn process_incoming_commit(
     let (staged, _committer_leaf_index) =
         stage_incoming_commit(group, commit_bytes, provider, last_own_commit)?;
     merge_inspected_commit(group, staged, provider)
+}
+
+/// The reliable self-eviction signal: `true` unless `group` has processed a
+/// Commit that removed the caller's own leaf, in which case openmls flips its
+/// internal state to `MlsGroupState::Inactive` and this returns `false`.
+///
+/// # Why this exists instead of a leaf-index comparison
+/// The obvious alternative — "is my leaf index still present in
+/// `group.members()`?" — has a false negative. RFC 9420 §12.3 requires Remove
+/// proposals to be applied before Add proposals within a single Commit, and
+/// §12.1.1 has Add fill the tree's LEFTMOST BLANK leaf (openmls's
+/// `free_leaf_index()`, `treesync/diff.rs`). A single "kick and replace"
+/// Commit — Remove this device's leaf, Add a new member, both in the same
+/// Commit — therefore commonly lands the new member on exactly the leaf index
+/// this device just vacated. [`MlsGroup::own_leaf_index`] on the evicted
+/// handle still reports that same (now reused) index, so a caller comparing
+/// `leaf_index == own_leaf` against the post-merge roster wrongly matches the
+/// new member's row as "self" and silently misses its own eviction. See
+/// `test_kick_and_replace_commit_reuses_vacated_leaf_defeats_leaf_index_self_check`
+/// for the exact reproduction, and RFC 9420 §12.1.1 / §12.3. `is_active()` has
+/// no such failure mode: it is openmls's own group state, not a leaf-index
+/// comparison, so it is unaffected by leaf reuse. This function is a thin,
+/// infallible accessor over that state — nothing here can fail, so unlike
+/// most of this module's public functions it does not return a `Result`.
+///
+/// Exported to WASM as `mls_group_is_active` (`wasm_exports.rs`); see that
+/// export's doc comment for why it is the signal the one-shot
+/// `mls_process_commit` receive path uses instead of `mls_group_members`'s
+/// `isSelf`.
+pub fn group_is_active(group: &MlsGroup) -> bool {
+    group.is_active()
 }
 
 /// Shared front half of [`process_incoming_commit`] and
@@ -1069,8 +1160,10 @@ fn stage_incoming_commit(
 /// Map an openmls `process_message` failure onto this module's coarse error
 /// enum, singling out the library's own "this Commit came from my own leaf"
 /// detection so a consumer loop can skip it instead of mistaking it for a
-/// fork. See [`MlsError::OwnCommit`] for why BOTH openmls signals are matched
-/// and for the limit of the detection.
+/// fork. See [`MlsError::OwnCommitPending`] for why BOTH openmls signals map
+/// to THAT variant (not [`MlsError::OwnCommit`], which is reserved for this
+/// crate's own hash-verified post-merge tracking) and for the limit of the
+/// detection.
 ///
 /// Every other failure — genuine validation failures, wrong-epoch commits,
 /// `NoPastEpochData`, secret reuse, storage errors — deliberately stays
@@ -1083,7 +1176,9 @@ fn classify_process_message_error<StorageError>(
 ) -> MlsError {
     match err {
         ProcessMessageError::ValidationError(ValidationError::CannotDecryptOwnMessage)
-        | ProcessMessageError::InvalidCommit(StageCommitError::OwnCommit) => MlsError::OwnCommit,
+        | ProcessMessageError::InvalidCommit(StageCommitError::OwnCommit) => {
+            MlsError::OwnCommitPending
+        }
         _ => MlsError::Decrypt,
     }
 }
@@ -1180,10 +1275,11 @@ pub struct StagedCommitInfo {
 /// Identical classification to [`process_incoming_commit`]: [`MlsError::Codec`]
 /// for malformed wire bytes, [`MlsError::UnexpectedMessage`] for a non-Commit
 /// (rejected by the same cleartext `content_type` guard, before any decrypt),
-/// [`MlsError::OwnCommit`] for a Commit this device authored — either because
-/// openmls's own pre-merge signal fired, or because `hash_own_commit(commit_bytes)`
-/// matches `last_own_commit` (post-merge case; see [`MlsError::OwnCommit`]'s
-/// "Case 2" section) — and [`MlsError::Decrypt`] for everything else.
+/// [`MlsError::OwnCommitPending`] for a Commit this device authored per
+/// openmls's own unverified pre-merge signal, [`MlsError::OwnCommit`] when
+/// `hash_own_commit(commit_bytes)` instead matches `last_own_commit`
+/// (post-merge case, hash-verified by this crate), and [`MlsError::Decrypt`]
+/// for everything else.
 pub fn inspect_incoming_commit(
     group: &mut MlsGroup,
     commit_bytes: &[u8],
@@ -1249,7 +1345,7 @@ pub fn inspect_incoming_commit(
 /// caller's own leaf returns `Ok(new_epoch)` and flips the group to inactive
 /// internally. Unlike the one-shot path, a caller here has already been told
 /// this would happen — [`StagedCommitInfo::self_removed`] — and can decline the
-/// merge. Callers that merge anyway MUST still check `group.is_active()`.
+/// merge. Callers that merge anyway MUST still check [`group_is_active`].
 ///
 /// # No `last_own_commit` parameter — deliberate
 /// This function takes no own-commit hash because it cannot receive one to
@@ -1456,6 +1552,34 @@ pub fn import_provider_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pins `MlsError::OwnCommit`'s `Display` string against
+    /// `app/src/workers/cryptoWorkerErrors.ts`'s `MLS_OWN_COMMIT_ERROR`
+    /// sentinel — the two are compared across the Comlink/wasm-bindgen
+    /// boundary as plain strings (`JsError::new(msg)` carries only the
+    /// `Display` output, no separate error-code field), so a drift here
+    /// would silently misroute a device's own-commit echo into the generic
+    /// failure branch on the TypeScript side instead of the ack-only one.
+    /// Update BOTH sides together if this string ever changes.
+    #[test]
+    fn own_commit_error_display_matches_ts_sentinel() {
+        assert_eq!(MlsError::OwnCommit.to_string(), "mls own commit error");
+    }
+
+    /// Pins `MlsError::OwnCommitPending`'s `Display` string against
+    /// `app/src/workers/cryptoWorkerErrors.ts`'s `MLS_OWN_COMMIT_PENDING_ERROR`
+    /// sentinel, same reasoning as `own_commit_error_display_matches_ts_sentinel`
+    /// above — this string is distinct from `MlsError::OwnCommit`'s precisely
+    /// so the TypeScript side can tell the unverified, forgeable pre-merge
+    /// signal apart from the hash-verified post-merge one and NOT auto-ack on
+    /// it (see `MlsError::OwnCommitPending`'s doc comment).
+    #[test]
+    fn own_commit_pending_error_display_matches_ts_sentinel() {
+        assert_eq!(
+            MlsError::OwnCommitPending.to_string(),
+            "mls own commit pending error"
+        );
+    }
 
     /// Create a group, encrypt "hello", and decrypt it as a second member;
     /// assert the recovered plaintext matches.
@@ -3052,10 +3176,14 @@ mod tests {
     // item (f) (own-commit granularity) and item (d) (a policy-inspection
     // point before the merge).
 
-    /// Item (f): a device that processes a Commit IT ITSELF PRODUCED must get
-    /// the distinct [`MlsError::OwnCommit`], not the catch-all
-    /// [`MlsError::Decrypt`] — otherwise a consumer loop cannot tell "already
-    /// applied locally, skip" from "the merge failed, we have forked".
+    /// Item (f): a device that processes a Commit IT ITSELF PRODUCED, before
+    /// merging it, must get the distinct [`MlsError::OwnCommitPending`], not
+    /// the catch-all [`MlsError::Decrypt`] — otherwise a consumer loop cannot
+    /// tell "openmls says this is mine, still pending" apart from "the merge
+    /// failed, we have forked". See [`MlsError::OwnCommitPending`]'s doc
+    /// comment for why this pre-merge signal is forgeable and must NOT be
+    /// treated as "safe to ack" the way the hash-verified, post-merge
+    /// [`MlsError::OwnCommit`] (Case 2, pinned by the sibling test below) is.
     ///
     /// Deliberately distinct from
     /// [`test_process_incoming_commit_silently_drops_receivers_own_staged_commit`],
@@ -3063,10 +3191,12 @@ mod tests {
     /// proposal* is dropped while merging SOMEONE ELSE's commit. Here the
     /// device processes the very commit IT sent, and never merges anything.
     ///
-    /// Also pins the LIMIT documented on [`MlsError::OwnCommit`]: the signal
-    /// only exists while the own commit is still at the current epoch. Once
-    /// merged, a re-delivery of the same bytes is indistinguishable from any
-    /// other stale commit and falls back to [`MlsError::Decrypt`].
+    /// Also pins the LIMIT documented on [`MlsError::OwnCommitPending`]: the
+    /// signal only exists while the own commit is still at the current
+    /// epoch. Once merged, a re-delivery of the same bytes is
+    /// indistinguishable from any other stale commit and falls back to
+    /// [`MlsError::Decrypt`] (unless a confirmed [`OwnCommitHash`] is
+    /// supplied — that is Case 2, the sibling test below).
     #[test]
     fn test_process_incoming_commit_reports_own_commit_distinctly() {
         let alice_provider = OpenMlsRustCrypto::default();
@@ -3103,9 +3233,9 @@ mod tests {
         // when the Delivery Service echoes a device's own commit back to it.
         let own = process_incoming_commit(&mut alice_group, &commit_bytes, &alice_provider, None);
         assert!(
-            matches!(own, Err(MlsError::OwnCommit)),
-            "a device processing its own Commit must get the distinct OwnCommit error, \
-             not the catch-all Decrypt: got {own:?}"
+            matches!(own, Err(MlsError::OwnCommitPending)),
+            "a device processing its own not-yet-merged Commit must get the distinct \
+             OwnCommitPending error, not the catch-all Decrypt: got {own:?}"
         );
         assert_eq!(
             alice_group.epoch().as_u64(),
@@ -3658,6 +3788,139 @@ mod tests {
         assert!(
             !bob_group.is_active(),
             "merging his own eviction must deactivate bob's group"
+        );
+    }
+
+    /// F3 regression: a single "kick and replace" Commit (Remove bob's leaf
+    /// AND Add dave, proposed together) commonly lands dave's new leaf on
+    /// exactly bob's just-vacated leaf index. RFC 9420 §12.3 applies Remove
+    /// before Add within one Commit, and §12.1.1 has Add fill the tree's
+    /// LEFTMOST BLANK leaf (openmls's `free_leaf_index()`,
+    /// `treesync/diff.rs`) — after bob's removal, that leftmost blank IS
+    /// bob's own old index. [`MlsGroup::own_leaf_index`] on bob's evicted
+    /// handle still reports that same (now reused) index, so a caller that
+    /// detects self-eviction by comparing `leaf_index == own_leaf` against
+    /// the post-merge roster wrongly treats dave's row as "self" and silently
+    /// misses its own eviction. This test pins both halves of the contrast:
+    /// the leaf-index check WOULD wrongly match (asserted explicitly below),
+    /// while [`group_is_active`] correctly reports `false`.
+    #[test]
+    fn test_kick_and_replace_commit_reuses_vacated_leaf_defeats_leaf_index_self_check() {
+        let alice_provider = OpenMlsRustCrypto::default();
+        let bob_provider = OpenMlsRustCrypto::default();
+        let charlie_provider = OpenMlsRustCrypto::default();
+        let dave_provider = OpenMlsRustCrypto::default();
+        let alice = generate_identity(b"alice", &alice_provider).unwrap();
+        let bob = generate_identity(b"bob", &bob_provider).unwrap();
+        let charlie = generate_identity(b"charlie", &charlie_provider).unwrap();
+        let dave = generate_identity(b"dave", &dave_provider).unwrap();
+        let bob_kp = generate_key_package(&bob, &bob_provider).unwrap();
+        let charlie_kp = generate_key_package(&charlie, &charlie_provider).unwrap();
+        let dave_kp = generate_key_package(&dave, &dave_provider).unwrap();
+
+        // alice=0, bob=1, charlie=2 — bob occupies a non-trivial leaf.
+        let mut alice_group = create_group(&alice, &alice_provider).unwrap();
+        let welcome1 = add_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+        let mut bob_group = join_group(&welcome1, &bob_provider).unwrap();
+        let (commit2, _welcome2, _gi) = alice_group
+            .add_members(
+                &alice_provider,
+                &alice.signer,
+                &[charlie_kp.key_package().clone()],
+            )
+            .unwrap();
+        alice_group.merge_pending_commit(&alice_provider).unwrap();
+        process_incoming_commit(
+            &mut bob_group,
+            &commit2.to_bytes().unwrap(),
+            &bob_provider,
+            None,
+        )
+        .unwrap();
+
+        let bob_leaf = alice_group
+            .members()
+            .find(|m| {
+                BasicCredential::try_from(m.credential.clone())
+                    .map(|basic| basic.identity() == b"bob")
+                    .unwrap_or(false)
+            })
+            .map(|m| m.index.u32())
+            .expect("bob must be in alice's roster");
+
+        // A single Commit: Remove bob's leaf AND Add dave, together — RFC
+        // 9420 §12.3 (Remove applied before Add) + §12.1.1 (Add fills the
+        // leftmost blank leaf) is what should make dave's new leaf equal
+        // bob's just-vacated one.
+        let commit_bundle = alice_group
+            .commit_builder()
+            .propose_removals([LeafNodeIndex::new(bob_leaf)])
+            .propose_adds([dave_kp.key_package().clone()])
+            .load_psks(alice_provider.storage())
+            .unwrap()
+            .build(
+                alice_provider.rand(),
+                alice_provider.crypto(),
+                &alice.signer,
+                |_| true,
+            )
+            .unwrap()
+            .stage_commit(&alice_provider)
+            .unwrap();
+        let (commit_out, _welcome_out, _group_info_out) = commit_bundle.into_contents();
+        let commit_bytes = commit_out.to_bytes().unwrap();
+        alice_group.merge_pending_commit(&alice_provider).unwrap();
+
+        let dave_leaf = alice_group
+            .members()
+            .find(|m| {
+                BasicCredential::try_from(m.credential.clone())
+                    .map(|basic| basic.identity() == b"dave")
+                    .unwrap_or(false)
+            })
+            .map(|m| m.index.u32())
+            .expect("dave must be in alice's post-merge roster");
+        assert_eq!(
+            dave_leaf, bob_leaf,
+            "precondition this test exercises: dave's new leaf must land on \
+             bob's just-vacated leaf index (RFC 9420 §12.1.1 / §12.3) — if \
+             this fails, openmls stopped co-locating them and the scenario \
+             below no longer reproduces the F3 false negative"
+        );
+
+        // Bob merges the Commit that evicted him.
+        process_incoming_commit(&mut bob_group, &commit_bytes, &bob_provider, None).unwrap();
+
+        // F3 / RFC 9420 §12.1.1 + §12.3: a leaf-index-based self check WOULD
+        // wrongly report "still a member" here — bob's own_leaf_index still
+        // equals dave's (new) leaf index, and bob's post-merge roster still
+        // has a row at that index (now dave's, not bob's).
+        assert_eq!(
+            bob_group.own_leaf_index().u32(),
+            dave_leaf,
+            "own_leaf_index must still report the reused index post-eviction \
+             — the false-negative this test exists to pin"
+        );
+        assert!(
+            bob_group
+                .members()
+                .any(|m| m.index.u32() == bob_group.own_leaf_index().u32()),
+            "the post-merge roster must still have a row at the reused index \
+             (dave's) — a leaf_index == own_leaf check would misclassify \
+             that row as self and miss the eviction"
+        );
+
+        // group_is_active is the correct signal and is unaffected by leaf reuse.
+        assert!(
+            !group_is_active(&bob_group),
+            "group_is_active must correctly report the eviction, unlike the \
+             leaf-index comparison asserted above"
         );
     }
 

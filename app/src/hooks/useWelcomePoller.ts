@@ -2,8 +2,22 @@
  * useWelcomePoller — global poll for MLS Welcome envelopes.
  *
  * Fires onNewGroup when a Welcome is successfully processed via mlsJoinGroup
- * in the WASM crypto layer.  Commit and Proposal envelopes are acked silently.
- * Application envelopes are left untouched for the per-group useMessages hook.
+ * in the WASM crypto layer.  Proposal envelopes are acked silently (see the
+ * Proposal branch below — an earlier design left them unacked on a
+ * now-retracted theory; RFC 9420 §12.4 resolves a by-reference proposal
+ * against the receiver's own local proposal store, which this codebase never
+ * populates, so leaving the envelope unacked bought no safety and only grew
+ * an unbounded backlog).  Commit
+ * envelopes are skipped entirely without acking — useMessages.ts (the
+ * per-active-group hook) owns Commit processing for its own group, in the
+ * SAME poll loop/cursor as its Application decrypt, so the two stay in
+ * server-delivery order relative to each other (see useMessages.ts's
+ * top-of-module doc comment for why splitting Commit into this separate
+ * global poller was tried and reverted — it broke that ordering guarantee:
+ * with `max_past_epochs(0)`, a Commit merged on this hook's independent
+ * timer could race ahead of an Application message from the same epoch
+ * still queued on useMessages.ts's own timer, permanently stranding it).
+ * Application envelopes are likewise left untouched for that hook.
  *
  * Security invariants:
  * - Welcome bytes are passed directly to mlsJoinGroup; never logged or stored.
@@ -62,8 +76,39 @@ export function useWelcomePoller(
 				return;
 			}
 
+			if (env.message_type === "Commit") {
+				// Commit envelopes are owned by useMessages.ts's per-group poll
+				// loop — see this module's top doc comment for why. Safe to leave
+				// unacked here: this hook's own fetch cursor still advances past it
+				// regardless (poll()'s comment below), and useMessages is a wholly
+				// separate hook instance with its own independent cursor,
+				// unaffected by this one.
+				return;
+			}
+
 			if (env.message_type !== "Welcome") {
-				// Commit / Proposal: ack silently; no content to process in this hook.
+				// Proposal: ack silently; no content to process in this hook yet.
+				// An earlier draft left this unacked (reasoning: a bystander's
+				// later `ProposalOrRef::Reference` Commit needs the referenced
+				// Proposal envelope to still exist server-side) — RETRACTED after
+				// crypto-reviewer verification: RFC 9420 §12.4 resolves a
+				// by-reference proposal against the RECEIVER'S OWN LOCAL
+				// `MlsGroup::store_pending_proposal` store, never by re-fetching
+				// the original Proposal envelope from the Delivery Service. This
+				// codebase never calls `store_pending_proposal` at all
+				// (`process_incoming_commit`'s doc comment, item (e), mls_group.rs)
+				// so a by-reference Commit already fails identically here whether
+				// or not the Proposal envelope is still on the server — leaving it
+				// unacked bought nothing. It did cost something real: every
+				// authenticated member's ordinary Proposal traffic (whether or not
+				// ever referenced by a Commit) would accumulate unbounded, unacked,
+				// re-paged from the head of the 30-day retention window on every
+				// poll tick, chat switch, and reload (`sinceRef` resets on every
+				// `groupId` change) — an attacker-growable backlog with no actual
+				// safety benefit. Ack it like Commit/Proposal always were before
+				// this file's Commit-processing wiring landed; standalone Proposal
+				// processing itself remains a separate, still-unwired gap (issue #2
+				// follow-up).
 				await ackMessage(sessionToken, env.id).catch(() => {});
 				return;
 			}

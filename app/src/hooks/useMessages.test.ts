@@ -3,6 +3,7 @@ import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } fr
 import * as MessagesModule from "../api/messages";
 import type { Envelope } from "../api/messages";
 import { useAuthStore } from "../store/auth";
+import { MLS_OWN_COMMIT_ERROR, MLS_OWN_COMMIT_PENDING_ERROR } from "../workers/cryptoWorkerErrors";
 import * as CryptoWorkerHook from "./useCryptoWorker";
 import { ALLOWED_REACTION_EMOJIS, type IncomingMessage, useMessages } from "./useMessages";
 
@@ -15,6 +16,13 @@ const ENV_ID = "cccccccc-cccc-cccc-cccc-cccccccccccc";
 const TOKEN = "session-token-xyz";
 const DECRYPTED_TEXT = "hello world";
 
+const SELF_MEMBER = {
+	leafIndex: 0,
+	sigKeyHex: "aa",
+	credentialIdentityHex: null,
+	isSelf: true,
+};
+
 const mockWorker = {
 	mlsDecrypt: vi.fn(async () => ({
 		plaintext: new TextEncoder().encode(DECRYPTED_TEXT),
@@ -22,6 +30,9 @@ const mockWorker = {
 	mlKem768DecapV2: vi.fn(async () => ({ sharedSecretHandle: "mock-ss-dec-0" })),
 	mlsPqDeriveBinding: vi.fn(async () => ({ bindingHex: "c702693eff3c46bd" })),
 	mlKem768DropDecapKey: vi.fn(async () => {}),
+	mlsProcessCommit: vi.fn(async () => ({ newEpoch: 2 })),
+	mlsGroupMembers: vi.fn(async () => [SELF_MEMBER]),
+	mlsGroupIsActive: vi.fn(async () => true),
 };
 
 let pollSpy: MockInstance<typeof MessagesModule.pollMessages>;
@@ -134,8 +145,29 @@ describe("useMessages", () => {
 		expect(onMessage).not.toHaveBeenCalled();
 	});
 
-	it("acks Commit envelopes silently without calling onMessage", async () => {
-		pollSpy.mockResolvedValueOnce([makeEnvelope({ message_type: "Commit" })]);
+	it("merges a Commit envelope for its own group via mlsProcessCommit and acks it on success", async () => {
+		pollSpy.mockResolvedValueOnce([
+			makeEnvelope({ message_type: "Commit", ciphertext: [5, 6, 7] }),
+		]);
+		const onMessage = vi.fn();
+
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, onMessage));
+
+		await waitFor(() => {
+			expect(mockWorker.mlsProcessCommit).toHaveBeenCalledWith(
+				IDENTITY_ID,
+				GROUP_ID,
+				expect.any(Uint8Array),
+			);
+		});
+		await waitFor(() => {
+			expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID);
+		});
+		expect(onMessage).not.toHaveBeenCalled();
+	});
+
+	it("acks a Proposal envelope silently without calling onMessage (retracted F5 — see useWelcomePoller.test.ts's sibling test for the full RFC 9420 §12.4 argument)", async () => {
+		pollSpy.mockResolvedValueOnce([makeEnvelope({ message_type: "Proposal" })]);
 		const onMessage = vi.fn();
 
 		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, onMessage));
@@ -144,6 +176,164 @@ describe("useMessages", () => {
 			expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID);
 		});
 		expect(onMessage).not.toHaveBeenCalled();
+		expect(mockWorker.mlsProcessCommit).not.toHaveBeenCalled();
+	});
+
+	it("acks a Commit envelope without re-merging when it is this device's own commit echoed back", async () => {
+		mockWorker.mlsProcessCommit.mockRejectedValueOnce(new Error(MLS_OWN_COMMIT_ERROR));
+		pollSpy.mockResolvedValueOnce([makeEnvelope({ message_type: "Commit" })]);
+
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn()));
+
+		await waitFor(() => {
+			expect(mockWorker.mlsProcessCommit).toHaveBeenCalled();
+		});
+		await waitFor(() => {
+			expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID);
+		});
+	});
+
+	it("does not ack a Commit envelope when mlsProcessCommit fails for a reason other than own-commit echo, and logs a content-free diagnostic", async () => {
+		const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		mockWorker.mlsProcessCommit.mockRejectedValueOnce(new Error("mls decrypt error"));
+		pollSpy.mockResolvedValueOnce([makeEnvelope({ message_type: "Commit" })]);
+
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn()));
+
+		await waitFor(() => {
+			expect(consoleSpy).toHaveBeenCalledWith(
+				"commit_process_failed",
+				"Error",
+				"mls decrypt error",
+			);
+		});
+		expect(ackSpy).not.toHaveBeenCalled();
+		consoleSpy.mockRestore();
+	});
+
+	it("logs a distinct diagnostic (but still acks) when a merged Commit evicted this device's own leaf", async () => {
+		const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		mockWorker.mlsGroupIsActive.mockResolvedValueOnce(false);
+		pollSpy.mockResolvedValueOnce([makeEnvelope({ message_type: "Commit" })]);
+
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn()));
+
+		await waitFor(() => {
+			expect(consoleSpy).toHaveBeenCalledWith("commit_self_evicted", GROUP_ID);
+		});
+		await waitFor(() => {
+			expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID);
+		});
+		consoleSpy.mockRestore();
+	});
+
+	it("fires onGroupChanged(groupId, false) after a normal merged Commit that did not evict this device (crypto-reviewer HIGH-2 — the Safety Number recompute trigger)", async () => {
+		pollSpy.mockResolvedValueOnce([makeEnvelope({ message_type: "Commit" })]);
+		const onGroupChanged = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onGroupChanged,
+			),
+		);
+
+		await waitFor(() => {
+			expect(onGroupChanged).toHaveBeenCalledWith(GROUP_ID, false);
+		});
+	});
+
+	it("fires onGroupChanged(groupId, true) when a merged Commit evicted this device's own leaf", async () => {
+		mockWorker.mlsGroupIsActive.mockResolvedValueOnce(false);
+		pollSpy.mockResolvedValueOnce([makeEnvelope({ message_type: "Commit" })]);
+		const onGroupChanged = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onGroupChanged,
+			),
+		);
+
+		await waitFor(() => {
+			expect(onGroupChanged).toHaveBeenCalledWith(GROUP_ID, true);
+		});
+	});
+
+	it("does NOT fire onGroupChanged when mlsProcessCommit fails outright (no merge happened)", async () => {
+		const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		mockWorker.mlsProcessCommit.mockRejectedValueOnce(new Error("mls decrypt error"));
+		pollSpy.mockResolvedValueOnce([makeEnvelope({ message_type: "Commit" })]);
+		const onGroupChanged = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onGroupChanged,
+			),
+		);
+
+		await waitFor(() => {
+			expect(consoleSpy).toHaveBeenCalledWith(
+				"commit_process_failed",
+				"Error",
+				"mls decrypt error",
+			);
+		});
+		expect(onGroupChanged).not.toHaveBeenCalled();
+		consoleSpy.mockRestore();
+	});
+
+	it("skips a Commit envelope for a different group without acking or merging", async () => {
+		const OTHER_GROUP_ID = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+		pollSpy.mockResolvedValueOnce([
+			makeEnvelope({ message_type: "Commit", group_id: OTHER_GROUP_ID }),
+		]);
+
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn()));
+
+		await waitFor(() => {
+			expect(pollSpy).toHaveBeenCalled();
+		});
+		await new Promise<void>((r) => setTimeout(r, 10));
+		expect(mockWorker.mlsProcessCommit).not.toHaveBeenCalled();
+		expect(ackSpy).not.toHaveBeenCalled();
 	});
 
 	it("skips messages for other groups without decrypting", async () => {
@@ -412,6 +602,119 @@ describe("useMessages", () => {
 
 			// After unmount the poll count must not increase by more than 1 in-flight call.
 			expect(pollSpy.mock.calls.length).toBeLessThanOrEqual(countBeforeUnmount + 1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("does not start a second poll while the first is still in flight (F1 — a slow backlog-catch-up tick must not race a later setInterval tick against the shared, already-advanced fetch cursor)", async () => {
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(0);
+			let resolveFirst: ((envelopes: Envelope[]) => void) | undefined;
+			const firstPoll = new Promise<Envelope[]>((resolve) => {
+				resolveFirst = resolve;
+			});
+			pollSpy.mockReturnValueOnce(firstPoll);
+
+			renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn()));
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(0);
+			});
+			expect(pollSpy).toHaveBeenCalledTimes(1);
+
+			// Advance through several interval ticks while the first poll's
+			// pollMessages promise is still unresolved. None of them may start a
+			// second pollMessages call — the in-flight guard must hold for the
+			// whole duration, not just the first tick after it.
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(3_000 * 4);
+			});
+			expect(pollSpy).toHaveBeenCalledTimes(1);
+
+			// Resolve the first poll — the guard releases once it settles.
+			await act(async () => {
+				resolveFirst?.([]);
+				await vi.advanceTimersByTimeAsync(0);
+			});
+
+			// The next interval tick is now free to start a second poll — proving
+			// the guard does not permanently wedge the loop.
+			pollSpy.mockResolvedValueOnce([]);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(3_000);
+			});
+			expect(pollSpy).toHaveBeenCalledTimes(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("does not let a stale run's finally clobber a NEWER run's in-flight claim for the SAME group revisited after a switch away and back (F9 — groupId alone is not a unique-enough key for pollInFlightRef)", async () => {
+		const GROUP_B = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(0);
+			let resolveRun1: ((e: Envelope[]) => void) | undefined;
+			const run1 = new Promise<Envelope[]>((resolve) => {
+				resolveRun1 = resolve;
+			});
+			let resolveRun3: ((e: Envelope[]) => void) | undefined;
+			const run3 = new Promise<Envelope[]>((resolve) => {
+				resolveRun3 = resolve;
+			});
+
+			pollSpy.mockReturnValueOnce(run1); // run 1: group A, hangs
+			pollSpy.mockResolvedValueOnce([]); // run 2: group B, settles
+			pollSpy.mockReturnValueOnce(run3); // run 3: group A again, hangs
+
+			const { rerender } = renderHook(({ groupId }) => useMessages(IDENTITY_ID, groupId, vi.fn()), {
+				initialProps: { groupId: GROUP_ID },
+			});
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(0);
+			});
+			expect(pollSpy).toHaveBeenCalledTimes(1);
+
+			rerender({ groupId: GROUP_B });
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(0);
+			});
+			expect(pollSpy).toHaveBeenCalledTimes(2);
+
+			rerender({ groupId: GROUP_ID });
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(0);
+			});
+			expect(pollSpy).toHaveBeenCalledTimes(3);
+
+			// The stale group-A run (run 1, abandoned when the effect re-ran for
+			// group B) now settles. Its `finally` must NOT clear run 3's claim —
+			// run 3 (the current, live group-A run) is still in flight.
+			await act(async () => {
+				resolveRun1?.([]);
+				await vi.advanceTimersByTimeAsync(0);
+			});
+
+			// Run 3 is still in flight — a correct guard keeps the next interval
+			// tick from starting a concurrent 4th poll for the same group.
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(3_000);
+			});
+			expect(pollSpy).toHaveBeenCalledTimes(3);
+
+			resolveRun3?.([]);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(0);
+			});
+
+			// Run 3's own finally releases the slot once IT settles — the guard
+			// does not permanently wedge the loop.
+			pollSpy.mockResolvedValueOnce([]);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(3_000);
+			});
+			expect(pollSpy).toHaveBeenCalledTimes(4);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -1042,6 +1345,336 @@ describe("useMessages — decrypt rate limit", () => {
 		expect(ackSpy).toHaveBeenCalledTimes(100);
 	});
 
+	it("defers a same-group Commit from a DIFFERENT sender behind a rate-limit-deferred earlier envelope, then merges it once the deferred queue drains (F2 — a Commit merging ahead of a deferred earlier-epoch message under max_past_epochs(0) would permanently strand it)", async () => {
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(0);
+			const COMMIT_SENDER = "eeeeeeee-ffff-ffff-ffff-ffffffffffff";
+			// 101 Application envelopes from SENDER_ID: 100 fill the budget exactly,
+			// the 101st is deferred. A Commit from a DIFFERENT sender, for the SAME
+			// group, appears later in the same page — its own per-sender budget is
+			// untouched, so without the F2 fix it would merge immediately.
+			const burst = Array.from({ length: 101 }, (_, i) => makeTextEnvelope({ id: `env-f2-${i}` }));
+			const commitEnv = makeTextEnvelope({
+				id: "commit-from-b",
+				message_type: "Commit",
+				sender: COMMIT_SENDER,
+				ciphertext: [5, 6, 7],
+			});
+			pollSpy.mockResolvedValueOnce([...burst, commitEnv]);
+			const onMessage = vi.fn();
+
+			renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, onMessage));
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(0);
+			});
+
+			expect(onMessage).toHaveBeenCalledTimes(100);
+			// The Commit must NOT have merged on this tick — sender A's 101st
+			// envelope is still deferred, so the Commit defers behind it instead of
+			// racing ahead and advancing the epoch.
+			expect(mockWorker.mlsProcessCommit).not.toHaveBeenCalled();
+			expect(ackSpy).not.toHaveBeenCalledWith(TOKEN, "commit-from-b");
+
+			// Past the 10s decrypt-rate window: the deferred queue drains in order —
+			// sender A's leftover envelope first, then the Commit — and since
+			// sender A's envelope no longer defers itself (window reset), the
+			// Commit's own deferred-queue check sees an empty queue and merges.
+			pollSpy.mockResolvedValueOnce([]);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(12_000);
+			});
+
+			expect(onMessage).toHaveBeenCalledTimes(101);
+			expect(mockWorker.mlsProcessCommit).toHaveBeenCalledWith(
+				IDENTITY_ID,
+				GROUP_ID,
+				expect.any(Uint8Array),
+			);
+			expect(ackSpy).toHaveBeenCalledWith(TOKEN, "commit-from-b");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("does not let a single sender's flood of fake Commit-typed envelopes starve a later, genuine Commit from a DIFFERENT sender, even though the pool-fullness-gated per-sender cap (crypto-reviewer B1 fix) now lets the flooder fill the WHOLE reserved pool before any rejection fires (F10 — MAX_DEFERRED_COMMITS_PER_SENDER)", async () => {
+		const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const FLOODER = "eeeeeeee-ffff-ffff-ffff-ffffffffffff";
+		const ADMIN = "12121212-1212-1212-1212-121212121212";
+		const processed: number[] = [];
+		mockWorker.mlsProcessCommit.mockImplementation(
+			async (_identityId: string, _groupId: string, bytes: Uint8Array) => {
+				processed.push(bytes[0]);
+				if (bytes[0] === 9) return { newEpoch: 2 }; // the REAL eviction commit
+				throw new Error("mls decrypt error"); // junk commits
+			},
+		);
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(0);
+			// 101 Application envelopes from SENDER_ID so the deferred queue is
+			// already non-empty (100 fill the decrypt-rate budget, the 101st
+			// defers) before any Commit is processed — this is what forces every
+			// subsequent Commit in this same page onto the head-of-line deferred
+			// path rather than being attempted immediately.
+			const flood = Array.from({ length: 101 }, (_, i) => makeTextEnvelope({ id: `env-f10-${i}` }));
+			// 16 junk Commit-typed envelopes, ALL from the same flooding sender —
+			// enough to fill MAX_DEFERRED_COMMITS entirely if there were no
+			// per-sender sub-cap.
+			const junk = Array.from({ length: 16 }, (_, i) =>
+				makeTextEnvelope({
+					id: `junk-commit-${i}`,
+					message_type: "Commit",
+					sender: FLOODER,
+					ciphertext: [7],
+				}),
+			);
+			// The REAL eviction Commit, from a DIFFERENT sender, later in the same
+			// server-delivery order.
+			const real = makeTextEnvelope({
+				id: "real-eviction-commit",
+				message_type: "Commit",
+				sender: ADMIN,
+				ciphertext: [9],
+			});
+			pollSpy.mockResolvedValueOnce([...flood, junk[0], ...junk.slice(1), real]);
+
+			renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn()));
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(0);
+			});
+
+			// The per-sender sub-cap is gated on pool-fullness (fixed post-review,
+			// crypto-reviewer B1): with only ONE sender contending, all 16 of the
+			// flooder's junk Commits fit — the reserved pool is a shared memory
+			// bound, not an independent per-sender one, and a single legitimate
+			// committer's real backlog must be able to fill it the same way (see
+			// the "lets a single legitimate committer's backlog exceed the old
+			// hard-coded per-sender cap" test below). What the sub-cap actually
+			// guarantees is proven here instead: once the pool IS full (16/16,
+			// all FLOODER's), the ADMIN's real Commit is NOT rejected — eviction
+			// makes room for it precisely because FLOODER holds far more than its
+			// fair share.
+			expect(consoleErrorSpy).toHaveBeenCalledWith(
+				"commit_process_deferred_queue_evicted",
+				FLOODER,
+			);
+			expect(consoleErrorSpy).not.toHaveBeenCalledWith("commit_process_deferred_queue_full", ADMIN);
+
+			// Drain everything: advance well past the 10s decrypt window, several
+			// ticks, so the deferred queue fully empties.
+			for (let t = 1; t <= 8; t++) {
+				pollSpy.mockResolvedValueOnce([]);
+				vi.setSystemTime(t * 11_000);
+				await act(async () => {
+					await vi.advanceTimersByTimeAsync(3_000);
+				});
+			}
+
+			// The real eviction Commit was processed — not silently dropped.
+			expect(processed).toContain(9);
+		} finally {
+			vi.useRealTimers();
+			consoleErrorSpy.mockRestore();
+			mockWorker.mlsProcessCommit.mockImplementation(async () => ({ newEpoch: 2 }));
+		}
+	});
+
+	it("does not let MULTIPLE colluding senders jointly exhaust the reserved deferred-commit pool either — a genuine Commit from a fresh sender evicts an existing entry rather than being dropped (crypto-reviewer HIGH-1, closes the gap MAX_DEFERRED_COMMITS_PER_SENDER alone left open)", async () => {
+		const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const FLOODERS = [
+			"e0000000-0000-0000-0000-000000000000",
+			"e0000000-0000-0000-0000-000000000001",
+			"e0000000-0000-0000-0000-000000000002",
+			"e0000000-0000-0000-0000-000000000003",
+		];
+		const ADMIN = "12121212-1212-1212-1212-121212121212";
+		const processed: number[] = [];
+		mockWorker.mlsProcessCommit.mockImplementation(
+			async (_identityId: string, _groupId: string, bytes: Uint8Array) => {
+				processed.push(bytes[0]);
+				if (bytes[0] === 9) return { newEpoch: 2 }; // the REAL eviction commit
+				throw new Error("mls decrypt error"); // junk commits
+			},
+		);
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(0);
+			const flood = Array.from({ length: 101 }, (_, i) => makeTextEnvelope({ id: `env-h1-${i}` }));
+			// 4 distinct senders, each sending exactly MAX_DEFERRED_COMMITS_PER_SENDER
+			// (4) junk Commits — 16 total, exactly filling MAX_DEFERRED_COMMITS
+			// without any single sender ever exceeding its own sub-cap. A
+			// per-sender cap ALONE cannot stop this; it takes eviction to.
+			const junk = FLOODERS.flatMap((sender, senderIdx) =>
+				Array.from({ length: 4 }, (_, i) =>
+					makeTextEnvelope({
+						id: `junk-${senderIdx}-${i}`,
+						message_type: "Commit",
+						sender,
+						ciphertext: [7],
+					}),
+				),
+			);
+			const real = makeTextEnvelope({
+				id: "real-eviction-commit",
+				message_type: "Commit",
+				sender: ADMIN,
+				ciphertext: [9],
+			});
+			pollSpy.mockResolvedValueOnce([...flood, ...junk, real]);
+
+			renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn()));
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(0);
+			});
+
+			// The pool was genuinely full (16/16 across 4 senders, none of them
+			// individually over cap) — admitting ADMIN's real Commit required
+			// evicting an existing entry, not just finding free space.
+			expect(consoleErrorSpy).toHaveBeenCalledWith(
+				"commit_process_deferred_queue_evicted",
+				expect.any(String),
+			);
+			expect(consoleErrorSpy).not.toHaveBeenCalledWith("commit_process_deferred_queue_full", ADMIN);
+
+			for (let t = 1; t <= 8; t++) {
+				pollSpy.mockResolvedValueOnce([]);
+				vi.setSystemTime(t * 11_000);
+				await act(async () => {
+					await vi.advanceTimersByTimeAsync(3_000);
+				});
+			}
+
+			// The real eviction Commit was processed — not silently dropped, even
+			// though 4 DISTINCT senders (not just one) jointly filled the pool.
+			expect(processed).toContain(9);
+		} finally {
+			vi.useRealTimers();
+			consoleErrorSpy.mockRestore();
+			mockWorker.mlsProcessCommit.mockImplementation(async () => ({ newEpoch: 2 }));
+		}
+	});
+
+	it("lets a single legitimate committer's backlog exceed the old hard-coded per-sender cap of 4 once queued, instead of silently dropping its 5th+ Commit (crypto-reviewer B1 regression test — no attacker involved)", async () => {
+		const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const ADMIN = "12121212-1212-1212-1212-121212121212";
+		const processed: number[] = [];
+		mockWorker.mlsProcessCommit.mockImplementation(
+			async (_identityId: string, _groupId: string, bytes: Uint8Array) => {
+				processed.push(bytes[0]);
+				return { newEpoch: 2 };
+			},
+		);
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(0);
+			// 101 Application envelopes from SENDER_ID so the deferred queue is
+			// already non-empty before ADMIN's Commits arrive — forces every
+			// subsequent Commit onto the head-of-line deferred path, exactly the
+			// precondition under which the old (buggy) ordering rejected a lone
+			// sender's 5th+ legitimate Commit outright.
+			const flood = Array.from({ length: 101 }, (_, i) => makeTextEnvelope({ id: `env-b1-${i}` }));
+			// 6 GENUINE Commits from ONE busy admin, catching up after being
+			// offline through several real epoch changes — more than the old
+			// MAX_DEFERRED_COMMITS_PER_SENDER (4), well under MAX_DEFERRED_COMMITS
+			// (16), so the shared pool has ample room and no other sender is
+			// contending for it.
+			const commits = Array.from({ length: 6 }, (_, i) =>
+				makeTextEnvelope({
+					id: `admin-commit-${i}`,
+					message_type: "Commit",
+					sender: ADMIN,
+					ciphertext: [i + 1],
+				}),
+			);
+			pollSpy.mockResolvedValueOnce([...flood, ...commits]);
+
+			renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn()));
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(0);
+			});
+
+			// None of ADMIN's 6 Commits were rejected — the pool never came close
+			// to its 16-entry cap with only one sender in it.
+			expect(consoleErrorSpy).not.toHaveBeenCalledWith("commit_process_deferred_queue_full", ADMIN);
+			expect(consoleErrorSpy).not.toHaveBeenCalledWith(
+				"commit_process_deferred_queue_evicted",
+				expect.any(String),
+			);
+
+			// Drain the deferred queue: advance well past the 10s decrypt window.
+			for (let t = 1; t <= 8; t++) {
+				pollSpy.mockResolvedValueOnce([]);
+				vi.setSystemTime(t * 11_000);
+				await act(async () => {
+					await vi.advanceTimersByTimeAsync(3_000);
+				});
+			}
+
+			// All 6 legitimate Commits were eventually processed, in order — none
+			// silently dropped.
+			expect(processed).toEqual([1, 2, 3, 4, 5, 6]);
+		} finally {
+			vi.useRealTimers();
+			consoleErrorSpy.mockRestore();
+			mockWorker.mlsProcessCommit.mockImplementation(async () => ({ newEpoch: 2 }));
+		}
+	});
+
+	it("does NOT ack a Commit that rejects with the UNVERIFIED, forgeable MLS_OWN_COMMIT_PENDING_ERROR sentinel — unlike MLS_OWN_COMMIT_ERROR, this signal must never be auto-acked (crypto-reviewer N5 — this rule previously had zero test coverage)", async () => {
+		const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		mockWorker.mlsProcessCommit.mockRejectedValueOnce(new Error(MLS_OWN_COMMIT_PENDING_ERROR));
+		pollSpy.mockResolvedValueOnce([makeEnvelope({ message_type: "Commit" })]);
+
+		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, vi.fn()));
+
+		await waitFor(() => {
+			expect(mockWorker.mlsProcessCommit).toHaveBeenCalled();
+		});
+		await waitFor(() => {
+			expect(consoleSpy).toHaveBeenCalledWith("commit_own_pending_unverified", GROUP_ID);
+		});
+		expect(ackSpy).not.toHaveBeenCalled();
+		consoleSpy.mockRestore();
+	});
+
+	it("still acks a successfully merged Commit and fires onGroupChanged(groupId, false) when the post-merge mlsGroupIsActive eviction check itself fails (crypto-reviewer N5 — the merge succeeded; only the diagnostic check failed, so this must not be treated as an unacked retry)", async () => {
+		const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		mockWorker.mlsGroupIsActive.mockRejectedValueOnce(new Error("worker unavailable"));
+		pollSpy.mockResolvedValueOnce([makeEnvelope({ message_type: "Commit" })]);
+		const onGroupChanged = vi.fn();
+
+		renderHook(() =>
+			useMessages(
+				IDENTITY_ID,
+				GROUP_ID,
+				vi.fn(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				onGroupChanged,
+			),
+		);
+
+		await waitFor(() => {
+			expect(consoleSpy).toHaveBeenCalledWith("commit_self_evicted_check_failed", "Error");
+		});
+		await waitFor(() => {
+			expect(onGroupChanged).toHaveBeenCalledWith(GROUP_ID, false);
+		});
+		await waitFor(() => {
+			expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID);
+		});
+		consoleSpy.mockRestore();
+	});
+
 	it("drops (with a log, no content) envelopes past the bounded deferred-queue cap", async () => {
 		const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 		try {
@@ -1140,23 +1773,57 @@ describe("useMessages — decrypt rate limit", () => {
 		}
 	});
 
-	it("does not throttle a different sender's decrypt budget when one sender floods", async () => {
-		const OTHER_SENDER = "ffffffff-ffff-ffff-ffff-ffffffffffff";
-		const flood = Array.from({ length: 101 }, (_, i) => makeTextEnvelope({ id: `env-flood-${i}` }));
-		pollSpy.mockResolvedValueOnce([
-			...flood,
-			makeTextEnvelope({ id: "env-other-sender", sender: OTHER_SENDER }),
-		]);
-		const onMessage = vi.fn();
+	it("defers a different sender's envelope behind a flooding sender's overflow, then delivers it once the window frees up (strict head-of-line ordering, F1/F7 crypto-reviewer)", async () => {
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(0);
+			const OTHER_SENDER = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+			const flood = Array.from({ length: 101 }, (_, i) =>
+				makeTextEnvelope({ id: `env-flood-${i}` }),
+			);
+			pollSpy.mockResolvedValueOnce([
+				...flood,
+				makeTextEnvelope({ id: "env-other-sender", sender: OTHER_SENDER }),
+			]);
+			const onMessage = vi.fn();
 
-		renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, onMessage));
+			renderHook(() => useMessages(IDENTITY_ID, GROUP_ID, onMessage));
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(0);
+			});
 
-		// 100 from the flooding sender in this tick (capped, the 101st deferred,
-		// not lost) + 1 from the other sender, whose own budget is untouched.
-		await waitFor(() => expect(onMessage).toHaveBeenCalledTimes(101));
-		expect(onMessage).toHaveBeenCalledWith(
-			expect.objectContaining({ id: "env-other-sender", senderId: OTHER_SENDER }),
-		);
+			// 100 from the flooding sender land this tick (capped). The 101st
+			// flood envelope is deferred, and once the deferred queue is
+			// non-empty, the trailing "env-other-sender" envelope is deferred
+			// right behind it too — strict per-group head-of-line ordering
+			// (this file's top-of-module doc comment) intentionally does NOT
+			// let a later, unrelated sender's envelope in the SAME page race
+			// ahead of an earlier-in-delivery-order entry already queued, even
+			// though that sender's own decrypt budget is untouched.
+			expect(onMessage).toHaveBeenCalledTimes(100);
+
+			// Still within the flooding sender's 10s window — both stay queued.
+			pollSpy.mockResolvedValueOnce([]);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(3_000);
+			});
+			expect(onMessage).toHaveBeenCalledTimes(100);
+
+			// Past the window — the flooding sender's budget resets, so both the
+			// still-deferred 101st flood envelope and "env-other-sender" (queued
+			// behind it) drain together, in order.
+			vi.setSystemTime(11_000);
+			pollSpy.mockResolvedValueOnce([]);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(3_000);
+			});
+			expect(onMessage).toHaveBeenCalledTimes(102);
+			expect(onMessage).toHaveBeenCalledWith(
+				expect.objectContaining({ id: "env-other-sender", senderId: OTHER_SENDER }),
+			);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("resets a sender's decrypt budget once the rate-limit window elapses", async () => {

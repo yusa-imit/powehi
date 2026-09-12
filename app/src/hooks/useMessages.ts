@@ -1,19 +1,48 @@
 /**
- * useMessages — poll for incoming MLS Application messages for an active group.
+ * useMessages — poll for incoming MLS Application and Commit envelopes for an
+ * active group.
  *
  * Polls GET /v1/messages every POLL_INTERVAL_MS.  Application messages for
  * this hook's own group are decrypted via the crypto worker and forwarded to
- * `onMessage`, then acked.  Commit and Proposal envelopes are acked silently.
- * Welcome envelopes are skipped — useWelcomePoller owns Welcome processing and
- * will ack them after mlsJoinGroup.  Application envelopes for a DIFFERENT
- * group are also skipped without acking — `pollMessages` returns envelopes
- * across all of the identity's groups, and only one useMessages instance (the
- * active chat's) is mounted at a time, so acking an off-group envelope here
- * would permanently delete it before its own group's poller ever sees it.
+ * `onMessage`, then acked.  Commit envelopes for this hook's own group are
+ * merged via the atomic `mlsProcessCommit` and acked — see the Commit branch
+ * below for the full ordering argument (issue #2).  Proposal envelopes are
+ * acked silently (out of scope for issue #2).  Welcome envelopes are skipped
+ * without acking — useWelcomePoller.ts's global poller owns Welcome (it has
+ * no per-group concept to get wrong, and Welcome always arrives before this
+ * hook has a `groupId` to be mounted with in the first place).
+ *
+ * Why Commit is processed HERE, in the SAME poll loop/cursor as Application,
+ * rather than in the global useWelcomePoller.ts poller: an earlier attempt
+ * moved Commit processing to the global poller specifically because this
+ * hook only sees the currently-OPEN group while `pollMessages` returns
+ * Commit envelopes for every group — crypto-reviewer flagged that as a real
+ * bug (feeding a background group's Commit through this hook's fixed
+ * `groupId` would misroute it), but ALSO flagged the two-poller split it
+ * introduced as a NEW, more serious bug: this group's MLS Commit and
+ * Application streams have independent poll cursors and independent
+ * `setInterval(3000)` timers, so nothing guarantees a Commit merges only
+ * after every Application envelope from the same or an earlier epoch has
+ * already been decrypted. With `max_past_epochs(0)` (see `mls_group.rs`),
+ * an epoch's keys are gone the instant a later Commit merges — so a Commit
+ * racing ahead of a same-epoch Application message on a separate poll cycle
+ * permanently strands that message (`NoPastEpochData`, dropped unacked
+ * forever, not just delayed). Filtering Commit to `env.group_id === groupId`
+ * here (same filter Application already uses) removes the original
+ * misrouting concern WITHOUT re-splitting the stream: both message types
+ * for the active group now flow through the same `sinceRef` cursor and the
+ * same sequential per-envelope `await` loop in `poll()` below, so they are
+ * always processed in the server's delivery order relative to each other.
+ * Commit envelopes for a DIFFERENT (background) group are skipped without
+ * acking — deferred, not lost: unacked envelopes are only GC'd by the
+ * 30-day retention floor, and switching to that group resets `sinceRef`
+ * (cycle 353) so its full backlog — Application AND Commit, still in
+ * order — is rescanned from the start once it becomes the active chat.
  *
  * Security invariants:
  * - Plaintext is never stored in component state; only the decoded string is
  *   passed to onMessage (react-hooks-only.md, no-plaintext-logging.md).
+ * - Commit bytes are passed directly to mlsProcessCommit; never logged or stored.
  * - Decryption errors are swallowed: a stale-epoch envelope cannot disrupt UI.
  * - Polling stops on unmount or when any required context is absent.
  */
@@ -22,6 +51,7 @@ import { useEffect, useRef } from "react";
 import { type Envelope, ackMessage, pollMessages } from "../api/messages";
 import { useAuthStore } from "../store/auth";
 import { uint8ToBase64 } from "../utils/base64";
+import { MLS_OWN_COMMIT_ERROR, MLS_OWN_COMMIT_PENDING_ERROR } from "../workers/cryptoWorkerErrors";
 import { useCryptoWorker } from "./useCryptoWorker";
 
 // Keep a direct store reference for use inside async callbacks (not a hook call).
@@ -217,6 +247,22 @@ export function useMessages(
 	onDelete?: (groupId: string, targetMessageId: string) => void,
 	onPin?: (groupId: string, targetMessageId: string, action: "pin" | "unpin") => void,
 	onPresence?: (groupId: string, status: "online" | "offline") => void,
+	/**
+	 * Fired once after EVERY successfully merged peer Commit for this hook's
+	 * own group (crypto-reviewer HIGH-2) — an Add, a Remove of someone else,
+	 * or a Remove of this device itself (`selfEvicted`). Merging a Commit
+	 * changes the local MLS roster with no other user-visible signal
+	 * anywhere in this hook; a caller MUST use this to invalidate/recompute
+	 * anything that assumes the roster is stable (in particular the group
+	 * Safety Number — see `ChatLayout.tsx`'s wiring — a merged Commit that
+	 * never triggers a recompute would let a stale, pre-Commit fingerprint
+	 * keep reading "verified" against a roster it no longer describes).
+	 * `selfEvicted` is `false` (not "unknown") if the post-merge active-state
+	 * check itself failed — the merge already succeeded either way, so the
+	 * caller must still treat the roster as changed; only the eviction
+	 * classification is uncertain in that rare case.
+	 */
+	onGroupChanged?: (groupId: string, selfEvicted: boolean) => void,
 ): void {
 	const { sessionToken } = useAuthStore();
 	const cryptoWorker = useCryptoWorker();
@@ -278,6 +324,11 @@ export function useMessages(
 		onPresenceRef.current = onPresence;
 	});
 
+	const onGroupChangedRef = useRef(onGroupChanged);
+	useEffect(() => {
+		onGroupChangedRef.current = onGroupChanged;
+	});
+
 	// Track the (created_at, id) of the last envelope fully processed, to avoid
 	// re-delivering on restart. An exact keyset cursor, not a rounded timestamp
 	// — see pollMessages'/find_pending's doc comments (cycle 351).
@@ -337,13 +388,64 @@ export function useMessages(
 	// sweep shape as `reactionTimestampsRef`.
 	const decryptTimestampsRef = useRef<Map<string, number[]>>(new Map());
 
-	// Envelopes deferred by withinDecryptRateLimit above, retried on the next poll
-	// tick (merged with that tick's freshly-fetched envelopes, deduped by id — see
-	// poll() below). Bounded so a sustained, sender-diverse flood can't grow this
-	// unboundedly in memory; once full, newly-deferred envelopes are dropped (this
-	// IS a real, logged loss, but only past ~5x one sender's full 10s decrypt
-	// budget of backlog, not the ordinary catch-up case above).
+	// Envelopes deferred by withinDecryptRateLimit above (Application) or by
+	// strict per-group head-of-line ordering (Commit — see the Commit branch's
+	// comment for why), retried on the next poll tick (merged with that tick's
+	// freshly-fetched envelopes, deduped by id — see poll() below). Bounded so a
+	// sustained, sender-diverse flood can't grow this unboundedly in memory,
+	// EACH message type against its OWN separate cap (MAX_DEFERRED_ENVELOPES for
+	// Application, MAX_DEFERRED_COMMITS for Commit — see their definitions
+	// below) so a flood of one type can never consume the other's reserved
+	// headroom; once a type's own cap is full, a newly-deferred envelope of that
+	// type is dropped (this IS a real, logged loss, but only past ~5x one
+	// sender's full 10s decrypt budget of Application backlog, or
+	// MAX_DEFERRED_COMMITS distinct Commits for the same group, not the ordinary
+	// catch-up case above).
 	const deferredEnvelopesRef = useRef<Envelope[]>([]);
+
+	// Guards against overlapping poll() ticks — see the effect body's comment
+	// where this is consumed for the full ordering argument. Deliberately a ref
+	// at HOOK-BODY scope (shared across effect re-runs), not a local `let`
+	// inside the effect (F6, crypto-reviewer LOW): this hook has exactly one
+	// instance per session — ChatLayout mounts it once, `groupId` just changes
+	// which chat it targets — so the effect can re-run (e.g. a `cryptoWorker`
+	// or `sessionToken` identity change) WITHOUT the component unmounting. A
+	// local `let` re-initialized to `false` on every effect run would let a new
+	// run's poll() start immediately even while the PREVIOUS run's poll() is
+	// still awaiting an in-flight `mlsProcessCommit`/`mlsDecrypt` call (the
+	// `cancelled` flag only stops the loop between envelopes, it does not abort
+	// an in-progress `await`) — reintroducing the exact concurrent-poll race
+	// this guard exists to close for a re-run that keeps the SAME groupId.
+	//
+	// Holds the groupId AND a per-effect-run token of the currently in-flight
+	// run, or `null` when none is in flight — NOT a bare boolean (fixed
+	// post-review: a bare boolean shared across every groupId blocked a
+	// brand-new group's very first poll for as long as a DIFFERENT, unrelated
+	// group's stale request was still resolving, defeating the cycle 353
+	// fix's whole point of an immediate full-backlog rescan on chat switch —
+	// confirmed by `useMessages.test.ts`'s "does not let a stale in-flight
+	// poll from the OLD group clobber the cursor after a groupId switch"
+	// regression test). Keying by groupId ALONE is also insufficient — fixed
+	// post-review a second time (F9): an A -> B -> A group-switch sequence
+	// creates a SEPARATE effect run each time groupId changes, so the run for
+	// the SECOND visit to A has a different closure than the run for the
+	// FIRST visit, but both closures see the identical groupId string "A".
+	// If the first visit's poll is still resolving (e.g. a slow network
+	// round trip) when the user has already switched away and back, its
+	// `finally` block would see `pollInFlightRef.current`'s groupId equal to
+	// its own captured groupId and incorrectly clear the SECOND visit's
+	// legitimately in-flight claim — reopening the exact concurrent-poll
+	// race this guard exists to close, just via a same-group revisit instead
+	// of a same-group re-run. `run` is a per-effect-run token (see
+	// `runTokenRef` below) unique across every mount of this effect,
+	// including two mounts for the same groupId — so a stale run's `finally`
+	// only clears the slot if `run` ALSO still matches, which is false once a
+	// newer run for the same group has claimed it.
+	const pollInFlightRef = useRef<{ groupId: string; run: number } | null>(null);
+	// Monotonic counter handed out one value per effect run (below), used
+	// only to give `pollInFlightRef` a value that is unique per mount even
+	// when `groupId` repeats (see that ref's doc comment, F9).
+	const runTokenRef = useRef(0);
 
 	useEffect(() => {
 		if (!sessionToken || !identityId || !groupId || !cryptoWorker) return;
@@ -363,6 +465,28 @@ export function useMessages(
 		deferredEnvelopesRef.current = [];
 
 		let cancelled = false;
+		// Unique per effect run, including a second run for a repeated groupId
+		// (F9) — see `pollInFlightRef`'s doc comment above for why a bare
+		// groupId string is not enough to tell two mounts of the same group
+		// apart.
+		const runToken = ++runTokenRef.current;
+		// Guards against overlapping poll() ticks during backlog catch-up: the
+		// fetch cursor (sinceRef) advances to a page's last envelope BEFORE the
+		// page finishes processing (intentional — see poll()'s own comment,
+		// cycle 352 livelock fix). If a decrypt/ack round trip for page N is
+		// still in flight when the next setInterval tick fires, that tick would
+		// see the already-advanced cursor and start fetching/processing page
+		// N+1 CONCURRENTLY with page N — racing the strict Application-then-
+		// Commit-per-group delivery ordering this hook's whole design depends
+		// on (see this file's top-of-module doc comment). Under
+		// `max_past_epochs(0)`, a Commit from page N+1 merging before a
+		// same-epoch Application envelope in page N has finished decrypting
+		// permanently strands that message. `pollInFlightRef` (hook-body scope,
+		// keyed by groupId — see its own doc comment for why NOT a bare
+		// boolean, and why NOT a local variable here) closes this both within
+		// one effect run AND across a same-instance, same-groupId effect
+		// re-run (F6, crypto-reviewer LOW) — a re-run for a DIFFERENT groupId
+		// (an ordinary chat switch) is deliberately NOT blocked by this guard.
 
 		const REACTION_RATE_WINDOW_MS = 10_000;
 		const REACTION_RATE_MAX = 20;
@@ -397,6 +521,51 @@ export function useMessages(
 		const DECRYPT_RATE_WINDOW_MS = 10_000;
 		const DECRYPT_RATE_MAX = 100;
 		const MAX_DEFERRED_ENVELOPES = 500;
+		// Commit envelopes get their OWN reserved bound, separate from
+		// MAX_DEFERRED_ENVELOPES above (F2, crypto-reviewer HIGH): a legitimate
+		// eviction Commit for this group must never be dropped just because an
+		// Application-envelope flood from the very device that Commit is about
+		// to evict has already filled the shared queue. At most one Commit per
+		// epoch can ever legitimately be outstanding for a live group, so a
+		// handful of slots is generous headroom for benign reordering/backlog,
+		// while still bounding an attacker who floods FAKE Commit-typed
+		// envelopes (this check runs before any signature/content
+		// verification, so message_type alone is attacker-controlled).
+		const MAX_DEFERRED_COMMITS = 16;
+		// Per-SENDER sub-cap on MAX_DEFERRED_COMMITS above (F10,
+		// crypto-reviewer HIGH — closes a gap the F2 fix left open): `sender`
+		// is the authenticated device_id that submitted the envelope (stamped
+		// server-side, unlike `message_type`, which is not verified until this
+		// hook actually attempts `mlsProcessCommit`), so bounding the reserved
+		// pool per sender means a SINGLE compromised or malicious device can
+		// never occupy more than its own share of it. Without this, one
+		// device sending MAX_DEFERRED_COMMITS junk Commit-typed envelopes
+		// (trivial — `message_type` alone gates this branch, no signature or
+		// content check has run yet) fills the entire reserved pool and
+		// causes a LATER, genuinely legitimate Commit from a DIFFERENT
+		// sender (e.g. an admin's real eviction of that very device) to be
+		// silently dropped — deterministically defeating the PCS property
+		// this wiring exists to provide, exactly the failure mode
+		// MAX_DEFERRED_COMMITS alone was meant to prevent, just moved from
+		// "any sender" to "one sender at a time". A small cap is enough once
+		// the pool is actually contested by more than one sender: only one
+		// Commit per epoch can ever legitimately be outstanding for a live
+		// group (see MAX_DEFERRED_COMMITS's own comment above).
+		//
+		// This cap is a FAIRNESS bound among competing senders, not an
+		// independent memory bound (fixed post-review, crypto-reviewer B1):
+		// the check site below only enforces it once `deferredCommits.length
+		// >= MAX_DEFERRED_COMMITS` — a single legitimate sender's backlog
+		// (e.g. catching up on many real epoch changes after being offline)
+		// can fill the WHOLE reserved pool with no rejection as long as no
+		// other sender is contending for it. Applying this cap unconditionally,
+		// before checking whether the pool even has room, previously dropped
+		// a single busy sender's 5th+ legitimate backlog Commit outright (no
+		// eviction fallback exists for a sender's own entries) — permanently
+		// stranding every later Commit for the group under `max_past_epochs(0)`
+		// with no attacker involved. See the check site for the corrected
+		// ordering.
+		const MAX_DEFERRED_COMMITS_PER_SENDER = 4;
 
 		const withinDecryptRateLimit = (senderId: string): boolean => {
 			const now = Date.now();
@@ -421,14 +590,287 @@ export function useMessages(
 			}
 		};
 
+		// Bounded retry for the ack immediately following a successful peer
+		// Commit merge (N1, crypto-reviewer nit): unlike every other ack in
+		// this hook, losing THIS one is not simply "retried harmlessly on the
+		// next poll" — MLS commit merging is not idempotent, so a later
+		// re-delivery of the same already-merged peer Commit (its ack never
+		// landed) fails openmls's wrong-epoch check and surfaces as the
+		// generic commit_process_failed/Decrypt path forever, never the
+		// safe-to-ack MLS_OWN_COMMIT_ERROR branch (that hash-tracking only
+		// covers THIS device's own commits, not a peer's). A few bounded
+		// retries close most of the transient-network-failure window without
+		// becoming an unbounded retry loop (Tiger Style: put a limit on
+		// everything); a still-unacked envelope after all attempts is no
+		// worse than this hook's existing genuine-failure handling elsewhere.
+		const MAX_ACK_RETRIES = 3;
+		const ackAfterMergeWithRetry = async (envId: string): Promise<void> => {
+			for (let attempt = 0; attempt < MAX_ACK_RETRIES; attempt++) {
+				try {
+					await ackMessage(sessionToken, envId);
+					return;
+				} catch {
+					if (attempt < MAX_ACK_RETRIES - 1) {
+						await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+					}
+				}
+			}
+			// Diagnostic only — groupId is an opaque server-assigned UUID, never
+			// content/PII. The commit is already merged locally; only the ack
+			// failed, so a future rescan will hit the (harmless but permanent)
+			// wrong-epoch Decrypt path described above for this one envelope.
+			console.error("commit_ack_failed_after_merge", groupId);
+		};
+
 		const processEnvelope = async (env: Envelope): Promise<void> => {
 			if (env.message_type === "Welcome") {
 				// Welcome envelopes are handled by useWelcomePoller — do not ack here.
 				return;
 			}
-			if (env.message_type !== "Application") {
-				// Commit / Proposal: ack silently; no content to process in this hook.
+			if (env.message_type === "Commit") {
+				if (env.group_id !== groupId) {
+					// Commit for a group other than the one this hook instance is
+					// bound to — see this file's top-of-module doc comment for why
+					// this hook (not a separate global poller) owns Commit, and why
+					// an off-group Commit is deferred (left unacked) rather than
+					// misrouted against the wrong MLS group state.
+					return;
+				}
+				// Strict per-group head-of-line ordering (F1, crypto-reviewer HIGH):
+				// a Commit must defer itself whenever ANYTHING is already sitting in
+				// the deferred queue — checked FIRST, before the per-sender rate
+				// limit, so a queue-non-empty defer never also consumes this
+				// sender's decrypt-rate budget for nothing (F7). A non-empty queue
+				// always means same-group work is outstanding (only this hook's
+				// bound `groupId` is ever pushed onto it — off-group envelopes
+				// `return` above before reaching either check), so deferring the
+				// Commit behind it preserves delivery order relative to whatever is
+				// already queued — INCLUDING a same-group Application envelope from
+				// a DIFFERENT sender than the one that got deferred, which the
+				// Application branch below must (and does, as of this fix) defer
+				// itself behind for the identical reason: without deferring on the
+				// Application side too, an unrelated sender's Application envelope
+				// arriving later in the SAME page would decrypt immediately (its own
+				// rate budget untouched), racing ahead of an earlier-in-delivery-
+				// order Commit or Application entry now sitting in the queue — under
+				// this group's `max_past_epochs(0)`, a Commit racing ahead of a
+				// same-epoch Application message this way permanently strands it.
+				// This terminates: `deferredEnvelopesRef.current` is drained at the
+				// top of every tick and re-processed FIRST, in order, ahead of any
+				// newly-fetched envelope (see poll()'s `combined` merge below) — a
+				// still-blocked earlier envelope re-defers itself and everything
+				// after it (Commit or Application) re-defers right behind it, until
+				// the earlier envelope's rate-limit window frees up and it drains.
+				//
+				// The deferred-queue capacity check below uses a SEPARATE, smaller
+				// bound (MAX_DEFERRED_COMMITS) than the Application branch's
+				// MAX_DEFERRED_ENVELOPES (F2, crypto-reviewer HIGH): sharing one
+				// capacity would let an Application-envelope flood from the very
+				// device a Commit is about to evict fill the queue and force this
+				// Commit to be silently dropped — deterministically suppressing its
+				// own eviction, defeating the PCS property this wiring exists to
+				// provide. Counting only Commit-typed entries against this bound
+				// (not the queue's total length) means an Application flood can
+				// never consume a Commit's reserved headroom. A SECOND, per-sender
+				// sub-cap (MAX_DEFERRED_COMMITS_PER_SENDER, F10) additionally
+				// bounds how much of THIS reserved pool a single sender can
+				// occupy — see that constant's doc comment for why: without it, a
+				// single sender flooding fake Commit-typed envelopes (this check
+				// runs before any content verification) can alone exhaust the
+				// whole reserved pool and starve out a legitimate Commit from a
+				// DIFFERENT sender arriving later in the same page.
+				//
+				// A per-sender sub-cap alone is still bypassable by enough DISTINCT
+				// senders (crypto-reviewer HIGH-1): MAX_DEFERRED_COMMITS /
+				// MAX_DEFERRED_COMMITS_PER_SENDER colluding or compromised senders
+				// can each fill their own share and jointly exhaust the whole pool
+				// before a genuine Commit from yet another sender ever arrives. On
+				// overflow, evict-oldest-from-the-largest-current-holder (below)
+				// closes this: a newly-arriving sender with FEWER entries already
+				// queued than some other sender is always entitled to bump that
+				// other sender's oldest entry rather than being rejected outright —
+				// so an admin's first eviction Commit for this group (0 entries of
+				// its own) can always displace an existing entry as long as anyone
+				// else holds more than 0, regardless of how many distinct senders
+				// contributed the flood. Evicting only ever removes a Commit-typed
+				// entry (never an Application one) and never reorders the entries
+				// that remain, so it cannot violate the head-of-line ordering
+				// argument above.
+				if (deferredEnvelopesRef.current.length > 0 || !withinDecryptRateLimit(env.sender)) {
+					const deferredCommits = deferredEnvelopesRef.current.filter(
+						(e) => e.message_type === "Commit",
+					);
+					const deferredCommitCountForSender = deferredCommits.filter(
+						(e) => e.sender === env.sender,
+					).length;
+					// Pool-fullness gates the per-sender fairness cap — checked in
+					// THIS order, not the reverse (fixed post-review, crypto-reviewer
+					// B1): `MAX_DEFERRED_COMMITS_PER_SENDER` exists ONLY to keep one
+					// sender from starving OTHER senders once the shared pool is
+					// actually contested (see that constant's doc comment); it is not
+					// an independent memory bound — `MAX_DEFERRED_COMMITS` already is
+					// one, and is sized "generous headroom for benign
+					// reordering/backlog" on its own terms. The previous ordering ran
+					// the per-sender check FIRST, unconditionally, so a single
+					// legitimate committer's backlog (e.g. catching up on >4 epochs
+					// of real admin activity after being offline) hit this reject
+					// branch well before the pool had any real contention — with no
+					// eviction fallback, since eviction never targets a sender's own
+					// entries, that Commit was silently dropped, out of order,
+					// permanently stranding every later Commit for this group under
+					// `max_past_epochs(0)`, with no attacker involved at all. Gating
+					// on pool-fullness first lets a single busy sender fill up to the
+					// full reserved pool during legitimate backlog catch-up; the
+					// fairness cap only starts rejecting/evicting once OTHER senders
+					// are actually competing for the same slots — exactly the
+					// multi-sender starvation scenario it was designed for.
+					if (deferredCommits.length >= MAX_DEFERRED_COMMITS) {
+						if (deferredCommitCountForSender >= MAX_DEFERRED_COMMITS_PER_SENDER) {
+							// This sender already holds its own full share of the
+							// reserved pool — never evict on its behalf, or a single
+							// sender could unboundedly churn other senders' entries by
+							// repeatedly re-sending.
+							console.error("commit_process_deferred_queue_full", env.sender);
+							return;
+						}
+						const perSenderCounts = new Map<string, number>();
+						for (const e of deferredCommits) {
+							perSenderCounts.set(e.sender, (perSenderCounts.get(e.sender) ?? 0) + 1);
+						}
+						let evictSender: string | null = null;
+						let evictCount = deferredCommitCountForSender;
+						for (const [sender, count] of perSenderCounts) {
+							if (sender !== env.sender && count > evictCount) {
+								evictSender = sender;
+								evictCount = count;
+							}
+						}
+						if (evictSender === null) {
+							// Every other sender already holds AT MOST as many
+							// slots as this one would — the pool is as fairly
+							// saturated as it can get. Drop this arrival instead.
+							console.error("commit_process_deferred_queue_full", env.sender);
+							return;
+						}
+						const evictIndex = deferredEnvelopesRef.current.findIndex(
+							(e) => e.message_type === "Commit" && e.sender === evictSender,
+						);
+						// Defensive (N2, crypto-reviewer nit): evictSender is derived
+						// from deferredCommits, itself a filtered snapshot of this same
+						// array, so evictIndex should always be found — but an
+						// unguarded -1 here would splice the LAST element (the newest
+						// entry, possibly this tick's own arrival) instead of the
+						// intended victim. Drop defensively rather than risk that.
+						if (evictIndex === -1) {
+							console.error("commit_process_deferred_queue_full", env.sender);
+							return;
+						}
+						deferredEnvelopesRef.current.splice(evictIndex, 1);
+						// Diagnostic only — evictSender is an opaque device UUID.
+						console.error("commit_process_deferred_queue_evicted", evictSender);
+					}
+					deferredEnvelopesRef.current.push(env);
+					return;
+				}
+				try {
+					const commitBytes = new Uint8Array(env.ciphertext);
+					await cryptoWorker.mlsProcessCommit(identityId, groupId, commitBytes);
+					try {
+						// mls_process_commit's doc comment: a Commit that removes the
+						// caller's OWN leaf still returns Ok — the caller MUST
+						// separately detect eviction via `mlsGroupIsActive` (openmls's
+						// own group-active state), NOT via `mlsGroupMembers`'s `isSelf`
+						// leaf-index comparison — RFC 9420 §12.1.1 fills the leftmost
+						// BLANK leaf on Add, and §12.3 applies Remove before Add within
+						// one Commit, so a "kick and replace" Commit can land the NEW
+						// member's leaf exactly on this device's just-vacated index,
+						// making `isSelf` (incorrectly) true and silently missing the
+						// eviction. Best-effort: a failure here must not turn an
+						// already-successfully-merged Commit into an unacked retry loop.
+						const active = await cryptoWorker.mlsGroupIsActive(identityId, groupId);
+						if (!active) {
+							// Diagnostic only — groupId is an opaque server-assigned UUID,
+							// never content/PII.
+							console.error("commit_self_evicted", groupId);
+						}
+						// Fired for EVERY merge, not just eviction — an Add also changes
+						// the roster and must invalidate anything (e.g. the group Safety
+						// Number) that assumes it is stable (crypto-reviewer HIGH-2).
+						onGroupChangedRef.current?.(groupId, !active);
+					} catch (evictionCheckErr) {
+						// Self-eviction check is best-effort diagnostics only — a
+						// failure here (F8, crypto-reviewer nit) must not turn an
+						// already-successfully-merged Commit into an unacked retry
+						// loop, but it must not be silently swallowed either, or a
+						// forced eviction could go completely unnoticed. Diagnostic
+						// only — never content/PII.
+						console.error(
+							"commit_self_evicted_check_failed",
+							evictionCheckErr instanceof Error ? evictionCheckErr.name : typeof evictionCheckErr,
+						);
+						// The merge itself still succeeded (only the eviction check
+						// failed) — the roster changed regardless, so still fire this.
+						// `false` here is a conservative default, not a claim the
+						// device was NOT evicted: it just means that classification is
+						// unknown in this rare double-failure case.
+						onGroupChangedRef.current?.(groupId, false);
+					}
+					await ackAfterMergeWithRetry(env.id);
+				} catch (err) {
+					if (err instanceof Error && err.message === MLS_OWN_COMMIT_ERROR) {
+						// Case 2 (hash-verified, post-merge): this crate's own
+						// tracking confirms these exact bytes are a commit THIS
+						// device already merged — already applied locally, so
+						// there is nothing to merge. Safe to ack. See
+						// cryptoWorkerErrors.ts's MLS_OWN_COMMIT_ERROR doc comment.
+						await ackMessage(sessionToken, env.id).catch(() => {});
+						return;
+					}
+					if (err instanceof Error && err.message === MLS_OWN_COMMIT_PENDING_ERROR) {
+						// Case 1 (openmls's own pre-merge signal, UNVERIFIED and
+						// forgeable by any current group member — see
+						// cryptoWorkerErrors.ts's MLS_OWN_COMMIT_PENDING_ERROR doc
+						// comment, crypto-reviewer F3). Unlike the Case 2 branch
+						// above, "already applied" does NOT hold here: a genuine
+						// pre-confirm echo of this device's own staged commit is
+						// still only staged, not merged, so acking would delete the
+						// Delivery Service's only copy before this device ever
+						// applies it — and a forged message would never have been
+						// this device's own commit at all. Treat exactly like any
+						// other rejection below: do not ack, log a content-free
+						// diagnostic, let the unacked-envelope retry path (a future
+						// poll, remount, or chat switch) handle it.
+						console.error("commit_own_pending_unverified", groupId);
+						return;
+					}
+					// Genuine failure (fork, stale epoch, decrypt error) — do NOT
+					// ack, same reasoning as message_decrypt_failed below: the
+					// 30-day retention floor eventually GCs it server-side, and
+					// this hook's own fetch cursor still advances past it
+					// regardless (poll()'s comment), so redelivery only happens on
+					// a future remount or a switch away from and back to this
+					// chat. Diagnostic only — never ciphertext/content.
+					console.error(
+						"commit_process_failed",
+						err instanceof Error ? err.name : typeof err,
+						err instanceof Error ? err.message : String(err),
+					);
+				}
+				return;
+			}
+			if (env.message_type === "Proposal") {
+				// Ack silently — see useWelcomePoller.ts's Proposal branch for the
+				// full argument (retracted F5): leaving Proposal envelopes unacked
+				// bought no real safety (RFC 9420 §12.4's `ProposalOrRef::Reference`
+				// resolves against the receiver's own LOCAL `store_pending_proposal`
+				// state, which this codebase never populates, not against a
+				// re-fetch of the original envelope) while growing an unbounded,
+				// attacker-inflatable backlog. Proposal processing itself remains a
+				// separate, still-unwired gap (issue #2 follow-up).
 				await ackMessage(sessionToken, env.id).catch(() => {});
+				return;
+			}
+			if (env.message_type !== "Application") {
 				return;
 			}
 			if (env.group_id !== groupId) {
@@ -460,12 +902,31 @@ export function useMessages(
 				return;
 			}
 
-			if (!withinDecryptRateLimit(env.sender)) {
-				// Over the sender's decrypt-attempt budget — defer instead of dropping
-				// (see deferredEnvelopesRef's doc comment for why: dropping here risked
-				// silently losing legitimate backlog, not just floods). Retried on a
-				// later poll tick once the sender's window has room again.
-				if (deferredEnvelopesRef.current.length < MAX_DEFERRED_ENVELOPES) {
+			// Strict per-group head-of-line ordering (F1, crypto-reviewer HIGH): defer
+			// whenever the queue is already non-empty, checked FIRST so it never also
+			// consumes this sender's decrypt-rate budget for nothing (F7) — mirrors
+			// the Commit branch above, and for the identical reason: without this, an
+			// unrelated sender's fresh-budget Application envelope arriving later in
+			// the SAME page would decrypt immediately, racing ahead of an
+			// earlier-in-delivery-order entry (Application OR Commit) already
+			// deferred — under this group's `max_past_epochs(0)`, an Application
+			// envelope racing ahead of an earlier same-epoch Commit (or vice versa)
+			// can permanently strand it. See the Commit branch's comment for the full
+			// argument; this is its Application-side half, closing the asymmetry a
+			// prior version of this file left open.
+			if (deferredEnvelopesRef.current.length > 0 || !withinDecryptRateLimit(env.sender)) {
+				// Deferred instead of dropped (see deferredEnvelopesRef's doc comment
+				// for why: dropping here risked silently losing legitimate backlog,
+				// not just floods). Retried on a later poll tick once the queue drains
+				// and/or the sender's rate window has room again. Counts only
+				// Application-typed entries against MAX_DEFERRED_ENVELOPES — Commit
+				// entries have their own separate, smaller reserved bound
+				// (MAX_DEFERRED_COMMITS, see the Commit branch above) so an
+				// Application flood can never consume a Commit's reserved headroom.
+				const deferredApplicationCount = deferredEnvelopesRef.current.filter(
+					(e) => e.message_type !== "Commit",
+				).length;
+				if (deferredApplicationCount < MAX_DEFERRED_ENVELOPES) {
 					deferredEnvelopesRef.current.push(env);
 				} else {
 					// Diagnostic only, no envelope content — env.sender is an opaque
@@ -743,7 +1204,8 @@ export function useMessages(
 		};
 
 		const poll = async () => {
-			if (cancelled) return;
+			if (cancelled || pollInFlightRef.current?.groupId === groupId) return;
+			pollInFlightRef.current = { groupId, run: runToken };
 			try {
 				const envelopes = await pollMessages(
 					sessionToken,
@@ -841,6 +1303,20 @@ export function useMessages(
 				sweepStaleDecryptRateEntries();
 			} catch {
 				// Network failure — silently retry on next interval.
+			} finally {
+				// Only clear the slot this run itself claimed. Checking BOTH groupId
+				// AND run (not groupId alone, F9) is what makes this safe: a stale
+				// run for a DIFFERENT groupId (e.g. the OLD group in a chat switch)
+				// never matches groupId; a stale run for the SAME groupId revisited
+				// later (e.g. A -> B -> A, see pollInFlightRef's doc comment) matches
+				// groupId but not run, so it still cannot clobber a NEWER run's
+				// legitimately in-flight claim for that same group.
+				if (
+					pollInFlightRef.current?.groupId === groupId &&
+					pollInFlightRef.current?.run === runToken
+				) {
+					pollInFlightRef.current = null;
+				}
 			}
 		};
 

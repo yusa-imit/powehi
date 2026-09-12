@@ -85,32 +85,72 @@ export type MlsPqEncapKeyResult = { encapKey: Uint8Array; signature: Uint8Array 
 // A real caller's local MLS epoch and the server counter therefore diverge
 // from the very first mlsAddMember.
 //
-// STATUS — the peer-side commit-processing primitive NOW EXISTS:
-// mlsProcessCommit (WASM mls_process_commit) has landed as a primitive (see
-// its doc comment below). It is still NOT wired into any consumer loop —
-// useMessages.ts and useWelcomePoller.ts still ack-and-drop every Commit
-// envelope, so nothing in the running application consumes a Commit yet.
-// Self-commit recognition is now built: a Commit this device itself sent is
-// reported as the distinct `MlsError::OwnCommit` (surfaced as a rejected
-// promise whose message is `"mls own commit error"` — there is no separate
-// error-code field; a consumer loop must match on that literal string, e.g.
-// `err.message === "mls own commit error"`, not just "rejected") — see
-// `MlsError::OwnCommit`'s doc comment in `mls_group.rs` for the full
-// pre-merge/post-merge split. This does NOT close all the gaps blocking
-// wiring — TWO remain open: (1) post-merge recognition
-// (`mlsRemoveMemberStage`/`mlsRemoveMemberConfirm`'s `own_commit_hashes`
-// bookkeeping) lives in worker thread-local memory only and is LOST on a
-// page reload / worker restart — the most likely time to hit this is
-// immediately after confirming a Remove, while the Delivery Service's echo
-// of that exact commit is often still in flight; a re-delivery that would
-// have hit OwnCommit before the reload instead falls back to the generic
-// "mls decrypt error" afterward, which a consumer loop must not treat as a
-// fork signal on its own; (2) the epoch-reconciliation gap described in the
-// paragraphs above (local MLS epoch vs the server's `groups.epoch` counter)
-// is still open. Therefore the Post-Compromise Security property the Rust
-// unit tests prove still holds in those tests only, NOT yet for the running
-// application, and these methods MUST NOT be wired into a production UI or
-// broadcast flow until BOTH gaps are resolved.
+// STATUS — the peer-side commit-processing primitive IS NOW WIRED, on the
+// RECEIVE path only: `useMessages.ts` (the per-active-group hook) calls
+// `mlsProcessCommit` for Commit envelopes belonging to its own `groupId`, in
+// the SAME poll loop/cursor as its Application decrypt (NOT the separate
+// global `useWelcomePoller.ts` — an earlier attempt wired it there and
+// crypto-reviewer flagged that the resulting two-independent-cursor split
+// could merge a Commit ahead of a same-epoch Application message on a
+// separate poll tick, permanently stranding it under this group's
+// `max_past_epochs(0)`; see useMessages.ts's top-of-module doc comment for
+// the full argument). A Commit this device itself sent is reported via ONE
+// OF TWO distinct sentinels — imported by main-thread callers from
+// `./cryptoWorkerErrors`, NEVER from this module, to avoid dragging this
+// file's top-level `Comlink.expose(api)` side effect into the main-thread
+// bundle; see that module's doc comment for both. There is no separate
+// error-code field; a consumer loop must match on the exact string. The two
+// are NOT interchangeable — `./cryptoWorkerErrors`'s doc comments spell out
+// why in full, but in short: `MLS_OWN_COMMIT_ERROR` (`MlsError::OwnCommit`)
+// is this crate's own hash-verified post-merge tracking and safe to
+// auto-ack; `MLS_OWN_COMMIT_PENDING_ERROR` (`MlsError::OwnCommitPending`) is
+// openmls's own unverified, forgeable pre-merge signal and must NOT be
+// auto-acked. See `MlsError::OwnCommit`'s and `MlsError::OwnCommitPending`'s
+// doc comments in `mls_group.rs` for the full pre-merge/post-merge split.
+// `mlsInspectCommit`/`mlsConfirmIncomingCommit`/`mlsDiscardIncomingCommit`
+// (the policy-gate trio, below) remain UNUSED by the app. The one-shot
+// `mlsProcessCommit`, paired with `mlsGroupIsActive` for post-merge
+// self-eviction detection (see `mlsGroupIsActive`'s doc comment — it reads
+// openmls's own group state, NOT a leaf-index comparison, which has a false
+// negative when an Add refills this device's just-vacated leaf, RFC 9420
+// §12.1.1/§12.3), is the mechanism ACTUALLY USED on the receive path.
+// CORRECTION (crypto-reviewer N4): the trio's `MlsInspectCommitResult.selfRemoved`
+// field is NOT interchangeable with `mlsGroupIsActive` — `selfRemoved` is
+// available BEFORE the commit merges (the caller can still decline);
+// `mlsGroupIsActive` is only readable AFTER `mlsProcessCommit` has already
+// merged the commit and advanced the epoch, by which point declining is no
+// longer possible. `selfRemoved` is strictly more capability, not a
+// redundant alternate source — the trio stays unused because (a) no
+// application-level POLICY exists yet to gate an incoming Commit on (e.g.
+// "only an admin may remove members"), and (b) it introduces an
+// orphaned-staged-handle window between inspect and confirm/discard that the
+// atomic `mlsProcessCommit` avoids entirely. The trio is kept available as a
+// primitive for whenever such a policy is designed.
+//
+// One gap remains genuinely open, but it is ORTHOGONAL to the receive path
+// just wired: the epoch-reconciliation gap described in the paragraphs
+// above (local MLS epoch vs the server's `groups.epoch` counter). Merging
+// an incoming Commit via openmls neither consults nor depends on that
+// server counter at all — only the SEND path's compare-and-swap
+// (`messaging_service.rs::send_commit`) touches it, and no production
+// frontend code calls `sendCommit` today (only `app/src/api/messages.ts`'s
+// definition and `messages.test.ts` reference it — still true, unchanged by
+// this pass). So wiring the receive path did not need to wait on that gap,
+// and closing that gap later does not require re-touching the receive path.
+// Post-merge own-commit recognition (`mlsRemoveMemberStage`/
+// `mlsRemoveMemberConfirm`'s `own_commit_hashes` bookkeeping, plus the
+// pending, not-yet-confirmed `pending_own_commit_hashes` populated at stage
+// time) is now PERSISTED, not worker-thread-local-only: both maps are part
+// of `MlsContextState` (`MLS_CONTEXT_STATE_VERSION` 2, see `mls_group.rs`'s
+// "Persisted across a worker reload (issue #2 gap 1, closed)" doc comment
+// and `wasm_exports.rs`'s `export_mls_context_inner`/
+// `import_mls_context_inner`), so a page reload, worker restart, or
+// export/import round trip carries both forward. This gap is CLOSED — a
+// re-delivery that would have hit `MLS_OWN_COMMIT_ERROR` before the reload
+// still hits it after (once confirmed), or `MLS_OWN_COMMIT_PENDING_ERROR`
+// in the still-pending window, so a generic "mls decrypt error" after a
+// reload can still be trusted as a genuine fork/decrypt-failure signal, not
+// an artifact of lost own-commit bookkeeping.
 export type MlsRemoveStageResult = { commit: Uint8Array; priorEpoch: number };
 // Peer/bystander-side counterpart: the result of processing an incoming MLS
 // Commit sent by ANOTHER member (a Remove or Add that member committed).
@@ -118,6 +158,14 @@ export type MlsRemoveStageResult = { commit: Uint8Array; priorEpoch: number };
 // `groups.epoch` counter — the two diverge from the first member add, see
 // the block above.
 export type MlsProcessCommitResult = { newEpoch: number };
+// `MLS_OWN_COMMIT_ERROR` and `MLS_OWN_COMMIT_PENDING_ERROR` (see the STATUS
+// block above) are defined in, and MUST be imported from,
+// `./cryptoWorkerErrors` — deliberately NOT re-exported from this file. That
+// module has no dependency on this one and no side effects, so main-thread
+// code can import the constants without pulling in this file's top-level
+// `Comlink.expose(api)` call (crypto-reviewer F1); re-exporting them here
+// would leave that exact footgun one
+// `import { MLS_OWN_COMMIT_ERROR } from "../workers/crypto.worker"` away.
 // Inspect/confirm/discard trio (peer/bystander side) — lets the caller run an
 // application-level policy check (e.g. "only an admin may remove members")
 // on an incoming Commit BEFORE deciding whether to merge it, unlike
@@ -273,6 +321,10 @@ interface WasmModule {
 	mls_encrypt: (identityId: string, groupId: string, plaintext: Uint8Array) => MlsCiphertextResult;
 	mls_decrypt: (identityId: string, groupId: string, ciphertext: Uint8Array) => MlsPlaintextResult;
 	mls_group_members: (identityId: string, groupId: string) => MlsGroupMember[];
+	// Reliable self-eviction signal after mlsProcessCommit — reads openmls's own
+	// group-active state, NOT a leaf-index comparison. See mlsGroupIsActive's doc
+	// comment (below, in the exposed api) for the false-negative isSelf has.
+	mls_group_is_active: (identityId: string, groupId: string) => boolean;
 	mls_compute_safety_number: (sigKeyA: Uint8Array, sigKeyB: Uint8Array) => MlsSafetyNumberResult;
 	mls_compute_group_safety_number: (identityId: string, groupId: string) => MlsSafetyNumberResult;
 	mls_clear_session: () => void;
@@ -820,13 +872,22 @@ const api = {
 	 *
 	 * Processing a Commit that evicts THIS device resolves successfully while
 	 * leaving the local group inactive — eviction is not reported as an
-	 * error, so callers must detect it separately (e.g. via
-	 * `mlsGroupMembers` no longer containing a self leaf).
+	 * error, so callers must detect it separately via `mlsGroupIsActive`
+	 * AFTER this call returns Ok. Do NOT use `mlsGroupMembers`'s `isSelf` for
+	 * this: it is a leaf-index comparison, and RFC 9420 §12.1.1 fills the
+	 * leftmost BLANK leaf on Add while §12.3 applies Remove before Add within
+	 * one Commit, so a "kick and replace" Commit can land the new member's
+	 * leaf exactly on this device's just-vacated index — `own_leaf_index()`
+	 * still reports the old index, so `isSelf` is (incorrectly) true for the
+	 * new member's row and the eviction is missed. `mlsGroupIsActive` reads
+	 * openmls's own group-active flag instead and has no such false negative.
 	 *
-	 * STATUS: crypto PRIMITIVE ONLY — see the `MlsRemoveStageResult` doc
-	 * comment above. Not wired into `useMessages.ts` or
-	 * `useWelcomePoller.ts`; self-commit recognition (skipping a Commit this
-	 * device itself sent) is still an open gap.
+	 * STATUS: wired into `useMessages.ts`'s per-group poll loop for the
+	 * RECEIVE path (peer/bystander merging an incoming Commit) — see the
+	 * module-top STATUS block above for what this does and does not close,
+	 * and why it is that hook and not the global `useWelcomePoller.ts`.
+	 * Self-commit recognition (skipping a Commit this device itself sent,
+	 * via the `MLS_OWN_COMMIT_ERROR` sentinel) is handled by that caller.
 	 */
 	async mlsProcessCommit(
 		identityId: string,
@@ -846,9 +907,18 @@ const api = {
 	 * The caller MUST follow this call with exactly ONE of
 	 * `mlsConfirmIncomingCommit` or `mlsDiscardIncomingCommit`.
 	 *
-	 * STATUS: crypto PRIMITIVE ONLY, exactly like `mlsProcessCommit` — see
-	 * the `MlsRemoveStageResult` doc comment above. Not wired into
-	 * `useMessages.ts` or `useWelcomePoller.ts`.
+	 * STATUS: crypto PRIMITIVE ONLY — unlike `mlsProcessCommit`, this trio
+	 * remains UNUSED by the app (see the module-top STATUS block above). The
+	 * receive path uses the atomic `mlsProcessCommit` + `mlsGroupIsActive`
+	 * instead: no application-level policy exists yet to gate an incoming
+	 * Commit on, and this trio's inspect/confirm/discard sequence would add
+	 * an orphaned-handle window between inspect and confirm that the atomic
+	 * call avoids. This result's own `selfRemoved` field is NOT a redundant
+	 * alternative source of `mlsGroupIsActive`'s signal (crypto-reviewer N4
+	 * correction) — it is available BEFORE the commit merges, while
+	 * `mlsGroupIsActive` is only readable AFTER the merge has already
+	 * happened and the epoch has advanced, when declining is no longer
+	 * possible. Kept available for a future real policy-gate use case.
 	 */
 	async mlsInspectCommit(
 		identityId: string,
@@ -864,9 +934,9 @@ const api = {
 	 * the epoch and consumes `commitHandle`. See `MlsInspectCommitResult`'s
 	 * doc comment for the full caller contract.
 	 *
-	 * STATUS: crypto PRIMITIVE ONLY, exactly like `mlsProcessCommit` — see
-	 * the `MlsRemoveStageResult` doc comment above. Not wired into
-	 * `useMessages.ts` or `useWelcomePoller.ts`.
+	 * STATUS: crypto PRIMITIVE ONLY — see `mlsInspectCommit`'s STATUS note
+	 * above: this trio is unused by the app, the receive path uses the
+	 * atomic `mlsProcessCommit` instead.
 	 */
 	async mlsConfirmIncomingCommit(
 		identityId: string,
@@ -884,9 +954,9 @@ const api = {
 	 * See `MlsInspectCommitResult`'s doc comment for why this is NOT a free
 	 * undo.
 	 *
-	 * STATUS: crypto PRIMITIVE ONLY, exactly like `mlsProcessCommit` — see
-	 * the `MlsRemoveStageResult` doc comment above. Not wired into
-	 * `useMessages.ts` or `useWelcomePoller.ts`.
+	 * STATUS: crypto PRIMITIVE ONLY — see `mlsInspectCommit`'s STATUS note
+	 * above: this trio is unused by the app, the receive path uses the
+	 * atomic `mlsProcessCommit` instead.
 	 */
 	async mlsDiscardIncomingCommit(
 		identityId: string,
@@ -1012,10 +1082,38 @@ const api = {
 	 * from the group (their stale handle's member list no longer includes
 	 * it). See MlsGroupMember's doc comment — this is NOT the server's
 	 * device_id.
+	 *
+	 * Do NOT use `isSelf` to detect self-eviction after a merged Commit — use
+	 * `mlsGroupIsActive` instead. See that method's doc comment for the
+	 * Add-refills-the-vacated-leaf false negative this has.
 	 */
 	async mlsGroupMembers(identityId: string, groupId: string): Promise<MlsGroupMember[]> {
 		const wasm = await getWasm();
 		return wasm.mls_group_members(identityId, groupId) as unknown as MlsGroupMember[];
+	},
+
+	/**
+	 * The RELIABLE self-eviction signal to call after `mlsProcessCommit`
+	 * resolves successfully. Returns openmls's own `group.is_active()` state
+	 * directly — NOT derived from leaf-index comparison — so it has none of
+	 * `mlsGroupMembers`'s `isSelf` false negatives.
+	 *
+	 * Do NOT use `mlsGroupMembers`'s `isSelf` for eviction detection: it is a
+	 * leaf-index comparison, and per RFC 9420 §12.1.1 an Add fills the
+	 * leftmost BLANK leaf while §12.3 applies Remove before Add within one
+	 * Commit — so a "kick and replace" Commit (remove this device, add a new
+	 * member in the same Commit) can land the NEW member's leaf exactly on
+	 * this device's just-vacated index. `own_leaf_index()` still reports the
+	 * old index in that case, so `isSelf` comes back true for the new
+	 * member's row and the eviction is silently missed. `mlsGroupIsActive`
+	 * has no such gap because it never compares leaf indices at all.
+	 *
+	 * Returns `false` once this device's own leaf has been removed from the
+	 * group (openmls deactivates the local group handle on self-removal).
+	 */
+	async mlsGroupIsActive(identityId: string, groupId: string): Promise<boolean> {
+		const wasm = await getWasm();
+		return wasm.mls_group_is_active(identityId, groupId);
 	},
 
 	/**

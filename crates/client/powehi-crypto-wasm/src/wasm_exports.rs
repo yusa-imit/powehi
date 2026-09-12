@@ -67,9 +67,9 @@ use crate::mls_group;
 use crate::mls_group::{
     abort_remove_member, add_member, confirm_remove_member, create_group, decrypt_message,
     encrypt_message, generate_identity, generate_identity_from_keypair,
-    generate_key_package_with_pq_ext, inspect_incoming_commit, join_group, merge_inspected_commit,
-    process_incoming_commit, stage_remove_member, Identity, POWEHI_PQ_KEM_EXT_TYPE,
-    PQ_EXT_ENCAP_KEY_LEN, PQ_EXT_PAYLOAD_LEN,
+    generate_key_package_with_pq_ext, group_is_active, inspect_incoming_commit, join_group,
+    merge_inspected_commit, process_incoming_commit, stage_remove_member, Identity,
+    POWEHI_PQ_KEM_EXT_TYPE, PQ_EXT_ENCAP_KEY_LEN, PQ_EXT_PAYLOAD_LEN,
 };
 use crate::opaque::{self, DefaultCipherSuite, EXPORT_KEY_LEN};
 
@@ -994,12 +994,13 @@ pub fn mls_add_member(
 /// follow-up).
 ///
 /// STATUS: the peer-side exports now exist — [`mls_process_commit`]
-/// (one-shot) and the [`mls_inspect_commit`] / [`mls_confirm_incoming_commit`]
-/// / [`mls_discard_incoming_commit`] two-phase trio (with a pre-merge policy
-/// point) — but no consumer loop calls any of them: `useMessages.ts` and
-/// `useWelcomePoller.ts` still ack-and-drop every Commit envelope, so nothing
-/// in the running application consumes a Commit produced here yet. Do not
-/// wire this into any production UI or broadcast flow yet; see
+/// (one-shot, wired into the receive path in `app/src/hooks/useMessages.ts`
+/// — see that export's doc comment) and the [`mls_inspect_commit`] /
+/// [`mls_confirm_incoming_commit`] / [`mls_discard_incoming_commit`]
+/// two-phase trio (still unused by the app; see [`mls_inspect_commit`]'s doc
+/// comment for why). `useWelcomePoller.ts` does not touch Commit envelopes at
+/// all. Do not wire the *stage/confirm/abort remove* flow this doc comment
+/// describes into any production UI or broadcast flow yet; see
 /// `stage_remove_member`'s doc comment in `mls_group.rs` for the full status
 /// note.
 ///
@@ -1198,29 +1199,105 @@ pub fn mls_remove_member_abort(identity_id: &str, group_id: &str) -> Result<(), 
 /// `process_incoming_commit`'s doc comment in `mls_group.rs` for the full
 /// argument, including why this cannot be recovered from after the fact.
 ///
-/// # STATUS: crypto primitive only — not yet wired into any poller
-/// Nothing in this codebase currently calls this export from a live
-/// consumer loop: `app/src/hooks/useMessages.ts` and
-/// `app/src/hooks/useWelcomePoller.ts` still ack-and-drop every Commit
-/// envelope today. Wiring this in is a deliberate separate follow-up.
+/// # STATUS: wired into the receive path, in `useMessages.ts`
+/// `app/src/hooks/useMessages.ts` (the per-active-group hook) calls this
+/// export for Commit envelopes belonging to its own `groupId`, in the SAME
+/// poll loop/cursor as its Application decrypt. An earlier attempt wired
+/// this into the global, once-per-identity `useWelcomePoller.ts` instead
+/// (reasoning: no "active group" to get wrong there) but crypto-reviewer
+/// flagged that the resulting two-independent-poll-cursor split could merge
+/// a Commit ahead of a same-epoch Application message queued on the other
+/// hook's separate timer, permanently stranding it under this group's
+/// `max_past_epochs(0)` — see `app/src/hooks/useMessages.ts`'s top-of-module
+/// doc comment for the full argument. `useWelcomePoller.ts` no longer
+/// touches Commit envelopes at all; a Commit for a group other than the
+/// currently-open one is left unacked until that group becomes active. The
+/// epoch-reconciliation gap (local MLS epoch vs. the server's `groups.epoch`
+/// counter, see `mls_remove_member_stage`'s doc comment) remains open but is
+/// orthogonal — merging an incoming Commit here never consults that counter.
 ///
-/// # Use [`mls_inspect_commit`] instead when wiring a consumer loop
-/// This export merges unconditionally: it has no point at which an
+/// # Accepted risk: no application-level policy gate on the wired path
+/// This export merges unconditionally — it has no point at which an
 /// application-level policy check (e.g. "only an admin may remove members")
-/// could run. The two-phase [`mls_inspect_commit`] /
-/// [`mls_confirm_incoming_commit`] / [`mls_discard_incoming_commit`] trio
-/// exists for exactly that and should be preferred by any new caller; this
-/// one-shot export is kept unchanged for its existing callers and tests.
+/// could run. The two-phase [`mls_inspect_commit`] / [`mls_confirm_incoming_commit`]
+/// / [`mls_discard_incoming_commit`] trio exists for exactly that, but
+/// remains unused: no such policy is designed yet, so a two-phase caller
+/// today would just be "inspect, then unconditionally confirm" with an
+/// added orphaned-handle-on-crash window and no other benefit. Wiring THIS
+/// one-shot export as the production receive path is therefore a deliberate,
+/// signed-off accepted risk, not an oversight: **any authenticated group
+/// member can silently evict or add members from every bystander's
+/// perspective, with no application-level veto anywhere in the path**, for
+/// as long as no policy exists. This is bounded by MLS's own membership
+/// authentication (only a current group member's signature is accepted at
+/// all — see `process_incoming_commit`'s content-type/signature checks); it
+/// is not a new capability MLS itself introduces. It is NOT, however,
+/// risk-free relative to this codebase's prior behaviour, in three specific
+/// ways a prior draft of this note glossed over as "symmetric with every
+/// other client" — that phrase is retracted, for these reasons:
+/// - **Remove is signaled, Add is not.** The receive path
+///   (`app/src/hooks/useMessages.ts`) detects and logs self-eviction via
+///   [`mls_group_is_active`], but has NO signal at all for a roster-growing
+///   Commit — an authenticated member silently adding an attacker-controlled
+///   device produces no diagnostic and no UI change on any bystander's
+///   client.
+/// - **Group AND DM safety numbers going stale silently — CLOSED.**
+///   `app/src/components/ChatLayout.tsx`'s `InfoPanel` now recomputes a
+///   chat's safety number on every merged peer Commit
+///   (`chat.groupCommitVersion`, bumped by `useMessages.ts`'s
+///   `onGroupChanged` callback), not just on mount or a server-reported
+///   `memberCount` change — closing the exposure window where an
+///   out-of-band-verifying user could compare against a value made stale by
+///   a roster change or a peer's self-Update mid-verification. This
+///   originally shipped gated on `chat.isGroup`, silently excluding DMs
+///   (threat-model-checker correction — prd.md §3.3 models a DM as a
+///   2-member MLS group, and `useMessages.ts`/`onGroupChanged` never
+///   distinguished DM from group, so the gate was purely a UI omission, not
+///   a real absence of the underlying signal); the gate has been removed.
+/// - **The untrusted Delivery Service now controls a destructive ordering
+///   lever it did not have before.** The whole ordering argument this
+///   receive path depends on (Commit and Application for one group share a
+///   single poll cursor, processed in server-delivery order) is anchored to
+///   an order the DS itself assigns. Combined with this group's
+///   `max_past_epochs(0)`, a DS that reorders a Commit ahead of a same-epoch
+///   Application envelope permanently and undetectably destroys that
+///   message (see `app/src/hooks/useMessages.ts`'s ordering discussion) —
+///   this DS is explicitly untrusted for content in this codebase's threat
+///   model, and this wiring is the first thing that turns its ordering
+///   choices into a content-loss primitive, not just a delay. Tracked in
+///   prd.md §3.4 (delivery-order-based permanent message destruction) and
+///   §3.1's T3 row, and in `docs/decisions/0005-mls-commit-receive-without-policy-gate.md`
+///   (also covers the sibling membership-integrity gap: any current member
+///   can add/remove others with no application-level veto, bounded by MLS's
+///   own membership authentication — tracked in prd.md §3.1 under T4, NOT
+///   T3, since the DS itself cannot construct a valid Commit).
 ///
-/// # Own commits are now reported distinctly
+/// None of the three points above change the confidentiality invariant
+/// (server never sees plaintext) — they are integrity/availability-adjacent
+/// gaps in what a bystander's client can observe or trust, tracked as
+/// follow-up hardening, not blockers for closing issue #2's receive-side
+/// primitive. Revisit this whole note — and prefer the two-phase trio
+/// instead of this one-shot export — the day a real admin-only-Remove (or
+/// similar) policy is designed; until then, a new caller should keep using
+/// this one-shot export, matching the only production caller that exists.
+///
+/// # Own commits are now reported distinctly — TWO variants, NOT interchangeable
 /// A Commit this device itself authored no longer collapses into the generic
-/// decrypt error: it rejects with the `mls own commit error` message
-/// (`MlsError::OwnCommit`), so a consumer loop can skip it instead of
-/// mistaking it for a fork. Read `MlsError::OwnCommit`'s doc comment in
-/// `mls_group.rs` for the limit — the signal only holds while the own commit
-/// is still at the CURRENT epoch; an own commit re-delivered AFTER this
-/// device merged it is a wrong-epoch message that openmls cannot tell apart
-/// from any other stale commit.
+/// decrypt error, but it rejects with one of TWO distinct messages depending
+/// on timing, and a caller MUST NOT treat them the same way:
+/// - `mls own commit pending error` (`MlsError::OwnCommitPending`) — openmls's
+///   OWN pre-merge signal, unverified by this crate and forgeable by any
+///   current group member. Read `MlsError::OwnCommitPending`'s doc comment in
+///   `mls_group.rs`: a caller must NOT auto-ack on this alone.
+/// - `mls own commit error` (`MlsError::OwnCommit`) — this crate's own
+///   hash-verified post-merge tracking. Safe to treat as "already applied,
+///   nothing to merge" and ack.
+///
+/// Read both variants' doc comments in `mls_group.rs` for the limit — the
+/// pre-merge signal only holds while the own commit is still at the CURRENT
+/// epoch; an own commit re-delivered AFTER this device merged it is a
+/// wrong-epoch message that openmls cannot tell apart from any other stale
+/// commit, UNLESS the confirmed hash is supplied (the post-merge variant).
 ///
 /// # Self-eviction
 /// If `commit` is the Commit that removes the CALLER'S OWN leaf, this still
@@ -1355,11 +1432,32 @@ fn take_inspected_commit(
 /// already applied to calling `mls_process_commit` twice — the two-phase API
 /// does not introduce it).
 ///
-/// # STATUS: crypto primitive only
-/// Nothing in this codebase calls this from a live consumer loop;
-/// `app/src/hooks/useMessages.ts` and `app/src/hooks/useWelcomePoller.ts`
-/// still ack-and-drop every Commit envelope. Wiring remains blocked on the
-/// epoch-reconciliation design (see `mls_remove_member_stage`'s doc comment).
+/// # STATUS: crypto primitive only — this trio remains unused by the app
+/// The receive path (`app/src/hooks/useMessages.ts`) uses the atomic
+/// one-shot [`mls_process_commit`] plus [`mls_group_is_active`] for
+/// self-eviction detection instead of this trio. **Correction (crypto-reviewer
+/// N4): these are NOT the same signal, timing-wise, and a prior version of
+/// this note incorrectly called them equivalent.**
+/// [`mls_group::StagedCommitInfo::self_removed`] (exposed by
+/// [`mls_confirm_incoming_commit`]/[`inspect_incoming_commit`]) is available
+/// BEFORE the commit is merged — the caller can still decline. `mls_group_is_active`
+/// is only readable AFTER `mls_process_commit` has already merged the commit,
+/// advanced the epoch (discarding the previous epoch's keys under
+/// `max_past_epochs(0)`), and the caller has acked the envelope — by which
+/// point declining is no longer possible. `self_removed` is strictly MORE
+/// capability: it is exactly the information a future "warn/confirm before
+/// merging a self-eviction" policy would need, and `mls_group_is_active`
+/// cannot substitute for it. The trio stays unused today not because the two
+/// signals are interchangeable, but because no application-level POLICY
+/// exists yet to gate ANY incoming Commit on (self-eviction or otherwise,
+/// e.g. "only an admin may remove members") — with no such policy to
+/// evaluate between inspect and confirm, the two-phase split today would only
+/// add risk (an orphaned staged handle if the caller crashes between inspect
+/// and confirm) without a policy decision to justify holding the commit open
+/// for. This trio is kept available for whenever such a policy is designed.
+/// Not blocked on the epoch-reconciliation gap (see `mls_remove_member_stage`'s
+/// doc comment) — that gap is orthogonal to processing incoming Commits, same
+/// as for [`mls_process_commit`].
 #[wasm_bindgen]
 pub fn mls_inspect_commit(
     identity_id: &str,
@@ -2046,7 +2144,7 @@ const GROUP_SAFETY_NUMBER_DOMAIN: &[u8] = b"powehi-group-safety-number-v1";
 /// this function never reads; crypto-reviewer, cycle 457, corrected an
 /// earlier doc version that conflated the two). It is still true, though,
 /// that group size is *remotely influenced*: members join via Commits/Welcome
-/// (RFC 9420 §12.1.1, §12.4) sent by other members, so a malicious-but-
+/// (RFC 9420 §12.4) sent by other members, so a malicious-but-
 /// legitimate member can grow a group past this bound. A group that large has
 /// no practical human-verifiable fingerprint anyway, but the eventual UI
 /// consumer of this export MUST render that case ("too many members to
@@ -2171,6 +2269,16 @@ struct MlsMemberInfo {
     /// longer yields its own leaf, while `own_leaf_index()` still reports the
     /// index it used to occupy, so nothing matches. See
     /// `test_mls_group_members_inner_evicted_caller_has_no_self_row`.
+    ///
+    /// WARNING — do NOT use `is_self` for eviction detection. It ALSO has a
+    /// false-NEGATIVE failure mode in the opposite direction: a single "kick
+    /// and replace" Commit (Remove this device's leaf + Add a new member, in
+    /// one Commit) commonly lands the new member's leaf on exactly this
+    /// device's just-vacated index (RFC 9420 §12.1.1 Add-fills-leftmost-blank
+    /// and §12.3 Remove-before-Add), so `is_self` reads `true` for the NEW
+    /// member's row instead of correctly reporting no self row at all. Use
+    /// [`mls_group_is_active`] for eviction detection instead — see its doc
+    /// comment.
     is_self: bool,
 }
 
@@ -2231,6 +2339,16 @@ fn mls_group_members_inner(
 /// exists — e.g. never `find(isSelf)` and unwrap the result. See
 /// `test_mls_group_members_inner_evicted_caller_has_no_self_row`.
 ///
+/// DO NOT use `isSelf` to detect self-eviction — it has its own false
+/// negative in exactly the eviction case, in the opposite direction from the
+/// zero-row case above: a single "kick and replace" Commit (Remove this
+/// device + Add a new member, together) commonly reuses this device's
+/// just-vacated leaf index for the new member (RFC 9420 §12.1.1 / §12.3), so
+/// `isSelf` reads `true` for the new member's row rather than correctly
+/// reporting no self row. Use [`mls_group_is_active`] for eviction detection;
+/// see its doc comment and `MlsMemberInfo::is_self`'s doc comment for the
+/// full explanation.
+///
 /// IMPORTANT — `credentialIdentityHex` is NOT a server `device_id` (see
 /// `member_credential_identity_hex`'s doc comment for why: in this
 /// codebase's current identity model it is an account-level, recovery-phrase
@@ -2258,6 +2376,48 @@ pub fn mls_group_members(identity_id: &str, group_id: &str) -> Result<JsValue, J
         arr.push(&obj);
     }
     Ok(arr.into())
+}
+
+/// Native-testable core of `mls_group_is_active`. See the `#[wasm_bindgen]`
+/// wrapper for the public doc-comment.
+///
+/// Delegates the actual state read to [`mls_group::group_is_active`] — this
+/// function's own job is exactly the `MLS_CTX` lookup / borrow, matching
+/// `mls_group_members_inner`'s shape, not re-deriving the signal itself
+/// (rule: one construction path).
+fn mls_group_is_active_inner(identity_id: &str, group_id: &str) -> Result<bool, &'static str> {
+    MLS_CTX.with(|ctx| -> Result<bool, &'static str> {
+        let ctx = ctx.borrow();
+        let c = ctx.get(identity_id).ok_or("unknown mls identity")?;
+        let group = c.groups.get(group_id).ok_or("unknown mls group")?;
+        Ok(group_is_active(group))
+    })
+}
+
+/// The reliable self-eviction signal for the one-shot [`mls_process_commit`]
+/// receive path.
+///
+/// Returns `false` once this identity's own leaf has been removed from the
+/// group by a merged Commit, `true` otherwise. Unlike `mls_group_members`'s
+/// `isSelf` field, this has no leaf-index-reuse false negative: RFC 9420
+/// §12.1.1 (Add fills the tree's leftmost blank leaf) combined with §12.3
+/// (Remove is applied before Add within one Commit) means a single "kick and
+/// replace" Commit — Remove this device + Add a new member, together —
+/// commonly reuses this device's just-vacated leaf index for the new member.
+/// A caller deriving self-eviction from `isSelf` (itself derived from
+/// `leaf_index == own_leaf_index()`) would then wrongly match the new
+/// member's row as "self" and silently miss the eviction. This export instead
+/// reads openmls's own group-active state directly ([`MlsGroup::is_active`]
+/// via [`mls_group::group_is_active`]), which is unaffected by leaf reuse.
+/// See `MlsMemberInfo::is_self`'s doc comment and `mls_group_members`'s
+/// `isSelf` doc comment for the same warning from the other side, and
+/// `mls_group::group_is_active`'s doc comment (`mls_group.rs`) for the full
+/// RFC citation and
+/// `test_kick_and_replace_commit_reuses_vacated_leaf_defeats_leaf_index_self_check`
+/// for the reproduction this export exists to be immune to.
+#[wasm_bindgen]
+pub fn mls_group_is_active(identity_id: &str, group_id: &str) -> Result<bool, JsError> {
+    mls_group_is_active_inner(identity_id, group_id).map_err(js_err)
 }
 
 /// Compute a Safety Number from two Ed25519 signature public keys.
@@ -4794,6 +4954,182 @@ mod tests {
             after[0].credential_identity_hex.as_deref(),
             Some(bytes_to_opaque_id_hex(&alice_bytes).as_str()),
             "the sole remaining member must be alice"
+        );
+
+        mls_clear_session();
+    }
+
+    /// F3 regression at the WASM export boundary: `mls_group_is_active`
+    /// (via `mls_group_is_active_inner`) must correctly report `false` for a
+    /// "kick and replace" Commit that reuses the evicted caller's leaf index
+    /// for a newly-added member — the exact scenario where
+    /// `mls_group_members_inner`'s `is_self` gets it wrong. See
+    /// `mls_group::group_is_active`'s doc comment (`mls_group.rs`) and
+    /// `test_kick_and_replace_commit_reuses_vacated_leaf_defeats_leaf_index_self_check`
+    /// (`mls_group.rs`) for the RFC 9420 §12.1.1 / §12.3 mechanics; this test
+    /// pins the same contrast through the WASM-facing inner functions instead
+    /// of the raw `mls_group` API.
+    #[test]
+    fn test_mls_group_is_active_inner_kick_and_replace_evicted_caller_returns_false() {
+        let alice_bytes: [u8; 16] = [0xa1; 16];
+        let bob_bytes: [u8; 16] = [0xb2; 16];
+        let charlie_bytes: [u8; 16] = [0xc3; 16];
+        let dave_bytes: [u8; 16] = [0xd4; 16];
+
+        let alice_provider = OpenMlsRustCrypto::default();
+        let alice = generate_identity(&alice_bytes, &alice_provider).unwrap();
+        let mut alice_group = create_group(&alice, &alice_provider).unwrap();
+
+        let bob_provider = OpenMlsRustCrypto::default();
+        let bob = generate_identity(&bob_bytes, &bob_provider).unwrap();
+        let bob_kp = generate_key_package(&bob, &bob_provider).unwrap();
+
+        let charlie_provider = OpenMlsRustCrypto::default();
+        let charlie = generate_identity(&charlie_bytes, &charlie_provider).unwrap();
+        let charlie_kp = generate_key_package(&charlie, &charlie_provider).unwrap();
+
+        let dave_provider = OpenMlsRustCrypto::default();
+        let dave = generate_identity(&dave_bytes, &dave_provider).unwrap();
+        let dave_kp = generate_key_package(&dave, &dave_provider).unwrap();
+
+        // alice=0, bob=1, charlie=2 — bob occupies a non-trivial leaf.
+        let welcome1 = add_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+        let bob_group = join_group(&welcome1, &bob_provider).unwrap();
+        let (commit2, _welcome2, _gi) = alice_group
+            .add_members(
+                &alice_provider,
+                &alice.signer,
+                &[charlie_kp.key_package().clone()],
+            )
+            .unwrap();
+        alice_group.merge_pending_commit(&alice_provider).unwrap();
+        let commit2_bytes = commit2.to_bytes().unwrap();
+
+        // Register bob under the WASM identity/group context so the export's
+        // inner functions can be exercised the same way the JS bindings do.
+        let bob_group_id = group_id_hex(&bob_group);
+        let bob_ctx_id = next_id();
+        MLS_CTX.with(|ctx| {
+            let mut groups = HashMap::new();
+            groups.insert(bob_group_id.clone(), bob_group);
+            ctx.borrow_mut().insert(
+                bob_ctx_id.clone(),
+                MlsContext {
+                    identity: bob,
+                    provider: bob_provider,
+                    groups,
+                    own_commit_hashes: HashMap::new(),
+                    pending_own_commit_hashes: HashMap::new(),
+                },
+            );
+        });
+        MLS_CTX.with(|ctx| {
+            let mut ctx = ctx.borrow_mut();
+            let c = ctx.get_mut(&bob_ctx_id).expect("bob context must exist");
+            let group = c
+                .groups
+                .get_mut(&bob_group_id)
+                .expect("bob group must exist");
+            process_incoming_commit(group, &commit2_bytes, &c.provider, None).unwrap();
+        });
+
+        // Positive control: bob is still active and has exactly one self row.
+        assert!(
+            mls_group_is_active_inner(&bob_ctx_id, &bob_group_id).unwrap(),
+            "positive control: bob must still be active before the kick-and-replace commit"
+        );
+        let before = mls_group_members_inner(&bob_ctx_id, &bob_group_id).unwrap();
+        assert_eq!(
+            before.iter().filter(|m| m.is_self).count(),
+            1,
+            "positive control: a still-joined caller must have exactly one self row"
+        );
+
+        let bob_leaf = alice_group
+            .members()
+            .find(|m| {
+                BasicCredential::try_from(m.credential.clone())
+                    .map(|basic| basic.identity() == bob_bytes)
+                    .unwrap_or(false)
+            })
+            .map(|m| m.index.u32())
+            .expect("bob must be in alice's roster before removal");
+
+        // A single Commit: Remove bob's leaf AND Add dave, together.
+        let commit_bundle = alice_group
+            .commit_builder()
+            .propose_removals([LeafNodeIndex::new(bob_leaf)])
+            .propose_adds([dave_kp.key_package().clone()])
+            .load_psks(alice_provider.storage())
+            .unwrap()
+            .build(
+                alice_provider.rand(),
+                alice_provider.crypto(),
+                &alice.signer,
+                |_| true,
+            )
+            .unwrap()
+            .stage_commit(&alice_provider)
+            .unwrap();
+        let (commit_out, _welcome_out, _group_info_out) = commit_bundle.into_contents();
+        let commit_bytes = commit_out.to_bytes().unwrap();
+        alice_group.merge_pending_commit(&alice_provider).unwrap();
+
+        let dave_leaf = alice_group
+            .members()
+            .find(|m| {
+                BasicCredential::try_from(m.credential.clone())
+                    .map(|basic| basic.identity() == dave_bytes)
+                    .unwrap_or(false)
+            })
+            .map(|m| m.index.u32())
+            .expect("dave must be in alice's post-merge roster");
+        assert_eq!(
+            dave_leaf, bob_leaf,
+            "precondition this test exercises: dave's new leaf must land on bob's \
+             just-vacated leaf index (RFC 9420 §12.1.1 / §12.3)"
+        );
+
+        // Bob's own handle processes and merges the commit that evicts him.
+        MLS_CTX.with(|ctx| {
+            let mut ctx = ctx.borrow_mut();
+            let c = ctx.get_mut(&bob_ctx_id).expect("bob context must exist");
+            let group = c
+                .groups
+                .get_mut(&bob_group_id)
+                .expect("bob group must exist");
+            process_incoming_commit(group, &commit_bytes, &c.provider, None).unwrap();
+        });
+
+        // The false positive: is_self reads true for dave's row, because
+        // bob's own_leaf_index still equals dave's (reused) leaf index.
+        let after = mls_group_members_inner(&bob_ctx_id, &bob_group_id).unwrap();
+        assert_eq!(
+            after.iter().filter(|m| m.is_self).count(),
+            1,
+            "is_self must (wrongly) match exactly one row — dave's, at the reused leaf \
+             index — demonstrating the false-negative mls_group_is_active exists to fix"
+        );
+        assert!(
+            after
+                .iter()
+                .find(|m| m.is_self)
+                .and_then(|m| m.credential_identity_hex.clone())
+                .map(|hex| hex == bytes_to_opaque_id_hex(&dave_bytes))
+                .unwrap_or(false),
+            "the wrongly-matched is_self row must be dave's, not bob's own"
+        );
+
+        // The correct signal: mls_group_is_active reports the eviction.
+        assert!(
+            !mls_group_is_active_inner(&bob_ctx_id, &bob_group_id).unwrap(),
+            "mls_group_is_active must correctly report bob's eviction, unlike is_self above"
         );
 
         mls_clear_session();

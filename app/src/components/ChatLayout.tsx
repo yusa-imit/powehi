@@ -128,6 +128,19 @@ interface Chat {
 	memberCount?: number;
 	/** Local member roster for group chats — never sent to server, never in MLS payload. */
 	members?: ChatMember[];
+	/**
+	 * Bumped once for every peer MLS Commit merged into this group (Add or
+	 * Remove of anyone, including this device). InfoPanel's group Safety
+	 * Number recompute effect keys off this — see that effect's doc comment
+	 * (crypto-reviewer HIGH-2). Never itself displayed; a counter, not a
+	 * timestamp, purely to force a dependency-array change.
+	 */
+	groupCommitVersion?: number;
+	/** True once a merged peer Commit has evicted this device's own leaf from
+	 * this group (crypto-reviewer HIGH-2 — previously this had no user-visible
+	 * signal at all, only a console.error). Drives the removed-from-group
+	 * banner; cleared on dismiss. */
+	selfEvicted?: boolean;
 	/** When true, incoming messages do not increment the unread badge. Local-only, never sent to server. */
 	muted?: boolean;
 	/** True when the local user has blocked this contact (local-only, not synced). Incoming
@@ -815,6 +828,70 @@ function PinnedBanner({
 				onClick={onUnpin}
 				aria-label="Unpin message"
 				data-testid="unpin-button"
+				style={{
+					background: "none",
+					border: "none",
+					color: "var(--fg-3)",
+					cursor: "pointer",
+					padding: 2,
+					display: "flex",
+					alignItems: "center",
+					flex: "none",
+				}}
+			>
+				<Icon name="x" size={13} />
+			</button>
+		</div>
+	);
+}
+
+// ── GroupRemovedBanner ───────────────────────────────────────────────────────
+
+/**
+ * Surfaces a merged peer Commit that evicted this device's own MLS leaf from
+ * a group (crypto-reviewer HIGH-2). Before this existed, self-eviction had
+ * NO user-visible signal anywhere — only a `console.error("commit_self_evicted", ...)`
+ * in useMessages.ts — so a user could keep composing into a group whose
+ * other members can no longer decrypt anything they send. Dismiss-only: this
+ * device cannot un-evict itself, so the only action is acknowledging it.
+ */
+function GroupRemovedBanner({ onDismiss }: { onDismiss: () => void }) {
+	return (
+		<div
+			data-testid="group-removed-banner"
+			style={{
+				display: "flex",
+				alignItems: "center",
+				gap: 8,
+				paddingRight: 18,
+				background: "rgba(205,48,63,0.08)",
+				borderBottom: "1px solid rgba(205,48,63,0.24)",
+				fontSize: 12,
+				color: "var(--fg-2)",
+				flex: "none",
+			}}
+		>
+			<span
+				style={{
+					display: "flex",
+					alignItems: "center",
+					gap: 8,
+					flex: 1,
+					padding: "6px 0 6px 18px",
+					minWidth: 0,
+				}}
+			>
+				<Icon name="alert" size={13} color="#E05261" />
+				<span style={{ color: "#E05261", fontWeight: 600 }}>You were removed from this group.</span>
+				<span style={{ color: "var(--fg-3)" }}>
+					You can no longer send or receive messages here.
+				</span>
+			</span>
+			<button
+				type="button"
+				onClick={onDismiss}
+				aria-label="Dismiss"
+				data-testid="group-removed-dismiss"
 				style={{
 					background: "none",
 					border: "none",
@@ -5208,19 +5285,35 @@ function InfoPanel({
 	// `memberCount` only) — keying off it here would make this effect dead
 	// code for every real group (crypto-reviewer, cycle 460, finding F1).
 	// `chat.memberCount` is the one local signal that actually changes on a
-	// LOCAL `mlsAddMember`, so use that instead. This is a best-effort trigger,
-	// not a complete one: it does not fire for a remote Add landing via the
-	// Welcome poller (RFC 9420 §12.1.1 — that path never touches
-	// `memberCount`), nor for a remove or a self-Update/key-rotation by
-	// another member. Those cases are only caught the next time InfoPanel
-	// mounts fresh for this chat, which recomputes unconditionally. Closing
-	// that gap needs a live epoch/member-count signal from the worker itself,
-	// not a UI-local counter (crypto-reviewer, cycle 460, findings F1/N1).
+	// LOCAL `mlsAddMember`. `chat.groupCommitVersion` closes the gap this
+	// comment used to describe as open (crypto-reviewer HIGH-2, cycle 460
+	// findings F1/N1 follow-up): `useMessages.ts`'s `onGroupChanged` callback
+	// (wired in `ChatLayout`) now bumps it on EVERY merged peer Commit for
+	// this group — a remote Add via the receive path, a Remove of someone
+	// else, or a self-eviction — so this effect no longer depends solely on
+	// InfoPanel remounting to pick up a roster change made by another member.
 	const groupMemberCountKey = chat.isGroup ? (chat.memberCount ?? 0) : 0;
+	// Deliberately NOT gated on `chat.isGroup` (threat-model-checker
+	// correction, T2): prd.md §3.3 models a DM as a 2-member MLS group, so
+	// `useMessages.ts` merges peer Commits for a DM's `mlsGroupId` exactly
+	// like it does for a real group, and `handleGroupCommitMerged` bumps
+	// `groupCommitVersion` by matching `mlsGroupId` alone, with no `isGroup`
+	// check either. Gating this key on `isGroup` (as `groupMemberCountKey`
+	// above correctly does — `memberCount` is a group-roster-size concept
+	// with no DM meaning) silently dropped every DM recompute trigger,
+	// leaving a DM's Safety Number able to go stale exactly during an
+	// out-of-band verification session (a peer's key-rotation/self-Update
+	// Commit merges while InfoPanel is open) without the effect below ever
+	// re-running to catch it — precisely the MITM exposure window this
+	// fingerprint exists to close. The DM-vs-group distinction below the
+	// effect (`members.length !== 2` inside `mlsComputeGroupSafetyNumber`'s
+	// caller-side branching) already fails closed on a real mismatch, so
+	// re-running the effect more often for a DM only improves correctness.
+	const groupCommitVersionKey = chat.groupCommitVersion ?? 0;
 
 	// Compute the safety number from the MLS group members' Ed25519 signature keys.
 	// Fails closed: if WASM unavailable or group not yet established, stays null.
-	// biome-ignore lint/correctness/useExhaustiveDependencies: groupMemberCountKey is a re-run trigger only (membership changed), not read in the body — mlsComputeGroupSafetyNumber re-reads live group state itself
+	// biome-ignore lint/correctness/useExhaustiveDependencies: groupMemberCountKey/groupCommitVersionKey are re-run triggers only (membership changed), not read in the body — mlsComputeGroupSafetyNumber re-reads live group state itself
 	useEffect(() => {
 		const worker = cryptoWorker;
 		// Reset immediately so a stale value from a previous chat never triggers a
@@ -5288,7 +5381,14 @@ function InfoPanel({
 		return () => {
 			cancelled = true;
 		};
-	}, [cryptoWorker, chat.mlsGroupId, chat.mlsIdentityId, chat.isGroup, groupMemberCountKey]);
+	}, [
+		cryptoWorker,
+		chat.mlsGroupId,
+		chat.mlsIdentityId,
+		chat.isGroup,
+		groupMemberCountKey,
+		groupCommitVersionKey,
+	]);
 
 	// Load stored verification state; re-runs when computedSafetyNumber arrives so
 	// MITM detection works even when WASM loads after the DB read completes.
@@ -9530,6 +9630,28 @@ export function ChatLayout() {
 		};
 	}, [sessionToken, cryptoWorker, active?.mlsGroupId, active?.mlsIdentityId]);
 
+	// Fired by useMessages.ts on EVERY merged peer Commit (crypto-reviewer
+	// HIGH-2) — matches by mlsGroupId: a Commit useMessages calls this for is
+	// by definition for its own bound group. Bumping groupCommitVersion is
+	// what makes InfoPanel's Safety Number recompute effect re-run for a
+	// REMOTE roster change, not just a local mlsAddMember — see that
+	// effect's doc comment. selfEvicted sets a sticky, dismissable banner
+	// (see the `active.selfEvicted` render below) so a forced eviction is no
+	// longer console.error-only.
+	const handleGroupCommitMerged = useCallback((groupId: string, selfEvicted: boolean) => {
+		setChats((prev) =>
+			prev.map((c) =>
+				c.mlsGroupId === groupId
+					? {
+							...c,
+							groupCommitVersion: (c.groupCommitVersion ?? 0) + 1,
+							selfEvicted: c.selfEvicted || selfEvicted,
+						}
+					: c,
+			),
+		);
+	}, []);
+
 	// Poll for incoming messages whenever there's an active MLS group + session.
 	useMessages(
 		active?.mlsIdentityId,
@@ -9545,6 +9667,7 @@ export function ChatLayout() {
 		handleIncomingDelete,
 		handleIncomingPin,
 		handleIncomingPresence,
+		handleGroupCommitMerged,
 	);
 
 	/** Select a chat and clear its unread and mention badges.
@@ -10217,6 +10340,15 @@ export function ChatLayout() {
 						onMsgSearch={setMsgSearch}
 						onAddMember={active.isGroup ? () => setAddMemberOpen(true) : undefined}
 					/>
+					{active.selfEvicted && (
+						<GroupRemovedBanner
+							onDismiss={() =>
+								setChats((prev) =>
+									prev.map((c) => (c.id === active.id ? { ...c, selfEvicted: false } : c)),
+								)
+							}
+						/>
+					)}
 					{active.pinnedMessageId && (
 						<PinnedBanner
 							pinnedMessageId={active.pinnedMessageId}

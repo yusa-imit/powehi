@@ -131,20 +131,7 @@ describe("useWelcomePoller", () => {
 		expect(ackSpy).not.toHaveBeenCalled();
 	});
 
-	it("acks Commit envelopes silently without firing onNewGroup", async () => {
-		pollSpy.mockResolvedValueOnce([makeEnvelope({ message_type: "Commit" })]);
-		const onNewGroup = vi.fn();
-
-		renderHook(() => useWelcomePoller(IDENTITY_ID, onNewGroup));
-
-		await waitFor(() => {
-			expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID);
-		});
-		expect(onNewGroup).not.toHaveBeenCalled();
-		expect(mockWorker.mlsJoinGroup).not.toHaveBeenCalled();
-	});
-
-	it("acks Proposal envelopes silently without firing onNewGroup", async () => {
+	it("acks Proposal envelopes silently (retracted F5 — a by-reference Commit resolves against the receiver's own local proposal store per RFC 9420 §12.4, never a re-fetch of this envelope, and this codebase never populates that store; leaving it unacked only grew an unbounded backlog for no safety benefit)", async () => {
 		pollSpy.mockResolvedValueOnce([makeEnvelope({ message_type: "Proposal" })]);
 		const onNewGroup = vi.fn();
 
@@ -153,6 +140,20 @@ describe("useWelcomePoller", () => {
 		await waitFor(() => {
 			expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID);
 		});
+		expect(onNewGroup).not.toHaveBeenCalled();
+	});
+
+	it("does not ack Commit envelopes (useMessages' per-group poll loop owns Commit)", async () => {
+		pollSpy.mockResolvedValueOnce([makeEnvelope({ message_type: "Commit" })]);
+		const onNewGroup = vi.fn();
+
+		renderHook(() => useWelcomePoller(IDENTITY_ID, onNewGroup));
+
+		await waitFor(() => {
+			expect(pollSpy).toHaveBeenCalled();
+		});
+		await new Promise<void>((r) => setTimeout(r, 10));
+		expect(ackSpy).not.toHaveBeenCalled();
 		expect(onNewGroup).not.toHaveBeenCalled();
 	});
 
