@@ -30,7 +30,11 @@ const mockWorker = {
 	mlKem768DecapV2: vi.fn(async () => ({ sharedSecretHandle: "mock-ss-dec-0" })),
 	mlsPqDeriveBinding: vi.fn(async () => ({ bindingHex: "c702693eff3c46bd" })),
 	mlKem768DropDecapKey: vi.fn(async () => {}),
-	mlsProcessCommit: vi.fn(async () => ({ newEpoch: 2 })),
+	mlsProcessCommit: vi.fn(
+		async (_identityId: string, _groupId: string, _commitBytes: Uint8Array) => ({
+			newEpoch: 2,
+		}),
+	),
 	mlsGroupMembers: vi.fn(async () => [SELF_MEMBER]),
 	mlsGroupIsActive: vi.fn(async () => true),
 };

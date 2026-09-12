@@ -30,7 +30,13 @@ services:
       retries: 30
 
   minio:
-    image: minio/minio:RELEASE.2022-02-07T08-17-33Z
+    # quay.io, not Docker Hub's minio/minio: that repository was removed
+    # upstream (cycle 494; every pull, any tag, now fails with "repository
+    # does not exist" — confirmed via hub.docker.com/v2/repositories API).
+    # Tag pinned to match the testcontainers suites' MINIO_TAG
+    # (crates/adapters/outbound/powehi-r2/tests/r2_media_it.rs), per this
+    # file's own header comment on keeping local/CI/dev images in sync.
+    image: quay.io/minio/minio:RELEASE.2025-02-28T09-55-16Z
     command: server /data
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -48,8 +54,10 @@ services:
   minio-init:
     # minio/mc does not publish tags matching the minio/minio server's dated
     # RELEASE.* scheme (confirmed by a failed CI pull, cycle 277) — mc has its
-    # own independent tag history, so `latest` is used here instead.
-    image: minio/mc:latest
+    # own independent tag history, so `latest` is used here instead. quay.io,
+    # not Docker Hub's minio/mc: also removed upstream alongside minio/minio
+    # (cycle 494).
+    image: quay.io/minio/mc:latest
     depends_on:
       minio:
         condition: service_healthy
