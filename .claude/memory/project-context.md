@@ -24,7 +24,205 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-11, cycle 485 — STABILIZATION: archive stale memory (carried candidate since cycle 480), fix a real bare-`var(--photon)` CSS bug flagged since cycle 452, full security sweep clean)
+## Current state (2026-09-13, cycle 494 — STABILIZATION (forced by red CI, counter said FEATURE): fix Docker Hub's removal of `minio/minio` breaking 2 of 3 CI checks, fix a frontend `tsc -b` type-inference break in a test mock, commit 2fa6184)
+
+- Mode selection: counter 493→494, 494 % 5 != 0 → nominally FEATURE, but
+  `gh run list --limit 5` showed all 3 checks (`CI — Rust`, `CI —
+  Frontend`, `CI — Live-backend E2E`) failing on the last push to main
+  (86d4f66) — FEATURE mode's own step 2 applied, ran as STABILIZATION.
+  Working tree was clean at session start (no orphaned WIP).
+- **Found an unlogged prior cycle first**: `86d4f66` (`feat(crypto,frontend):
+  wire MLS Commit processing into the receive path (issue #2)`) sat on
+  `main` with no `chore: update session memory` commit after it and no
+  entry in this file — the session that produced it evidently ended before
+  its end-of-cycle step. Read the commit message in full before doing
+  anything else (see the new entry immediately below this one for what it
+  actually contains) so this cycle's CI fix wouldn't be evaluated against
+  the wrong baseline. This file's mandatory end-of-cycle memory update
+  step is not optional even when a session is cut short — flag it if seen
+  again.
+- Root cause #1 (`CI — Rust`'s Integration Tests job + `CI — Live-backend
+  E2E`, both red): `docker pull minio/minio:RELEASE.2025-02-28T09-55-16Z`
+  failed with "repository does not exist or may require 'docker login'".
+  Verified directly against the registry (not just the CI log): `curl
+  https://hub.docker.com/v2/repositories/minio/minio/` returns `{"message":
+  "object not found"}` — Docker Hub's entire `minio/minio` repository has
+  been removed upstream (not just this tag), so **no tag** would have
+  pulled; a "just bump the pin" fix (the usual move for this class of CI
+  break, e.g. cycles 479/481's Tauri lockfile drift) would not have worked
+  here. Confirmed the replacement home via `quay.io/api/v1/repository/minio/minio`
+  — alive, and the exact pinned tag (`RELEASE.2025-02-28T09-55-16Z`) still
+  exists there byte-for-byte (same `manifest_digest`). `minio/mc` (used by
+  docker-compose's `minio-init`) was removed from Docker Hub the same way;
+  `quay.io/minio/mc:latest` exists.
+- The complication: `crates/adapters/outbound/powehi-r2/tests/r2_media_it.rs`
+  used `testcontainers_modules::minio::MinIO` (0.15.0, confirmed via
+  crates.io API to be the latest stable release — no newer version fixes
+  this), whose `Image::name()` is hardcoded to the dead `"minio/minio"`
+  string with no override hook; `.with_tag(...)` only changes the tag, not
+  the repository. Fetched the modules crate's actual source (not
+  docs.rs — 0.27.3's testcontainers docs failed to build, its
+  `GenericImage` API summary came from a different route) to get its exact
+  runtime shape: `ready_conditions()` waits for `"API:"` on **stderr**
+  (the test file's own doc comment had this wrong as "stdout" — also
+  corrected), `cmd()` is `["server", "/data"]`, `env_vars()` sets
+  `MINIO_CONSOLE_ADDRESS=":9001"`. Replaced the `MinIO` struct with a
+  hand-built `testcontainers::GenericImage::new("quay.io/minio/minio",
+  MINIO_TAG)` reproducing that exact shape (`ContainerAsync<MinIO>` →
+  `ContainerAsync<GenericImage>` in both the `Harness` struct field and
+  `start_minio_with_bucket`'s return type). Verified by actually compiling
+  (`cargo build -p powehi-r2 --tests` and `cargo clippy -p powehi-r2
+  --tests --all-targets -- -D warnings`, both clean) — no local Docker in
+  this sandbox to actually start the container, so the registry-API
+  cross-check above is the closest available confirmation short of CI
+  itself; watched CI to completion after push rather than assuming green
+  (see below). Also repointed `docker-compose.yml`'s `minio`/`minio-init`
+  services and `ci-rust.yml`'s pre-pull step at `quay.io`.
+- Root cause #2 (`CI — Frontend`'s Bundle budget check, red, independent
+  of the MinIO issue): `pnpm --filter app build` (`tsc -b && vite build`)
+  failed with 3 `TS2345` errors in `useMessages.test.ts` — a real type bug
+  in 86d4f66's own diff, not a flake. `mockWorker.mlsProcessCommit` was
+  declared as `vi.fn(async () => ({ newEpoch: 2 }))`: the 0-arg initial
+  stub fixed the mock's *inferred* type to a 0-parameter function, so a
+  later `.mockImplementation(async (_identityId, _groupId, bytes) =>
+  ...)` call (correctly typed against the REAL 3-parameter
+  `mlsProcessCommit(identityId, groupId, commitBytes)` signature in
+  `crypto.worker.ts:892`) became un-assignable — TS function subtyping
+  rejects a source function that declares MORE parameters than the
+  inferred target signature provides, since the target's callers would
+  otherwise pass it `undefined` for the missing ones. This only surfaced
+  now because `mlsProcessCommit` is the only mock in this file whose
+  initial `vi.fn()` stub is later overridden via `.mockImplementation`
+  with explicit parameter types (the others only use
+  `.mockResolvedValue`/`.mockRejectedValueOnce`, which don't force a
+  signature check against the stub). Fixed by typing the initial stub
+  with the real 3-parameter signature so inference matches.
+- **Full gate**: `cargo build --workspace`, `cargo clippy --workspace
+  --all-targets -- -D warnings`, `cargo fmt --all --check` all clean.
+  `cargo test --workspace` (nextest not installed in this sandbox,
+  documented fallback used): every crate `0 failed` (`powehi-r2`: 55
+  ignored, Docker-gated, expected; `powehi-crypto-wasm`: 232 passed/2
+  ignored). `cargo audit`: 664 crates scanned, clean. `cargo deny check`:
+  `advisories ok, bans ok, licenses ok, sources ok`. Frontend: `pnpm exec
+  tsc -b` clean, `pnpm --filter app build` succeeds end-to-end (matches
+  CI's actual failing step, not just `tsc --noEmit`), `pnpm exec biome
+  check --write` on the touched test file (1 pure-formatting fix, no
+  logic change), full `biome check` shows the same 4 pre-existing
+  unrelated `app/src-tauri/gen/schemas/*.json` errors noted since ≥cycle
+  472 (no regression), `pnpm exec vitest run`: 112 files/1631 tests green
+  (unchanged from 86d4f66's own baseline). Validated both edited YAML
+  files parse (`python3 -c 'import yaml; yaml.safe_load(...)'`).
+- No `crypto-reviewer`/`threat-model-checker`/`security-auditor` run:
+  matches the established precedent for CI/registry-config fixes (cycles
+  479/481) — no crypto/MLS/OPAQUE logic touched (the r2 test-harness edit
+  only changes which registry a throwaway container pulls from, not any
+  adapter or crypto code), no server-visible metadata change, no backend
+  handler logic changed (the mock-type fix is test-only).
+- Committed `2fa6184` (`fix(ci,frontend): repoint MinIO at quay.io, fix
+  mlsProcessCommit mock type inference`), 4 files changed
+  (`.github/workflows/ci-rust.yml`, `app/src/hooks/useMessages.test.ts`,
+  `crates/adapters/outbound/powehi-r2/tests/r2_media_it.rs`,
+  `docker-compose.yml`), pushed clean (`86d4f66..2fa6184 main -> main`).
+  Watched CI to completion after push (see below for result) rather than
+  assuming green from local checks alone, given the Docker-dependent fix
+  couldn't be locally verified end-to-end.
+- Target dir hygiene: not checked in depth (STABILIZATION mode, but the
+  fix itself is the mandated priority-1 action this cycle — CI-red always
+  comes before target-dir hygiene per this file's own STABILIZATION step
+  order).
+- **Next cycle candidates (carried/updated):**
+  1. **Resolved this cycle**: CI red on main (Docker Hub `minio/minio`/
+     `minio/mc` removal + frontend `tsc -b` mock-type break). If CI shows
+     red again on a MinIO-touching job, don't assume this is the same
+     class recurring — the registry move is a one-time upstream event,
+     not a periodic drift like the Tauri lockfile class (cycles 479/481).
+  2. **Resolved this cycle** (retroactively, see the entry below): the
+     "wire MLS commit-processing into the receive path" item that had
+     been carried as issue #2's single largest remaining piece since
+     ≥cycle 466's list. Confirm via a fresh read of issue #2 in a future
+     cycle whether it should now be closed or whether the entry below's
+     "capability shifts... accepted as the necessary cost" framing implies
+     follow-up hardening work first.
+  3. Carried: PQ hybrid Phase A prerequisite (human/crypto-lead policy
+     call, still blocked on openmls upstream).
+  4. Carried, still explicitly BLOCKED: `AbuseSignalStore`/
+     `RegionRouter::broadcast_abuse_signal` wiring needs F3 + the
+     HMAC-vs-plain-SHA256 gate resolved first.
+  5. Carried (unchanged): prd.md §3.3 doesn't yet document the
+     consumed-`key_packages` retention window.
+  6. New, from 86d4f66's own commit message (not yet independently
+     verified this cycle — read it before acting): prd.md §3.1/§3.4 and
+     ADR-0005 were updated to document two capability shifts the receive-
+     path wiring introduces — the Delivery Service's envelope ordering
+     becoming a permanent content-loss lever under `max_past_epochs(0)`,
+     and a compromised member device (not the server) now being able to
+     silently add/remove other members with no application-level policy
+     gate. `threat-model-checker` graded this YELLOW (documented, not
+     RED) per that commit's own claim — worth an independent re-check in
+     a future cycle rather than trusting the prior session's self-report
+     indefinitely.
+  7. Carried (unchanged from cycle 480's list, see cycle 480's own
+     section — now archived — for full text if needed):
+     `mls_confirm_incoming_commit` handle-consumption-before-`MLS_CTX`-
+     resolution ordering; epoch reconciliation; `mls_group_members`
+     `isSelf` leaf-index vs signature-key hardening; `PendingRemovalBanner`
+     local cross-check hardening; GitHub issues #1/#3/#4/#5; prd.md §10
+     REST API doc drift; `pending_removals` forged-signal defense;
+     unconsumed `RemovalRequired` WS event; `key_packages.device_id` FK
+     doc drift; `GroupRepository::save` blind `ON CONFLICT DO UPDATE`.
+
+## Previous state (2026-09-12, cycle unknown — likely 486-493, exact number lost: no memory entry was ever written for this cycle, discovered retroactively at the start of cycle 494 — FEATURE: wire MLS Commit processing into the receive path, issue #2, commit 86d4f66)
+
+- **This entry is reconstructed entirely from `git show 86d4f66`'s commit
+  message** (reproduced/condensed below), not from this session's own
+  work — flagged here so a future reader doesn't mistake it for
+  first-hand cycle-494 testimony. The session that did this work ended
+  before running its end-of-cycle memory-update step, so cycle 494 opened
+  with `main` one full FEATURE-mode commit ahead of this file's last
+  entry and no record of what happened in between (see cycle 494's entry
+  above for how that was discovered and handled).
+- Per the commit message: closed the largest remaining piece of issue #2
+  (P0-blocker: no MLS Remove path, PCS unattainable). `useMessages.ts` now
+  merges peer Commit envelopes for its own group via the
+  `mlsProcessCommit`/`mlsGroupIsActive` WASM exports, in the same poll
+  cursor as Application decrypt, with bounded per-group head-of-line
+  ordering between the two envelope types. Self-eviction surfaced via a
+  new dismissable banner (previously `console.error` only); the group/DM
+  Safety Number now recomputes on every merged Commit instead of only on
+  mount or a local memberCount change.
+- Two distinct own-commit sentinels (`MLS_OWN_COMMIT_ERROR`,
+  hash-verified/safe-to-ack; `MLS_OWN_COMMIT_PENDING_ERROR`, openmls's own
+  forgeable pre-merge signal, must NOT auto-ack) replaced the single prior
+  `MlsError::OwnCommit`. `mlsGroupIsActive` reads openmls's own
+  group-active state instead of the leaf-index-based `isSelf`, which has
+  a false negative on a "kick and replace" Commit reusing the evicted
+  device's leaf for a new member.
+- Per the commit message, a fresh `crypto-reviewer` pass found 2 blocking
+  findings, both fixed before commit: a per-sender deferred-Commit cap
+  that fired before checking shared-pool room (silently dropping a lone
+  legitimate committer's backlog), and Proposal envelopes left
+  permanently unacked on an incorrect RFC 9420 §12.4 justification. A
+  `threat-model-checker` finding was also fixed: the Safety Number
+  recompute trigger was gated on `chat.isGroup`, excluding DMs even
+  though prd.md models a DM as a 2-member MLS group.
+- Per the commit message: documented two capability shifts in prd.md
+  §3.1/§3.4 and ADR-0005 (see cycle 494's candidate list item 6 above) —
+  `threat-model-checker` graded YELLOW (documented, not RED), not
+  independently re-verified this cycle.
+- Per the commit message: `cargo test --workspace` 232/232 in
+  `powehi-crypto-wasm`, 0 failures workspace-wide; `pnpm vitest run`
+  112/112 files, 1631/1631 tests (up from 1615/1627 baseline);
+  clippy/fmt/tsc/biome clean AT THE TIME OF THAT COMMIT — cycle 494's
+  entry above found `tsc -b` (the actual `pnpm --filter app build` step,
+  not `tsc --noEmit`) broken on this exact commit when CI ran it, so
+  whatever local check produced "tsc clean" in this message either used a
+  different invocation or the type-checker's mock-inference issue was
+  narrowly missed.
+- Committed `86d4f66`, pushed to main. Per the commit message, a progress
+  comment was intended for issue #2 — not independently verified this
+  cycle; check issue #2's comment history in a future session.
+
+## Previous state (2026-09-11, cycle 485 — STABILIZATION: archive stale memory (carried candidate since cycle 480), fix a real bare-`var(--photon)` CSS bug flagged since cycle 452, full security sweep clean)
 
 - Mode selection: counter 484→485, 485 % 5 == 0 → STABILIZATION. `gh run
   list --limit 5` all green on `main` (cycle 484's push, all 3 checks
