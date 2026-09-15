@@ -36,6 +36,19 @@
  * stray double-click on the same coordinates as the arming click cannot
  * trigger it).
  *
+ * This component's confirm action can NEVER be wired to an MLS Remove commit
+ * as it stands. `mlsRemoveMemberStage` requires a `leafIndex` taken from this
+ * client's own `mlsGroupMembers` ratchet-tree roster, and this component only
+ * ever holds server-supplied `device_id`s. No authenticated binding between a
+ * server `device_id` and an MLS credential/leaf exists in this codebase
+ * (`wasm_exports.rs`'s `mls_group_members` doc comment; prd.md §3.3 records
+ * the cycle-456 crypto-reviewer NEEDS-REWORK). Bridging the two requires one
+ * of the two follow-ups prd.md §3.3 names — bind `device_id` into the MLS
+ * credential identity at registration/recovery, or re-evaluate the §5.6
+ * safety number as the T3 local trust anchor — each of which needs its own
+ * plan and a threat-model-checker pass. A real Remove UI must therefore be a
+ * separate, ratchet-tree-driven entry point, not this banner.
+ *
  * Scoping note: there is a server-side `RemovalRequired` WS event, but the
  * frontend has no WebSocket client yet. This component only polls the REST
  * endpoint on mount / group change — wiring a live WS push is out of scope.

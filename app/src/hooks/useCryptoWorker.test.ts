@@ -607,3 +607,163 @@ describe("wrapWithPersistence — bounded timeout (never-settling calls degrade 
 		expect(envelope.generation).toBe(1);
 	});
 });
+
+// Part of issue #2's compensating-abort fix (cycle 497): mlsRemoveMemberStage
+// stages an MLS Remove commit WITHOUT merging it, and its caller contract is
+// that every successful stage is followed by exactly one
+// mlsRemoveMemberConfirm or mlsRemoveMemberAbort. Before this fix, a resolved
+// WASM stage followed by a rejected persist left the wrapped call rejecting
+// with no result released — the caller could never confirm or abort, wedging
+// the group in PendingCommit (openmls's is_operational() check) for the rest
+// of the session and across reloads (mls_group.rs stage_remove_member doc
+// item (d)).
+describe("wrapWithPersistence — mlsRemoveMemberStage compensating abort on persist failure", () => {
+	beforeEach(async () => {
+		await db.identity.clear();
+		await db.identity.put({ id: 1, deviceId: "dev-remove-stage-abort" });
+	});
+
+	function fakeRaw(overrides: Record<string, unknown>): Comlink.Remote<CryptoWorkerApi> {
+		return {
+			encryptDbField: async (v: string) => v,
+			decryptDbField: async (v: string) => v,
+			clearSessionState: async () => {},
+			...overrides,
+		} as unknown as Comlink.Remote<CryptoWorkerApi>;
+	}
+
+	it("stage resolves but the persist throws: issues a compensating raw abort and rethrows the ORIGINAL persist error", async () => {
+		const mlsRemoveMemberAbort = vi.fn(async () => undefined);
+		const persistError = new Error("quota_exceeded");
+		const raw = fakeRaw({
+			mlsRemoveMemberStage: async () => ({ commit: new Uint8Array([1]), priorEpoch: 3 }),
+			mlsRemoveMemberAbort,
+			mlsExportState: async () => {
+				throw persistError;
+			},
+		});
+		const proxy = wrapWithPersistence(raw);
+		await proxy.clearSessionState();
+
+		await expect(proxy.mlsRemoveMemberStage("identity-x", "group-x", 2)).rejects.toBe(persistError);
+
+		expect(mlsRemoveMemberAbort).toHaveBeenCalledTimes(1);
+		expect(mlsRemoveMemberAbort).toHaveBeenCalledWith("identity-x", "group-x");
+	});
+
+	it("negative space: if the WASM stage call itself rejects, no compensating abort is issued", async () => {
+		const mlsRemoveMemberAbort = vi.fn(async () => undefined);
+		const stageError = new Error("is_operational_false_other_pending_commit");
+		const raw = fakeRaw({
+			mlsRemoveMemberStage: async () => {
+				throw stageError;
+			},
+			mlsRemoveMemberAbort,
+		});
+		const proxy = wrapWithPersistence(raw);
+		await proxy.clearSessionState();
+
+		await expect(proxy.mlsRemoveMemberStage("identity-x", "group-x", 2)).rejects.toBe(stageError);
+
+		expect(mlsRemoveMemberAbort).not.toHaveBeenCalled();
+	});
+
+	it("negative space: a different SYNC_FLUSH_ARG_METHODS method's persist failure does not trigger a remove-stage abort", async () => {
+		const mlsRemoveMemberAbort = vi.fn(async () => undefined);
+		const persistError = new Error("quota_exceeded");
+		const raw = fakeRaw({
+			mlsAddMember: async () => ({ welcome: new Uint8Array([1]) }),
+			mlsRemoveMemberAbort,
+			mlsExportState: async () => {
+				throw persistError;
+			},
+		});
+		const proxy = wrapWithPersistence(raw);
+		await proxy.clearSessionState();
+
+		await expect(proxy.mlsAddMember("identity-x", "group-x", new Uint8Array([1]))).rejects.toBe(
+			persistError,
+		);
+
+		expect(mlsRemoveMemberAbort).not.toHaveBeenCalled();
+	});
+
+	it("happy path unchanged: stage resolves and persist succeeds — result returned, no abort called", async () => {
+		const mlsRemoveMemberAbort = vi.fn(async () => undefined);
+		const stageResult = { commit: new Uint8Array([9]), priorEpoch: 1 };
+		const raw = fakeRaw({
+			mlsRemoveMemberStage: async () => stageResult,
+			mlsRemoveMemberAbort,
+			mlsExportState: async (_id: string, generation: number) => ({
+				stateBytes: new Uint8Array([1]),
+				generation,
+			}),
+		});
+		const proxy = wrapWithPersistence(raw);
+		await proxy.clearSessionState();
+
+		const result = await proxy.mlsRemoveMemberStage("identity-x", "group-x", 2);
+
+		expect(result).toEqual(stageResult);
+		expect(mlsRemoveMemberAbort).not.toHaveBeenCalled();
+	});
+
+	// crypto-reviewer F1: a hung raw.mlsRemoveMemberAbort call must not let the
+	// wrapped mlsRemoveMemberStage call hang forever — it must degrade to the
+	// same bounded-timeout rejection this file's withTimeout mechanism
+	// guarantees everywhere else, not silently opt out of it.
+	it("F1: a compensating abort that never settles still lets the wrapped call reject on a bounded timeout, not hang", async () => {
+		const persistError = new Error("quota_exceeded");
+		const raw = fakeRaw({
+			mlsRemoveMemberStage: async () => ({ commit: new Uint8Array([1]), priorEpoch: 3 }),
+			mlsExportState: async () => {
+				throw persistError;
+			},
+			// Simulates a wedged worker/Comlink channel — never settles.
+			mlsRemoveMemberAbort: () => new Promise(() => {}),
+		});
+		const proxy = wrapWithPersistence(raw);
+		await proxy.clearSessionState();
+
+		vi.useFakeTimers();
+		const pending = expect(proxy.mlsRemoveMemberStage("identity-x", "group-x", 2)).rejects.toBe(
+			persistError,
+		);
+		await vi.advanceTimersByTimeAsync(CRYPTO_CALL_TIMEOUT_MS);
+		await pending;
+		vi.useRealTimers();
+	});
+
+	// crypto-reviewer F2: once the compensating abort resolves, the post-abort
+	// state must be durably flushed on the shared chain — not assumed to
+	// already match what's on disk (withTimeout does not cancel the earlier,
+	// abandoned doFlush; see doFlush's own doc comment on the supersede check
+	// a fresh, later-issued generation relies on to win).
+	it("F2: a successful compensating abort is followed by a fresh durable flush attempt", async () => {
+		const mlsRemoveMemberAbort = vi.fn(async () => undefined);
+		const persistError = new Error("quota_exceeded");
+		const mlsExportState = vi
+			.fn()
+			.mockImplementationOnce(async () => {
+				throw persistError;
+			})
+			.mockImplementationOnce(async (_id: string, generation: number) => ({
+				stateBytes: new Uint8Array([2]),
+				generation,
+			}));
+		const raw = fakeRaw({
+			mlsRemoveMemberStage: async () => ({ commit: new Uint8Array([1]), priorEpoch: 3 }),
+			mlsRemoveMemberAbort,
+			mlsExportState,
+		});
+		const proxy = wrapWithPersistence(raw);
+		await proxy.clearSessionState();
+
+		await expect(proxy.mlsRemoveMemberStage("identity-x", "group-x", 2)).rejects.toBe(persistError);
+
+		expect(mlsRemoveMemberAbort).toHaveBeenCalledTimes(1);
+		// Once for the original (failed) persist attempt, once more for the
+		// fresh post-abort flush.
+		expect(mlsExportState).toHaveBeenCalledTimes(2);
+	});
+});

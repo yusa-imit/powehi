@@ -1319,27 +1319,103 @@ pub fn mls_remove_member_abort(identity_id: &str, group_id: &str) -> Result<(), 
 /// comment in `mls_group.rs` for the full argument and the test that pins
 /// this non-destructive behaviour
 /// (`test_process_incoming_commit_rejects_application_message`).
+///
+/// # A successful merge here clears THIS device's own pending-commit bookkeeping
+/// A merge in this function is, by definition, a PEER's Commit (openmls's own
+/// pre-/post-merge own-commit signals — [`MlsError::OwnCommitPending`] /
+/// [`MlsError::OwnCommit`] — already reject anything recognisable as this
+/// device's own commit before a merge ever happens). Successfully merging a
+/// peer's Commit makes openmls internally call `clear_pending_commit` as a
+/// side effect, silently invalidating any commit THIS device had separately
+/// staged via [`mls_remove_member_stage`] and not yet confirmed — see
+/// `stage_remove_member`'s doc comment in `mls_group.rs` and
+/// `test_process_incoming_commit_silently_drops_receivers_own_staged_commit`,
+/// which pins exactly this openmls behaviour. Left alone, this device's
+/// `pending_own_commit_hashes` entry for `group_id` would then dangle: it
+/// would keep naming a commit that can never be merged. On a successful
+/// merge, [`mls_process_commit_inner`] therefore also removes that entry
+/// here, at the source. This is defense-in-depth, not the only guard — even
+/// before this cycle's fix, [`mls_remove_member_confirm`]'s
+/// `pending.epoch == pre_merge_epoch` check and import-time revalidation
+/// (`import_mls_context_inner`) both already prevented a dangling entry from
+/// ever being wrongly promoted — but fixing it here closes the gap at its
+/// source instead of relying solely on those two downstream guards.
+///
+/// On every ERROR path THIS CRATE CAN ACTUALLY REACH — in particular
+/// [`MlsError::OwnCommitPending`] (this device's own still-outstanding
+/// staged commit was recognised) and [`MlsError::OwnCommit`] (an
+/// already-applied own commit was re-delivered) — no merge happened, so the
+/// entry is left untouched; for `OwnCommitPending` specifically the stage is
+/// still legitimately outstanding and clearing it would silently orphan the
+/// caller's own staged commit with no way to recover it via
+/// [`mls_remove_member_confirm`] / [`mls_remove_member_abort`]. This is
+/// scoped to "reachable" deliberately, not stated as an unconditional
+/// property of openmls itself: vendored openmls-0.8.1's `processing.rs` has
+/// two paths where a merge partially completes before an `Err` is returned —
+/// (1) `clear_pending_commit`'s own `StorageError` (lines 298-300) surfaces
+/// after the epoch has already advanced, and (2) a self-removing commit sets
+/// `group_state = Inactive` (destroying the pending-commit slot, lines
+/// 271-273) BEFORE `write_group_state` can fail (lines 274-277) — both
+/// surface here as [`MlsError::Membership`], the same variant a genuine
+/// non-merging failure also produces, so this function cannot distinguish
+/// them from the outside. Neither is reachable through this crate's
+/// `OpenMlsRustCrypto` in-memory storage provider, which cannot fail a
+/// write, so `MlsError::Membership` in practice always means "no merge
+/// happened" here — and even if one became reachable, the entry would only
+/// wrongly survive as stale (not wrongly clear a live one), caught by the
+/// same downstream guards named above ([`mls_remove_member_confirm`]'s
+/// `pending.epoch == pre_merge_epoch` check and import-time revalidation).
 #[wasm_bindgen]
 pub fn mls_process_commit(
     identity_id: &str,
     group_id: &str,
     commit: &[u8],
 ) -> Result<JsValue, JsError> {
-    let new_epoch = MLS_CTX.with(|ctx| -> Result<u64, JsError> {
+    let new_epoch =
+        mls_process_commit_inner(identity_id, group_id, commit).map_err(|e| js_err(&e))?;
+    let epoch_f64 = u64_to_f64_checked(new_epoch).map_err(js_err)?;
+    js_obj(&[("newEpoch", JsValue::from_f64(epoch_f64))])
+}
+
+/// `mls_process_commit`'s body, split out (rule: one construction path, same
+/// "_inner" pattern as `mls_remove_member_stage_inner` /
+/// `mls_group_members_inner` / `mls_group_is_active_inner`) so a native
+/// (non-wasm32) test can exercise the REAL post-merge
+/// `pending_own_commit_hashes` cleanup directly, instead of a hand-copied
+/// reproduction of it — the wasm export itself can't be called from a native
+/// test since its success path constructs a `JsValue`, which needs a real JS
+/// engine. Returns `String` (not `&'static str`, unlike the simpler `_inner`
+/// helpers) because it must also carry `MlsError`'s formatted message through
+/// `process_incoming_commit`, matching `mls_remove_member_stage_inner`'s
+/// reasoning for the same choice.
+///
+/// See [`mls_process_commit`]'s doc comment for the full argument for why a
+/// successful merge clears `pending_own_commit_hashes[group_id]` and why
+/// every error path (in particular [`MlsError::OwnCommitPending`]) must not.
+fn mls_process_commit_inner(
+    identity_id: &str,
+    group_id: &str,
+    commit: &[u8],
+) -> Result<u64, String> {
+    MLS_CTX.with(|ctx| -> Result<u64, String> {
         let mut ctx = ctx.borrow_mut();
         let c = ctx
             .get_mut(identity_id)
-            .ok_or_else(|| js_err("unknown mls identity"))?;
+            .ok_or_else(|| "unknown mls identity".to_string())?;
         let last_own_commit = c.own_commit_hashes.get(group_id).copied();
         let group = c
             .groups
             .get_mut(group_id)
-            .ok_or_else(|| js_err("unknown mls group"))?;
-        process_incoming_commit(group, commit, &c.provider, last_own_commit)
-            .map_err(|e| js_err(&e.to_string()))
-    })?;
-    let epoch_f64 = u64_to_f64_checked(new_epoch).map_err(js_err)?;
-    js_obj(&[("newEpoch", JsValue::from_f64(epoch_f64))])
+            .ok_or_else(|| "unknown mls group".to_string())?;
+        let new_epoch = process_incoming_commit(group, commit, &c.provider, last_own_commit)
+            .map_err(|e| e.to_string())?;
+        // Merge succeeded (not reached on any error path, in particular not
+        // on `MlsError::OwnCommitPending`/`MlsError::OwnCommit`, both of
+        // which return before this line) — see the doc comment above for why
+        // the pending entry, if any, is now dangling and must be dropped.
+        c.pending_own_commit_hashes.remove(group_id);
+        Ok(new_epoch)
+    })
 }
 
 /// Remove and return the [`InspectedCommit`] registered under `handle`,
@@ -1557,6 +1633,21 @@ pub fn mls_inspect_commit(
 /// have declined; a caller that confirms anyway must still detect the eviction
 /// itself (e.g. via `mls_group_members` no longer reporting a self row).
 ///
+/// # A successful merge here also clears THIS device's own pending-commit
+/// # bookkeeping — same hazard as [`mls_process_commit`], same fix
+/// [`merge_inspected_commit`] merges a PEER's Commit (this device's own
+/// staged commit can never reach here as `entry.staged` — see
+/// `merge_inspected_commit`'s "No `last_own_commit` parameter" section in
+/// `mls_group.rs`), and merging it triggers the exact same openmls
+/// `clear_pending_commit` side effect [`mls_process_commit`]'s doc comment
+/// describes: a SEPARATE commit this device staged via
+/// [`mls_remove_member_stage`] for the same group and had not yet confirmed
+/// is silently invalidated. [`mls_process_commit_inner`] closes this gap for
+/// the one-shot path; [`mls_confirm_incoming_commit_inner`] closes it here
+/// for the two-phase path so both merge sites share the same "on a
+/// successful merge, drop this device's own dangling pending entry" rule
+/// instead of only one of the two construction paths applying it.
+///
 /// # STATUS: crypto primitive only — see [`mls_inspect_commit`].
 #[wasm_bindgen]
 pub fn mls_confirm_incoming_commit(
@@ -1564,20 +1655,43 @@ pub fn mls_confirm_incoming_commit(
     group_id: &str,
     commit_handle: &str,
 ) -> Result<JsValue, JsError> {
-    let entry = take_inspected_commit(commit_handle, identity_id, group_id).map_err(js_err)?;
-    let new_epoch = MLS_CTX.with(|ctx| -> Result<u64, JsError> {
+    let new_epoch = mls_confirm_incoming_commit_inner(identity_id, group_id, commit_handle)
+        .map_err(|e| js_err(&e))?;
+    let epoch_f64 = u64_to_f64_checked(new_epoch).map_err(js_err)?;
+    js_obj(&[("newEpoch", JsValue::from_f64(epoch_f64))])
+}
+
+/// `mls_confirm_incoming_commit`'s body, split out (rule: one construction
+/// path, same `_inner` pattern as [`mls_process_commit_inner`]) so a native
+/// (non-wasm32) test can exercise the REAL post-merge
+/// `pending_own_commit_hashes` cleanup directly for the two-phase
+/// inspect/confirm path, mirroring the one-shot path's own regression test.
+/// See [`mls_confirm_incoming_commit`]'s doc comment for the full argument
+/// for why a successful merge here must also clear
+/// `pending_own_commit_hashes[group_id]`.
+fn mls_confirm_incoming_commit_inner(
+    identity_id: &str,
+    group_id: &str,
+    commit_handle: &str,
+) -> Result<u64, String> {
+    let entry = take_inspected_commit(commit_handle, identity_id, group_id)?;
+    MLS_CTX.with(|ctx| -> Result<u64, String> {
         let mut ctx = ctx.borrow_mut();
         let c = ctx
             .get_mut(identity_id)
-            .ok_or_else(|| js_err("unknown mls identity"))?;
+            .ok_or_else(|| "unknown mls identity".to_string())?;
         let group = c
             .groups
             .get_mut(group_id)
-            .ok_or_else(|| js_err("unknown mls group"))?;
-        merge_inspected_commit(group, entry.staged, &c.provider).map_err(|e| js_err(&e.to_string()))
-    })?;
-    let epoch_f64 = u64_to_f64_checked(new_epoch).map_err(js_err)?;
-    js_obj(&[("newEpoch", JsValue::from_f64(epoch_f64))])
+            .ok_or_else(|| "unknown mls group".to_string())?;
+        let new_epoch =
+            merge_inspected_commit(group, entry.staged, &c.provider).map_err(|e| e.to_string())?;
+        // Merge succeeded — see the doc comment above for why this device's
+        // own separately staged commit (if any) for this group is now
+        // dangling and must be dropped, mirroring mls_process_commit_inner.
+        c.pending_own_commit_hashes.remove(group_id);
+        Ok(new_epoch)
+    })
 }
 
 /// Drop the Commit previously staged by [`mls_inspect_commit`] under
@@ -5271,6 +5385,473 @@ mod tests {
              commit be recognized as OwnCommit through the same field the wasm exports use: \
              got {:?}",
             redelivered.map(|_| "unexpected Ok")
+        );
+
+        mls_clear_session();
+    }
+
+    /// Positive space of this cycle's fix: a successful merge of a PEER's
+    /// Commit through [`mls_process_commit_inner`] clears this device's own
+    /// `pending_own_commit_hashes` entry, so it can never be promoted later
+    /// against a commit openmls already silently dropped.
+    ///
+    /// Mirrors `test_process_incoming_commit_silently_drops_receivers_own_staged_commit`
+    /// (`mls_group.rs`) at the wasm-exports layer: charlie (this test's
+    /// subject, tracked in `MLS_CTX`) stages his own Remove(bob) via the REAL
+    /// `mls_remove_member_stage_inner` path (recording a pending hash) but
+    /// does NOT confirm it. Meanwhile alice, independently, stages+confirms
+    /// her OWN Remove(bob) — a different, already-merged commit — and that
+    /// commit is delivered to charlie via `mls_process_commit_inner`. Before
+    /// this cycle's fix, charlie's `pending_own_commit_hashes` entry would
+    /// have survived the merge, dangling (it names a commit openmls already
+    /// discarded via its internal `clear_pending_commit`). This test asserts
+    /// both that the entry is gone AND that a subsequent
+    /// `mls_remove_member_confirm` call (the only promotion path for that
+    /// entry) can no longer succeed against it, since the underlying openmls
+    /// pending commit is gone too.
+    #[test]
+    fn test_mls_process_commit_inner_clears_pending_own_commit_on_successful_peer_merge() {
+        let alice_bytes: [u8; 16] = [0x71; 16];
+        let bob_bytes: [u8; 16] = [0x72; 16];
+        let charlie_bytes: [u8; 16] = [0x73; 16];
+
+        let alice_provider = OpenMlsRustCrypto::default();
+        let alice = generate_identity(&alice_bytes, &alice_provider).unwrap();
+        let mut alice_group = create_group(&alice, &alice_provider).unwrap();
+
+        let bob_provider = OpenMlsRustCrypto::default();
+        let bob = generate_identity(&bob_bytes, &bob_provider).unwrap();
+        let bob_kp = generate_key_package(&bob, &bob_provider).unwrap();
+        add_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+
+        let charlie_provider = OpenMlsRustCrypto::default();
+        let charlie = generate_identity(&charlie_bytes, &charlie_provider).unwrap();
+        let charlie_kp = generate_key_package(&charlie, &charlie_provider).unwrap();
+        let welcome_for_charlie = add_member(
+            &mut alice_group,
+            &alice.signer,
+            charlie_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+        let charlie_group = join_group(&welcome_for_charlie, &charlie_provider).unwrap();
+
+        let alice_group_id = group_id_hex(&alice_group);
+        let charlie_group_id = group_id_hex(&charlie_group);
+        assert_eq!(alice_group_id, charlie_group_id);
+
+        let charlie_ctx_id = next_id();
+        MLS_CTX.with(|ctx| {
+            let mut groups = HashMap::new();
+            groups.insert(charlie_group_id.clone(), charlie_group);
+            ctx.borrow_mut().insert(
+                charlie_ctx_id.clone(),
+                MlsContext {
+                    identity: charlie,
+                    provider: charlie_provider,
+                    groups,
+                    own_commit_hashes: HashMap::new(),
+                    pending_own_commit_hashes: HashMap::new(),
+                },
+            );
+        });
+
+        // Charlie stages his own removal of bob — through the REAL
+        // `mls_remove_member_stage_inner` path, so the real stage-time
+        // `pending_own_commit_hashes` insert runs — but never confirms it.
+        let bob_leaf_for_charlie = MLS_CTX.with(|ctx| {
+            let ctx = ctx.borrow();
+            let c = ctx.get(&charlie_ctx_id).unwrap();
+            let group = c.groups.get(&charlie_group_id).unwrap();
+            let leaf = group
+                .members()
+                .find(|m| {
+                    BasicCredential::try_from(m.credential.clone())
+                        .map(|basic| basic.identity() == bob_bytes)
+                        .unwrap_or(false)
+                })
+                .map(|m| m.index.u32())
+                .expect("bob must be present in charlie's roster before removal");
+            leaf
+        });
+        let (_charlie_commit_bytes, _charlie_prior_epoch) =
+            mls_remove_member_stage_inner(&charlie_ctx_id, &charlie_group_id, bob_leaf_for_charlie)
+                .expect("charlie must be able to stage a removal of bob");
+
+        let pending_before = MLS_CTX.with(|ctx| {
+            ctx.borrow()
+                .get(&charlie_ctx_id)
+                .unwrap()
+                .pending_own_commit_hashes
+                .get(&charlie_group_id)
+                .copied()
+        });
+        assert!(
+            pending_before.is_some(),
+            "setup must have recorded charlie's own pending commit before the peer merge"
+        );
+
+        // Alice independently stages + confirms her OWN removal of bob — a
+        // different, already-merged commit that reaches charlie as an
+        // incoming (peer) commit.
+        let bob_leaf_for_alice = alice_group
+            .members()
+            .find(|m| {
+                BasicCredential::try_from(m.credential.clone())
+                    .map(|basic| basic.identity() == bob_bytes)
+                    .unwrap_or(false)
+            })
+            .map(|m| m.index.u32())
+            .expect("bob must be present in alice's roster before removal");
+        let (alice_commit_bytes, _alice_prior_epoch) = stage_remove_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_leaf_for_alice,
+            &alice_provider,
+        )
+        .unwrap();
+        confirm_remove_member(&mut alice_group, &alice_provider)
+            .expect("alice's removal commit must merge cleanly");
+
+        let new_epoch =
+            mls_process_commit_inner(&charlie_ctx_id, &charlie_group_id, &alice_commit_bytes)
+                .expect(
+                    "processing alice's peer commit must succeed even though charlie has his own \
+                 commit staged (openmls silently drops charlie's stage, per \
+                 test_process_incoming_commit_silently_drops_receivers_own_staged_commit)",
+                );
+        assert_eq!(new_epoch, alice_group.epoch().as_u64());
+
+        let pending_after = MLS_CTX.with(|ctx| {
+            ctx.borrow()
+                .get(&charlie_ctx_id)
+                .unwrap()
+                .pending_own_commit_hashes
+                .get(&charlie_group_id)
+                .copied()
+        });
+        assert_eq!(
+            pending_after, None,
+            "a successful peer-commit merge must clear this device's own dangling \
+             pending_own_commit_hashes entry"
+        );
+
+        // A stale entry can no longer be promoted: the underlying openmls
+        // pending commit is gone too (cleared as a side effect of the peer
+        // merge), so confirm must fail rather than wrongly promote a hash for
+        // a commit that was never actually merged. Calls `confirm_remove_member`
+        // directly (the same native call `mls_remove_member_confirm` makes
+        // under the hood) rather than the `#[wasm_bindgen]` export itself:
+        // the export's error path constructs a `JsError`, which panics on a
+        // non-wasm32 target ("cannot call wasm-bindgen imported functions on
+        // non-wasm targets") — the same reason `mls_process_commit_inner`
+        // exists as a native-callable split of `mls_process_commit`.
+        let confirm_result = MLS_CTX.with(|ctx| {
+            let mut ctx = ctx.borrow_mut();
+            let c = ctx.get_mut(&charlie_ctx_id).unwrap();
+            let group = c.groups.get_mut(&charlie_group_id).unwrap();
+            confirm_remove_member(group, &c.provider)
+        });
+        assert!(
+            confirm_result.is_err(),
+            "confirm must fail once the underlying openmls pending commit was silently \
+             dropped by the peer merge — a stale hash must never be promotable"
+        );
+        let own_commit_hash_after_confirm_attempt = MLS_CTX.with(|ctx| {
+            ctx.borrow()
+                .get(&charlie_ctx_id)
+                .unwrap()
+                .own_commit_hashes
+                .get(&charlie_group_id)
+                .copied()
+        });
+        assert_eq!(
+            own_commit_hash_after_confirm_attempt, None,
+            "a failed confirm attempt against a cleared pending entry must not promote any \
+             hash into own_commit_hashes"
+        );
+
+        mls_clear_session();
+    }
+
+    /// Negative space of this cycle's fix: when `mls_process_commit_inner`
+    /// returns an error because it recognised THIS device's OWN
+    /// still-outstanding staged commit (`MlsError::OwnCommitPending`, per
+    /// `MlsError::OwnCommitPending`'s doc comment in `mls_group.rs` — the
+    /// pre-merge signal for a commit not yet merged by anyone), the
+    /// `pending_own_commit_hashes` entry recorded at stage time must be left
+    /// untouched — no merge happened, so the stage is still legitimately
+    /// outstanding and must remain confirmable/abortable.
+    #[test]
+    fn test_mls_process_commit_inner_keeps_pending_own_commit_on_own_commit_pending_error() {
+        let alice_bytes: [u8; 16] = [0x81; 16];
+        let bob_bytes: [u8; 16] = [0x82; 16];
+
+        let alice_provider = OpenMlsRustCrypto::default();
+        let alice = generate_identity(&alice_bytes, &alice_provider).unwrap();
+        let mut alice_group = create_group(&alice, &alice_provider).unwrap();
+
+        let bob_provider = OpenMlsRustCrypto::default();
+        let bob = generate_identity(&bob_bytes, &bob_provider).unwrap();
+        let bob_kp = generate_key_package(&bob, &bob_provider).unwrap();
+        add_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+
+        let alice_group_id = group_id_hex(&alice_group);
+        let alice_ctx_id = next_id();
+        MLS_CTX.with(|ctx| {
+            let mut groups = HashMap::new();
+            groups.insert(alice_group_id.clone(), alice_group);
+            ctx.borrow_mut().insert(
+                alice_ctx_id.clone(),
+                MlsContext {
+                    identity: alice,
+                    provider: alice_provider,
+                    groups,
+                    own_commit_hashes: HashMap::new(),
+                    pending_own_commit_hashes: HashMap::new(),
+                },
+            );
+        });
+
+        let bob_leaf = MLS_CTX.with(|ctx| {
+            let ctx = ctx.borrow();
+            let c = ctx.get(&alice_ctx_id).unwrap();
+            let group = c.groups.get(&alice_group_id).unwrap();
+            let leaf = group
+                .members()
+                .find(|m| {
+                    BasicCredential::try_from(m.credential.clone())
+                        .map(|basic| basic.identity() == bob_bytes)
+                        .unwrap_or(false)
+                })
+                .map(|m| m.index.u32())
+                .expect("bob must be present before removal");
+            leaf
+        });
+
+        // Alice stages her own removal of bob (real stage-time insert) but
+        // never confirms it.
+        let (commit_bytes, prior_epoch) =
+            mls_remove_member_stage_inner(&alice_ctx_id, &alice_group_id, bob_leaf)
+                .expect("mls_remove_member_stage_inner must succeed for a freshly staged removal");
+        let expected_pending = mls_group::PendingOwnCommit {
+            epoch: prior_epoch,
+            hash: mls_group::hash_own_commit(&commit_bytes),
+        };
+
+        let pending_before = MLS_CTX.with(|ctx| {
+            ctx.borrow()
+                .get(&alice_ctx_id)
+                .unwrap()
+                .pending_own_commit_hashes
+                .get(&alice_group_id)
+                .copied()
+        });
+        assert_eq!(pending_before, Some(expected_pending));
+
+        // Re-deliver alice's own, still-unmerged commit straight back to
+        // herself through the same export a Delivery Service echo (or a
+        // misrouted receive-path call) would use — openmls must recognise it
+        // as her own not-yet-merged commit, not merge it.
+        let result = mls_process_commit_inner(&alice_ctx_id, &alice_group_id, &commit_bytes);
+        assert!(
+            matches!(result, Err(ref e) if e == "mls own commit pending error"),
+            "re-delivering this device's own still-pending commit must fail with \
+             MlsError::OwnCommitPending's message, not merge: got {result:?}"
+        );
+
+        let pending_after = MLS_CTX.with(|ctx| {
+            ctx.borrow()
+                .get(&alice_ctx_id)
+                .unwrap()
+                .pending_own_commit_hashes
+                .get(&alice_group_id)
+                .copied()
+        });
+        assert_eq!(
+            pending_after,
+            Some(expected_pending),
+            "an OwnCommitPending error must NOT clear pending_own_commit_hashes — no merge \
+             happened, so the stage is still legitimately outstanding and must remain \
+             confirmable/abortable"
+        );
+
+        mls_clear_session();
+    }
+
+    /// Two-phase mirror of
+    /// `test_mls_process_commit_inner_clears_pending_own_commit_on_successful_peer_merge`
+    /// — proves [`mls_confirm_incoming_commit_inner`] closes the same
+    /// dangling-entry hazard as [`mls_process_commit_inner`] (F3 from the
+    /// crypto-reviewer pass on this fix: the two merge sites must share the
+    /// same rule, not just one of them). Same charlie/alice/bob setup:
+    /// charlie stages his own Remove(bob) via the REAL
+    /// `mls_remove_member_stage_inner` path but never confirms it; alice
+    /// independently stages+confirms her OWN Remove(bob) and that commit
+    /// reaches charlie — this time through the two-phase
+    /// `inspect_incoming_commit` / `mls_confirm_incoming_commit_inner` pair
+    /// instead of the one-shot `mls_process_commit_inner`. Asserts charlie's
+    /// `pending_own_commit_hashes` entry is cleared by the merge, exactly as
+    /// the one-shot path clears it.
+    #[test]
+    fn test_mls_confirm_incoming_commit_inner_clears_pending_own_commit_on_successful_peer_merge() {
+        let alice_bytes: [u8; 16] = [0x91; 16];
+        let bob_bytes: [u8; 16] = [0x92; 16];
+        let charlie_bytes: [u8; 16] = [0x93; 16];
+
+        let alice_provider = OpenMlsRustCrypto::default();
+        let alice = generate_identity(&alice_bytes, &alice_provider).unwrap();
+        let mut alice_group = create_group(&alice, &alice_provider).unwrap();
+
+        let bob_provider = OpenMlsRustCrypto::default();
+        let bob = generate_identity(&bob_bytes, &bob_provider).unwrap();
+        let bob_kp = generate_key_package(&bob, &bob_provider).unwrap();
+        add_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+
+        let charlie_provider = OpenMlsRustCrypto::default();
+        let charlie = generate_identity(&charlie_bytes, &charlie_provider).unwrap();
+        let charlie_kp = generate_key_package(&charlie, &charlie_provider).unwrap();
+        let welcome_for_charlie = add_member(
+            &mut alice_group,
+            &alice.signer,
+            charlie_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+        let charlie_group = join_group(&welcome_for_charlie, &charlie_provider).unwrap();
+
+        let alice_group_id = group_id_hex(&alice_group);
+        let charlie_group_id = group_id_hex(&charlie_group);
+        assert_eq!(alice_group_id, charlie_group_id);
+
+        let charlie_ctx_id = next_id();
+        MLS_CTX.with(|ctx| {
+            let mut groups = HashMap::new();
+            groups.insert(charlie_group_id.clone(), charlie_group);
+            ctx.borrow_mut().insert(
+                charlie_ctx_id.clone(),
+                MlsContext {
+                    identity: charlie,
+                    provider: charlie_provider,
+                    groups,
+                    own_commit_hashes: HashMap::new(),
+                    pending_own_commit_hashes: HashMap::new(),
+                },
+            );
+        });
+
+        let bob_leaf_for_charlie = MLS_CTX.with(|ctx| {
+            let ctx = ctx.borrow();
+            let c = ctx.get(&charlie_ctx_id).unwrap();
+            let group = c.groups.get(&charlie_group_id).unwrap();
+            let leaf = group
+                .members()
+                .find(|m| {
+                    BasicCredential::try_from(m.credential.clone())
+                        .map(|basic| basic.identity() == bob_bytes)
+                        .unwrap_or(false)
+                })
+                .map(|m| m.index.u32())
+                .expect("bob must be present in charlie's roster before removal");
+            leaf
+        });
+        mls_remove_member_stage_inner(&charlie_ctx_id, &charlie_group_id, bob_leaf_for_charlie)
+            .expect("charlie must be able to stage a removal of bob");
+
+        let pending_before = MLS_CTX.with(|ctx| {
+            ctx.borrow()
+                .get(&charlie_ctx_id)
+                .unwrap()
+                .pending_own_commit_hashes
+                .get(&charlie_group_id)
+                .copied()
+        });
+        assert!(
+            pending_before.is_some(),
+            "setup must have recorded charlie's own pending commit before the peer merge"
+        );
+
+        // Alice independently stages + confirms her OWN removal of bob.
+        let bob_leaf_for_alice = alice_group
+            .members()
+            .find(|m| {
+                BasicCredential::try_from(m.credential.clone())
+                    .map(|basic| basic.identity() == bob_bytes)
+                    .unwrap_or(false)
+            })
+            .map(|m| m.index.u32())
+            .expect("bob must be present in alice's roster before removal");
+        let (alice_commit_bytes, _alice_prior_epoch) = stage_remove_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_leaf_for_alice,
+            &alice_provider,
+        )
+        .unwrap();
+        confirm_remove_member(&mut alice_group, &alice_provider)
+            .expect("alice's removal commit must merge cleanly");
+
+        // Deliver alice's commit to charlie through the TWO-PHASE path: stage
+        // it via the real `inspect_incoming_commit` primitive and register
+        // the handle exactly as `mls_inspect_commit` (the wasm export) would,
+        // then confirm through `mls_confirm_incoming_commit_inner` — the
+        // native-callable split under test here.
+        let handle = MLS_CTX.with(|ctx| -> String {
+            let mut ctx = ctx.borrow_mut();
+            let c = ctx.get_mut(&charlie_ctx_id).unwrap();
+            let group = c.groups.get_mut(&charlie_group_id).unwrap();
+            let (staged, _info) =
+                inspect_incoming_commit(group, &alice_commit_bytes, &c.provider, None)
+                    .expect("charlie must be able to inspect alice's peer commit");
+            let handle = next_id();
+            INSPECTED_COMMITS.with(|m| {
+                m.borrow_mut().insert(
+                    handle.clone(),
+                    InspectedCommit {
+                        identity_id: charlie_ctx_id.clone(),
+                        group_id: charlie_group_id.clone(),
+                        staged,
+                    },
+                )
+            });
+            handle
+        });
+
+        let new_epoch =
+            mls_confirm_incoming_commit_inner(&charlie_ctx_id, &charlie_group_id, &handle)
+                .expect("confirming alice's inspected peer commit must succeed");
+        assert_eq!(new_epoch, alice_group.epoch().as_u64());
+
+        let pending_after = MLS_CTX.with(|ctx| {
+            ctx.borrow()
+                .get(&charlie_ctx_id)
+                .unwrap()
+                .pending_own_commit_hashes
+                .get(&charlie_group_id)
+                .copied()
+        });
+        assert_eq!(
+            pending_after, None,
+            "a successful two-phase confirm must clear this device's own dangling \
+             pending_own_commit_hashes entry, exactly like the one-shot path"
         );
 
         mls_clear_session();

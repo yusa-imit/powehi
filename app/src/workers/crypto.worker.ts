@@ -71,19 +71,79 @@ export type MlsPqEncapKeyResult = { encapKey: Uint8Array; signature: Uint8Array 
 // called.
 //
 // priorEpoch is the LOCAL MLS group epoch immediately before this stage
-// call, returned for the caller's own bookkeeping and for potential future
-// use once a commit-broadcast / epoch-reconciliation design exists —
-// designing that reconciliation is explicitly OUT OF SCOPE for this pass,
-// tracked as a follow-up. It is NOT currently validated against the
-// server's `groups.epoch` counter and MUST NOT be passed as sendCommit's
-// `expectedEpoch`: the server counter (group.rs, starts at 0) is never
-// advanced by the member-add flow (group_service.rs::add_member only writes
-// group_members.joined_at_epoch) — the only thing that bumps it is
-// messaging_service.rs::send_commit's own compare-and-swap, and no
-// production frontend code calls sendCommit at all today (only
-// app/src/api/messages.ts's definition and messages.test.ts reference it).
-// A real caller's local MLS epoch and the server counter therefore diverge
-// from the very first mlsAddMember.
+// call, returned for the caller's own bookkeeping. See item (a) below for
+// what it is (and is NOT) currently good for relative to the server's
+// `groups.epoch` counter.
+//
+// STATUS (verified cycle 497 — supersedes all prior blocker text in this
+// comment block): the trio still MUST NOT be wired into any production UI
+// or broadcast flow. The blockers below are the VERIFIED, currently-
+// accurate reasons — several earlier revisions of this comment described
+// some of these as less understood, or as missing entirely, than they now
+// actually are:
+//
+// (a) EPOCH RECONCILIATION — now DESIGNED, not built. The answer is NOT
+//     "make the two counters agree": the server's `groups.epoch` is a
+//     Delivery-Service compare-and-swap token, not an MLS epoch, and the
+//     two legitimately and permanently diverge — `group_service.rs::
+//     add_member` only writes `group_members.joined_at_epoch` and never
+//     advances `groups.epoch`, while a Welcome-based add advances the
+//     LOCAL MLS epoch (a group created via `AcceptInviteModal.tsx` sits at
+//     local MLS epoch 1 with server counter 0). Correct rule: sendCommit's
+//     `expectedEpoch` MUST be the SERVER's current counter, read from the
+//     server; `priorEpoch` above must never be passed as it. Still
+//     missing: no endpoint exposes that counter today (`GET
+//     /v1/groups/:id/members` returns device ids + a `truncated` flag
+//     only). A small, concrete task now — not an undesigned one.
+// (b) COMMIT-PROCESSING CONSUMER LOOP — CLOSED (cycle 493). `useMessages.ts`
+//     calls `mlsProcessCommit` on the receive path and acks only after a
+//     successful merge — see the mechanism paragraph below for the full
+//     sentinel/wiring detail. Text elsewhere still claiming this is
+//     missing is stale and previously misled reviewers into believing
+//     more was open than actually is.
+// (c) RELOAD BETWEEN STAGE AND CONFIRM/ABORT — PARTIALLY CLOSED. The
+//     staged commit and its `pending_own_commit_hashes` entry DO survive
+//     export/import (see the "Post-merge own-commit recognition"
+//     paragraph below), and confirm still works after a reload. Still
+//     OPEN: nothing JS-side can DISCOVER that a stage is outstanding — no
+//     WASM export exposes `pending_commit()`, and `mlsGroupIsActive`
+//     returns `true` in the `PendingCommit` state so it cannot serve as
+//     that signal; there is no recovery routine on `mlsImportState`.
+//     Auto-aborting on import would be safe only while nothing broadcasts
+//     a staged commit, and becomes a permanent-fork hazard once the send
+//     path is wired — so it must not be added ahead of that wiring.
+// (d) PERSIST FAILURE AFTER A SUCCESSFUL IN-MEMORY STAGE — CLOSED this
+//     cycle. `useCryptoWorker.ts`'s `wrapWithPersistence` now issues a
+//     compensating `mlsRemoveMemberAbort` when `mlsRemoveMemberStage`
+//     resolves in WASM but the subsequent Dexie flush rejects, so the
+//     group can no longer be left wedged in `PendingCommit` by that
+//     failure mode (see that file's SYNC_FLUSH_ARG_METHODS branch, and
+//     `stage_remove_member`'s doc item (d) in `mls_group.rs`). The
+//     `"call"`-phase timeout variant of the same shape — where it is
+//     ambiguous whether the WASM call actually resolved before the
+//     timeout fired — remains OPEN and is deliberately NOT covered by
+//     that compensation.
+// (e) AN INCOMING COMMIT SILENTLY DISCARDS A LOCALLY STAGED COMMIT — OPEN.
+//     No error/flag/return-value signal exists for this; the next confirm
+//     just fails with `NoPendingCommit`.
+// (f) NO MUTUAL EXCLUSION between the 3s `useMessages.ts` poll loop and
+//     any UI-initiated MLS flow — OPEN, no lock primitive exists anywhere
+//     in `app/src`. Combined with (e): a poll tick landing between a UI
+//     stage and its confirm destroys the stage, and if the DS had already
+//     ACCEPTED that commit the group FORKS permanently under
+//     `max_past_epochs(0)`.
+// (g) A STALE LOCAL MLS EPOCH IS NOT DETECTABLE VIA THE SERVER CAS — OPEN.
+//     Because the counters are decoupled (see (a)), the DS will accept a
+//     Commit built on a stale local MLS epoch; peers reject it at the MLS
+//     layer while the committer merges it, forking the committer. A
+//     wiring pass must drain unprocessed Commit envelopes for the group
+//     before staging.
+//
+// A production Remove UI, when built, must take its `leafIndex` from the
+// client's own `mlsGroupMembers` roster and can NOT be driven from
+// server-supplied `device_id`s — no authenticated device_id-to-MLS-
+// credential/leaf binding exists in this codebase (prd.md §3.3, cycle-456
+// crypto-reviewer NEEDS-REWORK).
 //
 // STATUS — the peer-side commit-processing primitive IS NOW WIRED, on the
 // RECEIVE path only: `useMessages.ts` (the per-active-group hook) calls
@@ -127,16 +187,6 @@ export type MlsPqEncapKeyResult = { encapKey: Uint8Array; signature: Uint8Array 
 // atomic `mlsProcessCommit` avoids entirely. The trio is kept available as a
 // primitive for whenever such a policy is designed.
 //
-// One gap remains genuinely open, but it is ORTHOGONAL to the receive path
-// just wired: the epoch-reconciliation gap described in the paragraphs
-// above (local MLS epoch vs the server's `groups.epoch` counter). Merging
-// an incoming Commit via openmls neither consults nor depends on that
-// server counter at all — only the SEND path's compare-and-swap
-// (`messaging_service.rs::send_commit`) touches it, and no production
-// frontend code calls `sendCommit` today (only `app/src/api/messages.ts`'s
-// definition and `messages.test.ts` reference it — still true, unchanged by
-// this pass). So wiring the receive path did not need to wait on that gap,
-// and closing that gap later does not require re-touching the receive path.
 // Post-merge own-commit recognition (`mlsRemoveMemberStage`/
 // `mlsRemoveMemberConfirm`'s `own_commit_hashes` bookkeeping, plus the
 // pending, not-yet-confirmed `pending_own_commit_hashes` populated at stage
@@ -792,8 +842,10 @@ const api = {
 	 * Returns { commit, priorEpoch } — see `MlsRemoveStageResult`'s doc
 	 * comment for what `priorEpoch` is (and is NOT) currently good for.
 	 *
-	 * STATUS: crypto PRIMITIVE ONLY — see `MlsRemoveStageResult`'s doc
-	 * comment. MUST NOT be wired into any production UI or broadcast flow yet.
+	 * STATUS: crypto PRIMITIVE ONLY — MUST NOT be wired into any production
+	 * UI or broadcast flow yet. See the VERIFIED (a)-(g) blocker list in the
+	 * comment block above `MlsRemoveStageResult`'s type declaration for the
+	 * current, up-to-date reasons why.
 	 */
 	async mlsRemoveMemberStage(
 		identityId: string,
@@ -819,8 +871,10 @@ const api = {
 	 * of the WASM boundary — including this function's own caller — ever
 	 * gets to choose what bytes that recognition is based on.
 	 *
-	 * STATUS: crypto PRIMITIVE ONLY — see `MlsRemoveStageResult`'s doc
-	 * comment. MUST NOT be wired into any production UI or broadcast flow yet.
+	 * STATUS: crypto PRIMITIVE ONLY — MUST NOT be wired into any production
+	 * UI or broadcast flow yet. See the VERIFIED (a)-(g) blocker list in the
+	 * comment block above `MlsRemoveStageResult`'s type declaration for the
+	 * current, up-to-date reasons why.
 	 */
 	async mlsRemoveMemberConfirm(identityId: string, groupId: string): Promise<void> {
 		const wasm = await getWasm();
@@ -834,8 +888,10 @@ const api = {
 	 * prior epoch. Calling this with no outstanding staged commit for this
 	 * group is rejected by the WASM layer.
 	 *
-	 * STATUS: crypto PRIMITIVE ONLY — see `MlsRemoveStageResult`'s doc
-	 * comment. MUST NOT be wired into any production UI or broadcast flow yet.
+	 * STATUS: crypto PRIMITIVE ONLY — MUST NOT be wired into any production
+	 * UI or broadcast flow yet. See the VERIFIED (a)-(g) blocker list in the
+	 * comment block above `MlsRemoveStageResult`'s type declaration for the
+	 * current, up-to-date reasons why.
 	 */
 	async mlsRemoveMemberAbort(identityId: string, groupId: string): Promise<void> {
 		const wasm = await getWasm();

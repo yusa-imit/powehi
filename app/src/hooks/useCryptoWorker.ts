@@ -453,10 +453,110 @@ export function wrapWithPersistence(
 					const result = await withTimeout(orig(...args), prop, "call");
 					const identityId = args[0];
 					if (typeof identityId === "string") {
-						// Rejects (propagating out of the wrapped call) if the persist
-						// fails — the ratchet-advanced result must not be released while
-						// its advanced state is not durably saved.
-						await runOnChain(() => withTimeout(doFlush(raw, identityId), prop, "persist"));
+						try {
+							// Rejects (propagating out of the wrapped call) if the persist
+							// fails — the ratchet-advanced result must not be released while
+							// its advanced state is not durably saved.
+							await runOnChain(() => withTimeout(doFlush(raw, identityId), prop, "persist"));
+						} catch (persistError) {
+							// Compensating abort — mlsRemoveMemberStage ONLY, and ONLY for this
+							// exact shape: the WASM stage call above already RESOLVED (openmls
+							// is now sitting in PendingCommit for this group) but the flush
+							// that must precede releasing that result to the caller just
+							// REJECTED. Left alone, the caller never receives `result` (this
+							// wrapped call is about to reject below), so it can never call
+							// mlsRemoveMemberConfirm/Abort itself, and the group is left
+							// durably wedged in PendingCommit for the rest of the session and
+							// across reloads — mlsAddMember and any further
+							// mlsRemoveMemberStage for that group are then rejected by
+							// openmls's is_operational() check (mls_group.rs
+							// stage_remove_member doc item (d)). Issue the abort ourselves so
+							// the group returns to its pre-stage state before we rethrow.
+							//
+							// Deliberately NOT extended to two other failure shapes near this
+							// method:
+							//  - orig(...args) itself rejecting (the "call" phase above, outside
+							//    this try): openmls may have refused THIS stage because a
+							//    DIFFERENT commit was already pending (is_operational()) —
+							//    blindly aborting here could destroy that unrelated outstanding
+							//    stage instead of this (never-started) one.
+							//  - a "call"-phase timeout: ambiguous whether the WASM call
+							//    actually resolved before the timeout fired — remains a
+							//    documented open item, not fixed here.
+							//
+							// NOTE (crypto-reviewer, this pass): the window this branch DOES
+							// cover — stage resolved, abort about to run — still shares the
+							// same unrelated-stage risk described above in miniature: if a
+							// peer commit merges (e.g. via the poll loop's mlsProcessCommit)
+							// between the stage above and the abort below, openmls's own
+							// clear_pending_commit already discards the stage this abort was
+							// meant to undo, and if THIS caller's own stage had somehow been
+							// re-issued in that gap the abort could target the wrong one. Not
+							// reachable today (no production caller invokes this trio — see
+							// mls_group.rs stage_remove_member's doc comment), so left
+							// undefended rather than adding unreachable code; must be revisited
+							// once a real Remove UI exists (blocker item (f), no mutual
+							// exclusion between the poll loop and a UI-initiated MLS flow).
+							//
+							// LATENCY NOTE: this failure path chains up to four independently
+							// bounded CRYPTO_CALL_TIMEOUT_MS waits (stage call, failed persist,
+							// compensating abort, post-abort flush below) -- worst case ~4x
+							// CRYPTO_CALL_TIMEOUT_MS before the wrapped call rejects. Still
+							// bounded (never hangs forever), but a future Remove UI must not
+							// assume this call settles within a single CRYPTO_CALL_TIMEOUT_MS.
+							if (prop === "mlsRemoveMemberStage") {
+								const groupId = args[1];
+								if (typeof groupId === "string") {
+									let aborted = false;
+									try {
+										// RAW proxy, not the wrapped one — going through the wrapper
+										// would recurse back into this same persistence path and
+										// attempt another flush that is likely to fail for the same
+										// reason this one just did. Bounded by withTimeout — see
+										// this file's "must never hang forever" invariant above:
+										// the dominant trigger reaching this catch is a "persist"-
+										// phase CryptoWorkerTimeoutError, which means the
+										// worker/Comlink channel is already suspected wedged, so an
+										// unbounded RPC here could hang the wrapped call forever
+										// instead of degrading to the diagnosable rejection this
+										// whole mechanism exists to guarantee.
+										await withTimeout(
+											raw.mlsRemoveMemberAbort(identityId, groupId),
+											"mlsRemoveMemberAbort",
+											"call",
+										);
+										aborted = true;
+									} catch {
+										// Swallow — must not mask the real (persist) failure below.
+										// Content-free per no-plaintext-logging: method/category
+										// only, never identityId, groupId, or any result.
+										console.error("mls_remove_stage_compensating_abort_failed");
+									}
+									if (aborted) {
+										// The abort resolved in-memory, but the ORIGINAL persist
+										// above (of the now-superseded staged state) is what just
+										// failed — it must not be assumed to have landed, and it
+										// must not be assumed to have failed to land either
+										// (withTimeout does not cancel the underlying doFlush; see
+										// its doc comment). Issue a FRESH durable flush of the
+										// post-abort state on the shared chain so the abort is not
+										// left only in memory. If this second flush also fails, a
+										// dangling on-disk PendingCommit could still in principle
+										// land later from the abandoned first attempt — but this
+										// fresh, later-issued generation number will supersede it
+										// via doFlush's own generation check whenever it does
+										// (see doFlush's doc comment), so it can never durably win.
+										// Swallow: must not mask the real (persist) failure below.
+										await runOnChain(() =>
+											withTimeout(doFlush(raw, identityId), prop, "persist"),
+										).catch(() => {
+											console.error("mls_remove_stage_post_abort_flush_failed");
+										});
+									}
+								}
+							}
+							throw persistError;
+						}
 					}
 					return result;
 				};

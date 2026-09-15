@@ -618,66 +618,93 @@ pub fn add_member(
 ///   and fully processes the exact commit that evicts it (see
 ///   `test_mls_remove_member_restores_pcs`).
 ///
-/// # Status: primitive now exists — the consumer loop still does not
-/// The peer-side commit-processing **primitive** now exists:
-/// [`process_incoming_commit`] in this module, exported to WASM as
-/// `mls_process_commit` and to the frontend as `mlsProcessCommit`. What is
-/// still missing is the **consumer loop**, not the primitive:
-/// `app/src/hooks/useMessages.ts` still only handles Application-type
-/// envelopes and `app/src/hooks/useWelcomePoller.ts` still only handles
-/// Welcome messages, so both still ack-and-drop every Commit envelope —
-/// nothing in the **running application** consumes a Commit produced here
-/// yet. The PCS property `test_mls_remove_member_restores_pcs` proves holds
-/// **inside that unit test** (where a second in-test `MlsGroup` handle stands
-/// in for "a peer"), not yet for the deployed application. Do not wire this
-/// export into any production UI or broadcast flow until BOTH (a) a real
-/// epoch-reconciliation design exists (see `prior_epoch` below) AND (b) a
-/// commit-processing **consumer loop** is wired into the poller — the
-/// primitive half of (b) is done, including own-commit recognition
-/// ([`MlsError::OwnCommit`]) and a pre-merge policy point
-/// ([`inspect_incoming_commit`]); what remains is the wiring itself.
-/// (This `(a)/(b)` pair is this section's own list, naming what
-/// blocks wiring [`stage_remove_member`] into production; it is distinct from
-/// the `(a)/(b)/(c)` list in [`process_incoming_commit`]'s own doc comment,
-/// which enumerates what that primitive itself still leaves open.) Note that
-/// item (c) of [`process_incoming_commit`]'s doc comment documents a further
-/// hazard that wiring must handle: a staged-but-unconfirmed local commit is
-/// silently discarded when an incoming commit is merged, so a staged Remove
-/// can quietly evaporate. Wiring the consumer loop is a separate, materially
+/// # Status: primitive exists; production wiring is gated on a VERIFIED list
+/// The peer-side commit-processing **primitive** exists: [`process_incoming_commit`]
+/// in this module, exported to WASM as `mls_process_commit` and to the
+/// frontend as `mlsProcessCommit`. The PCS property `test_mls_remove_member_restores_pcs`
+/// proves holds **inside that unit test** (where a second in-test `MlsGroup`
+/// handle stands in for "a peer"). The conclusion is unchanged from prior
+/// cycles — **do not wire this trio ([`stage_remove_member`],
+/// [`confirm_remove_member`], [`abort_remove_member`]) into a production UI
+/// yet** — but the reasons below were stale (notably, item (b) was closed in
+/// cycle 493 and this comment kept claiming it was open). This list is
+/// re-verified against the current tree each time it is touched:
+///
+/// - (a) EPOCH RECONCILIATION — DESIGNED, not yet built. The answer is NOT
+///   "make the two counters agree". The server's `groups.epoch` is a
+///   Delivery-Service compare-and-swap token, not an MLS epoch, and the two
+///   legitimately and permanently diverge: `group_service.rs::add_member`
+///   only writes `group_members.joined_at_epoch` and never advances
+///   `groups.epoch` (and `create_group` starts it at `Epoch(0)`), while a
+///   Welcome-based add advances the LOCAL MLS epoch — so a group created
+///   through `AcceptInviteModal.tsx` sits at local MLS epoch 1 with server
+///   counter 0. Correct rule: `sendCommit`'s `expected_epoch` MUST be the
+///   SERVER's current counter, read from the server; `prior_epoch` (see
+///   below) must never be used for it. Still missing: no endpoint exposes
+///   that counter (`GET /v1/groups/:id/members` returns device ids + a
+///   `truncated` flag only). A small concrete task now, not an undesigned
+///   one.
+/// - (b) COMMIT-PROCESSING CONSUMER LOOP — CLOSED (cycle 493).
+///   `app/src/hooks/useMessages.ts` calls `mlsProcessCommit` for Commit
+///   envelopes of the active group and acks only after a successful merge.
+///   Text still claiming this is missing is STALE — it is what made prior
+///   cycles believe more was missing than actually is.
+/// - (c) RELOAD BETWEEN STAGE AND CONFIRM/ABORT — PARTIALLY CLOSED. The
+///   staged commit and its `pending_own_commit_hashes` entry DO survive
+///   export/import (import revalidates against the real
+///   `group.pending_commit()` + epoch) and confirm still works after a
+///   reload — pinned by
+///   `test_pending_own_commit_hash_survives_import_and_promotes_on_confirm`.
+///   Still OPEN: nothing JS-side can DISCOVER a stage is outstanding — no
+///   `#[wasm_bindgen]` export exposes `pending_commit()`, and
+///   `mls_group_is_active` returns `true` in `PendingCommit` state so it
+///   cannot serve as that signal; there is no recovery routine on
+///   `mlsImportState`. NOTE: auto-aborting an outstanding stage on import is
+///   safe ONLY while nothing in production broadcasts a staged commit, and
+///   becomes a permanent-fork hazard the moment the send path is wired — do
+///   not add it ahead of that wiring.
+/// - (d) PERSIST FAILURE AFTER A SUCCESSFUL IN-MEMORY STAGE — closed this
+///   cycle on the JS side: `app/src/hooks/useCryptoWorker.ts` now issues a
+///   compensating `mlsRemoveMemberAbort` when `mlsRemoveMemberStage` succeeds
+///   in WASM but the durable persist that follows fails, so a caller can no
+///   longer be left wedged in `PendingCommit` holding no commit bytes. The
+///   `"call"`-phase timeout variant of the same shape remains OPEN.
+/// - (e) AN INCOMING COMMIT SILENTLY DISCARDS A LOCALLY STAGED COMMIT —
+///   OPEN. Pinned by
+///   `test_process_incoming_commit_silently_drops_receivers_own_staged_commit`.
+///   No error, flag, or return-value signal; the next confirm just returns
+///   `NoPendingCommit`.
+/// - (f) NO MUTUAL EXCLUSION between the 3s `useMessages.ts` poll loop and
+///   any UI-initiated MLS flow — OPEN, no lock primitive exists in
+///   `app/src`. Combined with (e): a poll tick landing between a UI stage
+///   and its confirm destroys the stage, and if the DS had already ACCEPTED
+///   that commit the group FORKS permanently under `max_past_epochs(0)` —
+///   peers merge it, the committer never can.
+/// - (g) A STALE LOCAL MLS EPOCH IS NOT DETECTABLE VIA THE SERVER CAS —
+///   OPEN. Because the counters are decoupled (see (a)), the DS will accept
+///   a Commit built on a stale local MLS epoch; peers reject it at the MLS
+///   layer while the committer merges it on confirm, forking the committer.
+///   A wiring pass must drain unprocessed Commit envelopes for the group
+///   before staging.
+///
+/// (This `(a)`–`(g)` list is distinct from the `(a)/(b)/(c)` list in
+/// [`process_incoming_commit`]'s own doc comment, which enumerates what that
+/// primitive itself still leaves open — item (e) above is that list's item
+/// (c).) Wiring the consumer loop's remaining gaps is a separate, materially
 /// larger follow-up — explicitly out of scope for this change, and no part
 /// of that wiring is built here.
-///
-/// Two further preconditions a future wiring pass MUST resolve, beyond this
-/// section's (a)/(b) above (crypto-reviewer, this pass): (c) the
-/// pending-commit state persists into serialized provider state
-/// (`export_provider_state` /
-/// `restore_provider_state`) with no JS-side record of "a stage is
-/// outstanding" — a reload between stage and confirm/abort restores a group
-/// wedged in `PendingCommit` with nothing aware it must call
-/// [`abort_remove_member`] to un-wedge it; (d) the WASM export's caller
-/// contract ("every successful stage call must be followed by exactly one of
-/// confirm/abort") has no rollback if [`stage_remove_member`] itself succeeds
-/// in-memory but the JS-side Dexie persist that must follow it
-/// (`SYNC_FLUSH_ARG_METHODS` in `useCryptoWorker.ts`) then fails — the
-/// in-memory pending commit is left staged even though the JS call the caller
-/// sees rejected.
 ///
 /// # `prior_epoch` — local bookkeeping only, NOT a server epoch
 /// `prior_epoch` is the group's **local** MLS epoch immediately before the
 /// staged operation, returned purely for the caller's own bookkeeping and for
 /// a possible future commit-broadcast / epoch-reconciliation design. It is
 /// **not currently validated against anything server-side** and **must not**
-/// be passed as `sendCommit`'s `expected_epoch`: the server's `groups.epoch`
-/// counter (`crates/domain/powehi-domain/src/group.rs`, starts at `Epoch(0)`)
-/// is never advanced by the member-add flow
-/// (`crates/application/powehi-application/src/group_service.rs::add_member`
-/// only touches `group_members.joined_at_epoch`) — the only thing that bumps
-/// it is `messaging_service.rs::send_commit`'s compare-and-swap, and no
-/// production frontend code calls `sendCommit` at all today. A caller's local
-/// MLS epoch and the server's counter therefore diverge from the very first
-/// add, and reconciling them is explicitly out of scope for this change — a
-/// follow-up design is required before `prior_epoch` can be used for any
-/// server-side precondition.
+/// be passed as `sendCommit`'s `expected_epoch` — see item (a) above for the
+/// full argument for why the server's `groups.epoch` counter and this local
+/// MLS epoch legitimately and permanently diverge, and why `expected_epoch`
+/// must instead be read from the server. Reconciling them is explicitly out
+/// of scope for this change — a follow-up wiring pass (item (a)) is required
+/// before `prior_epoch` can be used for any server-side precondition.
 ///
 /// # Caller contract
 /// `leaf_index` MUST be a leaf index the caller read from this same `group`'s
@@ -693,6 +720,13 @@ pub fn add_member(
 /// convention); it is NOT input validation for untrusted data. The
 /// `mls_remove_member_stage` WASM export in `wasm_exports.rs` is the layer
 /// that documents and enforces the provenance requirement for any JS caller.
+///
+/// Concretely, this means a production Remove UI must take its `leaf_index`
+/// from the client's OWN `mls_group_members` roster; it can NOT be driven
+/// from `PendingRemovalBanner`'s server-supplied `device_id`s, because no
+/// authenticated device_id-to-MLS-credential/leaf binding exists (prd.md
+/// §3.3 records the cycle-456 crypto-reviewer NEEDS-REWORK and names the
+/// only two ways forward).
 ///
 /// Every caller MUST call exactly one of [`confirm_remove_member`] /
 /// [`abort_remove_member`] for every `Ok` return of this function — leaving a
