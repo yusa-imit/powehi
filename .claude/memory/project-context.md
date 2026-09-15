@@ -24,7 +24,151 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-15, cycle 498 — FEATURE: found + finished cycle 497's uncommitted MLS pending-commit-cleanup fix, fixed crypto-reviewer's needs-rework verdict, commit da96dee)
+## Current state (2026-09-15, cycle 499 — FEATURE: add `GET /v1/groups/:group_id/epoch`, region-authority fail-closed, commit 2ab7ad9)
+
+- Mode selection: counter 498→499, 499 % 5 != 0 → FEATURE. `gh run list`
+  green on main before starting (cycle 498's push). Working tree clean at
+  session start (no orphaned WIP, unlike several recent cycles).
+- **Picked candidate #2 from cycle 498's list, scoped narrowly**: rather
+  than attempt the full admin-initiated MLS Remove UI (blocked on epoch
+  reconciliation), picked the small concrete sub-task cycle 498 had
+  already identified: expose the server's `groups.epoch` counter via a
+  read endpoint, so a future client has something to bound a `sendCommit`
+  `expected_epoch` against. Did NOT attempt the reconciliation design
+  itself or wire any client consumer this cycle (no `app/src/api/groups.ts`
+  change) — deliberately step (a) only.
+- **What shipped**: `GroupUseCase::get_epoch(caller, group_id) -> Epoch`
+  (fail-closed membership guard, same non-existence-oracle contract as
+  `list_members`), `GET /v1/groups/:group_id/epoch` REST handler
+  (`GroupEpochResponse { epoch: u64 }`), wired into `lib.rs`'s
+  `api_routes` block (same `api_governor` rate-limit tier as its siblings).
+- **security-auditor: needs-rework on the first pass, PASS after fixes**
+  (backend handler, matches routing precedent). Findings and fixes:
+  - **F1 (MEDIUM, blocker)**: a group row synced into a non-home region via
+    `SyncGroupMembership` is created with `epoch: Epoch(0)` and never
+    updated after (`upsert_members`'s `ON CONFLICT DO NOTHING`) — a
+    non-home-region caller would get a stale/zero epoch back as `200 OK`
+    with no authority indicator, a false-trust signal indistinguishable
+    from a genuinely fresh group. Fixed: `GroupService::get_epoch` now
+    compares `group.home_region != self.local_region` and returns
+    `DomainError::RegionMismatch` (existing variant, already mapped to
+    `502 region_mismatch`) instead of ever answering with that value. Guard
+    order matters and was verified correct: the region check runs strictly
+    after the membership check, so a non-member can never use this to
+    probe "does this group exist in some other region" (would have been a
+    group-existence-plus-home-region oracle otherwise).
+  - **F2 (LOW/MEDIUM) + F3 (LOW), fixed together**: the original impl did
+    `list_members` (O(group size) list allocation for an O(1)-sized
+    response — worst amplification ratio of any `/v1/groups/*` endpoint)
+    followed by a separate non-transactional `find_by_id`, reopening a
+    TOCTOU window `list_members`'s own design explicitly avoids elsewhere.
+    Fixed: added `GroupRepository::get_epoch_if_member(group_id,
+    device_id) -> Option<Group>`, a single fused JOIN query
+    (`groups g JOIN group_members m ON m.group_id = g.id WHERE g.id = $1
+    AND m.device_id = $2`) that does the membership check and the read in
+    one round trip. `Ok(None)` covers "no such group" and "not a member"
+    identically — stronger than before, since there's no longer a second
+    code path where those two cases could theoretically diverge. Had to
+    add this method to 6 other `GroupRepository` fakes across the
+    workspace (`grpc/server.rs`, `ws-hub` tests,
+    `auth_service.rs`/`media_service.rs`/`messaging_service.rs`'s test
+    modules) — all fail-closed (real membership checks in 3, `Ok(None)` or
+    `unimplemented!()` in the rest, none unconditionally grant access).
+  - **F6 (INFO)**: fixed a doc typo (`GroupUseCase::advance_epoch` doesn't
+    exist; corrected to `GroupRepository::advance_epoch`).
+  - **F4 (LOW)**: agreed with threat-model-checker's parallel finding
+    (same review cycle) that this needed a `prd.md` §3.3 entry — added.
+  - **F5** (log volume) and **F7** (no consumer wired yet) left as
+    informational, matching the auditor's own severity call — F7 is
+    intentional this cycle (step (a) only, see above).
+  - **Re-verification pass caught doc drift from the two parallel reviews**:
+    threat-model-checker's prd.md §3.3/§3.5.1 additions (written before
+    F1's fix landed) still said the stale/zero epoch "may be returned
+    without an authority indicator" — no longer true once `RegionMismatch`
+    fail-closed shipped. Fixed both paragraphs to say the integrity risk is
+    closed and only an availability limitation (non-home-region members
+    can't use the endpoint at all) remains. Also fixed an inaccurate
+    "no TOCTOU window" claim in `group_service.rs`'s `FakeGroupRepo` test
+    comment (its two lock acquisitions are in fact separate statements;
+    harmless only because tests are single-threaded) — this repo treats
+    comments as normative, so a false claim was worth removing even though
+    it was purely cosmetic.
+  - **security-auditor's own new observations (not required this cycle,
+    tracked for the future consumer-wiring cycle)**: this is the first
+    code path in the whole workspace that actually produces
+    `DomainError::RegionMismatch` (previously only the error-mapping and
+    its own unit test existed) — so the `502` REST path opens in
+    production for the first time here. Auditor flagged that `502` may be
+    semantically wrong (a deterministic client-side "wrong region" isn't a
+    gateway failure; `421 Misdirected Request` fits closer) and that a
+    polling peer-region member would generate a steady 5xx stream that
+    could pollute `§13` SLO/alerting despite being expected behavior —
+    both flagged as pre-existing/shared-mapping concerns out of this
+    diff's scope, to revisit whenever step (b) actually wires a consumer.
+- **threat-model-checker: YELLOW, conditions applied**. Verdict: no
+  confidentiality invariant weakened (server learns nothing new — the
+  epoch value already flowed client→server via `AddMemberRequest.epoch`),
+  no out-of-scope-list migration, write path untouched, existing
+  fail-closed pattern reused correctly, `None → Unauthorized` default
+  already guarded (not a `0`-default oracle). Conditioned GREEN on two
+  `prd.md` doc-parity additions (this repo's established convention:
+  every newly-client-readable server-held field gets a §3.3 entry, per
+  the `/members` precedent from cycle 454) — added both, then corrected
+  per security-auditor's re-verification note above.
+- **Full gate**: `cargo build --workspace` and `cargo build --workspace
+  --all-targets` clean. `cargo clippy --workspace --all-targets -- -D
+  warnings` clean (multiple times, after this cycle's own review-fix
+  round too). `cargo fmt --all --check` clean (auto-fixed once via
+  `cargo fmt --all`, re-verified). `cargo test --workspace`: 0 failed
+  throughout (application 171, up from 167; rest-api 158, up from 154;
+  postgres integration tests unchanged runnable count, +1 new
+  Docker-gated `#[ignore]` test, confirmed compiles via `cargo build -p
+  powehi-postgres --tests` — no local Docker in this sandbox to actually
+  run it). `cargo audit`/`cargo deny check`/`pnpm audit --prod` all clean
+  (run by security-auditor as part of its pass).
+- Committed `2ab7ad9` (`feat(backend): add GET /v1/groups/:id/epoch,
+  fail-closed to home region`), 16 files changed (495 insertions, 0
+  deletions — no line removed anywhere in this diff). Pushed clean
+  (`f0fe588..2ab7ad9 main -> main`). CI triggered immediately after push;
+  not watched to completion before this memory entry was written — verify
+  `gh run list` next cycle if this session ends first.
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates (carried/updated from cycle 498's list):**
+  1. **Narrowed, not resolved** (was candidate #2): admin-initiated MLS
+     Remove UI is still blocked on the `sendCommit`/`expectedEpoch`
+     reconciliation design, but the "expose server's `groups.epoch`"
+     sub-step is now done. A future crypto-lead-scoped cycle should design
+     step (b): how a client actually uses this endpoint (poll before
+     retry? what to do when a `RegionMismatch` 502 means "can't reconcile
+     from here at all"?) and wire `app/src/api/groups.ts`'s
+     `getEpoch`/consumer.
+  2. New, from security-auditor's own observation this cycle: reconsider
+     whether `DomainError::RegionMismatch` should map to `421 Misdirected
+     Request` instead of `502 region_mismatch` before any real client
+     starts polling it (a steady expected-5xx stream from peer-region
+     members would pollute §13 SLO/alerting) — cheap to fix now, before
+     the mapping has other callers to keep compatible.
+  3. Carried unchanged: device_id-to-MLS-leaf binding half of issue #2's
+     `PendingRemovalBanner` cross-check (crypto-lead design call).
+  4. Carried unchanged: `mlsRemoveMemberStage`'s worst-case ~60s rejection
+     latency — informational until a real Remove UI exists.
+  5. Carried, optional, informational: `rustls`'s default `aws-lc-rs`
+     provider compiled in but unused; `default-features = false` would
+     shrink SBOM.
+  6. Carried: PQ hybrid Phase A prerequisite (blocked on openmls upstream).
+  7. Carried, BLOCKED: `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal`
+     wiring needs F3 + HMAC-vs-plain-SHA256 gate resolved first.
+  8. Carried: prd.md §3.3 doesn't document the consumed-`key_packages`
+     retention window (separate item — not the same as this cycle's new
+     `groups.epoch` §3.3 entry).
+  9. Carried: `mls_group_members` `isSelf` leaf-index hardening; issues
+     #1/#3/#4/#5; prd.md §10 REST API doc drift; unconsumed
+     `RemovalRequired` WS event; `key_packages.device_id` FK doc drift.
+  10. **This file is now well past ~3050 lines — cycle 500 (1 cycle away,
+      the next multiple of 5) is the STABILIZATION archive point, same
+      pattern as cycles 360/485.**
+
+## Previous state (2026-09-15, cycle 498 — FEATURE: found + finished cycle 497's uncommitted MLS pending-commit-cleanup fix, fixed crypto-reviewer's needs-rework verdict, commit da96dee)
 
 - Mode selection: counter 497→498, 498 % 5 != 0 → FEATURE. `gh run list`
   green on main before starting.
