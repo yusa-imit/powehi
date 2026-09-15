@@ -24,7 +24,159 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-13, cycle 494 — STABILIZATION (forced by red CI, counter said FEATURE): fix Docker Hub's removal of `minio/minio` breaking 2 of 3 CI checks, fix a frontend `tsc -b` type-inference break in a test mock, commit 2fa6184)
+## Current state (2026-09-15, cycle 495 — STABILIZATION: fix RUSTSEC-2026-0285 (rustls TLS 1.3 boundary bug) via dependency bump, harden `GroupRepository::save`'s blind upsert against epoch downgrade with a new integration test, commits 90dd021/5b46068)
+
+- Mode selection: counter 494→495, 495 % 5 == 0 → STABILIZATION. `gh run
+  list --limit 5` all green on main (cycle 494's push). `gh issue list
+  --state open`: same 5 open issues as prior cycles (#1 SPA deploy, #2
+  MLS Remove/PCS — large multi-cycle FEATURE item, #3 WS client, #4
+  load testing, #5 prod-ap-seoul PIPA), none `bug`-labeled, none
+  stabilization-sized — none picked. Working tree clean at session
+  start (no orphaned WIP).
+- **Picked a concrete item off the carried candidates list** rather than
+  a vague sweep: "`GroupRepository::save` blind `ON CONFLICT DO
+  UPDATE`" has been carried unactioned since ≥cycle 480's list. Traced
+  it fully before acting: confirmed via grep that `PgGroupRepository`
+  is the only non-test `GroupRepository` impl and every `save` call
+  site in the whole repo is inside a `#[cfg(test)]`/test-fake module —
+  it is dead in production today. The real MLS-Commit epoch-advance
+  path already uses the correct CAS primitive
+  (`advance_epoch`/`CommitLedger::commit_epoch_and_save`, explicitly
+  documented in `powehi-grpc/src/server.rs` as the only safe one). The
+  port trait doc's own claim that `save` is "still needed to persist an
+  epoch advance on commit" turned out stale/false. So `save` was a live
+  landmine in the API surface, not an active bug — a future caller
+  reaching for the obviously-named "save a group" method could silently
+  downgrade a group's epoch.
+- **Fix, following the exact precedent set for `PgDeviceRepository::save`
+  and `user_id` in cycle 445**: added `WHERE groups.epoch <=
+  EXCLUDED.epoch` to `save`'s `ON CONFLICT DO UPDATE`
+  (`group_repo.rs`) — Postgres skips the entire UPDATE (leaving every
+  column, including `home_region`, untouched) whenever the incoming
+  epoch would regress the stored one. This is a monotonic guard, not a
+  full CAS (no caller-supplied `expected` to race against) — documented
+  as such in both the SQL comment and the port trait doc, which was
+  also corrected to drop the stale "needed to persist an epoch advance"
+  claim.
+- **security-auditor: PASS-with-nits on the first draft.** Confirmed the
+  guard SQL is correct and race-safe under READ COMMITTED (Postgres
+  re-evaluates `DO UPDATE ... WHERE` against the post-lock row version,
+  no TOCTOU against `advance_epoch`'s CAS). Two cheap findings fixed in
+  this cycle: (1) the port doc's "monotonic-safe" phrasing understated
+  that `<=` (not `<`) means an EQUAL-epoch save still fully applies,
+  including rewriting `home_region` — `save` remains a live
+  home-region-repoint primitive for any non-decreasing epoch, not an
+  inert no-op; clarified in both the SQL comment and port doc, and
+  added an explicit equal-epoch boundary case to the new test. Two
+  findings left as-is per the auditor's own low/informational call: (a)
+  `save` returns `Result<(), _>` so a guard-skipped no-op is
+  indistinguishable from an applied write — no caller today depends on
+  telling them apart, changing the signature would ripple across every
+  `GroupRepository` test fake for a method with zero production
+  callers, not worth it this cycle; (b) `create_with_creator`/
+  `upsert_members` still bind `group.epoch.0 as i64` (wraps negative)
+  instead of `i64::try_from` like `save`/`advance_epoch` — pre-existing,
+  unreachable today (both call sites pass hardcoded `Epoch(0)`), no
+  `CHECK (epoch >= 0)` constraint exists.
+- **New integration test** (Docker-gated,
+  `pg_security_it.rs::save_never_downgrades_an_existing_groups_epoch`):
+  proves all three epoch boundaries — a lower-epoch save is a full
+  no-op (epoch AND home_region both survive unchanged), an equal-epoch
+  save still fully applies, and a genuinely-higher-epoch save applies
+  normally. Compiles clean (verified via `cargo build --tests -p
+  powehi-postgres`); actually runs in CI's `--run-ignored all` step,
+  not just locally.
+- **Also fixed, found during the mandated `cargo audit`/`cargo deny
+  check` security sweep**: RUSTSEC-2026-0285 (rustls <0.23.45, TLS 1.3
+  handshake messages incorrectly accepted across encryption level
+  boundaries, severity 5.3 medium). Not cosmetic — `rustls` 0.23.40 was
+  pulled in by `tokio-rustls`→`tonic` (the real gRPC transport carrying
+  inter-region mTLS traffic per prd.md), not just a dev/test-only path
+  (a second copy also comes in via `testcontainers`'s `ureq`, which
+  *is* dev-only, but that wasn't the blocking one). Fixed via `cargo
+  update -p rustls --precise 0.23.45` — single targeted bump, not a
+  broad `cargo update`. `cargo audit` and `cargo deny check` both clean
+  after (664 crates, `advisories ok, bans ok, licenses ok, sources
+  ok`). security-auditor separately noted (informational, not
+  blocking) that the bump transitively pulled `aws-lc-rs`/`aws-lc-sys`
+  forward too since `rustls`'s default crypto provider is `aws-lc-rs`,
+  but `powehi-grpc/src/tls.rs` explicitly installs
+  `ring::default_provider()` — so `aws-lc-rs` is compiled into the
+  binary but unused at runtime; `default-features = false` on the
+  `rustls` dep would shrink the SBOM/image surface, left as an optional
+  future hardening, not applied this cycle (scope creep beyond the
+  actual vulnerability fix). Confirmed separately that
+  `app/src-tauri`'s own `Cargo.lock` has no `rustls` entry at all — not
+  affected, no change needed there.
+- **Full gate**: `cargo build --workspace` clean (both before and after
+  the rustls bump). `cargo build --workspace --tests -p powehi-postgres`
+  clean (confirms the new test compiles). `cargo clippy --workspace
+  --all-targets -- -D warnings` clean. `cargo fmt --all --check` clean.
+  `cargo test --workspace`: all 45 test-result lines `ok`, 0 failed (run
+  twice — once before the rustls bump as a baseline, once after — no
+  regression from either change; new test correctly shows `ignored,
+  requires Docker` locally). `cargo audit`: 0 vulnerabilities (was 1
+  before the fix). `cargo deny check`: `advisories ok, bans ok, licenses
+  ok, sources ok` (was `advisories FAILED` before the fix). Frontend
+  untouched this cycle, not re-run (Rust-only change).
+- No `crypto-reviewer`/`threat-model-checker` run: no crypto/MLS/OPAQUE
+  code touched, no new server-visible metadata or architectural
+  shift — this hardens an existing DB write path's failure mode, it
+  doesn't add one. `security-auditor` run instead (backend/DB change),
+  matching the established routing precedent.
+- Committed as two separate commits (distinct concerns): `90dd021`
+  (`fix(deps): bump rustls to 0.23.45, fix RUSTSEC-2026-0285`), 1 file
+  (`Cargo.lock`); `5b46068` (`fix(backend): guard GroupRepository::save
+  against epoch downgrade`), 3 files (`group_repo.rs` ×2 — src and port
+  trait — plus `pg_security_it.rs`). Both pushed clean (`fe89b4d..5b46068
+  main -> main`). Watched CI to completion after push — **all 3 checks
+  (`CI — Rust`, `CI — Frontend`, `CI — Live-backend E2E`) green on
+  `5b46068`**, confirmed before ending the cycle.
+- Target dir hygiene: `target/` at 15G (up from 12G at session start,
+  under the 20G threshold — no pruning triggered), 0-byte `.rmeta`
+  prune ran first per the mandated step order.
+- **Next cycle candidates (carried/updated):**
+  1. **Resolved this cycle** (carried since ≥cycle 480's list):
+     `GroupRepository::save`'s blind `ON CONFLICT DO UPDATE`. Now
+     monotonic-epoch-guarded, with a regression test. Two related,
+     lower-priority informational items surfaced during the fix (not
+     applied, not urgent): `save`'s `Result<(), _>` return type can't
+     distinguish a guard-skipped no-op from an applied write; the
+     pre-existing unreachable `as i64` cast in
+     `create_with_creator`/`upsert_members` vs. `save`/`advance_epoch`'s
+     `i64::try_from`.
+  2. New, optional, informational (security-auditor note, not applied):
+     `rustls`'s default `aws-lc-rs` crypto provider is compiled into the
+     binary but unused at runtime (`powehi-grpc/src/tls.rs` explicitly
+     installs `ring::default_provider()` instead) — `default-features =
+     false` on the `rustls` workspace dependency would shrink the
+     SBOM/image surface. Cheap if a future cycle touches TLS/deps again.
+  3. Carried, unchanged, still the single largest remaining piece of
+     issue #2 (P0-blocker, security, frontend): epoch reconciliation
+     between the client's local MLS epoch and the server's
+     `groups.epoch` counter, and `mls_confirm_incoming_commit`
+     handle-consumption-before-`MLS_CTX`-resolution ordering.
+     FEATURE-mode-scale (crypto-lead/mls-engineer + fresh
+     crypto-reviewer pass).
+  4. Carried: PQ hybrid Phase A prerequisite (human/crypto-lead policy
+     call, still blocked on openmls upstream).
+  5. Carried, still explicitly BLOCKED: `AbuseSignalStore`/
+     `RegionRouter::broadcast_abuse_signal` wiring needs F3 + the
+     HMAC-vs-plain-SHA256 gate resolved first.
+  6. Carried (unchanged): prd.md §3.3 doesn't yet document the
+     consumed-`key_packages` retention window.
+  7. Carried (unchanged from cycle 480's list, see cycle 480's own
+     section — now archived — for full text if needed): `mls_group_members`
+     `isSelf` leaf-index vs signature-key hardening; `PendingRemovalBanner`
+     local cross-check hardening; GitHub issues #1/#3/#4/#5; prd.md §10
+     REST API doc drift; `pending_removals` forged-signal defense;
+     unconsumed `RemovalRequired` WS event; `key_packages.device_id` FK
+     doc drift.
+  8. Growing again: this file is approaching ~2600 lines — watch for it
+     crossing the ~2500-line point a future STABILIZATION cycle should
+     archive at (same pattern as cycles 360/485).
+
+## Previous state (2026-09-13, cycle 494 — STABILIZATION (forced by red CI, counter said FEATURE): fix Docker Hub's removal of `minio/minio` breaking 2 of 3 CI checks, fix a frontend `tsc -b` type-inference break in a test mock, commit 2fa6184)
 
 - Mode selection: counter 493→494, 494 % 5 != 0 → nominally FEATURE, but
   `gh run list --limit 5` showed all 3 checks (`CI — Rust`, `CI —
