@@ -24,7 +24,151 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-15, cycle 496 — FEATURE: wire the already-existing `GET /v1/groups/:id/members` endpoint into `PendingRemovalBanner` as a partial local staleness cross-check (issue #2), commit 7dc8d2e)
+## Current state (2026-09-15, cycle 498 — FEATURE: found + finished cycle 497's uncommitted MLS pending-commit-cleanup fix, fixed crypto-reviewer's needs-rework verdict, commit da96dee)
+
+- Mode selection: counter 497→498, 498 % 5 != 0 → FEATURE. `gh run list`
+  green on main before starting.
+- **Session opened with 6 modified files already in the working tree**
+  (PendingRemovalBanner.tsx, useCryptoWorker.ts/.test.ts, crypto.worker.ts,
+  mls_group.rs, wasm_exports.rs) — no memory entry describes cycle 497 at
+  all, meaning that session was cut short before EITHER its end-of-cycle
+  memory commit OR its own feature commit. Same "session cut short" pattern
+  this file has now flagged four times (445/494/495/496) — this is the
+  first time it left a real, substantial UNCOMMITTED diff behind rather
+  than just an uncommitted memory-file edit. Read the diff in full before
+  acting (doc comments in it self-identified as "cycle 497", confirming
+  provenance) rather than assuming it was safe to discard or blindly
+  commit.
+- **What the found diff did**: fixed a real bug — a successful merge of a
+  PEER's Commit (via either the one-shot `mls_process_commit` or an
+  incoming Welcome/Add flow) makes openmls internally call
+  `clear_pending_commit`, which silently invalidates any commit THIS
+  device had separately staged via `mls_remove_member_stage` but not yet
+  confirmed. Before the fix, that left a dangling
+  `pending_own_commit_hashes[group_id]` entry naming a commit that can
+  never be merged. Fixed for the one-shot path
+  (`mls_process_commit_inner`). Also (JS side): a compensating
+  `mlsRemoveMemberAbort` when `mlsRemoveMemberStage` resolves in WASM but
+  the required Dexie persist then rejects, so the group isn't left
+  durably wedged in `PendingCommit`. Extensive stale-doc-comment cleanup
+  in `mls_group.rs`/`crypto.worker.ts` converting a stale "(a)/(b)/(c)"
+  MLS-Remove-wiring blocker list into a verified "(a)-(g)" list (closes
+  item (d) — persist-failure-after-successful-stage — for the "call"-
+  resolved case; leaves the ambiguous "call"-phase-timeout variant open,
+  correctly).
+  All tests green as found: 234 Rust, 1647 frontend, tsc/biome clean.
+- **Before committing, ran the mandatory `crypto-reviewer` pass (this diff
+  touches MLS/WASM) — verdict: needs-rework, 2 HIGH + 1 MEDIUM + 2 LOW.**
+  This file's non-negotiables gate a commit on this passing, so did NOT
+  commit the found diff as-is; fixed all 5 findings before committing:
+  - **F1 (HIGH)**: the compensating `raw.mlsRemoveMemberAbort(...)` call
+    had no `withTimeout` — violated this file's own "a crypto-worker call
+    must never hang forever" invariant, and the dominant trigger reaching
+    that catch block (a "persist"-phase timeout) is exactly the situation
+    where the worker channel is already suspected wedged, so the abort
+    call itself would very plausibly also hang, turning a bounded
+    rejection into a permanent hang for the wrapped call. Fixed: wrapped
+    in `withTimeout(..., "mlsRemoveMemberAbort", "call")`.
+  - **F2 (HIGH)**: the comment justifying skipping a post-abort flush
+    ("abort restores in-memory state to exactly what's already durably on
+    disk, nothing new to persist") is false whenever `withTimeout` let the
+    caller give up on the ORIGINAL failed persist's `doFlush` without
+    actually cancelling it (documented `doFlush` behavior) — that
+    abandoned write can still land on disk AFTER the abort, durably
+    writing the wedged `PendingCommit` state to disk with nothing JS-side
+    able to detect it on reload. Fixed: after a successful abort, issue a
+    FRESH `runOnChain(() => withTimeout(doFlush(...)))` (failure
+    swallowed, logged, original persistError still rethrown) — relies on
+    `doFlush`'s existing generation-based supersede check to guarantee the
+    fresh, later-issued write can never durably lose to the earlier
+    abandoned one. Reviewer independently re-derived the race proof across
+    every interleaving and confirmed it holds.
+  - **F3 (MEDIUM)**: the two-phase `mls_confirm_incoming_commit` merge site
+    has the IDENTICAL dangling-`pending_own_commit_hashes` hazard as the
+    one-shot path, but the diff only fixed the one-shot path — violates
+    this codebase's own "one construction path" rule (two merge sites,
+    one of them silently exempt). Fixed: split into
+    `mls_confirm_incoming_commit_inner` (mirrors `mls_process_commit_inner`'s
+    pattern) which now also clears the entry on success; added a mirrored
+    regression test using the real `inspect_incoming_commit` primitive +
+    manual `INSPECTED_COMMITS` insert (JsValue-constructing wasm exports
+    can't be called from native tests).
+  - **F4/F5 (LOW)**: softened an absolute "on every ERROR path, no merge
+    happened" doc claim to scope it to errors this crate's in-memory
+    `OpenMlsRustCrypto` provider can actually produce, footnoting two
+    openmls-0.8.1 internal counterexamples the reviewer found by reading
+    vendored source; added a NOTE documenting that the compensating-abort
+    window itself still shares the same unrelated-stage-destruction risk
+    it was scoped to avoid elsewhere (unreached today, ties to blocker
+    item (f)).
+  - Re-review after fixes: **PASS**, all 5 confirmed resolved (reviewer
+    re-ran both test suites independently rather than trusting the
+    diff), no security invariant weakened. Noted 4 non-blocking residuals
+    for future reference (a narrow crash window between stale/fresh
+    writes, worst-case rejection latency now ~4x
+    `CRYPTO_CALL_TIMEOUT_MS` ≈ 60s for this one failure path, an F4
+    wording nit, an optional test gap) — added a one-line latency-caveat
+    comment for the first one since it was cheap; left the rest as
+    recorded observations, not required changes.
+  - Added tests: 1 new Rust test (two-phase confirm mirror, 235 total,
+    was 234), 2 new frontend tests (F1 hang-guard via fake timers, F2
+    post-abort-flush-attempted via call-count assertion; 38 total in
+    `useCryptoWorker.test.ts`, was 36; 1649 total frontend, was 1647).
+- **Full gate after fixes**: `cargo test -p powehi-crypto-wasm --lib`
+  235/235, `cargo fmt --check` clean. `pnpm exec vitest run` 1649/1649,
+  `pnpm exec tsc -b` clean, `pnpm exec biome check` clean (2 files
+  auto-formatted, applied via `biome check --write` + `cargo fmt`, both
+  re-verified clean after).
+- Committed `da96dee` (`fix(crypto): clear dangling pending own-commit
+  entry on peer merge; guard compensating abort`), 6 files changed
+  (1045 insertions, 101 deletions — the bulk of this diff was written by
+  the found cycle-497 session; this cycle's own contribution was the
+  crypto-reviewer fix cycle: F3's new inner-fn split + test, F1/F2's
+  TS fixes + 2 tests, F4/F5's doc edits). Pushed clean
+  (`088e218..da96dee main -> main`). CI running as of this entry (`gh run
+  list` showed 3 in-progress checks right after push) — verify green
+  next cycle if this session ends before confirming.
+- **Lesson for next time a bare working tree with real diffs is found at
+  session start**: do not assume "no memory entry = safe to discard" —
+  this diff was real, tested, substantial work. Reading the diff's own
+  doc comments (they self-dated "cycle 497") was what established
+  provenance and trustworthiness before deciding to build on it rather
+  than reverting it.
+- Target dir hygiene: not checked (FEATURE mode; Rust build ran via
+  `cargo test`/`cargo fmt` but no explicit `du -sh target/` this cycle —
+  next STABILIZATION cycle, still cycle 500, should check).
+- **Next cycle candidates (carried/updated from cycle 496's list, mostly
+  unchanged — this cycle fixed a review-blocking bug, not a candidates-list
+  item):**
+  1. Carried unchanged: device_id-to-MLS-leaf binding half of issue #2's
+     PendingRemovalBanner cross-check (crypto-lead design call).
+  2. Carried unchanged: admin-initiated MLS Remove UI, blocked on the
+     `sendCommit`/`expectedEpoch` gap named in `mls_group.rs`'s now-
+     verified (a)-(g) list — item (a) is now understood to be a small
+     concrete task (expose the server's `groups.epoch` counter via an
+     endpoint) rather than an undesigned one; a future crypto-lead-scoped
+     cycle should start there.
+  3. New from this cycle's review: consider whether
+     `mlsRemoveMemberStage`'s worst-case ~60s rejection latency (4x
+     `CRYPTO_CALL_TIMEOUT_MS` across call/persist/abort/post-abort-flush)
+     needs a UI-level timeout budget once a real Remove UI is built —
+     informational only, not actionable until that UI exists.
+  4. Carried, optional, informational: `rustls`'s default `aws-lc-rs`
+     provider compiled in but unused; `default-features = false` would
+     shrink SBOM.
+  5. Carried: PQ hybrid Phase A prerequisite (blocked on openmls upstream).
+  6. Carried, BLOCKED: `AbuseSignalStore`/`RegionRouter::broadcast_abuse_signal`
+     wiring needs F3 + HMAC-vs-plain-SHA256 gate resolved first.
+  7. Carried: prd.md §3.3 doesn't document the consumed-`key_packages`
+     retention window.
+  8. Carried: `mls_group_members` `isSelf` leaf-index hardening; issues
+     #1/#3/#4/#5; prd.md §10 REST API doc drift; unconsumed
+     `RemovalRequired` WS event; `key_packages.device_id` FK doc drift.
+  9. **This file is now well past ~2950 lines — cycle 500 (2 cycles away,
+     next multiple of 5) is the STABILIZATION archive point, same pattern
+     as cycles 360/485.**
+
+## Previous state (2026-09-15, cycle 496 — FEATURE: wire the already-existing `GET /v1/groups/:id/members` endpoint into `PendingRemovalBanner` as a partial local staleness cross-check (issue #2), commit 7dc8d2e)
 
 - Mode selection: counter 495→496, 496 % 5 != 0 → FEATURE. `gh run list
   --limit 5` all green on main (cycle 495's push). Working tree opened
