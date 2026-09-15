@@ -24,7 +24,172 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-15, cycle 495 — STABILIZATION: fix RUSTSEC-2026-0285 (rustls TLS 1.3 boundary bug) via dependency bump, harden `GroupRepository::save`'s blind upsert against epoch downgrade with a new integration test, commits 90dd021/5b46068)
+## Current state (2026-09-15, cycle 496 — FEATURE: wire the already-existing `GET /v1/groups/:id/members` endpoint into `PendingRemovalBanner` as a partial local staleness cross-check (issue #2), commit 7dc8d2e)
+
+- Mode selection: counter 495→496, 496 % 5 != 0 → FEATURE. `gh run list
+  --limit 5` all green on main (cycle 495's push). Working tree opened
+  with cycle 495's own memory-update entry written but never committed
+  (the file already had the full cycle-495 recap in it, no `chore:`
+  commit after `5b46068`) — same "session cut short before its
+  end-of-cycle step" pattern this file has flagged repeatedly (cycles
+  445/494). Committed it first as `6361565` before starting this
+  cycle's own work, so a future session doesn't lose it. Flag this
+  again if seen a third time — the end-of-cycle memory commit is not
+  optional even when a session is running low.
+- **Scoped the item deliberately, not just picked the top of the
+  candidates list.** The obvious next step for issue #2 (per its own
+  GitHub comment history — read in full this cycle) is "admin-initiated
+  Remove UI": the crypto primitives (`mlsRemoveMemberStage/Confirm/Abort`)
+  have existed since commit b737b2c, but nothing in the app calls them.
+  Traced why no prior cycle wired it: `mls_remove_member_stage`'s own
+  doc comment (`wasm_exports.rs`) explicitly says its `priorEpoch`
+  "must not be passed as sendCommit's expected_epoch" because "the
+  server epoch and the local MLS epoch diverge from the very first
+  member add in this codebase today" and reconciling them is
+  "explicitly OUT OF SCOPE ... tracked as a follow-up." Confirmed this
+  is real, not stale caution: `AddMemberModal.tsx` only calls the REST
+  `addMember` (hardcoded `epoch: 0`), never `cryptoWorker.mlsAddMember`
+  — so the server's `groups.epoch` counter has never actually been
+  advanced by anything reachable from today's UI, while a client's own
+  local MLS epoch (wherever `mlsAddMember`/`mlsRemoveMemberStage` get
+  called, e.g. `AcceptInviteModal.tsx`) is independently real. Attempting
+  the full Remove-commit UI this cycle would have meant either (a)
+  designing epoch reconciliation from scratch in one session — the kind
+  of "human/crypto-lead policy call" this file already carries as a
+  separate blocked item for PQ hybrid, not something to rush — or (b)
+  wiring `sendCommit` with a value explicitly documented as unsafe to
+  use that way. Declined both; picked a different, still-real, properly
+  bounded piece instead: `crates/adapters/inbound/powehi-rest-api/src/routes/groups.rs:192-197`'s
+  `list_members` handler doc comment says outright it exists as "one
+  half of the local cross-check for the server-reported pending-removals
+  signal (prd.md §5.4)" and was completely unused by the frontend —
+  a small, honest, additive piece with a backend contract already
+  spelled out, not a design decision I'd be making up on the spot.
+- **What shipped**: `listMembers(token, groupId)` added to
+  `app/src/api/groups.ts` (`GET /v1/groups/:groupId/members`).
+  `PendingRemovalBanner.tsx` now fetches it unconditionally alongside
+  `listPendingRemovals` (unconditional + parallel, not gated on
+  `pending.length > 0` — gating it would have made the mere existence
+  of the request an observable signal that this group has a pending
+  removal, a metadata leak; security-auditor confirmed this was the
+  right call, not just an incidental choice) and flags a pending
+  device_id absent from the current members list as informational
+  "may be stale" (`data-testid="pending-removal-stale-{deviceId}"`) —
+  never gates or disables the confirm action. Respects the endpoint's
+  documented truncation contract: when `truncated: true`, the
+  cross-check is skipped entirely for that fetch (never treats
+  truncated-absence as meaningful, per `MembersResponse`'s own Rust doc
+  comment's explicit warning against exactly that false-eviction
+  direction). Delegated implementation to `frontend-lead` (background
+  agent), verified the diff myself afterward rather than trusting the
+  report blind.
+- **Honest scope, stated in both the code and here**: this is a
+  same-trust-domain defense-in-depth check, NOT a T3 mitigation
+  (prd.md §3.5.1) — `listPendingRemovals` and `listMembers` are both
+  served by the same server, so a fully malicious/colluding server can
+  forge both consistently and this check catches nothing in that case.
+  It only catches server-side INCONSISTENCY between its own two data
+  sources (a pending-removal entry for a device that was never a
+  member, or one already removed). The other, real half of the T3
+  cross-check — binding `device_id` to the client's own MLS
+  ratchet-tree leaves — does not exist yet (no authenticated binding
+  between an MLS leaf/credential and a server `device_id` anywhere in
+  this codebase); that's explicitly called out as unimplemented in the
+  backend handler's own doc comment and NOT attempted this cycle.
+  Neither the component doc comment nor this entry oversells it.
+- **security-auditor: PASS, 2 LOW findings, both fixed before commit**
+  (not crypto/architectural — matches the established routing
+  precedent for a frontend-only REST-client change with no
+  crypto/WASM/backend touch): (1) `listMembers`'s response was cast via
+  `as` with no runtime validation — a malformed/missing `device_ids`
+  would have silently become e.g. a char-set `Set` from
+  `new Set(someString)`, and a missing `truncated` would have defaulted
+  falsy (the FALSE-EVICTION direction the backend doc explicitly warns
+  against). Fixed: `device_ids` is now validated as a string array
+  (throws `invalid_members_response` otherwise, which the component's
+  existing catch-and-skip-cross-check path already handles correctly —
+  no new fallback logic needed), and a missing/non-`false` `truncated`
+  now defaults to `true` (the safe direction) instead of `false`. (2)
+  The 4 new cross-check tests mocked `listMembers` without asserting
+  which `(token, groupId)` it was called with — a stale-closure
+  regression that cross-checked group A's pending list against group
+  B's membership would have passed silently. Fixed: added
+  `toHaveBeenCalledWith` assertions to all 4. Also fixed an
+  informational finding (truncation test used an unrealistic
+  `deviceIds: []` — real truncation is always a length-`MAX_MEMBERS_RESPONSE`
+  prefix, never empty — changed to a populated-but-still-absent-target
+  list matching the real contract) and added 3 new `groups.test.ts`
+  cases for the new validation logic. security-auditor separately
+  confirmed via mutation testing (temporarily removing the
+  `!membersTruncated` guard, temporarily fail-opening on fetch failure)
+  that the new tests are non-tautological — both mutations were caught
+  by exactly the intended test.
+- No `crypto-reviewer`/`threat-model-checker` run: no crypto/WASM
+  surface touched, and the diff explicitly does not shift any
+  threat-model boundary (no new T3 mitigation claimed) — matches
+  security-auditor's own routing recommendation in its report.
+- **Full gate**: `pnpm exec tsc -b` clean. `pnpm exec biome check`
+  clean (2 files auto-formatted, whitespace-only, confirmed via diff
+  before re-checking). `pnpm exec vitest run` (full suite): 1642/1643
+  passed, 1 failure in `ChatLayoutPoll.test.tsx` (poll-voters assertion)
+  — confirmed unrelated: that file has zero git diff, is untouched by
+  this cycle's changes, and passes 20/20 in isolation when re-run alone
+  — a pre-existing test-isolation flake, not a regression from this
+  diff. Backend untouched this cycle (frontend-only change,
+  `list_members`'s handler was read-only reference), not re-run.
+- Committed `7dc8d2e` (`feat(frontend): wire GET /v1/groups/:id/members
+  into PendingRemovalBanner as a partial staleness cross-check (issue
+  #2)`), 4 files changed, pushed clean (`6361565..7dc8d2e main ->
+  main`). CI watched after push — see next cycle's entry or `gh run
+  list` for outcome if this session ended before confirming.
+- Target dir hygiene: not checked (FEATURE mode, frontend-only cycle,
+  no Rust build artifacts touched).
+- **Next cycle candidates (carried/updated):**
+  1. **Partially addressed this cycle** (carried since cycle 480's
+     list, PendingRemovalBanner local cross-check hardening): the
+     REST-endpoint half now exists and is wired. Still open: the
+     device_id-to-MLS-leaf binding half (would likely require changing
+     what identity data an MLS credential carries at KeyPackage
+     creation time — a structural crypto change affecting join/Welcome
+     flows broadly, genuinely a crypto-lead design call, not a
+     follow-on glue task).
+  2. Carried, unchanged, still the single largest remaining piece of
+     issue #2 (P0-blocker, security, frontend): admin-initiated MLS
+     Remove UI, blocked on designing epoch reconciliation between the
+     client's local MLS epoch and the server's `groups.epoch` counter.
+     Traced this cycle in more depth than before: the backend already
+     has a CORRECT CAS mechanism for this
+     (`messaging_service.rs::send_commit` →
+     `commit_ledger.rs::commit_epoch_and_save` →
+     `group_repo.rs::advance_epoch`, tested and used by the receive
+     path's `sendCommit` calls) — the actual gap is narrower than "no
+     mechanism exists": it's that `AddMemberModal.tsx`'s Add flow
+     never calls `mlsAddMember`/`sendCommit` at all (REST-only,
+     hardcoded `epoch: 0`), so the server's epoch counter has never
+     been exercised by anything reachable from today's UI. A future
+     crypto-lead-scoped cycle should start by tracing whether
+     `AcceptInviteModal.tsx`'s `mlsAddMember` call (the one real
+     production call site) already reconciles correctly or has the
+     same gap, before attempting the Remove-side wiring.
+  3. New, optional, informational (carried from cycle 495, unchanged):
+     `rustls`'s default `aws-lc-rs` crypto provider compiled in but
+     unused at runtime — `default-features = false` would shrink SBOM.
+  4. Carried: PQ hybrid Phase A prerequisite (human/crypto-lead policy
+     call, still blocked on openmls upstream).
+  5. Carried, still explicitly BLOCKED: `AbuseSignalStore`/
+     `RegionRouter::broadcast_abuse_signal` wiring needs F3 + the
+     HMAC-vs-plain-SHA256 gate resolved first.
+  6. Carried (unchanged): prd.md §3.3 doesn't yet document the
+     consumed-`key_packages` retention window.
+  7. Carried (unchanged from cycle 480's list): `mls_group_members`
+     `isSelf` leaf-index vs signature-key hardening; GitHub issues
+     #1/#3/#4/#5; prd.md §10 REST API doc drift; unconsumed
+     `RemovalRequired` WS event; `key_packages.device_id` FK doc drift.
+  8. Growing: this file is now well past ~2800 lines — good
+     STABILIZATION candidate for cycle 500 (next multiple of 5) to
+     archive at, same pattern as cycles 360/485.
+
+## Previous state (2026-09-15, cycle 495 — STABILIZATION: fix RUSTSEC-2026-0285 (rustls TLS 1.3 boundary bug) via dependency bump, harden `GroupRepository::save`'s blind upsert against epoch downgrade with a new integration test, commits 90dd021/5b46068)
 
 - Mode selection: counter 494→495, 495 % 5 == 0 → STABILIZATION. `gh run
   list --limit 5` all green on main (cycle 494's push). `gh issue list
