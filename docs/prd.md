@@ -58,7 +58,7 @@
 - **Post-Quantum Resistance**: "Harvest now, decrypt later" 공격 대비
 - **Metadata Minimization**: 송수신 사실 외에 서버가 관찰하는 메타데이터 최소화
 - **Global Availability**: 리전 내 API p99 레이턴시 <100ms, WebSocket 연결 수립 <200ms
-- **Data Residency**: EU (GDPR), 한국 (PIPA), 일본 (APPI) 관할 규정 준수. 사용자 데이터는 home region에 물리 저장
+- **Data Residency**: EU (GDPR), 일본 (APPI) 관할 규정 준수. 사용자 데이터는 home region에 물리 저장. 한국 (PIPA)은 **미충족** — 실제 KR DC 없음, KR-home 사용자는 전면 차단 (§12A, GitHub #5)
 - **Horizontal Scalability**: 리전 독립적 수평 확장. 단일 리전 장애가 타 리전 서비스에 영향 없음
 - **Cross-Region DR**: 단일 리전 전체 장애 시 RTO <5분, RPO <30초 자동 페일오버
 
@@ -591,6 +591,12 @@ sequenceDiagram
 | 미디어 blob (R2) | Cloudflare R2 (글로벌, ciphertext) | 동일 | 동일 |
 | 로그/메트릭 | 리전 로컬 보관 | 리전 로컬 보관 | 리전 로컬 보관 |
 | 백업 | 리전 로컬 | 리전 로컬 | 리전 로컬 |
+
+**KR 컬럼은 목표 아키텍처(실제 한국 DC 확보 후)를 나타내며 현재 미충족 상태다.** 오늘 배포된
+`prod-ap-seoul`은 실제로 Hetzner Singapore(sin1)이고, KR-home 사용자는 Cloudflare smart-router가
+`503 PIPA_REGION_PENDING`으로 전면 차단해 이 표의 어떤 데이터 유형도 실제로 저장되지 않는다 (§12A,
+GitHub #5). 이 표는 실제 KR DC 확보 시 구현해야 할 리전별 요구사항 설계도이지, 현재 상태의 설명이
+아니다.
 
 **원칙**: 사용자 PII (handle_hash, OPAQUE envelope, device 정보)는 절대 home_region 밖으로 나가지 않음. 크로스 리전 전달되는 것은 ciphertext envelope, 공개 KeyPackage, 그리고 (ForwardCommit 한정) group epoch 카운터(`expected_epoch`/`accepted_epoch`, §4A.5)뿐 — epoch은 그룹의 진행 순서를 나타내는 정수일 뿐 메시지 내용이나 멤버십 자체를 노출하지 않는다.
 
@@ -1996,7 +2002,7 @@ E2EE 메신저에서 가장 중요한 부분 — 사용자가 받는 바이너�
 | 규정 | 관할 | 핵심 요구사항 | Powehi 대응 |
 |---|---|---|---|
 | **GDPR** | EU/EEA | 개인 데이터 EU 내 처리, 삭제권, 동의 기반 | EU 사용자 데이터는 EU-Frankfurt에만 저장. 계정 삭제 시 전체 데이터 삭제. E2EE로 개인 데이터 처리 최소화. |
-| **PIPA** | 한국 | 개인정보 국외 이전 시 정보주체 동의, 안전성 확보 | KR 사용자 데이터는 AP-Seoul에만 저장. 크로스 리전은 ciphertext(비개인정보)만 전달. |
+| **PIPA** | 한국 | 개인정보 국외 이전 시 정보주체 동의, 안전성 확보 | **미충족 (accepted risk, GitHub #5)**: `prod-ap-seoul`는 실제로 Hetzner Singapore(sin1)이며 한국 내 DC가 아님. KR-home 사용자 PII는 어느 리전에도 저장하지 않으며, Cloudflare smart-router가 `cf.country == KR` 요청을 `503 PIPA_REGION_PENDING`으로 즉시 차단(스푸핑 불가, 테스트로 검증됨: `infra/cloudflare/workers/smart-router`). 실제 한국 DC 확보 전까지 KR 사용자는 서비스 이용 불가. |
 | **APPI** | 일본 | 개인정보 보호, 제3자 제공 제한, 국외 이전 규정 | JP 사용자 데이터는 AP-Tokyo에 저장. 적정성 인정 없는 국가로의 이전 시 동의 필요. |
 | **PDPA** | 싱가포르/태국 | 목적 제한, 동의 기반, 보호 수준 확보 | 해당 리전 확장 시 별도 평가. E2EE 특성상 데이터 처리 최소. |
 | **CCPA/CPRA** | 미국 캘리포니아 | 삭제권, 판매 거부권, 데이터 접근권 | US 리전 확장 시 적용. 현재 미국 사용자는 EU 리전 사용. |
@@ -2179,7 +2185,7 @@ Alice → EU Gateway → EU DS    →   KR DS → KR WS → Bob
 | 규정 | 관할 | E2EE 메신저 영향 | Powehi 대응 |
 |---|---|---|---|
 | GDPR | EU/EEA | 개인 데이터 처리 최소화 의무, 삭제권 | E2EE로 최소 처리. EU 리전 데이터 저장. |
-| PIPA | 한국 | 국외 이전 시 동의, 안전성 확보 | KR 리전 저장. ciphertext만 국외 전달. |
+| PIPA | 한국 | 국외 이전 시 동의, 안전성 확보 | **미충족 (accepted risk, GitHub #5)**: 실제 KR 리전 없음 — `prod-ap-seoul`는 Singapore(sin1). KR-home 사용자는 smart-router가 `503`으로 전면 차단, PII 미저장. §12A 상세 참조. |
 | APPI | 일본 | 제3자 제공 제한, 국외 이전 규정 | JP 리전 저장. 적정성 인정국 간 전달. |
 | CCPA/CPRA | 미국 CA | 삭제권, 판매 거부 | US 리전 확장 시 적용. |
 | Online Safety Act | 영국 | E2EE 스캔 의무 논란 | 기술적으로 불가 (서버 zero-knowledge). 법적 동향 모니터링. |
