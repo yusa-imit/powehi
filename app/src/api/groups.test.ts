@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addMember, createGroup, listMembers, listPendingRemovals, removeMember } from "./groups";
+import {
+	addMember,
+	createGroup,
+	getEpoch,
+	listMembers,
+	listPendingRemovals,
+	removeMember,
+} from "./groups";
 
 const fetchMock = vi.fn<typeof fetch>();
 beforeEach(() => {
@@ -224,5 +231,82 @@ describe("listMembers", () => {
 			deviceIds: [DEVICE_ID],
 			truncated: true,
 		});
+	});
+});
+
+// ── getEpoch ─────────────────────────────────────────────────────────────────
+
+describe("getEpoch", () => {
+	it("gets the epoch from the correct path", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp({ epoch: 3 }, 200));
+
+		const result = await getEpoch(TOKEN, GROUP_ID);
+
+		const [url, init] = fetchMock.mock.calls[0];
+		expect(url).toBe(`/v1/groups/${GROUP_ID}/epoch`);
+		expect(init?.method).toBe("GET");
+		expect(init?.headers).toMatchObject({ Authorization: `Bearer ${TOKEN}` });
+		expect(result).toBe(3);
+	});
+
+	it("returns 0 for a freshly created group", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp({ epoch: 0 }, 200));
+		await expect(getEpoch(TOKEN, GROUP_ID)).resolves.toBe(0);
+	});
+
+	it("throws unauthorized when caller is not a member", async () => {
+		fetchMock.mockResolvedValueOnce(
+			new Response(JSON.stringify({ code: "unauthorized" }), { status: 401 }),
+		);
+		await expect(getEpoch(TOKEN, GROUP_ID)).rejects.toThrow("unauthorized");
+	});
+
+	it("throws region_mismatch (fail-closed) rather than a stale-or-zero epoch", async () => {
+		fetchMock.mockResolvedValueOnce(
+			new Response(JSON.stringify({ code: "region_mismatch" }), { status: 502 }),
+		);
+		await expect(getEpoch(TOKEN, GROUP_ID)).rejects.toThrow("region_mismatch");
+	});
+
+	it("rejects non-UUID groupId without fetch", async () => {
+		await expect(getEpoch(TOKEN, "not-a-uuid")).rejects.toThrow("invalid_group_id");
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("rejects path-traversal groupId without fetch", async () => {
+		await expect(getEpoch(TOKEN, "../admin")).rejects.toThrow("invalid_group_id");
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("rejects a response whose epoch is missing or not a number", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp({}, 200));
+		await expect(getEpoch(TOKEN, GROUP_ID)).rejects.toThrow("invalid_epoch_response");
+	});
+
+	it("rejects a non-integer epoch", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp({ epoch: 1.5 }, 200));
+		await expect(getEpoch(TOKEN, GROUP_ID)).rejects.toThrow("invalid_epoch_response");
+	});
+
+	it("rejects a negative epoch", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp({ epoch: -1 }, 200));
+		await expect(getEpoch(TOKEN, GROUP_ID)).rejects.toThrow("invalid_epoch_response");
+	});
+
+	it("rejects an epoch beyond Number.MAX_SAFE_INTEGER (server sends u64; a value this large would silently round in JS)", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp({ epoch: 2 ** 53 }, 200));
+		await expect(getEpoch(TOKEN, GROUP_ID)).rejects.toThrow("invalid_epoch_response");
+	});
+
+	it("accepts Number.MAX_SAFE_INTEGER itself", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp({ epoch: Number.MAX_SAFE_INTEGER }, 200));
+		await expect(getEpoch(TOKEN, GROUP_ID)).resolves.toBe(Number.MAX_SAFE_INTEGER);
+	});
+
+	it("normalizes a non-JSON 200 body to invalid_epoch_response instead of leaking a raw SyntaxError", async () => {
+		fetchMock.mockResolvedValueOnce(
+			new Response("not json", { status: 200, headers: { "Content-Type": "text/plain" } }),
+		);
+		await expect(getEpoch(TOKEN, GROUP_ID)).rejects.toThrow("invalid_epoch_response");
 	});
 });

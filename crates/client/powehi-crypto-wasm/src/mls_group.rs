@@ -630,20 +630,24 @@ pub fn add_member(
 /// cycle 493 and this comment kept claiming it was open). This list is
 /// re-verified against the current tree each time it is touched:
 ///
-/// - (a) EPOCH RECONCILIATION — DESIGNED, not yet built. The answer is NOT
-///   "make the two counters agree". The server's `groups.epoch` is a
-///   Delivery-Service compare-and-swap token, not an MLS epoch, and the two
-///   legitimately and permanently diverge: `group_service.rs::add_member`
-///   only writes `group_members.joined_at_epoch` and never advances
-///   `groups.epoch` (and `create_group` starts it at `Epoch(0)`), while a
-///   Welcome-based add advances the LOCAL MLS epoch — so a group created
-///   through `AcceptInviteModal.tsx` sits at local MLS epoch 1 with server
-///   counter 0. Correct rule: `sendCommit`'s `expected_epoch` MUST be the
-///   SERVER's current counter, read from the server; `prior_epoch` (see
-///   below) must never be used for it. Still missing: no endpoint exposes
-///   that counter (`GET /v1/groups/:id/members` returns device ids + a
-///   `truncated` flag only). A small concrete task now, not an undesigned
-///   one.
+/// - (a) EPOCH RECONCILIATION — PARTIALLY CLOSED (cycle 501, endpoint added
+///   cycle 499 commit 2ab7ad9). The answer is NOT "make the two counters
+///   agree". The server's `groups.epoch` is a Delivery-Service
+///   compare-and-swap token, not an MLS epoch, and the two legitimately and
+///   permanently diverge: `group_service.rs::add_member` only writes
+///   `group_members.joined_at_epoch` and never advances `groups.epoch` (and
+///   `create_group` starts it at `Epoch(0)`), while a Welcome-based add
+///   advances the LOCAL MLS epoch — so a group created through
+///   `AcceptInviteModal.tsx` sits at local MLS epoch 1 with server counter 0.
+///   Correct rule: `sendCommit`'s `expected_epoch` MUST be the SERVER's
+///   current counter, read from the server; `prior_epoch` (see below) must
+///   never be used for it. `GET /v1/groups/:id/epoch` now exposes that
+///   counter (fail-closed to `502 region_mismatch` outside the group's home
+///   region, never a stale-or-zero epoch), and `app/src/api/groups.ts`'s
+///   `getEpoch` wraps it — but has NO PRODUCTION CALLER yet, same as
+///   `sendCommit` itself (`app/src/api/messages.ts`'s `sendCommit` is
+///   likewise defined but never called). The reconciliation is available,
+///   not performed: no code path exercises it end-to-end.
 /// - (b) COMMIT-PROCESSING CONSUMER LOOP — CLOSED (cycle 493).
 ///   `app/src/hooks/useMessages.ts` calls `mlsProcessCommit` for Commit
 ///   envelopes of the active group and acks only after a successful merge.
@@ -675,17 +679,41 @@ pub fn add_member(
 ///   No error, flag, or return-value signal; the next confirm just returns
 ///   `NoPendingCommit`.
 /// - (f) NO MUTUAL EXCLUSION between the 3s `useMessages.ts` poll loop and
-///   any UI-initiated MLS flow — OPEN, no lock primitive exists in
-///   `app/src`. Combined with (e): a poll tick landing between a UI stage
-///   and its confirm destroys the stage, and if the DS had already ACCEPTED
-///   that commit the group FORKS permanently under `max_past_epochs(0)` —
-///   peers merge it, the committer never can.
+///   any UI-initiated MLS flow for an ALREADY-ACTIVE group — PARTIALLY
+///   CLOSED (cycle 501). `app/src/lib/mlsCommitLock.ts` adds a per-group,
+///   NON-REENTRANT async lock, and `useMessages.ts` now runs its
+///   `mlsProcessCommit` merge (plus the self-eviction check) inside
+///   `withMlsCommitLock(groupId, ...)`. Still OPEN: no UI-initiated flow
+///   touching an ALREADY-ACTIVE group exists yet to acquire the SAME lock
+///   around its own stage-to-confirm/abort span, so today the lock only
+///   ever has one caller and enforces nothing in practice — closing this
+///   item for real requires the still-unbuilt Remove UI (or any other
+///   future UI-initiated flow) to wrap its entire stage/confirm/abort
+///   sequence in `withMlsCommitLock`, not just call it once per WASM call.
+///   This is NOT the same claim as "no UI-initiated MLS flow exists yet" —
+///   `AcceptInviteModal.tsx`'s create+add-member and `CreateGroupModal.tsx`'s
+///   `mlsCreateGroup` are both existing UI-initiated MLS-mutating flows; they
+///   are safe without this lock only because they operate on a
+///   newly-created group the poll loop cannot yet be bound to (not an open
+///   chat yet), not because no such flow exists. (`useCryptoWorker.ts`'s
+///   compensating `mlsRemoveMemberAbort` is a THIRD MLS-mutating code path,
+///   but is unreachable in production today — `mlsRemoveMemberStage` has no
+///   production caller, see (f)'s own opening sentence — so it is not
+///   currently a live example of this, just future-proofing.) Combined with
+///   (e): a poll tick landing between a UI stage and its
+///   confirm — once that UI caller exists but skips this lock — destroys
+///   the stage, and if the DS had already ACCEPTED that commit the group
+///   FORKS permanently under `max_past_epochs(0)` — peers merge it, the
+///   committer never can.
 /// - (g) A STALE LOCAL MLS EPOCH IS NOT DETECTABLE VIA THE SERVER CAS —
 ///   OPEN. Because the counters are decoupled (see (a)), the DS will accept
 ///   a Commit built on a stale local MLS epoch; peers reject it at the MLS
 ///   layer while the committer merges it on confirm, forking the committer.
 ///   A wiring pass must drain unprocessed Commit envelopes for the group
-///   before staging.
+///   before staging — and because `withMlsCommitLock` is NOT reentrant (see
+///   its doc comment), that drain and the subsequent stage/confirm/abort
+///   MUST happen inside the SAME acquisition, not as two separate
+///   `withMlsCommitLock` calls (the second would deadlock behind the first).
 ///
 /// (This `(a)`–`(g)` list is distinct from the `(a)/(b)/(c)` list in
 /// [`process_incoming_commit`]'s own doc comment, which enumerates what that

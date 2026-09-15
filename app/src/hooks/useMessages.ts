@@ -43,12 +43,28 @@
  * - Plaintext is never stored in component state; only the decoded string is
  *   passed to onMessage (react-hooks-only.md, no-plaintext-logging.md).
  * - Commit bytes are passed directly to mlsProcessCommit; never logged or stored.
+ * - The merge (mlsProcessCommit, the self-eviction check, and — deliberately
+ *   — the post-merge ack, including its retries) runs inside
+ *   withMlsCommitLock(groupId, ...) (lib/mlsCommitLock.ts) — mutual exclusion
+ *   against any future UI-initiated MLS stage/confirm/abort for the same
+ *   group. See that module's doc comment and mls_group.rs's remove-member
+ *   status-list item (f) for why this matters: without it, a UI-initiated
+ *   stage racing this poll tick can be silently destroyed, and if the
+ *   Delivery Service had already accepted that commit the group forks
+ *   permanently under max_past_epochs(0). Including the ack (network I/O,
+ *   with retry backoff) inside the lock span is a known tradeoff, not an
+ *   oversight: it holds the lock longer than the WASM mutation strictly
+ *   needs, which a future UI caller competing for the same lock should
+ *   budget for (crypto-reviewer F8) — narrowing the span to exclude the ack
+ *   is a candidate follow-up once a real competing caller exists to measure
+ *   the actual contention against.
  * - Decryption errors are swallowed: a stale-epoch envelope cannot disrupt UI.
  * - Polling stops on unmount or when any required context is absent.
  */
 
 import { useEffect, useRef } from "react";
 import { type Envelope, ackMessage, pollMessages } from "../api/messages";
+import { withMlsCommitLock } from "../lib/mlsCommitLock";
 import { useAuthStore } from "../store/auth";
 import { uint8ToBase64 } from "../utils/base64";
 import { MLS_OWN_COMMIT_ERROR, MLS_OWN_COMMIT_PENDING_ERROR } from "../workers/cryptoWorkerErrors";
@@ -772,90 +788,92 @@ export function useMessages(
 					deferredEnvelopesRef.current.push(env);
 					return;
 				}
-				try {
-					const commitBytes = new Uint8Array(env.ciphertext);
-					await cryptoWorker.mlsProcessCommit(identityId, groupId, commitBytes);
+				await withMlsCommitLock(groupId, async () => {
 					try {
-						// mls_process_commit's doc comment: a Commit that removes the
-						// caller's OWN leaf still returns Ok — the caller MUST
-						// separately detect eviction via `mlsGroupIsActive` (openmls's
-						// own group-active state), NOT via `mlsGroupMembers`'s `isSelf`
-						// leaf-index comparison — RFC 9420 §12.1.1 fills the leftmost
-						// BLANK leaf on Add, and §12.3 applies Remove before Add within
-						// one Commit, so a "kick and replace" Commit can land the NEW
-						// member's leaf exactly on this device's just-vacated index,
-						// making `isSelf` (incorrectly) true and silently missing the
-						// eviction. Best-effort: a failure here must not turn an
-						// already-successfully-merged Commit into an unacked retry loop.
-						const active = await cryptoWorker.mlsGroupIsActive(identityId, groupId);
-						if (!active) {
-							// Diagnostic only — groupId is an opaque server-assigned UUID,
-							// never content/PII.
-							console.error("commit_self_evicted", groupId);
+						const commitBytes = new Uint8Array(env.ciphertext);
+						await cryptoWorker.mlsProcessCommit(identityId, groupId, commitBytes);
+						try {
+							// mls_process_commit's doc comment: a Commit that removes the
+							// caller's OWN leaf still returns Ok — the caller MUST
+							// separately detect eviction via `mlsGroupIsActive` (openmls's
+							// own group-active state), NOT via `mlsGroupMembers`'s `isSelf`
+							// leaf-index comparison — RFC 9420 §12.1.1 fills the leftmost
+							// BLANK leaf on Add, and §12.3 applies Remove before Add within
+							// one Commit, so a "kick and replace" Commit can land the NEW
+							// member's leaf exactly on this device's just-vacated index,
+							// making `isSelf` (incorrectly) true and silently missing the
+							// eviction. Best-effort: a failure here must not turn an
+							// already-successfully-merged Commit into an unacked retry loop.
+							const active = await cryptoWorker.mlsGroupIsActive(identityId, groupId);
+							if (!active) {
+								// Diagnostic only — groupId is an opaque server-assigned UUID,
+								// never content/PII.
+								console.error("commit_self_evicted", groupId);
+							}
+							// Fired for EVERY merge, not just eviction — an Add also changes
+							// the roster and must invalidate anything (e.g. the group Safety
+							// Number) that assumes it is stable (crypto-reviewer HIGH-2).
+							onGroupChangedRef.current?.(groupId, !active);
+						} catch (evictionCheckErr) {
+							// Self-eviction check is best-effort diagnostics only — a
+							// failure here (F8, crypto-reviewer nit) must not turn an
+							// already-successfully-merged Commit into an unacked retry
+							// loop, but it must not be silently swallowed either, or a
+							// forced eviction could go completely unnoticed. Diagnostic
+							// only — never content/PII.
+							console.error(
+								"commit_self_evicted_check_failed",
+								evictionCheckErr instanceof Error ? evictionCheckErr.name : typeof evictionCheckErr,
+							);
+							// The merge itself still succeeded (only the eviction check
+							// failed) — the roster changed regardless, so still fire this.
+							// `false` here is a conservative default, not a claim the
+							// device was NOT evicted: it just means that classification is
+							// unknown in this rare double-failure case.
+							onGroupChangedRef.current?.(groupId, false);
 						}
-						// Fired for EVERY merge, not just eviction — an Add also changes
-						// the roster and must invalidate anything (e.g. the group Safety
-						// Number) that assumes it is stable (crypto-reviewer HIGH-2).
-						onGroupChangedRef.current?.(groupId, !active);
-					} catch (evictionCheckErr) {
-						// Self-eviction check is best-effort diagnostics only — a
-						// failure here (F8, crypto-reviewer nit) must not turn an
-						// already-successfully-merged Commit into an unacked retry
-						// loop, but it must not be silently swallowed either, or a
-						// forced eviction could go completely unnoticed. Diagnostic
-						// only — never content/PII.
+						await ackAfterMergeWithRetry(env.id);
+					} catch (err) {
+						if (err instanceof Error && err.message === MLS_OWN_COMMIT_ERROR) {
+							// Case 2 (hash-verified, post-merge): this crate's own
+							// tracking confirms these exact bytes are a commit THIS
+							// device already merged — already applied locally, so
+							// there is nothing to merge. Safe to ack. See
+							// cryptoWorkerErrors.ts's MLS_OWN_COMMIT_ERROR doc comment.
+							await ackMessage(sessionToken, env.id).catch(() => {});
+							return;
+						}
+						if (err instanceof Error && err.message === MLS_OWN_COMMIT_PENDING_ERROR) {
+							// Case 1 (openmls's own pre-merge signal, UNVERIFIED and
+							// forgeable by any current group member — see
+							// cryptoWorkerErrors.ts's MLS_OWN_COMMIT_PENDING_ERROR doc
+							// comment, crypto-reviewer F3). Unlike the Case 2 branch
+							// above, "already applied" does NOT hold here: a genuine
+							// pre-confirm echo of this device's own staged commit is
+							// still only staged, not merged, so acking would delete the
+							// Delivery Service's only copy before this device ever
+							// applies it — and a forged message would never have been
+							// this device's own commit at all. Treat exactly like any
+							// other rejection below: do not ack, log a content-free
+							// diagnostic, let the unacked-envelope retry path (a future
+							// poll, remount, or chat switch) handle it.
+							console.error("commit_own_pending_unverified", groupId);
+							return;
+						}
+						// Genuine failure (fork, stale epoch, decrypt error) — do NOT
+						// ack, same reasoning as message_decrypt_failed below: the
+						// 30-day retention floor eventually GCs it server-side, and
+						// this hook's own fetch cursor still advances past it
+						// regardless (poll()'s comment), so redelivery only happens on
+						// a future remount or a switch away from and back to this
+						// chat. Diagnostic only — never ciphertext/content.
 						console.error(
-							"commit_self_evicted_check_failed",
-							evictionCheckErr instanceof Error ? evictionCheckErr.name : typeof evictionCheckErr,
+							"commit_process_failed",
+							err instanceof Error ? err.name : typeof err,
+							err instanceof Error ? err.message : String(err),
 						);
-						// The merge itself still succeeded (only the eviction check
-						// failed) — the roster changed regardless, so still fire this.
-						// `false` here is a conservative default, not a claim the
-						// device was NOT evicted: it just means that classification is
-						// unknown in this rare double-failure case.
-						onGroupChangedRef.current?.(groupId, false);
 					}
-					await ackAfterMergeWithRetry(env.id);
-				} catch (err) {
-					if (err instanceof Error && err.message === MLS_OWN_COMMIT_ERROR) {
-						// Case 2 (hash-verified, post-merge): this crate's own
-						// tracking confirms these exact bytes are a commit THIS
-						// device already merged — already applied locally, so
-						// there is nothing to merge. Safe to ack. See
-						// cryptoWorkerErrors.ts's MLS_OWN_COMMIT_ERROR doc comment.
-						await ackMessage(sessionToken, env.id).catch(() => {});
-						return;
-					}
-					if (err instanceof Error && err.message === MLS_OWN_COMMIT_PENDING_ERROR) {
-						// Case 1 (openmls's own pre-merge signal, UNVERIFIED and
-						// forgeable by any current group member — see
-						// cryptoWorkerErrors.ts's MLS_OWN_COMMIT_PENDING_ERROR doc
-						// comment, crypto-reviewer F3). Unlike the Case 2 branch
-						// above, "already applied" does NOT hold here: a genuine
-						// pre-confirm echo of this device's own staged commit is
-						// still only staged, not merged, so acking would delete the
-						// Delivery Service's only copy before this device ever
-						// applies it — and a forged message would never have been
-						// this device's own commit at all. Treat exactly like any
-						// other rejection below: do not ack, log a content-free
-						// diagnostic, let the unacked-envelope retry path (a future
-						// poll, remount, or chat switch) handle it.
-						console.error("commit_own_pending_unverified", groupId);
-						return;
-					}
-					// Genuine failure (fork, stale epoch, decrypt error) — do NOT
-					// ack, same reasoning as message_decrypt_failed below: the
-					// 30-day retention floor eventually GCs it server-side, and
-					// this hook's own fetch cursor still advances past it
-					// regardless (poll()'s comment), so redelivery only happens on
-					// a future remount or a switch away from and back to this
-					// chat. Diagnostic only — never ciphertext/content.
-					console.error(
-						"commit_process_failed",
-						err instanceof Error ? err.name : typeof err,
-						err instanceof Error ? err.message : String(err),
-					);
-				}
+				});
 				return;
 			}
 			if (env.message_type === "Proposal") {

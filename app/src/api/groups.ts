@@ -147,3 +147,45 @@ export async function listMembers(
 	}
 	return { deviceIds: body.device_ids, truncated: body.truncated !== false };
 }
+
+/**
+ * GET /v1/groups/:groupId/epoch — the server's current CAS epoch counter for
+ * `groupId`, scoping data for a future `sendCommit` call.
+ *
+ * This is NOT the client's local MLS epoch (`mls_group.rs`'s remove-member
+ * status-list item (a)): it only advances through `GroupRepository::
+ * advance_epoch`'s CAS on an accepted Commit, so it legitimately diverges
+ * from the local MLS epoch whenever a membership change reached the server
+ * through a path that never called `sendCommit`. Treat the returned value as
+ * an opaque CAS token for `sendCommit`'s `expectedEpoch`, never as a stand-in
+ * for the client's own local MLS epoch tracking.
+ *
+ * Caller must already be a group member (401 otherwise; an unknown group id
+ * answers identically, same non-oracle property as `listMembers`). A
+ * non-home-region caller gets `502 region_mismatch` instead of a stale-or-
+ * zero epoch (fail-closed, prd.md §3.5.1) — callers MUST treat that as a
+ * distinct, retryable-elsewhere failure, not as "epoch 0".
+ *
+ * No production caller reads this yet — issue #2's wiring pass (item (a) in
+ * `mls_group.rs`'s status list) is scoping-only until one exists. When a
+ * caller does wire this into a `sendCommit` flow, it MUST call `getEpoch`,
+ * drain the group's poll-loop backlog, stage, and send as work inside ONE
+ * `withMlsCommitLock` acquisition (`app/src/lib/mlsCommitLock.ts`) — reading
+ * the epoch outside that lock, or across two separate acquisitions, is
+ * structurally stale by the time `stage` runs, even though the server's CAS
+ * still fails such a stale attempt closed (`409 epoch_mismatch`) rather than
+ * letting it fork the group.
+ */
+export async function getEpoch(token: string, groupId: string): Promise<number> {
+	assertOpaqueId(groupId, "group_id");
+	const resp = await fetch(`${API_BASE}/groups/${encodeURIComponent(groupId)}/epoch`, {
+		method: "GET",
+		headers: { Authorization: `Bearer ${token}` },
+	});
+	await throwOnError(resp);
+	const body = (await resp.json().catch(() => ({}))) as { epoch?: unknown };
+	if (typeof body.epoch !== "number" || !Number.isSafeInteger(body.epoch) || body.epoch < 0) {
+		throw new Error("invalid_epoch_response");
+	}
+	return body.epoch;
+}
