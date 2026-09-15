@@ -24,7 +24,154 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-16, cycle 500 — STABILIZATION: archive this file (cycles 453-484), reconcile prd.md PIPA/KR-residency doc drift with actual deployed topology (issue #5), full green sweep)
+## Current state (2026-09-16, cycle 501 — FEATURE: MLS commit-lock primitive + GET /epoch client wrapper, issue #2 prereq, commit c3519b9)
+
+- Mode selection: counter 500→501, 501 % 5 != 0 → FEATURE. `gh run list
+  --limit 3` all green on main (cycle 500's push). `gh issue list
+  --state open`: same 5 open issues (#1 SPA deploy, #2 MLS Remove/PCS,
+  #3 WS client, #4 load testing, #5 prod-ap-seoul PIPA).
+- Picked up issue #2 (P0-blocker) via the carried candidate list. An
+  Explore-agent survey first (don't skip this next time either) found the
+  situation was narrower than the issue title suggests: the Rust MLS
+  Remove commit primitive (`stage_remove_member`/`confirm_remove_member`/
+  `abort_remove_member` in `crates/client/powehi-crypto-wasm/src/
+  mls_group.rs`) and its WASM/Comlink exports already existed,
+  unit-tested, since an earlier cycle. But that module's own doc comment
+  explicitly says **"do not wire this trio into a production UI yet"**
+  pending open items (a) epoch reconciliation, (e) an incoming commit can
+  silently discard a locally-staged commit, (f) no mutual exclusion
+  between the poll loop and a future UI flow, (g) a stale local epoch
+  undetectable via the server CAS. Deliberately did NOT build a
+  production Remove UI this cycle — building it while (e)/(g) stay open
+  risks a permanent, unrecoverable group fork under `max_past_epochs(0)`.
+  Scoped instead to closing (a) and partially closing (f), i.e. safe
+  prerequisite infra with zero new UI attack surface.
+- **`app/src/lib/mlsCommitLock.ts` (new)**: per-group async mutex
+  (`withMlsCommitLock(groupId, fn)`), built on the existing
+  `concurrencyLimiter.ts` `createLimiter`. Bounded to 128 tracked groups,
+  idle-LRU eviction (never evicts a busy lock). Wired into
+  `useMessages.ts`'s existing Commit-merge path (`mlsProcessCommit` + the
+  self-eviction check, deliberately including the post-merge ack+retry —
+  documented tradeoff, not an oversight).
+- **`app/src/api/groups.ts`**: added `getEpoch(token, groupId)` wrapping
+  the already-existing `GET /v1/groups/:id/epoch` endpoint (added cycle
+  499, commit 2ab7ad9). No production caller wired yet — scoping only.
+- **`crates/client/powehi-crypto-wasm/src/mls_group.rs`**: doc-only
+  updates to the remove-member status list — (a) → PARTIALLY CLOSED
+  (endpoint+wrapper exist, no caller), (f) → PARTIALLY CLOSED (lock
+  exists, poll loop uses it, but no second/UI caller yet so the mutual-
+  exclusion guarantee doesn't hold in practice), (g) got a note that the
+  pre-stage drain and the stage/confirm/abort must happen inside ONE
+  `withMlsCommitLock` acquisition (the lock is non-reentrant — a naive
+  drain-then-reacquire implementation would deadlock).
+- **Two review passes, both required by CLAUDE.md for this diff**:
+  - `threat-model-checker`: **YELLOW** (documentation-only, not
+    blocking). Confirmed T1-T7 unchanged, zero new metadata exposed
+    (`getEpoch` has 0 call sites). Flagged F1 (the lock span includes
+    unbounded network I/O — the ack call has no timeout — a future
+    concern once a UI caller actually contends for the lock, since a
+    malicious DS could then stall a Remove attempt at the acquisition
+    step) and F2 (item (a)'s original "CLOSED" label was inconsistent
+    with (f)'s honest "PARTIALLY CLOSED — one caller only" framing).
+    Both addressed in doc updates (see above) before commit.
+  - `crypto-reviewer`: **first pass was needs-rework** — found a real,
+    reproducible bug (F1, verified via a probe test that was deleted
+    after confirming): `withMlsCommitLock`'s underlying
+    `createLimiter` executor is `fn().finally(release)`; a `fn` that
+    throws SYNCHRONOUSLY (not `async () => { throw }`, a genuine sync
+    throw) or returns a non-Promise value never reaches `.finally`, so
+    `release` never runs — the capacity-1 mutex wedges PERMANENTLY for
+    that group's remaining process lifetime. Fixed by normalizing via
+    `const safeFn = () => Promise.resolve().then(fn)` before handing it
+    to the limiter; pinned with two new regression tests. Also flagged
+    doc-accuracy findings F2-F4 (over-claimed "closes item (f)"/"item
+    (a) CLOSED" language; non-reentrancy undocumented despite item (g)
+    implying a drain-then-reacquire pattern that would deadlock; "no
+    UI-initiated MLS flow exists yet" was false — `AcceptInviteModal.tsx`
+    and `CreateGroupModal.tsx` both call MLS-mutating worker methods
+    today, just safely, since the poll loop can't bind to a
+    not-yet-open group) — all fixed. Plus low-severity F5 (`Number.
+    isInteger` → `Number.isSafeInteger`, server returns u64) and F6
+    (`resp.json()` needed the same `.catch(() => ({}))` fail-closed
+    pattern `throwOnError` already uses). **Re-review after fixes: PASS.**
+  - Non-blocking carried findings for a future cycle (crypto-reviewer's
+    own triage, not urgent): F8 (ack+retry inside the lock span — fine
+    today, revisit once a real competing caller exists to measure
+    contention), F9 (no acquisition timeout/AbortSignal — a crashed
+    worker wedges the lock forever, future UI caller should apply its
+    own timeout), F10 (the 128-cap eviction test doesn't assert
+    `locks.size` directly — no export exists to check it), F11 (lock key
+    is `groupId` alone, not `(identityId, groupId)` — intentional,
+    over-serializes safely, now documented).
+- **Full gate, all green**: `cargo build --workspace`, `cargo fmt --all
+  --check`, `cargo clippy --workspace --all-targets -- -D warnings` all
+  clean. `cargo test --workspace` (nextest not installed in this
+  sandbox, documented fallback used): every crate `0 failed`, same
+  171/58/235(2 ignored)/62/12/120/10/8/4/4/18/20/158/3/10/13/38/3 counts
+  as cycle 500 baseline — no regression (this cycle's Rust changes were
+  doc-comment-only). `cargo deny check`: `advisories ok, bans ok,
+  licenses ok, sources ok`. Frontend: `pnpm exec tsc -b` clean; `pnpm
+  exec biome check` — 4 pre-existing unrelated `app/src-tauri/gen/
+  schemas/*.json` errors only (same baseline noted since ≥cycle 472);
+  `pnpm exec vitest run`: 113 files / 1672 tests, all green (was 1667 —
+  +9 new `mlsCommitLock.test.ts` tests, +2 new `groups.test.ts` `getEpoch`
+  tests after the F5/F6 fixes, net +5 shown live but 1672 is the final
+  post-fix count).
+- Committed as `c3519b9` (feature commit only this cycle — this memory
+  update is a separate `chore:` commit per convention). 6 files changed:
+  `mlsCommitLock.ts`+test (new), `groups.ts`+test, `useMessages.ts`,
+  `mls_group.rs`.
+- Target dir hygiene: not checked this cycle (FEATURE mode; hygiene step
+  is STABILIZATION-only per the cycle instructions).
+- **Next cycle candidates (carried/updated from cycle 500's list):**
+  1. **Partially addressed this cycle** (issue #2): closed (a), partially
+     closed (f) as prerequisite infra. Still the real remaining work:
+     (e) incoming-commit-silently-discards-staged-commit and (g)
+     stale-local-epoch-undetectable-via-CAS are BOTH still fully OPEN
+     and BOTH independently cause a permanent, unrecoverable group fork
+     under `max_past_epochs(0)` — closing them is the real gate before
+     any Remove UI can be safely built. Also still undesigned: the T3
+     local trust anchor for picking *which* leaf to remove (prd.md §3.3
+     names two ways forward — bind `device_id` into the MLS credential,
+     or lean on the §5.6 safety number — a product/crypto-lead decision,
+     not something to default into). A production Remove UI, when it's
+     finally safe to build, should select from `mlsGroupMembers()`'s
+     roster directly (leaf index + sigKeyHex), NOT from
+     `PendingRemovalBanner`'s server-supplied device_ids — see
+     `mls_group.rs`'s "Caller contract" section for why.
+  2. Carried non-blocking crypto-reviewer findings from this cycle: F8
+     (narrow the lock span to exclude the ack once a real competing
+     caller exists to measure against), F9 (acquisition timeout/
+     AbortSignal for `withMlsCommitLock`), F10 (export a test hook or
+     otherwise directly assert the 128-group eviction cap holds).
+  3. Carried, unchanged: renaming `prod-ap-seoul` (cross-cutting
+     Terraform/DNS/CD rename, a policy call — not attempted) and the
+     origin-direct-ingress bypass gap threat-model-checker flagged at
+     cycle 500 (`smart-router`'s `index.ts` `"XX"` fallback routes to EU
+     when `request.cf` is absent — verify whether Hetzner origins are
+     actually network-restricted to Cloudflare-only ingress).
+  4. Carried: reconsider `DomainError::RegionMismatch` mapping to `421
+     Misdirected Request` instead of `502 region_mismatch` before a real
+     client polls it.
+  5. Carried unchanged: device_id-to-MLS-leaf binding half of issue #2's
+     `PendingRemovalBanner` cross-check (crypto-lead design call).
+  6. Carried unchanged: `mlsRemoveMemberStage`'s worst-case ~60s
+     rejection latency — informational until a real Remove UI exists.
+  7. Carried, optional, informational: `rustls`'s default `aws-lc-rs`
+     provider compiled in but unused; `default-features = false` would
+     shrink SBOM.
+  8. Carried: PQ hybrid Phase A prerequisite (blocked on openmls
+     upstream).
+  9. Carried, BLOCKED: `AbuseSignalStore`/
+     `RegionRouter::broadcast_abuse_signal` wiring needs F3 + the
+     HMAC-vs-plain-SHA256 gate resolved first.
+  10. Carried: prd.md §3.3 doesn't document the consumed-`key_packages`
+      retention window; `mls_group_members` `isSelf` leaf-index
+      hardening; issues #1/#3/#4; prd.md §10 REST API doc drift;
+      unconsumed `RemovalRequired` WS event; `key_packages.device_id`
+      FK doc drift.
+
+## Previous state (2026-09-16, cycle 500 — STABILIZATION: archive this file (cycles 453-484), reconcile prd.md PIPA/KR-residency doc drift with actual deployed topology (issue #5), full green sweep)
 
 - Mode selection: counter 499→500, 500 % 5 == 0 → STABILIZATION. `gh run
   list --limit 5` all green on main (cycle 499's push). `gh issue list
