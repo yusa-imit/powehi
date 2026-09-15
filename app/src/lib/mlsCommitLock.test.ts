@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { withMlsCommitLock } from "./mlsCommitLock";
+import { trackedGroupCount, withMlsCommitLock } from "./mlsCommitLock";
 
 function deferred<T>(): {
 	promise: Promise<T>;
@@ -164,6 +164,11 @@ describe("withMlsCommitLock", () => {
 			await withMlsCommitLock(`churn-${i}`, async () => {});
 		}
 
+		// Direct assertion (crypto-reviewer F10), not just inferred from timing:
+		// busy-group (never idle, never evicted) plus the 127 most-recently-used
+		// churn groups holds the cap at exactly MAX_TRACKED_GROUPS.
+		expect(trackedGroupCount()).toBe(128);
+
 		expect(order).toEqual(["busy-start"]);
 		const raceTask = withMlsCommitLock("busy-group", async () => {
 			order.push("race");
@@ -175,6 +180,91 @@ describe("withMlsCommitLock", () => {
 		busy.resolve();
 		await Promise.all([busyTask, raceTask]);
 		expect(order).toEqual(["busy-start", "busy-end", "race"]);
+	});
+});
+
+describe("withMlsCommitLock — AbortSignal (crypto-reviewer F9)", () => {
+	it("rejects a still-QUEUED caller with AbortError when its signal aborts, without ever running fn, and does NOT free the holder's slot", async () => {
+		const holder = deferred<void>();
+		const held = withMlsCommitLock("group-abort-queued", async () => {
+			await holder.promise;
+		});
+
+		const controller = new AbortController();
+		const queuedFn = vi.fn(async () => "should never run");
+		const queued = withMlsCommitLock("group-abort-queued", queuedFn, controller.signal);
+
+		controller.abort();
+		await expect(queued).rejects.toMatchObject({ name: "AbortError" });
+		expect(queuedFn).not.toHaveBeenCalled();
+
+		// Prove the abort did NOT free the holder's slot (crypto-reviewer F-C):
+		// queue a third caller WHILE the holder is still unresolved and confirm
+		// it has not started after several ticks. If abort had incorrectly
+		// freed the slot, this would start immediately — the exact regression
+		// this module exists to prevent (two callers running for one group).
+		const thirdFn = vi.fn(async () => "third");
+		const third = withMlsCommitLock("group-abort-queued", thirdFn);
+		await Promise.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(thirdFn).not.toHaveBeenCalled();
+
+		holder.resolve();
+		await expect(held).resolves.toBeUndefined();
+		await expect(third).resolves.toBe("third");
+	});
+
+	it("rejects immediately without running fn when the signal is already aborted", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		const fn = vi.fn(async () => "should never run");
+
+		await expect(
+			withMlsCommitLock("group-abort-preaborted", fn, controller.signal),
+		).rejects.toMatchObject({ name: "AbortError" });
+		expect(fn).not.toHaveBeenCalled();
+
+		// The group's lock is still usable afterward — an aborted acquisition
+		// attempt must not leave any state behind.
+		await expect(withMlsCommitLock("group-abort-preaborted", async () => "ok")).resolves.toBe("ok");
+	});
+
+	it("a signal aborting AFTER its caller has already been dequeued (acquired the slot) has no effect on that call", async () => {
+		// Must actually traverse createLimiter's QUEUE path (not the
+		// immediate-acquire fast path) for this to exercise the abort-listener
+		// registration/removal at all — a fresh, uncontended group never
+		// reaches that code (crypto-reviewer F-B).
+		const holder = deferred<void>();
+		const held = withMlsCommitLock("group-abort-running", async () => {
+			await holder.promise;
+		});
+
+		const controller = new AbortController();
+		let ran = false;
+		const result = withMlsCommitLock(
+			"group-abort-running",
+			async () => {
+				ran = true;
+				return "completed";
+			},
+			controller.signal,
+		);
+
+		holder.resolve();
+		await held;
+		// A few ticks for createLimiter to dequeue this caller and for the
+		// `safeFn` normalization wrapper (crypto-reviewer F1) to actually
+		// invoke `fn` — by this point the signal can no longer have any effect
+		// per this module's documented contract.
+		await Promise.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(ran).toBe(true);
+		controller.abort();
+
+		await expect(result).resolves.toBe("completed");
 	});
 });
 

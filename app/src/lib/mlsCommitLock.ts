@@ -41,14 +41,22 @@
  * that drain and the stage/confirm/abort as work inside ONE acquisition,
  * never as two separate `withMlsCommitLock` calls.
  *
- * No acquisition timeout or `AbortSignal` support: a caller whose `fn` never
- * settles (e.g. a Comlink call to a crashed worker) holds the group's lock
- * for the rest of the process lifetime, and any later caller for the same
- * group queues behind it with no way to give up. This is not a regression
- * for the current sole caller (it previously awaited the same underlying
- * call directly, unlocked), but a future UI-initiated caller inherits this
- * limitation and should apply its own timeout around the whole
- * `withMlsCommitLock` call if it cannot tolerate hanging indefinitely.
+ * Optional `signal` (crypto-reviewer F9): a caller still QUEUED behind a
+ * holder that never settles (e.g. a Comlink call to a crashed worker) can
+ * pass an `AbortSignal` to give up waiting instead of queuing forever —
+ * `fn` is never invoked in that case. This does NOT free the wedged
+ * holder's slot; it only lets a later caller stop waiting for it. The
+ * signal stops having any effect as soon as this call ACQUIRES the
+ * group's slot (i.e. is dequeued by `createLimiter`) — this happens
+ * strictly before `fn` runs, not at the same instant: the `safeFn`
+ * normalization wrapper below (crypto-reviewer F1) inserts its own
+ * microtask between acquisition and the actual `fn()` call, during which
+ * an abort is already too late to have any effect. `fn` itself remains
+ * responsible for its own in-flight cancellation once running, exactly as
+ * `createLimiter` already documents. The current sole caller
+ * (`useMessages.ts`'s poll loop) does not pass one; a future UI-initiated
+ * caller that cannot tolerate hanging indefinitely behind a wedged
+ * poll-loop holder should.
  */
 
 import { type Limiter, createLimiter } from "./concurrencyLimiter";
@@ -92,8 +100,20 @@ function entryFor(groupId: string): LockEntry {
 	return entry;
 }
 
-/** Run `fn` with exclusive access to `groupId`'s MLS commit lock. */
-export function withMlsCommitLock<T>(groupId: string, fn: () => Promise<T>): Promise<T> {
+/**
+ * Run `fn` with exclusive access to `groupId`'s MLS commit lock.
+ *
+ * `signal`, if given and already-aborted or aborted while this call is still
+ * QUEUED (not yet holding the group's slot), rejects with `AbortError`
+ * without ever invoking `fn` — see the module doc comment (crypto-reviewer
+ * F9). Has no effect once this call has acquired the group's slot, which
+ * happens strictly before `fn` is invoked.
+ */
+export function withMlsCommitLock<T>(
+	groupId: string,
+	fn: () => Promise<T>,
+	signal?: AbortSignal,
+): Promise<T> {
 	const entry = entryFor(groupId);
 	entry.active++;
 	entry.lastUsed = Date.now();
@@ -107,8 +127,18 @@ export function withMlsCommitLock<T>(groupId: string, fn: () => Promise<T>): Pro
 	// receives a genuine Promise, so `.finally(release)` always fires,
 	// regardless of how `fn` misbehaves.
 	const safeFn = () => Promise.resolve().then(fn);
-	return entry.limiter(safeFn).finally(() => {
+	return entry.limiter(safeFn, signal).finally(() => {
 		entry.active--;
 		entry.lastUsed = Date.now();
 	});
+}
+
+/**
+ * Number of groups this module currently tracks a lock entry for (busy or
+ * idle). Test-only introspection (crypto-reviewer F10) — lets a test assert
+ * the `MAX_TRACKED_GROUPS` eviction cap directly instead of inferring it from
+ * timing/ordering side effects.
+ */
+export function trackedGroupCount(): number {
+	return locks.size;
 }
