@@ -24,7 +24,134 @@ memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode 
 now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
 follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
 
-## Current state (2026-09-16, cycle 501 — FEATURE: MLS commit-lock primitive + GET /epoch client wrapper, issue #2 prereq, commit c3519b9)
+## Current state (2026-09-16, cycle 502 — FEATURE: withMlsCommitLock AbortSignal support + trackedGroupCount test hook (carried F9/F10), commit 1837da7)
+
+- Mode selection: counter 501→502, 502 % 5 != 0 → FEATURE. `gh run list
+  --limit 3` green on main (cycle 501's push; one `cancelled` run on the
+  same commit was a redundant duplicate trigger, not a failure — the
+  `success` run for that commit's CI — Rust and the CI — Live-backend
+  E2E both passed). `gh issue list --state open`: same 5 open issues,
+  none newly bug-labeled. Working tree clean at session start.
+- Picked carried candidate #2 from cycle 501's list: F9 (acquisition
+  timeout/AbortSignal for `withMlsCommitLock`) and F10 (export a test
+  hook to directly assert the 128-group eviction cap), both small,
+  scoped, frontend-only, zero new UI attack surface — deliberately did
+  NOT touch (e)/(g) (the real Remove-UI blockers, still fully open) or
+  the device_id-to-MLS-leaf binding design call (crypto-lead-scoped).
+- **What shipped** (`app/src/lib/mlsCommitLock.ts`): `withMlsCommitLock`
+  now takes an optional third `signal?: AbortSignal` param, passed
+  through to the underlying `createLimiter` call (which already
+  supported an abort-while-queued contract, previously unused by this
+  module). A caller still QUEUED behind a holder that never settles can
+  now give up waiting instead of queuing forever — `fn` is never
+  invoked in that case, and the holder's slot is NOT freed (only a
+  still-waiting caller can give up, not a running one). Also added
+  `trackedGroupCount()`, a read-only export returning `locks.size`, for
+  direct test assertions of the `MAX_TRACKED_GROUPS` cap.
+- **crypto-reviewer: first pass needs-rework, re-review PASS** (this
+  file touches the MLS commit-lock primitive gating merge/stage/confirm
+  exclusivity, matching the routing precedent from cycle 501). The
+  reviewer ran the module in isolation (`/tmp`, deleted after) to
+  measure real interleavings rather than just reading code, confirming
+  no live bug: exclusivity, FIFO order, `entry.active` bookkeeping, and
+  no permanent-wedge risk all held under abort injected at every tick
+  boundary. What needed fixing was documentation/test accuracy, not
+  runtime behavior:
+  - **F-A**: the new docstring claimed the signal "has no effect once
+    fn has started running" — actually measured to go dead ONE TICK
+    EARLIER, at slot acquisition (dequeue), because the F1 `safeFn =
+    () => Promise.resolve().then(fn)` normalization wrapper inserts its
+    own microtask between acquisition and the real `fn()` call. Fixed
+    the docstring to say "acquires the group's slot," not "fn starts."
+  - **F-B**: the "abort after running has no effect" test used a fresh,
+    uncontended group — `createLimiter`'s immediate-acquire fast path
+    never registers an abort listener at all, so the test passed even
+    with the abort-listener-removal logic deleted (verified: reviewer
+    instrumented `addEventListener` call count = 0 on that path).
+    Fixed by rewriting the test to actually hold the group first via a
+    separate holder task, so the signal-bearing caller genuinely queues
+    and registers a listener before being dequeued.
+  - **F-C**: the queued-abort test's comment claimed "abort does not
+    free the holder's slot" but nothing asserted it — the follow-up
+    call in that test only ran AFTER the holder had already resolved
+    normally, so a bug that freed the slot on abort would have gone
+    undetected (mutation-tested by the reviewer: manually adding
+    `release()` to the abort path flipped this test from pass to fail
+    only after the fix). Fixed by queuing a third caller WHILE the
+    holder is still unresolved, right after the abort, and asserting it
+    has not started for several ticks before releasing the holder.
+  - Re-review: **PASS**, mutation-tested. 3 non-blocking notes carried
+    forward (not required): the acquisition→fn gap is actually 2
+    microtasks not 1 (doc credits only `safeFn`, technically
+    incomplete but not wrong in direction); the "no effect" test
+    validates the weaker after-fn-ran claim since the stronger
+    inert-from-dequeue instant isn't observable via the public API;
+    `trackedGroupCount()`'s `toBe(128)` assertion depends on shared
+    module-singleton state and file test order (would break under
+    `--shuffle`/`.concurrent`, not used by this repo's vitest config).
+- No `threat-model-checker`/`security-auditor` run: no new
+  server-visible metadata, no backend/infra touched — matches the
+  established routing precedent (crypto-reviewer alone for a
+  crypto/MLS-adjacent frontend-only primitive change with no threat-
+  model-boundary shift).
+- **Full gate**: `pnpm exec tsc -b` clean. `pnpm exec biome check`
+  clean on both changed files (2 auto-format passes applied and
+  re-verified, both whitespace/wrapping only). `pnpm exec vitest run`:
+  113 files / 1675 tests, all green (was 1672 — +3 new AbortSignal
+  tests; the F10 eviction-cap assertion was added inline to an existing
+  test, not a new one). Rust untouched this cycle (frontend-only
+  diff) — `cargo build --workspace` not re-run; no regression risk
+  since zero `.rs` files changed (confirmed via `git diff --stat`
+  showing only the two `app/src/lib/mlsCommitLock.*` files).
+- Committed `1837da7` (`feat(frontend): add AbortSignal support +
+  test-only eviction-cap hook to withMlsCommitLock`), 2 files changed
+  (132 insertions, 12 deletions). Pushed clean (`66b8700..1837da7 main
+  -> main`).
+- Target dir hygiene: not checked (FEATURE mode).
+- **Next cycle candidates (carried/updated from cycle 501's list):**
+  1. **Resolved this cycle**: F9 (AbortSignal support) and F10 (eviction-
+     cap test hook), both from cycle 501's crypto-reviewer pass.
+  2. Unchanged, still the real gate before any Remove UI can be safely
+     built: (e) incoming-commit-silently-discards-staged-commit and (g)
+     stale-local-epoch-undetectable-via-CAS in `mls_group.rs`'s status
+     list are BOTH still fully OPEN, both independently cause a
+     permanent unrecoverable group fork under `max_past_epochs(0)`.
+     Also still undesigned: the T3 local trust anchor for picking
+     *which* leaf to remove (prd.md §3.3 names two ways forward — bind
+     `device_id` into the MLS credential, or lean on the §5.6 safety
+     number — a product/crypto-lead decision). A production Remove UI
+     should select from `mlsGroupMembers()`'s roster directly (leaf
+     index + sigKeyHex), NOT from `PendingRemovalBanner`'s
+     server-supplied device_ids — see `mls_group.rs`'s "Caller
+     contract" section for why.
+  3. Carried, unchanged: renaming `prod-ap-seoul` (cross-cutting
+     Terraform/DNS/CD rename, a policy call — not attempted) and the
+     origin-direct-ingress bypass gap threat-model-checker flagged at
+     cycle 500 (`smart-router`'s `index.ts` `"XX"` fallback routes to EU
+     when `request.cf` is absent — verify whether Hetzner origins are
+     actually network-restricted to Cloudflare-only ingress).
+  4. Carried: reconsider `DomainError::RegionMismatch` mapping to `421
+     Misdirected Request` instead of `502 region_mismatch` before a real
+     client polls it.
+  5. Carried unchanged: device_id-to-MLS-leaf binding half of issue #2's
+     `PendingRemovalBanner` cross-check (crypto-lead design call).
+  6. Carried unchanged: `mlsRemoveMemberStage`'s worst-case ~60s
+     rejection latency — informational until a real Remove UI exists.
+  7. Carried, optional, informational: `rustls`'s default `aws-lc-rs`
+     provider compiled in but unused; `default-features = false` would
+     shrink SBOM.
+  8. Carried: PQ hybrid Phase A prerequisite (blocked on openmls
+     upstream).
+  9. Carried, BLOCKED: `AbuseSignalStore`/
+     `RegionRouter::broadcast_abuse_signal` wiring needs F3 + the
+     HMAC-vs-plain-SHA256 gate resolved first.
+  10. Carried: prd.md §3.3 doesn't document the consumed-`key_packages`
+      retention window; `mls_group_members` `isSelf` leaf-index
+      hardening; issues #1/#3/#4; prd.md §10 REST API doc drift;
+      unconsumed `RemovalRequired` WS event; `key_packages.device_id`
+      FK doc drift.
+
+## Previous state (2026-09-16, cycle 501 — FEATURE: MLS commit-lock primitive + GET /epoch client wrapper, issue #2 prereq, commit c3519b9)
 
 - Mode selection: counter 500→501, 501 % 5 != 0 → FEATURE. `gh run list
   --limit 3` all green on main (cycle 500's push). `gh issue list
