@@ -909,6 +909,13 @@ mod tests {
         async fn find_by_id(&self, _id: &GroupId) -> Result<Option<Group>, DomainError> {
             unimplemented!("auth_service tests never look up a group entity")
         }
+        async fn get_epoch_if_member(
+            &self,
+            _group_id: &GroupId,
+            _device_id: &DeviceId,
+        ) -> Result<Option<Group>, DomainError> {
+            unimplemented!("auth_service tests never look up a group's epoch")
+        }
         async fn add_member(&self, _member: &GroupMember) -> Result<(), DomainError> {
             unimplemented!("auth_service tests never add a group member directly")
         }
@@ -1017,6 +1024,13 @@ mod tests {
         }
         async fn find_by_id(&self, id: &GroupId) -> Result<Option<Group>, DomainError> {
             self.inner.find_by_id(id).await
+        }
+        async fn get_epoch_if_member(
+            &self,
+            group_id: &GroupId,
+            device_id: &DeviceId,
+        ) -> Result<Option<Group>, DomainError> {
+            self.inner.get_epoch_if_member(group_id, device_id).await
         }
         async fn add_member(&self, member: &GroupMember) -> Result<(), DomainError> {
             self.inner.add_member(member).await

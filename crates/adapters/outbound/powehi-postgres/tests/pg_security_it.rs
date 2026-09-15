@@ -761,6 +761,52 @@ async fn group_add_member_is_idempotent() {
     );
 }
 
+/// `get_epoch_if_member` is a fused single-query membership-check + read
+/// (security-auditor finding, cycle 499 — replaces a `list_members` +
+/// `find_by_id` pair that would reopen a TOCTOU window and cost an O(group
+/// size) read for an O(1) answer). Exercises the real JOIN against Postgres:
+/// a member gets the row back, a non-member and an unknown group both get
+/// `None` — the same non-existence-oracle contract as `list_members`.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn get_epoch_if_member_joins_membership_and_group_in_one_query() {
+    let (_c, pool) = setup().await;
+    let repo = PgGroupRepository::new(pool.clone());
+
+    let member = insert_device(&pool, insert_user(&pool).await).await;
+    let outsider = insert_device(&pool, insert_user(&pool).await).await;
+    let group_id = insert_group(&pool).await;
+    join_group(&pool, group_id.clone(), member.clone()).await;
+
+    let for_member = repo
+        .get_epoch_if_member(&group_id, &member)
+        .await
+        .expect("query")
+        .expect("member must get the group row back");
+    assert_eq!(for_member.id, group_id);
+    assert_eq!(for_member.epoch, Epoch(0));
+
+    let for_outsider = repo
+        .get_epoch_if_member(&group_id, &outsider)
+        .await
+        .expect("query");
+    assert!(
+        for_outsider.is_none(),
+        "a non-member must get None, not the group row"
+    );
+
+    let unknown_group = GroupId::from(Uuid::new_v4());
+    let for_unknown_group = repo
+        .get_epoch_if_member(&unknown_group, &member)
+        .await
+        .expect("query");
+    assert!(
+        for_unknown_group.is_none(),
+        "an unknown group_id must be indistinguishable from a non-member \
+         result — both are None"
+    );
+}
+
 // ── server_config_repo integration tests ────────────────────────────────────
 
 #[tokio::test]

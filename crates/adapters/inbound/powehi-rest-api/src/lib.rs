@@ -161,6 +161,7 @@ fn router_inner(
             "/v1/groups/:group_id/members",
             get(routes::groups::list_members),
         )
+        .route("/v1/groups/:group_id/epoch", get(routes::groups::get_epoch))
         .route(
             "/v1/messages",
             post(routes::messaging::send_message).get(routes::messaging::poll),
@@ -563,6 +564,10 @@ mod tests {
     const NOOP_GROUP_MEMBER_DEVICE_ID: uuid::Uuid =
         uuid::uuid!("00000000-0000-4000-8000-0000000000aa");
 
+    /// Fixed epoch returned by `NoopGroup::get_epoch`, so handler tests can
+    /// assert on the exact serialized shape.
+    const NOOP_GROUP_EPOCH: u64 = 7;
+
     /// No-op group mock used in tests that don't exercise group creation.
     struct NoopGroup;
     #[async_trait]
@@ -612,6 +617,13 @@ mod tests {
                 joined_at_epoch: powehi_domain::group::Epoch(424242),
             }])
         }
+        async fn get_epoch(
+            &self,
+            _caller: &DeviceId,
+            _group_id: &GroupId,
+        ) -> Result<powehi_domain::group::Epoch, DomainError> {
+            Ok(powehi_domain::group::Epoch(NOOP_GROUP_EPOCH))
+        }
     }
 
     fn noop_group() -> Arc<dyn GroupUseCase> {
@@ -659,6 +671,13 @@ mod tests {
             _caller: &DeviceId,
             _group_id: &GroupId,
         ) -> Result<Vec<powehi_domain::group::GroupMember>, DomainError> {
+            Err(DomainError::Unauthorized)
+        }
+        async fn get_epoch(
+            &self,
+            _caller: &DeviceId,
+            _group_id: &GroupId,
+        ) -> Result<powehi_domain::group::Epoch, DomainError> {
             Err(DomainError::Unauthorized)
         }
     }
@@ -723,6 +742,13 @@ mod tests {
                 })
                 .collect())
         }
+        async fn get_epoch(
+            &self,
+            _caller: &DeviceId,
+            _group_id: &GroupId,
+        ) -> Result<powehi_domain::group::Epoch, DomainError> {
+            Ok(powehi_domain::group::Epoch(0))
+        }
     }
 
     /// Group mock whose membership is EXACTLY `MAX_MEMBERS_RESPONSE`, so
@@ -779,6 +805,13 @@ mod tests {
                     joined_at_epoch: powehi_domain::group::Epoch(0),
                 })
                 .collect())
+        }
+        async fn get_epoch(
+            &self,
+            _caller: &DeviceId,
+            _group_id: &GroupId,
+        ) -> Result<powehi_domain::group::Epoch, DomainError> {
+            Ok(powehi_domain::group::Epoch(0))
         }
     }
 
@@ -2978,6 +3011,76 @@ mod tests {
             crate::routes::groups::MAX_MEMBERS_RESPONSE
         );
         assert_eq!(body["truncated"], false);
+    }
+
+    // ── GET /v1/groups/:group_id/epoch tests ────────────────────────────────
+
+    #[tokio::test]
+    async fn get_epoch_returns_ok_for_a_member() {
+        let group_id = uuid::Uuid::new_v4();
+        let resp = groups_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/groups/{group_id}/epoch"))
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["epoch"], NOOP_GROUP_EPOCH);
+    }
+
+    #[tokio::test]
+    async fn get_epoch_rejects_a_non_member() {
+        let group_id = uuid::Uuid::new_v4();
+        let resp = groups_router_unauthorized()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/groups/{group_id}/epoch"))
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn get_epoch_requires_authentication() {
+        let group_id = uuid::Uuid::new_v4();
+        let resp = test_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/groups/{group_id}/epoch"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn get_epoch_rejects_a_malformed_group_id() {
+        let resp = groups_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/groups/not-a-uuid/epoch")
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     // ── Device management endpoint tests ─────────────────────────────────────

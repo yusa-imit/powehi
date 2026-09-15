@@ -1209,6 +1209,22 @@ mod tests {
         async fn find_by_id(&self, id: &GroupId) -> Result<Option<Group>, DomainError> {
             Ok(self.groups.lock().unwrap().get(id).cloned())
         }
+        async fn get_epoch_if_member(
+            &self,
+            group_id: &GroupId,
+            device_id: &DeviceId,
+        ) -> Result<Option<Group>, DomainError> {
+            let is_member = self
+                .members
+                .lock()
+                .unwrap()
+                .get(group_id)
+                .is_some_and(|members| members.iter().any(|m| &m.device_id == device_id));
+            if !is_member {
+                return Ok(None);
+            }
+            Ok(self.groups.lock().unwrap().get(group_id).cloned())
+        }
         async fn add_member(&self, member: &GroupMember) -> Result<(), DomainError> {
             self.members
                 .lock()

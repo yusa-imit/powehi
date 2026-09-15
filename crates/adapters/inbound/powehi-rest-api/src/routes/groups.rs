@@ -223,3 +223,42 @@ pub async fn list_members(
         truncated,
     }))
 }
+
+/// Response body for `GET /v1/groups/:group_id/epoch`.
+#[derive(Serialize)]
+pub struct GroupEpochResponse {
+    pub epoch: u64,
+}
+
+/// `GET /v1/groups/:group_id/epoch`
+///
+/// Returns the server's current epoch counter for `group_id`. The caller
+/// must already be a member; the application layer returns `Unauthorized`
+/// otherwise, which surfaces as `401 Unauthorized` via `ApiError` — an
+/// unknown group id is answered identically, so this is not a
+/// group-existence oracle at the response level (same property as
+/// `list_members`).
+///
+/// This is scoping data for a future client-side `sendCommit` call, NOT a
+/// substitute for a client's own local MLS epoch tracking: this counter only
+/// advances through `GroupRepository::advance_epoch`'s CAS on an accepted
+/// Commit, so it lags whenever a client's membership change reached the
+/// server through a path that never calls `send_commit` (see
+/// `GroupUseCase::get_epoch`'s doc comment for the full explanation,
+/// including why the returned value must be treated as an opaque CAS token
+/// only, and why a non-home-region caller gets `502 region_mismatch`
+/// instead of a stale-or-zero epoch — prd.md §3.5.1).
+pub async fn get_epoch(
+    State(state): State<AppState>,
+    AuthenticatedDevice(caller): AuthenticatedDevice,
+    Path(raw_group_id): Path<Uuid>,
+) -> Result<Json<GroupEpochResponse>, ApiError> {
+    let group_id = GroupId::from(raw_group_id);
+    tracing::info!(
+        caller = %caller,
+        group_id = %group_id,
+        "groups.get_epoch"
+    );
+    let epoch = state.group.get_epoch(&caller, &group_id).await?;
+    Ok(Json(GroupEpochResponse { epoch: epoch.0 }))
+}

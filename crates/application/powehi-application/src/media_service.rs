@@ -566,6 +566,13 @@ mod tests {
         async fn find_by_id(&self, _id: &GroupId) -> Result<Option<Group>, DomainError> {
             Ok(None)
         }
+        async fn get_epoch_if_member(
+            &self,
+            _group_id: &GroupId,
+            _device_id: &DeviceId,
+        ) -> Result<Option<Group>, DomainError> {
+            Ok(None)
+        }
         async fn add_member(&self, _member: &GroupMember) -> Result<(), DomainError> {
             Ok(())
         }

@@ -185,6 +185,51 @@ impl GroupUseCase for GroupService {
         }
         Ok(members)
     }
+
+    #[instrument(skip(self), fields(caller = %caller, group_id = %group_id))]
+    async fn get_epoch(&self, caller: &DeviceId, group_id: &GroupId) -> Result<Epoch, DomainError> {
+        // Fused single-query membership-check + read (security-auditor
+        // finding, cycle 499): unlike list_members's own "the guard's own
+        // fetch IS the result" design, a separate list_members() +
+        // find_by_id() pair here would (a) reopen a TOCTOU window between
+        // the two non-transactional reads, and (b) cost an O(group size)
+        // list allocation for an O(1)-sized response — the worst
+        // egress-to-work ratio of any /v1/groups/* endpoint. An absent
+        // group_id and "caller is not a member of a real group" both
+        // resolve to the identical `None` here, preserving the same
+        // non-existence-oracle property as every sibling guard.
+        let group = self
+            .group_repo
+            .get_epoch_if_member(group_id, caller)
+            .await?
+            .ok_or_else(|| {
+                tracing::warn!(caller = %caller, group_id = %group_id, "get_epoch: caller is not a member");
+                DomainError::Unauthorized
+            })?;
+        // Region-authority guard (security-auditor cycle 499): a group's
+        // epoch only ever advances via advance_epoch's CAS in its
+        // home_region (§4A.5) — a group row synced into a non-home region
+        // via SyncGroupMembership is created with epoch pinned to 0 and is
+        // never updated afterward (upsert_members's ON CONFLICT DO
+        // NOTHING), so a non-home-region reply would silently return a
+        // stale-or-zero value with no way for the caller to tell it apart
+        // from a genuinely fresh group. Fail closed instead of returning an
+        // unauthoritative number a client might mistake for ground truth.
+        if group.home_region != self.local_region {
+            tracing::warn!(
+                caller = %caller,
+                group_id = %group_id,
+                home_region = %group.home_region,
+                local_region = %self.local_region,
+                "get_epoch: group's home region is not this region; refusing to answer with a non-authoritative epoch"
+            );
+            return Err(DomainError::RegionMismatch {
+                target: group.home_region.to_string(),
+                local: self.local_region.to_string(),
+            });
+        }
+        Ok(group.epoch)
+    }
 }
 
 #[cfg(test)]
@@ -267,6 +312,27 @@ mod tests {
         }
         async fn find_by_id(&self, id: &GroupId) -> Result<Option<Group>, DomainError> {
             Ok(self.groups.lock().unwrap().get(id).cloned())
+        }
+        async fn get_epoch_if_member(
+            &self,
+            group_id: &GroupId,
+            device_id: &DeviceId,
+        ) -> Result<Option<Group>, DomainError> {
+            // Mirrors the real adapter's single-query join by requiring
+            // both maps to agree before returning a group. This fake does
+            // take the two locks as separate statements (unlike the real
+            // adapter's single SQL round trip), but single-threaded test
+            // usage never observes a concurrent mutation between them.
+            let is_member = self
+                .members
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| &m.group_id == group_id && &m.device_id == device_id);
+            if !is_member {
+                return Ok(None);
+            }
+            Ok(self.groups.lock().unwrap().get(group_id).cloned())
         }
         async fn add_member(&self, member: &GroupMember) -> Result<(), DomainError> {
             self.members.lock().unwrap().push(member.clone());
@@ -818,6 +884,87 @@ mod tests {
 
         let err = svc.list_members(&outsider, &group_id).await.unwrap_err();
         assert!(matches!(err, DomainError::Unauthorized));
+    }
+
+    #[tokio::test]
+    async fn get_epoch_returns_the_current_epoch_for_a_member() {
+        let repo = FakeGroupRepo::new();
+        let svc = make_svc(repo.clone());
+        let owner = DeviceId::new();
+        let group_id = GroupId::new();
+
+        svc.create_group(&owner, group_id.clone()).await.unwrap();
+        let mut group = repo.find_by_id(&group_id).await.unwrap().unwrap();
+        group.epoch = Epoch(5);
+        repo.save(&group).await.unwrap();
+
+        let epoch = svc.get_epoch(&owner, &group_id).await.unwrap();
+        assert_eq!(epoch, Epoch(5));
+    }
+
+    #[tokio::test]
+    async fn get_epoch_rejects_a_non_member_caller() {
+        let repo = FakeGroupRepo::new();
+        let svc = make_svc(repo.clone());
+        let owner = DeviceId::new();
+        let outsider = DeviceId::new();
+        let group_id = GroupId::new();
+
+        svc.create_group(&owner, group_id.clone()).await.unwrap();
+
+        let err = svc.get_epoch(&outsider, &group_id).await.unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
+    }
+
+    #[tokio::test]
+    async fn get_epoch_on_an_unknown_group_is_unauthorized_not_a_default_epoch() {
+        let repo = FakeGroupRepo::new();
+        let svc = make_svc(repo.clone());
+        let outsider = DeviceId::new();
+        let group_id = GroupId::new();
+
+        // No group is ever created here — same non-existence-oracle
+        // property as list_members: an absent group must not be
+        // distinguishable from "caller is not a member" of a real one.
+        let err = svc.get_epoch(&outsider, &group_id).await.unwrap_err();
+        assert!(matches!(err, DomainError::Unauthorized));
+    }
+
+    /// security-auditor finding, cycle 499: a group row synced in from
+    /// another region's home (e.g. via `SyncGroupMembership`) must never be
+    /// answered with its (stale-or-zero) epoch — that value is
+    /// unauthoritative and indistinguishable from a genuinely fresh group.
+    #[tokio::test]
+    async fn get_epoch_rejects_a_group_whose_home_region_is_not_this_region() {
+        let repo = FakeGroupRepo::new();
+        let svc = make_svc(repo.clone()); // local_region = "eu-central"
+        let member = DeviceId::new();
+        let group_id = GroupId::new();
+
+        // Simulate a group synced in from a DIFFERENT region's home, the way
+        // SyncGroupMembership would create it locally, rather than one this
+        // service created itself (which would always carry its own
+        // local_region as home_region).
+        let synced_group = Group {
+            id: group_id.clone(),
+            home_region: RegionId::new("ap-seoul"),
+            epoch: Epoch(3),
+            created_at: chrono::Utc::now(),
+        };
+        repo.save(&synced_group).await.unwrap();
+        repo.add_member(&GroupMember {
+            group_id: group_id.clone(),
+            device_id: member.clone(),
+            joined_at_epoch: Epoch(0),
+        })
+        .await
+        .unwrap();
+
+        let err = svc.get_epoch(&member, &group_id).await.unwrap_err();
+        assert!(
+            matches!(err, DomainError::RegionMismatch { .. }),
+            "expected RegionMismatch, got {err:?}"
+        );
     }
 
     #[tokio::test]

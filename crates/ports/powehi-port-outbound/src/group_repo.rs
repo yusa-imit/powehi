@@ -87,6 +87,29 @@ pub trait GroupRepository: Send + Sync {
         creator: &GroupMember,
     ) -> Result<bool, DomainError>;
     async fn find_by_id(&self, id: &GroupId) -> Result<Option<Group>, DomainError>;
+    /// Returns `group_id`'s current row iff `device_id` is currently a
+    /// member of it, else `None`.
+    ///
+    /// This is a single-query fused membership-check + read: implementors
+    /// MUST join `groups` against `group_members` in one round trip rather
+    /// than issuing a `list_members` call followed by a separate
+    /// `find_by_id`. Doing the check and the read as two non-transactional
+    /// calls reopens a TOCTOU window (a device removed between the two
+    /// calls could still read a stale `Group`) that this method exists
+    /// specifically to close — mirroring [`GroupRepository::list_members`]'s
+    /// own "the guard's own fetch IS the result" property, just scoped to a
+    /// single member instead of the whole roster.
+    ///
+    /// `Ok(None)` covers BOTH "no such group" and "`device_id` is not
+    /// currently a member of it" identically — a caller using this for a
+    /// fail-closed authorization check MUST treat both as the same
+    /// rejection (same non-existence-oracle contract every other
+    /// membership-gated method in this trait already provides).
+    async fn get_epoch_if_member(
+        &self,
+        group_id: &GroupId,
+        device_id: &DeviceId,
+    ) -> Result<Option<Group>, DomainError>;
     async fn add_member(&self, member: &GroupMember) -> Result<(), DomainError>;
     async fn remove_member(
         &self,

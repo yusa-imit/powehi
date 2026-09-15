@@ -209,6 +209,25 @@ impl GroupRepository for PgGroupRepository {
         Ok(row.map(Group::from))
     }
 
+    async fn get_epoch_if_member(
+        &self,
+        group_id: &GroupId,
+        device_id: &DeviceId,
+    ) -> Result<Option<Group>, DomainError> {
+        let row = sqlx::query_as::<_, GroupRow>(
+            "SELECT g.id, g.home_region, g.epoch, g.created_at
+             FROM groups g
+             JOIN group_members m ON m.group_id = g.id
+             WHERE g.id = $1 AND m.device_id = $2",
+        )
+        .bind(group_id.as_uuid())
+        .bind(device_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_err)?;
+        Ok(row.map(Group::from))
+    }
+
     async fn add_member(&self, member: &GroupMember) -> Result<(), DomainError> {
         sqlx::query(
             "INSERT INTO group_members (group_id, device_id, joined_at_epoch)

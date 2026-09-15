@@ -323,6 +323,9 @@ mod tests {
         ) -> Result<Vec<powehi_domain::group::GroupMember>, DomainError> {
             unimplemented!()
         }
+        async fn get_epoch(&self, _: &DeviceId, _: &GroupId) -> Result<Epoch, DomainError> {
+            unimplemented!()
+        }
     }
 
     #[async_trait]

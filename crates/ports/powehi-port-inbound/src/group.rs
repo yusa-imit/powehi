@@ -62,4 +62,41 @@ pub trait GroupUseCase: Send + Sync {
         caller: &DeviceId,
         group_id: &GroupId,
     ) -> Result<Vec<GroupMember>, DomainError>;
+
+    /// Returns the server's currently-recorded epoch counter for `group_id`.
+    /// `caller` must already be a member of `group_id`; fails with
+    /// `Unauthorized` otherwise (fail-closed, same guard and non-existence-
+    /// oracle property as `list_members`/`list_pending_removals`).
+    ///
+    /// This is the SERVER's view of the epoch — the value
+    /// `GroupRepository::advance_epoch`'s compare-and-swap last advanced it
+    /// to on an accepted Commit — not a client's own local MLS epoch. The
+    /// two can diverge: the server only advances this counter
+    /// through the `send_commit`/`advance_epoch` path, so a client whose
+    /// membership changes never went through that path (e.g. today's
+    /// `add_member` REST call, which does not call `send_commit`) will see
+    /// this value lag its local MLS state. Exists so a client can bound
+    /// what `expected_epoch` to pass a future `sendCommit` call against,
+    /// not as a substitute for the client's own epoch tracking.
+    ///
+    /// CALLERS MUST TREAT THIS AS AN OPAQUE CAS PRECONDITION TOKEN ONLY —
+    /// never as an input to a client's own MLS state decisions (resync
+    /// triggers, ratchet tree judgments, overwriting the local epoch). A
+    /// malicious server (T3, prd.md §3.1) can return any value here, so
+    /// feeding it into local state decisions would reopen the same class of
+    /// hazard prd.md §5.4 item 5 documents for `pending_removals`: trusting
+    /// a server-reported signal as ground truth.
+    ///
+    /// REGION-AUTHORITY GUARD (security-auditor, cycle 499): `groups.epoch`
+    /// only ever advances via `advance_epoch`'s CAS in the group's
+    /// `home_region` (prd.md §4A.5); a group row synced into a non-home
+    /// region via `SyncGroupMembership` is created with epoch pinned to 0
+    /// and is never updated afterward. Implementors MUST fail closed with
+    /// `DomainError::RegionMismatch` rather than answer with that
+    /// stale-or-zero value when the group's `home_region` is not the
+    /// implementation's own region — an unauthoritative epoch is
+    /// indistinguishable from a genuinely fresh group otherwise, and a
+    /// future caller feeding it into a `sendCommit` retry loop would spin
+    /// forever against a CAS it can never satisfy (prd.md §3.5.1).
+    async fn get_epoch(&self, caller: &DeviceId, group_id: &GroupId) -> Result<Epoch, DomainError>;
 }
