@@ -11,6 +11,9 @@ const DEVICE_B = "cccccccc-cccc-cccc-cccc-cccccccccccc";
 describe("PendingRemovalBanner", () => {
 	beforeEach(() => {
 		useAuthStore.setState({ sessionToken: "tok-pending", identityId: "id", deviceId: "dev" });
+		// Default: skip the cross-check (as if truncated) so existing tests that
+		// don't care about the members cross-check are unaffected by it.
+		vi.spyOn(GroupsApiModule, "listMembers").mockResolvedValue({ deviceIds: [], truncated: true });
 	});
 
 	afterEach(() => {
@@ -158,5 +161,95 @@ describe("PendingRemovalBanner", () => {
 			"http_500",
 		);
 		expect(screen.getByTestId(`pending-removal-row-${DEVICE_A}`)).toBeInTheDocument();
+	});
+});
+
+// ── local members cross-check ────────────────────────────────────────────────
+
+describe("PendingRemovalBanner — members cross-check", () => {
+	beforeEach(() => {
+		useAuthStore.setState({ sessionToken: "tok-pending", identityId: "id", deviceId: "dev" });
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("does not flag a pending device that is present in the members list", async () => {
+		vi.spyOn(GroupsApiModule, "listPendingRemovals").mockResolvedValue([DEVICE_A]);
+		const membersSpy = vi.spyOn(GroupsApiModule, "listMembers").mockResolvedValue({
+			deviceIds: [DEVICE_A, DEVICE_B],
+			truncated: false,
+		});
+
+		render(<PendingRemovalBanner groupId={GROUP_ID} />);
+
+		await waitFor(() => {
+			expect(screen.getByTestId(`pending-removal-row-${DEVICE_A}`)).toBeInTheDocument();
+		});
+		expect(screen.queryByTestId(`pending-removal-stale-${DEVICE_A}`)).not.toBeInTheDocument();
+		expect(membersSpy).toHaveBeenCalledWith("tok-pending", GROUP_ID);
+	});
+
+	it("flags a pending device absent from the members list as stale, without blocking confirm", async () => {
+		vi.spyOn(GroupsApiModule, "listPendingRemovals").mockResolvedValue([DEVICE_A]);
+		const membersSpy = vi.spyOn(GroupsApiModule, "listMembers").mockResolvedValue({
+			deviceIds: [DEVICE_B],
+			truncated: false,
+		});
+		const removeSpy = vi.spyOn(GroupsApiModule, "removeMember").mockResolvedValue(undefined);
+
+		render(<PendingRemovalBanner groupId={GROUP_ID} />);
+
+		await waitFor(() => {
+			expect(screen.getByTestId(`pending-removal-stale-${DEVICE_A}`)).toBeInTheDocument();
+		});
+		expect(membersSpy).toHaveBeenCalledWith("tok-pending", GROUP_ID);
+
+		// Informational only — confirm remains available and functional.
+		fireEvent.click(screen.getByTestId(`pending-removal-btn-${DEVICE_A}`));
+		await waitFor(() => {
+			expect(screen.getByTestId(`pending-removal-confirm-${DEVICE_A}`)).toBeEnabled();
+		});
+		fireEvent.click(screen.getByTestId(`pending-removal-confirm-${DEVICE_A}`));
+
+		await waitFor(() => {
+			expect(removeSpy).toHaveBeenCalledWith("tok-pending", GROUP_ID, DEVICE_A);
+		});
+	});
+
+	it("does not flag any row as stale when the members response is truncated", async () => {
+		vi.spyOn(GroupsApiModule, "listPendingRemovals").mockResolvedValue([DEVICE_A]);
+		// DEVICE_A absent from the (truncated) prefix — models the real
+		// server contract (truncated means "prefix", never an empty list) and
+		// still proves the truncated guard fires: without it, this would
+		// otherwise be flagged stale exactly like the absent-device case above.
+		const membersSpy = vi.spyOn(GroupsApiModule, "listMembers").mockResolvedValue({
+			deviceIds: [DEVICE_B],
+			truncated: true,
+		});
+
+		render(<PendingRemovalBanner groupId={GROUP_ID} />);
+
+		await waitFor(() => {
+			expect(screen.getByTestId(`pending-removal-row-${DEVICE_A}`)).toBeInTheDocument();
+		});
+		expect(screen.queryByTestId(`pending-removal-stale-${DEVICE_A}`)).not.toBeInTheDocument();
+		expect(membersSpy).toHaveBeenCalledWith("tok-pending", GROUP_ID);
+	});
+
+	it("renders pending rows normally without crashing when listMembers fails", async () => {
+		vi.spyOn(GroupsApiModule, "listPendingRemovals").mockResolvedValue([DEVICE_A]);
+		const membersSpy = vi
+			.spyOn(GroupsApiModule, "listMembers")
+			.mockRejectedValue(new Error("http_500"));
+
+		render(<PendingRemovalBanner groupId={GROUP_ID} />);
+
+		await waitFor(() => {
+			expect(screen.getByTestId(`pending-removal-row-${DEVICE_A}`)).toBeInTheDocument();
+		});
+		expect(screen.queryByTestId(`pending-removal-stale-${DEVICE_A}`)).not.toBeInTheDocument();
+		expect(membersSpy).toHaveBeenCalledWith("tok-pending", GROUP_ID);
 	});
 });

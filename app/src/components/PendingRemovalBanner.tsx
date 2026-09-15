@@ -6,9 +6,24 @@
  * so it can never construct or verify a Remove commit — this signal is a
  * REQUEST, never a proof, and a malicious/compromised server operator can
  * forge it to trick a user into evicting a legitimate device (prd.md §3.5.1
- * T3). There is no local cross-check yet (no group-scoped device-list
- * endpoint is wired), so the per-device human confirmation click is
- * currently the ONLY defense — the UI says so explicitly.
+ * T3). The per-device human confirmation click remains the primary defense
+ * regardless of anything below — confirming is never gated on it.
+ *
+ * Partial local cross-check (prd.md §5.4): this component also fetches
+ * `listMembers` (`GET /v1/groups/:groupId/members`) and flags a pending
+ * device_id as "stale" (`data-testid="pending-removal-stale-{deviceId}"`)
+ * when it does NOT appear in that list. This can catch server-side
+ * INCONSISTENCY — e.g. a pending-removal entry for a device that was never
+ * a member, or one already removed — but it is same-trust-domain
+ * defense-in-depth, not a T3 mitigation: both signals come from the same
+ * server, so a fully malicious/colluding server can forge both consistently
+ * and this check catches nothing. It also does NOT join against the
+ * client's own MLS ratchet tree (that device_id-to-leaf binding does not
+ * exist yet), so it can never prove a device IS legitimately absent. When
+ * the members response is `truncated`, the cross-check is skipped entirely
+ * for that fetch (no row is marked stale) per the endpoint's own contract —
+ * treating truncated-absence as meaningful would itself be the false-
+ * eviction failure mode this check exists to avoid.
  *
  * IMPORTANT: confirming here only calls `removeMember`, which is server-side
  * `group_members` routing bookkeeping (stops future envelope fan-out to that
@@ -27,7 +42,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { listPendingRemovals, removeMember } from "../api/groups";
+import { listMembers, listPendingRemovals, removeMember } from "../api/groups";
 import { useAuthStore } from "../store/auth";
 import { Icon } from "./Icon";
 
@@ -51,6 +66,10 @@ export function PendingRemovalBanner({ groupId }: PendingRemovalBannerProps) {
 	const [confirmArmed, setConfirmArmed] = useState(false);
 	const [removing, setRemoving] = useState<string | null>(null);
 	const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
+	// `null` means "unknown" — either not loaded yet or the fetch failed;
+	// the cross-check is skipped entirely in that case, same as `truncated`.
+	const [memberIds, setMemberIds] = useState<Set<string> | null>(null);
+	const [membersTruncated, setMembersTruncated] = useState(false);
 	const armTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
 	useEffect(() => {
@@ -79,6 +98,8 @@ export function PendingRemovalBanner({ groupId }: PendingRemovalBannerProps) {
 		setRowErrors({});
 		if (!sessionToken || !groupId) {
 			setPending([]);
+			setMemberIds(null);
+			setMembersTruncated(false);
 			setLoaded(true);
 			return;
 		}
@@ -95,6 +116,28 @@ export function PendingRemovalBanner({ groupId }: PendingRemovalBannerProps) {
 			.finally(() => {
 				if (!cancelled) setLoaded(true);
 			});
+
+		// Partial local cross-check (module doc) — best-effort only. A
+		// failure here must never block or alter the pending-removals
+		// display, so it is handled independently of the fetch above.
+		setMemberIds(null);
+		setMembersTruncated(false);
+		listMembers(sessionToken, groupId)
+			.then(({ deviceIds, truncated }) => {
+				if (!cancelled) {
+					setMemberIds(new Set(deviceIds));
+					setMembersTruncated(truncated);
+				}
+			})
+			.catch(() => {
+				// Category-only failure — no plaintext/response-body logging.
+				// Skip the cross-check; pending rows still render normally.
+				if (!cancelled) {
+					setMemberIds(null);
+					setMembersTruncated(false);
+				}
+			});
+
 		return () => {
 			cancelled = true;
 		};
@@ -164,6 +207,10 @@ export function PendingRemovalBanner({ groupId }: PendingRemovalBannerProps) {
 					const isConfirming = confirming === deviceId;
 					const isRemoving = removing === deviceId;
 					const rowError = rowErrors[deviceId];
+					// Skip the cross-check entirely when the members list is
+					// unknown (not loaded / fetch failed) or truncated — see
+					// module doc. Never treat truncated-absence as meaningful.
+					const isStale = memberIds !== null && !membersTruncated && !memberIds.has(deviceId);
 
 					return (
 						<div
@@ -255,6 +302,15 @@ export function PendingRemovalBanner({ groupId }: PendingRemovalBannerProps) {
 									</button>
 								)}
 							</div>
+
+							{isStale && (
+								<span
+									data-testid={`pending-removal-stale-${deviceId}`}
+									style={{ fontSize: 11, color: "var(--fg-4)" }}
+								>
+									Not currently listed as a group member — signal may be stale.
+								</span>
+							)}
 
 							{rowError && (
 								<span

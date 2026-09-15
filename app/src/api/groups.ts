@@ -106,3 +106,44 @@ export async function listPendingRemovals(token: string, groupId: string): Promi
 	const body = (await resp.json()) as { device_ids: string[] };
 	return body.device_ids;
 }
+
+/**
+ * GET /v1/groups/:groupId/members — device UUIDs the server records as
+ * current members of `group_id`.
+ *
+ * This is one half of the local cross-check for the `pending-removals`
+ * signal (prd.md §5.4): joining this list against a pending device_id can
+ * catch server-side inconsistency (e.g. a pending-removal entry for a
+ * device that was never a member, or one already removed), but NOT a fully
+ * malicious/colluding server — the other half (binding device_ids to the
+ * client's own MLS ratchet tree leaves) does not exist yet. See
+ * `MembersResponse` doc comment in `groups.rs` for the full contract.
+ *
+ * `truncated: true` means `deviceIds` is a PREFIX, not the full membership
+ * — callers MUST NOT treat absence from a truncated response as meaningful.
+ * Caller must already be a group member (401 otherwise).
+ */
+export async function listMembers(
+	token: string,
+	groupId: string,
+): Promise<{ deviceIds: string[]; truncated: boolean }> {
+	assertOpaqueId(groupId, "group_id");
+	const resp = await fetch(`${API_BASE}/groups/${encodeURIComponent(groupId)}/members`, {
+		method: "GET",
+		headers: { Authorization: `Bearer ${token}` },
+	});
+	await throwOnError(resp);
+	const body = (await resp.json()) as { device_ids?: unknown; truncated?: unknown };
+	// Validate rather than blindly trust the cast: a malformed/missing
+	// `device_ids` must fail (the caller then skips the cross-check, same as
+	// any other fetch failure) instead of silently becoming e.g. a char set
+	// from `new Set(someString)`. A malformed/missing `truncated` defaults to
+	// `true` (safe direction) rather than `false` — per `MembersResponse`'s
+	// own contract, treating absence as meaningful is the false-eviction
+	// failure mode this endpoint exists to avoid, so an unrecognized shape
+	// must degrade toward "skip the cross-check", never toward "trust it".
+	if (!Array.isArray(body.device_ids) || !body.device_ids.every((id) => typeof id === "string")) {
+		throw new Error("invalid_members_response");
+	}
+	return { deviceIds: body.device_ids, truncated: body.truncated !== false };
+}

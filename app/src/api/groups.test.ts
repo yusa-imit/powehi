@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addMember, createGroup, listPendingRemovals, removeMember } from "./groups";
+import { addMember, createGroup, listMembers, listPendingRemovals, removeMember } from "./groups";
 
 const fetchMock = vi.fn<typeof fetch>();
 beforeEach(() => {
@@ -163,5 +163,66 @@ describe("listPendingRemovals", () => {
 	it("rejects path-traversal groupId without fetch", async () => {
 		await expect(listPendingRemovals(TOKEN, "../admin")).rejects.toThrow("invalid_group_id");
 		expect(fetchMock).not.toHaveBeenCalled();
+	});
+});
+
+// ── listMembers ──────────────────────────────────────────────────────────────
+
+describe("listMembers", () => {
+	it("gets device_ids and truncated from correct path", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp({ device_ids: [DEVICE_ID], truncated: false }, 200));
+
+		const result = await listMembers(TOKEN, GROUP_ID);
+
+		const [url, init] = fetchMock.mock.calls[0];
+		expect(url).toBe(`/v1/groups/${GROUP_ID}/members`);
+		expect(init?.method).toBe("GET");
+		expect(init?.headers).toMatchObject({ Authorization: `Bearer ${TOKEN}` });
+		expect(result).toEqual({ deviceIds: [DEVICE_ID], truncated: false });
+	});
+
+	it("returns truncated: true when the response is a prefix", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp({ device_ids: [DEVICE_ID], truncated: true }, 200));
+		await expect(listMembers(TOKEN, GROUP_ID)).resolves.toEqual({
+			deviceIds: [DEVICE_ID],
+			truncated: true,
+		});
+	});
+
+	it("throws unauthorized when caller is not a member", async () => {
+		fetchMock.mockResolvedValueOnce(
+			new Response(JSON.stringify({ code: "unauthorized" }), { status: 401 }),
+		);
+		await expect(listMembers(TOKEN, GROUP_ID)).rejects.toThrow("unauthorized");
+	});
+
+	it("rejects non-UUID groupId without fetch", async () => {
+		await expect(listMembers(TOKEN, "not-a-uuid")).rejects.toThrow("invalid_group_id");
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("rejects path-traversal groupId without fetch", async () => {
+		await expect(listMembers(TOKEN, "../admin")).rejects.toThrow("invalid_group_id");
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("rejects a response whose device_ids is missing or not a string array (fail-safe: caller then skips the cross-check, same as any other fetch failure — never silently trusts a malformed shape)", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp({ truncated: false }, 200));
+		await expect(listMembers(TOKEN, GROUP_ID)).rejects.toThrow("invalid_members_response");
+	});
+
+	it("rejects a response whose device_ids contains a non-string element", async () => {
+		fetchMock.mockResolvedValueOnce(
+			jsonResp({ device_ids: [DEVICE_ID, 1], truncated: false }, 200),
+		);
+		await expect(listMembers(TOKEN, GROUP_ID)).rejects.toThrow("invalid_members_response");
+	});
+
+	it("defaults truncated to true (safe direction) when the field is missing, rather than false", async () => {
+		fetchMock.mockResolvedValueOnce(jsonResp({ device_ids: [DEVICE_ID] }, 200));
+		await expect(listMembers(TOKEN, GROUP_ID)).resolves.toEqual({
+			deviceIds: [DEVICE_ID],
+			truncated: true,
+		});
 	});
 });
