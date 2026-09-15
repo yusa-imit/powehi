@@ -67,12 +67,26 @@ impl GroupRepository for PgGroupRepository {
         // every future call for this group.
         let epoch_i64 = i64::try_from(group.epoch.0)
             .map_err(|_| DomainError::Internal("epoch exceeds representable range".into()))?;
+        // `WHERE groups.epoch <= EXCLUDED.epoch` is a monotonic-epoch guard,
+        // not a CAS (no caller-supplied `expected` to compare against — this
+        // is not `advance_epoch`'s primitive and MUST NOT be used to accept
+        // an MLS Commit). It exists purely to make an epoch *downgrade*
+        // structurally impossible at the DB layer: a caller building a
+        // stale/racy `Group` value can never regress a row that has already
+        // moved further via `advance_epoch`'s CAS. When the guard is false
+        // the whole `DO UPDATE` is skipped by Postgres (no column, including
+        // `home_region`, is touched) — same "existing row is either fully
+        // updated or fully left alone" shape as every other upsert in this
+        // file. `<=`, not `<`: an equal-epoch call still applies (rewrites
+        // `home_region` too) — this only blocks strict regression, it does
+        // not make `save` a no-op whenever the epoch merely fails to advance.
         sqlx::query(
             "INSERT INTO groups (id, home_region, epoch, created_at)
              VALUES ($1, $2, $3, $4)
              ON CONFLICT (id) DO UPDATE
                SET home_region = EXCLUDED.home_region,
-                   epoch       = EXCLUDED.epoch",
+                   epoch       = EXCLUDED.epoch
+               WHERE groups.epoch <= EXCLUDED.epoch",
         )
         .bind(group.id.as_uuid())
         .bind(group.home_region.as_str())

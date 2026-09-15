@@ -8,6 +8,27 @@ use powehi_domain::{
 
 #[async_trait]
 pub trait GroupRepository: Send + Sync {
+    /// Upsert a group's `home_region` and `epoch`.
+    ///
+    /// NOT the primitive for accepting an MLS Commit — that is
+    /// [`GroupRepository::advance_epoch`]'s compare-and-swap (directly, or
+    /// through `CommitLedger::commit_epoch_and_save`), which is what the
+    /// real commit-ingest path actually uses. `save` has no caller-supplied
+    /// `expected` epoch to race against, so it cannot arbitrate between two
+    /// concurrent writers the way a CAS can.
+    ///
+    /// Implementors MUST still guard against *regressing* a stored epoch:
+    /// a `save` call carrying a lower epoch than what is currently stored
+    /// (e.g. built from a stale in-memory `Group` snapshot) must leave the
+    /// existing row untouched — including `home_region` — rather than
+    /// downgrading it, mirroring how [`GroupRepository::create_if_absent`]
+    /// can never reset an existing group's fields. This makes `save`
+    /// monotonic-safe against epoch regression, but it is still a full
+    /// upsert (not a no-op) whenever the incoming epoch is greater than OR
+    /// EQUAL TO the stored one: an equal-epoch call still rewrites
+    /// `home_region`, so `save` remains a live home-region-repoint
+    /// primitive for any caller that happens to pass a non-decreasing
+    /// epoch — it is not inert.
     async fn save(&self, group: &Group) -> Result<(), DomainError>;
     /// Atomically advance `group_id`'s epoch by exactly 1, iff its
     /// currently-stored epoch equals `expected`.
@@ -35,10 +56,11 @@ pub trait GroupRepository: Send + Sync {
     /// existed — in which case no column of the existing row is modified.
     ///
     /// This is the client-facing creation primitive. Unlike
-    /// [`GroupRepository::save`] (a destructive upsert, still needed to persist
-    /// an epoch advance on commit), it can never reset an existing group's
-    /// `epoch`, `home_region` or `created_at`, so a caller that supplies another
-    /// group's id cannot downgrade or hijack it.
+    /// [`GroupRepository::save`] (an upsert that may still touch an existing
+    /// row's `home_region`/`epoch`, monotonic-epoch-guarded but not a full
+    /// CAS), `create_if_absent` can never reset an existing group's `epoch`,
+    /// `home_region` or `created_at` at all, so a caller that supplies
+    /// another group's id cannot downgrade or hijack it.
     async fn create_if_absent(&self, group: &Group) -> Result<bool, DomainError>;
     /// Atomically create a group and add `creator` as its sole initial member
     /// in a single transaction.

@@ -9,6 +9,9 @@
 //!   - TTL enforcement: expired envelopes are filtered at the DB layer.
 //!   - `add_member` ON CONFLICT DO NOTHING idempotency.
 //!   - `create_if_absent` never overwrites an existing group row.
+//!   - `GroupRepository::save` (cycle 495): the `ON CONFLICT DO UPDATE`
+//!     upsert can never downgrade an existing group's stored epoch, and
+//!     forward-progress saves still apply normally.
 //!   - `server_config` round-trip and first-boot race convergence (DO NOTHING).
 //!   - `PgLeaderLock` advisory-lock mutual exclusion, distinct-key independence,
 //!     and Drop-without-release still frees the lock (moved from powehi-r2 cycle 373).
@@ -1105,6 +1108,101 @@ async fn create_if_absent_does_not_overwrite_an_existing_group() {
         .await
         .expect("count group rows");
     assert_eq!(count, 1, "exactly one group row must exist");
+}
+
+/// `save`'s `ON CONFLICT DO UPDATE` is not a CAS (no `expected` epoch to
+/// race against — `advance_epoch`/`commit_epoch_and_save` are the only safe
+/// primitives for accepting a Commit). It must still be monotonic-safe: a
+/// call carrying a lower epoch than what is already stored (e.g. built from
+/// a stale in-memory snapshot) must leave the existing row completely
+/// untouched, not silently regress it — the same "existing row is either
+/// fully updated or fully left alone" contract `create_if_absent` gives for
+/// the creation case.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn save_never_downgrades_an_existing_groups_epoch() {
+    let (_c, pool) = setup().await;
+    let repo = PgGroupRepository::new(pool.clone());
+
+    let group_id = GroupId::from(Uuid::new_v4());
+    let created_at = Utc::now();
+    let advanced = Group {
+        id: group_id.clone(),
+        home_region: RegionId::new("eu-central-1"),
+        epoch: Epoch(9),
+        created_at,
+    };
+    repo.save(&advanced).await.expect("initial save");
+
+    // A caller racing against a concurrent `advance_epoch` CAS, or replaying
+    // a stale cached `Group`, must not be able to walk the stored epoch
+    // backwards via `save`.
+    let stale_view = Group {
+        id: group_id.clone(),
+        home_region: RegionId::new("us-east-1"),
+        epoch: Epoch(3),
+        created_at,
+    };
+    repo.save(&stale_view).await.expect("stale save");
+
+    let after = repo
+        .find_by_id(&group_id)
+        .await
+        .expect("find_by_id")
+        .expect("group row must still exist");
+    assert_eq!(
+        after.epoch,
+        Epoch(9),
+        "a lower-epoch save must never downgrade the stored epoch"
+    );
+    assert_eq!(
+        after.home_region.as_str(),
+        "eu-central-1",
+        "the WHERE guard skips the entire UPDATE, so home_region must also \
+         stay unchanged when the epoch would have regressed"
+    );
+
+    // The guard is `<=`, not `<`: an EQUAL epoch is not a regression, so it
+    // must still fully apply (including home_region) — `save` is a live
+    // home-region-repoint primitive for any non-decreasing epoch, not an
+    // inert no-op whenever the epoch merely fails to advance.
+    let same_epoch_new_region = Group {
+        id: group_id.clone(),
+        home_region: RegionId::new("ap-southeast-1"),
+        epoch: Epoch(9),
+        created_at,
+    };
+    repo.save(&same_epoch_new_region)
+        .await
+        .expect("equal-epoch save");
+    let after_equal = repo
+        .find_by_id(&group_id)
+        .await
+        .expect("find_by_id")
+        .expect("group row must still exist");
+    assert_eq!(
+        after_equal.home_region.as_str(),
+        "ap-southeast-1",
+        "an equal-epoch save is not a regression and must still apply"
+    );
+    assert_eq!(after_equal.epoch, Epoch(9));
+
+    // A save carrying an epoch that has genuinely advanced must still apply
+    // normally — the guard blocks regression only, not forward progress.
+    let advanced_further = Group {
+        id: group_id.clone(),
+        home_region: RegionId::new("ap-northeast-1"),
+        epoch: Epoch(12),
+        created_at,
+    };
+    repo.save(&advanced_further).await.expect("forward save");
+    let after_forward = repo
+        .find_by_id(&group_id)
+        .await
+        .expect("find_by_id")
+        .expect("group row must still exist");
+    assert_eq!(after_forward.epoch, Epoch(12));
+    assert_eq!(after_forward.home_region.as_str(), "ap-northeast-1");
 }
 
 /// `advance_epoch` is the CAS primitive that `forward_commit`/`send_commit`
