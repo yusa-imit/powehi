@@ -57,8 +57,12 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum InviteCommand {
-    /// Create an invite link.
-    Create,
+    /// Create an invite link; with --wait, then wait for the peer's Welcome and join.
+    Create {
+        /// Seconds to wait for the peer to redeem and send the Welcome (0 = do not wait).
+        #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u32).range(0..=900))]
+        wait: u32,
+    },
     /// Redeem an invite link (read from stdin, not argv).
     Redeem,
 }
@@ -76,7 +80,7 @@ impl Command {
             Command::Status => "status",
             Command::Register => "register",
             Command::Login => "login",
-            Command::Invite(InviteCommand::Create) => "invite create",
+            Command::Invite(InviteCommand::Create { .. }) => "invite create",
             Command::Invite(InviteCommand::Redeem) => "invite redeem",
             Command::Send(_) => "send",
             Command::Inbox => "inbox",
@@ -180,6 +184,15 @@ mod tests {
         assert!(parse(&["send", "c1"]).is_ok());
         assert!(parse(&["send", "c1", "hello body"]).is_err());
         assert!(parse(&["send"]).is_err());
+    }
+
+    #[test]
+    fn invite_create_wait_is_bounded_and_redeem_takes_no_link_argument() {
+        assert!(parse(&["invite", "create"]).is_ok());
+        assert!(parse(&["invite", "create", "--wait", "900"]).is_ok());
+        assert!(parse(&["invite", "create", "--wait", "901"]).is_err());
+        assert!(parse(&["invite", "redeem"]).is_ok());
+        assert!(parse(&["invite", "redeem", "abc.def"]).is_err());
     }
 
     #[test]

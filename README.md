@@ -72,8 +72,8 @@ Testing standards and what gate applies to which layer: `.claude/rules/testing-c
 ## CLI client (`powehi`)
 
 The primary client is the terminal client in `crates/client/powehi-cli` (prd.md §7A).
-`powehi status`, `powehi register` and `powehi login` are functional; the other subcommands
-parse but report "not implemented yet".
+`powehi status`, `register`, `login` and `invite create` / `invite redeem` are functional; the
+other subcommands parse but report "not implemented yet".
 
 ```bash
 cargo run -p powehi-cli -- --server http://localhost:8080 status
@@ -87,6 +87,13 @@ Passwords are never accepted as arguments and message bodies are read from stdin
 shows a 24-word recovery phrase once on the terminal (not stdout) and stores only keys derived
 from it, encrypted. The session token lives in memory only; every command that needs one logs in
 again.
+
+Starting a 1:1 conversation: `powehi invite create [--wait <secs>]` prints a link
+`<server>/i/connect#<code>.<sha256 of the pinned KeyPackage>`; the peer pipes it to
+`powehi invite redeem` (stdin, never argv). The redeemer verifies the KeyPackage against the hash
+in the link, creates the MLS group and sends the Welcome; with `--wait` the inviter polls for it
+and joins (otherwise the join happens when `inbox` lands). Each conversation is a `conv-<group id>`
+record in the profile store.
 
 The library contains an encrypted profile store (`powehi_cli::store`, Unix only): AES-256-GCM
 records under `<data-dir>/powehi/<profile>/` (dir `0700`, files `0600`), keyed from the OPAQUE

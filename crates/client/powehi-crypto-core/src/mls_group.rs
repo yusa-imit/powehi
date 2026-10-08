@@ -1494,6 +1494,82 @@ pub fn merge_inspected_commit(
     Ok(group.epoch().as_u64())
 }
 
+/// [`add_member`] for a KeyPackage that arrives as serialized `MlsMessageOut` bytes (invite
+/// links, KeyPackage Service). The bytes are deserialized and signature-validated before use.
+pub fn add_member_from_bytes(
+    group: &mut MlsGroup,
+    signer: &SignatureKeyPair,
+    key_package_bytes: &[u8],
+    provider: &impl OpenMlsProvider,
+) -> Result<Vec<u8>, MlsError> {
+    let msg =
+        MlsMessageIn::tls_deserialize_exact(key_package_bytes).map_err(|_| MlsError::Codec)?;
+    let MlsMessageBodyIn::KeyPackage(kp_in) = msg.extract() else {
+        return Err(MlsError::Codec);
+    };
+    let kp = kp_in
+        .validate(provider.crypto(), ProtocolVersion::Mls10)
+        .map_err(|_| MlsError::KeyPackage)?;
+    add_member(group, signer, kp, provider)
+}
+
+/// Which of this device's own KeyPackages a `Welcome` consumes, and the ML-KEM encapsulation
+/// key that package published (prd.md §5.3 Phase B).
+pub struct WelcomePqBinding {
+    /// RFC 9420 §5.2 KeyPackageRef the Welcome names for this device.
+    pub key_package_ref: Vec<u8>,
+    /// Encapsulation key from the stored KeyPackage's `0xF001` extension.
+    pub encap_key: Vec<u8>,
+}
+
+/// Finds the Welcome's secrets entry addressed to a KeyPackage whose private bundle `provider`
+/// still holds, and returns its ref and published encapsulation key.
+///
+/// Call BEFORE [`join_group`]: joining consumes (deletes) the KeyPackage bundle. The ek is read
+/// from the locally stored bundle, never from the Welcome, so a sender cannot choose it.
+/// Errors with [`MlsError::Membership`] when no entry matches a stored KeyPackage, and
+/// [`MlsError::KeyPackage`] when the stored package carries no well-formed PQ extension.
+pub fn welcome_pq_binding(
+    welcome_bytes: &[u8],
+    provider: &impl OpenMlsProvider,
+) -> Result<WelcomePqBinding, MlsError> {
+    use openmls_traits::storage::StorageProvider as _;
+    let message =
+        MlsMessageIn::tls_deserialize_exact(welcome_bytes).map_err(|_| MlsError::Codec)?;
+    let MlsMessageBodyIn::Welcome(welcome) = message.extract() else {
+        return Err(MlsError::Codec);
+    };
+    for secrets in welcome.secrets() {
+        let key_package_ref = secrets.new_member();
+        let stored: Option<KeyPackageBundle> = provider
+            .storage()
+            .key_package(&key_package_ref)
+            .map_err(|_| MlsError::Membership)?;
+        let Some(bundle) = stored else { continue };
+        let ext = bundle
+            .key_package()
+            .extensions()
+            .unknown(POWEHI_PQ_KEM_EXT_TYPE)
+            .ok_or(MlsError::KeyPackage)?;
+        if ext.0.len() != PQ_EXT_PAYLOAD_LEN {
+            return Err(MlsError::KeyPackage);
+        }
+        return Ok(WelcomePqBinding {
+            key_package_ref: key_package_ref.as_slice().to_vec(),
+            encap_key: ext.0[..PQ_EXT_ENCAP_KEY_LEN].to_vec(),
+        });
+    }
+    Err(MlsError::Membership)
+}
+
+/// True when `group` is exactly a freshly formed pair: two members at epoch 1 (the shape
+/// `add_member` produces from a one-member group). Callers joining a 1:1 conversation MUST
+/// check this before trusting a Welcome: its sender may have added further members, and the
+/// application (not MLS) owns membership policy (RFC 9420 §5.3.1).
+pub fn is_fresh_pair(group: &MlsGroup) -> bool {
+    group.epoch().as_u64() == 1 && group.members().count() == 2
+}
+
 /// Join a group from a serialized `Welcome` message produced by [`add_member`].
 pub fn join_group(
     welcome_bytes: &[u8],
@@ -1698,6 +1774,91 @@ mod tests {
             MlsError::OwnCommitPending.to_string(),
             "mls own commit pending error"
         );
+    }
+
+    /// The binding names the consumed KeyPackage and its published ek, read from local
+    /// storage before the join; a Welcome for a package we never held is rejected.
+    #[test]
+    fn test_welcome_pq_binding_matches_stored_package_and_precedes_join() {
+        let (a_prov, b_prov, c_prov) = (
+            OpenMlsRustCrypto::default(),
+            OpenMlsRustCrypto::default(),
+            OpenMlsRustCrypto::default(),
+        );
+        let alice = generate_identity(b"alice", &a_prov).unwrap();
+        let bob = generate_identity(b"bob", &b_prov).unwrap();
+        let pq = generate_pq_key_package(&bob, &b_prov).unwrap();
+        let mut group = create_group(&alice, &a_prov).unwrap();
+        let welcome =
+            add_member_from_bytes(&mut group, &alice.signer, &pq.key_package, &a_prov).unwrap();
+
+        let binding = welcome_pq_binding(&welcome, &b_prov).unwrap();
+        assert_eq!(binding.key_package_ref, pq.key_package_ref);
+        assert_eq!(binding.encap_key, pq.encap_key);
+        // A provider that never held the package cannot claim the Welcome.
+        assert!(matches!(
+            welcome_pq_binding(&welcome, &c_prov),
+            Err(MlsError::Membership)
+        ));
+        assert!(matches!(
+            welcome_pq_binding(&[1, 2, 3], &b_prov),
+            Err(MlsError::Codec)
+        ));
+        // Joining consumes the bundle, so the binding must be read first.
+        let joined = join_group(&welcome, &b_prov).unwrap();
+        assert!(is_fresh_pair(&joined));
+        assert!(is_fresh_pair(&group));
+        assert!(welcome_pq_binding(&welcome, &b_prov).is_err());
+    }
+
+    /// A Welcome that also seats a third (ghost) member is not a fresh pair.
+    #[test]
+    fn test_is_fresh_pair_rejects_a_ghost_member() {
+        let (a, b, c) = (
+            OpenMlsRustCrypto::default(),
+            OpenMlsRustCrypto::default(),
+            OpenMlsRustCrypto::default(),
+        );
+        let (alice, bob, ghost) = (
+            generate_identity(b"alice", &a).unwrap(),
+            generate_identity(b"bob", &b).unwrap(),
+            generate_identity(b"ghost", &c).unwrap(),
+        );
+        let mut group = create_group(&alice, &a).unwrap();
+        assert!(!is_fresh_pair(&group), "solo group at epoch 0");
+        let kp_b = generate_pq_key_package(&bob, &b).unwrap();
+        let kp_g = generate_pq_key_package(&ghost, &c).unwrap();
+        add_member_from_bytes(&mut group, &alice.signer, &kp_b.key_package, &a).unwrap();
+        assert!(is_fresh_pair(&group));
+        let welcome =
+            add_member_from_bytes(&mut group, &alice.signer, &kp_g.key_package, &a).unwrap();
+        assert!(!is_fresh_pair(&group), "three members at epoch 2");
+        // Bob never saw the first Welcome here; Ghost's Welcome shows the 3-member tree.
+        let joined = join_group(&welcome, &c).unwrap();
+        assert!(!is_fresh_pair(&joined));
+    }
+
+    #[test]
+    fn test_add_member_from_bytes_rejects_garbage_and_non_key_package() {
+        let prov = OpenMlsRustCrypto::default();
+        let alice = generate_identity(b"alice", &prov).unwrap();
+        let mut group = create_group(&alice, &prov).unwrap();
+        assert!(matches!(
+            add_member_from_bytes(&mut group, &alice.signer, &[0u8; 8], &prov),
+            Err(MlsError::Codec)
+        ));
+        let other = generate_identity(b"carol", &prov).unwrap();
+        let mut g2 = create_group(&other, &prov).unwrap();
+        let bob = generate_identity(b"bob", &prov).unwrap();
+        let pq = generate_pq_key_package(&bob, &prov).unwrap();
+        let welcome =
+            add_member_from_bytes(&mut g2, &other.signer, &pq.key_package, &prov).unwrap();
+        // A Welcome is a valid MLS message but not a KeyPackage.
+        assert!(matches!(
+            add_member_from_bytes(&mut group, &alice.signer, &welcome, &prov),
+            Err(MlsError::Codec)
+        ));
+        assert_eq!(group.epoch().as_u64(), 0);
     }
 
     #[test]

@@ -130,6 +130,35 @@ impl PqKeys {
     }
 }
 
+/// Looks up the decapsulation key persisted for a KeyPackageRef, if any.
+pub(crate) fn pq_key_for(
+    store: &ProfileStore,
+    key_ref: &[u8],
+) -> Result<Option<Zeroizing<Vec<u8>>>, IdentityError> {
+    let keys = PqKeys::load(store)?;
+    Ok(keys
+        .entries
+        .iter()
+        .find(|(r, _)| r[..] == *key_ref)
+        .map(|(_, dk)| dk.clone()))
+}
+
+/// KeyPackageRef of the most recently generated package (the last `pq-keys` entry).
+pub(crate) fn last_pq_ref(store: &ProfileStore) -> Result<Option<Vec<u8>>, IdentityError> {
+    Ok(PqKeys::load(store)?.entries.last().map(|(r, _)| r.to_vec()))
+}
+
+/// Drops the decapsulation key for a consumed KeyPackageRef. Absent refs are a no-op.
+pub(crate) fn prune_pq_key(store: &ProfileStore, key_ref: &[u8]) -> Result<(), IdentityError> {
+    let mut keys = PqKeys::load(store)?;
+    let before = keys.entries.len();
+    keys.entries.retain(|(r, _)| r[..] != *key_ref);
+    if keys.entries.len() != before {
+        keys.save(store)?;
+    }
+    Ok(())
+}
+
 /// The MLS provider and identity restored from the profile store.
 pub struct LocalIdentity {
     pub provider: Provider,
@@ -188,6 +217,17 @@ async fn send_bounded<R: DeserializeOwned>(
     req: reqwest::RequestBuilder,
     session: &Session,
 ) -> Result<R, IdentityError> {
+    let buf = send_raw(req, session, MAX_RESPONSE_BYTES).await?;
+    serde_json::from_slice(&buf).map_err(|_| IdentityError::BadResponse)
+}
+
+/// Sends an authenticated request and returns the body, which may be empty (204) but never
+/// exceeds `limit` bytes. Non-2xx statuses are typed errors; the bearer header is sensitive.
+pub(crate) async fn send_raw(
+    req: reqwest::RequestBuilder,
+    session: &Session,
+    limit: usize,
+) -> Result<Vec<u8>, IdentityError> {
     let bearer = session.bearer();
     let mut value = reqwest::header::HeaderValue::from_str(bearer.as_str())
         .map_err(|_| IdentityError::BadResponse)?;
@@ -202,12 +242,12 @@ async fn send_bounded<R: DeserializeOwned>(
     }
     let mut buf = Vec::new();
     while let Some(chunk) = resp.chunk().await.map_err(|_| IdentityError::Unreachable)? {
-        if buf.len() + chunk.len() > MAX_RESPONSE_BYTES {
+        if buf.len() + chunk.len() > limit {
             return Err(IdentityError::BadResponse);
         }
         buf.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&buf).map_err(|_| IdentityError::BadResponse)
+    Ok(buf)
 }
 
 fn kp_url(server: &Url, session: &Session, suffix: &str) -> Result<Url, IdentityError> {
@@ -229,7 +269,7 @@ pub async fn server_count(
 
 /// Generates `n` PQ KeyPackages, persists their private halves, and returns the public bytes.
 /// Nothing is uploaded here; callers upload only after this returns.
-fn generate_and_persist(
+pub(crate) fn generate_and_persist(
     store: &ProfileStore,
     local: &mut LocalIdentity,
     n: usize,
