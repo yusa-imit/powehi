@@ -1361,6 +1361,9 @@ STABILIZATION follow-ups and shared crypto-core/server items, not for web featur
      unconsumed `RemovalRequired` WS event; `key_packages.device_id` FK
      doc drift; `GroupRepository::save` blind `ON CONFLICT DO UPDATE`.
 
+## Cycle 505 (STABILIZATION)
+CI green; audit/deny/clippy clean; full workspace tests pass. Added `count_key_packages_malformed_device_id_returns_400` (test gap). Issue #10 already fixed by PR #11. Phase 7.1 remains the next FEATURE item.
+
 ## Archive index
 Cycles 20-277: `.claude/memory/archive/project-context-cycles-20-277.md`
 Cycles 279-319 (+cyclelog): `.claude/memory/archive/project-context-cycles-279-319-and-cyclelog.md`

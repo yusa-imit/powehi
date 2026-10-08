@@ -3607,6 +3607,22 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
+    #[tokio::test]
+    async fn count_key_packages_malformed_device_id_returns_400() {
+        let resp = key_package_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/key-packages/not-a-uuid/count")
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
     // ── list_devices error-path tests ─────────────────────────────────────────
 
     struct MockAuthDeviceListInternalError;
