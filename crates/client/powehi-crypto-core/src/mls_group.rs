@@ -277,10 +277,10 @@ pub enum MlsError {
 /// in `wasm_exports.rs`).
 pub type OwnCommitHash = [u8; 32];
 
-/// Compute the [`OwnCommitHash`] of `commit_bytes`. `pub(crate)` so
+/// Compute the [`OwnCommitHash`] of `commit_bytes`. `pub` so
 /// `wasm_exports.rs` can hash a staged commit's bytes at stage time, before
 /// this crate's own confirm/merge step — see [`OwnCommitHash`]'s doc comment.
-pub(crate) fn hash_own_commit(commit_bytes: &[u8]) -> OwnCommitHash {
+pub fn hash_own_commit(commit_bytes: &[u8]) -> OwnCommitHash {
     Sha256::digest(commit_bytes).into()
 }
 

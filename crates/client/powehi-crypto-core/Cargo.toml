@@ -1,0 +1,49 @@
+[package]
+name = "powehi-crypto-core"
+description = "Shared pure-Rust crypto core: MLS (openmls) + OPAQUE (opaque-ke) + ML-KEM + media AEAD + recovery."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_bytes = "0.11"
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+zeroize = { workspace = true }
+# Post-quantum KEM (FIPS 203 ML-KEM-768)
+ml-kem = { workspace = true }
+# OPAQUE (RFC 9807) — pure Rust, compiles on native + wasm32. No homegrown crypto.
+opaque-ke = { workspace = true, features = ["ristretto255", "argon2", "serde", "std"] }
+argon2 = { workspace = true }
+# AES-256-GCM for client-side media encryption (prd.md §9.2, RustCrypto).
+aes-gcm = { workspace = true }
+# HKDF-SHA256 (RFC 5869) — derives the MLS Ed25519 signing key from a BIP-39 seed (§8.5).
+hkdf = { workspace = true }
+ed25519-dalek = { workspace = true }
+# BIP-39 mnemonic codes (24-word recovery phrase).
+bip39 = "2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+openmls = { workspace = true }
+openmls_rust_crypto = { workspace = true }
+openmls_basic_credential = { workspace = true }
+openmls_traits = { workspace = true }
+getrandom = { version = "0.2" }
+
+# MLS on wasm32: openmls `js` feature wires WASM-safe time/rng shims.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+openmls = { workspace = true, features = ["js"] }
+openmls_rust_crypto = { workspace = true }
+openmls_basic_credential = { workspace = true }
+openmls_traits = { workspace = true }
+
+[dev-dependencies]
+# Deterministic keygen/encap APIs for the FIPS 203 KAT test (test-only).
+ml-kem = { workspace = true, features = ["deterministic"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+proptest = { workspace = true }

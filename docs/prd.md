@@ -2344,7 +2344,7 @@ gantt
 - [ ] 데이터 거주성 검증: home_region 외부로 PII 비전송 확인
 
 #### Phase 7: CLI Client (CLI 우선, ADR-0006)
-- [ ] `powehi-crypto-core` 분리 (이동만, crypto-reviewer PASS, WASM 빌드/Vitest 유지)
+- [x] `powehi-crypto-core` 분리 (이동만, crypto-reviewer PASS, WASM 빌드/Vitest 유지)
 - [ ] 암호화 profile store (§7A.3) — 평문 바이트 디스크 미기록 테스트
 - [ ] CLI 회원가입/로그인 (OPAQUE) + KeyPackage 업로드
 - [ ] 초대 → 1:1 대화 시작 → 양방향 메시지 송수신 (`send`/`inbox`)

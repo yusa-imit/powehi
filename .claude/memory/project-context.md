@@ -43,7 +43,11 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
-## Current state (2026-10-08, cycle 504 — CI-red fix: libcrux-kem audit waiver + MinIO image move; counter said FEATURE)
+## Current state (2026-10-08, cycle 506 — Phase 7.1 done)
+
+- 7.1: kem/kem_credential/media/mls_group/opaque/recovery moved verbatim to `crates/client/powehi-crypto-core` (no wasm-bindgen/js-sys); `powehi-crypto-wasm` `pub use`s them. Only change: `hash_own_commit` pub(crate)→pub. 235 Rust tests (111 core + 124 wasm), build:wasm, Vitest 1675 green. `ci-frontend.yml` paths include core. Next: 7.2 `powehi-cli` skeleton. Cron PATH lacks `~/.cargo/bin` locally; `cargo nextest` not installed (use `cargo test`). The cycle-503 WIP is preserved on `wip/uncommitted-mls-group-worker-20261008`.
+
+## Previous state (2026-10-08, cycle 504 — CI-red fix: libcrux-kem audit waiver + MinIO image move; counter said FEATURE)
 
 - Main CI was red: `cargo audit` (RUSTSEC-2026-0330/0331, libcrux-kem 0.0.7, lockfile-only via
   hpke-rs-libcrux, same unreachability argument as the other libcrux waivers — see .cargo/audit.toml)
