@@ -104,6 +104,20 @@
 # Revisit when aws-sdk-s3 releases a version depending on lru >=0.18.2, or if Powehi ever adds S3
 # Express One Zone bucket support (re-run `grep -n LruCache::pop\|get_or_insert_mut` on the new
 # aws-sdk-s3's s3_express.rs to re-confirm pop() is still unused).
+# RUSTSEC-2026-0330 / RUSTSEC-2026-0331: libcrux-kem 0.0.7 — hybrid encapsulation from short seed
+# panics / panic on decoding short hybrid keys (availability class; 0331 is rated 8.7 high by
+# severity score, but the impact is a panic on malformed input, not key or plaintext disclosure).
+# Impact: NOT compiled into any Powehi artifact. Same root cause as the aesgcm/chacha entries
+# above: libcrux-kem is reachable only through hpke-rs's optional "libcrux" backend
+# (`hpke-rs-libcrux`), which openmls_rust_crypto 0.5.1 does not activate.
+# `cargo tree -i libcrux-kem --target all --workspace` and `-i hpke-rs-libcrux ...` (also with
+# `-e features`) print "nothing to print" — verified cycle 504. The fix (libcrux-kem >=0.0.10)
+# cannot be taken: hpke-rs-libcrux 0.6.1 pins the 0.0.7 line and is itself inactive, and a
+# `cargo update` of a lock-only crate is rejected by its parent's version requirement.
+# Revisit when openmls_rust_crypto / hpke-rs release versions on libcrux-kem >=0.0.10, or if
+# "libcrux" ever activates (the tree queries above must keep printing nothing). The PQ-enablement
+# cycle must re-open this waiver first — hybrid KEM key decoding is exactly the affected path.
+#
 ignore = [
     "RUSTSEC-2023-0071",
     "RUSTSEC-2026-0124",
@@ -117,4 +131,6 @@ ignore = [
     "RUSTSEC-2026-0211",
     "RUSTSEC-2026-0212",
     "RUSTSEC-2026-0253",
+    "RUSTSEC-2026-0330",
+    "RUSTSEC-2026-0331",
 ]
