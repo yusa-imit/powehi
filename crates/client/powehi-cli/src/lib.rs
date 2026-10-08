@@ -3,8 +3,12 @@
 //! Rules from §7A.3 that shape this crate: no secrets or message bodies in argv (no
 //! subcommand takes them as arguments), and nothing here logs content.
 
+#[cfg(unix)]
+pub mod auth;
 pub mod cli;
 pub mod profile;
+#[cfg(unix)]
+pub mod prompt;
 pub mod status;
 #[cfg(unix)]
 pub mod store;
@@ -22,6 +26,9 @@ pub enum CliError {
     NoDataDir,
     #[error("status check failed: {0}")]
     Status(#[from] status::StatusError),
+    #[cfg(unix)]
+    #[error("{0}")]
+    Auth(#[from] auth::AuthError),
     #[error("could not start the async runtime")]
     Runtime,
     #[error("`{0}` is not implemented yet")]
@@ -40,15 +47,46 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
     debug_assert!(paths.dir.starts_with(&base));
     match args.command {
         cli::Command::Status => run_status(&args.server),
+        #[cfg(unix)]
+        cli::Command::Register => run_auth(&args.server, &paths, true),
+        #[cfg(unix)]
+        cli::Command::Login => run_auth(&args.server, &paths, false),
         ref other => Err(CliError::NotImplemented(other.name())),
     }
 }
 
-fn run_status(server: &url::Url) -> Result<(), CliError> {
-    let rt = tokio::runtime::Builder::new_current_thread()
+fn runtime() -> Result<tokio::runtime::Runtime, CliError> {
+    tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|_| CliError::Runtime)?;
+        .map_err(|_| CliError::Runtime)
+}
+
+/// `register` / `login`: prompts on the TTY, talks OPAQUE to the server, prints only ids.
+#[cfg(unix)]
+fn run_auth(
+    server: &url::Url,
+    paths: &profile::ProfilePaths,
+    register: bool,
+) -> Result<(), CliError> {
+    let rt = runtime()?;
+    let client = status::http_client()?;
+    let mut prompter = prompt::TtyPrompter;
+    let session = if register {
+        rt.block_on(auth::register(&client, server, paths, &mut prompter))?
+    } else {
+        rt.block_on(auth::login(&client, server, paths, &mut prompter))?
+    };
+    println!(
+        "{} as device {}",
+        if register { "registered" } else { "logged in" },
+        session.device_id
+    );
+    Ok(())
+}
+
+fn run_status(server: &url::Url) -> Result<(), CliError> {
+    let rt = runtime()?;
     let client = status::http_client()?;
     let s = rt.block_on(status::fetch(&client, server))?;
     println!("server:  {server}");

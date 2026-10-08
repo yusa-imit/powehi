@@ -24,7 +24,7 @@ aes-gcm = { workspace = true }
 hkdf = { workspace = true }
 ed25519-dalek = { workspace = true }
 # BIP-39 mnemonic codes (24-word recovery phrase).
-bip39 = "2"
+bip39 = { version = "2", features = ["zeroize"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 openmls = { workspace = true }

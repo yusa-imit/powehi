@@ -72,8 +72,8 @@ Testing standards and what gate applies to which layer: `.claude/rules/testing-c
 ## CLI client (`powehi`)
 
 The primary client is the terminal client in `crates/client/powehi-cli` (prd.md §7A).
-Currently only `powehi status` is functional; the other subcommands parse but report
-"not implemented yet".
+`powehi status`, `powehi register` and `powehi login` are functional; the other subcommands
+parse but report "not implemented yet".
 
 ```bash
 cargo run -p powehi-cli -- --server http://localhost:8080 status
@@ -82,10 +82,15 @@ cargo run -p powehi-cli -- --server http://localhost:8080 status
 ```
 
 Passwords are never accepted as arguments and message bodies are read from stdin only.
+`register` and `login` prompt for the handle and password on the controlling terminal
+(`/dev/tty`, echo off), run OPAQUE against the server, and unlock the profile store. `register`
+shows a 24-word recovery phrase once on the terminal (not stdout) and stores only keys derived
+from it, encrypted. The session token lives in memory only; every command that needs one logs in
+again.
 
 The library contains an encrypted profile store (`powehi_cli::store`, Unix only): AES-256-GCM
 records under `<data-dir>/powehi/<profile>/` (dir `0700`, files `0600`), keyed from the OPAQUE
-`export_key` via HKDF-SHA256. No command uses it yet; `register`/`login` will.
+`export_key` via HKDF-SHA256. `register` creates it and `login` unlocks it.
 
 ## Non-negotiables
 
