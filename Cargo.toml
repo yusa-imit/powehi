@@ -17,6 +17,7 @@ members = [
     "crates/infra/powehi-config",
     "crates/infra/powehi-telemetry",
     "crates/infra/powehi-proto",
+    "crates/client/powehi-crypto-core",
     "crates/client/powehi-crypto-wasm",
     "bin/powehi-server",
 ]

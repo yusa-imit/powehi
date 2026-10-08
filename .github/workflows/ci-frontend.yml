@@ -9,12 +9,14 @@ on:
     paths:
       - 'app/**'
       - 'crates/client/powehi-crypto-wasm/**'
+      - 'crates/client/powehi-crypto-core/**'
       - '.github/workflows/ci-frontend.yml'
   pull_request:
     branches: [main]
     paths:
       - 'app/**'
       - 'crates/client/powehi-crypto-wasm/**'
+      - 'crates/client/powehi-crypto-core/**'
       - '.github/workflows/ci-frontend.yml'
 
 concurrency:

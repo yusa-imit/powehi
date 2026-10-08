@@ -8,7 +8,7 @@ unchecked item, in order. The web client (`app/`) is in maintenance: CI-red,
 below is checked. See `docs/decisions/0006-cli-first-client.md`, prd.md §7A.
 
 ## Definition of Done (in order)
-- [ ] 7.1 Extract `crates/client/powehi-crypto-core` — move `kem`,
+- [x] 7.1 Extract `crates/client/powehi-crypto-core` — move `kem`,
   `kem_credential`, `media`, `mls_group`, `opaque`, `recovery` out of
   `powehi-crypto-wasm` (pure move, no logic change, no `wasm-bindgen`/`js-sys`
   deps in the core). `powehi-crypto-wasm` re-exports them and keeps only

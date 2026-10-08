@@ -7,12 +7,9 @@
 
 use wasm_bindgen::prelude::*;
 
-pub mod kem;
-pub mod kem_credential;
-pub mod media;
-pub mod mls_group;
-pub mod opaque;
-pub mod recovery;
+// Pure crypto lives in `powehi-crypto-core` (shared with the CLI); re-exported
+// so `crate::kem::…` paths and downstream `powehi_crypto_wasm::…` users are unchanged.
+pub use powehi_crypto_core::{kem, kem_credential, media, mls_group, opaque, recovery};
 /// TEST-ONLY OPAQUE server simulation, gated behind the default-off
 /// `test-server-sim` Cargo feature. Absent from the production
 /// `wasm-pack build --target web` artifact — see the module's own doc comment.
