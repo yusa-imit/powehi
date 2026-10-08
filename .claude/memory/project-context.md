@@ -43,7 +43,11 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
-## Current state (2026-10-08, cycle 507 — Phase 7.2 done)
+## Current state (2026-10-08, cycle 509 — Phase 7.3 done (crypto-reviewer PASS after rework))
+
+- 7.3: `powehi_cli::store::ProfileStore` (cfg(unix)): `PHS1||nonce||AES-256-GCM`, key=HKDF-SHA256(export_key 32..64B, info `powehi-cli/profile-store/v1/record-key`), AAD=magic||record name, 0700 dir/0600 files, symlink+loose-perm rejection, atomic temp+fsync+rename, key zeroized. Not wired to a command yet (7.4 will pass the OPAQUE export_key). Next: 7.4 register/login.
+
+## Previous state (cycle 507 — Phase 7.2 done)
 
 - 7.2: `crates/client/powehi-cli` (lib `powehi_cli` + bin `powehi`): clap surface per §7A.2 (status/register/login/invite/send/inbox/chat/verify), global `--server` (http/https, no creds) / `--profile` (validated path component) / `--data-dir`; `ProfilePaths::resolve` = `<data_dir>/powehi/<profile>` (pure; 0700 creation is 7.3). `status` real (reqwest, 10s timeout, no redirects, 4KB cap; in-test TCP server); others return NotImplemented. No password/body flags (tests assert). 22 tests; security-auditor findings fixed (loopback-only http, region_id charset, abs data-dir, lowercase profiles, no_proxy); deny clean. Depends on no crypto yet. Next: 7.3.
 - Open: need-human #13 (bip39 not on approved crypto list).
@@ -1383,3 +1387,4 @@ Cycles 402-421: `.claude/memory/archive/project-context-cycles-402-421.md`
 Cycles 425-431: `.claude/memory/archive/project-context-cycles-425-431.md`
 Cycles 443-452: `.claude/memory/archive/project-context-cycles-443-452.md`
 Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
+- Open: need-human #16 (store rollback\/delete, DEK\/KEK, owner-uid check, key canary, `&mut self` on put\/remove) — settle before 7.5.

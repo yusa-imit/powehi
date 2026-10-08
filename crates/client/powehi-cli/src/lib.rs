@@ -6,6 +6,8 @@
 pub mod cli;
 pub mod profile;
 pub mod status;
+#[cfg(unix)]
+pub mod store;
 
 use std::path::PathBuf;
 

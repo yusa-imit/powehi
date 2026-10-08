@@ -21,7 +21,7 @@ below is checked. See `docs/decisions/0006-cli-first-client.md`, prd.md §7A.
   `powehi status` hits `GET /health` and `GET /v1/region/detect`. Unit tests
   against an in-test HTTP server. README gains a CLI section (only for what
   the CLI actually does at that commit).
-- [ ] 7.3 Encrypted profile store — AES-256-GCM per record, key =
+- [x] 7.3 Encrypted profile store — AES-256-GCM per record, key =
   HKDF-SHA256(OPAQUE `export_key`, CLI-specific info label), dir `0700` / files
   `0600`, atomic writes, zeroize on drop. Tests: round trip, wrong key → typed
   error, tampered file → typed error, no plaintext bytes on disk. crypto-reviewer.
