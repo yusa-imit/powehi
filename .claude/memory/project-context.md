@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 512 (2026-10-09, FEATURE) — Phase 7.5 done (identity + KeyPackages)
+- `powehi_cli::identity`: `LocalIdentity::load` restores the phrase-derived Ed25519 identity (`mls-signing-key` + account label) and the openmls provider (`mls-provider` record = export_provider_state, generation bumped per save); `pq-keys` record = `ver||count||(sha256(ek)||dk)*` (cap 1024). `ensure_key_packages` (called after register/login): GET count, if < 10 top up to 50 in batches of 10; private halves persisted BEFORE upload. Core additions: `generate_identity_from_seed`, `generate_pq_key_package` (web-identical PQ payload). Not yet: consuming pq-keys on Welcome join (7.6), pruning keys of consumed KPs.
+
 ## Cycle 511 (2026-10-09, FEATURE) — Phase 7.4 done (register/login)
 - `powehi_cli::auth` (register/login via core OPAQUE) + `prompt` (TTY `/dev/tty`, echo off, phrase shown on tty only, tcflush, ISIG off). Register opens the store with the registration export_key (== login export_key), saves `account` + `mls-signing-key` records BEFORE showing the phrase, then logs in; a later failure leaves a loginable profile. Session token memory-only. MLS label = SHA256(phrase)[..16] (web-compatible); recovery_pubkey from recovery-auth domain. bip39 `zeroize` feature enabled in core.
 - crypto-reviewer first pass FAIL (stranded account, phrase zeroize, missing invariant tests) -> reworked. Opened need-human #19 (Unicode normalization of handle/password, web+CLI). Next: 7.5 identity + KeyPackages (signing key already stored as `mls-signing-key`; Ctrl-C during password prompt leaves echo off in non-interactive parents — known minor).
