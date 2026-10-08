@@ -123,9 +123,29 @@ export type MlsPqEncapKeyResult = { encapKey: Uint8Array; signature: Uint8Array 
 //     ambiguous whether the WASM call actually resolved before the
 //     timeout fired — remains OPEN and is deliberately NOT covered by
 //     that compensation.
-// (e) AN INCOMING COMMIT SILENTLY DISCARDS A LOCALLY STAGED COMMIT — OPEN.
-//     No error/flag/return-value signal exists for this; the next confirm
-//     just fails with `NoPendingCommit`.
+// (e) AN INCOMING COMMIT SILENTLY DISCARDS A LOCALLY STAGED COMMIT —
+//     PARTIALLY CLOSED (detection only). `mlsProcessCommit` now returns
+//     `discardedOwnPendingCommit` on `MlsProcessCommitResult`, true iff
+//     merging the incoming Commit tore out a commit this device had staged
+//     and not yet confirmed. `useMessages.ts` deliberately does not read
+//     it — no production Remove flow exists yet to react to it. The next
+//     confirm STILL fails with `NoPendingCommit`: the new field is
+//     additive, not a replacement for that failure. Fully closing this
+//     item requires a consumer that RE-STAGES the caller's own operation
+//     when it observes `discardedOwnPendingCommit === true`, and that
+//     re-stage must happen inside the SAME `withMlsCommitLock` acquisition
+//     that observed the discard — the lock is non-reentrant.
+//     Re-staging has two further requirements, neither optional: (i) MLS
+//     leaf indices are epoch-relative, so before re-staging the consumer
+//     MUST re-resolve the removal target against the NEW epoch's roster
+//     (`mlsGroupMembers`) — reusing the leaf index captured before the
+//     merge would evict a DIFFERENT member (RFC 9420 §12.1.1 fills the
+//     leftmost blank leaf on Add, §12.3 applies Remove before Add within
+//     one Commit, so indices get reused). (ii) The consumer MUST check
+//     `mlsGroupIsActive` BEFORE reacting: if the incoming commit was the
+//     one that evicted THIS device, the flag still reads `true` but the
+//     group is inactive and re-staging is impossible — the signal is
+//     unactionable on that path.
 // (f) NO MUTUAL EXCLUSION between the 3s `useMessages.ts` poll loop and
 //     any UI-initiated MLS flow — OPEN, no lock primitive exists anywhere
 //     in `app/src`. Combined with (e): a poll tick landing between a UI
@@ -207,7 +227,20 @@ export type MlsRemoveStageResult = { commit: Uint8Array; priorEpoch: number };
 // newEpoch is the receiver's LOCAL post-merge MLS epoch, NOT the server's
 // `groups.epoch` counter — the two diverge from the first member add, see
 // the block above.
-export type MlsProcessCommitResult = { newEpoch: number };
+//
+// discardedOwnPendingCommit is true iff merging this incoming Commit tore
+// out a commit THIS device had itself staged via `mlsRemoveMemberStage` and
+// had not yet confirmed: openmls's `merge_staged_commit` ends by calling
+// `clear_pending_commit`, so a peer's Commit winning the race silently wipes
+// this device's own pending stage as a side effect of the merge. This is a
+// DETECTION signal, not an error — losing a commit race and having the
+// loser's stage discarded is the CORRECT MLS resolution (RFC 9420's single-
+// committer-per-epoch rule), so the call still resolves Ok either way. It is
+// currently INTENTIONALLY UNREAD by every caller: `mlsRemoveMemberStage` has
+// no production caller yet, so there is no production Remove flow that could
+// react to losing its own staged commit — see item (e) in the module-top
+// STATUS block above for what closing that loop would require.
+export type MlsProcessCommitResult = { newEpoch: number; discardedOwnPendingCommit: boolean };
 // `MLS_OWN_COMMIT_ERROR` and `MLS_OWN_COMMIT_PENDING_ERROR` (see the STATUS
 // block above) are defined in, and MUST be imported from,
 // `./cryptoWorkerErrors` — deliberately NOT re-exported from this file. That
@@ -258,6 +291,17 @@ export type MlsInspectCommitResult = {
 	selfRemoved: boolean;
 	priorEpoch: number;
 };
+// The two-phase inspect/confirm/discard trio's merge step returns only
+// newEpoch — split out from `MlsProcessCommitResult` NOT because the
+// underlying merge hazard differs, but solely because the one-shot
+// `mls_process_commit` above now ALSO reports `discardedOwnPendingCommit`
+// while `mls_confirm_incoming_commit` does not. openmls's
+// `clear_pending_commit` fires identically on this trio's merge
+// (`merge_inspected_commit`) and could tear out a locally staged commit the
+// same way; it simply is not surfaced here yet. Since the inspect/confirm/
+// discard trio has no production caller (see `mlsInspectCommit`'s STATUS
+// note below), nothing is lost by that asymmetry today.
+export type MlsConfirmIncomingCommitResult = { newEpoch: number };
 export type MlsWelcomeResult = { welcome: Uint8Array };
 export type MlsCiphertextResult = { ciphertext: Uint8Array };
 export type MlsPlaintextResult = { plaintext: Uint8Array };
@@ -365,7 +409,7 @@ interface WasmModule {
 		identityId: string,
 		groupId: string,
 		commitHandle: string,
-	) => MlsProcessCommitResult;
+	) => MlsConfirmIncomingCommitResult;
 	mls_discard_incoming_commit: (identityId: string, groupId: string, commitHandle: string) => void;
 	mls_join_group: (identityId: string, welcome: Uint8Array) => MlsGroupResult;
 	mls_encrypt: (identityId: string, groupId: string, plaintext: Uint8Array) => MlsCiphertextResult;
@@ -907,11 +951,15 @@ const api = {
 	 * bystander's stays behind, and traffic at the new epoch stops decrypting
 	 * for them.
 	 *
-	 * Returns { newEpoch } — the receiver's LOCAL post-merge MLS epoch, see
-	 * `MlsProcessCommitResult`'s doc comment for what it is (and is NOT)
-	 * relative to the server's `groups.epoch` counter. Rejects on malformed
-	 * commit bytes, a non-Commit message (e.g. an application-message
-	 * ciphertext), a failed merge, or an epoch beyond
+	 * Returns { newEpoch, discardedOwnPendingCommit } — see
+	 * `MlsProcessCommitResult`'s doc comment for what newEpoch is (and is NOT)
+	 * relative to the server's `groups.epoch` counter, and for the full
+	 * account of discardedOwnPendingCommit: true iff merging this Commit tore
+	 * out a commit this device had itself staged and not yet confirmed. It is
+	 * not an error — losing a commit race is the correct MLS outcome — and no
+	 * caller reads it yet, since `mlsRemoveMemberStage` has no production
+	 * caller. Rejects on malformed commit bytes, a non-Commit message (e.g. an
+	 * application-message ciphertext), a failed merge, or an epoch beyond
 	 * `Number.MAX_SAFE_INTEGER`.
 	 *
 	 * Misrouting a non-Commit envelope here (e.g. an Application-type
@@ -998,7 +1046,7 @@ const api = {
 		identityId: string,
 		groupId: string,
 		commitHandle: string,
-	): Promise<MlsProcessCommitResult> {
+	): Promise<MlsConfirmIncomingCommitResult> {
 		const wasm = await getWasm();
 		return wasm.mls_confirm_incoming_commit(identityId, groupId, commitHandle);
 	},

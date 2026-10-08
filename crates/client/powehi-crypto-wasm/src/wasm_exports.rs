@@ -69,7 +69,7 @@ use crate::mls_group::{
     encrypt_message, generate_identity, generate_identity_from_keypair,
     generate_key_package_with_pq_ext, group_is_active, inspect_incoming_commit, join_group,
     merge_inspected_commit, process_incoming_commit, stage_remove_member, Identity,
-    POWEHI_PQ_KEM_EXT_TYPE, PQ_EXT_ENCAP_KEY_LEN, PQ_EXT_PAYLOAD_LEN,
+    ProcessedCommit, POWEHI_PQ_KEM_EXT_TYPE, PQ_EXT_ENCAP_KEY_LEN, PQ_EXT_PAYLOAD_LEN,
 };
 use crate::opaque::{self, DefaultCipherSuite, EXPORT_KEY_LEN};
 
@@ -1301,7 +1301,8 @@ pub fn mls_remove_member_abort(identity_id: &str, group_id: &str) -> Result<(), 
 ///
 /// # Self-eviction
 /// If `commit` is the Commit that removes the CALLER'S OWN leaf, this still
-/// returns `Ok({ newEpoch })` — it does not report the eviction. openmls
+/// returns `Ok({ newEpoch, discardedOwnPendingCommit })` — it does not report
+/// the eviction itself. openmls
 /// internally flips the group to its `Inactive` state in that case; the
 /// caller is responsible for separately detecting that (e.g. via the
 /// existing `mls_group_members` export — the caller's own leaf will no
@@ -1341,6 +1342,24 @@ pub fn mls_remove_member_abort(identity_id: &str, group_id: &str) -> Result<(), 
 /// ever being wrongly promoted — but fixing it here closes the gap at its
 /// source instead of relying solely on those two downstream guards.
 ///
+/// # `discardedOwnPendingCommit`: the caller-visible report of the section above
+/// The section above describes this function's INTERNAL handling of the
+/// `pending_own_commit_hashes` cleanup a peer's merge forces. The
+/// `discardedOwnPendingCommit` field on the returned object is simply the
+/// CALLER-VISIBLE report of that exact same side effect — sourced from
+/// [`ProcessedCommit::discarded_own_pending_commit`] in `mls_group.rs`
+/// (see its doc comment for the underlying `pending_commit().is_some()`
+/// sampling and the openmls `clear_pending_commit` mechanics). It is `true`
+/// iff the merge that just happened destroyed a Remove this device had
+/// separately staged via [`mls_remove_member_stage`] and not yet confirmed.
+/// It is NOT an error signal: losing a commit race is the correct MLS
+/// resolution (see [`ProcessedCommit`]'s doc comment), so this field is
+/// `true` on an otherwise ordinary `Ok`. No JS caller reads this field
+/// today — [`mls_remove_member_stage`] itself has no production caller yet
+/// — so this is purely additive plumbing ahead of that consumer existing;
+/// see item (e) in `crypto.worker.ts`'s module-top STATUS block for the
+/// closing-the-loop plan.
+///
 /// On every ERROR path THIS CRATE CAN ACTUALLY REACH — in particular
 /// [`MlsError::OwnCommitPending`] (this device's own still-outstanding
 /// staged commit was recognised) and [`MlsError::OwnCommit`] (an
@@ -1371,10 +1390,16 @@ pub fn mls_process_commit(
     group_id: &str,
     commit: &[u8],
 ) -> Result<JsValue, JsError> {
-    let new_epoch =
+    let processed =
         mls_process_commit_inner(identity_id, group_id, commit).map_err(|e| js_err(&e))?;
-    let epoch_f64 = u64_to_f64_checked(new_epoch).map_err(js_err)?;
-    js_obj(&[("newEpoch", JsValue::from_f64(epoch_f64))])
+    let epoch_f64 = u64_to_f64_checked(processed.new_epoch).map_err(js_err)?;
+    js_obj(&[
+        ("newEpoch", JsValue::from_f64(epoch_f64)),
+        (
+            "discardedOwnPendingCommit",
+            JsValue::from_bool(processed.discarded_own_pending_commit),
+        ),
+    ])
 }
 
 /// `mls_process_commit`'s body, split out (rule: one construction path, same
@@ -1396,8 +1421,8 @@ fn mls_process_commit_inner(
     identity_id: &str,
     group_id: &str,
     commit: &[u8],
-) -> Result<u64, String> {
-    MLS_CTX.with(|ctx| -> Result<u64, String> {
+) -> Result<ProcessedCommit, String> {
+    MLS_CTX.with(|ctx| -> Result<ProcessedCommit, String> {
         let mut ctx = ctx.borrow_mut();
         let c = ctx
             .get_mut(identity_id)
@@ -1407,14 +1432,14 @@ fn mls_process_commit_inner(
             .groups
             .get_mut(group_id)
             .ok_or_else(|| "unknown mls group".to_string())?;
-        let new_epoch = process_incoming_commit(group, commit, &c.provider, last_own_commit)
+        let processed = process_incoming_commit(group, commit, &c.provider, last_own_commit)
             .map_err(|e| e.to_string())?;
         // Merge succeeded (not reached on any error path, in particular not
         // on `MlsError::OwnCommitPending`/`MlsError::OwnCommit`, both of
         // which return before this line) — see the doc comment above for why
         // the pending entry, if any, is now dangling and must be dropped.
         c.pending_own_commit_hashes.remove(group_id);
-        Ok(new_epoch)
+        Ok(processed)
     })
 }
 
@@ -5525,7 +5550,8 @@ mod tests {
                     "processing alice's peer commit must succeed even though charlie has his own \
                  commit staged (openmls silently drops charlie's stage, per \
                  test_process_incoming_commit_silently_drops_receivers_own_staged_commit)",
-                );
+                )
+                .new_epoch;
         assert_eq!(new_epoch, alice_group.epoch().as_u64());
 
         let pending_after = MLS_CTX.with(|ctx| {

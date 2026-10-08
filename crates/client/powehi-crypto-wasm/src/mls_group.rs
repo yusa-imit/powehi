@@ -674,10 +674,21 @@ pub fn add_member(
 ///   longer be left wedged in `PendingCommit` holding no commit bytes. The
 ///   `"call"`-phase timeout variant of the same shape remains OPEN.
 /// - (e) AN INCOMING COMMIT SILENTLY DISCARDS A LOCALLY STAGED COMMIT —
-///   OPEN. Pinned by
+///   PARTIALLY CLOSED (detection only). Pinned by
 ///   `test_process_incoming_commit_silently_drops_receivers_own_staged_commit`.
-///   No error, flag, or return-value signal; the next confirm just returns
-///   `NoPendingCommit`.
+///   `process_incoming_commit` now returns
+///   `ProcessedCommit::discarded_own_pending_commit`, surfaced to JS as
+///   `mls_process_commit`'s `discardedOwnPendingCommit` field — but NO
+///   CONSUMER READS IT: `stage_remove_member` still has no production
+///   caller, so nothing can yet be lost or recovered in production. This is
+///   additive, not a replacement for the existing behaviour: the next
+///   confirm still just returns `NoPendingCommit`, exactly as before. Fully
+///   closing (e) requires a consumer that re-stages the caller's own
+///   operation when it observes `discardedOwnPendingCommit === true` —
+///   which interacts with item (f)'s lock below: that re-stage must happen
+///   inside the SAME `withMlsCommitLock` acquisition that observed the
+///   discard, since the lock is non-reentrant and a second acquisition would
+///   deadlock behind the first.
 /// - (f) NO MUTUAL EXCLUSION between the 3s `useMessages.ts` poll loop and
 ///   any UI-initiated MLS flow for an ALREADY-ACTIVE group — PARTIALLY
 ///   CLOSED (cycle 501). `app/src/lib/mlsCommitLock.ts` adds a per-group,
@@ -911,6 +922,50 @@ pub fn abort_remove_member(
         .map_err(|_| MlsError::Membership)
 }
 
+/// The result of a successful [`process_incoming_commit`] call.
+///
+/// A named struct rather than a bare tuple — this module's convention (see
+/// [`StagedCommitInfo`]) is that every multi-value return gets a field name,
+/// not a positional `.0`/`.1`.
+///
+/// Derives `Debug`: several test call sites format a
+/// `Result<ProcessedCommit, MlsError>` with `{:?}` in an `assert!` failure
+/// message. Safe to derive — like [`StagedCommitInfo`], this struct holds
+/// only a public epoch counter and a boolean, never key material, ciphertext,
+/// or plaintext.
+#[derive(Debug)]
+pub struct ProcessedCommit {
+    /// The group's LOCAL MLS epoch immediately after the merge — NOT the
+    /// server's `groups.epoch` counter. Same caveat as item (a) of
+    /// [`process_incoming_commit`]'s own "Still out of scope" list; see that
+    /// item for the full divergence analysis rather than repeating it here.
+    /// Do not treat this value as authoritative against any server-side
+    /// epoch.
+    pub new_epoch: u64,
+    /// `true` iff, at the instant this call merged the incoming Commit, this
+    /// device held a locally staged, unmerged OWN commit — one produced by
+    /// an earlier [`stage_remove_member`] call this device had not yet
+    /// confirmed or aborted. Sampled from `group.pending_commit().is_some()`
+    /// immediately before the merge. Per the vendored openmls-0.8.1 source
+    /// (`src/group/mls_group/processing.rs`), `merge_staged_commit` ends by
+    /// calling `clear_pending_commit`, so whenever this flag reads `true`
+    /// that staged commit was just destroyed as a side effect of the very
+    /// call that produced this value.
+    ///
+    /// This is a DETECTION signal only, not an error: dropping the losing
+    /// side of an MLS commit race is the CORRECT protocol resolution (only
+    /// one Commit can ever win a given epoch), so `true` never turns this
+    /// function's result into `Err` — the call still returns `Ok`. Acting on
+    /// the loss (e.g. re-staging the caller's own Remove) is the consumer
+    /// loop's job, not this primitive's; see item (c) of
+    /// [`process_incoming_commit`]'s own "Still out of scope" list for the
+    /// full argument.
+    ///
+    /// `false` says nothing about any peer's state — it only means THIS
+    /// device had nothing staged at merge time.
+    pub discarded_own_pending_commit: bool,
+}
+
 /// Process a Commit produced by a peer (e.g. [`stage_remove_member`] +
 /// [`confirm_remove_member`], or a raw `add_members`/`remove_members` call)
 /// and merge it into this `group`, advancing the local epoch.
@@ -998,18 +1053,26 @@ pub fn abort_remove_member(
 ///     on `self.is_active()`, NOT `self.is_operational()` — so a commit
 ///     pending from this module's own [`stage_remove_member`] call does NOT
 ///     block this function, and openmls handles the combination without
-///     corrupting state. The consequence the WIRING follow-up must handle:
-///     the caller's OWN staged commit is SILENTLY DISCARDED by the call —
-///     e.g. a staged Remove of a compromised device can quietly evaporate
-///     without ever taking effect, and the caller's later
-///     [`confirm_remove_member`] call then returns
-///     [`MlsError::NoPendingCommit`] with no other signal that anything went
-///     wrong. See `test_process_incoming_commit_silently_drops_receivers_own_staged_commit`,
-///     which pins this exact behaviour. No guard is added here deliberately:
-///     dropping the losing side of this race is the correct MLS resolution
-///     (only one Commit per epoch can ever win); detecting the loss and
-///     re-staging the caller's own operation is the consumer loop's job, not
-///     this primitive's.
+///     corrupting state. The consequence: the caller's OWN staged commit is
+///     SILENTLY DISCARDED by the call — e.g. a staged Remove of a
+///     compromised device can quietly evaporate without ever taking effect.
+///     DETECTING this is this primitive's job now: [`ProcessedCommit`]'s
+///     `discarded_own_pending_commit` field reports exactly this condition,
+///     sampled immediately before the merge. What remains the consumer
+///     loop's job, not this primitive's, is REACTING to it (e.g. re-staging
+///     the caller's own operation) — this function performs no re-stage and
+///     adds no guard, because dropping the losing side of this race is the
+///     correct MLS resolution (only one Commit per epoch can ever win). A
+///     caller that drops the returned field on the floor sees exactly what
+///     it saw before this signal existed: the later
+///     [`confirm_remove_member`] call returns [`MlsError::NoPendingCommit`],
+///     with nothing else marking that anything went wrong. Note also the
+///     asymmetry with the two-phase pair: [`merge_inspected_commit`] has the
+///     identical `clear_pending_commit` side effect but does not (yet)
+///     surface it — a caller wired to that path instead of this one has no
+///     equivalent signal at all. See
+///     `test_process_incoming_commit_silently_drops_receivers_own_staged_commit`,
+///     which pins both the discard and the new field's report of it.
 /// (d) **No policy-inspection point IN THIS FUNCTION — accepted risk, wired
 ///     as-is.** This function still unconditionally merges ANY validly-framed
 ///     Commit: it never exposes the `StagedCommit`'s add/remove proposals or
@@ -1079,10 +1142,20 @@ pub fn process_incoming_commit(
     commit_bytes: &[u8],
     provider: &impl OpenMlsProvider,
     last_own_commit: Option<OwnCommitHash>,
-) -> Result<u64, MlsError> {
+) -> Result<ProcessedCommit, MlsError> {
     let (staged, _committer_leaf_index) =
         stage_incoming_commit(group, commit_bytes, provider, last_own_commit)?;
-    merge_inspected_commit(group, staged, provider)
+    // Sample BEFORE the merge, not after: merge_inspected_commit's call into
+    // openmls's merge_staged_commit ends by clearing any pending commit as a
+    // side effect (see ProcessedCommit::discarded_own_pending_commit above)
+    // — sampling post-merge would always observe `None`, including on the
+    // very calls this flag exists to catch.
+    let discarded_own_pending_commit = group.pending_commit().is_some();
+    let new_epoch = merge_inspected_commit(group, staged, provider)?;
+    Ok(ProcessedCommit {
+        new_epoch,
+        discarded_own_pending_commit,
+    })
 }
 
 /// The reliable self-eviction signal: `true` unless `group` has processed a
@@ -2787,7 +2860,8 @@ mod tests {
             &bob_provider,
             None,
         )
-        .expect("bob must be able to process the charlie-add commit");
+        .expect("bob must be able to process the charlie-add commit")
+        .new_epoch;
         assert_eq!(new_epoch_for_bob, alice_group.epoch().as_u64());
 
         let bob_leaf = alice_group
@@ -2807,12 +2881,21 @@ mod tests {
             .expect("staged removal commit must merge cleanly");
 
         let charlie_epoch_before = charlie_group.epoch().as_u64();
-        let returned_epoch =
+        let processed =
             process_incoming_commit(&mut charlie_group, &commit_bytes, &charlie_provider, None)
                 .expect("charlie (bystander) must be able to process alice's removal commit");
 
+        // Negative space for ProcessedCommit::discarded_own_pending_commit:
+        // charlie has nothing staged via stage_remove_member before this
+        // merge, so the signal must read false here — it must not
+        // false-positive on the ordinary receive path useMessages.ts
+        // actually runs.
+        assert!(
+            !processed.discarded_own_pending_commit,
+            "charlie has no own commit staged before this merge, so nothing was discarded"
+        );
         assert_eq!(
-            returned_epoch,
+            processed.new_epoch,
             alice_group.epoch().as_u64(),
             "the returned epoch must be the committer's new epoch"
         );
@@ -2892,7 +2975,8 @@ mod tests {
             &bob_provider,
             None,
         )
-        .expect("bob (bystander) must be able to process alice's add commit");
+        .expect("bob (bystander) must be able to process alice's add commit")
+        .new_epoch;
 
         assert_eq!(returned_epoch, alice_group.epoch().as_u64());
         assert_eq!(bob_group.epoch().as_u64(), alice_group.epoch().as_u64());
@@ -3068,8 +3152,9 @@ mod tests {
 
         // Non-destructive: the same Commit, routed correctly this time
         // through process_incoming_commit, must still succeed.
-        let new_epoch =
-            process_incoming_commit(&mut bob_group, &commit_bytes, &bob_provider, None).unwrap();
+        let new_epoch = process_incoming_commit(&mut bob_group, &commit_bytes, &bob_provider, None)
+            .unwrap()
+            .new_epoch;
         assert_eq!(
             new_epoch,
             alice_group.epoch().as_u64(),
@@ -3201,12 +3286,12 @@ mod tests {
 
         // VERIFIED: openmls accepts the call (does not reject it because a
         // local commit is pending) rather than rejecting it outright.
-        let new_epoch = result.expect(
+        let processed = result.expect(
             "openmls accepts processing an incoming commit even while a local commit is \
              pending — see process_incoming_commit's doc comment item (c)",
         );
         assert_eq!(
-            new_epoch,
+            processed.new_epoch,
             alice_group.epoch().as_u64(),
             "charlie's new epoch must match alice's after merging her commit"
         );
@@ -3219,15 +3304,25 @@ mod tests {
             "charlie's own staged removal must have been silently cleared by merging \
              alice's incoming commit — this is the hazard item (c) documents"
         );
+        // The new detection signal must report exactly what the assertion
+        // above independently observes via pending_commit(): charlie DID
+        // have an own commit staged, and it WAS destroyed by this merge.
+        assert!(
+            processed.discarded_own_pending_commit,
+            "ProcessedCommit::discarded_own_pending_commit must be true here — it reports \
+             the exact discard the pending_commit().is_none() assertion above just verified"
+        );
 
         // VERIFIED: a subsequent confirm on charlie's now-empty pending slot
-        // fails with NoPendingCommit, with no other signal that charlie's
-        // staged removal ever evaporated.
+        // fails with NoPendingCommit — the pre-existing behaviour that
+        // remains unchanged; the new field above is additive, not a
+        // replacement for it (see stage_remove_member's item (e)).
         let confirm_result = confirm_remove_member(&mut charlie_group, &charlie_provider);
         assert!(
             matches!(confirm_result, Err(MlsError::NoPendingCommit)),
             "confirming charlie's silently-dropped staged commit must fail as \
-             NoPendingCommit — proving the staged removal evaporated with no other signal"
+             NoPendingCommit — the only signal a caller sees on this path if it drops \
+             ProcessedCommit::discarded_own_pending_commit on the floor"
         );
     }
 
@@ -3312,7 +3407,8 @@ mod tests {
         // Negative space: the SAME bytes reaching a genuine peer are NOT an
         // own commit — bob merges them normally.
         let bob_epoch = process_incoming_commit(&mut bob_group, &commit_bytes, &bob_provider, None)
-            .expect("a peer must still merge the same commit normally");
+            .expect("a peer must still merge the same commit normally")
+            .new_epoch;
 
         // The documented LIMIT, narrowed since Case 2 was added: once alice
         // has merged her own commit, a re-delivery of the identical bytes is
@@ -3438,7 +3534,8 @@ mod tests {
         // here it just confirms Case 2 doesn't accidentally intercept HIS
         // processing of it, since he has no own_commit_hashes entry for it).
         let bob_epoch = process_incoming_commit(&mut bob_group, &commit_bytes, &bob_provider, None)
-            .expect("the removal target must still merge the commit that evicts him");
+            .expect("the removal target must still merge the commit that evicts him")
+            .new_epoch;
         assert_eq!(bob_epoch, alice_group.epoch().as_u64());
 
         // Charlie (the actual bystander used below) also processes the
@@ -3448,7 +3545,8 @@ mod tests {
         // wrong-epoch mismatch unrelated to own-commit detection.
         let charlie_epoch_after_removal =
             process_incoming_commit(&mut charlie_group, &commit_bytes, &charlie_provider, None)
-                .expect("charlie, a bystander to the removal, must merge it normally");
+                .expect("charlie, a bystander to the removal, must merge it normally")
+                .new_epoch;
         assert_eq!(charlie_epoch_after_removal, alice_group.epoch().as_u64());
 
         // Negative space, on a LIVE group: charlie — a genuine bystander who
@@ -3480,12 +3578,15 @@ mod tests {
             &charlie_provider,
             Some(own_hash),
         );
-        let new_epoch = different_result.unwrap_or_else(|e| {
-            panic!(
-                "a genuinely different commit on a LIVE, non-evicted bystander's group must \
-                 merge successfully even with an unrelated last_own_commit set — got Err({e:?})"
-            )
-        });
+        let new_epoch = different_result
+            .unwrap_or_else(|e| {
+                panic!(
+                    "a genuinely different commit on a LIVE, non-evicted bystander's group must \
+                     merge successfully even with an unrelated last_own_commit set — got \
+                     Err({e:?})"
+                )
+            })
+            .new_epoch;
         assert!(
             new_epoch > charlie_epoch_before,
             "the different commit must have actually advanced charlie's epoch, proving it was \
@@ -4049,7 +4150,8 @@ mod tests {
             .expect("bob confirms the inspected commit");
         let charlie_epoch =
             process_incoming_commit(&mut charlie_group, &commit3_bytes, &charlie_provider, None)
-                .expect("charlie takes the one-shot path");
+                .expect("charlie takes the one-shot path")
+                .new_epoch;
 
         assert_eq!(
             bob_epoch, charlie_epoch,
@@ -4174,7 +4276,8 @@ mod tests {
         // A DIFFERENT commit at the same epoch still merges normally.
         let new_epoch =
             process_incoming_commit(&mut bob_group, &commit_b_bytes, &bob_provider, None)
-                .expect("a different commit at the same epoch must still merge after a discard");
+                .expect("a different commit at the same epoch must still merge after a discard")
+                .new_epoch;
         assert_eq!(new_epoch, alice_group.epoch().as_u64());
     }
 
@@ -4244,7 +4347,8 @@ mod tests {
         // ... but merges B instead via the one-shot path, advancing his epoch.
         let epoch_after_b =
             process_incoming_commit(&mut bob_group, &commit_b_bytes, &bob_provider, None)
-                .expect("bob merges commit B normally");
+                .expect("bob merges commit B normally")
+                .new_epoch;
         assert_eq!(epoch_after_b, alice_group.epoch().as_u64());
 
         // Confirming the now-stale A must be rejected, not silently merged.

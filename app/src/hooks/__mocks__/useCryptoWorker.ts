@@ -65,8 +65,16 @@ const mockWorker = {
 	}),
 	mlsRemoveMemberConfirm: async (_identityId: string, _groupId: string) => undefined,
 	mlsRemoveMemberAbort: async (_identityId: string, _groupId: string) => undefined,
+	// Must track the real WASM result shape (crypto.worker.ts
+	// `MlsProcessCommitResult`): omitting `discardedOwnPendingCommit` here is
+	// a falsy-undefined trap — in JS, a consumer branching on
+	// `result.discardedOwnPendingCommit === true` would silently take the
+	// "nothing was discarded" path in every test, even ones meant to exercise
+	// the discard-detection branch, and `tsc -b` won't catch the drift
+	// because this literal is untyped.
 	mlsProcessCommit: async (_identityId: string, _groupId: string, _commitBytes: Uint8Array) => ({
 		newEpoch: 2,
+		discardedOwnPendingCommit: false,
 	}),
 	// MLS inspect/confirm/discard trio — crypto PRIMITIVE ONLY, not wired to
 	// any UI yet (see crypto.worker.ts MlsInspectCommitResult doc comment).
