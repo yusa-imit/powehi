@@ -19,6 +19,7 @@ members = [
     "crates/infra/powehi-proto",
     "crates/client/powehi-crypto-core",
     "crates/client/powehi-crypto-wasm",
+    "crates/client/powehi-cli",
     "bin/powehi-server",
 ]
 
@@ -132,6 +133,10 @@ testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres", "redis", "minio"] }
 # property-based testing (testing-conventions.md: crypto round-trips and serialization)
 proptest = "1"
+# CLI client (prd.md §7A)
+clap = { version = "4", features = ["derive", "env"] }
+url = "2"
+dirs = "6"
 # workspace crates
 powehi-domain = { path = "crates/domain/powehi-domain" }
 powehi-port-inbound = { path = "crates/ports/powehi-port-inbound" }

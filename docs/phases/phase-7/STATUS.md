@@ -16,7 +16,7 @@ below is checked. See `docs/decisions/0006-cli-first-client.md`, prd.md §7A.
   succeeds, Vitest green, crypto-reviewer PASS. Add `crates/client/powehi-crypto-core/**`
   to the `paths` filters of `.github/workflows/ci-frontend.yml` so core changes still run
   the WASM/Vitest job.
-- [ ] 7.2 `crates/client/powehi-cli` skeleton — lib + thin bin `powehi`, `clap`
+- [x] 7.2 `crates/client/powehi-cli` skeleton — lib + thin bin `powehi`, `clap`
   subcommands, `--server <url>`, `--profile <name>`, per-profile data dir.
   `powehi status` hits `GET /health` and `GET /v1/region/detect`. Unit tests
   against an in-test HTTP server. README gains a CLI section (only for what

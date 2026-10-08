@@ -69,6 +69,20 @@ helm lint && kubeconform && conftest test
 
 Testing standards and what gate applies to which layer: `.claude/rules/testing-conventions.md`.
 
+## CLI client (`powehi`)
+
+The primary client is the terminal client in `crates/client/powehi-cli` (prd.md §7A).
+Currently only `powehi status` is functional; the other subcommands parse but report
+"not implemented yet".
+
+```bash
+cargo run -p powehi-cli -- --server http://localhost:8080 status
+# global flags: --server <url>, --profile <name>, --data-dir <dir>
+# (env: POWEHI_SERVER, POWEHI_PROFILE, POWEHI_DATA_DIR)
+```
+
+Passwords are never accepted as arguments and message bodies are read from stdin only.
+
 ## Non-negotiables
 
 - The server never sees plaintext message content.
