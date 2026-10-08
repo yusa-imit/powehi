@@ -931,6 +931,7 @@ dependencies = [
  "bitcoin_hashes",
  "serde",
  "unicode-normalization",
+ "zeroize",
 ]
 
 [[package]]
@@ -4191,6 +4192,8 @@ dependencies = [
  "dirs",
  "hkdf",
  "libc",
+ "opaque-ke",
+ "powehi-crypto-core",
  "proptest",
  "rand 0.8.6",
  "reqwest",
@@ -4201,6 +4204,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "url",
+ "uuid",
  "zeroize",
 ]
 

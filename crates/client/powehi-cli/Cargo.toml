@@ -25,6 +25,8 @@ tokio = { workspace = true }
 reqwest = { workspace = true }
 aes-gcm = { workspace = true, features = ["zeroize"] }
 libc = "0.2"
+powehi-crypto-core = { path = "../powehi-crypto-core" }
+uuid = { workspace = true }
 # Only to enable aes/zeroize via feature unification; do not remove.
 aes = { version = "0.8", features = ["zeroize"] }
 hkdf = { workspace = true }
@@ -33,5 +35,6 @@ zeroize = { workspace = true }
 rand = { workspace = true }
 
 [dev-dependencies]
+opaque-ke = { workspace = true, features = ["ristretto255", "argon2", "serde", "std"] }
 tempfile = { workspace = true }
 proptest = { workspace = true }

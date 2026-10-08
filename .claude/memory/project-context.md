@@ -43,6 +43,10 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 511 (2026-10-09, FEATURE) — Phase 7.4 done (register/login)
+- `powehi_cli::auth` (register/login via core OPAQUE) + `prompt` (TTY `/dev/tty`, echo off, phrase shown on tty only, tcflush, ISIG off). Register opens the store with the registration export_key (== login export_key), saves `account` + `mls-signing-key` records BEFORE showing the phrase, then logs in; a later failure leaves a loginable profile. Session token memory-only. MLS label = SHA256(phrase)[..16] (web-compatible); recovery_pubkey from recovery-auth domain. bip39 `zeroize` feature enabled in core.
+- crypto-reviewer first pass FAIL (stranded account, phrase zeroize, missing invariant tests) -> reworked. Opened need-human #19 (Unicode normalization of handle/password, web+CLI). Next: 7.5 identity + KeyPackages (signing key already stored as `mls-signing-key`; Ctrl-C during password prompt leaves echo off in non-interactive parents — known minor).
+
 ## Cycle 510 (2026-10-09, STABILIZATION)
 - main CI green; workspace tests, clippy, `cargo audit`, `cargo deny` all clean. Added 6 store.rs tests (bad magic, oversize file, FIFO, names() filtering/stale tmp, MAX_RECORDS cap, loosened dir) — test-only. Next FEATURE: 7.4 register/login. Cron PATH needs `export PATH=$HOME/.cargo/bin:$PATH`.
 

@@ -25,7 +25,7 @@ below is checked. See `docs/decisions/0006-cli-first-client.md`, prd.md §7A.
   HKDF-SHA256(OPAQUE `export_key`, CLI-specific info label), dir `0700` / files
   `0600`, atomic writes, zeroize on drop. Tests: round trip, wrong key → typed
   error, tampered file → typed error, no plaintext bytes on disk. crypto-reviewer.
-- [ ] 7.4 `powehi register` / `powehi login` — OPAQUE via the core, password from
+- [x] 7.4 `powehi register` / `powehi login` — OPAQUE via the core, password from
   TTY with echo off (never argv), device registration, recovery phrase shown
   once at register. Session token in memory or encrypted store only.
   crypto-reviewer.
