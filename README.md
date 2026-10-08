@@ -83,6 +83,10 @@ cargo run -p powehi-cli -- --server http://localhost:8080 status
 
 Passwords are never accepted as arguments and message bodies are read from stdin only.
 
+The library contains an encrypted profile store (`powehi_cli::store`, Unix only): AES-256-GCM
+records under `<data-dir>/powehi/<profile>/` (dir `0700`, files `0600`), keyed from the OPAQUE
+`export_key` via HKDF-SHA256. No command uses it yet; `register`/`login` will.
+
 ## Non-negotiables
 
 - The server never sees plaintext message content.
