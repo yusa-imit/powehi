@@ -43,6 +43,19 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Current state (2026-10-08, cycle 504 — CI-red fix: libcrux-kem audit waiver + MinIO image move; counter said FEATURE)
+
+- Main CI was red: `cargo audit` (RUSTSEC-2026-0330/0331, libcrux-kem 0.0.7, lockfile-only via
+  hpke-rs-libcrux, same unreachability argument as the other libcrux waivers — see .cargo/audit.toml)
+  and the MinIO pre-pull (quay.io/minio/minio now rejects anonymous pulls). MinIO moved to Docker Hub's
+  frozen `bitnamilegacy/minio:2025.7.23-debian-12-r5` (+ `bitnamilegacy/minio-client`); tests/CI/compose
+  updated together. Cannot run docker locally: the r2 integration job is the first real exercise of it.
+- Uncommitted work found at cycle start (mls_group.rs, wasm_exports.rs, crypto.worker.ts, worker mock) was
+  preserved on branch `wip/uncommitted-mls-group-worker-20261008` (not reviewed). Phase 7.1 moves
+  mls_group.rs, so reconcile that branch first or drop it.
+- Phase 7.1 (crypto-core extraction) is still the first unchecked item; do it next FEATURE cycle.
+
+
 ## Current state (2026-09-16, cycle 502 — FEATURE: withMlsCommitLock AbortSignal support + trackedGroupCount test hook (carried F9/F10), commit 1837da7)
 
 - Mode selection: counter 501→502, 502 % 5 != 0 → FEATURE. `gh run list

@@ -32,7 +32,7 @@
 //!     without deleting anything once its orphan-ratio circuit breaker trips.
 //!
 //! Uses postgres:16-alpine explicitly (the modules default 11-alpine is EOL) and
-//! a hand-built `GenericImage` at `quay.io/minio/minio:RELEASE.2025-02-28T09-55-16Z`
+//! a hand-built `GenericImage` at `bitnamilegacy/minio:2025.7.23-debian-12-r5`
 //! — NOT `testcontainers_modules::minio::MinIO`, whose `Image::name()` is
 //! hardcoded to the Docker Hub repository `minio/minio`. That repository was
 //! removed from Docker Hub entirely (MinIO discontinued Docker Hub
@@ -41,12 +41,14 @@
 //! "repository does not exist", regardless of which tag is requested, so
 //! `.with_tag(...)` on the modules struct can no longer produce a working
 //! container. The upstream crate (testcontainers-modules 0.15.0, the latest
-//! stable release as of this fix) has not been updated to point at the new
-//! home, `quay.io/minio/minio`. The `GenericImage` below reproduces the
-//! modules struct's exact runtime shape (same tag, `server /data` cmd,
-//! `MINIO_CONSOLE_ADDRESS=:9001` env var, port 9000, ready once STDERR
-//! contains `"API:"` — verified against the modules crate's own source, not
-//! guessed) so behaviour is unchanged, only the registry differs. The
+//! stable release as of this fix) has not been updated. Its interim home,
+//! `quay.io/minio/minio`, now answers "unauthorized" to anonymous pulls too
+//! (cycle 504: MinIO stopped publishing community images), so the pin moved to
+//! Docker Hub's frozen `bitnamilegacy/minio` archive: real MinIO server
+//! 2025.7.23 in Bitnami's wrapper (default entrypoint, port 9000, credentials
+//! via `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`, ready once STDERR contains
+//! `"API:"` as with the modules struct). The archive is immutable, so the
+//! pin cannot rot further, but it receives no security fixes — test-only use. The
 //! reasoning for pinning this exact tag (not `latest`, not the modules
 //! crate's shifting default) is unchanged from before: MinIO's support for
 //! AWS S3's conditional-write wildcard (`If-None-Match: *`, added in MinIO PR
@@ -99,14 +101,14 @@ use uuid::Uuid;
 /// upstream, see the module doc comment), and NOT the `testcontainers_modules`
 /// crate's `MinIO` struct (its `Image::name()` is hardcoded to that dead
 /// repository with no override hook).
-const MINIO_REPOSITORY: &str = "quay.io/minio/minio";
+const MINIO_REPOSITORY: &str = "bitnamilegacy/minio";
 /// MinIO tag pinned explicitly by every container start below — see the
 /// module doc comment for why this isn't left to any crate's own default.
-const MINIO_TAG: &str = "RELEASE.2025-02-28T09-55-16Z";
-/// MinIO default credentials (unaffected by the tag pin above — MinIO's
-/// `minioadmin`/`minioadmin` static default has been stable across releases).
+const MINIO_TAG: &str = "2025.7.23-debian-12-r5";
+/// MinIO root credentials, passed explicitly via `MINIO_ROOT_USER` (the Bitnami
+/// image's own defaults differ from upstream MinIO's `minioadmin`).
 const MINIO_ACCESS_KEY: &str = "minioadmin";
-/// MinIO default secret credential (the modules image ships this static value).
+/// MinIO root secret, passed explicitly via `MINIO_ROOT_PASSWORD`.
 const MINIO_SECRET: &str = "minioadmin";
 /// Bucket the adapter and fixtures share, created before `R2MediaAdapter::new`.
 const TEST_BUCKET: &str = "powehi-media-test";
@@ -172,17 +174,16 @@ async fn start_postgres() -> (ContainerAsync<Postgres>, PgPool) {
 }
 
 /// Starts a throwaway MinIO container at `MINIO_REPOSITORY:MINIO_TAG` (S3 API
-/// on port 9000, ready once STDERR has "API:" — reproducing
-/// `testcontainers_modules::minio::MinIO`'s exact runtime shape against a
-/// registry that still hosts the image), creates `TEST_BUCKET`, and returns
+/// on port 9000, ready once STDERR has "API:", root credentials set via env
+/// for the Bitnami wrapper's default entrypoint), creates `TEST_BUCKET`, and returns
 /// the container handle (caller must keep it alive), its HTTP endpoint, and
 /// a raw `S3Client` for fixture writes/reads.
 async fn start_minio_with_bucket() -> (ContainerAsync<GenericImage>, String, S3Client) {
     let minio = GenericImage::new(MINIO_REPOSITORY, MINIO_TAG)
         .with_exposed_port(9000.tcp())
         .with_wait_for(WaitFor::message_on_stderr("API:"))
-        .with_env_var("MINIO_CONSOLE_ADDRESS", ":9001")
-        .with_cmd(["server", "/data"])
+        .with_env_var("MINIO_ROOT_USER", MINIO_ACCESS_KEY)
+        .with_env_var("MINIO_ROOT_PASSWORD", MINIO_SECRET)
         .start()
         .await
         .expect("MinIO container started");
