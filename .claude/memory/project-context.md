@@ -43,7 +43,10 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
-## Current state (2026-10-08, cycle 509 — Phase 7.3 done (crypto-reviewer PASS after rework))
+## Cycle 510 (2026-10-09, STABILIZATION)
+- main CI green; workspace tests, clippy, `cargo audit`, `cargo deny` all clean. Added 6 store.rs tests (bad magic, oversize file, FIFO, names() filtering/stale tmp, MAX_RECORDS cap, loosened dir) — test-only. Next FEATURE: 7.4 register/login. Cron PATH needs `export PATH=$HOME/.cargo/bin:$PATH`.
+
+## Previous state (2026-10-08, cycle 509 — Phase 7.3 done (crypto-reviewer PASS after rework))
 
 - 7.3: `powehi_cli::store::ProfileStore` (cfg(unix)): `PHS1||nonce||AES-256-GCM`, key=HKDF-SHA256(export_key 32..64B, info `powehi-cli/profile-store/v1/record-key`), AAD=magic||record name, 0700 dir/0600 files, symlink+loose-perm rejection, atomic temp+fsync+rename, key zeroized. Not wired to a command yet (7.4 will pass the OPAQUE export_key). Next: 7.4 register/login.
 
