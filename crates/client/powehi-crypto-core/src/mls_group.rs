@@ -413,6 +413,20 @@ pub fn generate_identity_from_keypair(
     })
 }
 
+/// Like [`generate_identity_from_keypair`] (the caller MUST hold `private_key` in a `Zeroizing`
+/// wrapper), but derives the verifying key from the 32-byte
+/// Ed25519 seed itself, for callers (the CLI profile store) that persist only the seed.
+pub fn generate_identity_from_seed(
+    identity: &[u8],
+    private_key: &[u8; 32],
+    provider: &impl OpenMlsProvider,
+) -> Result<Identity, MlsError> {
+    let public_key = Ed25519SigningKey::from_bytes(private_key)
+        .verifying_key()
+        .to_bytes();
+    generate_identity_from_keypair(identity, private_key, &public_key, provider)
+}
+
 /// Extension type ID for the Powehi PQ KEM extension.
 ///
 /// 0xF001 is in the private-use range 0xF000–0xFFFF defined by RFC 9420 §17.3.
@@ -490,6 +504,49 @@ pub fn generate_key_package_with_pq_ext(
             identity.credential_with_key.clone(),
         )
         .map_err(|_| MlsError::KeyPackage)
+}
+
+/// A serialized PQ-extended KeyPackage plus the private half of its ML-KEM-768 key.
+pub struct PqKeyPackage {
+    /// TLS-serialized `MlsMessageOut` (what the KeyPackage Service stores).
+    pub key_package: Vec<u8>,
+    /// ML-KEM-768 encapsulation key embedded in the KeyPackage extension.
+    pub encap_key: Vec<u8>,
+    /// RFC 9420 §5.2 KeyPackageRef: how a Welcome names the consumed KeyPackage, so the only
+    /// sound index for the matching decap key.
+    pub key_package_ref: Vec<u8>,
+    /// Matching decapsulation key; secret, needed to open the Welcome's KEM ciphertext.
+    pub decap_key: zeroize::Zeroizing<Vec<u8>>,
+}
+
+/// Build a KeyPackage carrying a fresh, identity-signed ML-KEM-768 encap key (prd.md §5.3
+/// Phase B), exactly as the web client does, and serialize it for upload.
+pub fn generate_pq_key_package(
+    identity: &Identity,
+    provider: &impl OpenMlsProvider,
+) -> Result<PqKeyPackage, MlsError> {
+    let pair = crate::kem::generate();
+    let signature = crate::kem_credential::sign_encap_key(&pair.encap_key, &identity.signer)
+        .map_err(|_| MlsError::KeyPackage)?;
+    let mut payload = [0u8; PQ_EXT_PAYLOAD_LEN];
+    payload[..PQ_EXT_ENCAP_KEY_LEN].copy_from_slice(&pair.encap_key);
+    payload[PQ_EXT_ENCAP_KEY_LEN..].copy_from_slice(&signature);
+    let bundle = generate_key_package_with_pq_ext(identity, provider, &payload)?;
+    let key_package_ref = bundle
+        .key_package()
+        .hash_ref(provider.crypto())
+        .map_err(|_| MlsError::KeyPackage)?
+        .as_slice()
+        .to_vec();
+    let key_package = MlsMessageOut::from(bundle)
+        .to_bytes()
+        .map_err(|_| MlsError::KeyPackage)?;
+    Ok(PqKeyPackage {
+        key_package,
+        encap_key: pair.encap_key.to_vec(),
+        key_package_ref,
+        decap_key: pair.decap_key,
+    })
 }
 
 /// Create a new MLS group with `creator` as the sole member.
@@ -1641,6 +1698,58 @@ mod tests {
             MlsError::OwnCommitPending.to_string(),
             "mls own commit pending error"
         );
+    }
+
+    #[test]
+    fn test_pq_key_package_round_trips_through_add_member() {
+        let (a_prov, b_prov) = (OpenMlsRustCrypto::default(), OpenMlsRustCrypto::default());
+        let alice = generate_identity_from_seed(b"alice", &[7u8; 32], &a_prov).unwrap();
+        let bob = generate_identity_from_seed(b"bob", &[9u8; 32], &b_prov).unwrap();
+        // Same seed -> same signing public key (recoverable identity).
+        let again = generate_identity_from_seed(b"bob", &[9u8; 32], &a_prov).unwrap();
+        assert_eq!(
+            bob.credential_with_key.signature_key,
+            again.credential_with_key.signature_key
+        );
+        let pq = generate_pq_key_package(&bob, &b_prov).unwrap();
+        assert_eq!(pq.encap_key.len(), PQ_EXT_ENCAP_KEY_LEN);
+        assert_eq!(pq.decap_key.len(), crate::kem::DK_SIZE);
+        let msg = MlsMessageIn::tls_deserialize_exact(&pq.key_package).unwrap();
+        let MlsMessageBodyIn::KeyPackage(kp) = msg.extract() else {
+            panic!("not a key package");
+        };
+        let kp = kp
+            .validate(a_prov.crypto(), ProtocolVersion::Mls10)
+            .unwrap();
+        // The PQ extension verifies under the KeyPackage's leaf key (what web peers enforce)
+        // and the KEM pair is consistent: encapsulating to the ek decapsulates with the dk.
+        let sig_pub = bob.credential_with_key.signature_key.as_slice();
+        let sig = &pq_ext_payload(&kp)[PQ_EXT_ENCAP_KEY_LEN..];
+        assert_eq!(
+            &pq_ext_payload(&kp)[..PQ_EXT_ENCAP_KEY_LEN],
+            &pq.encap_key[..]
+        );
+        assert!(
+            crate::kem_credential::verify_encap_key(&pq.encap_key, sig, sig_pub, &a_prov).unwrap()
+        );
+        let (ct, ss) = crate::kem::encapsulate(&pq.encap_key).unwrap();
+        assert_eq!(*crate::kem::decapsulate(&pq.decap_key, &ct).unwrap(), *ss);
+        assert_eq!(
+            kp.hash_ref(a_prov.crypto()).unwrap().as_slice(),
+            &pq.key_package_ref[..]
+        );
+        let mut group = create_group(&alice, &a_prov).unwrap();
+        assert!(add_member(&mut group, &alice.signer, kp, &a_prov).is_ok());
+    }
+
+    fn pq_ext_payload(kp: &KeyPackage) -> Vec<u8> {
+        kp.extensions()
+            .iter()
+            .find_map(|e| match e {
+                Extension::Unknown(POWEHI_PQ_KEM_EXT_TYPE, u) => Some(u.0.clone()),
+                _ => None,
+            })
+            .unwrap()
     }
 
     /// Create a group, encrypt "hello", and decrypt it as a second member;

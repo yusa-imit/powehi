@@ -6,6 +6,8 @@
 #[cfg(unix)]
 pub mod auth;
 pub mod cli;
+#[cfg(unix)]
+pub mod identity;
 pub mod profile;
 #[cfg(unix)]
 pub mod prompt;
@@ -29,6 +31,9 @@ pub enum CliError {
     #[cfg(unix)]
     #[error("{0}")]
     Auth(#[from] auth::AuthError),
+    #[cfg(unix)]
+    #[error("{0}")]
+    Identity(#[from] identity::IdentityError),
     #[error("could not start the async runtime")]
     Runtime,
     #[error("`{0}` is not implemented yet")]
@@ -82,6 +87,10 @@ fn run_auth(
         if register { "registered" } else { "logged in" },
         session.device_id
     );
+    let uploaded = rt.block_on(identity::ensure_key_packages(&client, server, &session))?;
+    if uploaded > 0 {
+        println!("uploaded {uploaded} key packages");
+    }
     Ok(())
 }
 

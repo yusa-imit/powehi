@@ -2346,7 +2346,7 @@ gantt
 #### Phase 7: CLI Client (CLI 우선, ADR-0006)
 - [x] `powehi-crypto-core` 분리 (이동만, crypto-reviewer PASS, WASM 빌드/Vitest 유지)
 - [x] 암호화 profile store (§7A.3) — 평문 바이트 디스크 미기록 테스트
-- [ ] CLI 회원가입/로그인 (OPAQUE) + KeyPackage 업로드
+- [x] CLI 회원가입/로그인 (OPAQUE) + KeyPackage 업로드
 - [ ] 초대 → 1:1 대화 시작 → 양방향 메시지 송수신 (`send`/`inbox`)
 - [ ] `powehi chat`: `/v1/ws` 실시간 수신 + 재연결 catch-up
 - [ ] Safety Number 표시

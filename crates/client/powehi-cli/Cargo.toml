@@ -38,3 +38,4 @@ rand = { workspace = true }
 opaque-ke = { workspace = true, features = ["ristretto255", "argon2", "serde", "std"] }
 tempfile = { workspace = true }
 proptest = { workspace = true }
+openmls = { workspace = true }

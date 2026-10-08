@@ -81,6 +81,18 @@ impl Session {
     }
 }
 
+#[cfg(test)]
+impl Session {
+    pub(crate) fn for_test(store: ProfileStore, device_id: Uuid, token: &str) -> Self {
+        Session {
+            user_id: Uuid::new_v4(),
+            device_id,
+            store,
+            token: Zeroizing::new(token.to_owned()),
+        }
+    }
+}
+
 impl std::fmt::Debug for Session {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Session")
@@ -91,12 +103,22 @@ impl std::fmt::Debug for Session {
 }
 
 #[derive(Serialize, Deserialize)]
-struct Account {
+pub(crate) struct Account {
     version: u8,
-    user_id: Uuid,
-    device_id: Uuid,
+    pub(crate) user_id: Uuid,
+    pub(crate) device_id: Uuid,
     /// Non-secret 16-byte MLS credential label (`SHA-256(phrase)[..16]`, same as the web client).
-    mls_label: Vec<u8>,
+    pub(crate) mls_label: Vec<u8>,
+}
+
+/// Reads and validates the `account` record of an open store.
+pub(crate) fn load_account(store: &ProfileStore) -> Result<Account, AuthError> {
+    let raw = store.get(ACCOUNT_RECORD)?.ok_or(AuthError::NotRegistered)?;
+    let account: Account = serde_json::from_slice(&raw).map_err(|_| AuthError::NotRegistered)?;
+    if account.version != ACCOUNT_VERSION {
+        return Err(AuthError::NotRegistered);
+    }
+    Ok(account)
 }
 
 // ---- wire types (serde encodes `Vec<u8>` as a JSON integer array, matching the server) ----
@@ -339,11 +361,7 @@ pub async fn login(
     let password = prompter.password(false)?;
     let hs = login_handshake(client, server, &handle_hash(&handle), &password).await?;
     let store = ProfileStore::open(paths, &hs.export_key)?;
-    let raw = store.get(ACCOUNT_RECORD)?.ok_or(AuthError::NotRegistered)?;
-    let account: Account = serde_json::from_slice(&raw).map_err(|_| AuthError::NotRegistered)?;
-    if account.version != ACCOUNT_VERSION {
-        return Err(AuthError::NotRegistered);
-    }
+    let account = load_account(&store)?;
     finish_login(
         client,
         server,

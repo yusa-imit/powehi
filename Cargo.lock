@@ -4193,6 +4193,7 @@ dependencies = [
  "hkdf",
  "libc",
  "opaque-ke",
+ "openmls",
  "powehi-crypto-core",
  "proptest",
  "rand 0.8.6",
