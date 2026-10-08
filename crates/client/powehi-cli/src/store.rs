@@ -549,6 +549,86 @@ mod tests {
         assert!(matches!(s.get("a"), Err(StoreError::Authentication)));
     }
 
+    #[test]
+    fn bad_magic_with_valid_length_is_corrupt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp, &EK).unwrap();
+        s.put("a", b"hello").unwrap();
+        let mut b = fs::read(s.record_path("a")).unwrap();
+        b[..MAGIC.len()].copy_from_slice(b"PHS2");
+        fs::write(s.record_path("a"), &b).unwrap();
+        assert!(matches!(s.get("a"), Err(StoreError::Corrupt)));
+    }
+
+    #[test]
+    fn oversized_record_file_is_corrupt_without_reading() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp, &EK).unwrap();
+        s.put("a", b"x").unwrap();
+        let f = OpenOptions::new()
+            .write(true)
+            .open(s.record_path("a"))
+            .unwrap();
+        f.set_len((MAGIC.len() + NONCE_LEN + TAG_LEN + MAX_RECORD_LEN + 1) as u64)
+            .unwrap();
+        assert!(matches!(s.get("a"), Err(StoreError::Corrupt)));
+    }
+
+    #[test]
+    fn fifo_record_is_refused_not_hung() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp, &EK).unwrap();
+        let path = std::ffi::CString::new(s.record_path("a").to_str().unwrap()).unwrap();
+        // SAFETY: `path` is a valid NUL-terminated string that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        assert!(matches!(s.get("a"), Err(StoreError::InsecurePath)));
+    }
+
+    #[test]
+    fn names_ignores_foreign_files_and_stale_temp_is_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp, &EK).unwrap();
+        s.put("good", b"x").unwrap();
+        for junk in ["Bad.rec", "x.txt", "good.rec.tmp", ".rec"] {
+            fs::write(s.dir.join(junk), b"junk").unwrap();
+        }
+        assert_eq!(s.names().unwrap(), vec!["good"]);
+        fs::write(s.dir.join("fresh.rec.tmp"), b"stale").unwrap();
+        s.put("fresh", b"y").unwrap();
+        assert_eq!(&**s.get("fresh").unwrap().unwrap(), b"y");
+        assert!(!s.dir.join("fresh.rec.tmp").exists());
+    }
+
+    #[test]
+    fn record_limit_blocks_new_names_but_not_overwrites() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp, &EK).unwrap();
+        s.put("first", b"x").unwrap();
+        for i in 1..MAX_RECORDS {
+            fs::write(s.dir.join(format!("r{i}.rec")), b"").unwrap();
+        }
+        assert_eq!(s.names().unwrap().len(), MAX_RECORDS);
+        assert!(matches!(
+            s.put("extra", b"x"),
+            Err(StoreError::TooManyRecords)
+        ));
+        s.put("first", b"y").unwrap();
+        assert_eq!(&**s.get("first").unwrap().unwrap(), b"y");
+        fs::write(s.dir.join("overflow.rec"), b"").unwrap();
+        assert!(matches!(s.names(), Err(StoreError::TooManyRecords)));
+    }
+
+    #[test]
+    fn operations_refuse_a_loosened_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp, &EK).unwrap();
+        s.put("a", b"x").unwrap();
+        fs::set_permissions(&s.dir, fs::Permissions::from_mode(0o750)).unwrap();
+        assert!(matches!(s.put("b", b"x"), Err(StoreError::InsecurePath)));
+        assert!(matches!(s.get("a"), Err(StoreError::InsecurePath)));
+        assert!(matches!(s.remove("a"), Err(StoreError::InsecurePath)));
+    }
+
     proptest::proptest! {
         #![proptest_config(proptest::prelude::ProptestConfig::with_cases(32))]
         #[test]
