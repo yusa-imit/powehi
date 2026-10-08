@@ -12,6 +12,8 @@ serde_json = { workspace = true }
 serde_bytes = "0.11"
 thiserror = { workspace = true }
 sha2 = { workspace = true }
+# SHA3-256 for the FIPS 203 §7.3 decap-key hash check (RustCrypto; already in the tree via ml-kem).
+sha3 = { workspace = true }
 zeroize = { workspace = true }
 # Post-quantum KEM (FIPS 203 ML-KEM-768)
 ml-kem = { workspace = true }

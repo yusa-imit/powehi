@@ -7,13 +7,21 @@
 pub mod auth;
 pub mod cli;
 #[cfg(unix)]
+pub mod conversation;
+#[cfg(unix)]
 pub mod identity;
+#[cfg(unix)]
+pub mod invite;
 pub mod profile;
 #[cfg(unix)]
 pub mod prompt;
 pub mod status;
 #[cfg(unix)]
 pub mod store;
+#[cfg(all(test, unix))]
+mod testsrv;
+#[cfg(unix)]
+pub mod welcome;
 
 use std::path::PathBuf;
 
@@ -31,6 +39,12 @@ pub enum CliError {
     #[cfg(unix)]
     #[error("{0}")]
     Auth(#[from] auth::AuthError),
+    #[cfg(unix)]
+    #[error("{0}")]
+    Invite(#[from] invite::InviteError),
+    #[cfg(unix)]
+    #[error("could not read the invite link from stdin")]
+    Stdin,
     #[cfg(unix)]
     #[error("{0}")]
     Identity(#[from] identity::IdentityError),
@@ -56,6 +70,8 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
         cli::Command::Register => run_auth(&args.server, &paths, true),
         #[cfg(unix)]
         cli::Command::Login => run_auth(&args.server, &paths, false),
+        #[cfg(unix)]
+        cli::Command::Invite(ref cmd) => run_invite(&args.server, &paths, cmd),
         ref other => Err(CliError::NotImplemented(other.name())),
     }
 }
@@ -91,6 +107,85 @@ fn run_auth(
     if uploaded > 0 {
         println!("uploaded {uploaded} key packages");
     }
+    Ok(())
+}
+
+/// Seconds between Welcome polls while `invite create --wait` is waiting.
+#[cfg(unix)]
+const WAIT_POLL_SECS: u64 = 3;
+
+/// `invite create` / `invite redeem`: logs in (password from the TTY) and runs the invite flow.
+#[cfg(unix)]
+fn run_invite(
+    server: &url::Url,
+    paths: &profile::ProfilePaths,
+    cmd: &cli::InviteCommand,
+) -> Result<(), CliError> {
+    use std::io::Read as _;
+    let rt = runtime()?;
+    let client = status::http_client()?;
+    // Read the link before the password prompt so a bad paste fails fast.
+    let link = match cmd {
+        cli::InviteCommand::Redeem => {
+            let mut buf = String::new();
+            std::io::stdin()
+                .take(invite::MAX_LINK_LEN as u64 + 1)
+                .read_to_string(&mut buf)
+                .map_err(|_| CliError::Stdin)?;
+            Some(invite::parse_link(&buf)?)
+        }
+        cli::InviteCommand::Create { .. } => None,
+    };
+    let mut prompter = prompt::TtyPrompter;
+    let session = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
+    match (cmd, link) {
+        (cli::InviteCommand::Create { wait }, _) => {
+            let (url, key_ref) = rt.block_on(invite::create(&client, server, &session))?;
+            println!("{url}");
+            if *wait > 0 {
+                let w = u64::from(*wait);
+                wait_for_welcome(&rt, &client, server, &session, &key_ref, w)?;
+            }
+        }
+        (cli::InviteCommand::Redeem, Some(link)) => {
+            let id = rt.block_on(invite::redeem(&client, server, &session, &link))?;
+            println!("conversation {id}");
+        }
+        (cli::InviteCommand::Redeem, None) => return Err(CliError::Stdin),
+    }
+    Ok(())
+}
+
+/// Polls for the Welcome that consumes the invite's KeyPackage (`key_ref`) for at most `wait`
+/// seconds of wall clock and prints the joined conversation.
+#[cfg(unix)]
+fn wait_for_welcome(
+    rt: &tokio::runtime::Runtime,
+    client: &reqwest::Client,
+    server: &url::Url,
+    session: &auth::Session,
+    key_ref: &[u8],
+    wait: u64,
+) -> Result<(), CliError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
+    loop {
+        let report = rt.block_on(welcome::join_pending(
+            client,
+            server,
+            session,
+            Some(key_ref),
+        ))?;
+        if let Some(id) = report.joined.first() {
+            println!("conversation {id}");
+            return Ok(());
+        }
+        let poll = std::time::Duration::from_secs(WAIT_POLL_SECS);
+        if std::time::Instant::now() + poll >= deadline {
+            break;
+        }
+        std::thread::sleep(poll);
+    }
+    println!("no one has redeemed the invite yet; it stays valid for 24 hours");
     Ok(())
 }
 

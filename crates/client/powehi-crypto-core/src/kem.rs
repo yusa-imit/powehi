@@ -115,6 +115,33 @@ pub fn decapsulate(dk_bytes: &[u8], ct_bytes: &[u8]) -> Result<Zeroizing<Vec<u8>
     Ok(Zeroizing::new((ss.as_ref() as &[u8]).to_vec()))
 }
 
+/// Offsets inside an ML-KEM-768 decapsulation key (FIPS 203 Alg. 16):
+/// `dk_PKE (1152) || ek (1184) || H(ek) (32) || z (32)`.
+const DK_PKE_LEN: usize = 1152;
+const DK_HASH_OFFSET: usize = DK_PKE_LEN + EK_SIZE;
+
+/// FIPS 203 §7.3 decapsulation-key check plus a binding to a known encapsulation key.
+///
+/// Verifies that the ek embedded in `dk_bytes` hashes (SHA3-256, the spec's `H`) to the stored
+/// digest, and that it equals `expected_ek` (the key that was actually published). Run it on a
+/// key restored from disk before decapsulating with it. Public data only, so the comparison is
+/// not constant-time. Errors are content-free.
+pub fn validate_decap_key(dk_bytes: &[u8], expected_ek: &[u8]) -> Result<(), &'static str> {
+    use sha3::{Digest, Sha3_256};
+    if dk_bytes.len() != DK_SIZE || expected_ek.len() != EK_SIZE {
+        return Err("invalid key length");
+    }
+    let embedded = &dk_bytes[DK_PKE_LEN..DK_HASH_OFFSET];
+    let stored_hash = &dk_bytes[DK_HASH_OFFSET..DK_HASH_OFFSET + 32];
+    if Sha3_256::digest(embedded).as_slice() != stored_hash {
+        return Err("decap key hash check failed");
+    }
+    if embedded != expected_ek {
+        return Err("decap key does not match the published encap key");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,6 +360,25 @@ mod tests {
         );
         // ss1 and ss2 are independent — one cannot be derived from the other or from ek.
         assert_ne!(recovered1.as_slice(), recovered2.as_slice());
+    }
+
+    #[test]
+    fn validate_decap_key_accepts_a_generated_pair_and_rejects_tampering() {
+        let pair = generate();
+        assert!(validate_decap_key(&pair.decap_key, &pair.encap_key).is_ok());
+        // Another key's ek is a mismatch.
+        let other = generate();
+        assert!(validate_decap_key(&pair.decap_key, &other.encap_key).is_err());
+        // Flipping a byte in the embedded ek breaks the §7.3 hash check.
+        let mut bad = pair.decap_key.to_vec();
+        bad[DK_PKE_LEN + 5] ^= 1;
+        assert!(validate_decap_key(&bad, &pair.encap_key).is_err());
+        // Flipping the stored hash does too.
+        let mut bad = pair.decap_key.to_vec();
+        bad[DK_HASH_OFFSET] ^= 1;
+        assert!(validate_decap_key(&bad, &pair.encap_key).is_err());
+        assert!(validate_decap_key(&pair.decap_key[1..], &pair.encap_key).is_err());
+        assert!(validate_decap_key(&pair.decap_key, &pair.encap_key[1..]).is_err());
     }
 }
 

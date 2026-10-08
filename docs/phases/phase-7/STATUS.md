@@ -32,12 +32,17 @@ below is checked. See `docs/decisions/0006-cli-first-client.md`, prd.md §7A.
 - [x] 7.5 Identity + KeyPackages — MLS identity generated and persisted in the
   store; KeyPackages uploaded; top-up when
   `GET /v1/key-packages/:device_id/count` is low.
-- [ ] 7.6 Start a 1:1 conversation — `powehi invite create` /
+- [x] 7.6 Start a 1:1 conversation — `powehi invite create` /
   `powehi invite redeem` (prd.md §8.3), group create, add member, Welcome sent
   and joined (prd.md §4.2). Carry-over from 7.5 review: on Welcome join, look up the decap key
   by KeyPackageRef in `pq-keys`, and before decapsulating validate the dk (FIPS 203 §7.3 hash
   check; dk-embedded ek matches the uploaded one); consumed refs are pruned.
-- [ ] 7.7 Send and receive — `powehi send <conversation>` (body from stdin, not
+- [ ] 7.7 Send and receive — FIRST, `pq_init` (prd.md §5.3 Phase B; the web sends it after the
+  Welcome, CLI 7.6 does not, so CLI 1:1s are classical-only until this lands): redeemer runs
+  `kem_credential::verify_encap_key` on the inviter's KeyPackage ek, adds a FIPS 203 §7.2
+  modulus check on the ek, encapsulates and sends `pq_init`; joiner decapsulates with the dk
+  stored in the `conv-*` record. Then `inbox` calls `welcome::join_pending` and applies the
+  issue #24 policy. Also: `powehi send <conversation>` (body from stdin, not
   argv), `powehi inbox` (fetch `/v1/messages`, decrypt, persist, ack). Incoming
   Commits use the one-shot merge (ADR-0005).
 - [ ] 7.8 `powehi chat <conversation>` — interactive line REPL with live delivery
