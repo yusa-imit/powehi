@@ -17,12 +17,31 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - No plaintext logging of content / PII / ciphertext (rule: no-plaintext-logging).
 - Every layer has a test gate (rule: testing-conventions).
 
+## PRIORITY DIRECTIVE — CLI-first (owner, 2026-10-08; ADR-0006) — read before picking work
+- **FEATURE mode takes the first unchecked item in `docs/phases/phase-7/STATUS.md`**, in
+  order (7.1 crypto-core extraction → 7.2 `powehi-cli` skeleton → … → 7.11). This replaces
+  the "Next cycle candidates" list as the FEATURE work source until Phase 7 is complete.
+- **Web client `app/` is in maintenance**: CI-red, `bug` issues, security fixes on shipped
+  behavior only. Do NOT build new web UI/features. Parked (not closed): issues #1 (SPA
+  deploy), #3 (web WS client); candidate items that are web-only (Remove UI, banners).
+- Still allowed: shared crypto-core work (issue #2 items (e)/(g) in `mls_group.rs` serve
+  the CLI too), and server changes the CLI needs. STABILIZATION mode is unchanged.
+- Spec: prd.md §7A (crate layout, command surface, encrypted profile store, terminal
+  threats: no secrets/message text in argv, no plaintext on disk, no content in logs).
+- Routing: CLI crate → `backend-lead`; core extraction / profile store → `crypto-lead`
+  + `crypto-reviewer`. 7.11 needs `threat-model-checker`.
+- **Dirty tree at directive time**: cycle 503 timed out (2026-09-16) leaving uncommitted,
+  unreviewed WIP in `mls_group.rs`, `wasm_exports.rs`, `crypto.worker.ts`,
+  `hooks/__mocks__/useCryptoWorker.ts` (issue #2 item (e) detection:
+  `ProcessedCommit::discarded_own_pending_commit`). Before 7.1 moves `mls_group.rs`,
+  either finish it (tests + crypto-reviewer PASS + commit) or preserve it on a
+  `wip/cycle-503-commit-discard-detection` branch. Never discard it.
+
 ## Phase status
-All 6 phases in `docs/phases/phase-{1..6}/STATUS.md` show every DoD item checked
-(`[x]`) as of cycle 425/426 — confirmed by grepping each STATUS.md fresh, not from
-memory. There is no phase-checklist "next item" left to pull from; FEATURE-mode work
-now comes from each cycle's "Next cycle candidates" list below (review-agent-flagged
-follow-ups, prd.md drift, scoping tasks) rather than an unchecked phase DoD box.
+Phases 1-6 in `docs/phases/phase-{1..6}/STATUS.md` are complete (every DoD item `[x]`,
+confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the directive
+above. The "Next cycle candidates" lists below are now the source only for
+STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
 ## Current state (2026-09-16, cycle 502 — FEATURE: withMlsCommitLock AbortSignal support + trackedGroupCount test hook (carried F9/F10), commit 1837da7)
 

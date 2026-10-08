@@ -17,6 +17,7 @@
 5. [암호화 프로토콜 (MLS 기반)](#5-암호화-프로토콜-mls-기반)
 6. [백엔드 (Rust) 설계 — Hexagonal Architecture](#6-백엔드-rust-설계--hexagonal-architecture)
 7. [프론트엔드 설계 (React 19 + Vite 6 + TanStack)](#7-프론트엔드-설계-react-19--vite-6--tanstack)
+7A. [CLI 클라이언트 (Rust) — CLI 우선](#7a-cli-클라이언트-rust--cli-우선)
 8. [연락처 발견 (Contact Discovery)](#8-연락처-발견-contact-discovery)
 9. [미디어 처리](#9-미디어-처리)
 10. [데이터 모델 및 저장소](#10-데이터-모델-및-저장소)
@@ -1203,6 +1204,64 @@ RegionService.HealthCheck            리전 간 헬스 체크
 
 ---
 
+## 7A. CLI 클라이언트 (Rust) — CLI 우선
+
+2026-10-08 소유자 지시로 **CLI 우선** 개발로 전환 (ADR-0006, `docs/decisions/0006-cli-first-client.md`).
+Phase 7 DoD(§15.4, `docs/phases/phase-7/STATUS.md`)가 완료될 때까지 터미널 클라이언트가 1차
+클라이언트이고, 웹 클라이언트(§7)는 유지보수 모드(CI 복구, `bug` 이슈, 보안 수정만)입니다.
+
+### 7A.1 크레이트 구성
+
+```
+crates/client/
+├── powehi-crypto-core   # 순수 Rust: mls_group, opaque, kem, kem_credential, media, recovery
+├── powehi-crypto-wasm   # wasm-bindgen glue만 유지, core를 re-export (§7.3)
+└── powehi-cli           # lib + bin `powehi` (clap, tokio, reqwest, tokio-tungstenite)
+```
+
+- CLI는 `powehi-crypto-core`만 의존하며 `-wasm` 크레이트에 의존하지 않음.
+- core 분리는 **이동이지 재작성이 아님**: 암호 로직 변경 없음, crypto-reviewer 필수.
+- 서버는 REST와 `/v1/ws` 업그레이드 모두 `Authorization: Bearer`로 인증하므로, 브라우저와 달리
+  CLI는 서버 변경 없이 WebSocket 실시간 전달을 사용 가능 (§6.3).
+
+### 7A.2 명령 표면 (1차: line REPL + 스크립트 가능한 서브커맨드)
+
+| 명령 | 동작 | 근거 |
+|---|---|---|
+| `powehi status` | `/health`, `/v1/region/detect` | §7.6 |
+| `powehi register` / `login` | OPAQUE, 비밀번호는 TTY echo off로 입력 | §5.5 |
+| `powehi invite create` / `redeem` | 초대 링크 → 1:1 그룹 생성, Welcome | §8.3, §4.2 |
+| `powehi send <대화>` | 본문은 stdin에서만 읽음 (argv 금지) | §7A.3 |
+| `powehi inbox` | `/v1/messages` 수신 → 복호화 → 저장 → ack | §11.1 |
+| `powehi chat <대화>` | 대화형 REPL, `/v1/ws` 실시간 수신, 재연결 3회 | §7.6 |
+| `powehi verify <대화>` | Safety Number 표시 | §5.6 |
+
+전체 화면 TUI(`ratatui`)는 같은 lib 위에 올리는 후속 작업이며 Phase 7 DoD에 포함하지 않음.
+
+### 7A.3 로컬 저장소와 터미널 고유 위협
+
+웹의 Dexie 암호화 계층(§7.4, §10.2)에 대응하는 **profile store**:
+
+- 프로필별 디렉터리 `<data_dir>/powehi/<profile>/` (`0700`, 파일 `0600`).
+- 모든 record는 AES-256-GCM, 키는 OPAQUE `export_key`에서 HKDF-SHA256으로 파생하며
+  웹 DB 키와 **도메인 분리된** CLI 전용 info 라벨 사용. `export_key`와 파생 키는 사용 후 zeroize.
+- 쓰기는 원자적 (임시 파일 → fsync → rename). 디스크에 평문 바이트 없음을 테스트로 확인.
+- 저장 대상: identity(MLS 서명 키), MLS provider state(`export_provider_state`), KeyPackage 비밀,
+  대화 목록, 메시지, 검증된 연락처.
+
+터미널 환경에서 추가되는 규칙:
+
+- **argv에 비밀/본문 금지** — 셸 history와 `ps`로 유출. 비밀번호는 TTY, 본문은 REPL 또는 stdin.
+- **세션 토큰** — 메모리 또는 암호화 store 안에만. 평문 파일 금지.
+- **로그** — `tracing`(stderr, `RUST_LOG`)은 작업 이름과 상태 코드만. 본문/PII/ciphertext 금지.
+- 터미널 scrollback/로그 파일 리다이렉트에 남는 평문은 스크린샷과 같은 범주로 §3.2 Out of Scope에
+  추가 (T4 디바이스 압수 경계). threat-model-checker가 CLI 플랫폼을 1회 검토.
+- MLS provider-state는 웹과 같은 monotonic `generation` envelope을 사용하므로, §3.2의 "스냅샷
+  wholesale 리플레이" accepted risk가 profile store 파일에도 그대로 적용됨 (서버 high-water-mark 앵커가
+  생기면 함께 해소).
+
+---
+
 ## 8. 연락처 발견 (Contact Discovery)
 
 ### 8.1 결정: 익명 핸들 + 초대 링크/QR
@@ -2284,6 +2343,16 @@ gantt
 - [ ] 크로스 리전 합성 모니터링 동작
 - [ ] 데이터 거주성 검증: home_region 외부로 PII 비전송 확인
 
+#### Phase 7: CLI Client (CLI 우선, ADR-0006)
+- [ ] `powehi-crypto-core` 분리 (이동만, crypto-reviewer PASS, WASM 빌드/Vitest 유지)
+- [ ] 암호화 profile store (§7A.3) — 평문 바이트 디스크 미기록 테스트
+- [ ] CLI 회원가입/로그인 (OPAQUE) + KeyPackage 업로드
+- [ ] 초대 → 1:1 대화 시작 → 양방향 메시지 송수신 (`send`/`inbox`)
+- [ ] `powehi chat`: `/v1/ws` 실시간 수신 + 재연결 catch-up
+- [ ] Safety Number 표시
+- [ ] CLI↔CLI E2E: docker-compose 백엔드 대상 두 프로필 왕복 테스트 (CI)
+- [ ] threat-model-checker: CLI 클라이언트 플랫폼 검토 통과
+
 ---
 
 ## 16. 부록 + 변경 이력
@@ -2426,6 +2495,7 @@ gantt
 | v2 | 검증 완료. Signal Protocol → MLS 전환, PQ day-1 격상, 미정 항목 6개 모두 결정, 호스팅 Hetzner+R2 확정 |
 | **v3 (현재)** | **헥사고날 아키텍처 전환**, **멀티 리전 글로벌 서비스 설계**. 주요 변경: (1) §6 크레이트 구조를 Hexagonal Architecture로 전면 재구성, (2) §4A 멀티 리전 아키텍처 섹션 신설 (3-Tier 토폴로지, gRPC 메시, MLS commit 직렬화, 데이터 거주성), (3) §3 위협 모델에 T7 리전 관할 공격자 + §3.5 멀티 리전 위협 추가, (4) §12A 글로벌 규정 준수 매트릭스 신설, (5) §15 로드맵에 Phase 6: Global Infrastructure 추가, (6) 전 섹션에 걸쳐 멀티 리전 고려사항 반영 |
 | cycle 290 | 미디어 GC ACK 타이밍 정정(threat-model-checker: yellow — merge acceptable with doc update). cycle 289에서 `get_download_url`이 URL 발급 즉시 기록하던 ACK를, 클라이언트의 blobHash 검증 + AES-GCM 복호화 성공 후에만 별도 `POST /v1/media/:id/confirm-download`(신규 엔드포인트, `get_download_url`과 동일한 authz: uploader 또는 group member)가 기록하도록 변경. 새 메타데이터 카테고리나 DB 컬럼은 없음 — `media_acks` 테이블 의미만 "URL 발급됨"에서 "실제 복호화 검증됨"으로 강화됨. §3.4의 GC-타이밍 read-receipt 오라클이 이전보다 약간 더 정밀한 신호(요청만 하고 전송 실패한 경우를 더 이상 포함하지 않음)를 노출하게 되어 §3.3(L182), §3.4(L203), §9.4.3(L1280) 문구를 사실관계에 맞게 정정 |
+| 2026-10-08 | **CLI 우선 전환** (소유자 지시, ADR-0006). §7A CLI 클라이언트 신설 (`powehi-crypto-core` 분리, `powehi-cli`, 암호화 profile store, 터미널 고유 위협), §15.4에 Phase 7 DoD 추가. 웹 클라이언트(§7)는 Phase 7 완료까지 유지보수 모드 |
 
 ---
 
