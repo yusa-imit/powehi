@@ -43,7 +43,12 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
-## Current state (2026-10-08, cycle 506 — Phase 7.1 done)
+## Current state (2026-10-08, cycle 507 — Phase 7.2 done)
+
+- 7.2: `crates/client/powehi-cli` (lib `powehi_cli` + bin `powehi`): clap surface per §7A.2 (status/register/login/invite/send/inbox/chat/verify), global `--server` (http/https, no creds) / `--profile` (validated path component) / `--data-dir`; `ProfilePaths::resolve` = `<data_dir>/powehi/<profile>` (pure; 0700 creation is 7.3). `status` real (reqwest, 10s timeout, no redirects, 4KB cap; in-test TCP server); others return NotImplemented. No password/body flags (tests assert). 22 tests; security-auditor findings fixed (loopback-only http, region_id charset, abs data-dir, lowercase profiles, no_proxy); deny clean. Depends on no crypto yet. Next: 7.3.
+- Open: need-human #13 (bip39 not on approved crypto list).
+
+## Previous state (cycle 506 — Phase 7.1 done)
 
 - 7.1: kem/kem_credential/media/mls_group/opaque/recovery moved verbatim to `crates/client/powehi-crypto-core` (no wasm-bindgen/js-sys); `powehi-crypto-wasm` `pub use`s them. Only change: `hash_own_commit` pub(crate)→pub. 235 Rust tests (111 core + 124 wasm), build:wasm, Vitest 1675 green. `ci-frontend.yml` paths include core. Next: 7.2 `powehi-cli` skeleton. Cron PATH lacks `~/.cargo/bin` locally; `cargo nextest` not installed (use `cargo test`). The cycle-503 WIP is preserved on `wip/uncommitted-mls-group-worker-20261008`.
 
