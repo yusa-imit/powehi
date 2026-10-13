@@ -1456,3 +1456,8 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
   version check in `Conversation::check`). Test-only; no review agents required. powehi-cli: 107 lib tests pass.
 - Note: `cargo-nextest` not installed locally; use `cargo test` (PATH needs `~/.cargo/bin`).
 - Still open need-human: #13 #16 #19 #20 #22 #24 #28 #30 #32.
+
+## Cycle 525 (STABILIZATION)
+- CI green on main; `cargo deny check` ok; no open `bug` issues; no owner comments. 132 lib tests passed at start.
+- Added `ws::tests::an_oversized_frame_ends_the_connection_without_waking` (16 KiB frame cap). Test-only; no review agents required.
+- Still open need-human: #13 #16 #19 #20 #22 #24 #28 #30 #32 #39. All Phase 7 items through 7.11 shipped; check STATUS.md for the next unchecked item.
