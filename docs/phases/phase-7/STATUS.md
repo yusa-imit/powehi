@@ -54,9 +54,9 @@ below is checked. See `docs/decisions/0006-cli-first-client.md`, prd.md §7A.
 - [x] 7.9 `powehi verify <conversation>` — Safety Number display (prd.md §5.6),
   verified flag stored in the profile store. (`--confirm` records the comparison;
   a later key change reports CHANGED. Pairwise number now lives in `powehi-crypto-core::safety`.)
-- [ ] 7.10 E2E gate — two CLI profiles register, start a conversation, and
+- [x] 7.10 E2E gate — two CLI profiles register, start a conversation, and
   exchange messages both ways against the docker-compose backend (`#[ignore]`d
-  live test + CI job, like `e2e-live`).
+  live test + CI job, like `e2e-live`). (`src/live_e2e.rs`; job `cli-live-backend` in `ci-e2e-live.yml`.)
 - [ ] 7.11 threat-model-checker pass on the CLI as a new client platform
   (at-rest store, argv/history, scrollback, multiple profiles per machine).
 
