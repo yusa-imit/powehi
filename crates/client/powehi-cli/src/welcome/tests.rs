@@ -98,7 +98,9 @@ async fn oversized_poll_response_is_rejected() {
     let me = alice.device_id.to_string();
     state.lock().unwrap().inbox.push(json!({
         "recipient": me, "message_type": "Application",
-        "ciphertext": vec![255u8; MAX_POLL_BYTES / 4],
+        // A string body is cheap to serialize; a 4M-element number array took >10s in CI
+        // debug builds and tripped the client's request timeout instead of the size cap.
+        "ciphertext": "A".repeat(MAX_POLL_BYTES + 1),
     }));
     let err = join_pending(&client(), &url, &alice, None)
         .await
