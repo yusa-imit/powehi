@@ -23,6 +23,8 @@ pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_
 /// RustCrypto provider is used; the wasm32 difference is purely openmls's `js`
 /// feature (configured in Cargo.toml), not a different provider type.
 pub type Provider = OpenMlsRustCrypto;
+/// The openmls group handle, re-exported so native clients need no direct `openmls` dependency.
+pub use openmls::group::MlsGroup as Group;
 
 /// Errors surfaced by the MLS group operations.
 ///
@@ -1562,6 +1564,51 @@ pub fn welcome_pq_binding(
     Err(MlsError::Membership)
 }
 
+/// Extracts the ML-KEM encapsulation key from `key_package_bytes` for the group's one other
+/// member. `Ok(None)` means the package carries no PQ extension (a classical-only peer). A
+/// present-but-invalid extension (wrong length, unreduced key per FIPS 203 §7.2, bad signature)
+/// is an `Err(MlsError::KeyPackage)`, so callers can tell "classical" from "tampered".
+///
+/// The package must be the peer's own: its leaf signature key has to equal the roster's key for
+/// the other member, and the extension signature is verified under that key (prd.md §5.3
+/// Phase B). Callers still need an out-of-band pin on the package itself (the invite-link hash);
+/// the roster alone does not authenticate it when the member was just added from this package.
+/// Errors with [`MlsError::Membership`] unless `group` has exactly two members.
+pub fn peer_pq_encap_key(
+    group: &MlsGroup,
+    key_package_bytes: &[u8],
+    provider: &Provider,
+) -> Result<Option<Vec<u8>>, MlsError> {
+    let own = group.own_leaf_index();
+    let mut others = group.members().filter(|m| m.index != own);
+    let (Some(peer), None) = (others.next(), others.next()) else {
+        return Err(MlsError::Membership);
+    };
+    let msg =
+        MlsMessageIn::tls_deserialize_exact(key_package_bytes).map_err(|_| MlsError::Codec)?;
+    let MlsMessageBodyIn::KeyPackage(kp_in) = msg.extract() else {
+        return Err(MlsError::Codec);
+    };
+    let kp = kp_in
+        .validate(provider.crypto(), ProtocolVersion::Mls10)
+        .map_err(|_| MlsError::KeyPackage)?;
+    if kp.leaf_node().signature_key().as_slice() != peer.signature_key.as_slice() {
+        return Err(MlsError::KeyPackage);
+    }
+    let Some(ext) = kp.extensions().unknown(POWEHI_PQ_KEM_EXT_TYPE) else {
+        return Ok(None);
+    };
+    if ext.0.len() != PQ_EXT_PAYLOAD_LEN {
+        return Err(MlsError::KeyPackage);
+    }
+    let (ek, sig) = ext.0.split_at(PQ_EXT_ENCAP_KEY_LEN);
+    crate::kem::check_encap_key(ek).map_err(|_| MlsError::KeyPackage)?;
+    match crate::kem_credential::verify_encap_key(ek, sig, &peer.signature_key, provider) {
+        Ok(true) => Ok(Some(ek.to_vec())),
+        _ => Err(MlsError::KeyPackage),
+    }
+}
+
 /// True when `group` is exactly a freshly formed pair: two members at epoch 1 (the shape
 /// `add_member` produces from a one-member group). Callers joining a 1:1 conversation MUST
 /// check this before trusting a Welcome: its sender may have added further members, and the
@@ -1809,6 +1856,54 @@ mod tests {
         assert!(is_fresh_pair(&joined));
         assert!(is_fresh_pair(&group));
         assert!(welcome_pq_binding(&welcome, &b_prov).is_err());
+    }
+
+    #[test]
+    fn test_peer_pq_encap_key_verifies_against_roster_member() {
+        let (a, b, c) = (
+            OpenMlsRustCrypto::default(),
+            OpenMlsRustCrypto::default(),
+            OpenMlsRustCrypto::default(),
+        );
+        let alice = generate_identity(b"alice", &a).unwrap();
+        let bob = generate_identity(b"bob", &b).unwrap();
+        let mallory = generate_identity(b"mallory", &c).unwrap();
+        let kp_bob = generate_pq_key_package(&bob, &b).unwrap();
+        let kp_mal = generate_pq_key_package(&mallory, &c).unwrap();
+        let mut group = create_group(&alice, &a).unwrap();
+        // Solo group: no peer to verify against.
+        assert!(matches!(
+            peer_pq_encap_key(&group, &kp_bob.key_package, &a),
+            Err(MlsError::Membership)
+        ));
+        add_member_from_bytes(&mut group, &alice.signer, &kp_bob.key_package, &a).unwrap();
+        assert_eq!(
+            peer_pq_encap_key(&group, &kp_bob.key_package, &a).unwrap(),
+            Some(kp_bob.encap_key.clone())
+        );
+        // A package signed by someone other than the roster peer is a substitution.
+        assert!(matches!(
+            peer_pq_encap_key(&group, &kp_mal.key_package, &a),
+            Err(MlsError::KeyPackage)
+        ));
+        // Classical-only package from the peer itself: no extension is not an error.
+        let plain = MlsMessageOut::from(generate_key_package(&bob, &b).unwrap())
+            .to_bytes()
+            .unwrap();
+        assert_eq!(peer_pq_encap_key(&group, &plain, &a).unwrap(), None);
+        // Another identity's package (leaf key differs from the roster peer) is rejected even
+        // without an extension.
+        let other_plain = MlsMessageOut::from(generate_key_package(&mallory, &c).unwrap())
+            .to_bytes()
+            .unwrap();
+        assert!(matches!(
+            peer_pq_encap_key(&group, &other_plain, &a),
+            Err(MlsError::KeyPackage)
+        ));
+        assert!(matches!(
+            peer_pq_encap_key(&group, &[1, 2, 3], &a),
+            Err(MlsError::Codec)
+        ));
     }
 
     /// A Welcome that also seats a third (ghost) member is not a fresh pair.

@@ -23,6 +23,18 @@ pub struct Backend {
     pub calls: Vec<String>,
     /// Corrupt the key package on redeem (what a malicious server would try).
     pub tamper_redeem: bool,
+    /// Answer `POST /v1/messages` with a 500.
+    pub fail_messages: bool,
+}
+
+impl Backend {
+    /// Pending Welcome envelopes (the `pq_init` Application message is counted separately).
+    pub fn welcome_count(&self) -> usize {
+        self.inbox
+            .iter()
+            .filter(|e| e["message_type"] == "Welcome")
+            .count()
+    }
 }
 
 fn respond(status: u16, body: Option<Value>) -> String {
@@ -84,6 +96,30 @@ fn handle(st: &mut Backend, method: &str, path: &str, caller: Uuid, body: &Value
                 "expires_at": null,
             }));
             respond(204, None)
+        }
+        ("POST", ["v1", "messages"]) if st.fail_messages => respond(500, None),
+        ("POST", ["v1", "messages"]) => {
+            let group: Uuid = body["group_id"].as_str().unwrap().parse().unwrap();
+            let id = Uuid::new_v4();
+            for (_, dev, _) in st
+                .members
+                .clone()
+                .iter()
+                .filter(|(g, d, _)| *g == group && *d != caller)
+            {
+                st.inbox.push(json!({
+                    "id": id,
+                    "group_id": group,
+                    "sender": caller,
+                    "recipient": dev,
+                    "message_type": "Application",
+                    "ciphertext": body["ciphertext"],
+                    "epoch": 1,
+                    "created_at": "2026-10-09T00:00:00Z",
+                    "expires_at": null,
+                }));
+            }
+            respond(201, Some(json!({ "envelope_id": id })))
         }
         ("GET", ["v1", "messages"]) => {
             let mine: Vec<&Value> = st

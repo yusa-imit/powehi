@@ -43,6 +43,11 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 516 (2026-10-13, FEATURE) — Phase 7.7 slice A (redeemer pq_init)
+- Core: `kem::check_encap_key` (FIPS 203 §7.2, enforced in `kem::encapsulate`), `kem::derive_pq_binding` (moved from wasm; wasm delegates), `mls_group::peer_pq_encap_key` (-> `Option`; None=no ext, Err=invalid; leaf key must equal roster peer), `mls_group::Group` re-export. CLI: `invite::redeem` returns `(Uuid, PqStatus)`; sends `pq_init` after the Welcome (best effort), binding stored in `conv-*` only after a successful send. testsrv handles `POST /v1/messages`.
+- crypto-reviewer: first pass NEEDS-REWORK (absent vs invalid conflated, misleading wording) -> fixed. Binding is display-only (ADR-0003): messages stay classical MLS.
+- NEXT (7.7 slice B): inbox fetch/decrypt/ack, joiner-side `pq_init` receive (only after join, only from the roster peer, once, discard dk after), `send`, issue #24 policy.
+
 ## Cycle 514 (2026-10-13, FEATURE→CI-red fix)
 - main CI-Rust was red after #25: `welcome::tests::oversized_poll_response_is_rejected` built a 16 MB JSON number array; >10s in CI debug builds tripped `REQUEST_TIMEOUT` instead of the size cap. Fixed by using a string payload (cheap). Lesson: size-cap tests must not serialize multi-MB number arrays. Phase 7.7 is next.
 

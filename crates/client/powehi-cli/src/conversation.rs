@@ -47,6 +47,9 @@ pub struct Conversation {
     pq_decap_key: Option<Vec<u8>>,
     /// The published ek the key above must match; public, re-checked on every load.
     pq_encap_key: Option<Vec<u8>>,
+    /// 16-hex PQ binding (prd.md §5.3 Phase B) once the ML-KEM exchange completed on this side.
+    #[serde(default)]
+    pq_binding: Option<String>,
 }
 
 impl Conversation {
@@ -67,7 +70,19 @@ impl Conversation {
             role,
             pq_decap_key,
             pq_encap_key,
+            pq_binding: None,
         }
+    }
+
+    /// The PQ binding recorded after a successful `pq_init` exchange, if any.
+    pub fn pq_binding(&self) -> Option<&str> {
+        self.pq_binding.as_deref()
+    }
+
+    /// Records the binding derived from the ML-KEM shared secret.
+    pub fn set_pq_binding(&mut self, binding: String) {
+        debug_assert_eq!(binding.len(), 16);
+        self.pq_binding = Some(binding);
     }
 
     /// The decapsulation key kept for the peer's `pq_init` message, if this side joined.
@@ -83,7 +98,11 @@ impl Conversation {
             _ => false,
         };
         let role_ok = (self.role == Role::Joiner) == self.pq_decap_key.is_some();
-        if self.version == VERSION && key_ok && role_ok {
+        let binding_ok = self
+            .pq_binding
+            .as_ref()
+            .is_none_or(|b| b.len() == 16 && b.bytes().all(|c| c.is_ascii_hexdigit()));
+        if self.version == VERSION && key_ok && role_ok && binding_ok {
             Ok(())
         } else {
             Err(ConversationError::Malformed)

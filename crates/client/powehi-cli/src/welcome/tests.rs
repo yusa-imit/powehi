@@ -19,7 +19,7 @@ async fn pending_welcome() -> (tempfile::TempDir, Session, Arc<Mutex<Backend>>, 
     let url = serve(state.clone()).await;
     let (link, _) = invite::create(&client(), &url, &alice).await.unwrap();
     let link = invite::parse_link(&link).unwrap();
-    let gid = invite::redeem(&client(), &url, &bob, &link).await.unwrap();
+    let (gid, _) = invite::redeem(&client(), &url, &bob, &link).await.unwrap();
     (tmp, alice, state, url, gid)
 }
 
@@ -34,7 +34,7 @@ async fn tampered_decap_key_is_skipped_unacked_and_not_joined() {
     assert_eq!(report.joined, Vec::<Uuid>::new());
     assert_eq!(report.skipped, 1);
     assert_eq!(
-        state.lock().unwrap().inbox.len(),
+        state.lock().unwrap().welcome_count(),
         1,
         "left for expiry, not acked"
     );
@@ -51,7 +51,7 @@ async fn missing_decap_key_is_skipped() {
     alice.store.remove(PQ_KEYS_RECORD).unwrap();
     let report = join_pending(&client(), &url, &alice, None).await.unwrap();
     assert_eq!((report.joined.len(), report.skipped), (0, 1));
-    assert_eq!(state.lock().unwrap().inbox.len(), 1);
+    assert_eq!(state.lock().unwrap().welcome_count(), 1);
 }
 
 #[tokio::test]
@@ -86,7 +86,11 @@ async fn garbage_and_non_welcome_envelopes_are_ignored() {
     assert_eq!(report.joined, vec![gid]);
     assert_eq!(report.skipped, 2);
     // Only the good Welcome was acked.
-    assert_eq!(state.lock().unwrap().inbox.len(), 3);
+    assert_eq!(
+        state.lock().unwrap().inbox.len(),
+        4,
+        "3 junk + pq_init remain"
+    );
 }
 
 #[tokio::test]

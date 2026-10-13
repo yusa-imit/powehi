@@ -2833,16 +2833,7 @@ pub fn mls_pq_derive_binding(ss_handle: &str, group_id: &str) -> Result<JsValue,
 }
 
 fn pq_derive_binding_inner(ss: &[u8], group_id: &str) -> Result<String, &'static str> {
-    use hkdf::Hkdf;
-    use sha2::Sha256;
-    let hk = Hkdf::<Sha256>::new(None, ss);
-    let mut info = Vec::with_capacity(20 + group_id.len());
-    info.extend_from_slice(b"powehi-pq-binding-v1");
-    info.extend_from_slice(group_id.as_bytes());
-    let mut okm = [0u8; 8];
-    hk.expand(&info, &mut okm)
-        .map_err(|_| "HKDF expand failed")?;
-    Ok(okm.iter().map(|b| format!("{b:02x}")).collect())
+    kem::derive_pq_binding(ss, group_id)
 }
 
 // ── ML-KEM-768 Phase B: signed encap key (ADR-0003 Phase B, Y-3 fix) ──────────
