@@ -27,6 +27,8 @@ pub mod store;
 #[cfg(all(test, unix))]
 mod testsrv;
 #[cfg(unix)]
+pub mod verify;
+#[cfg(unix)]
 pub mod welcome;
 #[cfg(unix)]
 pub mod ws;
@@ -59,6 +61,9 @@ pub enum CliError {
     #[error("{0}")]
     Message(#[from] message::MessageError),
     #[cfg(unix)]
+    #[error("{0}")]
+    Verify(#[from] verify::VerifyError),
+    #[cfg(unix)]
     #[error("could not read the invite link from stdin")]
     Stdin,
     #[cfg(unix)]
@@ -72,6 +77,7 @@ pub enum CliError {
     Identity(#[from] identity::IdentityError),
     #[error("could not start the async runtime")]
     Runtime,
+    #[cfg(not(unix))]
     #[error("`{0}` is not implemented yet")]
     NotImplemented(&'static str),
 }
@@ -102,6 +108,9 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
         cli::Command::Read(ref c) => run_read(&args.server, &paths, &c.conversation),
         #[cfg(unix)]
         cli::Command::Chat(ref c) => run_chat(&args.server, &paths, &c.conversation),
+        #[cfg(unix)]
+        cli::Command::Verify(ref c) => run_verify(&args.server, &paths, c),
+        #[cfg(not(unix))]
         ref other => Err(CliError::NotImplemented(other.name())),
     }
 }
@@ -214,6 +223,34 @@ fn run_read(
     if msgs.is_empty() {
         println!("no new messages");
     }
+    Ok(())
+}
+
+/// `verify`: shows the Safety Number (local computation) and optionally records the comparison.
+#[cfg(unix)]
+fn run_verify(
+    server: &url::Url,
+    paths: &profile::ProfilePaths,
+    args: &cli::VerifyArgs,
+) -> Result<(), CliError> {
+    let rt = runtime()?;
+    let client = status::http_client()?;
+    let mut prompter = prompt::TtyPrompter;
+    let session = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
+    let group_id = message::resolve(&session.store, &args.conversation)?;
+    let number = verify::number(&session.store, group_id)?;
+    let mut state = verify::state(&session.store, group_id, &number)?;
+    if let Some(typed) = &args.confirm {
+        if state == verify::State::Changed {
+            eprintln!(
+                "warning: the safety number CHANGED since you last verified this conversation"
+            );
+        }
+        verify::confirm(&session.store, group_id, &number, typed)?;
+        state = verify::State::Verified;
+    }
+    verify::report(&mut std::io::stdout(), group_id, &number, state)
+        .map_err(|_| CliError::Stdout)?;
     Ok(())
 }
 
@@ -406,7 +443,7 @@ mod tests {
 
     #[test]
     fn valid_args_reach_command_dispatch() {
-        let r = run(cli(&["verify", "x"]), Some("/d".into()));
-        assert!(matches!(r, Err(CliError::NotImplemented("verify"))));
+        let r = run(cli(&["--profile", "..", "verify", "x"]), Some("/d".into()));
+        assert!(matches!(r, Err(CliError::InvalidProfile(_))));
     }
 }
