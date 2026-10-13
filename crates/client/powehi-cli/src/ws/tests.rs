@@ -147,6 +147,34 @@ async fn a_server_that_accepts_and_drops_at_once_exhausts_the_budget() {
     assert_eq!(seen.lock().unwrap().len(), 4, "1 try + 3 retries");
 }
 
+#[tokio::test]
+async fn an_oversized_frame_ends_the_connection_without_waking() {
+    let g = Uuid::new_v4();
+    let big = format!(
+        r#"{{"group_id":"{g}","pad":"{}"}}"#,
+        "x".repeat(MAX_FRAME_BYTES + 1)
+    );
+    let (url, _seen) = server(vec![big], true).await;
+    let (tx, mut rx) = channel(64);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        wake_loop(url, bearer(), g, tx, TICK),
+    )
+    .await
+    .unwrap();
+    let mut wakes = 0;
+    let mut last = None;
+    while let Some(e) = rx.recv().await {
+        if matches!(e, Event::Wake) {
+            wakes += 1;
+        }
+        last = Some(e);
+    }
+    // Only the connect-time catch-up wakes fire; the matching-but-oversized frame never does.
+    assert!(wakes <= 4, "got {wakes} wakes");
+    assert!(matches!(last, Some(Event::RealtimeLost)));
+}
+
 #[test]
 fn tls_connector_builds_with_an_explicit_provider() {
     assert!(tls_connector().is_some());
