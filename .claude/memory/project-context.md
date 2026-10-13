@@ -43,6 +43,10 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 522 (2026-10-14, FEATURE) — Phase 7.9 `powehi verify` [x]
+- Core: `safety::{pairwise, digits_from_hash}` moved verbatim from wasm (KAT kept in both crates; wasm delegates). CLI: `verify.rs` (number from the 2 MLS signature keys, local only; `verified-<group>` record; states Unverified/Verified/Changed, corrupt record = Changed; `--confirm` flag records/replaces). All `Command` variants now implemented on unix (`NotImplemented` arm is non-unix only).
+- NEXT: 7.10 E2E gate (two CLI profiles vs docker-compose, `#[ignore]` live test + CI job like `e2e-live`), then 7.11 threat-model-checker.
+
 ## Cycle 521 (2026-10-13, FEATURE) — Phase 7.8 `powehi chat` [x]
 - CLI: `chat.rs` (event-loop REPL: stdin lines -> `message::send`, Wake -> `inbox::receive` + show/remove stored msgs; `/quit`; poll fallback 5s after realtime lost, 60s safety net; `read_lines` caps lines at 16 KiB) and `ws.rs` (`/v1/ws` Bearer header, notifications are metadata-only wake hints filtered to the conversation's group id, catch-up Wake on every (re)connect, 3 retries then `RealtimeLost`; connections <5s don't refill the budget). New deps: tokio-tungstenite 0.24 (rustls ring, webpki-roots), futures-util. `message::display` shared with `read`.
 - NEXT: 7.9 `powehi verify` (Safety Number, prd §5.6).
