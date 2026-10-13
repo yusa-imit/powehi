@@ -135,3 +135,72 @@ jobs:
       - name: Stop docker compose stack
         if: always()
         run: docker compose down -v
+
+  cli-live-backend:
+    name: powehi CLI E2E (real backend)
+    # Phase 7.10: two CLI profiles register, converse both ways and compare Safety Numbers
+    # against the same docker-compose stack (crates/client/powehi-cli/src/live_e2e.rs).
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Start postgres/redis/minio
+        run: docker compose up -d --wait postgres redis minio
+
+      - name: Create the powehi-media bucket (minio-init)
+        run: docker compose up minio-init
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c  # v2
+
+      - name: Build backend server
+        run: cargo build --release -p powehi-server
+
+      - name: Start backend server
+        env:
+          POWEHI__DATABASE_URL: postgres://powehi:powehi@localhost:5432/powehi
+          POWEHI__REDIS_URL: redis://localhost:6379
+          POWEHI__R2_ENDPOINT: http://localhost:9000
+          POWEHI__R2_BUCKET: powehi-media
+          POWEHI__R2_ACCESS_KEY_ID: minioadmin
+          POWEHI__R2_SECRET_ACCESS_KEY: minioadmin
+          POWEHI__HOST: 127.0.0.1
+          POWEHI__PORT: "8080"
+        run: |
+          ./target/release/powehi-server > backend.log 2>&1 &
+          echo $! > backend.pid
+
+      - name: Wait for backend /health
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8080/health > /dev/null; then
+              echo "backend healthy"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "backend did not become healthy in time" >&2
+          cat backend.log >&2 || true
+          exit 1
+
+      - name: Run CLI live E2E
+        env:
+          POWEHI_E2E_SERVER: http://127.0.0.1:8080
+        run: cargo test -p powehi-cli live_e2e -- --ignored --nocapture
+
+      - name: Upload backend log on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: backend-log-cli
+          path: backend.log
+
+      - name: Stop backend
+        if: always()
+        run: kill "$(cat backend.pid)" 2>/dev/null || true
+
+      - name: Stop docker compose stack
+        if: always()
+        run: docker compose down -v

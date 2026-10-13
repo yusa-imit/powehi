@@ -43,6 +43,11 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 523 (2026-10-14, FEATURE) — Phase 7.10 CLI live E2E gate
+- `powehi-cli/src/live_e2e.rs` (`#[ignore]`, env `POWEHI_E2E_SERVER`) + CI job `cli-live-backend` in
+  `ci-e2e-live.yml`. Not runnable locally (no docker); CI is the first real run. Auth governor burst=8
+  per IP, so the test keeps to 6 `/v1/auth/*` calls. Next: 7.11 threat-model-checker pass.
+
 ## Cycle 522 (2026-10-14, FEATURE) — Phase 7.9 `powehi verify` [x]
 - Core: `safety::{pairwise, digits_from_hash}` moved verbatim from wasm (KAT kept in both crates; wasm delegates). CLI: `verify.rs` (number from the 2 MLS signature keys, local only; `verified-<group>` record; states Unverified/Verified/Changed, corrupt record = Changed; `--confirm` flag records/replaces). All `Command` variants now implemented on unix (`NotImplemented` arm is non-unix only).
 - NEXT: 7.10 E2E gate (two CLI profiles vs docker-compose, `#[ignore]` live test + CI job like `e2e-live`), then 7.11 threat-model-checker.
