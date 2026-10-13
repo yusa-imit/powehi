@@ -1,5 +1,6 @@
 //! Live-backend E2E gate (Phase 7.10): two CLI profiles register against a real
-//! `powehi-server`, start a conversation and exchange messages both ways.
+//! `powehi-server` (register ends with a real OPAQUE login; an extra explicit login would trip the
+//! per-handle limiter, burst 5), start a conversation and exchange messages both ways.
 //!
 //! `#[ignore]`d: it needs the docker-compose stack and a running server, so it only runs in
 //! the `CI — Live-backend E2E` workflow (or locally with `POWEHI_E2E_SERVER` set):
@@ -52,16 +53,8 @@ async fn two_profiles_register_converse_and_verify() {
     let url = server();
     let client = crate::status::http_client().unwrap();
     let tmp = tempfile::tempdir().unwrap();
-    let (alice, a_handle, a_pw) = register(&client, &url, &tmp, "alice").await;
+    let (alice, _, _) = register(&client, &url, &tmp, "alice").await;
     let (bob, _, _) = register(&client, &url, &tmp, "bob").await;
-
-    // A fresh login re-opens the same encrypted profile (OPAQUE export_key round trip).
-    let paths = ProfilePaths::resolve(tmp.path(), "alice").unwrap();
-    let relogin = auth::login(&client, &url, &paths, &mut prompter(&a_handle, &a_pw))
-        .await
-        .unwrap();
-    assert_eq!(relogin.device_id, alice.device_id);
-    drop(relogin);
 
     // Alice invites, Bob redeems, Alice joins from the Welcome.
     let (link, _) = invite::create(&client, &url, &alice).await.unwrap();
