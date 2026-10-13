@@ -43,6 +43,10 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 519 (2026-10-13, FEATURE) — Phase 7.7 slice D (#24 interim policy) -> 7.7 [x]
+- CLI: `welcome::join_invited` (used by `inbox`) joins only Welcomes whose KeyPackage was minted by `invite create` (marker record `invite-kp-<hash>` written before upload, removed on join). Pool-KP Welcomes stay unjoined/unacked. `join_pending` stays permissive for `--wait` (ref-filtered). security-auditor findings fixed (hashed marker name, tests). Residual: orphan markers (#22), starvation (#30), no `accept` command until #24 answered.
+- NEXT: 7.8 `powehi chat`.
+
 ## Cycle 518 (2026-10-13, FEATURE) — Phase 7.7 slice C (send + read)
 - CLI: `message.rs` (`send`: stdin body <=16 KiB UTF-8, MLS encrypt, save ratchet BEFORE POST; `read`: renders + deletes `rx-*`, neutralises control/bidi/format chars, indents continuation lines, web `{"type":"text"}` unwrapped). `Received.received_at` (ns) orders display; inbox dedup now ignores it (crash-window fix). testsrv: creator receives peer messages, ids ascending.
 - Reviews: crypto-reviewer + security-auditor NEEDS-REWORK -> blockers fixed. Residual lows: plaintext copies in read path not zeroized, TTL not enforced, no display cap, #24 policy still open. Escalated design points -> need-human issue (peer credential binding, padding, no PCS).

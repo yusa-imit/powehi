@@ -1,6 +1,6 @@
 //! `powehi inbox`: fetch, decrypt, store and acknowledge pending messages (prd.md §7A.2).
 //!
-//! Welcomes are joined first (`welcome::join_pending`). Application envelopes are accepted
+//! Welcomes are joined first (`welcome::join_invited`: invite KeyPackages only, issue #24). Application envelopes are accepted
 //! only for a stored 1:1 conversation and only from its peer device. The joiner's first peer
 //! message may be the `pq_init` ML-KEM ciphertext (prd.md §5.3 Phase B): it is decapsulated
 //! with the single-use key from the `conv-*` record, which is then discarded; the result is a
@@ -83,7 +83,7 @@ pub async fn receive(
     server: &Url,
     session: &Session,
 ) -> Result<InboxReport, InviteError> {
-    let joined = welcome::join_pending(client, server, session, None).await?;
+    let joined = welcome::join_invited(client, server, session).await?;
     let mut report = InboxReport {
         joined: joined.joined,
         ..InboxReport::default()

@@ -89,7 +89,7 @@ pub(crate) async fn fetch_pending(
     Ok(all)
 }
 
-/// Fetches pending envelopes and joins every Welcome addressed to one of our KeyPackages, or,
+/// Permissive: no invite-marker check (inbox must use [`join_invited`]). Fetches pending envelopes and joins every Welcome addressed to one of our KeyPackages, or,
 /// with `only_ref`, only the Welcome that consumes that exact KeyPackage (an invite's package,
 /// so a pool package handed to a stranger cannot masquerade as the invite being waited on).
 pub async fn join_pending(
@@ -97,6 +97,27 @@ pub async fn join_pending(
     server: &Url,
     session: &Session,
     only_ref: Option<&[u8]>,
+) -> Result<JoinReport, InviteError> {
+    join_filtered(client, server, session, only_ref, false).await
+}
+
+/// Like [`join_pending`] but joins only Welcomes that consume a KeyPackage minted by
+/// `invite create` (issue #24, interim policy): a pool KeyPackage is handed to any
+/// authenticated device, so a stranger's Welcome for one stays unjoined and unacked.
+pub async fn join_invited(
+    client: &Client,
+    server: &Url,
+    session: &Session,
+) -> Result<JoinReport, InviteError> {
+    join_filtered(client, server, session, None, true).await
+}
+
+async fn join_filtered(
+    client: &Client,
+    server: &Url,
+    session: &Session,
+    only_ref: Option<&[u8]>,
+    invites_only: bool,
 ) -> Result<JoinReport, InviteError> {
     let items = fetch_pending(client, server, session).await?;
     let mut report = JoinReport::default();
@@ -117,7 +138,7 @@ pub async fn join_pending(
             sender,
             ciphertext,
         };
-        match join_one(session, &env, only_ref) {
+        match join_one(session, &env, only_ref, invites_only) {
             Ok(group_id) => {
                 report.joined.push(group_id);
                 // The join is already persisted; a failed ack only leaves a stale envelope
@@ -154,6 +175,7 @@ fn join_one(
     session: &Session,
     env: &Joinable,
     only_ref: Option<&[u8]>,
+    invites_only: bool,
 ) -> Result<Uuid, JoinOutcome> {
     // A fresh provider per Welcome: a rejected join must not leave state in memory that a
     // later successful `save` would persist.
@@ -161,6 +183,9 @@ fn join_one(
     let binding = mls_group::welcome_pq_binding(&env.ciphertext, &local.provider)
         .map_err(|_| JoinOutcome::Skip)?;
     if only_ref.is_some_and(|r| r != binding.key_package_ref.as_slice()) {
+        return Err(JoinOutcome::Skip);
+    }
+    if invites_only && !invite_marker_exists(&session.store, &binding.key_package_ref)? {
         return Err(JoinOutcome::Skip);
     }
     let dk =
@@ -189,7 +214,29 @@ fn join_one(
     conversation::save(&session.store, &conv).map_err(|e| fatal(e.into()))?;
     local.save(&session.store)?;
     identity::prune_pq_key(&session.store, &binding.key_package_ref)?;
+    let _ = session
+        .store
+        .remove(&invite_marker(&binding.key_package_ref));
     Ok(group_id)
+}
+
+/// Profile-store record naming a KeyPackage minted for an invite (value is a constant).
+pub(crate) fn invite_marker(key_ref: &[u8]) -> String {
+    // Hashed so the plaintext record name does not expose the KeyPackageRef; a 24-byte digest
+    // prefix keeps the name under the 64-char record-name cap.
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest([b"powehi-cli/invite-kp/v1".as_slice(), key_ref].concat());
+    format!("invite-kp-{}", crate::invite::hex(&digest[..24]))
+}
+
+fn invite_marker_exists(
+    store: &crate::store::ProfileStore,
+    key_ref: &[u8],
+) -> Result<bool, JoinOutcome> {
+    store
+        .get(&invite_marker(key_ref))
+        .map(|v| v.is_some())
+        .map_err(|e| JoinOutcome::Fatal(IdentityError::from(e).into()))
 }
 
 pub(crate) async fn ack(
