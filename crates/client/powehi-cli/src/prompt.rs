@@ -197,3 +197,69 @@ impl Prompter for ScriptedPrompter {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Seek, SeekFrom};
+
+    /// A regular file stands in for the tty: `read_line` only needs `Read`.
+    fn file_with(bytes: &[u8]) -> File {
+        let mut f = tempfile::tempfile().unwrap();
+        f.write_all(bytes).unwrap();
+        f.seek(SeekFrom::Start(0)).unwrap();
+        f
+    }
+
+    #[test]
+    fn reads_one_line_and_consumes_nothing_past_it() {
+        let mut f = file_with(b"alice\nsecond\n");
+        assert_eq!(*read_line(&mut f).unwrap(), "alice");
+        assert_eq!(*read_line(&mut f).unwrap(), "second");
+    }
+
+    #[test]
+    fn strips_one_trailing_carriage_return_and_accepts_eof_as_end() {
+        assert_eq!(*read_line(&mut file_with(b"pw\r\n")).unwrap(), "pw");
+        assert_eq!(
+            *read_line(&mut file_with(b"no-newline")).unwrap(),
+            "no-newline"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_lines_and_eof() {
+        for raw in [&b""[..], b"\n", b"\r\n"] {
+            assert_eq!(
+                read_line(&mut file_with(raw)).unwrap_err(),
+                PromptError::Empty
+            );
+        }
+    }
+
+    #[test]
+    fn enforces_the_line_length_limit_exactly() {
+        let mut ok = vec![b'a'; MAX_LINE_LEN];
+        ok.push(b'\n');
+        assert_eq!(read_line(&mut file_with(&ok)).unwrap().len(), MAX_LINE_LEN);
+        let mut long = vec![b'a'; MAX_LINE_LEN + 1];
+        long.push(b'\n');
+        assert_eq!(
+            read_line(&mut file_with(&long)).unwrap_err(),
+            PromptError::TooLong
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_utf8() {
+        let r = read_line(&mut file_with(b"\xff\xfe\n"));
+        assert_eq!(r.unwrap_err(), PromptError::NotUtf8);
+    }
+
+    #[test]
+    fn terminal_modes_need_a_real_tty() {
+        // A regular file is not a terminal, so echo can never be silently "disabled" on it.
+        let f = file_with(b"x");
+        assert_eq!(set_lflag(&f, libc::ECHO).err(), Some(PromptError::NoTty));
+    }
+}
