@@ -158,6 +158,23 @@ pub fn pending(store: &ProfileStore, group_id: Uuid) -> Result<Vec<Pending>, Mes
     Ok(out)
 }
 
+/// Writes one message as `[sender] first line`, with continuation lines indented so a body
+/// cannot forge a `[id] ...` header line, and flushes so only what reached the terminal is
+/// ever discarded afterwards.
+pub fn display(out: &mut impl std::io::Write, msg: &Pending) -> std::io::Result<()> {
+    let mut lines = msg.text.split('\n');
+    writeln!(
+        out,
+        "[{}] {}",
+        short_id(&msg.sender),
+        lines.next().unwrap_or("")
+    )?;
+    for l in lines {
+        writeln!(out, "    | {l}")?;
+    }
+    out.flush()
+}
+
 /// Removes a message from the store once it has been shown.
 pub fn discard(store: &ProfileStore, msg: &Pending) -> Result<(), MessageError> {
     debug_assert!(msg.name.starts_with(RX_PREFIX));

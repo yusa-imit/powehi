@@ -33,6 +33,10 @@ hkdf = { workspace = true }
 sha2 = { workspace = true }
 zeroize = { workspace = true }
 rand = { workspace = true }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+rustls = { workspace = true }
+webpki-roots = "0.26"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 
 [dev-dependencies]
 opaque-ke = { workspace = true, features = ["ristretto255", "argon2", "serde", "std"] }

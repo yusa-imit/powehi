@@ -48,7 +48,7 @@ below is checked. See `docs/decisions/0006-cli-first-client.md`, prd.md §7A.
   issue #24 policy. Also: `powehi send <conversation>` (body from stdin, not
   argv), `powehi inbox` (fetch `/v1/messages`, decrypt, persist, ack). Incoming
   Commits use the one-shot merge (ADR-0005).
-- [ ] 7.8 `powehi chat <conversation>` — interactive line REPL with live delivery
+- [x] 7.8 `powehi chat <conversation>` — interactive line REPL with live delivery
   over `/v1/ws` (Bearer), reconnect with catch-up via `since` (prd.md §7.6:
   max 3 retries, then tell the user).
 - [ ] 7.9 `powehi verify <conversation>` — Safety Number display (prd.md §5.6),
