@@ -1407,3 +1407,9 @@ Cycles 425-431: `.claude/memory/archive/project-context-cycles-425-431.md`
 Cycles 443-452: `.claude/memory/archive/project-context-cycles-443-452.md`
 Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 - Open: need-human #16 (store rollback\/delete, DEK\/KEK, owner-uid check, key canary, `&mut self` on put\/remove) — settle before 7.5.
+
+## Cycle 515 (STABILIZATION)
+- CI green on main; `cargo deny check` ok; `cargo audit` no new vulns; no open `bug` issues.
+- Added 6 unit tests for `powehi-cli` `prompt.rs` (read_line limits/CRLF/EOF/UTF-8, set_lflag
+  non-tty) — PR for branch `test/stabilization-cycle-515`. Test-only; no review agents required.
+- Still open need-human: #13 #16 #19 #20 #22 #24. Next FEATURE item: first unchecked in phase-7 STATUS.
