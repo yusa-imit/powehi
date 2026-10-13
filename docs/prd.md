@@ -2348,7 +2348,7 @@ gantt
 - [x] 암호화 profile store (§7A.3) — 평문 바이트 디스크 미기록 테스트
 - [x] CLI 회원가입/로그인 (OPAQUE) + KeyPackage 업로드
 - [ ] 초대 → 1:1 대화 시작 → 양방향 메시지 송수신 (`send`/`inbox`)
-- [ ] `powehi chat`: `/v1/ws` 실시간 수신 + 재연결 catch-up
+- [x] `powehi chat`: `/v1/ws` 실시간 수신 + 재연결 catch-up
 - [ ] Safety Number 표시
 - [ ] CLI↔CLI E2E: docker-compose 백엔드 대상 두 프로필 왕복 테스트 (CI)
 - [ ] threat-model-checker: CLI 클라이언트 플랫폼 검토 통과

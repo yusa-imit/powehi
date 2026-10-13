@@ -5,6 +5,8 @@
 
 #[cfg(unix)]
 pub mod auth;
+#[cfg(unix)]
+pub mod chat;
 pub mod cli;
 #[cfg(unix)]
 pub mod conversation;
@@ -26,8 +28,9 @@ pub mod store;
 mod testsrv;
 #[cfg(unix)]
 pub mod welcome;
+#[cfg(unix)]
+pub mod ws;
 
-use std::io::Write as _;
 use std::path::PathBuf;
 
 use thiserror::Error;
@@ -97,6 +100,8 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
         cli::Command::Send(ref c) => run_send(&args.server, &paths, &c.conversation),
         #[cfg(unix)]
         cli::Command::Read(ref c) => run_read(&args.server, &paths, &c.conversation),
+        #[cfg(unix)]
+        cli::Command::Chat(ref c) => run_chat(&args.server, &paths, &c.conversation),
         ref other => Err(CliError::NotImplemented(other.name())),
     }
 }
@@ -202,23 +207,58 @@ fn run_read(
     let group_id = message::resolve(&session.store, reference)?;
     let msgs = message::pending(&session.store, group_id)?;
     for m in &msgs {
-        // Continuation lines are indented so a body cannot forge a `[id] ...` header line.
-        let mut lines = m.text.split('\n');
-        println!(
-            "[{}] {}",
-            message::short_id(&m.sender),
-            lines.next().unwrap_or("")
-        );
-        for l in lines {
-            println!("    | {l}");
-        }
         // Only delete what reached the terminal: a closed pipe must not eat unseen messages.
-        std::io::stdout().flush().map_err(|_| CliError::Stdout)?;
+        message::display(&mut std::io::stdout(), m).map_err(|_| CliError::Stdout)?;
         message::discard(&session.store, m)?;
     }
     if msgs.is_empty() {
         println!("no new messages");
     }
+    Ok(())
+}
+
+/// `chat`: logs in, then runs the REPL with stdin lines and `/v1/ws` wake-ups as events.
+#[cfg(unix)]
+fn run_chat(
+    server: &url::Url,
+    paths: &profile::ProfilePaths,
+    reference: &str,
+) -> Result<(), CliError> {
+    let rt = runtime()?;
+    let client = status::http_client()?;
+    let mut prompter = prompt::TtyPrompter;
+    let session = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
+    let group_id = message::resolve(&session.store, reference)?;
+    println!(
+        "chat {group_id}: type a line and press Enter; {} to leave",
+        chat::QUIT
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let stdin_tx = tx.clone();
+    // Detached on purpose: a blocked stdin read must not delay exit.
+    std::thread::spawn(move || chat::read_lines(std::io::stdin().lock(), &stdin_tx));
+    rt.block_on(async {
+        let ws = tokio::spawn(ws::wake_loop(
+            server.clone(),
+            session.bearer(),
+            group_id,
+            tx,
+            std::time::Duration::from_secs(1),
+        ));
+        let res = chat::run(
+            &client,
+            server,
+            &session,
+            group_id,
+            &mut rx,
+            &mut std::io::stdout(),
+            chat::Polling::default(),
+        )
+        .await;
+        ws.abort();
+        res
+    })
+    .map_err(|_| CliError::Stdout)?;
     Ok(())
 }
 
@@ -366,7 +406,7 @@ mod tests {
 
     #[test]
     fn valid_args_reach_command_dispatch() {
-        let r = run(cli(&["chat", "x"]), Some("/d".into()));
-        assert!(matches!(r, Err(CliError::NotImplemented("chat"))));
+        let r = run(cli(&["verify", "x"]), Some("/d".into()));
+        assert!(matches!(r, Err(CliError::NotImplemented("verify"))));
     }
 }
