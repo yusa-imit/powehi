@@ -43,6 +43,11 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 517 (2026-10-13, FEATURE) — Phase 7.7 slice B (inbox + joiner pq_init receive)
+- Core: `mls_group::load_group(group_id_bytes, provider)`. CLI: `inbox.rs` (`inbox::receive`: `welcome::join_pending` then Application envelopes from the conv peer only; fresh `LocalIdentity` per envelope; joiner awaiting pq_init decapsulates, `Conversation::complete_pq` stores binding and drops dk/ek; other plaintext -> `rx-<envelope id>` record, cap 2048; order: records, MLS save, ack). `powehi inbox` prints counts/binding only, never bodies.
+- Reviews: crypto-reviewer NEEDS-REWORK x2 -> fixed (keyset paging `welcome::fetch_pending`, own-echo ack, ephemeral types dropped, rx never overwritten, is_fresh_pair before decrypt, budget only on decrypt attempts); security-auditor fixes (page cap, cursor len). Residual starvation -> need-human issue (see PR).
+- NEXT (7.7 slice C): `send` (stdin body), showing stored `rx-*` messages (+ removal), issue #24 auto-join policy.
+
 ## Cycle 516 (2026-10-13, FEATURE) — Phase 7.7 slice A (redeemer pq_init)
 - Core: `kem::check_encap_key` (FIPS 203 §7.2, enforced in `kem::encapsulate`), `kem::derive_pq_binding` (moved from wasm; wasm delegates), `mls_group::peer_pq_encap_key` (-> `Option`; None=no ext, Err=invalid; leaf key must equal roster peer), `mls_group::Group` re-export. CLI: `invite::redeem` returns `(Uuid, PqStatus)`; sends `pq_init` after the Welcome (best effort), binding stored in `conv-*` only after a successful send. testsrv handles `POST /v1/messages`.
 - crypto-reviewer: first pass NEEDS-REWORK (absent vs invalid conflated, misleading wording) -> fixed. Binding is display-only (ADR-0003): messages stay classical MLS.

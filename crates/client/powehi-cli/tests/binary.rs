@@ -32,7 +32,7 @@ fn invalid_profile_fails_cleanly() {
 #[test]
 fn unimplemented_command_reports_it() {
     let out = powehi()
-        .args(["--data-dir", "/tmp", "inbox"])
+        .args(["--data-dir", "/tmp", "verify", "x"])
         .output()
         .unwrap();
     assert!(!out.status.success());

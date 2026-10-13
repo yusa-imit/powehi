@@ -1617,6 +1617,16 @@ pub fn is_fresh_pair(group: &MlsGroup) -> bool {
     group.epoch().as_u64() == 1 && group.members().count() == 2
 }
 
+/// Restores a group the provider's storage already holds, by its MLS group id bytes.
+/// `Ok(None)` means the provider has no such group; `Err` means stored state is unreadable.
+pub fn load_group(
+    group_id: &[u8],
+    provider: &impl OpenMlsProvider,
+) -> Result<Option<MlsGroup>, MlsError> {
+    MlsGroup::load(provider.storage(), &GroupId::from_slice(group_id))
+        .map_err(|_| MlsError::Persistence)
+}
+
 /// Join a group from a serialized `Welcome` message produced by [`add_member`].
 pub fn join_group(
     welcome_bytes: &[u8],

@@ -31,14 +31,62 @@ pub struct JoinReport {
     pub skipped: usize,
 }
 
+/// Pages fetched per call. The server returns at most 64 envelopes per page in ascending
+/// `(created_at, id)` order and never skips acked ones, so un-acked skipped envelopes at the
+/// head (own broadcasts, junk groups) must be paged past or they would starve newer ones.
+pub(crate) const MAX_PAGES: usize = 4;
+/// The server's page size is 64; a page beyond twice that is a misbehaving server.
+const MAX_PAGE_ENVELOPES: usize = 128;
+/// Longest cursor timestamp accepted back from the server (RFC 3339 with nanoseconds fits).
+const MAX_CURSOR_LEN: usize = 64;
+
 /// Typed (not `Value`) so a hostile page cannot blow up memory: ~1 byte per ciphertext byte.
 #[derive(Deserialize)]
-struct Envelope {
-    message_type: String,
-    id: Option<Uuid>,
-    group_id: Option<Uuid>,
-    sender: Option<Uuid>,
-    ciphertext: Option<Vec<u8>>,
+pub(crate) struct Envelope {
+    pub message_type: String,
+    pub id: Option<Uuid>,
+    pub group_id: Option<Uuid>,
+    pub sender: Option<Uuid>,
+    pub ciphertext: Option<Vec<u8>>,
+    created_at: Option<String>,
+}
+
+/// Fetches up to [`MAX_PAGES`] pages of pending envelopes, following the server's
+/// `(since, since_id)` keyset cursor taken from the last envelope of each page.
+pub(crate) async fn fetch_pending(
+    client: &Client,
+    server: &Url,
+    session: &Session,
+) -> Result<Vec<Envelope>, InviteError> {
+    let mut all: Vec<Envelope> = Vec::new();
+    let mut cursor: Option<(String, Uuid)> = None;
+    for _ in 0..MAX_PAGES {
+        let mut url = server
+            .join("/v1/messages")
+            .map_err(|_| InviteError::BadResponse)?;
+        if let Some((since, since_id)) = &cursor {
+            url.query_pairs_mut()
+                .append_pair("since", since)
+                .append_pair("since_id", &since_id.to_string());
+        }
+        let raw = identity::send_raw(client.get(url), session, MAX_POLL_BYTES).await?;
+        let page: Vec<Envelope> =
+            serde_json::from_slice(&raw).map_err(|_| InviteError::BadResponse)?;
+        if page.len() > MAX_PAGE_ENVELOPES {
+            return Err(InviteError::BadResponse);
+        }
+        let next = page
+            .last()
+            .and_then(|e| Some((e.created_at.clone()?, e.id?)))
+            .filter(|(since, _)| since.len() <= MAX_CURSOR_LEN);
+        all.extend(page);
+        match next {
+            // No progress (server ignored the cursor, or no timestamp): stop, don't spin.
+            Some(n) if cursor.as_ref() != Some(&n) => cursor = Some(n),
+            _ => break,
+        }
+    }
+    Ok(all)
 }
 
 /// Fetches pending envelopes and joins every Welcome addressed to one of our KeyPackages, or,
@@ -50,12 +98,7 @@ pub async fn join_pending(
     session: &Session,
     only_ref: Option<&[u8]>,
 ) -> Result<JoinReport, InviteError> {
-    let url = server
-        .join("/v1/messages")
-        .map_err(|_| InviteError::BadResponse)?;
-    let raw = identity::send_raw(client.get(url), session, MAX_POLL_BYTES).await?;
-    let items: Vec<Envelope> =
-        serde_json::from_slice(&raw).map_err(|_| InviteError::BadResponse)?;
+    let items = fetch_pending(client, server, session).await?;
     let mut report = JoinReport::default();
     for env in items.into_iter().filter(|e| e.message_type == "Welcome") {
         // Only joins count toward the cap; skipped ones cost one cheap local check each and
@@ -149,7 +192,7 @@ fn join_one(
     Ok(group_id)
 }
 
-async fn ack(
+pub(crate) async fn ack(
     client: &Client,
     server: &Url,
     session: &Session,
