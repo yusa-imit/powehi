@@ -2227,12 +2227,12 @@ pub fn mls_import_state(state_bytes: &[u8], min_generation: f64) -> Result<JsVal
 
 // ── Safety Numbers ─────────────────────────────────────────────────────────────
 
-/// Domain-separation prefix for the safety number derivation (prd.md §5.6).
-/// Pinning the construction version here makes any future format change detectable.
-const SAFETY_NUMBER_DOMAIN: &[u8] = b"powehi-safety-number-v1";
+use powehi_crypto_core::safety::{
+    digits_from_hash as safety_number_digits_from_hash, pairwise as compute_safety_number_inner,
+};
 
 /// Domain-separation prefix for the N-party group safety number (prd.md §5.6).
-/// Deliberately distinct from `SAFETY_NUMBER_DOMAIN`: this distinct string,
+/// Deliberately distinct from the pairwise domain in `powehi_crypto_core::safety`: this distinct string,
 /// not the member-count field below, is what makes a 2-member group's output
 /// unable to collide with (or be confused for) the pairwise construction's
 /// output on the same two keys — with fixed-length (32-byte), length-prefixed
@@ -2265,60 +2265,6 @@ const GROUP_SAFETY_NUMBER_DOMAIN: &[u8] = b"powehi-group-safety-number-v1";
 /// verify") distinctly from "verification failed" — the two are not the same
 /// finding and must not be presented identically to a user.
 const MAX_GROUP_SAFETY_NUMBER_MEMBERS: usize = 512;
-
-/// Render a SHA-512 digest as the 12-group decimal safety number format
-/// (prd.md §5.6 "숫자 6자리 그룹"): 12 six-digit decimal groups, space-separated,
-/// 83 characters total. Shared by both the pairwise and group constructions.
-fn safety_number_digits_from_hash(hash: &[u8; 64]) -> String {
-    // 12 groups × 4 bytes = 48 bytes; SHA-512 provides 64 bytes, 16 bytes unused.
-    // Each u32 mod 1_000_000 → 6-digit group (prd.md §5.6).
-    // Bias: 2^32 mod 1_000_000 = 967_296; values 0-967_295 appear once more in a
-    // uniform 32-bit space — negligible (< 0.03%) for a human-verified fingerprint.
-    let groups: Vec<String> = (0..12)
-        .map(|i| {
-            let val = u32::from_be_bytes([
-                hash[4 * i],
-                hash[4 * i + 1],
-                hash[4 * i + 2],
-                hash[4 * i + 3],
-            ]);
-            format!("{:06}", val % 1_000_000)
-        })
-        .collect();
-    groups.join(" ")
-}
-
-/// Inner computation for safety numbers — testable without js_sys.
-///
-/// Inputs are two Ed25519 signature public keys, each exactly 32 bytes.
-/// Returns a 83-char string: 12 six-digit decimal groups separated by spaces
-/// (prd.md §5.6 "숫자 6자리 그룹"). Symmetric: same result for (a,b) and (b,a).
-///
-/// Construction: SHA-512(DOMAIN || 0x00 || len(first) || first || len(second) || second)
-/// where first/second are sorted lexicographically. Domain separation + length prefixes
-/// prevent cross-protocol collisions and extension attacks.
-fn compute_safety_number_inner(key_a: &[u8], key_b: &[u8]) -> Result<String, &'static str> {
-    use sha2::{Digest, Sha512};
-    if key_a.len() != 32 || key_b.len() != 32 {
-        return Err("safety number keys must be exactly 32 bytes");
-    }
-    // Sort lexicographically so (a,b) and (b,a) hash identically.
-    // Both operands are public keys — no timing side-channel concern.
-    let (first, second) = if key_a <= key_b {
-        (key_a, key_b)
-    } else {
-        (key_b, key_a)
-    };
-    let mut h = Sha512::new();
-    h.update(SAFETY_NUMBER_DOMAIN);
-    h.update([0u8]); // separator between domain and data
-    h.update((first.len() as u32).to_be_bytes()); // length-prefix (always 32; explicit for framing)
-    h.update(first);
-    h.update((second.len() as u32).to_be_bytes());
-    h.update(second);
-    let hash: [u8; 64] = h.finalize().into();
-    Ok(safety_number_digits_from_hash(&hash))
-}
 
 /// Inner computation for an N-party group safety number — testable without js_sys.
 ///

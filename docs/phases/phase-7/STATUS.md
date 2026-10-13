@@ -51,8 +51,9 @@ below is checked. See `docs/decisions/0006-cli-first-client.md`, prd.md §7A.
 - [x] 7.8 `powehi chat <conversation>` — interactive line REPL with live delivery
   over `/v1/ws` (Bearer), reconnect with catch-up via `since` (prd.md §7.6:
   max 3 retries, then tell the user).
-- [ ] 7.9 `powehi verify <conversation>` — Safety Number display (prd.md §5.6),
-  verified flag stored in the profile store.
+- [x] 7.9 `powehi verify <conversation>` — Safety Number display (prd.md §5.6),
+  verified flag stored in the profile store. (`--confirm` records the comparison;
+  a later key change reports CHANGED. Pairwise number now lives in `powehi-crypto-core::safety`.)
 - [ ] 7.10 E2E gate — two CLI profiles register, start a conversation, and
   exchange messages both ways against the docker-compose backend (`#[ignore]`d
   live test + CI job, like `e2e-live`).
@@ -60,6 +61,8 @@ below is checked. See `docs/decisions/0006-cli-first-client.md`, prd.md §7A.
   (at-rest store, argv/history, scrollback, multiple profiles per machine).
 
 ## Follow-ups (not Phase 7 DoD)
+- Blocking requirement for any CLI Commit-merge work: wire the §5.6 CHANGED alert (compare the
+  stored `verified-<group>` number) into `read`/`chat`/`send` first (crypto-reviewer, cycle 522).
 - Full-screen TUI (`ratatui`) on top of the same lib.
 - Media send/receive (prd.md §9), groups of more than two, member Remove
   (blocked on issue #2 items (e)/(g)), multi-device, recovery-phrase restore.

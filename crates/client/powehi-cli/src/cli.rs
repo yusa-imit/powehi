@@ -54,7 +54,17 @@ pub enum Command {
     /// Interactive chat REPL with realtime delivery.
     Chat(ConversationArg),
     /// Show the Safety Number for a conversation.
-    Verify(ConversationArg),
+    Verify(VerifyArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct VerifyArgs {
+    /// Conversation id (or a unique prefix of at least 4 characters).
+    pub conversation: String,
+    /// Record that you compared this safety number (quote it) with your peer; replaces an
+    /// earlier confirmation. The number is public, so it may appear in argv.
+    #[arg(long, value_name = "NUMBER")]
+    pub confirm: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]

@@ -12,3 +12,4 @@ pub mod media;
 pub mod mls_group;
 pub mod opaque;
 pub mod recovery;
+pub mod safety;

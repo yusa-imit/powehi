@@ -30,11 +30,10 @@ fn invalid_profile_fails_cleanly() {
 }
 
 #[test]
-fn unimplemented_command_reports_it() {
-    let out = powehi()
-        .args(["--data-dir", "/tmp", "verify", "x"])
-        .output()
-        .unwrap();
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("not implemented"));
+fn verify_takes_a_conversation_and_an_optional_confirm_flag() {
+    let help = powehi().args(["verify", "--help"]).output().unwrap();
+    assert!(help.status.success());
+    assert!(String::from_utf8_lossy(&help.stdout).contains("--confirm"));
+    let missing = powehi().arg("verify").output().unwrap();
+    assert!(!missing.status.success());
 }
