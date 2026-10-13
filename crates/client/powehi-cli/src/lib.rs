@@ -11,6 +11,8 @@ pub mod conversation;
 #[cfg(unix)]
 pub mod identity;
 #[cfg(unix)]
+pub mod inbox;
+#[cfg(unix)]
 pub mod invite;
 pub mod profile;
 #[cfg(unix)]
@@ -43,6 +45,9 @@ pub enum CliError {
     #[error("{0}")]
     Invite(#[from] invite::InviteError),
     #[cfg(unix)]
+    #[error("{0}")]
+    Conversation(#[from] conversation::ConversationError),
+    #[cfg(unix)]
     #[error("could not read the invite link from stdin")]
     Stdin,
     #[cfg(unix)]
@@ -72,6 +77,8 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
         cli::Command::Login => run_auth(&args.server, &paths, false),
         #[cfg(unix)]
         cli::Command::Invite(ref cmd) => run_invite(&args.server, &paths, cmd),
+        #[cfg(unix)]
+        cli::Command::Inbox => run_inbox(&args.server, &paths),
         ref other => Err(CliError::NotImplemented(other.name())),
     }
 }
@@ -106,6 +113,32 @@ fn run_auth(
     let uploaded = rt.block_on(identity::ensure_key_packages(&client, server, &session))?;
     if uploaded > 0 {
         println!("uploaded {uploaded} key packages");
+    }
+    Ok(())
+}
+
+/// `inbox`: logs in, joins pending Welcomes and stores new messages; prints counts only.
+#[cfg(unix)]
+fn run_inbox(server: &url::Url, paths: &profile::ProfilePaths) -> Result<(), CliError> {
+    let rt = runtime()?;
+    let client = status::http_client()?;
+    let mut prompter = prompt::TtyPrompter;
+    let session = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
+    let r = rt.block_on(inbox::receive(&client, server, &session))?;
+    for id in &r.joined {
+        println!("joined conversation {id}");
+    }
+    for id in &r.pq_bound {
+        if let Some(b) = conversation::load(&session.store, id)?
+            .as_ref()
+            .and_then(|c| c.pq_binding().map(str::to_owned))
+        {
+            println!("conversation {id}: post-quantum binding {b} (compare with your peer)");
+        }
+    }
+    println!("{} new message(s) stored", r.stored);
+    if r.skipped > 0 {
+        eprintln!("{} envelope(s) skipped", r.skipped);
     }
     Ok(())
 }
@@ -254,7 +287,7 @@ mod tests {
 
     #[test]
     fn valid_args_reach_command_dispatch() {
-        let r = run(cli(&["inbox"]), Some("/d".into()));
-        assert!(matches!(r, Err(CliError::NotImplemented("inbox"))));
+        let r = run(cli(&["send", "x"]), Some("/d".into()));
+        assert!(matches!(r, Err(CliError::NotImplemented("send"))));
     }
 }

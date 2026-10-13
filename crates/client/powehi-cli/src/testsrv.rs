@@ -25,6 +25,8 @@ pub struct Backend {
     pub tamper_redeem: bool,
     /// Answer `POST /v1/messages` with a 500.
     pub fail_messages: bool,
+    /// Envelopes per `GET /v1/messages` page; 0 means the real server's 64.
+    pub page_limit: usize,
 }
 
 impl Backend {
@@ -49,6 +51,7 @@ fn respond(status: u16, body: Option<Value>) -> String {
 
 fn handle(st: &mut Backend, method: &str, path: &str, caller: Uuid, body: &Value) -> String {
     st.calls.push(format!("{method} {path}"));
+    let (path, query) = path.split_once('?').unwrap_or((path, ""));
     let segs: Vec<&str> = path.trim_matches('/').split('/').collect();
     match (method, segs.as_slice()) {
         ("POST", ["v1", "invites"]) => {
@@ -122,11 +125,28 @@ fn handle(st: &mut Backend, method: &str, path: &str, caller: Uuid, body: &Value
             respond(201, Some(json!({ "envelope_id": id })))
         }
         ("GET", ["v1", "messages"]) => {
-            let mine: Vec<&Value> = st
+            let since_id = query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("since_id="))
+                .map(str::to_owned);
+            let limit = if st.page_limit == 0 {
+                64
+            } else {
+                st.page_limit
+            };
+            // Stand-in keyset: tests share one timestamp, so the cursor is the id order.
+            let mut mine: Vec<&Value> = st
                 .inbox
                 .iter()
                 .filter(|e| e["recipient"].as_str() == Some(&caller.to_string()))
+                .filter(|e| {
+                    since_id
+                        .as_deref()
+                        .is_none_or(|s| e["id"].as_str() > Some(s))
+                })
                 .collect();
+            mine.sort_by_key(|e| e["id"].as_str().map(str::to_owned));
+            mine.truncate(limit);
             respond(200, Some(json!(mine)))
         }
         ("DELETE", ["v1", "messages", id]) => {

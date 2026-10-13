@@ -85,6 +85,18 @@ impl Conversation {
         self.pq_binding = Some(binding);
     }
 
+    /// Finishes the joiner's ML-KEM exchange: records the binding and discards the
+    /// decapsulation key, which is single-use and must not outlive the message it served.
+    pub fn complete_pq(&mut self, binding: String) {
+        debug_assert!(self.role == Role::Joiner && self.pq_binding.is_none());
+        self.set_pq_binding(binding);
+        if let Some(k) = self.pq_decap_key.as_mut() {
+            k.zeroize();
+        }
+        self.pq_decap_key = None;
+        self.pq_encap_key = None;
+    }
+
     /// The decapsulation key kept for the peer's `pq_init` message, if this side joined.
     pub fn pq_decap_key(&self) -> Option<&[u8]> {
         self.pq_decap_key.as_deref()
@@ -97,7 +109,11 @@ impl Conversation {
             (Some(dk), Some(ek)) => kem::validate_decap_key(dk, ek).is_ok(),
             _ => false,
         };
-        let role_ok = (self.role == Role::Joiner) == self.pq_decap_key.is_some();
+        // A joiner holds its key until `pq_init` arrives, then only the binding remains.
+        let role_ok = match self.role {
+            Role::Creator => self.pq_decap_key.is_none(),
+            Role::Joiner => self.pq_decap_key.is_some() || self.pq_binding.is_some(),
+        };
         let binding_ok = self
             .pq_binding
             .as_ref()
@@ -288,6 +304,27 @@ mod tests {
             Err(ConversationError::TooMany)
         ));
         save(&store, &creator(first)).unwrap();
+    }
+
+    #[test]
+    fn completing_pq_drops_the_key_and_keeps_the_binding() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let g = Uuid::new_v4();
+        let mut c = joiner(g);
+        c.complete_pq("0123456789abcdef".into());
+        assert!(c.pq_decap_key().is_none());
+        save(&store, &c).unwrap();
+        let got = load(&store, &g).unwrap().unwrap();
+        assert_eq!(got.pq_binding(), Some("0123456789abcdef"));
+        assert!(got.pq_decap_key().is_none());
+        // A creator never holds a key, binding or not.
+        let mut bad = Conversation::new(g, Uuid::new_v4(), Role::Creator, None);
+        bad.pq_decap_key = Some(vec![0; 4]);
+        assert!(matches!(
+            save(&store, &bad),
+            Err(ConversationError::Malformed)
+        ));
     }
 
     #[test]
