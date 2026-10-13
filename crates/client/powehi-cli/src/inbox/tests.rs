@@ -293,3 +293,27 @@ async fn stranger_junk_beyond_the_run_budget_cannot_starve_real_messages() {
     assert!(stored.is_some(), "{r:?}");
     assert_eq!(r.stored, 1);
 }
+
+#[tokio::test]
+async fn rerun_after_crash_between_put_and_save_reprocesses_and_acks() {
+    let (_tmp, p) = pair().await;
+    receive(&client(), &p.url, &p.alice).await.unwrap();
+    let id = bob_sends(&p, b"once");
+    // Simulate the crash window: the rx record exists (with an older receive time) but the MLS
+    // state was never saved and the envelope was never acked.
+    let name = format!("{RX_PREFIX}{}", id.hyphenated());
+    let rec = Received {
+        group_id: p.gid,
+        sender: p.bob.device_id,
+        body: b"once".to_vec(),
+        received_at: 1,
+    };
+    p.alice
+        .store
+        .put(&name, &serde_json::to_vec(&rec).unwrap())
+        .unwrap();
+    let r = receive(&client(), &p.url, &p.alice).await.unwrap();
+    assert_eq!((r.stored, r.skipped), (1, 0));
+    assert!(p.state.lock().unwrap().inbox.is_empty(), "acked");
+    assert_eq!(rx_names(&p.alice).len(), 1);
+}

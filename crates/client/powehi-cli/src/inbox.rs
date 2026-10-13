@@ -36,7 +36,7 @@ const EPHEMERAL_TYPES: [&str; 5] = [
 /// Cap on stored, not yet displayed messages. `store::MAX_RECORDS` is 4096; conversations
 /// (256), key packages and misc records need the remainder.
 pub const MAX_STORED_MESSAGES: usize = 2048;
-const RX_PREFIX: &str = "rx-";
+pub(crate) const RX_PREFIX: &str = "rx-";
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct InboxReport {
@@ -58,10 +58,13 @@ struct PqInit {
 }
 
 #[derive(Serialize, Deserialize)]
-struct Received {
-    group_id: Uuid,
-    sender: Uuid,
-    body: Vec<u8>,
+pub(crate) struct Received {
+    pub(crate) group_id: Uuid,
+    pub(crate) sender: Uuid,
+    pub(crate) body: Vec<u8>,
+    /// Local receive time, nanoseconds since the Unix epoch; orders display (0 = unknown).
+    #[serde(default)]
+    pub(crate) received_at: u64,
 }
 
 enum Outcome {
@@ -186,12 +189,15 @@ fn process_one(
             group_id,
             sender,
             body: plain.to_vec(),
+            received_at: now_nanos(),
         })
         .map_err(|_| InviteError::BadResponse)?,
     );
     // The envelope id is server-chosen: never overwrite a stored message with different bytes.
     match store.get(&name)? {
-        Some(old) if *old != *rec => return Ok(Outcome::Skip),
+        // A re-run after a crash between `put` and the MLS save: same content (the receive
+        // time legitimately differs), so fall through to save the ratchet and ack.
+        Some(old) if !same_message(&old, &plain, group_id, sender) => return Ok(Outcome::Skip),
         Some(_) => {}
         None => store.put(&name, &rec)?,
     }
@@ -210,6 +216,12 @@ fn pq_binding(conv: &conversation::Conversation, plain: &[u8], group_id: Uuid) -
     kem::derive_pq_binding(&ss, &group_id.hyphenated().to_string()).ok()
 }
 
+/// True when the stored record `old` holds exactly this group, sender and plaintext.
+fn same_message(old: &[u8], plain: &[u8], group_id: Uuid, sender: Uuid) -> bool {
+    serde_json::from_slice::<Received>(old)
+        .is_ok_and(|r| r.group_id == group_id && r.sender == sender && r.body == plain)
+}
+
 /// True for a JSON object whose `type` is one of [`EPHEMERAL_TYPES`].
 fn is_ephemeral(plain: &[u8]) -> bool {
     #[derive(Deserialize)]
@@ -218,6 +230,14 @@ fn is_ephemeral(plain: &[u8]) -> bool {
         kind: String,
     }
     serde_json::from_slice::<Typed>(plain).is_ok_and(|t| EPHEMERAL_TYPES.contains(&t.kind.as_str()))
+}
+
+fn now_nanos() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_nanos()).ok())
+        .unwrap_or(0)
 }
 
 fn stored_count(store: &ProfileStore) -> Result<usize, InviteError> {

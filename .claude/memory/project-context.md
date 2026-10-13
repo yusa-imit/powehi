@@ -43,6 +43,11 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 518 (2026-10-13, FEATURE) — Phase 7.7 slice C (send + read)
+- CLI: `message.rs` (`send`: stdin body <=16 KiB UTF-8, MLS encrypt, save ratchet BEFORE POST; `read`: renders + deletes `rx-*`, neutralises control/bidi/format chars, indents continuation lines, web `{"type":"text"}` unwrapped). `Received.received_at` (ns) orders display; inbox dedup now ignores it (crash-window fix). testsrv: creator receives peer messages, ids ascending.
+- Reviews: crypto-reviewer + security-auditor NEEDS-REWORK -> blockers fixed. Residual lows: plaintext copies in read path not zeroized, TTL not enforced, no display cap, #24 policy still open. Escalated design points -> need-human issue (peer credential binding, padding, no PCS).
+- NEXT: 7.7 remainder = issue #24 policy; then 7.8 `chat`.
+
 ## Cycle 517 (2026-10-13, FEATURE) — Phase 7.7 slice B (inbox + joiner pq_init receive)
 - Core: `mls_group::load_group(group_id_bytes, provider)`. CLI: `inbox.rs` (`inbox::receive`: `welcome::join_pending` then Application envelopes from the conv peer only; fresh `LocalIdentity` per envelope; joiner awaiting pq_init decapsulates, `Conversation::complete_pq` stores binding and drops dk/ek; other plaintext -> `rx-<envelope id>` record, cap 2048; order: records, MLS save, ack). `powehi inbox` prints counts/binding only, never bodies.
 - Reviews: crypto-reviewer NEEDS-REWORK x2 -> fixed (keyset paging `welcome::fetch_pending`, own-echo ack, ephemeral types dropped, rx never overwritten, is_fresh_pair before decrypt, budget only on decrypt attempts); security-auditor fixes (page cap, cursor len). Residual starvation -> need-human issue (see PR).
