@@ -148,8 +148,9 @@ fn run_invite(
             }
         }
         (cli::InviteCommand::Redeem, Some(link)) => {
-            let id = rt.block_on(invite::redeem(&client, server, &session, &link))?;
+            let (id, pq) = rt.block_on(invite::redeem(&client, server, &session, &link))?;
             println!("conversation {id}");
+            print_pq_status(&pq);
         }
         (cli::InviteCommand::Redeem, None) => return Err(CliError::Stdin),
     }
@@ -204,6 +205,27 @@ fn run_status(server: &url::Url) -> Result<(), CliError> {
     );
     println!("region:  {}", s.region_id);
     Ok(())
+}
+
+/// Tells the user what the `pq_init` step achieved. The binding is a comparison value only:
+/// message encryption itself stays classical MLS (ADR-0003, prd.md §5.3).
+fn print_pq_status(pq: &invite::PqStatus) {
+    match pq {
+        invite::PqStatus::Bound(b) => {
+            println!(
+                "post-quantum key exchange completed, binding {b} (messages stay classical MLS)"
+            )
+        }
+        invite::PqStatus::PeerClassical => println!("peer has no post-quantum key; classical only"),
+        invite::PqStatus::KeyRejected => eprintln!(
+            "warning: the inviter's post-quantum key failed verification and was ignored; \
+             the conversation is classical only. Do not trust this invite without checking \
+             with the inviter."
+        ),
+        invite::PqStatus::NotSent => {
+            println!("post-quantum key exchange could not be sent; classical only")
+        }
+    }
 }
 
 #[cfg(test)]

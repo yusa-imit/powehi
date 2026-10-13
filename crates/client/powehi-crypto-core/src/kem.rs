@@ -61,6 +61,44 @@ pub fn generate() -> MlKem768KeyPair {
     }
 }
 
+/// ML-KEM modulus q (FIPS 203 Table 2).
+const Q: u16 = 3329;
+/// Length of the encoded polynomial vector t-hat at the start of an ek (384 * k, k = 3).
+const EK_T_LEN: usize = 1152;
+
+/// FIPS 203 §7.2 encapsulation-key check: right length, and every 12-bit coefficient of the
+/// encoded polynomial vector (the first 1152 bytes) is below q, i.e. `ByteEncode(ByteDecode(t))`
+/// round-trips. The trailing 32 bytes (rho) are unconstrained.
+pub fn check_encap_key(ek_bytes: &[u8]) -> Result<(), &'static str> {
+    if ek_bytes.len() != EK_SIZE {
+        return Err("invalid encap key: expected 1184 bytes");
+    }
+    for triple in ek_bytes[..EK_T_LEN].as_chunks::<3>().0 {
+        let lo = u16::from(triple[0]) | (u16::from(triple[1] & 0x0f) << 8);
+        let hi = u16::from(triple[1] >> 4) | (u16::from(triple[2]) << 4);
+        if lo >= Q || hi >= Q {
+            return Err("invalid encap key: coefficient not reduced mod q");
+        }
+    }
+    Ok(())
+}
+
+/// Short human-comparable PQ binding (16 hex chars) both sides derive from the ML-KEM shared
+/// secret and the conversation id: `HKDF-SHA256(ss, info = "powehi-pq-binding-v1" || group_id)`
+/// truncated to 8 bytes (prd.md §5.3 Phase B). Does not expose the secret.
+pub fn derive_pq_binding(ss: &[u8], group_id: &str) -> Result<String, &'static str> {
+    use hkdf::Hkdf;
+    use sha2::Sha256;
+    let hk = Hkdf::<Sha256>::new(None, ss);
+    let mut info = Vec::with_capacity(20 + group_id.len());
+    info.extend_from_slice(b"powehi-pq-binding-v1");
+    info.extend_from_slice(group_id.as_bytes());
+    let mut okm = [0u8; 8];
+    hk.expand(&info, &mut okm)
+        .map_err(|_| "HKDF expand failed")?;
+    Ok(okm.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 /// Encapsulate: produce a (ciphertext, shared_secret) for the given encapsulation key.
 ///
 /// Returns:
@@ -68,11 +106,11 @@ pub fn generate() -> MlKem768KeyPair {
 /// - `shared_secret` (32 bytes) — the locally derived shared key, wrapped in Zeroizing.
 ///
 /// Errors if `ek_bytes` is not exactly EK_SIZE bytes.
-/// Note: ml-kem 0.2.x does NOT perform the FIPS 203 §7.2 coefficient modulus check on the
-/// encapsulation key — passing a malformed (non-reduced) key does not produce an error; it
-/// produces a silently divergent shared secret. Callers who receive encap keys over an
-/// untrusted channel should authenticate them before use (e.g. via a signature).
+/// ml-kem 0.2.x does not perform the FIPS 203 §7.2 coefficient modulus check itself, so this
+/// function runs [`check_encap_key`] first and rejects a non-reduced key. Callers who receive
+/// encap keys over an untrusted channel should still authenticate them (e.g. via a signature).
 pub fn encapsulate(ek_bytes: &[u8]) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>), &'static str> {
+    check_encap_key(ek_bytes)?;
     let ek_encoded: ml_kem::Encoded<Ek768> = ek_bytes
         .try_into()
         .map_err(|_| "invalid encap key: expected 1184 bytes")?;
@@ -145,6 +183,44 @@ pub fn validate_decap_key(dk_bytes: &[u8], expected_ek: &[u8]) -> Result<(), &'s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn check_encap_key_accepts_generated_and_rejects_unreduced() {
+        let pair = generate();
+        assert!(check_encap_key(&pair.encap_key).is_ok());
+        assert!(encapsulate(&pair.encap_key).is_ok());
+        // 0xfff,0xfff = 4095 >= q in the first coefficient pair.
+        let mut bad = pair.encap_key.clone();
+        bad[..3].copy_from_slice(&[0xff, 0xff, 0xff]);
+        assert!(check_encap_key(&bad).is_err());
+        assert!(encapsulate(&bad).is_err());
+        // Exactly q (0xd01) is rejected, q-1 (0xd00) is accepted; either half of a triple.
+        let mut edge = pair.encap_key.clone();
+        edge[..3].copy_from_slice(&[0x01, 0x0d, 0x00]);
+        assert!(check_encap_key(&edge).is_err());
+        edge[..3].copy_from_slice(&[0x00, 0x0d, 0x00]);
+        assert!(check_encap_key(&edge).is_ok());
+        edge[..3].copy_from_slice(&[0x00, 0x10, 0xd0]);
+        assert!(check_encap_key(&edge).is_err());
+        // The last coefficient pair and rho: rho bytes are not constrained.
+        let mut last = pair.encap_key.clone();
+        last[1149..1152].copy_from_slice(&[0xff, 0xff, 0xff]);
+        assert!(check_encap_key(&last).is_err());
+        let mut rho = pair.encap_key.clone();
+        rho[1152..].fill(0xff);
+        assert!(check_encap_key(&rho).is_ok());
+        assert!(check_encap_key(&pair.encap_key[..1183]).is_err());
+    }
+
+    #[test]
+    fn derive_pq_binding_is_group_scoped_and_secret_bound() {
+        let a = derive_pq_binding(&[1u8; 32], "g1").unwrap();
+        assert_eq!(a.len(), 16);
+        assert!(a.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_ne!(a, derive_pq_binding(&[1u8; 32], "g2").unwrap());
+        assert_ne!(a, derive_pq_binding(&[2u8; 32], "g1").unwrap());
+        assert_eq!(a, derive_pq_binding(&[1u8; 32], "g1").unwrap());
+    }
 
     // ── Key sizes ────────────────────────────────────────────────────────────────
 

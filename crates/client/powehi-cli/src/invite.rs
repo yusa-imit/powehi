@@ -6,13 +6,14 @@
 //! MLS group, adds the inviter and sends the Welcome. The inviter joins in [`crate::welcome`].
 //! The code, hash and KeyPackage bytes are never logged.
 
-use powehi_crypto_core::mls_group;
+use powehi_crypto_core::{kem, mls_group};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::auth::Session;
 use crate::conversation::{self, Conversation, ConversationError, Role};
@@ -186,7 +187,9 @@ pub async fn create(
 }
 
 /// Redeems an invite: verifies the pinned KeyPackage, creates the group, adds the inviter,
-/// registers both with the server and sends the Welcome. Returns the new conversation id.
+/// registers both with the server and sends the Welcome, then (when the inviter's KeyPackage
+/// carries a verified ML-KEM key) the `pq_init` message. Returns the new conversation id and
+/// how the PQ exchange went.
 ///
 /// Order matters for crash safety: MLS state is saved before any server call that depends on
 /// it, and the conversation record before the Welcome leaves, so a lost response never leaves
@@ -196,7 +199,7 @@ pub async fn redeem(
     server: &Url,
     session: &Session,
     link: &InviteLink,
-) -> Result<Uuid, InviteError> {
+) -> Result<(Uuid, PqStatus), InviteError> {
     if link
         .origin
         .as_ref()
@@ -221,12 +224,10 @@ pub async fn redeem(
     if pinned.device_id == session.device_id {
         return Err(InviteError::SelfInvite);
     }
-    let (group_id, welcome) = build_group(session, &pinned.key_package)?;
+    let (group_id, welcome, pq_init, pq_state) = build_group(session, &pinned.key_package)?;
     post_registration(client, server, session, group_id, pinned.device_id).await?;
-    conversation::save(
-        &session.store,
-        &Conversation::new(group_id, pinned.device_id, Role::Creator, None),
-    )?;
+    let mut conv = Conversation::new(group_id, pinned.device_id, Role::Creator, None);
+    conversation::save(&session.store, &conv)?;
     send_welcome(
         client,
         server,
@@ -236,12 +237,111 @@ pub async fn redeem(
         &welcome,
     )
     .await?;
-    Ok(group_id)
+    // Best effort, like the web client: a failed send leaves a working classical conversation
+    // and no binding recorded, so a stored binding always means the message left.
+    if let Some(pq) = pq_init {
+        if send_application(client, server, session, group_id, &pq.message)
+            .await
+            .is_ok()
+        {
+            conv.set_pq_binding(pq.binding);
+            conversation::save(&session.store, &conv)?;
+        }
+    }
+    let status = match (conv.pq_binding(), pq_state) {
+        (Some(b), _) => PqStatus::Bound(b.to_owned()),
+        (None, PqState::Classical) => PqStatus::PeerClassical,
+        (None, PqState::Rejected) => PqStatus::KeyRejected,
+        (None, PqState::Ready) => PqStatus::NotSent,
+    };
+    Ok((group_id, status))
+}
+
+/// Outcome of the `pq_init` step for the user (prd.md §5.3 Phase B). The ML-KEM secret only
+/// yields a comparison binding today; message keys stay classical (ADR-0003).
+#[derive(Debug, PartialEq, Eq)]
+pub enum PqStatus {
+    /// `pq_init` was sent; both sides derive this 16-hex binding.
+    Bound(String),
+    /// The inviter's KeyPackage has no PQ key: a classical-only peer.
+    PeerClassical,
+    /// The inviter's PQ key failed verification (bad signature, unreduced key, bad length).
+    KeyRejected,
+    /// A valid PQ key was found but the message could not be built or sent.
+    NotSent,
+}
+
+enum PqState {
+    Ready,
+    Classical,
+    Rejected,
+}
+
+/// The encrypted `pq_init` application message and the binding derived alongside it.
+struct PqInit {
+    message: Vec<u8>,
+    binding: String,
+}
+
+/// Encapsulates to the inviter's verified ML-KEM key and encrypts the `pq_init` envelope into
+/// the group (prd.md §5.3 Phase B). A classical-only peer and a rejected key are reported
+/// separately; the shared secret is zeroized and the conversation stays classical either way.
+fn make_pq_init(
+    group: &mut mls_group::Group,
+    local: &LocalIdentity,
+    key_package: &[u8],
+    group_id: Uuid,
+) -> (Option<PqInit>, PqState) {
+    let ek = match mls_group::peer_pq_encap_key(group, key_package, &local.provider) {
+        Ok(Some(ek)) => ek,
+        Ok(None) => return (None, PqState::Classical),
+        Err(_) => return (None, PqState::Rejected),
+    };
+    let built = (|| {
+        let (ct, ss) = kem::encapsulate(&ek).ok()?;
+        let ss: Zeroizing<Vec<u8>> = ss;
+        let binding = kem::derive_pq_binding(&ss, &group_id.hyphenated().to_string()).ok()?;
+        let payload = Zeroizing::new(
+            serde_json::to_vec(&serde_json::json!({ "type": "pq_init", "ct": ct })).ok()?,
+        );
+        let message =
+            mls_group::encrypt_message(group, &local.identity.signer, &payload, &local.provider)
+                .ok()?;
+        Some(PqInit { message, binding })
+    })();
+    (built, PqState::Ready)
+}
+
+async fn send_application(
+    client: &Client,
+    server: &Url,
+    session: &Session,
+    group_id: Uuid,
+    ciphertext: &[u8],
+) -> Result<(), InviteError> {
+    #[derive(Serialize)]
+    struct MessageReq<'a> {
+        group_id: Uuid,
+        ciphertext: &'a [u8],
+    }
+    let req = json_post(
+        client,
+        api(server, "/v1/messages")?,
+        &MessageReq {
+            group_id,
+            ciphertext,
+        },
+    )?;
+    identity::send_raw(req, session, SMALL_BODY).await?;
+    Ok(())
 }
 
 /// Creates the MLS group with the inviter added; persists the provider. Returns the group's
-/// UUID (its 16-byte MLS id) and the serialized Welcome.
-fn build_group(session: &Session, key_package: &[u8]) -> Result<(Uuid, Vec<u8>), InviteError> {
+/// UUID (its 16-byte MLS id), the serialized Welcome and the `pq_init` message when PQ applies.
+fn build_group(
+    session: &Session,
+    key_package: &[u8],
+) -> Result<(Uuid, Vec<u8>, Option<PqInit>, PqState), InviteError> {
     let mut local = LocalIdentity::load(&session.store)?;
     let mut group = mls_group::create_group(&local.identity, &local.provider)?;
     let welcome = mls_group::add_member_from_bytes(
@@ -252,8 +352,9 @@ fn build_group(session: &Session, key_package: &[u8]) -> Result<(Uuid, Vec<u8>),
     )?;
     debug_assert_eq!(group.epoch().as_u64(), 1);
     let group_id = Uuid::from_slice(group.group_id().as_slice()).map_err(|_| InviteError::Mls)?;
+    let (pq_init, pq_state) = make_pq_init(&mut group, &local, key_package, group_id);
     local.save(&session.store)?;
-    Ok((group_id, welcome))
+    Ok((group_id, welcome, pq_init, pq_state))
 }
 
 /// Registers the group and the inviter as a member (epoch 1) with the Delivery Service.

@@ -74,12 +74,16 @@ async fn invite_to_joined_conversation_end_to_end() {
     }
     assert!(alice.store.get(PQ_KEYS_RECORD).unwrap().is_some());
 
-    let group_id = redeem(&client(), &url, &bob, &parsed).await.unwrap();
+    let (group_id, binding) = redeem(&client(), &url, &bob, &parsed).await.unwrap();
+    let PqStatus::Bound(binding) = binding else {
+        panic!("both KeyPackages are PQ-capable: {binding:?}");
+    };
     {
         let st = state.lock().unwrap();
         assert_eq!(st.groups, vec![group_id]);
         assert_eq!(st.members, vec![(group_id, alice.device_id, 1)]);
-        assert_eq!(st.inbox.len(), 1);
+        assert_eq!(st.welcome_count(), 1);
+        assert_eq!(st.inbox.len(), 2, "Welcome + pq_init");
         assert_eq!(st.inbox[0]["recipient"], alice.device_id.to_string());
         assert!(st.invites.is_empty(), "code is single use");
     }
@@ -99,7 +103,7 @@ async fn invite_to_joined_conversation_end_to_end() {
     assert_eq!(conv.peer_device_id, bob.device_id);
     assert!(conv.pq_decap_key().is_some());
     // The consumed KeyPackage's key moved into the conversation and left `pq-keys`.
-    assert!(state.lock().unwrap().inbox.is_empty(), "welcome acked");
+    assert_eq!(state.lock().unwrap().welcome_count(), 0, "welcome acked");
     let left = alice.store.get(PQ_KEYS_RECORD).unwrap().unwrap();
     assert_eq!(left.len(), 3, "no decap keys remain: header only");
 
@@ -113,6 +117,25 @@ async fn invite_to_joined_conversation_end_to_end() {
     assert_eq!(
         mls_group::decrypt_message(&mut ag, &ct, &a.provider).unwrap(),
         b"hi"
+    );
+
+    // The pq_init envelope decrypts for Alice, and decapsulating with her stored key yields
+    // the same binding Bob recorded (prd.md §5.3 Phase B).
+    let env = state.lock().unwrap().inbox[0].clone();
+    assert_eq!(env["message_type"], "Application");
+    let ct: Vec<u8> = serde_json::from_value(env["ciphertext"].clone()).unwrap();
+    let plain = mls_group::decrypt_message(&mut ag, &ct, &a.provider).unwrap();
+    let init: serde_json::Value = serde_json::from_slice(&plain).unwrap();
+    assert_eq!(init["type"], "pq_init");
+    let kem_ct: Vec<u8> = serde_json::from_value(init["ct"].clone()).unwrap();
+    let ss = kem::decapsulate(conv.pq_decap_key().unwrap(), &kem_ct).unwrap();
+    let theirs = kem::derive_pq_binding(&ss, &group_id.hyphenated().to_string()).unwrap();
+    assert_eq!(theirs, binding);
+    let bob_conv = conversation::load(&bob.store, &group_id).unwrap().unwrap();
+    assert_eq!(bob_conv.pq_binding(), Some(binding.as_str()));
+    assert!(
+        !String::from_utf8_lossy(&ct).contains("pq_init"),
+        "ciphertext only"
     );
 
     // A second poll finds nothing and does not rejoin.
@@ -207,7 +230,7 @@ async fn wait_filter_ignores_welcomes_for_other_key_packages() {
         .await
         .unwrap();
     assert_eq!((r.joined.len(), r.skipped), (0, 1));
-    assert_eq!(state.lock().unwrap().inbox.len(), 1);
+    assert_eq!(state.lock().unwrap().welcome_count(), 1);
     let r = welcome::join_pending(&client(), &url, &alice, Some(&key_ref))
         .await
         .unwrap();
@@ -226,4 +249,95 @@ async fn link_for_another_server_is_refused_before_any_request() {
         Err(InviteError::WrongServer)
     ));
     assert!(state.lock().unwrap().calls.is_empty());
+}
+
+/// A peer whose KeyPackage has no PQ extension gets a classical-only conversation: no
+/// `pq_init` leaves, no binding is recorded.
+#[tokio::test]
+async fn classical_only_peer_gets_no_pq_init_and_no_binding() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (alice, bob) = (session(&tmp, "alice", 1), session(&tmp, "bob", 2));
+    let state = Arc::new(Mutex::new(Backend::default()));
+    let url = serve(state.clone()).await;
+    let a = LocalIdentity::load(&alice.store).unwrap();
+    let plain = mls_group::generate_key_package(&a.identity, &a.provider).unwrap();
+    let kp = openmls::prelude::MlsMessageOut::from(plain)
+        .to_bytes()
+        .unwrap();
+    let code = "ab".repeat(16);
+    state
+        .lock()
+        .unwrap()
+        .invites
+        .insert(code.clone(), (alice.device_id, kp.clone()));
+    let link = build_link(&url, &code, &hex(&Sha256::digest(&kp))).unwrap();
+    let (gid, binding) = redeem(&client(), &url, &bob, &parse_link(&link).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(binding, PqStatus::PeerClassical);
+    let st = state.lock().unwrap();
+    assert_eq!((st.welcome_count(), st.inbox.len()), (1, 1));
+    drop(st);
+    let conv = conversation::load(&bob.store, &gid).unwrap().unwrap();
+    assert_eq!(conv.pq_binding(), None);
+}
+
+/// A KeyPackage whose PQ extension was signed by someone other than the group's peer is a key
+/// substitution: no encapsulation to it, classical fallback.
+#[tokio::test]
+async fn pq_key_signed_by_someone_else_is_not_used() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (alice, bob, mallory) = (
+        session(&tmp, "alice", 1),
+        session(&tmp, "bob", 2),
+        session(&tmp, "mallory", 3),
+    );
+    let state = Arc::new(Mutex::new(Backend::default()));
+    let url = serve(state.clone()).await;
+    // Alice's leaf identity, Mallory's signature over the encap key: build a payload by hand.
+    let (a, m) = (
+        LocalIdentity::load(&alice.store).unwrap(),
+        LocalIdentity::load(&mallory.store).unwrap(),
+    );
+    let pair = kem::generate();
+    let sig =
+        powehi_crypto_core::kem_credential::sign_encap_key(&pair.encap_key, &m.identity.signer)
+            .unwrap();
+    let mut payload = pair.encap_key.to_vec();
+    payload.extend_from_slice(&sig);
+    let bundle =
+        mls_group::generate_key_package_with_pq_ext(&a.identity, &a.provider, &payload).unwrap();
+    let kp = openmls::prelude::MlsMessageOut::from(bundle)
+        .to_bytes()
+        .unwrap();
+    let code = "cd".repeat(16);
+    state
+        .lock()
+        .unwrap()
+        .invites
+        .insert(code.clone(), (alice.device_id, kp.clone()));
+    let link = build_link(&url, &code, &hex(&Sha256::digest(&kp))).unwrap();
+    let (_, binding) = redeem(&client(), &url, &bob, &parse_link(&link).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(binding, PqStatus::KeyRejected);
+    assert_eq!(state.lock().unwrap().inbox.len(), 1, "Welcome only");
+}
+
+/// If `pq_init` cannot be sent the conversation still works, and no binding is recorded.
+#[tokio::test]
+async fn failed_pq_init_send_records_no_binding() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (alice, bob) = (session(&tmp, "alice", 1), session(&tmp, "bob", 2));
+    let state = Arc::new(Mutex::new(Backend::default()));
+    state.lock().unwrap().fail_messages = true;
+    let url = serve(state.clone()).await;
+    let (link, _) = create(&client(), &url, &alice).await.unwrap();
+    let (gid, status) = redeem(&client(), &url, &bob, &parse_link(&link).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(status, PqStatus::NotSent);
+    assert_eq!(state.lock().unwrap().welcome_count(), 1);
+    let conv = conversation::load(&bob.store, &gid).unwrap().unwrap();
+    assert_eq!(conv.pq_binding(), None);
 }
