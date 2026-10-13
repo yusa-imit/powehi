@@ -37,10 +37,10 @@ below is checked. See `docs/decisions/0006-cli-first-client.md`, prd.md §7A.
   and joined (prd.md §4.2). Carry-over from 7.5 review: on Welcome join, look up the decap key
   by KeyPackageRef in `pq-keys`, and before decapsulating validate the dk (FIPS 203 §7.3 hash
   check; dk-embedded ek matches the uploaded one); consumed refs are pruned.
-- [ ] 7.7 Send and receive — (slice A done, #29: redeemer-side `pq_init` send, ek §7.2
+- [x] 7.7 Send and receive — (slice D done, cycle 519: `inbox` joins only invite-minted KeyPackages (interim #24 policy; `powehi accept` for others awaits the owner decision); slice A done, #29: redeemer-side `pq_init` send, ek §7.2
   check, `peer_pq_encap_key`; slice B done, cycle 517: `powehi inbox` = join Welcomes, decrypt
   Application messages from the conv peer, joiner-side `pq_init` receive (dk discarded),
-  store as `rx-*` records, ack; slice C done, cycle 518: `powehi send` (stdin body) + `powehi read` (show + remove stored `rx-*`); REMAINING: issue #24 policy) FIRST, `pq_init` (prd.md §5.3 Phase B; the web sends it after the
+  store as `rx-*` records, ack; slice C done, cycle 518: `powehi send` (stdin body) + `powehi read` (show + remove stored `rx-*`);  FIRST, `pq_init` (prd.md §5.3 Phase B; the web sends it after the
   Welcome, CLI 7.6 does not, so CLI 1:1s are classical-only until this lands): redeemer runs
   `kem_credential::verify_encap_key` on the inviter's KeyPackage ek, adds a FIPS 203 §7.2
   modulus check on the ek, encapsulates and sends `pq_init`; joiner decapsulates with the dk

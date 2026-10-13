@@ -174,6 +174,11 @@ pub async fn create(
     let key_package = packages.pop().ok_or(InviteError::Mls)?;
     let key_ref = identity::last_pq_ref(&session.store)?.ok_or(InviteError::Mls)?;
     let kp_hash = hex(&Sha256::digest(&key_package));
+    // Marker first: `inbox` joins only invite KeyPackages (issue #24 interim policy).
+    session
+        .store
+        .put(&crate::welcome::invite_marker(&key_ref), b"1")
+        .map_err(IdentityError::from)?;
     let req = json_post(
         client,
         api(server, "/v1/invites")?,
