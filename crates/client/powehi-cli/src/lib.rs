@@ -14,6 +14,8 @@ pub mod identity;
 pub mod inbox;
 #[cfg(unix)]
 pub mod invite;
+#[cfg(unix)]
+pub mod message;
 pub mod profile;
 #[cfg(unix)]
 pub mod prompt;
@@ -25,9 +27,12 @@ mod testsrv;
 #[cfg(unix)]
 pub mod welcome;
 
+use std::io::Write as _;
 use std::path::PathBuf;
 
 use thiserror::Error;
+#[cfg(unix)]
+use zeroize::Zeroizing;
 
 /// Errors surfaced to the user. Messages never contain secrets or message content.
 #[derive(Debug, Error)]
@@ -48,8 +53,17 @@ pub enum CliError {
     #[error("{0}")]
     Conversation(#[from] conversation::ConversationError),
     #[cfg(unix)]
+    #[error("{0}")]
+    Message(#[from] message::MessageError),
+    #[cfg(unix)]
     #[error("could not read the invite link from stdin")]
     Stdin,
+    #[cfg(unix)]
+    #[error("could not read the message from stdin")]
+    StdinMessage,
+    #[cfg(unix)]
+    #[error("could not write to stdout; unread messages were kept")]
+    Stdout,
     #[cfg(unix)]
     #[error("{0}")]
     Identity(#[from] identity::IdentityError),
@@ -79,6 +93,10 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
         cli::Command::Invite(ref cmd) => run_invite(&args.server, &paths, cmd),
         #[cfg(unix)]
         cli::Command::Inbox => run_inbox(&args.server, &paths),
+        #[cfg(unix)]
+        cli::Command::Send(ref c) => run_send(&args.server, &paths, &c.conversation),
+        #[cfg(unix)]
+        cli::Command::Read(ref c) => run_read(&args.server, &paths, &c.conversation),
         ref other => Err(CliError::NotImplemented(other.name())),
     }
 }
@@ -139,6 +157,67 @@ fn run_inbox(server: &url::Url, paths: &profile::ProfilePaths) -> Result<(), Cli
     println!("{} new message(s) stored", r.stored);
     if r.skipped > 0 {
         eprintln!("{} envelope(s) skipped", r.skipped);
+    }
+    Ok(())
+}
+
+/// `send`: body from stdin (never argv), then log in and post it into the conversation.
+#[cfg(unix)]
+fn run_send(
+    server: &url::Url,
+    paths: &profile::ProfilePaths,
+    reference: &str,
+) -> Result<(), CliError> {
+    use std::io::Read as _;
+    // Read and validate the body before the password prompt so a bad pipe fails fast.
+    let mut raw = Zeroizing::new(Vec::with_capacity(message::MAX_BODY_LEN + 3));
+    std::io::stdin()
+        .take(message::MAX_BODY_LEN as u64 + 3)
+        .read_to_end(&mut raw)
+        .map_err(|_| CliError::StdinMessage)?;
+    message::check_body(&raw)?;
+    let rt = runtime()?;
+    let client = status::http_client()?;
+    let mut prompter = prompt::TtyPrompter;
+    let session = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
+    let group_id = message::resolve(&session.store, reference)?;
+    let body = message::check_body(&raw)?;
+    rt.block_on(message::send(&client, server, &session, group_id, body))?;
+    println!("sent to conversation {group_id}");
+    Ok(())
+}
+
+/// `read`: shows and removes the stored messages of one conversation. Logging in (OPAQUE)
+/// is how the store is opened, so the server sees a login, but no message traffic.
+#[cfg(unix)]
+fn run_read(
+    server: &url::Url,
+    paths: &profile::ProfilePaths,
+    reference: &str,
+) -> Result<(), CliError> {
+    let rt = runtime()?;
+    let client = status::http_client()?;
+    let mut prompter = prompt::TtyPrompter;
+    let session = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
+    let group_id = message::resolve(&session.store, reference)?;
+    let msgs = message::pending(&session.store, group_id)?;
+    for m in &msgs {
+        // Continuation lines are indented so a body cannot forge a `[id] ...` header line.
+        let mut lines = m.text.split('\n');
+        println!(
+            "[{}] {}",
+            message::short_id(&m.sender),
+            lines.next().unwrap_or("")
+        );
+        for l in lines {
+            println!("    | {l}");
+        }
+        // Only delete what reached the terminal: a closed pipe must not eat unseen messages.
+        std::io::stdout().flush().map_err(|_| CliError::Stdout)?;
+        message::discard(&session.store, m)?;
+    }
+    if msgs.is_empty() {
+        println!("no new messages");
     }
     Ok(())
 }
@@ -287,7 +366,7 @@ mod tests {
 
     #[test]
     fn valid_args_reach_command_dispatch() {
-        let r = run(cli(&["send", "x"]), Some("/d".into()));
-        assert!(matches!(r, Err(CliError::NotImplemented("send"))));
+        let r = run(cli(&["chat", "x"]), Some("/d".into()));
+        assert!(matches!(r, Err(CliError::NotImplemented("chat"))));
     }
 }

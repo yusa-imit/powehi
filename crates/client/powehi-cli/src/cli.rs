@@ -49,6 +49,8 @@ pub enum Command {
     Send(ConversationArg),
     /// Fetch, decrypt, store and acknowledge pending messages.
     Inbox,
+    /// Show stored received messages for a conversation, then remove them from the store.
+    Read(ConversationArg),
     /// Interactive chat REPL with realtime delivery.
     Chat(ConversationArg),
     /// Show the Safety Number for a conversation.
@@ -69,7 +71,7 @@ pub enum InviteCommand {
 
 #[derive(Debug, Args)]
 pub struct ConversationArg {
-    /// Conversation reference.
+    /// Conversation id (or a unique prefix of at least 4 characters).
     pub conversation: String,
 }
 
@@ -84,6 +86,7 @@ impl Command {
             Command::Invite(InviteCommand::Redeem) => "invite redeem",
             Command::Send(_) => "send",
             Command::Inbox => "inbox",
+            Command::Read(_) => "read",
             Command::Chat(_) => "chat",
             Command::Verify(_) => "verify",
         }

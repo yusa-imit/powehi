@@ -312,7 +312,7 @@ fn make_pq_init(
     (built, PqState::Ready)
 }
 
-async fn send_application(
+pub(crate) async fn send_application(
     client: &Client,
     server: &Url,
     session: &Session,

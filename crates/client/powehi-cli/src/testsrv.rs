@@ -17,6 +17,8 @@ pub struct Backend {
     pub invites: HashMap<String, (Uuid, Vec<u8>)>,
     pub groups: Vec<Uuid>,
     pub members: Vec<(Uuid, Uuid, u64)>,
+    /// (group, creating device): receives the peer's messages like a member does.
+    pub creators: Vec<(Uuid, Uuid)>,
     /// Stored envelopes as the server returns them (`recipient` is a UUID string).
     pub inbox: Vec<Value>,
     /// `"METHOD /path"` of every request, in order.
@@ -74,8 +76,9 @@ fn handle(st: &mut Backend, method: &str, path: &str, caller: Uuid, body: &Value
             }
         }
         ("POST", ["v1", "groups"]) => {
-            st.groups
-                .push(body["group_id"].as_str().unwrap().parse().unwrap());
+            let group: Uuid = body["group_id"].as_str().unwrap().parse().unwrap();
+            st.groups.push(group);
+            st.creators.push((group, caller));
             respond(204, None)
         }
         ("POST", ["v1", "groups", g, "members", d]) => {
@@ -103,13 +106,18 @@ fn handle(st: &mut Backend, method: &str, path: &str, caller: Uuid, body: &Value
         ("POST", ["v1", "messages"]) if st.fail_messages => respond(500, None),
         ("POST", ["v1", "messages"]) => {
             let group: Uuid = body["group_id"].as_str().unwrap().parse().unwrap();
-            let id = Uuid::new_v4();
-            for (_, dev, _) in st
+            // Ascending ids (every call logs once): the test server pages by id and MLS
+            // decryption is order-sensitive.
+            let id = Uuid::from_u128(st.calls.len() as u128);
+            let recipients: Vec<Uuid> = st
                 .members
-                .clone()
                 .iter()
-                .filter(|(g, d, _)| *g == group && *d != caller)
-            {
+                .map(|(g, d, _)| (*g, *d))
+                .chain(st.creators.iter().copied())
+                .filter(|(g, d)| *g == group && *d != caller)
+                .map(|(_, d)| d)
+                .collect();
+            for dev in recipients {
                 st.inbox.push(json!({
                     "id": id,
                     "group_id": group,
