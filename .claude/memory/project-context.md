@@ -1432,3 +1432,10 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 - Added 6 unit tests for `powehi-cli` `prompt.rs` (read_line limits/CRLF/EOF/UTF-8, set_lflag
   non-tty) — PR for branch `test/stabilization-cycle-515`. Test-only; no review agents required.
 - Still open need-human: #13 #16 #19 #20 #22 #24. Next FEATURE item: first unchecked in phase-7 STATUS.
+
+## Cycle 520 (STABILIZATION)
+- CI green on main; `cargo audit`/`deny`/`clippy` clean; no open `bug` issues; no owner comments.
+- Added `conversation::tests::rejects_malformed_binding_and_unknown_version` (binding format +
+  version check in `Conversation::check`). Test-only; no review agents required. powehi-cli: 107 lib tests pass.
+- Note: `cargo-nextest` not installed locally; use `cargo test` (PATH needs `~/.cargo/bin`).
+- Still open need-human: #13 #16 #19 #20 #22 #24 #28 #30 #32.

@@ -328,6 +328,38 @@ mod tests {
     }
 
     #[test]
+    fn rejects_malformed_binding_and_unknown_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let g = Uuid::new_v4();
+        // Bindings must be exactly 16 hex digits.
+        for bad in ["", "0123", "0123456789abcdeg", "0123456789abcdef00"] {
+            let mut c = joiner(g);
+            c.pq_binding = Some(bad.into());
+            assert!(
+                matches!(save(&store, &c), Err(ConversationError::Malformed)),
+                "binding {bad:?}"
+            );
+        }
+        let mut ok = joiner(g);
+        ok.set_pq_binding("0123456789ABCDEF".into());
+        save(&store, &ok).unwrap();
+        // A record from a future format version is refused on save and on load.
+        let mut future = joiner(g);
+        future.version = VERSION + 1;
+        assert!(matches!(
+            save(&store, &future),
+            Err(ConversationError::Malformed)
+        ));
+        let bytes = serde_json::to_vec(&future).unwrap();
+        store.put(&record_name(&g), &bytes).unwrap();
+        assert!(matches!(
+            load(&store, &g),
+            Err(ConversationError::Malformed)
+        ));
+    }
+
+    #[test]
     fn debug_never_prints_the_key() {
         let c = joiner(Uuid::new_v4());
         let s = format!("{c:?}");
