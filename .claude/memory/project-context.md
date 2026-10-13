@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 514 (2026-10-13, FEATURE→CI-red fix)
+- main CI-Rust was red after #25: `welcome::tests::oversized_poll_response_is_rejected` built a 16 MB JSON number array; >10s in CI debug builds tripped `REQUEST_TIMEOUT` instead of the size cap. Fixed by using a string payload (cheap). Lesson: size-cap tests must not serialize multi-MB number arrays. Phase 7.7 is next.
+
 ## Cycle 513 (2026-10-09, FEATURE) — Phase 7.6 done (invite + conversation + Welcome join)
 - Core: `kem::validate_decap_key` (FIPS 203 §7.3 SHA3-256 hash + equals published ek; `sha3` now a direct core dep), `mls_group::{add_member_from_bytes, welcome_pq_binding}` (ek read from LOCAL stored KeyPackage by the Welcome's KeyPackageRef, must be called BEFORE join_group, which consumes the bundle).
 - CLI: `invite.rs` (create: generate+persist KP then POST /v1/invites, link `<server>/i/connect#code.sha256(kp)`; redeem: hash-pin check, group create, add member, register group + member epoch 1, conv record, then send Welcome), `welcome.rs` (`join_pending`: validate dk -> join -> conv record -> save provider -> prune pq-keys -> ack; unjoinable Welcomes are skipped unacked), `conversation.rs` (`conv-<uuid>` records, cap 256; joiner keeps the dk for pq_init), `testsrv.rs` (in-test mini DS). `invite create --wait <secs<=900>` polls and joins; `inbox` (7.7) must call `welcome::join_pending` too.
