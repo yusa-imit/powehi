@@ -169,6 +169,10 @@
 - ❌ 트래픽 패턴 분석 기반의 사용자 식별 (T5 부분 대응만)
 - ❌ 강제 (rubber-hose) 공격 — 디바이스 비밀번호 강요
 - ❌ **로컬 저장소 쓰기 접근을 통한 MLS provider-state 스냅샷의 wholesale 리플레이** (T4 로컬 침해 경계 내, 이 단계에서 미방어): XSS 또는 로컬 디바이스 접근으로 IndexedDB에 직접 쓸 수 있는 공격자가 이전에 캡처한(여전히 AES-GCM 인증이 유효한) 오래된 MLS provider-state envelope 전체를 리로드 시점에 통째로 복원하는 경우. envelope에 번들된 monotonic `generation` 카운터는 카운터만 독립적으로 롤백하는 변종(AEAD로 blob과 함께 인증됨)은 막지만, 리로드 후 첫 import 시점에는 클라이언트 단독으로 신뢰 가능한 freshness floor가 0이므로(서버/하드웨어 앵커 부재) envelope 통째 리플레이는 방어하지 않음 → 오래된 ratchet 위치로 되돌아가 AEAD nonce/key 재사용 가능. 세션 내에서는 in-session high-water-mark로 두 번째 import의 롤백을 차단함. **완화(추후 단계로 연기, 추적 항목)**: 로그인 시 서버가 per-device monotonic generation high-water-mark를 반환해 import floor로 사용 (`import_provider_state`의 `min_generation` 배관이 이미 end-to-end로 존재하므로 서버 앵커 연동은 additive). 근거: crypto-reviewer approve + threat-model-checker ACCEPT-WITH-CONDITIONS.
+- ❌ **터미널 scrollback·세션 복원·로그에 남는 평문 (CLI, §7A.3)** (T4 경계): `powehi read`/`chat`이 출력한 수신 본문, `chat`에서 입력해 터미널이 echo한 본문, `Handle:` 입력, `invite create`가 출력한 초대 링크(24시간 유효한 bearer capability)는 터미널 scrollback, tmux/screen history, 기본값으로 디스크에 기록되는 세션 복원 파일(macOS Terminal.app, iTerm2 등), 로그 리다이렉트에 평문으로 남을 수 있음. profile store 밖의 사본은 암호화하거나 지울 수 없으며, 복구 문구 표시 후 화면 소거는 best-effort.
+- ❌ **CLI profile store의 record 단위 롤백·삭제·혼합·재주입** (T4 로컬 쓰기 접근, issue #16 해결 전 미방어): AAD는 `profile‖name`만 묶으므로 디렉터리 쓰기 권한자는 키 없이 과거 record를 개별 복원·삭제할 수 있음 — (a) 표시 후 삭제된 `rx-*` 재표시, (b) `verified-*` 삭제로 CHANGED 경보 없이 Unverified로 강등, (c) `conv-*`/`pq-keys` 롤백으로 1회용 ML-KEM decapsulation key 부활, (d) `mls-provider` 단독 롤백. 위조는 불가(AES-GCM).
+- ❌ **CLI 로컬 삭제는 암호학적 소거가 아님**: unlink/rename된 record는 해제 블록에 ciphertext로 남을 수 있고 store key는 OPAQUE 등록 수명 동안 고정이므로, 나중에 key를 얻은 공격자(T3+T4 오프라인 사전 공격 등)는 지운 메시지와 과거 ratchet 상태를 복원할 수 있음. CLI 1:1은 epoch 1에 고정(PCS 없음, §7A.3).
+- ❌ **CLI profile store 파일시스템 메타데이터** (T4): profile 이름, record 개수·크기(수신 본문 길이에 비례, `pq-keys` 크기 = 미사용 KeyPackage 수), mtime, 그리고 record 이름에 평문으로 들어간 `group_id`/`envelope_id`(서버 데이터와 결합 시 비밀번호 없이 디바이스 ↔ 계정 ↔ 상대 연결, 추적 항목).
 
 ### 3.3 메타데이터 노출 한계
 
@@ -201,6 +205,8 @@
 - **MLS LeafNode 암호화 자료** (그룹 멤버의 공개 키, 서명 키, credential bytes): 서버는 `(group_id, device_id)` 매핑은 알지만 MLS GroupContext 내의 암호화된 신원 자료는 알지 못함
 - 사용자의 연락처 목록
 - 발신자가 누구인지 (Sealed Sender 적용 시 — 단, 후술하는 한계 있음)
+
+**CLI 추가 노출 (ADR-0006, threat-model-checker 7.11):** CLI는 세션을 저장하지 않으므로 모든 명령(서버 트래픽이 필요 없는 `read`/`verify` 포함)이 OPAQUE 로그인 후 새 24시간 세션 토큰을 받고 종료 시 폐기하지 않음 — 서버는 로그인 시점을 사용자 행동 단위 해상도로 보며, 세션 저장소에 최근 24시간 실행 횟수만큼 유효 세션이 남음(추적: revoke 엔드포인트). CLI는 User-Agent/Origin이 없고 `/v1/ws`는 `chat` 실행 중에만 연결되므로 서버는 CLI 사용 여부와 REPL이 열린 구간을 구분할 수 있음. 내용·연락처에 대한 새 정보는 없음.
 
 ### 3.4 Sealed Sender의 한계 (정직성)
 
@@ -1256,9 +1262,23 @@ crates/client/
 - **로그** — `tracing`(stderr, `RUST_LOG`)은 작업 이름과 상태 코드만. 본문/PII/ciphertext 금지.
 - 터미널 scrollback/로그 파일 리다이렉트에 남는 평문은 스크린샷과 같은 범주로 §3.2 Out of Scope에
   추가 (T4 디바이스 압수 경계). threat-model-checker가 CLI 플랫폼을 1회 검토.
-- MLS provider-state는 웹과 같은 monotonic `generation` envelope을 사용하므로, §3.2의 "스냅샷
-  wholesale 리플레이" accepted risk가 profile store 파일에도 그대로 적용됨 (서버 high-water-mark 앵커가
-  생기면 함께 해소).
+- MLS provider-state는 웹과 같은 monotonic `generation` envelope을 사용하므로 §3.2의 "스냅샷
+  wholesale 리플레이" accepted risk가 profile store에도 적용됨 (서버 high-water-mark 앵커가 생기면
+  해소). CLI는 명령마다 새 프로세스라 프로세스 간 floor는 0이고, 현재는 프로세스 내 floor도 없음
+  (`import_provider_state(_, 0)`, 추적 항목) — 웹과 달리 한 `chat` 세션 안의 롤백도 탐지되지 않음.
+- **store key는 서버 OPRF 키에 묶임**: export_key는 비밀번호와 서버 `ServerSetup`의 함수. (장점)
+  디바이스만 가진 공격자는 오프라인 대입 불가. (한계) ① `ServerSetup` 재생성·비밀번호 변경 시 모든 CLI
+  profile이 복호화 불가 — T3는 로컬 기록을 crypto-shred할 수 있음. ② T3/T7이 디바이스를 함께 확보하면
+  Argon2id 비용의 오프라인 사전 공격 가능. ③ 로컬 전용 명령(`read`, `verify`)도 서버 로그인 필요.
+- **PCS 미제공**: CLI 1:1은 epoch 1에 고정되고 Commit(self-Update 포함)을 보내거나 적용하지 않음.
+  hash ratchet 수준의 forward secrecy만 있으며 store가 한 번 침해되면 이후 메시지가 모두 노출됨.
+- **TLS**: rustls + webpki roots, 인증서 검증 항상 활성, `http://`는 loopback만,
+  redirect·환경변수 proxy 미사용, Bearer는 헤더로만. TLS 1.3 전용 고정은 아직 없음(협상 가능, 추적 항목 — Cloudflare `tls_1_3` 설정 고정과 함께). Certificate pinning(§3.1 T2)도 아직 없음 —
+  CLI의 T2 방어는 WebPKI + OPAQUE 상호 인증 + Safety Number.
+- **argv**: 대화 id(접두어)와 `--profile`은 argv에 들어가 셸 history와 `ps`에 노출됨(비밀은 아님).
+  `echo 본문 | powehi send`는 본문을 history에 남기므로 대화형 입력(Ctrl-D)이나 파일 리다이렉트 사용.
+- **로컬 경로**: `<data_dir>/powehi/`와 profile 디렉터리는 0700이고 소유자 uid가 현재 사용자여야 하며,
+  부모가 group/other 쓰기 가능하면 거부함(과거 umask 기본값으로 만들어진 소유자 본인의 부모는 0700으로 조인다). 그 위 `data_dir`은 신뢰한다고 가정하며 macOS ACL은 확인하지 않음(경로 기반 TOCTOU는 #16과 함께 dirfd 방식으로 해소 예정).
 
 ---
 

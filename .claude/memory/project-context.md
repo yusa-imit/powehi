@@ -43,6 +43,10 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 524 (2026-10-14, FEATURE) — Phase 7.11 CLI threat-model pass [x]
+- threat-model-checker on powehi-cli: YELLOW. Accepted risks documented in prd §3.2/§3.3/§7A.3; code fixes: owner-uid + parent-dir checks (store.rs), legacy parent tightened to 0700 (store.rs); TLS1.3 pin deferred (needs test + Cloudflare setting). Owner decisions in issue #39.
+- Remaining FIX-NOW follow-ups (listed in phase-7 STATUS Follow-ups): in-session generation floor (F6), opaque record names (F1), body encoding/padding (F9), core dumps/zeroize (F8). All need crypto-reviewer. Phase 7 DoD complete after this PR.
+
 ## Cycle 523 (2026-10-14, FEATURE) — Phase 7.10 CLI live E2E gate
 - `powehi-cli/src/live_e2e.rs` (`#[ignore]`, env `POWEHI_E2E_SERVER`) + CI job `cli-live-backend` in
   `ci-e2e-live.yml`. Not runnable locally (no docker); CI is the first real run. Auth governor burst=8

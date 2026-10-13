@@ -57,10 +57,16 @@ below is checked. See `docs/decisions/0006-cli-first-client.md`, prd.md §7A.
 - [x] 7.10 E2E gate — two CLI profiles register, start a conversation, and
   exchange messages both ways against the docker-compose backend (`#[ignore]`d
   live test + CI job, like `e2e-live`). (`src/live_e2e.rs`; job `cli-live-backend` in `ci-e2e-live.yml`.)
-- [ ] 7.11 threat-model-checker pass on the CLI as a new client platform
-  (at-rest store, argv/history, scrollback, multiple profiles per machine).
+- [x] 7.11 threat-model-checker pass on the CLI as a new client platform
+  (at-rest store, argv/history, scrollback, multiple profiles per machine). Verdict YELLOW (cycle 524);
+  accepted risks in prd §3.2/§3.3/§7A.3; fixed now: parent/owner dir checks.
 
 ## Follow-ups (not Phase 7 DoD)
+- From 7.11 (FIX-NOW, not yet done): in-session provider-state generation floor (F6, `identity.rs`
+  `import_provider_state(_, 0)`); opaque record names (HMAC of group/envelope id, F1, store format
+  change); `Received.body` as bytes not JSON number array + size buckets (F9); disable core dumps and
+  zeroize plaintext copies (F8); mark WS Authorization header sensitive (F10);
+  TLS 1.3-only for reqwest+WS with an rcgen regression test and `use_rustls_tls()` pin, plus Cloudflare `tls_1_3` in Terraform (F11); record `ring` exception for the CLI. All need crypto-reviewer.
 - Blocking requirement for any CLI Commit-merge work: wire the §5.6 CHANGED alert (compare the
   stored `verified-<group>` number) into `read`/`chat`/`send` first (crypto-reviewer, cycle 522).
 - Full-screen TUI (`ratatui`) on top of the same lib.

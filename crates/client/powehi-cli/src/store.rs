@@ -63,7 +63,7 @@ pub enum StoreError {
     TooLarge,
     #[error("too many records in the profile")]
     TooManyRecords,
-    #[error("profile path is not a private directory or file (expected 0700/0600, no symlinks)")]
+    #[error("profile path is not a private directory or file (expected 0700/0600, current-user owner, no symlinks, parent not group/other-writable)")]
     InsecurePath,
     #[error("record is malformed")]
     Corrupt,
@@ -132,24 +132,55 @@ fn aad(profile: &str, name: &str) -> Vec<u8> {
     a
 }
 
-/// Rejects symlinks, non-directories and any group/other permission bits.
+/// Rejects symlinks, non-directories, foreign owners and any group/other permission bits.
 fn check_private_dir(dir: &Path) -> Result<(), StoreError> {
     let md = fs::symlink_metadata(dir)?;
-    if !md.is_dir() || md.mode() & 0o077 != 0 {
+    // SAFETY: `geteuid` has no preconditions and cannot fail.
+    if !md.is_dir() || md.mode() & 0o077 != 0 || md.uid() != unsafe { libc::geteuid() } {
         return Err(StoreError::InsecurePath);
     }
     Ok(())
 }
 
-fn create_private_dir(dir: &Path) -> Result<(), StoreError> {
-    if let Some(parent) = dir.parent() {
-        fs::create_dir_all(parent)?;
+/// The `powehi/` parent holds the profile names: it must be ours and not writable by others
+/// (a swapped-in parent would let a local attacker race the path-based operations).
+fn check_parent_dir(dir: &Path) -> Result<(), StoreError> {
+    let md = fs::symlink_metadata(dir)?;
+    // SAFETY: `geteuid` has no preconditions and cannot fail.
+    if !md.is_dir() || md.mode() & 0o022 != 0 || md.uid() != unsafe { libc::geteuid() } {
+        return Err(StoreError::InsecurePath);
     }
+    Ok(())
+}
+
+/// Older versions created `powehi/` with the umask default (0755/0775). Tighten a directory we
+/// own to 0700; anything else (symlink, foreign owner) is left for `check_parent_dir` to refuse.
+fn tighten_legacy_parent(dir: &Path) -> Result<(), StoreError> {
+    let md = fs::symlink_metadata(dir)?;
+    // SAFETY: `geteuid` has no preconditions and cannot fail.
+    if md.is_dir() && md.uid() == unsafe { libc::geteuid() } && md.mode() & 0o077 != 0 {
+        fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn mkdir_private(dir: &Path) -> Result<(), StoreError> {
     match fs::DirBuilder::new().mode(0o700).create(dir) {
-        Ok(()) => {}
-        Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(e.into()),
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e.into()),
     }
+}
+
+fn create_private_dir(dir: &Path) -> Result<(), StoreError> {
+    let parent = dir.parent().ok_or(StoreError::InsecurePath)?;
+    if let Some(base) = parent.parent() {
+        fs::create_dir_all(base)?;
+    }
+    mkdir_private(parent)?;
+    tighten_legacy_parent(parent)?;
+    check_parent_dir(parent)?;
+    mkdir_private(dir)?;
     check_private_dir(dir)
 }
 
@@ -454,6 +485,24 @@ mod tests {
             open(&link_base, &EK),
             Err(StoreError::InsecurePath)
         ));
+    }
+
+    #[test]
+    fn parent_dir_is_private_legacy_tightened_symlink_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        open(&tmp, &EK).unwrap();
+        let parent = tmp.path().join("powehi");
+        assert_eq!(fs::metadata(&parent).unwrap().mode() & 0o777, 0o700);
+        // A legacy umask-default parent is tightened, not refused.
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o775)).unwrap();
+        open(&tmp, &EK).unwrap();
+        assert_eq!(fs::metadata(&parent).unwrap().mode() & 0o777, 0o700);
+        // A symlinked parent is refused.
+        let other = tempfile::tempdir().unwrap();
+        let real = other.path().join("real");
+        fs::DirBuilder::new().mode(0o700).create(&real).unwrap();
+        std::os::unix::fs::symlink(&real, other.path().join("powehi")).unwrap();
+        assert!(matches!(open(&other, &EK), Err(StoreError::InsecurePath)));
     }
 
     #[test]
