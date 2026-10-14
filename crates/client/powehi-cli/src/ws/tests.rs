@@ -187,3 +187,19 @@ async fn an_oversized_frame_ends_the_connection_without_waking() {
 fn tls_connector_builds_with_an_explicit_provider() {
     assert!(tls_connector().is_some());
 }
+
+#[tokio::test]
+async fn wss_offers_only_tls13() {
+    let (port, hello) = crate::testsrv::client_hello_listener().await;
+    let url = Url::parse(&format!("wss://127.0.0.1:{port}/v1/ws")).unwrap();
+    let (tx, _rx) = channel(4);
+    let _ = one_connection(&url, &bearer(), Uuid::nil(), &tx).await;
+    let hello = tokio::time::timeout(Duration::from_secs(5), hello)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        crate::testsrv::offers_only_tls13(&hello),
+        "ClientHello offers more than TLS 1.3"
+    );
+}

@@ -55,14 +55,14 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// TLS with the `ring` provider named explicitly (the process-default provider is ambiguous
 /// when another crate in the workspace enables `aws-lc-rs`) and the same Mozilla roots as the
-/// REST client. Used for `wss://` only; `ws://` ignores it.
+/// REST client, TLS 1.3 only (7.11 F11). Used for `wss://` only; `ws://` ignores it.
 fn tls_connector() -> Option<tokio_tungstenite::Connector> {
     let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
     let roots = rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
     };
     let config = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
+        .with_protocol_versions(&[&rustls::version::TLS13])
         .ok()?
         .with_root_certificates(roots)
         .with_no_client_auth();
