@@ -56,6 +56,14 @@ async fn next(rx: &mut Receiver<Event>) -> Event {
 }
 
 #[test]
+fn auth_header_is_sensitive_and_rejects_invalid_values() {
+    let v = auth_header("Bearer tok").unwrap();
+    assert!(v.is_sensitive());
+    assert!(!format!("{v:?}").contains("tok"));
+    assert!(auth_header("Bearer \n tok").is_none());
+}
+
+#[test]
 fn ws_url_maps_schemes_and_rejects_others() {
     let u = |s: &str| ws_url(&Url::parse(s).unwrap()).map(String::from);
     assert_eq!(

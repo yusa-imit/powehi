@@ -110,11 +110,20 @@ pub async fn wake_loop(
     }
 }
 
+/// The upgrade `Authorization` value, marked sensitive so header `Debug` output redacts it
+/// (tungstenite's own trace-level raw-request log is not covered: never install a trace logger).
+fn auth_header(bearer: &str) -> Option<tokio_tungstenite::tungstenite::http::HeaderValue> {
+    let mut value = tokio_tungstenite::tungstenite::http::HeaderValue::from_str(bearer).ok()?;
+    value.set_sensitive(true);
+    debug_assert!(value.is_sensitive());
+    Some(value)
+}
+
 async fn one_connection(url: &Url, bearer: &str, group_id: Uuid, tx: &Sender<Event>) -> Ended {
     let Ok(mut request) = url.as_str().into_client_request() else {
         return Ended::NeverConnected;
     };
-    let Ok(value) = bearer.parse() else {
+    let Some(value) = auth_header(bearer) else {
         return Ended::NeverConnected;
     };
     request.headers_mut().insert("authorization", value);
