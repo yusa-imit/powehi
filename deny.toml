@@ -78,7 +78,12 @@ ignore = true
 [bans]
 # Deny duplicate versions of security-critical crates to keep the dependency graph tight.
 multiple-versions = "warn"
-deny = []
+deny = [
+    # `ring` is allowed ONLY as the rustls TLS-transport provider (rustls, rustls-webpki; rcgen for
+    # test certs). It must never be a direct dependency of crypto-core, crypto-wasm or any code
+    # doing message/key crypto. See .claude/rules/crypto-libraries-pinned.md "ring exception".
+    { crate = "ring", wrappers = ["rustls", "rustls-webpki", "rcgen"], reason = "TLS transport provider only" },
+]
 
 [sources]
 # Every dependency in this graph resolves from crates.io — no git dependencies, no

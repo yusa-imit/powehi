@@ -17,9 +17,16 @@ Approved libraries only:
 - `getrandom` with `wasm_js` feature for WASM targets
 
 Do NOT add:
-- `ring` (conflicts with openmls on WASM)
+- `ring` (conflicts with openmls on WASM) — except as the transitive rustls TLS provider, below
 - `openssl` bindings (not WASM-compatible)
 - Any crate that rolls its own primitives
+
+## `ring` exception (TLS transport only)
+`ring` is present in the server crates and `powehi-cli` solely as the crypto provider of
+`rustls` (reqwest / tokio-tungstenite TLS 1.3 transport; `rcgen` for test certs). It is never a
+direct dependency, is absent from `powehi-crypto-core` and `powehi-crypto-wasm`, and performs no
+MLS/OPAQUE/message/key crypto. Enforced by the `[bans]` entry in `deny.toml` (`wrappers` =
+rustls, rustls-webpki, rcgen); any other parent of `ring` fails `cargo deny check bans`.
 
 ## opaque-ke major-version migrations (stored password files)
 Before bumping opaque-ke across a major version once live user credentials exist,
