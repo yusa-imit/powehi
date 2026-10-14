@@ -66,8 +66,11 @@ below is checked. See `docs/decisions/0006-cli-first-client.md`, prd.md §7A.
   change); ~~`Received.body` as bytes not JSON number array~~ (done, cycle 529: hex string, legacy array still readable) — size buckets (F9, padding) still open; ~~disable core dumps~~ (done, cycle 531: `hardening::disable_core_dumps` at startup) and
   zeroize plaintext copies (F8, partial, cycle 532: `Received` wipes `body` on drop, `Pending.text` is `Zeroizing`; cycle 533: `render`/`sanitize` now return `Zeroizing<String>`, pre-sized, parsed without a `serde_json::Value`; still open: serde_json's escape scratch buffer (any text with a newline/quote/backslash leaves an unwiped copy; fix needs a wiping allocator or a custom parser, crypto-lead call), `to_vec(&Received)` realloc, legacy `visit_seq`, `decrypt_message` return type); ~~mark WS Authorization header sensitive (F10)~~ (done, cycle 526);
   ~~TLS 1.3-only for reqwest+WS~~ (done, cycle 528: ClientHello-inspection tests, no rcgen needed; the Cloudflare `tls_1_3` Terraform setting (F11) is still open); ~~record `ring` exception for the CLI~~ (done, cycle 536: deny.toml wrappers ban + rule doc). All need crypto-reviewer.
-- Blocking requirement for any CLI Commit-merge work: wire the §5.6 CHANGED alert (compare the
-  stored `verified-<group>` number) into `read`/`chat`/`send` first (crypto-reviewer, cycle 522).
+- ~~Blocking requirement for any CLI Commit-merge work: wire the §5.6 CHANGED alert into `read`/`chat`/`send`~~
+  (done, cycle 537: `verify::changed_since_verified`, warn-only on stderr; blocking on change is not decided).
+  Still gating any Commit-merge/member-change work: re-run the check after each `inbox::receive` in
+  `chat::sync` (today `chat` checks once at start), and add a CLI test that a Welcome for an existing
+  group_id is not joined (group keys are immutable per group_id only because of that). Policy: issue #53.
 - Full-screen TUI (`ratatui`) on top of the same lib.
 - Media send/receive (prd.md §9), groups of more than two, member Remove
   (blocked on issue #2 items (e)/(g)), multi-device, recovery-phrase restore.

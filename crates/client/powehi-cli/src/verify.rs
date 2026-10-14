@@ -92,7 +92,7 @@ pub fn number(store: &ProfileStore, group_id: Uuid) -> Result<String, VerifyErro
 }
 
 /// Compares `current` with the stored confirmation. A record that fails authentication or
-/// parsing counts as changed: it must never be shown as verified.
+/// parsing counts as changed (other store errors are returned; `changed_since_verified` alerts on them): it must never be shown as verified.
 pub fn state(store: &ProfileStore, group_id: Uuid, current: &str) -> Result<State, VerifyError> {
     let raw = match store.get(&record_name(&group_id)) {
         Ok(Some(raw)) => raw,
@@ -131,6 +131,25 @@ fn store_record(store: &ProfileStore, group_id: Uuid, number: &str) -> Result<()
     store.put(&record_name(&group_id), &bytes)?;
     Ok(())
 }
+
+/// The §5.6 alert for commands that touch a conversation (`read`, `send`, `chat`): `true` when
+/// a confirmation record exists (or cannot be read) and the current number cannot be shown to
+/// match it. It warns, it never blocks. Only an absent record, or a record matching the
+/// recomputed number, is silent: any store error or unrecomputable number alerts.
+pub fn changed_since_verified(store: &ProfileStore, group_id: Uuid) -> bool {
+    match store.get(&record_name(&group_id)) {
+        Ok(None) => false,
+        Err(_) => true,
+        Ok(Some(_)) => match number(store, group_id) {
+            Ok(current) => !matches!(state(store, group_id, &current), Ok(State::Verified)),
+            Err(_) => true,
+        },
+    }
+}
+
+/// The one-line warning shown when [`changed_since_verified`] is true.
+pub const CHANGED_WARNING: &str = "warning: the safety number CHANGED since you verified this \
+conversation; run `powehi verify <conversation>` and compare it with your peer before trusting it";
 
 /// Writes the report for `verify` in the given state.
 pub fn report(
@@ -250,6 +269,74 @@ mod tests {
         assert_eq!(state(&alice.store, gid, &n).unwrap(), State::Changed);
         confirm(&alice.store, gid, &n, &n).unwrap();
         assert_eq!(state(&alice.store, gid, &n).unwrap(), State::Verified);
+    }
+
+    fn record_file(tmp: &tempfile::TempDir, gid: Uuid) -> std::path::PathBuf {
+        let name = format!("{}.{}", record_name(&gid), "rec");
+        let mut stack = vec![tmp.path().to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for entry in std::fs::read_dir(d).unwrap().flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.file_name().is_some_and(|n| *n == *name) {
+                    return p;
+                }
+            }
+        }
+        panic!("record file not found");
+    }
+
+    #[tokio::test]
+    async fn changed_alert_silent_for_none_or_matching_record() {
+        let (_tmp, alice, _bob, gid) = pair().await;
+        assert!(!changed_since_verified(&alice.store, gid));
+        let n = number(&alice.store, gid).unwrap();
+        confirm(&alice.store, gid, &n, &n).unwrap();
+        assert!(!changed_since_verified(&alice.store, gid));
+        // No record and an unusable (unknown) conversation: nothing to compare, silent.
+        assert!(!changed_since_verified(&alice.store, Uuid::new_v4()));
+    }
+
+    #[tokio::test]
+    async fn changed_alert_fires_for_stale_or_tampered_records() {
+        use std::os::unix::fs::PermissionsExt;
+        let (tmp, alice, _bob, gid) = pair().await;
+        let n = number(&alice.store, gid).unwrap();
+        let other = safety::pairwise(&[1u8; 32], &[2u8; 32]).unwrap();
+        store_record(&alice.store, gid, &other).unwrap();
+        assert!(changed_since_verified(&alice.store, gid));
+        alice.store.put(&record_name(&gid), b"x").unwrap();
+        assert!(changed_since_verified(&alice.store, gid));
+        confirm(&alice.store, gid, &n, &n).unwrap();
+        let path = record_file(&tmp, gid);
+        let good = std::fs::read(&path).unwrap();
+        // Byte flip: authentication failure.
+        let mut flipped = good.clone();
+        *flipped.last_mut().unwrap() ^= 1;
+        std::fs::write(&path, &flipped).unwrap();
+        assert!(changed_since_verified(&alice.store, gid));
+        // Truncation: corrupt, still mode 0600.
+        std::fs::write(&path, &good[..4]).unwrap();
+        assert!(changed_since_verified(&alice.store, gid));
+        // Loosened mode.
+        std::fs::write(&path, &good).unwrap();
+        assert!(!changed_since_verified(&alice.store, gid));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(changed_since_verified(&alice.store, gid));
+    }
+
+    #[tokio::test]
+    async fn changed_alert_fires_when_record_exists_but_number_cannot_be_computed() {
+        let (_tmp, alice, _bob, gid) = pair().await;
+        let n = number(&alice.store, gid).unwrap();
+        confirm(&alice.store, gid, &n, &n).unwrap();
+        alice
+            .store
+            .remove(&format!("conv-{}", gid.hyphenated()))
+            .unwrap();
+        assert!(number(&alice.store, gid).is_err());
+        assert!(changed_since_verified(&alice.store, gid));
     }
 
     #[tokio::test]
