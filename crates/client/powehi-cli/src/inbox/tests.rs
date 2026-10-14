@@ -317,3 +317,57 @@ async fn rerun_after_crash_between_put_and_save_reprocesses_and_acks() {
     assert!(p.state.lock().unwrap().inbox.is_empty(), "acked");
     assert_eq!(rx_names(&p.alice).len(), 1);
 }
+
+#[test]
+fn body_is_hex_on_write_and_legacy_array_still_reads() {
+    let rec = Received {
+        group_id: Uuid::nil(),
+        sender: Uuid::nil(),
+        body: vec![0x00, 0xab, 0xff],
+        received_at: 7,
+    };
+    let json = String::from_utf8(serde_json::to_vec(&rec).unwrap()).unwrap();
+    assert!(json.contains("\"body\":\"00abff\""), "{json}");
+    let back: Received = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.body, rec.body);
+    let legacy = json.replace("\"00abff\"", "[0,171,255]");
+    assert_eq!(
+        serde_json::from_str::<Received>(&legacy).unwrap().body,
+        rec.body
+    );
+    for bad in ["\"0\"", "\"zz\"", "\"AB\"", "[256]"] {
+        let j = json.replace("\"00abff\"", bad);
+        assert!(serde_json::from_str::<Received>(&j).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn body_bound_is_exact_for_hex_and_legacy_array() {
+    use super::body_hex::MAX_BODY_BYTES;
+    let mk = |n: usize, hex: bool| {
+        let body = if hex {
+            format!("\"{}\"", "ab".repeat(n))
+        } else {
+            format!("[{}]", "1,".repeat(n - 1) + "1")
+        };
+        format!(
+            "{{\"group_id\":\"{0}\",\"sender\":\"{0}\",\"body\":{body}}}",
+            Uuid::nil()
+        )
+    };
+    for hex in [true, false] {
+        let ok: Received = serde_json::from_str(&mk(MAX_BODY_BYTES, hex)).unwrap();
+        assert_eq!(ok.body.len(), MAX_BODY_BYTES);
+        assert!(serde_json::from_str::<Received>(&mk(MAX_BODY_BYTES + 1, hex)).is_err());
+    }
+    let big = Received {
+        group_id: Uuid::nil(),
+        sender: Uuid::nil(),
+        body: vec![0; MAX_BODY_BYTES + 1],
+        received_at: 0,
+    };
+    assert!(
+        serde_json::to_vec(&big).is_err(),
+        "oversize is a typed error, not a panic"
+    );
+}

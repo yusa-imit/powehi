@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 529 (2026-10-14, FEATURE) — follow-up F9 (encoding half)
+- `Received.body` serialized as hex via `inbox/body_hex.rs` (legacy number array still reads; 1 MiB bound, error not panic). Padding/size buckets still open. Remaining: F1, F8, CHANGED alert, Cloudflare tls_1_3.
+
 ## Cycle 528 (2026-10-14, FEATURE) — follow-up F11 (client half)
 - reqwest (`status::http_client`) and WS rustls config are TLS 1.3-only; tests inspect the ClientHello (`testsrv::client_hello_listener`/`offers_only_tls13`), no rcgen. Open: Cloudflare `tls_1_3` Terraform setting (no zone-settings resource exists yet), F1, F9, F8, CHANGED alert.
 
