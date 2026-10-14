@@ -13,7 +13,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use url::Url;
 use uuid::Uuid;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::auth::Session;
 use crate::conversation::{self, Role};
@@ -66,6 +66,12 @@ pub(crate) struct Received {
     /// Local receive time, nanoseconds since the Unix epoch; orders display (0 = unknown).
     #[serde(default)]
     pub(crate) received_at: u64,
+}
+
+impl Drop for Received {
+    fn drop(&mut self) {
+        self.body.zeroize();
+    }
 }
 
 enum Outcome {
