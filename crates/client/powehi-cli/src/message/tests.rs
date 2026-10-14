@@ -103,28 +103,64 @@ fn body_checks() {
 #[test]
 fn render_neutralises_terminal_escapes_and_hides_structured_payloads() {
     assert_eq!(
-        render(b"\x1b[2Jhi\x07\nok\t!"),
+        render(b"\x1b[2Jhi\x07\nok\t!").as_str(),
         "\u{fffd}[2Jhi\u{fffd}\nok\t!"
     );
-    assert_eq!(render("\u{9b}31m".as_bytes()), "\u{fffd}31m", "C1 CSI");
-    assert_eq!(render(br#"{"type":"image","blobId":"x"}"#), "[image]");
-    assert_eq!(render(br#"{"type":"reaction"}"#), "[unsupported message]");
-    assert_eq!(render(br#"{"not":"typed"}"#), r#"{"not":"typed"}"#);
     assert_eq!(
-        render("a\u{202e}b\u{200b}c\u{2066}".as_bytes()),
+        render("\u{9b}31m".as_bytes()).as_str(),
+        "\u{fffd}31m",
+        "C1 CSI"
+    );
+    assert_eq!(
+        render(br#"{"type":"image","blobId":"x"}"#).as_str(),
+        "[image]"
+    );
+    assert_eq!(
+        render(br#"{"type":"reaction"}"#).as_str(),
+        "[unsupported message]"
+    );
+    assert_eq!(render(br#"{"not":"typed"}"#).as_str(), r#"{"not":"typed"}"#);
+    assert_eq!(
+        render("a\u{202e}b\u{200b}c\u{2066}".as_bytes()).as_str(),
         "a\u{fffd}b\u{fffd}c\u{fffd}"
     );
     assert_eq!(
-        render("a\u{e0041}b\u{2028}c\u{fe0f}".as_bytes()),
+        render("a\u{e0041}b\u{2028}c\u{fe0f}".as_bytes()).as_str(),
         "a\u{fffd}b\u{fffd}c\u{fffd}"
     );
     assert_eq!(
-        render(br#"{"type":"text","text":"hey\u001b[0m","ttl":5}"#),
+        render(br#"{"type":"text","text":"hey\u001b[0m","ttl":5}"#).as_str(),
         "hey\u{fffd}[0m"
     );
     assert_eq!(
-        render(br#"{"type":"text","text":3}"#),
+        render(br#"{"type":"text","text":3}"#).as_str(),
         "[unsupported message]"
     );
-    assert_eq!(render(&[0xff]), "\u{fffd}");
+    assert_eq!(render(&[0xff]).as_str(), "\u{fffd}");
+    // Arrays are not structured payloads (web client shows them raw).
+    for raw in [r#"["text","hello"]"#, r#"["image"]"#] {
+        assert_eq!(render(raw.as_bytes()).as_str(), raw);
+    }
+    // Duplicate keys: last wins, as in JSON.parse.
+    assert_eq!(
+        render(br#"{"type":"text","text":"a","text":"b"}"#).as_str(),
+        "b"
+    );
+    assert_eq!(
+        render(br#"{"type":"text","type":"image"}"#).as_str(),
+        "[image]"
+    );
+    // Escaped multi-line text and CRLF / invalid UTF-8 mixes.
+    assert_eq!(
+        render(br#"{"type":"text","text":"a\nb \"q\" \\"}"#).as_str(),
+        "a\nb \"q\" \\"
+    );
+    assert_eq!(
+        render(b"x\r\n\xff\x1b").as_str(),
+        "x\u{fffd}\n\u{fffd}\u{fffd}"
+    );
+    assert_eq!(
+        render(br#"{"type":"image","x":[1,{"a":null}],"n":1.5}"#).as_str(),
+        "[image]"
+    );
 }
