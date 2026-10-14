@@ -61,6 +61,7 @@ struct PqInit {
 pub(crate) struct Received {
     pub(crate) group_id: Uuid,
     pub(crate) sender: Uuid,
+    #[serde(with = "body_hex")]
     pub(crate) body: Vec<u8>,
     /// Local receive time, nanoseconds since the Unix epoch; orders display (0 = unknown).
     #[serde(default)]
@@ -247,6 +248,8 @@ fn stored_count(store: &ProfileStore) -> Result<usize, InviteError> {
         .filter(|n| n.starts_with(RX_PREFIX))
         .count())
 }
+
+mod body_hex;
 
 #[cfg(test)]
 mod tests;
