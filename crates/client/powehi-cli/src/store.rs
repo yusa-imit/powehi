@@ -22,6 +22,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
@@ -86,6 +87,9 @@ pub struct ProfileStore {
     dir: PathBuf,
     profile: String,
     cipher: Aes256Gcm,
+    /// In-memory lower bound for the MLS provider-state generation seen or written by this
+    /// process; never persisted, so a swapped-in older record cannot lower it.
+    provider_floor: AtomicU64,
     _lock: File,
 }
 
@@ -214,8 +218,19 @@ impl ProfileStore {
             dir: paths.dir.clone(),
             profile,
             cipher,
+            provider_floor: AtomicU64::new(0),
             _lock: lock,
         })
+    }
+
+    /// Lowest provider-state generation this process will accept on reload.
+    pub(crate) fn provider_floor(&self) -> u64 {
+        self.provider_floor.load(Ordering::Acquire)
+    }
+
+    /// Raises (never lowers) the in-process provider-state generation floor.
+    pub(crate) fn raise_provider_floor(&self, generation: u64) {
+        self.provider_floor.fetch_max(generation, Ordering::AcqRel);
     }
 
     fn record_path(&self, name: &str) -> PathBuf {

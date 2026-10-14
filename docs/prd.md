@@ -1264,8 +1264,11 @@ crates/client/
   추가 (T4 디바이스 압수 경계). threat-model-checker가 CLI 플랫폼을 1회 검토.
 - MLS provider-state는 웹과 같은 monotonic `generation` envelope을 사용하므로 §3.2의 "스냅샷
   wholesale 리플레이" accepted risk가 profile store에도 적용됨 (서버 high-water-mark 앵커가 생기면
-  해소). CLI는 명령마다 새 프로세스라 프로세스 간 floor는 0이고, 현재는 프로세스 내 floor도 없음
-  (`import_provider_state(_, 0)`, 추적 항목) — 웹과 달리 한 `chat` 세션 안의 롤백도 탐지되지 않음.
+  해소). CLI는 명령마다 새 프로세스라 프로세스 간 floor는 0. login 시점에 저장된 provider record의
+  generation으로 프로세스 내 floor를 seed하고(`identity::seed_provider_floor`), 이후 기록·삭제·구버전
+  교체는 `StateRollback`으로 거부됨. 범위: 세션 내, `mls-provider` record에 한정 (`pq-keys`,
+  `conversation-*`, `verified-*`와의 일관성은 묶이지 않음), login 이전 구간은 미보호. floor는 generation 기반이라 세션 내에서 floor 이상 generation을
+  가진 fork record(같은 generation 포함)로의 교체는 허용됨 — 막으려면 in-memory digest 바인딩 필요(추적 항목).
 - **store key는 서버 OPRF 키에 묶임**: export_key는 비밀번호와 서버 `ServerSetup`의 함수. (장점)
   디바이스만 가진 공격자는 오프라인 대입 불가. (한계) ① `ServerSetup` 재생성·비밀번호 변경 시 모든 CLI
   profile이 복호화 불가 — T3는 로컬 기록을 crypto-shred할 수 있음. ② T3/T7이 디바이스를 함께 확보하면
