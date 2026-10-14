@@ -214,4 +214,28 @@ mod tests {
         let e = fetch(&http_client().unwrap(), &url).await.unwrap_err();
         assert!(matches!(e, StatusError::Unreachable));
     }
+
+    #[test]
+    fn region_id_length_and_charset_boundaries() {
+        assert!(valid_region_id("a"));
+        assert!(valid_region_id(&"a".repeat(32)));
+        assert!(!valid_region_id(""));
+        assert!(!valid_region_id(&"a".repeat(33)));
+        assert!(!valid_region_id("EU-de-1"));
+        assert!(!valid_region_id("eu_de"));
+        assert!(!valid_region_id("eu de"));
+        assert!(!valid_region_id("eu\n"));
+    }
+
+    #[tokio::test]
+    async fn non_ok_health_body_reports_unhealthy() {
+        let url = serve(vec![
+            ok("/health", "degraded"),
+            ok("/v1/region/detect", r#"{"region_id":"eu-de-1"}"#),
+        ])
+        .await;
+        let s = fetch(&http_client().unwrap(), &url).await.unwrap();
+        assert!(!s.healthy);
+        assert_eq!(s.region_id, "eu-de-1");
+    }
 }
