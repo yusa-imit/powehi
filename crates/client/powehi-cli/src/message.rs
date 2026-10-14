@@ -12,6 +12,7 @@ use reqwest::Client;
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::auth::Session;
 use crate::conversation::{self, ConversationError};
@@ -62,7 +63,7 @@ impl From<mls_group::MlsError> for MessageError {
 pub struct Pending {
     name: String,
     pub sender: Uuid,
-    pub text: String,
+    pub text: Zeroizing<String>,
     received_at: u64,
 }
 
@@ -147,7 +148,7 @@ pub fn pending(store: &ProfileStore, group_id: Uuid) -> Result<Vec<Pending>, Mes
         };
         if rec.group_id == group_id {
             out.push(Pending {
-                text: render(&rec.body),
+                text: Zeroizing::new(render(&rec.body)),
                 sender: rec.sender,
                 received_at: rec.received_at,
                 name,

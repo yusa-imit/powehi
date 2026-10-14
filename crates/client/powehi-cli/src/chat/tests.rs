@@ -87,7 +87,9 @@ async fn typed_lines_are_sent_and_the_peer_receives_them() {
     let r = inbox::receive(&client(), &p.url, &p.bob).await.unwrap();
     assert_eq!(r.stored, 1, "blank lines are not sent");
     assert_eq!(
-        message::pending(&p.bob.store, p.gid).unwrap()[0].text,
+        message::pending(&p.bob.store, p.gid).unwrap()[0]
+            .text
+            .as_str(),
         "hi bob"
     );
 }

@@ -36,7 +36,7 @@ async fn send_then_inbox_then_read_round_trips_both_ways() {
     );
     send(&client(), &url, &alice, gid, b"hi bob").await.unwrap();
     inbox::receive(&client(), &url, &bob).await.unwrap();
-    assert_eq!(pending(&bob.store, gid).unwrap()[0].text, "hi bob");
+    assert_eq!(pending(&bob.store, gid).unwrap()[0].text.as_str(), "hi bob");
     discard(&alice.store, &got[0]).unwrap();
     assert!(pending(&alice.store, gid).unwrap().is_empty());
 }
@@ -53,7 +53,7 @@ async fn messages_come_back_in_receive_order() {
     let texts: Vec<String> = pending(&alice.store, gid)
         .unwrap()
         .into_iter()
-        .map(|m| m.text)
+        .map(|m| m.text.as_str().to_owned())
         .collect();
     assert_eq!(texts, ["one", "two", "three"]);
 }

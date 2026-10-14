@@ -1481,3 +1481,9 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 - CI green on main; `cargo audit`/`deny` clean; clippy/fmt clean; no open `bug` issues; no owner comments. 144 lib tests pass.
 - Added `status::tests` for `valid_region_id` boundaries and non-`ok` health body → unhealthy. Test-only; no review agents required.
 - Pruned target/ (26G → 15G). Still open need-human: #13 #16 #19 #20 #22 #24 #28 #30 #32 #39.
+
+## Cycle 532 (FEATURE — Phase 7 all [x]; took 7.11 follow-up F8 partial)
+- `Received` zeroizes `body` on drop; `Pending.text` is `Zeroizing<String>`. crypto-reviewer PASS (scoped).
+- F8 stays open: `render`/`sanitize` intermediates, `serde_json::to_vec(&Received)` realloc, legacy `visit_seq`
+  Vec growth, `decrypt_message` return type (core). Next cycle: finish these, then F1 opaque record names.
+- No drop-wipe test (reading freed memory is UB); guard is the type change + review.
