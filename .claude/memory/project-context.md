@@ -1490,3 +1490,6 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 
 ## Cycle 533 (FEATURE — Phase 7 all [x]; 7.11 follow-up F8 render intermediates)
 - `message::render`/`sanitize` return `Zeroizing<String>`, pre-sized 3x (no realloc); structured web payloads parsed by a hand-written object-only, last-wins Visitor (no `serde_json::Value`, no untagged/Content buffering). First review FAILed an untagged-derive version (array/dup-key parity, hidden copies) — hand visitor is the fix. Residual: serde_json escape scratch buffer. F8 still open: `to_vec(&Received)` realloc, legacy `visit_seq`, `decrypt_message` return type.
+
+## Cycle 534 (FEATURE → CI-red fix)
+- Main CI (cargo-deny) was red: rustls 0.23.45 hit RUSTSEC-2026-0346..0349. Lockfile bump to 0.23.46; deny/audit clean, 147 powehi-cli tests pass. No code changes. F8 remainder unchanged.
