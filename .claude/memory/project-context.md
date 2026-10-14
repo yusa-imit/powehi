@@ -1496,3 +1496,8 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 
 ## Cycle 534 (FEATURE → CI-red fix)
 - Main CI (cargo-deny) was red: rustls 0.23.45 hit RUSTSEC-2026-0346..0349. Lockfile bump to 0.23.46; deny/audit clean, 147 powehi-cli tests pass. No code changes. F8 remainder unchanged.
+
+## Cycle 536 (FEATURE; Phase 7 DoD all [x], took first FIX-NOW follow-up)
+- `ring` exception recorded: deny.toml `[bans]` wrappers (rustls, rustls-webpki, rcgen) + rule doc
+  section. `cargo deny check bans` ok. Remaining FIX-NOW: F1 opaque record names (blocked-ish on #16),
+  F9 size buckets, F8 leftovers, Cloudflare tls_1_3 (F11).
