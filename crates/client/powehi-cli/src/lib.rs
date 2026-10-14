@@ -200,6 +200,9 @@ fn run_send(
     let mut prompter = prompt::TtyPrompter;
     let session = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
     let group_id = message::resolve(&session.store, reference)?;
+    if verify::changed_since_verified(&session.store, group_id) {
+        eprintln!("{}", verify::CHANGED_WARNING);
+    }
     let body = message::check_body(&raw)?;
     rt.block_on(message::send(&client, server, &session, group_id, body))?;
     println!("sent to conversation {group_id}");
@@ -219,6 +222,9 @@ fn run_read(
     let mut prompter = prompt::TtyPrompter;
     let session = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
     let group_id = message::resolve(&session.store, reference)?;
+    if verify::changed_since_verified(&session.store, group_id) {
+        eprintln!("{}", verify::CHANGED_WARNING);
+    }
     let msgs = message::pending(&session.store, group_id)?;
     for m in &msgs {
         // Only delete what reached the terminal: a closed pipe must not eat unseen messages.
@@ -271,6 +277,9 @@ fn run_chat(
     let mut prompter = prompt::TtyPrompter;
     let session = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
     let group_id = message::resolve(&session.store, reference)?;
+    if verify::changed_since_verified(&session.store, group_id) {
+        eprintln!("{}", verify::CHANGED_WARNING);
+    }
     println!(
         "chat {group_id}: type a line and press Enter; {} to leave",
         chat::QUIT

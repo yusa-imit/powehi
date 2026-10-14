@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 537 (2026-10-15, FEATURE) — CHANGED alert
+- `verify::changed_since_verified` + `CHANGED_WARNING` wired into read/send/chat (stderr, warn-only). Open 7.11: F1, F9 padding, F8 remainder, Cloudflare tls_1_3.
+
 ## Cycle 535 (2026-10-15, STABILIZATION)
 - CI green, `cargo audit`/`cargo deny` clean, no open bug issues. Added verify.rs unknown-record-version test (PR below). cargo-nextest not installed locally; used `cargo test`.
 
