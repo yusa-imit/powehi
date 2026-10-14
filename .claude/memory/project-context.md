@@ -1487,3 +1487,6 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 - F8 stays open: `render`/`sanitize` intermediates, `serde_json::to_vec(&Received)` realloc, legacy `visit_seq`
   Vec growth, `decrypt_message` return type (core). Next cycle: finish these, then F1 opaque record names.
 - No drop-wipe test (reading freed memory is UB); guard is the type change + review.
+
+## Cycle 533 (FEATURE — Phase 7 all [x]; 7.11 follow-up F8 render intermediates)
+- `message::render`/`sanitize` return `Zeroizing<String>`, pre-sized 3x (no realloc); structured web payloads parsed by a hand-written object-only, last-wins Visitor (no `serde_json::Value`, no untagged/Content buffering). First review FAILed an untagged-derive version (array/dup-key parity, hidden copies) — hand visitor is the fix. Residual: serde_json escape scratch buffer. F8 still open: `to_vec(&Received)` realloc, legacy `visit_seq`, `decrypt_message` return type.
