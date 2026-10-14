@@ -36,12 +36,14 @@ struct RegionDetect {
 }
 
 /// Builds the HTTP client used for all server calls: bounded timeout, no redirects (a
-/// redirect could move a bearer token to another origin), rustls only.
+/// redirect could move a bearer token to another origin), rustls, TLS 1.3 only (7.11 F11).
 pub fn http_client() -> Result<Client, StatusError> {
     Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
+        .use_rustls_tls()
+        .min_tls_version(reqwest::tls::Version::TLS_1_3)
         .build()
         .map_err(|_| StatusError::Unreachable)
 }
@@ -96,6 +98,22 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn http_client_offers_only_tls13() {
+        let (port, hello) = crate::testsrv::client_hello_listener().await;
+        let url = Url::parse(&format!("https://127.0.0.1:{port}/")).unwrap();
+        assert!(http_client().unwrap().get(url).send().await.is_err());
+        let hello = tokio::time::timeout(Duration::from_secs(5), hello)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            crate::testsrv::offers_only_tls13(&hello),
+            "ClientHello offers more than TLS 1.3"
+        );
+    }
 
     /// Serves canned `(status line, body)` per path until dropped.
     async fn serve(routes: Vec<(&'static str, &'static str, String)>) -> Url {

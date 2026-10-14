@@ -237,3 +237,29 @@ pub fn session(tmp: &tempfile::TempDir, name: &str, seed: u8) -> crate::auth::Se
     store.put(MLS_SIGNING_RECORD, &[seed; 32]).unwrap();
     crate::auth::Session::for_test(store, device, &device.to_string())
 }
+
+/// Accepts one raw TCP connection and returns the body of the first TLS record the client
+/// sends (its ClientHello) once the caller connects to the returned port. Lets tests assert which TLS
+/// versions a client offers without needing a certificate.
+pub async fn client_hello_listener() -> (u16, tokio::task::JoinHandle<Vec<u8>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let task = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut head = [0u8; 5];
+        sock.read_exact(&mut head).await.unwrap();
+        let len = usize::from(u16::from_be_bytes([head[3], head[4]])).min(16_384);
+        let mut hello = vec![0u8; len];
+        sock.read_exact(&mut hello).await.unwrap();
+        hello
+    });
+    (port, task)
+}
+
+/// True when the ClientHello carries a `supported_versions` extension (type 43) that lists
+/// exactly TLS 1.3 (0x0304).
+pub fn offers_only_tls13(hello: &[u8]) -> bool {
+    hello
+        .windows(7)
+        .any(|w| w == [0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04])
+}
