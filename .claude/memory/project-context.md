@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 527 (2026-10-14, FEATURE) — follow-up F6
+- `ProfileStore.provider_floor` (in-memory AtomicU64); `LocalIdentity::load` passes it as min_generation and refuses a vanished record once floor>0; `save` raises it. Remaining 7.11 follow-ups: F1, F9, F8, F11, CHANGED alert.
+
 ## Cycle 526 (2026-10-14, FEATURE) — all Phase 7 DoD done; follow-up F10
 - `ws.rs::auth_header` marks the upgrade Authorization value sensitive (test in ws/tests.rs). Remaining 7.11 follow-ups in STATUS (F6, F1, F9, F8, F11, CHANGED alert) need crypto-reviewer. No `cargo nextest` locally: use `cargo test` with PATH=$HOME/.cargo/bin.
 

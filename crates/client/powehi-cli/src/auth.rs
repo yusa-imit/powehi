@@ -362,6 +362,7 @@ pub async fn login(
     let hs = login_handshake(client, server, &handle_hash(&handle), &password).await?;
     let store = ProfileStore::open(paths, &hs.export_key)?;
     let account = load_account(&store)?;
+    crate::identity::seed_provider_floor(&store).map_err(|_| AuthError::Crypto)?;
     finish_login(
         client,
         server,
@@ -831,6 +832,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(*s.bearer(), format!("Bearer {TOKEN}"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn login_seeds_provider_floor_from_stored_record() {
+        use crate::identity::{IdentityError, LocalIdentity, PROVIDER_RECORD};
+        let m = mock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths(&tmp, "a");
+        let client = crate::status::http_client().unwrap();
+        let s = register(&client, &m.url, &p, &mut prompter("pw-123456"))
+            .await
+            .unwrap();
+        let mut local = LocalIdentity::load(&s.store).unwrap();
+        local.save(&s.store).unwrap();
+        let old = s.store.get(PROVIDER_RECORD).unwrap().unwrap();
+        local.save(&s.store).unwrap();
+        drop((local, s));
+
+        let s = login(&client, &m.url, &p, &mut prompter("pw-123456"))
+            .await
+            .unwrap();
+        assert_eq!(s.store.provider_floor(), 2);
+        s.store.put(PROVIDER_RECORD, &old).unwrap();
+        assert!(matches!(
+            LocalIdentity::load(&s.store),
+            Err(IdentityError::StateRollback)
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]

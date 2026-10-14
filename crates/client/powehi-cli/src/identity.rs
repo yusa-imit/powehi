@@ -64,6 +64,8 @@ pub enum IdentityError {
     TooManyLocalKeys,
     #[error("MLS operation failed")]
     Mls,
+    #[error("profile MLS state was rolled back or deleted during this session")]
+    StateRollback,
 }
 
 impl From<MlsError> for IdentityError {
@@ -159,6 +161,16 @@ pub(crate) fn prune_pq_key(store: &ProfileStore, key_ref: &[u8]) -> Result<(), I
     Ok(())
 }
 
+/// Seeds the in-process generation floor from the stored provider record, so the floor holds
+/// from session start (login), not from the first `LocalIdentity::load`. No record = floor 0.
+pub(crate) fn seed_provider_floor(store: &ProfileStore) -> Result<(), IdentityError> {
+    if let Some(raw) = store.get(PROVIDER_RECORD)? {
+        let (_provider, generation) = mls_group::import_provider_state(&raw, 0)?;
+        store.raise_provider_floor(generation);
+    }
+    Ok(())
+}
+
 /// The MLS provider and identity restored from the profile store.
 pub struct LocalIdentity {
     pub provider: Provider,
@@ -177,10 +189,16 @@ impl LocalIdentity {
         let seed: Zeroizing<[u8; SEED_LEN]> = Zeroizing::new(
             <[u8; SEED_LEN]>::try_from(&seed[..]).map_err(|_| IdentityError::BadIdentity)?,
         );
+        // Generation-based floor: an in-session swap to a validly encrypted fork record with
+        // generation >= floor is accepted (closing that needs a digest binding; prd §7A.3).
         let (provider, generation) = match store.get(PROVIDER_RECORD)? {
-            Some(raw) => mls_group::import_provider_state(&raw, 0)?,
-            None => (Provider::default(), 0),
+            Some(raw) => mls_group::import_provider_state(&raw, store.provider_floor())
+                .map_err(|_| IdentityError::StateRollback)?,
+            None if store.provider_floor() == 0 => (Provider::default(), 0),
+            // A record that existed earlier in this process vanished: rollback/delete.
+            None => return Err(IdentityError::StateRollback),
         };
+        store.raise_provider_floor(generation);
         let identity =
             mls_group::generate_identity_from_seed(&account.mls_label, &seed, &provider)?;
         Ok(Self {
@@ -192,9 +210,14 @@ impl LocalIdentity {
 
     /// Persists the provider state with a bumped generation.
     pub fn save(&mut self, store: &ProfileStore) -> Result<(), IdentityError> {
+        // A stale instance must not overwrite a newer ratchet state.
+        if self.generation < store.provider_floor() {
+            return Err(IdentityError::StateRollback);
+        }
         let next = self.generation.checked_add(1).ok_or(IdentityError::Mls)?;
         let blob = Zeroizing::new(mls_group::export_provider_state(&self.provider, next)?);
         store.put(PROVIDER_RECORD, &blob)?;
+        store.raise_provider_floor(next);
         self.generation = next;
         Ok(())
     }
@@ -476,6 +499,65 @@ mod tests {
             joined.is_ok(),
             "reloaded provider must hold the KeyPackage private bundle"
         );
+    }
+
+    /// An older (validly encrypted) provider record swapped in mid-session is refused.
+    #[test]
+    fn rolled_back_or_deleted_provider_state_is_refused_in_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = seeded(&tmp);
+        let mut local = LocalIdentity::load(&store).unwrap();
+        local.save(&store).unwrap();
+        let old = store.get(PROVIDER_RECORD).unwrap().unwrap();
+        local.save(&store).unwrap();
+        store.put(PROVIDER_RECORD, &old).unwrap();
+        assert!(matches!(
+            LocalIdentity::load(&store),
+            Err(IdentityError::StateRollback)
+        ));
+        store.remove(PROVIDER_RECORD).unwrap();
+        assert!(matches!(
+            LocalIdentity::load(&store),
+            Err(IdentityError::StateRollback)
+        ));
+    }
+
+    /// Reopen → seed from the stored record → swap in an older one / delete it before any load.
+    #[test]
+    fn seeded_floor_refuses_swap_and_delete_before_first_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = seeded(&tmp);
+        let mut local = LocalIdentity::load(&store).unwrap();
+        local.save(&store).unwrap();
+        let old = store.get(PROVIDER_RECORD).unwrap().unwrap();
+        local.save(&store).unwrap();
+        drop(local);
+        drop(store);
+
+        let store = open(&tmp);
+        seed_provider_floor(&store).unwrap();
+        assert_eq!(store.provider_floor(), 2);
+        store.put(PROVIDER_RECORD, &old).unwrap();
+        assert!(matches!(
+            LocalIdentity::load(&store),
+            Err(IdentityError::StateRollback)
+        ));
+        store.remove(PROVIDER_RECORD).unwrap();
+        assert!(matches!(
+            LocalIdentity::load(&store),
+            Err(IdentityError::StateRollback)
+        ));
+    }
+
+    #[test]
+    fn stale_instance_cannot_save_over_newer_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = seeded(&tmp);
+        let mut a = LocalIdentity::load(&store).unwrap();
+        let mut b = LocalIdentity::load(&store).unwrap();
+        a.save(&store).unwrap();
+        a.save(&store).unwrap();
+        assert!(matches!(b.save(&store), Err(IdentityError::StateRollback)));
     }
 
     #[test]
