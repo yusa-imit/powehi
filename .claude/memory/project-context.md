@@ -1473,3 +1473,8 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 - CI green on main; `cargo deny check` ok; no open `bug` issues; no owner comments. 132 lib tests passed at start.
 - Added `ws::tests::an_oversized_frame_ends_the_connection_without_waking` (16 KiB frame cap). Test-only; no review agents required.
 - Still open need-human: #13 #16 #19 #20 #22 #24 #28 #30 #32 #39. All Phase 7 items through 7.11 shipped; check STATUS.md for the next unchecked item.
+
+## Cycle 530 (STABILIZATION)
+- CI green on main; `cargo audit`/`deny` clean; clippy/fmt clean; no open `bug` issues; no owner comments. 144 lib tests pass.
+- Added `status::tests` for `valid_region_id` boundaries and non-`ok` health body → unhealthy. Test-only; no review agents required.
+- Pruned target/ (26G → 15G). Still open need-human: #13 #16 #19 #20 #22 #24 #28 #30 #32 #39.
