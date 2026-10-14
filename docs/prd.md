@@ -1257,6 +1257,7 @@ crates/client/
 
 터미널 환경에서 추가되는 규칙:
 
+- **코어 덤프 금지** — 시작 시 `RLIMIT_CORE=0`(+Linux `PR_SET_DUMPABLE=0`, pipe `core_pattern`에서는 이쪽이 실제 방어). `execve` 시 dumpable이 리셋되므로 서브프로세스 추가 시 재검토. 잔여 위험: root/`CAP_SYS_RESOURCE`, macOS ReportCrash의 레지스터/backtrace.
 - **argv에 비밀/본문 금지** — 셸 history와 `ps`로 유출. 비밀번호는 TTY, 본문은 REPL 또는 stdin.
 - **세션 토큰** — 메모리 또는 암호화 store 안에만. 평문 파일 금지.
 - **로그** — `tracing`(stderr, `RUST_LOG`)은 작업 이름과 상태 코드만. 본문/PII/ciphertext 금지.

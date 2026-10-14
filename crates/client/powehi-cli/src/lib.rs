@@ -1,7 +1,8 @@
 //! Powehi terminal client library (prd.md §7A). The `powehi` binary is a thin wrapper.
 //!
 //! Rules from §7A.3 that shape this crate: no secrets or message bodies in argv (no
-//! subcommand takes them as arguments), and nothing here logs content.
+//! subcommand takes them as arguments), and nothing here logs content. A binary using this
+//! crate must call [`hardening::disable_core_dumps`] before touching any secret.
 
 #[cfg(unix)]
 pub mod auth;
@@ -10,6 +11,8 @@ pub mod chat;
 pub mod cli;
 #[cfg(unix)]
 pub mod conversation;
+#[cfg(unix)]
+pub mod hardening;
 #[cfg(unix)]
 pub mod identity;
 #[cfg(unix)]

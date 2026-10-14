@@ -63,8 +63,8 @@ below is checked. See `docs/decisions/0006-cli-first-client.md`, prd.md §7A.
 
 ## Follow-ups (not Phase 7 DoD)
 - From 7.11 (FIX-NOW, not yet done): ~~in-session provider-state generation floor (F6)~~ (done, cycle 527); opaque record names (HMAC of group/envelope id, F1, store format
-  change); ~~`Received.body` as bytes not JSON number array~~ (done, cycle 529: hex string, legacy array still readable) — size buckets (F9, padding) still open; disable core dumps and
-  zeroize plaintext copies (F8); ~~mark WS Authorization header sensitive (F10)~~ (done, cycle 526);
+  change); ~~`Received.body` as bytes not JSON number array~~ (done, cycle 529: hex string, legacy array still readable) — size buckets (F9, padding) still open; ~~disable core dumps~~ (done, cycle 531: `hardening::disable_core_dumps` at startup) and
+  zeroize plaintext copies (F8, still open); ~~mark WS Authorization header sensitive (F10)~~ (done, cycle 526);
   ~~TLS 1.3-only for reqwest+WS~~ (done, cycle 528: ClientHello-inspection tests, no rcgen needed; the Cloudflare `tls_1_3` Terraform setting (F11) is still open); record `ring` exception for the CLI. All need crypto-reviewer.
 - Blocking requirement for any CLI Commit-merge work: wire the §5.6 CHANGED alert (compare the
   stored `verified-<group>` number) into `read`/`chat`/`send` first (crypto-reviewer, cycle 522).

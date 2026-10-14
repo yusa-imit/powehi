@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 531 (2026-10-14, FEATURE) — follow-up F8 (core-dump half)
+- `hardening.rs`: RLIMIT_CORE=0 (+ Linux PR_SET_DUMPABLE=0), fail-closed in `main`. Open: zeroize plaintext copies, F1, F9 padding, CHANGED alert, Cloudflare tls_1_3.
+
 ## Cycle 529 (2026-10-14, FEATURE) — follow-up F9 (encoding half)
 - `Received.body` serialized as hex via `inbox/body_hex.rs` (legacy number array still reads; 1 MiB bound, error not panic). Padding/size buckets still open. Remaining: F1, F8, CHANGED alert, Cloudflare tls_1_3.
 
