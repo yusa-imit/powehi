@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 535 (2026-10-15, STABILIZATION)
+- CI green, `cargo audit`/`cargo deny` clean, no open bug issues. Added verify.rs unknown-record-version test (PR below). cargo-nextest not installed locally; used `cargo test`.
+
 ## Cycle 531 (2026-10-14, FEATURE) — follow-up F8 (core-dump half)
 - `hardening.rs`: RLIMIT_CORE=0 (+ Linux PR_SET_DUMPABLE=0), fail-closed in `main`. Open: zeroize plaintext copies, F1, F9 padding, CHANGED alert, Cloudflare tls_1_3.
 

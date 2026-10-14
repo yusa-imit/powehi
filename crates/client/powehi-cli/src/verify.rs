@@ -238,6 +238,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn record_with_unknown_version_is_never_verified() {
+        let (_tmp, alice, _bob, gid) = pair().await;
+        let n = number(&alice.store, gid).unwrap();
+        let future = Record {
+            version: VERSION + 1,
+            number: n.clone(),
+        };
+        let bytes = serde_json::to_vec(&future).unwrap();
+        alice.store.put(&record_name(&gid), &bytes).unwrap();
+        assert_eq!(state(&alice.store, gid, &n).unwrap(), State::Changed);
+        confirm(&alice.store, gid, &n, &n).unwrap();
+        assert_eq!(state(&alice.store, gid, &n).unwrap(), State::Verified);
+    }
+
+    #[tokio::test]
     async fn unknown_conversation_is_an_error() {
         let (_tmp, alice, _bob, _gid) = pair().await;
         assert!(matches!(
