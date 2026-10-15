@@ -37,3 +37,12 @@ resource "cloudflare_dns_record" "wildcard_cname" {
 
   comment = "Wildcard → api.powehi.app — managed by Terraform"
 }
+
+# TLS 1.3 on at the edge (7.11 F11, prd §7A.3). The CLI already speaks TLS 1.3 only; this makes
+# the edge negotiate it. `min_tls_version = 1.3` (dropping older web clients) is NOT set here:
+# that is a compatibility policy call for the owner.
+resource "cloudflare_zone_setting" "tls_1_3" {
+  zone_id    = var.cloudflare_zone_id
+  setting_id = "tls_1_3"
+  value      = "on"
+}

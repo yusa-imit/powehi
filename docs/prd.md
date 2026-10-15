@@ -1277,7 +1277,7 @@ crates/client/
 - **PCS 미제공**: CLI 1:1은 epoch 1에 고정되고 Commit(self-Update 포함)을 보내거나 적용하지 않음.
   hash ratchet 수준의 forward secrecy만 있으며 store가 한 번 침해되면 이후 메시지가 모두 노출됨.
 - **TLS**: rustls + webpki roots, 인증서 검증 항상 활성, `http://`는 loopback만,
-  redirect·환경변수 proxy 미사용, Bearer는 헤더로만. TLS 1.3 전용 고정은 아직 없음(협상 가능, 추적 항목 — Cloudflare `tls_1_3` 설정 고정과 함께). Certificate pinning(§3.1 T2)도 아직 없음 —
+  redirect·환경변수 proxy 미사용, Bearer는 헤더로만. CLI는 TLS 1.3 전용(cycle 528). 서버 edge는 Cloudflare `tls_1_3` 설정은 Terraform으로 고정됨(`infra/terraform/envs/cloudflare/main.tf`), min_tls_version 1.3은 미설정이라 edge는 TLS 1.2도 허용(owner 결정 대기)). Certificate pinning(§3.1 T2)도 아직 없음 —
   CLI의 T2 방어는 WebPKI + OPAQUE 상호 인증 + Safety Number.
 - **argv**: 대화 id(접두어)와 `--profile`은 argv에 들어가 셸 history와 `ps`에 노출됨(비밀은 아님).
   `echo 본문 | powehi send`는 본문을 history에 남기므로 대화형 입력(Ctrl-D)이나 파일 리다이렉트 사용.

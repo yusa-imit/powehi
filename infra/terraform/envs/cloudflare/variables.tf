@@ -1,5 +1,5 @@
 variable "cloudflare_api_token" {
-  description = "Cloudflare API token with Zone:Edit permissions. Supply via TF_VAR_cloudflare_api_token — never hardcode."
+  description = "Cloudflare API token with Zone:Edit and Zone Settings:Edit permissions. Supply via TF_VAR_cloudflare_api_token — never hardcode."
   type        = string
   sensitive   = true
   default     = ""

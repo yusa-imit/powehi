@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 539 (2026-10-15, FEATURE) — Cloudflare tls_1_3
+- `cloudflare_zone_setting.tls_1_3`=on (F11). min_tls_version 1.3 left to owner. security-auditor PASS. Open 7.11: F1, F9 padding, F8 remainder.
+
 ## Cycle 538 (2026-10-15, FEATURE) — CHANGED re-check + join guard
 - `chat::alert_if_changed` after every fetch (once per change; lib.rs startup eprintln removed). `welcome::join_one` skips Welcomes for a group already held (record-without-group = interrupted join, still finished; crypto-reviewer found the first, broader guard broke that). Open 7.11: F1, F9 padding, F8 remainder, Cloudflare tls_1_3.
 
