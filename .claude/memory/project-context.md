@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 545 (2026-10-15, STABILIZATION)
+- `StoreError::Authentication` text now says wrong key/password most likely and "do not delete" the files (cycle-544 advisory). CI green on main, `cargo deny` ok, `cargo audit` no vulns; target/ 19G (under 20G cap). cargo-nextest absent locally; used `cargo test -p powehi-cli` (168 pass).
+
 ## Cycle 544 (2026-10-15, FEATURE) — store open names the bad file
 - crypto-reviewer PASS; advisory: with a wrong key the error names only the first file read, so users may delete it as "damaged" (consider a clearer wrong-key message). `StoreError::Record{tag,cause}` wraps errors from `load_index` (tag = opaque file stem); `root()` strips it. Callers matching Authentication/Corrupt on `open`: none outside tests. Decrypted-name zeroize item judged moot (index holds names for the process lifetime by design; `inner` buffer is `Zeroizing`).
 

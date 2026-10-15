@@ -85,7 +85,7 @@ pub enum StoreError {
     InsecurePath,
     #[error("record is malformed")]
     Corrupt,
-    #[error("record failed authentication (wrong key or tampered file)")]
+    #[error("record failed authentication (wrong key, or a modified or tampered file; do not delete record files to work around this)")]
     Authentication,
     #[error("profile is already open in another process")]
     Locked,
@@ -650,6 +650,10 @@ mod tests {
         open(&tmp, &EK).unwrap().put("a", b"x").unwrap();
         let err = open(&tmp, &[8u8; 32]).unwrap_err();
         assert!(matches!(err.root(), StoreError::Authentication));
+        assert!(
+            err.to_string().contains("do not delete") && err.to_string().contains("tampered"),
+            "{err}"
+        );
     }
 
     #[test]
