@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 549 (2026-10-16, FEATURE) — Received deserialize wipes on failure
+- Phase 7 DoD all [x]; F8: `Received` reads via `RawReceived` with `WipedBody` (Drop zeroizes) so a later-field failure wipes the decoded body. crypto-reviewer PASS (advisory: add ordering/duplicate-body tests). Open: serde_json escape scratch (unreachable for our own records).
+
 ## Cycle 548 (2026-10-16, FEATURE) — legacy body visit_seq wiped
 - Phase 7 DoD all [x]; F8: `body_hex::visit_seq` grows geometrically into fresh `Zeroizing` buffers (no unwiped realloc); `visit_str` wiped on error. crypto-reviewer round 1 needs-rework (fixed 8 MiB prealloc cost 3.9s/2048 records), round 2 PASS. Open: serde-derive intermediate `Option<Vec>` unwiped when a later field fails (needs custom Deserialize / wiping type).
 

@@ -423,3 +423,15 @@ fn encode_rejects_oversize_body_before_allocating() {
     };
     assert!(rec.encode().is_err());
 }
+
+#[test]
+fn received_with_bad_trailing_field_is_rejected_and_good_one_still_reads() {
+    let g = Uuid::from_u128(1);
+    let ok = format!(r#"{{"group_id":"{g}","sender":"{g}","body":"6869","received_at":7}}"#);
+    let rec: Received = serde_json::from_str(&ok).unwrap();
+    assert_eq!((rec.body.as_slice(), rec.received_at), (&b"hi"[..], 7));
+    let bad = format!(r#"{{"group_id":"{g}","sender":"{g}","body":"6869","received_at":"x"}}"#);
+    assert!(serde_json::from_str::<Received>(&bad).is_err());
+    let missing = format!(r#"{{"group_id":"{g}","body":"6869"}}"#);
+    assert!(serde_json::from_str::<Received>(&missing).is_err());
+}

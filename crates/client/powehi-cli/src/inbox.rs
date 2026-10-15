@@ -57,7 +57,45 @@ struct PqInit {
     ct: Vec<u8>,
 }
 
+/// Wire shape of [`Received`] for reading. The body sits in [`WipedBody`] while the other
+/// fields parse, so a failure on a later field drops (and wipes) it instead of leaving the
+/// decoded bytes in serde's intermediate `Option<Vec<u8>>`.
+#[derive(Deserialize)]
+struct RawReceived {
+    group_id: Uuid,
+    sender: Uuid,
+    body: WipedBody,
+    #[serde(default)]
+    received_at: u64,
+}
+
+struct WipedBody(Vec<u8>);
+
+impl<'de> Deserialize<'de> for WipedBody {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        body_hex::deserialize(d).map(WipedBody)
+    }
+}
+
+impl Drop for WipedBody {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl From<RawReceived> for Received {
+    fn from(mut raw: RawReceived) -> Self {
+        Received {
+            group_id: raw.group_id,
+            sender: raw.sender,
+            body: std::mem::take(&mut raw.body.0),
+            received_at: raw.received_at,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
+#[serde(from = "RawReceived")]
 pub(crate) struct Received {
     pub(crate) group_id: Uuid,
     pub(crate) sender: Uuid,
