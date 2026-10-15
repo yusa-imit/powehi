@@ -173,10 +173,11 @@ fn process_one(
     if !mls_group::is_fresh_pair(&group) {
         return Ok(Outcome::Skip);
     }
-    let Ok(plain) = mls_group::decrypt_message(&mut group, ciphertext, &local.provider) else {
+    let Ok(plain): Result<Zeroizing<Vec<u8>>, _> =
+        mls_group::decrypt_message(&mut group, ciphertext, &local.provider)
+    else {
         return Ok(Outcome::Skip);
     };
-    let plain = Zeroizing::new(plain);
     let awaiting_pq = conv.role == Role::Joiner && conv.pq_decap_key().is_some();
     if awaiting_pq {
         if let Some(binding) = pq_binding(&conv, &plain, group_id) {

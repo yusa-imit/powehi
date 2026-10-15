@@ -115,7 +115,9 @@ async fn invite_to_joined_conversation_end_to_end() {
     let mut ag = load_group(&a, &gid);
     let ct = mls_group::encrypt_message(&mut bg, &b.identity.signer, b"hi", &b.provider).unwrap();
     assert_eq!(
-        mls_group::decrypt_message(&mut ag, &ct, &a.provider).unwrap(),
+        mls_group::decrypt_message(&mut ag, &ct, &a.provider)
+            .unwrap()
+            .to_vec(),
         b"hi"
     );
 

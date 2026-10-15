@@ -597,13 +597,16 @@ pub fn encrypt_message(
 
 /// Decrypt a serialized MLS application message and return the plaintext.
 ///
+/// The returned buffer is wiped on drop; openmls's internal decrypted copy (plaintext plus
+/// padding, freed inside `process_message`) is not, and cannot be wiped from here.
+///
 /// Forward secrecy: openmls rejects ciphertext whose epoch no longer has key
 /// material in the group's secret tree; such attempts return [`MlsError::Decrypt`].
 pub fn decrypt_message(
     group: &mut MlsGroup,
     ciphertext: &[u8],
     provider: &impl OpenMlsProvider,
-) -> Result<Vec<u8>, MlsError> {
+) -> Result<zeroize::Zeroizing<Vec<u8>>, MlsError> {
     let message = MlsMessageIn::tls_deserialize_exact(ciphertext).map_err(|_| MlsError::Codec)?;
     let protocol_message: ProtocolMessage = message
         .try_into_protocol_message()
@@ -618,7 +621,9 @@ pub fn decrypt_message(
         .process_message(provider, protocol_message)
         .map_err(|_| MlsError::Decrypt)?;
     match processed.into_content() {
-        ProcessedMessageContent::ApplicationMessage(app) => Ok(app.into_bytes()),
+        ProcessedMessageContent::ApplicationMessage(app) => {
+            Ok(zeroize::Zeroizing::new(app.into_bytes()))
+        }
         _ => Err(MlsError::UnexpectedMessage),
     }
 }
@@ -2164,21 +2169,29 @@ mod tests {
             encrypt_message(&mut bob_group, &bob.signer, &long, &bob_provider).unwrap();
         assert_eq!(from_bob.len(), from_bob_100.len());
         assert_eq!(
-            decrypt_message(&mut alice_group, &from_bob, &alice_provider).unwrap(),
+            decrypt_message(&mut alice_group, &from_bob, &alice_provider)
+                .unwrap()
+                .to_vec(),
             b"b"
         );
 
         // Padding is invisible to the receiver.
         assert_eq!(
-            decrypt_message(&mut bob_group, &short, &bob_provider).unwrap(),
+            decrypt_message(&mut bob_group, &short, &bob_provider)
+                .unwrap()
+                .to_vec(),
             b"a"
         );
         assert_eq!(
-            decrypt_message(&mut bob_group, &mid, &bob_provider).unwrap(),
+            decrypt_message(&mut bob_group, &mid, &bob_provider)
+                .unwrap()
+                .to_vec(),
             long
         );
         assert_eq!(
-            decrypt_message(&mut bob_group, &next, &bob_provider).unwrap(),
+            decrypt_message(&mut bob_group, &next, &bob_provider)
+                .unwrap()
+                .to_vec(),
             big
         );
     }
