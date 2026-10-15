@@ -1624,12 +1624,36 @@ pub fn is_fresh_pair(group: &MlsGroup) -> bool {
 
 /// Restores a group the provider's storage already holds, by its MLS group id bytes.
 /// `Ok(None)` means the provider has no such group; `Err` means stored state is unreadable.
+///
+/// Groups created before F9 carry a stored `padding_size` of 0; they are migrated here to
+/// the canonical join configuration (same as [`join_group`]) and the new config is written to the provider's storage
+/// (it reaches disk when the caller next saves the provider state).
 pub fn load_group(
     group_id: &[u8],
     provider: &impl OpenMlsProvider,
 ) -> Result<Option<MlsGroup>, MlsError> {
-    MlsGroup::load(provider.storage(), &GroupId::from_slice(group_id))
-        .map_err(|_| MlsError::Persistence)
+    let loaded = MlsGroup::load(provider.storage(), &GroupId::from_slice(group_id))
+        .map_err(|_| MlsError::Persistence)?;
+    let Some(mut group) = loaded else {
+        return Ok(None);
+    };
+    if group.configuration().padding_size() != PADDING_SIZE {
+        group
+            .set_configuration(provider.storage(), &canonical_join_config())
+            .map_err(|_| MlsError::Persistence)?;
+    }
+    assert_eq!(group.configuration().padding_size(), PADDING_SIZE);
+    Ok(Some(group))
+}
+
+/// The join-side group configuration every Powehi member uses (F9 padding; max_past_epochs 0 only
+/// takes effect at create/join time, `set_configuration` cannot shrink an existing group's retention).
+fn canonical_join_config() -> MlsGroupJoinConfig {
+    MlsGroupJoinConfig::builder()
+        .use_ratchet_tree_extension(true)
+        .max_past_epochs(0)
+        .padding_size(PADDING_SIZE)
+        .build()
 }
 
 /// Join a group from a serialized `Welcome` message produced by [`add_member`].
@@ -1637,11 +1661,7 @@ pub fn join_group(
     welcome_bytes: &[u8],
     provider: &impl OpenMlsProvider,
 ) -> Result<MlsGroup, MlsError> {
-    let config = MlsGroupJoinConfig::builder()
-        .use_ratchet_tree_extension(true)
-        .max_past_epochs(0)
-        .padding_size(PADDING_SIZE)
-        .build();
+    let config = canonical_join_config();
     let message =
         MlsMessageIn::tls_deserialize_exact(welcome_bytes).map_err(|_| MlsError::Codec)?;
     let welcome = match message.extract() {
@@ -2065,6 +2085,44 @@ mod tests {
             !contains_subslice(&ciphertext, plaintext),
             "ciphertext must not leak the plaintext"
         );
+    }
+
+    /// F9 migration: a group stored with padding 0 is upgraded (and persisted) on load.
+    #[test]
+    fn test_load_group_migrates_unpadded_group() {
+        let provider = OpenMlsRustCrypto::default();
+        let alice = generate_identity(b"alice", &provider).unwrap();
+        let old = MlsGroupCreateConfig::builder()
+            .ciphersuite(CIPHERSUITE)
+            .use_ratchet_tree_extension(true)
+            .max_past_epochs(0)
+            .padding_size(0)
+            .build();
+        let group = MlsGroup::new(
+            &provider,
+            &alice.signer,
+            &old,
+            alice.credential_with_key.clone(),
+        )
+        .unwrap();
+        assert_eq!(group.configuration().padding_size(), 0);
+        let id = group.group_id().as_slice().to_vec();
+        drop(group);
+
+        let loaded = load_group(&id, &provider).unwrap().unwrap();
+        assert_eq!(loaded.configuration().padding_size(), PADDING_SIZE);
+        // Persisted: a raw reload sees the migrated config.
+        let raw = MlsGroup::load(provider.storage(), &GroupId::from_slice(&id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(raw.configuration().padding_size(), PADDING_SIZE);
+        assert!(load_group(b"missing", &provider).unwrap().is_none());
+
+        // A migrated group now emits bucketed ciphertext.
+        let mut loaded = loaded;
+        let a = encrypt_message(&mut loaded, &alice.signer, b"a", &provider).unwrap();
+        let b = encrypt_message(&mut loaded, &alice.signer, &[b'z'; 100], &provider).unwrap();
+        assert_eq!(a.len(), b.len());
     }
 
     /// F9 (prd.md §3.3): application messages are padded into `PADDING_SIZE` buckets, so
