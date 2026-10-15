@@ -13,7 +13,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::auth::Session;
-use crate::conversation::{self, Conversation, Role};
+use crate::conversation::{self, Conversation, ConversationError, Role};
 use crate::identity::{self, IdentityError, LocalIdentity};
 use crate::invite::InviteError;
 
@@ -171,6 +171,25 @@ impl From<IdentityError> for JoinOutcome {
     }
 }
 
+/// Group keys are immutable per group_id: a Welcome for a group we already hold is never
+/// joined, whether or not its conversation record exists. A record WITHOUT the MLS group is an
+/// interrupted join (crash between the two saves in `join_one`) and is finished by re-joining.
+fn check_group_not_held(
+    store: &crate::store::ProfileStore,
+    local: &LocalIdentity,
+    group_id: Uuid,
+) -> Result<(), JoinOutcome> {
+    match conversation::load(store, &group_id) {
+        Ok(_) => {}
+        Err(ConversationError::Store(e)) => return Err(JoinOutcome::Fatal(e.into())),
+        Err(_) => return Err(JoinOutcome::Skip),
+    }
+    match mls_group::load_group(group_id.as_bytes(), &local.provider) {
+        Ok(None) => Ok(()),
+        Ok(Some(_)) | Err(_) => Err(JoinOutcome::Skip),
+    }
+}
+
 fn join_one(
     session: &Session,
     env: &Joinable,
@@ -180,6 +199,7 @@ fn join_one(
     // A fresh provider per Welcome: a rejected join must not leave state in memory that a
     // later successful `save` would persist.
     let mut local = LocalIdentity::load(&session.store)?;
+    check_group_not_held(&session.store, &local, env.group_id)?;
     let binding = mls_group::welcome_pq_binding(&env.ciphertext, &local.provider)
         .map_err(|_| JoinOutcome::Skip)?;
     if only_ref.is_some_and(|r| r != binding.key_package_ref.as_slice()) {
