@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 543 (2026-10-15, FEATURE) — F1 opaque record names
+- Profile store `PHS2`: files `<hmac tag>.rc2`, real name inside ciphertext, AAD `profile||tag`, in-memory name index built (all records authenticated) at `open`, hidden `store-v2` marker latches the PHS1 import window (written only after migration completes). crypto-reviewer took 3 rounds (round 1: names() decrypt cost, downgrade window; round 2: marker written too early deleted unread legacy files). threat-model-checker YELLOW -> prd §3.2/§7A.3 updated. Deferred (in STATUS): per-store salt for tags, zeroize decrypted names, error names no file. Open 7.11: F8 remainder.
+
 ## Cycle 542 (2026-10-15, FEATURE) — padding migration
 - `load_group` migrates stored padding 0 -> 256 via `canonical_join_config` (CLI groups). crypto-reviewer PASS. Open: web `wasm_exports.rs` loads with `MlsGroup::load` directly (old web groups stay unpadded; maintenance mode, crypto-lead call); F1, F8 remainder.
 

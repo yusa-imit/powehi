@@ -30,6 +30,7 @@ uuid = { workspace = true }
 # Only to enable aes/zeroize via feature unification; do not remove.
 aes = { version = "0.8", features = ["zeroize"] }
 hkdf = { workspace = true }
+hmac = { workspace = true }
 sha2 = { workspace = true }
 zeroize = { workspace = true }
 rand = { workspace = true }
