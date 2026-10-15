@@ -371,3 +371,34 @@ fn body_bound_is_exact_for_hex_and_legacy_array() {
         "oversize is a typed error, not a panic"
     );
 }
+
+#[test]
+fn encode_never_reallocates_and_matches_to_vec() {
+    for len in [0usize, 1, 100, 4096, 70_000] {
+        let rec = Received {
+            group_id: Uuid::from_u128(u128::MAX),
+            sender: Uuid::from_u128(u128::MAX - 1),
+            body: vec![0xab; len],
+            received_at: u64::MAX,
+        };
+        let enc = rec.encode().unwrap();
+        assert_eq!(
+            enc.capacity(),
+            len * 2 + Received::JSON_OVERHEAD,
+            "len {len}"
+        );
+        assert_eq!(&enc[..], &serde_json::to_vec(&rec).unwrap()[..]);
+    }
+}
+
+#[test]
+fn encode_rejects_oversize_body_before_allocating() {
+    use super::body_hex::MAX_BODY_BYTES;
+    let rec = Received {
+        group_id: Uuid::nil(),
+        sender: Uuid::nil(),
+        body: vec![0; MAX_BODY_BYTES + 1],
+        received_at: 0,
+    };
+    assert!(rec.encode().is_err());
+}
