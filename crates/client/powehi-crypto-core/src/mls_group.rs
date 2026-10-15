@@ -429,6 +429,10 @@ pub fn generate_identity_from_seed(
     generate_identity_from_keypair(identity, private_key, &public_key, provider)
 }
 
+/// Application-message padding bucket (RFC 9420 §15.1): plaintext lengths are rounded up
+/// to a multiple of this, hiding exact message sizes from the delivery service (prd.md §3.3).
+pub const PADDING_SIZE: usize = 256;
+
 /// Extension type ID for the Powehi PQ KEM extension.
 ///
 /// 0xF001 is in the private-use range 0xF000–0xFFFF defined by RFC 9420 §17.3.
@@ -566,6 +570,7 @@ pub fn create_group(
         // If out-of-order delivery requires a wider window in the future, this
         // MUST be re-evaluated through the threat-model-checker first.
         .max_past_epochs(0)
+        .padding_size(PADDING_SIZE)
         .build();
     MlsGroup::new(
         provider,
@@ -1635,6 +1640,7 @@ pub fn join_group(
     let config = MlsGroupJoinConfig::builder()
         .use_ratchet_tree_extension(true)
         .max_past_epochs(0)
+        .padding_size(PADDING_SIZE)
         .build();
     let message =
         MlsMessageIn::tls_deserialize_exact(welcome_bytes).map_err(|_| MlsError::Codec)?;
@@ -2058,6 +2064,64 @@ mod tests {
         assert!(
             !contains_subslice(&ciphertext, plaintext),
             "ciphertext must not leak the plaintext"
+        );
+    }
+
+    /// F9 (prd.md §3.3): application messages are padded into `PADDING_SIZE` buckets, so
+    /// the server cannot tell a 1-byte message from a 100-byte one (the joiner pads too).
+    #[test]
+    fn test_mls_application_messages_are_padded_to_buckets() {
+        let alice_provider = OpenMlsRustCrypto::default();
+        let bob_provider = OpenMlsRustCrypto::default();
+        let alice = generate_identity(b"alice", &alice_provider).unwrap();
+        let bob = generate_identity(b"bob", &bob_provider).unwrap();
+        let bob_kp = generate_key_package(&bob, &bob_provider).unwrap();
+        let mut alice_group = create_group(&alice, &alice_provider).unwrap();
+        let welcome = add_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+        let mut bob_group = join_group(&welcome, &bob_provider).unwrap();
+
+        let short =
+            encrypt_message(&mut alice_group, &alice.signer, b"a", &alice_provider).unwrap();
+        let long = vec![b'z'; 100];
+        let mid = encrypt_message(&mut alice_group, &alice.signer, &long, &alice_provider).unwrap();
+        assert_eq!(
+            short.len(),
+            mid.len(),
+            "same bucket must give equal wire length"
+        );
+        // A message past the bucket boundary lands in the next bucket.
+        let big = vec![b'z'; PADDING_SIZE + 1];
+        let next = encrypt_message(&mut alice_group, &alice.signer, &big, &alice_provider).unwrap();
+        assert_eq!(next.len() - short.len(), PADDING_SIZE);
+
+        // The joiner's side (join config) pads as well.
+        let from_bob = encrypt_message(&mut bob_group, &bob.signer, b"b", &bob_provider).unwrap();
+        let from_bob_100 =
+            encrypt_message(&mut bob_group, &bob.signer, &long, &bob_provider).unwrap();
+        assert_eq!(from_bob.len(), from_bob_100.len());
+        assert_eq!(
+            decrypt_message(&mut alice_group, &from_bob, &alice_provider).unwrap(),
+            b"b"
+        );
+
+        // Padding is invisible to the receiver.
+        assert_eq!(
+            decrypt_message(&mut bob_group, &short, &bob_provider).unwrap(),
+            b"a"
+        );
+        assert_eq!(
+            decrypt_message(&mut bob_group, &mid, &bob_provider).unwrap(),
+            long
+        );
+        assert_eq!(
+            decrypt_message(&mut bob_group, &next, &bob_provider).unwrap(),
+            big
         );
     }
 
