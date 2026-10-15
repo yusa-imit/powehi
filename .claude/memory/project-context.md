@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 542 (2026-10-15, FEATURE) — padding migration
+- `load_group` migrates stored padding 0 -> 256 via `canonical_join_config` (CLI groups). crypto-reviewer PASS. Open: web `wasm_exports.rs` loads with `MlsGroup::load` directly (old web groups stay unpadded; maintenance mode, crypto-lead call); F1, F8 remainder.
+
 ## Cycle 541 (2026-10-15, FEATURE) — F9 padding
 - `PADDING_SIZE`=256 in MLS create/join config (core, so web too); new groups only (stored config of older groups stays unpadded; migrate via set_configuration on load = open). crypto-reviewer: needs-rework items fixed except migration. Open 7.11: F1, F8 remainder. Issue #32 option (2) applied per its recommendation.
 
