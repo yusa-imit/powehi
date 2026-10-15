@@ -68,9 +68,10 @@ below is checked. See `docs/decisions/0006-cli-first-client.md`, prd.md §7A.
   ~~TLS 1.3-only for reqwest+WS~~ (done, cycle 528: ClientHello-inspection tests, no rcgen needed; the Cloudflare `tls_1_3` Terraform setting (F11) is still open); ~~record `ring` exception for the CLI~~ (done, cycle 536: deny.toml wrappers ban + rule doc). All need crypto-reviewer.
 - ~~Blocking requirement for any CLI Commit-merge work: wire the §5.6 CHANGED alert into `read`/`chat`/`send`~~
   (done, cycle 537: `verify::changed_since_verified`, warn-only on stderr; blocking on change is not decided).
-  Still gating any Commit-merge/member-change work: re-run the check after each `inbox::receive` in
-  `chat::sync` (today `chat` checks once at start), and add a CLI test that a Welcome for an existing
-  group_id is not joined (group keys are immutable per group_id only because of that). Policy: issue #53.
+  ~~Re-run the check after each `inbox::receive` in `chat::sync`; Welcome for an existing group_id is not joined~~
+  (done, cycle 538: `chat::alert_if_changed` warns when the number turns CHANGED; `welcome::join_one` skips a
+  Welcome whose MLS group is already held — a conversation record without the group is an interrupted join and
+  is still finished). Policy: issue #53.
 - Full-screen TUI (`ratatui`) on top of the same lib.
 - Media send/receive (prd.md §9), groups of more than two, member Remove
   (blocked on issue #2 items (e)/(g)), multi-device, recovery-phrase restore.

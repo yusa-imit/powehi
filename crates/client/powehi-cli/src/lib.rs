@@ -277,9 +277,7 @@ fn run_chat(
     let mut prompter = prompt::TtyPrompter;
     let session = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
     let group_id = message::resolve(&session.store, reference)?;
-    if verify::changed_since_verified(&session.store, group_id) {
-        eprintln!("{}", verify::CHANGED_WARNING);
-    }
+    // The CHANGED alert is printed by `chat::run` itself, at start and after every fetch.
     println!(
         "chat {group_id}: type a line and press Enter; {} to leave",
         chat::QUIT

@@ -220,3 +220,27 @@ async fn read_lines_flags_an_oversize_line_and_keeps_going() {
     assert!(got[0].len() > message::MAX_BODY_LEN);
     assert_eq!((got[1].as_str(), got[2].as_str()), ("after\n", "<eof>"));
 }
+
+#[tokio::test]
+async fn changed_alert_is_printed_once_and_rearmed_after_it_clears() {
+    let p = pair().await;
+    let mut out = Vec::new();
+    let mut alerted = false;
+    alert_if_changed(&p.alice, p.gid, &mut alerted, &mut out).unwrap();
+    assert!(out.is_empty(), "no confirmation record: silent");
+    let n = verify::number(&p.alice.store, p.gid).unwrap();
+    verify::confirm(&p.alice.store, p.gid, &n, &n).unwrap();
+    alert_if_changed(&p.alice, p.gid, &mut alerted, &mut out).unwrap();
+    assert!(out.is_empty(), "matching record: silent");
+    p.alice
+        .store
+        .put(&format!("verified-{}", p.gid.hyphenated()), b"x")
+        .unwrap();
+    alert_if_changed(&p.alice, p.gid, &mut alerted, &mut out).unwrap();
+    alert_if_changed(&p.alice, p.gid, &mut alerted, &mut out).unwrap();
+    let text = String::from_utf8(out.clone()).unwrap();
+    assert_eq!(text.matches("CHANGED").count(), 1, "{text:?}");
+    verify::confirm(&p.alice.store, p.gid, &n, &n).unwrap();
+    alert_if_changed(&p.alice, p.gid, &mut alerted, &mut out).unwrap();
+    assert!(!alerted);
+}

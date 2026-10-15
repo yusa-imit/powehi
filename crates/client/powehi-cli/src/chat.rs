@@ -17,7 +17,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::auth::Session;
-use crate::{inbox, message};
+use crate::{inbox, message, verify};
 
 /// A line typed by the user that ends the session.
 pub const QUIT: &str = "/quit";
@@ -115,7 +115,8 @@ pub async fn run(
     polling: Polling,
 ) -> std::io::Result<()> {
     let mut realtime = true;
-    if sync(client, server, session, group_id, out).await? {
+    let mut alerted = false;
+    if sync(client, server, session, group_id, &mut alerted, out).await? {
         return Ok(());
     }
     for _ in 0..MAX_EVENTS {
@@ -132,7 +133,7 @@ pub async fn run(
         match event {
             Event::Eof => return Ok(()),
             Event::Wake => {
-                if sync(client, server, session, group_id, out).await? {
+                if sync(client, server, session, group_id, &mut alerted, out).await? {
                     return Ok(());
                 }
             }
@@ -178,6 +179,23 @@ async fn send_line(
     Ok(())
 }
 
+/// Re-runs the §5.6 CHANGED check after a fetch (membership or keys may have moved) and
+/// warns when it turns CHANGED: `alerted` stays set until the number is verified again.
+fn alert_if_changed(
+    session: &Session,
+    group_id: Uuid,
+    alerted: &mut bool,
+    out: &mut impl Write,
+) -> std::io::Result<()> {
+    let changed = verify::changed_since_verified(&session.store, group_id);
+    if changed && !*alerted {
+        writeln!(out, "! {}", verify::CHANGED_WARNING)?;
+        out.flush()?;
+    }
+    *alerted = changed;
+    Ok(())
+}
+
 /// Fetches, then shows and removes the conversation's stored messages. Returns true when
 /// the output is gone and the session should end.
 async fn sync(
@@ -185,11 +203,13 @@ async fn sync(
     server: &Url,
     session: &Session,
     group_id: Uuid,
+    alerted: &mut bool,
     out: &mut impl Write,
 ) -> std::io::Result<bool> {
     if let Err(e) = inbox::receive(client, server, session).await {
         writeln!(out, "! receive failed: {e}")?;
     }
+    alert_if_changed(session, group_id, alerted, out)?;
     let Ok(msgs) = message::pending(&session.store, group_id) else {
         writeln!(out, "! could not read stored messages")?;
         return Ok(false);

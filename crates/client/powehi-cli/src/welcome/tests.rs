@@ -114,3 +114,44 @@ async fn oversized_poll_response_is_rejected() {
         InviteError::Identity(IdentityError::BadResponse)
     ));
 }
+
+#[tokio::test]
+async fn interrupted_join_is_finished_by_the_same_welcome() {
+    use crate::conversation::{self, Conversation, Role};
+    // Crash window: conversation record saved, MLS state not yet.
+    let (_tmp, alice, _state, url, gid) = pending_welcome().await;
+    let stale = Conversation::new(gid, Uuid::new_v4(), Role::Creator, None);
+    conversation::save(&alice.store, &stale).unwrap();
+    let report = join_pending(&client(), &url, &alice, None).await.unwrap();
+    assert_eq!(report.joined, vec![gid]);
+    let conv = conversation::load(&alice.store, &gid).unwrap().unwrap();
+    assert_eq!(conv.role, Role::Joiner);
+}
+
+#[tokio::test]
+async fn a_held_group_is_refused_with_or_without_its_conversation_record() {
+    use crate::identity::LocalIdentity;
+    let (_tmp, alice, _state, url, gid) = pending_welcome().await;
+    let fresh = || LocalIdentity::load(&alice.store).unwrap();
+    assert!(check_group_not_held(&alice.store, &fresh(), gid).is_ok());
+    assert_eq!(
+        join_pending(&client(), &url, &alice, None)
+            .await
+            .unwrap()
+            .joined,
+        vec![gid]
+    );
+    let held = check_group_not_held(&alice.store, &fresh(), gid);
+    assert!(matches!(held, Err(JoinOutcome::Skip)));
+    // Orphan group: the MLS state survives without the conversation record.
+    alice
+        .store
+        .remove(&format!("conv-{}", gid.hyphenated()))
+        .unwrap();
+    assert!(crate::conversation::load(&alice.store, &gid)
+        .unwrap()
+        .is_none());
+    let held = check_group_not_held(&alice.store, &fresh(), gid);
+    assert!(matches!(held, Err(JoinOutcome::Skip)));
+    assert!(check_group_not_held(&alice.store, &fresh(), Uuid::new_v4()).is_ok());
+}
