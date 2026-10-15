@@ -1510,3 +1510,8 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 - `ring` exception recorded: deny.toml `[bans]` wrappers (rustls, rustls-webpki, rcgen) + rule doc
   section. `cargo deny check bans` ok. Remaining FIX-NOW: F1 opaque record names (blocked-ish on #16),
   F9 size buckets, F8 leftovers, Cloudflare tls_1_3 (F11).
+
+## Cycle 540 (STABILIZATION)
+- Main CI green, no `bug` issues, no open PRs. `cargo audit` + `cargo deny check` clean. Added 3 powehi-cli auth tests
+  (ct_eq, Session Debug/bearer token redaction, profile_has_data); 157 lib tests pass, fmt+clippy clean. Test-only,
+  no review agents needed. target/ was 17G (<20G, no prune). Note: store export key must be exactly 32 bytes in tests.
