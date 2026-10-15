@@ -373,6 +373,27 @@ fn body_bound_is_exact_for_hex_and_legacy_array() {
 }
 
 #[test]
+fn legacy_array_body_round_trips_across_growth_and_stays_small() {
+    for n in [0usize, 3, 64, 65, 1000, 70_000] {
+        let arr = (0..n)
+            .map(|i| (i % 251).to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let j = format!(
+            "{{\"group_id\":\"{0}\",\"sender\":\"{0}\",\"body\":[{arr}]}}",
+            Uuid::nil()
+        );
+        let rec: Received = serde_json::from_str(&j).unwrap();
+        let want: Vec<u8> = (0..n).map(|i| (i % 251) as u8).collect();
+        assert_eq!(rec.body, want, "n {n}");
+        assert!(
+            rec.body.capacity() <= 2 * n.max(64),
+            "n {n}: cost tracks body size"
+        );
+    }
+}
+
+#[test]
 fn encode_never_reallocates_and_matches_to_vec() {
     for len in [0usize, 1, 100, 4096, 70_000] {
         let rec = Received {
