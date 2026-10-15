@@ -52,24 +52,32 @@ impl<'de> Visitor<'de> for BodyVisitor {
         if raw.len() & 1 != 0 || raw.len() / 2 > MAX_BODY_BYTES {
             return Err(E::custom("bad body length"));
         }
-        let mut out = Vec::with_capacity(raw.len() / 2);
+        let mut out = Zeroizing::new(Vec::with_capacity(raw.len() / 2));
         for i in 0..raw.len() / 2 {
             match (nibble(raw[2 * i]), nibble(raw[2 * i + 1])) {
                 (Some(h), Some(l)) => out.push(h << 4 | l),
                 _ => return Err(E::custom("bad hex digit")),
             }
         }
-        Ok(out)
+        Ok(std::mem::take(&mut *out))
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
-        let mut out = Vec::new();
+        // Never `Vec::push`-realloc: that frees the old buffer unwiped. Grow geometrically into
+        // a fresh zeroizing buffer; the old one is wiped on drop. Wiped on error paths too.
+        let mut out = Zeroizing::new(Vec::with_capacity(64));
         while let Some(b) = seq.next_element::<u8>()? {
             if out.len() >= MAX_BODY_BYTES {
                 return Err(de::Error::custom("body too long"));
             }
+            if out.len() == out.capacity() {
+                let cap = (out.capacity() * 2).min(MAX_BODY_BYTES);
+                let mut bigger = Zeroizing::new(Vec::with_capacity(cap));
+                bigger.extend_from_slice(&out);
+                out = bigger;
+            }
             out.push(b);
         }
-        Ok(out)
+        Ok(std::mem::take(&mut *out))
     }
 }
