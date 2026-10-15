@@ -898,4 +898,43 @@ mod tests {
         assert_ne!(handle_hash("a"), handle_hash("b"));
         assert_eq!(handle_hash("a"), Sha256::digest(b"a").as_slice());
     }
+
+    #[test]
+    fn ct_eq_accepts_equal_and_rejects_any_difference() {
+        assert!(ct_eq(b"", b""));
+        assert!(ct_eq(b"secret", b"secret"));
+        assert!(!ct_eq(b"secret", b"secreT"));
+        assert!(!ct_eq(b"secret", b"secre"));
+        assert!(!ct_eq(b"", b"x"));
+        for i in 0..8 {
+            let mut b = [0u8; 8];
+            b[i] = 1;
+            assert!(
+                !ct_eq(&[0u8; 8], &b),
+                "single-byte diff at {i} must be seen"
+            );
+        }
+    }
+
+    #[test]
+    fn session_debug_never_prints_the_token_but_bearer_has_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProfileStore::open(&paths(&dir, "dbg"), &[7u8; 32]).unwrap();
+        let s = Session::for_test(store, Uuid::new_v4(), "tok-SENTINEL-123");
+        assert!(!format!("{s:?}").contains("SENTINEL"));
+        assert_eq!(s.bearer().as_str(), "Bearer tok-SENTINEL-123");
+    }
+
+    #[test]
+    fn profile_has_data_ignores_only_the_lock_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = paths(&dir, "pre");
+        assert!(!profile_has_data(&p), "missing dir is empty");
+        fs::create_dir_all(&p.dir).unwrap();
+        assert!(!profile_has_data(&p), "empty dir is empty");
+        fs::write(p.dir.join(".lock"), b"").unwrap();
+        assert!(!profile_has_data(&p), "lock file alone is empty");
+        fs::write(p.dir.join("store.db"), b"x").unwrap();
+        assert!(profile_has_data(&p), "any other file counts as data");
+    }
 }
