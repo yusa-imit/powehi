@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 547 (2026-10-16, FEATURE) — Received::encode pre-sized
+- Phase 7 DoD all [x]; closed F8 `to_vec(&Received)` realloc: `Received::encode` writes into a pre-sized `Zeroizing<Vec>` (oversize body rejected before allocating). crypto-reviewer round 1 needs-rework (minor: check order, exact-capacity asserts) fixed. Residual: debug-only no-realloc assert.
+
 ## Cycle 546 (2026-10-16, FEATURE) — decrypt_message returns Zeroizing
 - Phase 7 DoD all [x]; took F8 follow-up. `mls_group::decrypt_message` -> `Zeroizing<Vec<u8>>` (CLI annotated, wasm `mls_decrypt` keeps Zeroizing to `bytes_js`). crypto-reviewer round 1 needs-rework (3 minor) fixed. Residual: openmls internal decrypted buffer unwiped. cargo needs `PATH=$HOME/.cargo/bin`.
 

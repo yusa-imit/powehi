@@ -68,6 +68,26 @@ pub(crate) struct Received {
     pub(crate) received_at: u64,
 }
 
+impl Received {
+    /// Fixed JSON overhead: two hyphenated UUIDs, `received_at`, keys and punctuation.
+    const JSON_OVERHEAD: usize = 192;
+
+    /// The stored JSON, written into a buffer sized up front so it never reallocates: a
+    /// growing `Vec` would leave unwiped copies of the body behind (hex doubles it, and
+    /// needs no escaping, so `2 * len + overhead` always fits).
+    fn encode(&self) -> Result<Zeroizing<Vec<u8>>, serde_json::Error> {
+        if self.body.len() > body_hex::MAX_BODY_BYTES {
+            return Err(serde::ser::Error::custom("body too long"));
+        }
+        let cap = self.body.len() * 2 + Self::JSON_OVERHEAD;
+        let mut out = Zeroizing::new(Vec::with_capacity(cap));
+        let allocated = out.capacity();
+        serde_json::to_writer(&mut *out, self)?;
+        debug_assert_eq!(out.capacity(), allocated, "encode reallocated");
+        Ok(out)
+    }
+}
+
 impl Drop for Received {
     fn drop(&mut self) {
         self.body.zeroize();
@@ -192,15 +212,14 @@ fn process_one(
         return Ok(Outcome::Dropped);
     }
     let name = format!("{RX_PREFIX}{}", id.hyphenated());
-    let rec = Zeroizing::new(
-        serde_json::to_vec(&Received {
-            group_id,
-            sender,
-            body: plain.to_vec(),
-            received_at: now_nanos(),
-        })
-        .map_err(|_| InviteError::BadResponse)?,
-    );
+    let rec = Received {
+        group_id,
+        sender,
+        body: plain.to_vec(),
+        received_at: now_nanos(),
+    }
+    .encode()
+    .map_err(|_| InviteError::BadResponse)?;
     // The envelope id is server-chosen: never overwrite a stored message with different bytes.
     match store.get(&name)? {
         // A re-run after a crash between `put` and the MLS save: same content (the receive
