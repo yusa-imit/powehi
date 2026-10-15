@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 546 (2026-10-16, FEATURE) — decrypt_message returns Zeroizing
+- Phase 7 DoD all [x]; took F8 follow-up. `mls_group::decrypt_message` -> `Zeroizing<Vec<u8>>` (CLI annotated, wasm `mls_decrypt` keeps Zeroizing to `bytes_js`). crypto-reviewer round 1 needs-rework (3 minor) fixed. Residual: openmls internal decrypted buffer unwiped. cargo needs `PATH=$HOME/.cargo/bin`.
+
 ## Cycle 545 (2026-10-15, STABILIZATION)
 - `StoreError::Authentication` text now says wrong key/password most likely and "do not delete" the files (cycle-544 advisory). CI green on main, `cargo deny` ok, `cargo audit` no vulns; target/ 19G (under 20G cap). cargo-nextest absent locally; used `cargo test -p powehi-cli` (168 pass).
 

@@ -1801,7 +1801,7 @@ pub fn mls_decrypt(
     group_id: &str,
     ciphertext: &[u8],
 ) -> Result<JsValue, JsError> {
-    let plaintext = MLS_CTX.with(|ctx| -> Result<Vec<u8>, JsError> {
+    let plaintext = MLS_CTX.with(|ctx| -> Result<Zeroizing<Vec<u8>>, JsError> {
         let mut ctx = ctx.borrow_mut();
         let c = ctx
             .get_mut(identity_id)
@@ -4086,13 +4086,17 @@ mod tests {
         let ct_a =
             encrypt_message(&mut alice_group_a, &alice.signer, msg_a, &alice_provider).unwrap();
         assert_eq!(
-            decrypt_message(&mut bob_group_a, &ct_a, &bob_provider).unwrap(),
+            decrypt_message(&mut bob_group_a, &ct_a, &bob_provider)
+                .unwrap()
+                .to_vec(),
             msg_a
         );
         let msg_b = b"hello in group B";
         let ct_b = encrypt_message(&mut bob_group_b, &bob.signer, msg_b, &bob_provider).unwrap();
         assert_eq!(
-            decrypt_message(&mut alice_group_b, &ct_b, &alice_provider).unwrap(),
+            decrypt_message(&mut alice_group_b, &ct_b, &alice_provider)
+                .unwrap()
+                .to_vec(),
             msg_b
         );
 
@@ -4219,7 +4223,9 @@ mod tests {
             encrypt_message(group, &c.identity.signer, msg_a2, &c.provider).unwrap()
         });
         assert_eq!(
-            decrypt_message(&mut bob_group_a, &ct_a2, &bob_provider).unwrap(),
+            decrypt_message(&mut bob_group_a, &ct_a2, &bob_provider)
+                .unwrap()
+                .to_vec(),
             msg_a2
         );
 
@@ -4231,7 +4237,9 @@ mod tests {
             encrypt_message(group, &c.identity.signer, msg_b2, &c.provider).unwrap()
         });
         assert_eq!(
-            decrypt_message(&mut bob_group_b, &ct_b2, &bob_provider).unwrap(),
+            decrypt_message(&mut bob_group_b, &ct_b2, &bob_provider)
+                .unwrap()
+                .to_vec(),
             msg_b2
         );
 
