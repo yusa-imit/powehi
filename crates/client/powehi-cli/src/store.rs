@@ -91,6 +91,20 @@ pub enum StoreError {
     Locked,
     #[error("profile store I/O error: {0}")]
     Io(ErrorKind),
+    /// `open` failed on one record file; `tag` is its opaque file stem (no record name).
+    #[error("record file {tag}.{EXT}: {cause}")]
+    Record { tag: String, cause: Box<StoreError> },
+}
+
+impl StoreError {
+    /// The underlying error, with any `Record` file context stripped.
+    #[must_use]
+    pub fn root(&self) -> &StoreError {
+        match self {
+            Self::Record { cause, .. } => cause.root(),
+            other => other,
+        }
+    }
 }
 
 impl From<std::io::Error> for StoreError {
@@ -308,8 +322,12 @@ impl ProfileStore {
         let mut names = BTreeSet::new();
         for tag in self.tags()? {
             let path = self.dir.join(format!("{tag}.{EXT}"));
-            let inner = self.read_file(&path, MAGIC, &tag)?;
-            names.insert(self.split_inner(inner, &tag)?.0);
+            let named = |cause: StoreError| StoreError::Record {
+                tag: tag.clone(),
+                cause: Box::new(cause),
+            };
+            let inner = self.read_file(&path, MAGIC, &tag).map_err(named)?;
+            names.insert(self.split_inner(inner, &tag).map_err(named)?.0);
         }
         *self.index()? = names;
         Ok(())
@@ -630,10 +648,8 @@ mod tests {
     fn wrong_key_is_typed_error() {
         let tmp = tempfile::tempdir().unwrap();
         open(&tmp, &EK).unwrap().put("a", b"x").unwrap();
-        assert!(matches!(
-            open(&tmp, &[8u8; 32]),
-            Err(StoreError::Authentication)
-        ));
+        let err = open(&tmp, &[8u8; 32]).unwrap_err();
+        assert!(matches!(err.root(), StoreError::Authentication));
     }
 
     #[test]
@@ -997,10 +1013,8 @@ mod tests {
         assert!(!paths.dir.join("a.rec").exists());
         drop(s);
         legacy_record(&paths.dir, &EK, "work", "b", b"x");
-        assert!(matches!(
-            ProfileStore::open(&paths, &[9u8; 32]),
-            Err(StoreError::Authentication)
-        ));
+        let err = ProfileStore::open(&paths, &[9u8; 32]).unwrap_err();
+        assert!(matches!(err.root(), StoreError::Authentication));
         assert!(paths.dir.join("b.rec").exists());
     }
 
@@ -1012,7 +1026,9 @@ mod tests {
         let forged = s.dir.join(format!("{:032x}.rc2", 7));
         fs::copy(s.record_path("a"), &forged).unwrap();
         drop(s);
-        assert!(matches!(open(&tmp, &EK), Err(StoreError::Authentication)));
+        let err = open(&tmp, &EK).unwrap_err();
+        assert!(matches!(err.root(), StoreError::Authentication));
+        assert!(err.to_string().contains(&format!("{:032x}", 7)), "{err}");
         fs::remove_file(&forged).unwrap();
         let s = open(&tmp, &EK).unwrap();
         fs::copy(s.record_path("a"), s.record_path("b")).unwrap();
@@ -1112,10 +1128,8 @@ mod tests {
         // A PHS1 blob moved to an opaque name is not a PHS2 record.
         let s_tag = format!("{:032x}.rc2", 5);
         fs::rename(paths.dir.join("b.rec"), paths.dir.join(&s_tag)).unwrap();
-        assert!(matches!(
-            ProfileStore::open(&paths, &EK),
-            Err(StoreError::Corrupt)
-        ));
+        let err = ProfileStore::open(&paths, &EK).unwrap_err();
+        assert!(matches!(err.root(), StoreError::Corrupt));
     }
 
     #[test]
