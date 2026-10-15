@@ -271,20 +271,8 @@ mod tests {
         assert_eq!(state(&alice.store, gid, &n).unwrap(), State::Verified);
     }
 
-    fn record_file(tmp: &tempfile::TempDir, gid: Uuid) -> std::path::PathBuf {
-        let name = format!("{}.{}", record_name(&gid), "rec");
-        let mut stack = vec![tmp.path().to_path_buf()];
-        while let Some(d) = stack.pop() {
-            for entry in std::fs::read_dir(d).unwrap().flatten() {
-                let p = entry.path();
-                if p.is_dir() {
-                    stack.push(p);
-                } else if p.file_name().is_some_and(|n| *n == *name) {
-                    return p;
-                }
-            }
-        }
-        panic!("record file not found");
+    fn record_file(store: &ProfileStore, gid: Uuid) -> std::path::PathBuf {
+        store.record_path(&record_name(&gid))
     }
 
     #[tokio::test]
@@ -301,7 +289,7 @@ mod tests {
     #[tokio::test]
     async fn changed_alert_fires_for_stale_or_tampered_records() {
         use std::os::unix::fs::PermissionsExt;
-        let (tmp, alice, _bob, gid) = pair().await;
+        let (_tmp, alice, _bob, gid) = pair().await;
         let n = number(&alice.store, gid).unwrap();
         let other = safety::pairwise(&[1u8; 32], &[2u8; 32]).unwrap();
         store_record(&alice.store, gid, &other).unwrap();
@@ -309,7 +297,7 @@ mod tests {
         alice.store.put(&record_name(&gid), b"x").unwrap();
         assert!(changed_since_verified(&alice.store, gid));
         confirm(&alice.store, gid, &n, &n).unwrap();
-        let path = record_file(&tmp, gid);
+        let path = record_file(&alice.store, gid);
         let good = std::fs::read(&path).unwrap();
         // Byte flip: authentication failure.
         let mut flipped = good.clone();

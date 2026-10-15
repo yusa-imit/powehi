@@ -1,11 +1,14 @@
 //! Encrypted profile store (prd.md §7A.3). Unix only: relies on POSIX modes.
 //!
-//! Every record is one file `<name>.rec` holding `MAGIC || nonce(12) || AES-256-GCM(..)`.
-//! The record key is `HKDF-SHA256(ikm = OPAQUE export_key, info = KEY_INFO)`; the info label
-//! is CLI-specific so it is domain-separated from the web DB key (§7.4). The AEAD AAD binds
-//! `MAGIC || name`, so a record file renamed to another record name fails authentication.
-//! Record *names* are non-secret labels and appear in file names; contents never do.
-//! The AAD also binds the profile directory name, so records cannot be moved between profiles.
+//! Every record is one file `<tag>.rc2` holding `MAGIC || nonce(12) || AES-256-GCM(..)`, where
+//! `tag` is the hex of `HMAC-SHA256(name_key, name)[..16]` (threat-model F1: record names such
+//! as a group or envelope id never reach the directory listing). The real name travels inside
+//! the ciphertext (`len || name || payload`). The record key is
+//! `HKDF-SHA256(ikm = OPAQUE export_key, info = KEY_INFO)`; the info label is CLI-specific so
+//! it is domain-separated from the web DB key (§7.4), and `name_key` uses its own label. The
+//! AEAD AAD binds `MAGIC || profile || tag`, so a record file renamed to another tag fails
+//! authentication, and so does one moved between profiles. A decrypted name must hash back to
+//! its file's tag. `<name>.rec` files (format `PHS1`, plain names) are migrated at `open`.
 //!
 //! Known limits (escalated to the owner, see the need-human issue on store rollback): each
 //! record is an independent file, so an attacker with write access to the profile directory can
@@ -18,15 +21,18 @@
 //! internals and the GHASH subkey held by the cipher are not zeroized (upstream) and may linger
 //! in memory. Further hardening (owner checks, DEK/KEK, key canary) is tracked in issue #16.
 
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use hkdf::Hkdf;
+use hmac::{Hmac, Mac};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use sha2::Sha256;
@@ -36,9 +42,15 @@ use zeroize::Zeroizing;
 use crate::profile::ProfilePaths;
 
 /// File magic and format version.
-const MAGIC: &[u8; 4] = b"PHS1";
+const MAGIC: &[u8; 4] = b"PHS2";
+/// Format of the pre-F1 store: plain `<name>.rec` files, AAD `MAGIC || profile || name`.
+const LEGACY_MAGIC: &[u8; 4] = b"PHS1";
 /// HKDF info label (domain separation from every other use of the export key).
 const KEY_INFO: &[u8] = b"powehi-cli/profile-store/v1/record-key";
+/// HKDF info label for the key that turns record names into file-name tags.
+const NAME_KEY_INFO: &[u8] = b"powehi-cli/profile-store/v2/name-key";
+/// Hex characters in a file-name tag (128 bits).
+const TAG_HEX_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
 const KEY_LEN: usize = 32;
@@ -48,11 +60,16 @@ const EXPORT_KEY_LEN: usize = 32;
 const LOCK_FILE: &str = ".lock";
 /// Upper bound on one record's plaintext.
 pub const MAX_RECORD_LEN: usize = 16 * 1024 * 1024;
-/// Upper bound on records per profile (bounds `names()` and the directory scan in `put`).
+/// Largest on-disk plaintext: one length byte, the name, then the payload.
+const MAX_INNER_LEN: usize = 1 + MAX_NAME_LEN + MAX_RECORD_LEN;
+/// Upper bound on user records per profile (the internal marker is extra).
 pub const MAX_RECORDS: usize = 4096;
 /// Longest record name, in bytes.
 pub const MAX_NAME_LEN: usize = 64;
-const EXT: &str = "rec";
+const EXT: &str = "rc2";
+const LEGACY_EXT: &str = "rec";
+/// Internal record whose presence latches the `PHS1` import window shut (hidden from `names`).
+const MARKER: &str = "store-v2";
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -82,11 +99,17 @@ impl From<std::io::Error> for StoreError {
     }
 }
 
-/// Handle to one profile directory plus its derived record key. The key is zeroized on drop.
+/// Handle to one profile directory plus its derived record key. The AES key is zeroized on drop (the HMAC state is not).
 pub struct ProfileStore {
     dir: PathBuf,
     profile: String,
     cipher: Aes256Gcm,
+    /// Keyed once at `open`; cloned per tag (the HMAC internals are not zeroized, see above).
+    name_mac: Hmac<Sha256>,
+    /// Names of the records present. Built (and every record authenticated) at `open`; this
+    /// process holds the profile lock, so it stays in step with `put`/`remove` and keeps
+    /// `names()` and the record limit from decrypting the whole store on hot paths.
+    index: Mutex<BTreeSet<String>>,
     /// In-memory lower bound for the MLS provider-state generation seen or written by this
     /// process; never persisted, so a swapped-in older record cannot lower it.
     provider_floor: AtomicU64,
@@ -114,25 +137,51 @@ fn validate_record_name(name: &str) -> Result<(), StoreError> {
     }
 }
 
-fn derive_key(export_key: &[u8]) -> Result<Zeroizing<[u8; KEY_LEN]>, StoreError> {
+fn expand(export_key: &[u8], info: &[u8]) -> Result<Zeroizing<[u8; KEY_LEN]>, StoreError> {
     if export_key.len() != EXPORT_KEY_LEN {
         return Err(StoreError::BadKeyLength);
     }
     let mut key = Zeroizing::new([0u8; KEY_LEN]);
     Hkdf::<Sha256>::new(None, export_key)
-        .expand(KEY_INFO, key.as_mut())
+        .expand(info, key.as_mut())
         .map_err(|_| StoreError::BadKeyLength)?;
     Ok(key)
 }
 
-fn aad(profile: &str, name: &str) -> Vec<u8> {
-    let mut a = Vec::with_capacity(MAGIC.len() + 1 + profile.len() + name.len());
-    a.extend_from_slice(MAGIC);
+fn derive_key(export_key: &[u8]) -> Result<Zeroizing<[u8; KEY_LEN]>, StoreError> {
+    expand(export_key, KEY_INFO)
+}
+
+/// File-name tag of a record: truncated HMAC of its name under the profile's name key.
+fn tag_of(name_mac: &Hmac<Sha256>, name: &str) -> String {
+    let mut mac = name_mac.clone();
+    mac.update(name.as_bytes());
+    let digest = mac.finalize().into_bytes();
+    debug_assert!(digest.len() >= TAG_HEX_LEN / 2);
+    digest[..TAG_HEX_LEN / 2]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// `tag` is 32 lowercase hex characters.
+fn is_tag(tag: &str) -> bool {
+    tag.len() == TAG_HEX_LEN
+        && tag
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// AAD: `magic || len(profile) || profile || label`, where `label` is the file-name tag
+/// (`PHS2`) or the plain record name (`PHS1`).
+fn aad(magic: &[u8; 4], profile: &str, label: &str) -> Vec<u8> {
+    let mut a = Vec::with_capacity(magic.len() + 1 + profile.len() + label.len());
+    a.extend_from_slice(magic);
     // `open` re-validates the profile name (<= 64 bytes); the length prefix keeps
-    // `profile || name` unambiguous.
+    // `profile || label` unambiguous.
     a.push(u8::try_from(profile.len()).unwrap_or(u8::MAX));
     a.extend_from_slice(profile.as_bytes());
-    a.extend_from_slice(name.as_bytes());
+    a.extend_from_slice(label.as_bytes());
     a
 }
 
@@ -190,9 +239,13 @@ fn create_private_dir(dir: &Path) -> Result<(), StoreError> {
 
 impl ProfileStore {
     /// Opens (creating with mode 0700 if absent) the profile directory and derives the key.
-    /// `export_key` is borrowed; the caller zeroizes its own copy.
+    /// `export_key` is borrowed; the caller zeroizes its own copy. Legacy `PHS1` records are
+    /// re-encrypted under opaque file names before this returns.
     pub fn open(paths: &ProfilePaths, export_key: &[u8]) -> Result<Self, StoreError> {
         let key = derive_key(export_key)?;
+        let name_key = expand(export_key, NAME_KEY_INFO)?;
+        let name_mac = <Hmac<Sha256> as Mac>::new_from_slice(name_key.as_ref())
+            .map_err(|_| StoreError::BadKeyLength)?;
         create_private_dir(&paths.dir)?;
         let profile = paths
             .dir
@@ -214,13 +267,18 @@ impl ProfileStore {
         })?;
         debug_assert!(key.iter().any(|&b| b != 0));
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_ref()));
-        Ok(Self {
+        let store = Self {
             dir: paths.dir.clone(),
             profile,
             cipher,
+            name_mac,
+            index: Mutex::new(BTreeSet::new()),
             provider_floor: AtomicU64::new(0),
             _lock: lock,
-        })
+        };
+        store.load_index()?;
+        store.migrate_legacy()?;
+        Ok(store)
     }
 
     /// Lowest provider-state generation this process will accept on reload.
@@ -233,21 +291,128 @@ impl ProfileStore {
         self.provider_floor.fetch_max(generation, Ordering::AcqRel);
     }
 
-    fn record_path(&self, name: &str) -> PathBuf {
-        self.dir.join(format!("{name}.{EXT}"))
+    pub(crate) fn record_path(&self, name: &str) -> PathBuf {
+        self.dir
+            .join(format!("{}.{EXT}", tag_of(&self.name_mac, name)))
+    }
+
+    fn index(&self) -> Result<std::sync::MutexGuard<'_, BTreeSet<String>>, StoreError> {
+        self.index.lock().map_err(|_| StoreError::Corrupt)
+    }
+
+    /// Authenticates every `.rc2` record and builds the name index. With a wrong key every name
+    /// hashes to a different tag, so a lookup alone would report "absent" instead of failing;
+    /// this makes a wrong key or a tampered file an error at `open`.
+    fn load_index(&self) -> Result<(), StoreError> {
+        check_private_dir(&self.dir)?;
+        let mut names = BTreeSet::new();
+        for tag in self.tags()? {
+            let path = self.dir.join(format!("{tag}.{EXT}"));
+            let inner = self.read_file(&path, MAGIC, &tag)?;
+            names.insert(self.split_inner(inner, &tag)?.0);
+        }
+        *self.index()? = names;
+        Ok(())
+    }
+
+    /// Re-encrypts every `<name>.rec` (`PHS1`) record as an opaque-named `PHS2` record, then
+    /// deletes it. Each legacy file is removed only after its replacement authenticates (a
+    /// crash between write and delete leaves both; the new record wins). Once the store holds
+    /// the `MARKER` record the import window is closed: stray `.rec` files (for example planted
+    /// from an old backup) are deleted unread. Stale `<name>.rec.tmp` files are always removed.
+    fn migrate_legacy(&self) -> Result<(), StoreError> {
+        let mut legacy = Vec::new();
+        for entry in fs::read_dir(&self.dir)? {
+            let file = entry?.file_name();
+            let Some(file) = file.to_str() else { continue };
+            if let Some(stem) = file.strip_suffix(".rec.tmp") {
+                if validate_record_name(stem).is_ok() {
+                    fs::remove_file(self.dir.join(file))?;
+                }
+            } else if let Some(stem) = file.strip_suffix(".rec") {
+                if validate_record_name(stem).is_ok() {
+                    legacy.push(stem.to_owned());
+                    if legacy.len() > MAX_RECORDS {
+                        return Err(StoreError::TooManyRecords);
+                    }
+                }
+            }
+        }
+        legacy.sort();
+        let closed = self.index()?.contains(MARKER);
+        let mut imported = false;
+        for name in legacy {
+            let path = self.dir.join(format!("{name}.{LEGACY_EXT}"));
+            if !closed {
+                self.import_legacy(&path, &name)?;
+            }
+            fs::remove_file(&path)?;
+            File::open(&self.dir)?.sync_all()?;
+            imported = imported || !closed;
+        }
+        if imported {
+            self.put_record(MARKER, b"", false)?;
+        }
+        Ok(())
+    }
+
+    /// Imports one legacy record unless an authenticating new-format record already exists.
+    fn import_legacy(&self, path: &Path, name: &str) -> Result<(), StoreError> {
+        if self.index()?.contains(name) {
+            return Ok(());
+        }
+        match fs::symlink_metadata(self.record_path(name)) {
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+            // Present but not in the index: it failed to load, which `load_index` already
+            // turned into an error; refuse rather than overwrite.
+            Ok(_) => return Err(StoreError::Corrupt),
+        }
+        let pt = self.read_file(path, LEGACY_MAGIC, name)?;
+        if pt.len() > MAX_RECORD_LEN {
+            return Err(StoreError::Corrupt);
+        }
+        self.put_record(name, &pt, false)
     }
 
     /// Encrypts and atomically writes a record (temp file 0600 → fsync → rename → fsync dir).
     pub fn put(&self, name: &str, plaintext: &[u8]) -> Result<(), StoreError> {
         validate_record_name(name)?;
+        if name == MARKER {
+            return Err(StoreError::BadName);
+        }
+        self.put_record(name, plaintext, true)
+    }
+
+    /// `latch`: write the `MARKER` first when the store has none. Migration passes `false` and
+    /// writes the marker itself once every legacy file is dealt with, so a failed migration
+    /// never closes the import window.
+    fn put_record(&self, name: &str, plaintext: &[u8], latch: bool) -> Result<(), StoreError> {
         if plaintext.len() > MAX_RECORD_LEN {
             return Err(StoreError::TooLarge);
         }
         check_private_dir(&self.dir)?;
-        let is_new = fs::symlink_metadata(self.record_path(name)).is_err();
-        if is_new && self.names()?.len() >= MAX_RECORDS {
+        let (is_new, has_marker, user_records) = {
+            let index = self.index()?;
+            let has_marker = index.contains(MARKER);
+            (
+                !index.contains(name),
+                has_marker,
+                index.len() - usize::from(has_marker),
+            )
+        };
+        // The marker is internal and does not count against the user-visible limit.
+        if is_new && name != MARKER && user_records >= MAX_RECORDS {
             return Err(StoreError::TooManyRecords);
         }
+        if latch && !has_marker {
+            self.put_record(MARKER, b"", false)?;
+        }
+        let tag = tag_of(&self.name_mac, name);
+        let mut inner = Zeroizing::new(Vec::with_capacity(1 + name.len() + plaintext.len()));
+        inner.push(u8::try_from(name.len()).map_err(|_| StoreError::BadName)?);
+        inner.extend_from_slice(name.as_bytes());
+        inner.extend_from_slice(plaintext);
         let mut nonce = [0u8; NONCE_LEN];
         OsRng
             .try_fill_bytes(&mut nonce)
@@ -257,8 +422,8 @@ impl ProfileStore {
             .encrypt(
                 Nonce::from_slice(&nonce),
                 Payload {
-                    msg: plaintext,
-                    aad: &aad(&self.profile, name),
+                    msg: &inner,
+                    aad: &aad(MAGIC, &self.profile, &tag),
                 },
             )
             .map_err(|_| StoreError::Corrupt)?;
@@ -266,11 +431,13 @@ impl ProfileStore {
         blob.extend_from_slice(MAGIC);
         blob.extend_from_slice(&nonce);
         blob.extend_from_slice(&ct);
-        self.write_atomic(name, &blob)
+        self.write_atomic(&tag, &blob, name)
     }
 
-    fn write_atomic(&self, name: &str, blob: &[u8]) -> Result<(), StoreError> {
-        let tmp = self.dir.join(format!("{name}.{EXT}.tmp"));
+    /// Once the rename has landed the record exists, so it enters the index before the final
+    /// directory fsync (whose failure is still reported).
+    fn write_atomic(&self, tag: &str, blob: &[u8], name: &str) -> Result<(), StoreError> {
+        let tmp = self.dir.join(format!("{tag}.{EXT}.tmp"));
         // The profile lock makes this process the only writer; a stale temp holds only ciphertext.
         match fs::remove_file(&tmp) {
             Ok(()) => {}
@@ -282,11 +449,13 @@ impl ProfileStore {
             .create_new(true)
             .mode(0o600)
             .open(&tmp)?;
+        let target = self.dir.join(format!("{tag}.{EXT}"));
         let written = f.write_all(blob).and_then(|()| f.sync_all());
-        if let Err(e) = written.and_then(|()| fs::rename(&tmp, self.record_path(name))) {
+        if let Err(e) = written.and_then(|()| fs::rename(&tmp, target)) {
             let _ = fs::remove_file(&tmp);
             return Err(e.into());
         }
+        self.index()?.insert(name.to_owned());
         File::open(&self.dir)?.sync_all()?;
         Ok(())
     }
@@ -294,16 +463,33 @@ impl ProfileStore {
     /// Reads and decrypts a record; `Ok(None)` if it does not exist.
     pub fn get(&self, name: &str) -> Result<Option<Zeroizing<Vec<u8>>>, StoreError> {
         validate_record_name(name)?;
+        if name == MARKER {
+            return Err(StoreError::BadName);
+        }
         check_private_dir(&self.dir)?;
-        let path = self.record_path(name);
+        let tag = tag_of(&self.name_mac, name);
+        match self.read_file(&self.record_path(name), MAGIC, &tag) {
+            Ok(inner) => Ok(Some(self.split_inner(inner, &tag)?.1)),
+            Err(StoreError::Io(ErrorKind::NotFound)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Opens `path` (no symlink, no FIFO hang, private regular file) and decrypts it with
+    /// `label` in the AAD. A missing file is `Io(NotFound)`.
+    fn read_file(
+        &self,
+        path: &Path,
+        magic: &[u8; 4],
+        label: &str,
+    ) -> Result<Zeroizing<Vec<u8>>, StoreError> {
         // O_NOFOLLOW: a symlinked record is refused; O_NONBLOCK: a FIFO cannot hang the open.
         let mut f = match OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(&path)
+            .open(path)
         {
             Ok(f) => f,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
             Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
                 return Err(StoreError::InsecurePath)
             }
@@ -313,13 +499,13 @@ impl ProfileStore {
         if !md.is_file() || md.mode() & 0o077 != 0 {
             return Err(StoreError::InsecurePath);
         }
-        let max = (MAGIC.len() + NONCE_LEN + TAG_LEN + MAX_RECORD_LEN) as u64;
+        let max = (MAGIC.len() + NONCE_LEN + TAG_LEN + MAX_INNER_LEN) as u64;
         if md.len() > max {
             return Err(StoreError::Corrupt);
         }
         let mut blob = Vec::with_capacity(md.len() as usize);
         Read::by_ref(&mut f).take(max).read_to_end(&mut blob)?;
-        if blob.len() < MAGIC.len() + NONCE_LEN + TAG_LEN || &blob[..MAGIC.len()] != MAGIC {
+        if blob.len() < MAGIC.len() + NONCE_LEN + TAG_LEN || &blob[..MAGIC.len()] != magic {
             return Err(StoreError::Corrupt);
         }
         let (nonce, ct) = blob[MAGIC.len()..].split_at(NONCE_LEN);
@@ -329,43 +515,76 @@ impl ProfileStore {
                 Nonce::from_slice(nonce),
                 Payload {
                     msg: ct,
-                    aad: &aad(&self.profile, name),
+                    aad: &aad(magic, &self.profile, label),
                 },
             )
             .map_err(|_| StoreError::Authentication)?;
-        Ok(Some(Zeroizing::new(pt)))
+        Ok(Zeroizing::new(pt))
+    }
+
+    /// Splits `len || name || payload`; the name must be valid and hash back to `tag`.
+    fn split_inner(
+        &self,
+        mut inner: Zeroizing<Vec<u8>>,
+        tag: &str,
+    ) -> Result<(String, Zeroizing<Vec<u8>>), StoreError> {
+        let len = inner.first().map(|&n| 1 + usize::from(n));
+        let len = len
+            .filter(|&n| n <= inner.len())
+            .ok_or(StoreError::Corrupt)?;
+        let name = std::str::from_utf8(&inner[1..len]).map_err(|_| StoreError::Corrupt)?;
+        if validate_record_name(name).is_err() || tag_of(&self.name_mac, name) != tag {
+            return Err(StoreError::Corrupt);
+        }
+        let name = name.to_owned();
+        inner.drain(..len);
+        Ok((name, inner))
     }
 
     /// Deletes a record; absent records are not an error.
     pub fn remove(&self, name: &str) -> Result<(), StoreError> {
         validate_record_name(name)?;
+        if name == MARKER {
+            return Err(StoreError::BadName);
+        }
         check_private_dir(&self.dir)?;
         match fs::remove_file(self.record_path(name)) {
             Ok(()) => {}
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                self.index()?.remove(name);
+                return Ok(());
+            }
             Err(e) => return Err(e.into()),
         }
+        self.index()?.remove(name);
         File::open(&self.dir)?.sync_all()?;
         Ok(())
     }
 
-    /// Sorted record names currently present; more than `MAX_RECORDS` is an error.
-    pub fn names(&self) -> Result<Vec<String>, StoreError> {
+    /// File-name tags of the records present; more than `MAX_RECORDS` plus the marker is an error.
+    fn tags(&self) -> Result<Vec<String>, StoreError> {
         let mut out = Vec::new();
         for entry in fs::read_dir(&self.dir)? {
             let file = entry?.file_name();
-            let Some(stem) = file.to_str().and_then(|s| s.strip_suffix(".rec")) else {
+            let Some(stem) = file.to_str().and_then(|s| s.strip_suffix(".rc2")) else {
                 continue;
             };
-            if validate_record_name(stem).is_ok() {
+            if is_tag(stem) {
                 out.push(stem.to_owned());
-                if out.len() > MAX_RECORDS {
+                if out.len() > MAX_RECORDS + 1 {
                     return Err(StoreError::TooManyRecords);
                 }
             }
         }
-        out.sort();
         Ok(out)
+    }
+
+    /// Sorted record names currently present (from the index built at `open`; the internal
+    /// marker is hidden). No decryption happens here.
+    pub fn names(&self) -> Result<Vec<String>, StoreError> {
+        check_private_dir(&self.dir)?;
+        let index = self.index()?;
+        Ok(index.iter().filter(|n| *n != MARKER).cloned().collect())
     }
 }
 
@@ -376,6 +595,7 @@ mod tests {
     use super::*;
 
     const EK: [u8; 32] = [7u8; 32];
+    const KAT_TAG: &str = "467c076c500f1cab67ef8c840817f5a9";
     const KAT_KEY: &str = "0baafe165147fa018516574f9d58ff546bcfec06647af0cc8e3edb63b64dea32";
 
     fn open(tmp: &tempfile::TempDir, ek: &[u8]) -> Result<ProfileStore, StoreError> {
@@ -410,8 +630,10 @@ mod tests {
     fn wrong_key_is_typed_error() {
         let tmp = tempfile::tempdir().unwrap();
         open(&tmp, &EK).unwrap().put("a", b"x").unwrap();
-        let other = open(&tmp, &[8u8; 32]).unwrap();
-        assert!(matches!(other.get("a"), Err(StoreError::Authentication)));
+        assert!(matches!(
+            open(&tmp, &[8u8; 32]),
+            Err(StoreError::Authentication)
+        ));
     }
 
     #[test]
@@ -477,7 +699,7 @@ mod tests {
             fs::metadata(s.record_path("a")).unwrap().mode() & 0o777,
             0o600
         );
-        assert!(!s.dir.join("a.rec.tmp").exists());
+        assert!(!PathBuf::from(format!("{}.tmp", s.record_path("a").display())).exists());
     }
 
     #[test]
@@ -560,6 +782,14 @@ mod tests {
     }
 
     #[test]
+    fn name_tag_known_answer() {
+        let key = expand(&EK, NAME_KEY_INFO).unwrap();
+        let mac = <Hmac<Sha256> as Mac>::new_from_slice(key.as_ref()).unwrap();
+        assert_eq!(tag_of(&mac, "identity"), KAT_TAG);
+        assert_ne!(tag_of(&mac, "identity"), tag_of(&mac, "identitz"));
+    }
+
+    #[test]
     fn key_derivation_known_answer() {
         let k = derive_key(&EK).unwrap();
         assert_eq!(hex(&k[..]), KAT_KEY);
@@ -619,7 +849,7 @@ mod tests {
         let s = open(&tmp, &EK).unwrap();
         s.put("a", b"hello").unwrap();
         let mut b = fs::read(s.record_path("a")).unwrap();
-        b[..MAGIC.len()].copy_from_slice(b"PHS2");
+        b[..MAGIC.len()].copy_from_slice(b"PHS9");
         fs::write(s.record_path("a"), &b).unwrap();
         assert!(matches!(s.get("a"), Err(StoreError::Corrupt)));
     }
@@ -633,7 +863,7 @@ mod tests {
             .write(true)
             .open(s.record_path("a"))
             .unwrap();
-        f.set_len((MAGIC.len() + NONCE_LEN + TAG_LEN + MAX_RECORD_LEN + 1) as u64)
+        f.set_len((MAGIC.len() + NONCE_LEN + TAG_LEN + MAX_INNER_LEN + 1) as u64)
             .unwrap();
         assert!(matches!(s.get("a"), Err(StoreError::Corrupt)));
     }
@@ -653,14 +883,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let s = open(&tmp, &EK).unwrap();
         s.put("good", b"x").unwrap();
-        for junk in ["Bad.rec", "x.txt", "good.rec.tmp", ".rec"] {
+        for junk in ["Bad.rec", "x.txt", "good.rc2.tmp", ".rec", "short.rc2"] {
             fs::write(s.dir.join(junk), b"junk").unwrap();
         }
         assert_eq!(s.names().unwrap(), vec!["good"]);
-        fs::write(s.dir.join("fresh.rec.tmp"), b"stale").unwrap();
+        let tmp_name = format!("{}.tmp", s.record_path("fresh").display());
+        fs::write(&tmp_name, b"stale").unwrap();
         s.put("fresh", b"y").unwrap();
         assert_eq!(&**s.get("fresh").unwrap().unwrap(), b"y");
-        assert!(!s.dir.join("fresh.rec.tmp").exists());
+        assert!(!Path::new(&tmp_name).exists());
     }
 
     #[test]
@@ -669,7 +900,7 @@ mod tests {
         let s = open(&tmp, &EK).unwrap();
         s.put("first", b"x").unwrap();
         for i in 1..MAX_RECORDS {
-            fs::write(s.dir.join(format!("r{i}.rec")), b"").unwrap();
+            s.index().unwrap().insert(format!("fake{i}"));
         }
         assert_eq!(s.names().unwrap().len(), MAX_RECORDS);
         assert!(matches!(
@@ -678,8 +909,15 @@ mod tests {
         ));
         s.put("first", b"y").unwrap();
         assert_eq!(&**s.get("first").unwrap().unwrap(), b"y");
-        fs::write(s.dir.join("overflow.rec"), b"").unwrap();
-        assert!(matches!(s.names(), Err(StoreError::TooManyRecords)));
+        drop(s);
+        for i in 0..=MAX_RECORDS + 1 {
+            fs::write(
+                tmp.path().join("powehi/work").join(format!("{i:032x}.rc2")),
+                b"",
+            )
+            .unwrap();
+        }
+        assert!(matches!(open(&tmp, &EK), Err(StoreError::TooManyRecords)));
     }
 
     #[test]
@@ -691,6 +929,233 @@ mod tests {
         assert!(matches!(s.put("b", b"x"), Err(StoreError::InsecurePath)));
         assert!(matches!(s.get("a"), Err(StoreError::InsecurePath)));
         assert!(matches!(s.remove("a"), Err(StoreError::InsecurePath)));
+    }
+
+    fn legacy_record(dir: &Path, key: &[u8], profile: &str, name: &str, pt: &[u8]) {
+        let k = derive_key(key).unwrap();
+        let c = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(k.as_ref()));
+        let nonce = [3u8; NONCE_LEN];
+        let ct = c
+            .encrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: pt,
+                    aad: &aad(LEGACY_MAGIC, profile, name),
+                },
+            )
+            .unwrap();
+        let mut blob = LEGACY_MAGIC.to_vec();
+        blob.extend_from_slice(&nonce);
+        blob.extend_from_slice(&ct);
+        let path = dir.join(format!("{name}.rec"));
+        fs::write(&path, blob).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[test]
+    fn file_names_do_not_reveal_record_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp, &EK).unwrap();
+        s.put("conv-secretgroupid", b"x").unwrap();
+        s.put("conv-secretgroupid", b"y").unwrap();
+        let files: Vec<String> = fs::read_dir(&s.dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert!(
+            files.iter().all(|f| !f.contains("secretgroupid")),
+            "{files:?}"
+        );
+        assert_eq!(s.names().unwrap(), vec!["conv-secretgroupid"]);
+        assert!(s.tags().unwrap().iter().all(|t| is_tag(t)));
+    }
+
+    #[test]
+    fn legacy_records_are_migrated_at_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = ProfilePaths::resolve(tmp.path(), "work").unwrap();
+        drop(ProfileStore::open(&paths, &EK).unwrap());
+        legacy_record(&paths.dir, &EK, "work", "identity", b"old-secret");
+        legacy_record(&paths.dir, &EK, "work", "conv-abc", b"");
+        let s = ProfileStore::open(&paths, &EK).unwrap();
+        assert!(!paths.dir.join("identity.rec").exists());
+        assert!(!paths.dir.join("conv-abc.rec").exists());
+        assert_eq!(s.names().unwrap(), vec!["conv-abc", "identity"]);
+        assert_eq!(&**s.get("identity").unwrap().unwrap(), b"old-secret");
+    }
+
+    #[test]
+    fn migration_prefers_existing_new_record_and_rejects_wrong_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = ProfilePaths::resolve(tmp.path(), "work").unwrap();
+        let s = ProfileStore::open(&paths, &EK).unwrap();
+        s.put("a", b"new").unwrap();
+        drop(s);
+        legacy_record(&paths.dir, &EK, "work", "a", b"stale");
+        let s = ProfileStore::open(&paths, &EK).unwrap();
+        assert_eq!(&**s.get("a").unwrap().unwrap(), b"new");
+        assert!(!paths.dir.join("a.rec").exists());
+        drop(s);
+        legacy_record(&paths.dir, &EK, "work", "b", b"x");
+        assert!(matches!(
+            ProfileStore::open(&paths, &[9u8; 32]),
+            Err(StoreError::Authentication)
+        ));
+        assert!(paths.dir.join("b.rec").exists());
+    }
+
+    #[test]
+    fn record_renamed_to_another_tag_fails_open_and_get() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp, &EK).unwrap();
+        s.put("a", b"one").unwrap();
+        let forged = s.dir.join(format!("{:032x}.rc2", 7));
+        fs::copy(s.record_path("a"), &forged).unwrap();
+        drop(s);
+        assert!(matches!(open(&tmp, &EK), Err(StoreError::Authentication)));
+        fs::remove_file(&forged).unwrap();
+        let s = open(&tmp, &EK).unwrap();
+        fs::copy(s.record_path("a"), s.record_path("b")).unwrap();
+        assert!(matches!(s.get("b"), Err(StoreError::Authentication)));
+    }
+
+    #[test]
+    fn legacy_import_window_closes_once_the_store_has_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = ProfilePaths::resolve(tmp.path(), "work").unwrap();
+        let s = ProfileStore::open(&paths, &EK).unwrap();
+        s.put("a", b"new").unwrap();
+        s.put("gone", b"x").unwrap();
+        s.remove("gone").unwrap();
+        drop(s);
+        legacy_record(&paths.dir, &EK, "work", "gone", b"resurrected");
+        legacy_record(&paths.dir, &EK, "work", "a", b"stale");
+        fs::write(paths.dir.join("rx-1.rec.tmp"), b"junk").unwrap();
+        let s = ProfileStore::open(&paths, &EK).unwrap();
+        assert!(s.get("gone").unwrap().is_none());
+        assert_eq!(&**s.get("a").unwrap().unwrap(), b"new");
+        assert_eq!(s.names().unwrap(), vec!["a"]);
+        for f in ["gone.rec", "a.rec", "rx-1.rec.tmp"] {
+            assert!(!paths.dir.join(f).exists(), "{f}");
+        }
+    }
+
+    #[test]
+    fn failed_migration_never_closes_the_window() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = ProfilePaths::resolve(tmp.path(), "work").unwrap();
+        let marker = drop_and_marker_path(&paths);
+        for n in ["a", "z"] {
+            legacy_record(&paths.dir, &EK, "work", n, n.as_bytes());
+        }
+        // Sorted import order is a, m, z: the damaged file sits between two good ones.
+        let bad = paths.dir.join("m.rec");
+        fs::write(&bad, b"damaged").unwrap();
+        fs::set_permissions(&bad, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(ProfileStore::open(&paths, &EK).is_err());
+        assert!(!marker.exists(), "failed migration must not latch");
+        assert!(paths.dir.join("z.rec").exists());
+        fs::remove_file(&bad).unwrap();
+        let s = ProfileStore::open(&paths, &EK).unwrap();
+        assert_eq!(s.names().unwrap(), vec!["a", "z"]);
+        assert_eq!(&**s.get("z").unwrap().unwrap(), b"z");
+        assert!(marker.exists());
+    }
+
+    /// Creates the profile dir and returns where its marker record would live.
+    fn drop_and_marker_path(paths: &ProfilePaths) -> PathBuf {
+        let s = ProfileStore::open(paths, &EK).unwrap();
+        let p = s.record_path(MARKER);
+        drop(s);
+        p
+    }
+
+    #[test]
+    fn full_legacy_store_migrates_and_marker_is_reserved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = ProfilePaths::resolve(tmp.path(), "work").unwrap();
+        drop(ProfileStore::open(&paths, &EK).unwrap());
+        for i in 0..40 {
+            legacy_record(&paths.dir, &EK, "work", &format!("r{i}"), b"x");
+        }
+        let s = ProfileStore::open(&paths, &EK).unwrap();
+        assert_eq!(s.names().unwrap().len(), 40);
+        for i in 40..MAX_RECORDS {
+            s.index().unwrap().insert(format!("fake{i}"));
+        }
+        assert!(matches!(
+            s.put("extra", b"x"),
+            Err(StoreError::TooManyRecords)
+        ));
+        for r in [
+            s.put(MARKER, b"").map(drop),
+            s.get(MARKER).map(drop),
+            s.remove(MARKER),
+        ] {
+            assert!(matches!(r, Err(StoreError::BadName)));
+        }
+        drop(s);
+        assert_eq!(open(&tmp, &EK).unwrap().names().unwrap().len(), 40);
+    }
+
+    #[test]
+    fn legacy_name_swap_and_transplant_fail_to_authenticate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = ProfilePaths::resolve(tmp.path(), "work").unwrap();
+        drop(ProfileStore::open(&paths, &EK).unwrap());
+        legacy_record(&paths.dir, &EK, "work", "a", b"x");
+        fs::rename(paths.dir.join("a.rec"), paths.dir.join("b.rec")).unwrap();
+        assert!(matches!(
+            ProfileStore::open(&paths, &EK),
+            Err(StoreError::Authentication)
+        ));
+        // A PHS1 blob moved to an opaque name is not a PHS2 record.
+        let s_tag = format!("{:032x}.rc2", 5);
+        fs::rename(paths.dir.join("b.rec"), paths.dir.join(&s_tag)).unwrap();
+        assert!(matches!(
+            ProfileStore::open(&paths, &EK),
+            Err(StoreError::Corrupt)
+        ));
+    }
+
+    #[test]
+    fn unauthenticated_new_record_blocks_legacy_deletion() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = ProfilePaths::resolve(tmp.path(), "work").unwrap();
+        let s = ProfileStore::open(&paths, &EK).unwrap();
+        let junk = s.record_path("a");
+        drop(s);
+        legacy_record(&paths.dir, &EK, "work", "a", b"only-copy");
+        fs::write(&junk, b"not a record").unwrap();
+        fs::set_permissions(&junk, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(ProfileStore::open(&paths, &EK).is_err());
+        assert!(paths.dir.join("a.rec").exists());
+    }
+
+    #[test]
+    fn name_header_must_match_tag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp, &EK).unwrap();
+        // A record whose inner name hashes to a different tag than its file (validly encrypted).
+        let tag = tag_of(&s.name_mac, "a");
+        let mut inner = vec![1u8, b'b'];
+        inner.extend_from_slice(b"payload");
+        let nonce = [1u8; NONCE_LEN];
+        let ct = s
+            .cipher
+            .encrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: &inner,
+                    aad: &aad(MAGIC, &s.profile, &tag),
+                },
+            )
+            .unwrap();
+        let mut blob = MAGIC.to_vec();
+        blob.extend_from_slice(&nonce);
+        blob.extend_from_slice(&ct);
+        s.write_atomic(&tag, &blob, "a").unwrap();
+        assert!(matches!(s.get("a"), Err(StoreError::Corrupt)));
     }
 
     proptest::proptest! {

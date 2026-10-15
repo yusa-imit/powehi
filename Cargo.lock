@@ -4194,6 +4194,7 @@ dependencies = [
  "dirs",
  "futures-util",
  "hkdf",
+ "hmac 0.12.1",
  "libc",
  "opaque-ke",
  "openmls",
