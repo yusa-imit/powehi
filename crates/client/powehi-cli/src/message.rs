@@ -7,6 +7,8 @@
 //! [`crate::inbox`]; `read` renders them with terminal control characters neutralised and then
 //! removes them from the store. Bodies are never logged.
 
+use std::collections::BTreeMap;
+
 use powehi_crypto_core::mls_group;
 use reqwest::Client;
 use serde::Deserialize;
@@ -131,6 +133,26 @@ pub async fn send(
     local.save(store)?;
     invite::send_application(client, server, session, group_id, &ct).await?;
     Ok(())
+}
+
+/// Number of stored (unread) messages per conversation; groups with none are absent.
+/// Unparseable records are ignored, as in [`pending`]. Bodies are dropped (and wiped) at once.
+pub fn unread_counts(store: &ProfileStore) -> Result<BTreeMap<Uuid, usize>, MessageError> {
+    let mut out = BTreeMap::new();
+    for name in store
+        .names()?
+        .into_iter()
+        .filter(|n| n.starts_with(RX_PREFIX))
+    {
+        let Some(raw) = store.get(&name)? else {
+            continue;
+        };
+        if let Ok(rec) = serde_json::from_slice::<Received>(&raw) {
+            *out.entry(rec.group_id).or_insert(0) += 1;
+        }
+    }
+    debug_assert!(out.values().sum::<usize>() <= crate::store::MAX_RECORDS);
+    Ok(out)
 }
 
 /// Stored messages of one conversation, oldest first. Records that fail to parse are ignored.
