@@ -112,7 +112,7 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
         #[cfg(unix)]
         cli::Command::Send(ref c) => run_send(&args.server, &paths, &c.conversation),
         #[cfg(unix)]
-        cli::Command::Read(ref c) => run_read(&args.server, &paths, &c.conversation),
+        cli::Command::Read(ref c) => run_read(&args.server, &paths, &c.conversation, c.keep),
         #[cfg(unix)]
         cli::Command::Chat(ref c) => run_chat(&args.server, &paths, &c.conversation),
         #[cfg(unix)]
@@ -230,6 +230,7 @@ fn run_read(
     server: &url::Url,
     paths: &profile::ProfilePaths,
     reference: &str,
+    keep: bool,
 ) -> Result<(), CliError> {
     let rt = runtime()?;
     let client = status::http_client()?;
@@ -240,11 +241,11 @@ fn run_read(
         eprintln!("{}", verify::CHANGED_WARNING);
     }
     let msgs = message::pending(&session.store, group_id)?;
-    for m in &msgs {
-        // Only delete what reached the terminal: a closed pipe must not eat unseen messages.
-        message::display(&mut std::io::stdout(), m).map_err(|_| CliError::Stdout)?;
-        message::discard(&session.store, m)?;
-    }
+    // Only delete what reached the terminal: a closed pipe must not eat unseen messages.
+    message::show(&session.store, &msgs, keep, &mut std::io::stdout()).map_err(|e| match e {
+        message::ShowError::Output => CliError::Stdout,
+        message::ShowError::Discard(e) => CliError::Message(e),
+    })?;
     if msgs.is_empty() {
         println!("no new messages");
     }

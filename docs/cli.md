@@ -42,7 +42,7 @@ powehi chat <conversation>           # interactive REPL, live delivery
 | `invite redeem` | Redeem a link read from stdin |
 | `send <conv>` | Send the message body read from stdin (never argv) |
 | `inbox` | Fetch, decrypt, store and acknowledge pending messages |
-| `read <conv>` | Show stored messages, then remove them from the store |
+| `read <conv> [--keep]` | Show stored messages, then remove them from the store (`--keep` leaves them) |
 | `chat <conv>` | Interactive REPL; reconnects up to 3 times, then tells you |
 | `verify <conv> [--confirm N]` | Show / record the Safety Number (prd.md §5.6) |
 | `conversations` | List conversation ids, roles, unread counts and a `CHANGED` flag |

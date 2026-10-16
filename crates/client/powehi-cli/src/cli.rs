@@ -50,7 +50,7 @@ pub enum Command {
     /// Fetch, decrypt, store and acknowledge pending messages.
     Inbox,
     /// Show stored received messages for a conversation, then remove them from the store.
-    Read(ConversationArg),
+    Read(ReadArgs),
     /// Interactive chat REPL with realtime delivery.
     Chat(ConversationArg),
     /// Show the Safety Number for a conversation.
@@ -81,6 +81,15 @@ pub enum InviteCommand {
     },
     /// Redeem an invite link (read from stdin, not argv).
     Redeem,
+}
+
+#[derive(Debug, Args)]
+pub struct ReadArgs {
+    /// Conversation id (or a unique prefix of at least 4 characters).
+    pub conversation: String,
+    /// Keep the messages in the encrypted store instead of removing them after display.
+    #[arg(long)]
+    pub keep: bool,
 }
 
 #[derive(Debug, Args)]
@@ -212,6 +221,18 @@ mod tests {
         assert!(parse(&["invite", "create", "--wait", "901"]).is_err());
         assert!(parse(&["invite", "redeem"]).is_ok());
         assert!(parse(&["invite", "redeem", "abc.def"]).is_err());
+    }
+
+    #[test]
+    fn read_keep_is_opt_in() {
+        let Command::Read(a) = parse(&["read", "c1"]).unwrap().command else {
+            panic!("not read");
+        };
+        assert!(!a.keep);
+        let Command::Read(a) = parse(&["read", "c1", "--keep"]).unwrap().command else {
+            panic!("not read");
+        };
+        assert!(a.keep);
     }
 
     #[test]

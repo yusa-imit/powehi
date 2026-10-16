@@ -181,3 +181,43 @@ fn render_neutralises_terminal_escapes_and_hides_structured_payloads() {
         "[image]"
     );
 }
+
+#[tokio::test]
+async fn show_removes_shown_messages_unless_keep() {
+    let (_tmp, alice, bob, url, gid) = pair().await;
+    for t in ["one", "two"] {
+        send(&client(), &url, &bob, gid, t.as_bytes())
+            .await
+            .unwrap();
+    }
+    inbox::receive(&client(), &url, &alice).await.unwrap();
+    let msgs = pending(&alice.store, gid).unwrap();
+    let mut out = Vec::new();
+    show(&alice.store, &msgs, true, &mut out).unwrap();
+    assert_eq!(pending(&alice.store, gid).unwrap().len(), 2);
+    assert!(String::from_utf8(out).unwrap().contains("one"));
+    show(&alice.store, &msgs, false, &mut Vec::new()).unwrap();
+    assert!(pending(&alice.store, gid).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn show_to_closed_output_keeps_unseen_messages() {
+    struct Closed;
+    impl std::io::Write for Closed {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let (_tmp, alice, bob, url, gid) = pair().await;
+    send(&client(), &url, &bob, gid, b"x").await.unwrap();
+    inbox::receive(&client(), &url, &alice).await.unwrap();
+    let msgs = pending(&alice.store, gid).unwrap();
+    assert!(matches!(
+        show(&alice.store, &msgs, false, &mut Closed),
+        Err(ShowError::Output)
+    ));
+    assert_eq!(pending(&alice.store, gid).unwrap().len(), 1);
+}
