@@ -222,6 +222,35 @@ async fn read_lines_flags_an_oversize_line_and_keeps_going() {
 }
 
 #[tokio::test]
+async fn read_lines_cap_boundaries() {
+    let cap = message::MAX_BODY_LEN;
+    // A body of exactly the cap plus its newline is forwarded verbatim.
+    let mut exact = vec![b'e'; cap];
+    exact.push(b'\n');
+    let got = collect_lines(&exact).await;
+    assert_eq!((got[0].len(), got[1].as_str()), (cap + 1, "<eof>"));
+    assert_eq!(got.len(), 2);
+
+    // One byte over the cap is flagged as too long, and the next line still arrives.
+    for over in [cap + 1, cap + 2, cap + 3, cap + 4] {
+        let mut input = vec![b'o'; over];
+        input.extend_from_slice(b"\nnext\n");
+        let got = collect_lines(&input).await;
+        assert!(got[0].len() > cap, "over={over}");
+        assert_eq!(&got[1..], ["next\n", "<eof>"], "over={over}");
+    }
+}
+
+#[tokio::test]
+async fn read_lines_oversize_without_newline_ends_cleanly() {
+    let input = vec![b'u'; message::MAX_BODY_LEN * 2];
+    let got = collect_lines(&input).await;
+    assert_eq!(got.len(), 2);
+    assert!(got[0].len() > message::MAX_BODY_LEN);
+    assert_eq!(got[1], "<eof>");
+}
+
+#[tokio::test]
 async fn changed_alert_is_printed_once_and_rearmed_after_it_clears() {
     let p = pair().await;
     let mut out = Vec::new();

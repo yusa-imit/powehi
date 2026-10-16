@@ -1542,3 +1542,9 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 - Main CI green, no `bug` issues, no open PRs. `cargo audit` + `cargo deny check` clean. Added 3 powehi-cli auth tests
   (ct_eq, Session Debug/bearer token redaction, profile_has_data); 157 lib tests pass, fmt+clippy clean. Test-only,
   no review agents needed. target/ was 17G (<20G, no prune). Note: store export key must be exactly 32 bytes in tests.
+
+## Cycle 550 (STABILIZATION)
+- Main CI green, no `bug` issues, no open PRs. `cargo audit` + `cargo deny check` clean. Added 2 `read_lines` tests
+  (chat/tests.rs): cap-boundary lines (exact cap, cap+1..cap+4 → flagged, next line survives) and oversize unterminated
+  input at EOF. 174 lib tests pass, fmt+clippy clean. Test-only, no review agents needed. target/ 20G (at threshold, no prune).
+  Note: `cargo nextest` not installed locally; use `cargo test`; cargo needs `PATH=$HOME/.cargo/bin`.
