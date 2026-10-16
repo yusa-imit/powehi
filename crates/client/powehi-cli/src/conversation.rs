@@ -168,15 +168,19 @@ pub fn list(store: &ProfileStore) -> Result<Vec<Uuid>, ConversationError> {
 
 /// Writes one line per stored conversation (`<id> <role>`, plus ` <n> unread` when `n > 0` and
 /// ` CHANGED` when a verified Safety Number no longer matches (§5.6), sorted by id), then a count. Ids and roles are server-visible metadata and `n` is a local
-/// count; no message text or key material is printed.
+/// count; with `only_unread`, conversations without unread messages are omitted. No message text or key material is printed.
 pub fn report(
     store: &ProfileStore,
     unread: &BTreeMap<Uuid, usize>,
+    only_unread: bool,
     out: &mut impl std::io::Write,
 ) -> Result<(), ConversationError> {
     let mut ids = list(store)?;
     ids.sort();
     assert!(ids.len() <= crate::store::MAX_RECORDS);
+    if only_unread {
+        ids.retain(|id| unread.get(id).copied().unwrap_or(0) > 0);
+    }
     for id in &ids {
         let role = match load(store, id)? {
             Some(c) => c.role,
@@ -282,7 +286,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = open(&tmp);
         let mut out = Vec::new();
-        report(&store, &BTreeMap::new(), &mut out).unwrap();
+        report(&store, &BTreeMap::new(), false, &mut out).unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), "0 conversation(s)\n");
         let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
         save(&store, &joiner(a)).unwrap();
@@ -292,7 +296,7 @@ mod tests {
         )
         .unwrap();
         let mut out = Vec::new();
-        report(&store, &BTreeMap::new(), &mut out).unwrap();
+        report(&store, &BTreeMap::new(), false, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         let mut want = [format!("{a} joiner"), format!("{b} creator")];
         want.sort();
@@ -300,7 +304,7 @@ mod tests {
         assert_eq!(lines[..2], want[..]);
         assert_eq!(lines[2], "2 conversation(s)");
         let mut out = Vec::new();
-        report(&store, &BTreeMap::from([(a, 3), (b, 0)]), &mut out).unwrap();
+        report(&store, &BTreeMap::from([(a, 3), (b, 0)]), false, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains(&format!("{a} joiner 3 unread\n")));
         assert!(text.contains(&format!("{b} creator\n")));
@@ -325,12 +329,29 @@ mod tests {
         save(&store, &joiner(known)).unwrap();
         let unread = BTreeMap::from([(stranger, 9)]);
         let mut out = Vec::new();
-        report(&store, &unread, &mut out).unwrap();
+        report(&store, &unread, false, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(!text.contains(&stranger.to_string()));
         assert!(!text.contains("unread"));
-        let err = report(&store, &unread, &mut FailingWriter).unwrap_err();
+        let err = report(&store, &unread, false, &mut FailingWriter).unwrap_err();
         assert!(matches!(err, ConversationError::Output));
+    }
+
+    #[test]
+    fn report_unread_filter_keeps_only_conversations_with_unread() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let (quiet, busy) = (Uuid::new_v4(), Uuid::new_v4());
+        save(&store, &joiner(quiet)).unwrap();
+        save(&store, &joiner(busy)).unwrap();
+        let unread = BTreeMap::from([(busy, 2), (quiet, 0)]);
+        let mut out = Vec::new();
+        report(&store, &unread, true, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text, format!("{busy} joiner 2 unread\n1 conversation(s)\n"));
+        let mut out = Vec::new();
+        report(&store, &BTreeMap::new(), true, &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "0 conversation(s)\n");
     }
 
     #[test]
@@ -346,7 +367,7 @@ mod tests {
             .put(&rec, br#"{"version":1,"number":"1 2 3"}"#)
             .unwrap();
         let mut out = Vec::new();
-        report(&store, &BTreeMap::from([(flagged, 2)]), &mut out).unwrap();
+        report(&store, &BTreeMap::from([(flagged, 2)]), false, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains(&format!("{flagged} joiner 2 unread CHANGED\n")));
         assert!(text.contains(&format!("{plain} joiner\n")));
