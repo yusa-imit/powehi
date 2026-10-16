@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 553 (2026-10-16, FEATURE) — `powehi profiles`
+- Phase 7 DoD all [x]; added `profiles`: lists valid profile dir names under `<data>/powehi` (names only, skips symlinks/files/odd names, capped 256, no store open/password). 4 new tests; no crypto/arch/backend change so no review agent required.
+
 ## Cycle 552 (2026-10-16, FEATURE) — CLI user guide
 - Phase 7 DoD all [x]; added `docs/cli.md` (options, quick start, command table, safety notes). Docs only; no review agent required.
 

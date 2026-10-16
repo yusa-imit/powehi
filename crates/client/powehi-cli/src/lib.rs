@@ -80,6 +80,8 @@ pub enum CliError {
     #[cfg(unix)]
     #[error("{0}")]
     Identity(#[from] identity::IdentityError),
+    #[error("could not list the data directory")]
+    DataDirList,
     #[error("could not start the async runtime")]
     Runtime,
     #[cfg(not(unix))]
@@ -117,9 +119,19 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
         cli::Command::Verify(ref c) => run_verify(&args.server, &paths, c),
         #[cfg(unix)]
         cli::Command::Conversations => run_conversations(&args.server, &paths),
+        cli::Command::Profiles => run_profiles(&base),
         #[cfg(not(unix))]
         ref other => Err(CliError::NotImplemented(other.name())),
     }
+}
+
+/// `profiles`: local directory listing; opens no store and asks for no password.
+fn run_profiles(base: &std::path::Path) -> Result<(), CliError> {
+    let names = profile::list(base).map_err(|_| CliError::DataDirList)?;
+    for n in &names {
+        println!("{n}");
+    }
+    Ok(())
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime, CliError> {
