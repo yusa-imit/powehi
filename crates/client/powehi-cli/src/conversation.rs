@@ -167,8 +167,10 @@ pub fn list(store: &ProfileStore) -> Result<Vec<Uuid>, ConversationError> {
 }
 
 /// Writes one line per stored conversation (`<id> <role>`, plus ` <n> unread` when `n > 0` and
-/// ` CHANGED` when a verified Safety Number no longer matches (§5.6), sorted by id), then a count. Ids and roles are server-visible metadata and `n` is a local
-/// count; with `only_unread`, conversations without unread messages are omitted. No message text or key material is printed.
+/// ` CHANGED` when a verified Safety Number no longer matches (§5.6), sorted by id), then a
+/// count. Ids and roles are server-visible metadata and `n` is a local count; with
+/// `only_unread`, conversations without unread messages are omitted. No message text or key
+/// material is printed.
 pub fn report(
     store: &ProfileStore,
     unread: &BTreeMap<Uuid, usize>,
@@ -371,6 +373,27 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains(&format!("{flagged} joiner 2 unread CHANGED\n")));
         assert!(text.contains(&format!("{plain} joiner\n")));
+    }
+
+    #[test]
+    fn unread_filter_still_flags_changed_safety_number() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let (quiet_changed, busy_changed) = (Uuid::new_v4(), Uuid::new_v4());
+        for id in [quiet_changed, busy_changed] {
+            save(&store, &joiner(id)).unwrap();
+            let rec = format!("{}{}", crate::verify::PREFIX, id.hyphenated());
+            store
+                .put(&rec, br#"{"version":1,"number":"1 2 3"}"#)
+                .unwrap();
+        }
+        let unread = BTreeMap::from([(busy_changed, 1)]);
+        let mut out = Vec::new();
+        report(&store, &unread, true, &mut out).unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            format!("{busy_changed} joiner 1 unread CHANGED\n1 conversation(s)\n")
+        );
     }
 
     #[test]

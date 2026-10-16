@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 560 (2026-10-17, STABILIZATION)
+- CI green on main, `cargo deny` ok, `cargo audit` no vulns, target/ 19G. Added test for `conversations --unread` combined with CHANGED; rewrapped >100-col `report` doc comment. `cargo test -p powehi-cli` 189 pass, clippy clean. Test-only, no crypto/arch change.
+
 ## Cycle 559 (2026-10-17, FEATURE) — `conversations --unread`
 - Phase 7 DoD all [x]; `conversations --unread` lists only conversations with unread messages (local filter in `conversation::report`). 188 tests pass, clippy clean; no crypto/arch/backend change so no review agent required.
 
