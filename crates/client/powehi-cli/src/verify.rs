@@ -17,7 +17,7 @@ use crate::conversation::{self, ConversationError};
 use crate::identity::{IdentityError, LocalIdentity};
 use crate::store::{ProfileStore, StoreError};
 
-const PREFIX: &str = "verified-";
+pub(crate) const PREFIX: &str = "verified-";
 const VERSION: u8 = 1;
 const KEY_LEN: usize = 32;
 

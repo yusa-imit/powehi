@@ -166,8 +166,8 @@ pub fn list(store: &ProfileStore) -> Result<Vec<Uuid>, ConversationError> {
     Ok(out)
 }
 
-/// Writes one line per stored conversation (`<id> <role>`, plus ` <n> unread` when `n > 0`,
-/// sorted by id), then a count. Ids and roles are server-visible metadata and `n` is a local
+/// Writes one line per stored conversation (`<id> <role>`, plus ` <n> unread` when `n > 0` and
+/// ` CHANGED` when a verified Safety Number no longer matches (§5.6), sorted by id), then a count. Ids and roles are server-visible metadata and `n` is a local
 /// count; no message text or key material is printed.
 pub fn report(
     store: &ProfileStore,
@@ -186,9 +186,14 @@ pub fn report(
             Role::Creator => "creator",
             Role::Joiner => "joiner",
         };
+        let changed = if crate::verify::changed_since_verified(store, *id) {
+            " CHANGED"
+        } else {
+            ""
+        };
         match unread.get(id).copied().unwrap_or(0) {
-            0 => writeln!(out, "{id} {name}"),
-            n => writeln!(out, "{id} {name} {n} unread"),
+            0 => writeln!(out, "{id} {name}{changed}"),
+            n => writeln!(out, "{id} {name} {n} unread{changed}"),
         }
         .map_err(|_| ConversationError::Output)?;
     }
@@ -326,6 +331,25 @@ mod tests {
         assert!(!text.contains("unread"));
         let err = report(&store, &unread, &mut FailingWriter).unwrap_err();
         assert!(matches!(err, ConversationError::Output));
+    }
+
+    #[test]
+    fn report_flags_changed_safety_number() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let (plain, flagged) = (Uuid::new_v4(), Uuid::new_v4());
+        save(&store, &joiner(plain)).unwrap();
+        save(&store, &joiner(flagged)).unwrap();
+        // A confirmation record whose number cannot be recomputed must alert, not stay silent.
+        let rec = format!("{}{}", crate::verify::PREFIX, flagged.hyphenated());
+        store
+            .put(&rec, br#"{"version":1,"number":"1 2 3"}"#)
+            .unwrap();
+        let mut out = Vec::new();
+        report(&store, &BTreeMap::from([(flagged, 2)]), &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains(&format!("{flagged} joiner 2 unread CHANGED\n")));
+        assert!(text.contains(&format!("{plain} joiner\n")));
     }
 
     #[test]
