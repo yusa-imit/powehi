@@ -4,6 +4,8 @@
 //! side that joined by Welcome, the ML-KEM decapsulation key moved out of `pq-keys` once its
 //! KeyPackage was consumed. The MLS group state itself lives in the `mls-provider` record.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -164,10 +166,12 @@ pub fn list(store: &ProfileStore) -> Result<Vec<Uuid>, ConversationError> {
     Ok(out)
 }
 
-/// Writes one line per stored conversation (`<id> <role>`, sorted by id), then a count.
-/// Ids and roles are server-visible metadata; no message text or key material is printed.
+/// Writes one line per stored conversation (`<id> <role>`, plus ` <n> unread` when `n > 0`,
+/// sorted by id), then a count. Ids and roles are server-visible metadata and `n` is a local
+/// count; no message text or key material is printed.
 pub fn report(
     store: &ProfileStore,
+    unread: &BTreeMap<Uuid, usize>,
     out: &mut impl std::io::Write,
 ) -> Result<(), ConversationError> {
     let mut ids = list(store)?;
@@ -182,7 +186,11 @@ pub fn report(
             Role::Creator => "creator",
             Role::Joiner => "joiner",
         };
-        writeln!(out, "{id} {name}").map_err(|_| ConversationError::Output)?;
+        match unread.get(id).copied().unwrap_or(0) {
+            0 => writeln!(out, "{id} {name}"),
+            n => writeln!(out, "{id} {name} {n} unread"),
+        }
+        .map_err(|_| ConversationError::Output)?;
     }
     writeln!(out, "{} conversation(s)", ids.len()).map_err(|_| ConversationError::Output)
 }
@@ -269,7 +277,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = open(&tmp);
         let mut out = Vec::new();
-        report(&store, &mut out).unwrap();
+        report(&store, &BTreeMap::new(), &mut out).unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), "0 conversation(s)\n");
         let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
         save(&store, &joiner(a)).unwrap();
@@ -279,13 +287,18 @@ mod tests {
         )
         .unwrap();
         let mut out = Vec::new();
-        report(&store, &mut out).unwrap();
+        report(&store, &BTreeMap::new(), &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         let mut want = [format!("{a} joiner"), format!("{b} creator")];
         want.sort();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[..2], want[..]);
         assert_eq!(lines[2], "2 conversation(s)");
+        let mut out = Vec::new();
+        report(&store, &BTreeMap::from([(a, 3), (b, 0)]), &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains(&format!("{a} joiner 3 unread\n")));
+        assert!(text.contains(&format!("{b} creator\n")));
     }
 
     #[test]

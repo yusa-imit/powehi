@@ -55,7 +55,7 @@ pub enum Command {
     Chat(ConversationArg),
     /// Show the Safety Number for a conversation.
     Verify(VerifyArgs),
-    /// List the conversations stored in this profile (ids and roles only).
+    /// List the conversations stored in this profile (ids, roles, unread counts).
     Conversations,
     /// List the profile names in the data directory (no password; names only).
     Profiles,

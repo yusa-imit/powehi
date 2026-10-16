@@ -258,7 +258,8 @@ fn run_conversations(server: &url::Url, paths: &profile::ProfilePaths) -> Result
     let client = status::http_client()?;
     let mut prompter = prompt::TtyPrompter;
     let session = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
-    conversation::report(&session.store, &mut std::io::stdout())?;
+    let unread = message::unread_counts(&session.store)?;
+    conversation::report(&session.store, &unread, &mut std::io::stdout())?;
     Ok(())
 }
 

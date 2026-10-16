@@ -42,6 +42,23 @@ async fn send_then_inbox_then_read_round_trips_both_ways() {
 }
 
 #[tokio::test]
+async fn unread_counts_track_stored_messages_per_conversation() {
+    let (_tmp, alice, bob, url, gid) = pair().await;
+    assert!(unread_counts(&alice.store).unwrap().is_empty());
+    for t in ["a", "b"] {
+        send(&client(), &url, &bob, gid, t.as_bytes())
+            .await
+            .unwrap();
+    }
+    inbox::receive(&client(), &url, &alice).await.unwrap();
+    assert_eq!(unread_counts(&alice.store).unwrap().get(&gid), Some(&2));
+    for m in pending(&alice.store, gid).unwrap() {
+        discard(&alice.store, &m).unwrap();
+    }
+    assert!(unread_counts(&alice.store).unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn messages_come_back_in_receive_order() {
     let (_tmp, alice, bob, url, gid) = pair().await;
     for t in ["one", "two", "three"] {

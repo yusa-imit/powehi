@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 554 (2026-10-16, FEATURE) — unread counts in `conversations`
+- Phase 7 DoD all [x]; `conversations` now prints `<id> <role> [<n> unread]` via `message::unread_counts` (local count of `rx-*` records, bodies never printed). 180 tests pass, clippy clean; no crypto/arch/backend change so no review agent required.
+
 ## Cycle 553 (2026-10-16, FEATURE) — `powehi profiles`
 - Phase 7 DoD all [x]; added `profiles`: lists valid profile dir names under `<data>/powehi` (names only, skips symlinks/files/odd names, capped 256, no store open/password). 4 new tests; no crypto/arch/backend change so no review agent required.
 
