@@ -45,7 +45,7 @@ powehi chat <conversation>           # interactive REPL, live delivery
 | `read <conv>` | Show stored messages, then remove them from the store |
 | `chat <conv>` | Interactive REPL; reconnects up to 3 times, then tells you |
 | `verify <conv> [--confirm N]` | Show / record the Safety Number (prd.md §5.6) |
-| `conversations` | List conversation ids, roles and unread counts |
+| `conversations` | List conversation ids, roles, unread counts and a `CHANGED` flag |
 | `profiles` | List profile names in the data directory (no password) |
 
 `<conv>` accepts a unique prefix of at least 4 characters.
