@@ -221,3 +221,26 @@ async fn show_to_closed_output_keeps_unseen_messages() {
     ));
     assert_eq!(pending(&alice.store, gid).unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn newest_limits_to_last_messages_and_leaves_older_stored() {
+    let (_tmp, alice, bob, url, gid) = pair().await;
+    for t in ["one", "two", "three"] {
+        send(&client(), &url, &bob, gid, t.as_bytes())
+            .await
+            .unwrap();
+    }
+    inbox::receive(&client(), &url, &alice).await.unwrap();
+    let msgs = pending(&alice.store, gid).unwrap();
+    assert_eq!(newest(&msgs, None).len(), 3);
+    assert_eq!(newest(&msgs, Some(10)).len(), 3);
+    let tail = newest(&msgs, Some(2));
+    assert_eq!(tail.len(), 2);
+    let mut out = Vec::new();
+    show(&alice.store, tail, false, &mut out).unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(!out.contains("one") && out.contains("two") && out.contains("three"));
+    let left = pending(&alice.store, gid).unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].text.as_str(), "one");
+}

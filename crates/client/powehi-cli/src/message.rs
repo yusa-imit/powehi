@@ -223,6 +223,16 @@ pub fn show(
     Ok(())
 }
 
+/// The newest `last` messages of an oldest-first slice (`None` = all). Older ones are not
+/// returned, so `show` neither displays nor removes them.
+pub fn newest(msgs: &[Pending], last: Option<usize>) -> &[Pending] {
+    let Some(n) = last else {
+        return msgs;
+    };
+    assert!(n > 0, "callers validate --last >= 1");
+    &msgs[msgs.len().saturating_sub(n)..]
+}
+
 /// Removes a message from the store once it has been shown.
 pub fn discard(store: &ProfileStore, msg: &Pending) -> Result<(), MessageError> {
     debug_assert!(msg.name.starts_with(RX_PREFIX));

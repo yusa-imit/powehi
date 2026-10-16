@@ -90,6 +90,9 @@ pub struct ReadArgs {
     /// Keep the messages in the encrypted store instead of removing them after display.
     #[arg(long)]
     pub keep: bool,
+    /// Show only the newest N messages; older ones stay stored untouched.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=10000))]
+    pub last: Option<u32>,
 }
 
 #[derive(Debug, Args)]
@@ -221,6 +224,20 @@ mod tests {
         assert!(parse(&["invite", "create", "--wait", "901"]).is_err());
         assert!(parse(&["invite", "redeem"]).is_ok());
         assert!(parse(&["invite", "redeem", "abc.def"]).is_err());
+    }
+
+    #[test]
+    fn read_last_is_bounded_and_optional() {
+        let Command::Read(a) = parse(&["read", "c1"]).unwrap().command else {
+            panic!("not read");
+        };
+        assert_eq!(a.last, None);
+        let Command::Read(a) = parse(&["read", "c1", "--last", "5"]).unwrap().command else {
+            panic!("not read");
+        };
+        assert_eq!(a.last, Some(5));
+        assert!(parse(&["read", "c1", "--last", "0"]).is_err());
+        assert!(parse(&["read", "c1", "--last", "10001"]).is_err());
     }
 
     #[test]
