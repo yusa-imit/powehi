@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 557 (2026-10-16, FEATURE) — `read --keep`
+- Phase 7 DoD all [x]; `read <conv> --keep` shows stored messages without removing them (opt-in; records stay in the encrypted store). Extracted `message::show`; 185 tests pass, clippy clean; no crypto/arch/backend change so no review agent required.
+
 ## Cycle 556 (2026-10-16, FEATURE) — `conversations` flags CHANGED safety numbers
 - Phase 7 DoD all [x]; `conversations` appends ` CHANGED` when `verify::changed_since_verified` alerts (§5.6), so the warning is visible without opening each chat. Local only, no new metadata. 182 tests pass, clippy clean; no crypto/arch/backend change so no review agent required.
 

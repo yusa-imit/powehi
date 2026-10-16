@@ -199,6 +199,30 @@ pub fn display(out: &mut impl std::io::Write, msg: &Pending) -> std::io::Result<
     out.flush()
 }
 
+/// Why [`show`] stopped: the output closed, or a shown message could not be removed.
+#[derive(Debug)]
+pub enum ShowError {
+    Output,
+    Discard(MessageError),
+}
+
+/// Displays each message in order and, unless `keep`, removes it right after it was written.
+/// Only what reached `out` is removed: a closed pipe leaves the unseen messages stored.
+pub fn show(
+    store: &ProfileStore,
+    msgs: &[Pending],
+    keep: bool,
+    out: &mut impl std::io::Write,
+) -> Result<(), ShowError> {
+    for m in msgs {
+        display(out, m).map_err(|_| ShowError::Output)?;
+        if !keep {
+            discard(store, m).map_err(ShowError::Discard)?;
+        }
+    }
+    Ok(())
+}
+
 /// Removes a message from the store once it has been shown.
 pub fn discard(store: &ProfileStore, msg: &Pending) -> Result<(), MessageError> {
     debug_assert!(msg.name.starts_with(RX_PREFIX));
