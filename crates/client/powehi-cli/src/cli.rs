@@ -57,6 +57,8 @@ pub enum Command {
     Verify(VerifyArgs),
     /// List the conversations stored in this profile (ids and roles only).
     Conversations,
+    /// List the profile names in the data directory (no password; names only).
+    Profiles,
 }
 
 #[derive(Debug, Args)]
@@ -102,6 +104,7 @@ impl Command {
             Command::Chat(_) => "chat",
             Command::Verify(_) => "verify",
             Command::Conversations => "conversations",
+            Command::Profiles => "profiles",
         }
     }
 }

@@ -62,9 +62,78 @@ impl ProfilePaths {
     }
 }
 
+/// Most profiles `list` reports; a directory with more is cut off, never scanned unbounded.
+pub const MAX_LISTED: usize = 256;
+
+/// Names of the profiles under `<base>/powehi`, sorted. Only directories with a valid
+/// profile name count (stray files and odd names are skipped). A missing directory means no
+/// profiles yet. Reads names only: never opens a store, so it needs no password.
+pub fn list(base: &Path) -> Result<Vec<String>, std::io::Error> {
+    let entries = match std::fs::read_dir(base.join(APP_DIR)) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut names = Vec::new();
+    for entry in entries.take(MAX_LISTED * 4) {
+        let entry = entry?;
+        // `file_type` does not follow symlinks, so a link is never listed as a profile.
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if validate_name(&name).is_ok() {
+            names.push(name);
+        }
+    }
+    names.sort();
+    names.truncate(MAX_LISTED);
+    debug_assert!(names.iter().all(|n| validate_name(n).is_ok()));
+    Ok(names)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_missing_dir_is_empty() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(list(d.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_returns_sorted_valid_profile_dirs_only() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join(APP_DIR);
+        for n in ["work", "default", "Bad", ".hidden", "a b"] {
+            std::fs::create_dir_all(root.join(n)).unwrap();
+        }
+        std::fs::write(root.join("file"), b"x").unwrap();
+        assert_eq!(list(d.path()).unwrap(), ["default", "work"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_skips_symlinks() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join(APP_DIR);
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+        assert_eq!(list(d.path()).unwrap(), ["real"]);
+    }
+
+    #[test]
+    fn list_is_bounded() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join(APP_DIR);
+        for i in 0..MAX_LISTED + 5 {
+            std::fs::create_dir_all(root.join(format!("p{i:04}"))).unwrap();
+        }
+        assert_eq!(list(d.path()).unwrap().len(), MAX_LISTED);
+    }
 
     #[test]
     fn accepts_plain_names() {

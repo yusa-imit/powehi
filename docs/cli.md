@@ -26,6 +26,7 @@ powehi login                         # unlocks the store for this run
 powehi invite create --wait 120      # prints an invite link, waits for the peer
 powehi invite redeem                 # peer pastes the link on stdin
 powehi conversations                 # list "<conversation id> <role>"
+powehi profiles                      # list profile names
 powehi verify <conversation>         # compare the Safety Number out of band
 powehi verify <conversation> --confirm "<number>"
 powehi chat <conversation>           # interactive REPL, live delivery
@@ -45,6 +46,7 @@ powehi chat <conversation>           # interactive REPL, live delivery
 | `chat <conv>` | Interactive REPL; reconnects up to 3 times, then tells you |
 | `verify <conv> [--confirm N]` | Show / record the Safety Number (prd.md §5.6) |
 | `conversations` | List conversation ids and roles |
+| `profiles` | List profile names in the data directory (no password) |
 
 `<conv>` accepts a unique prefix of at least 4 characters.
 
