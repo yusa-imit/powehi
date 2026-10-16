@@ -120,7 +120,9 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
         #[cfg(unix)]
         cli::Command::Verify(ref c) => run_verify(&args.server, &paths, c),
         #[cfg(unix)]
-        cli::Command::Conversations(ref a) => run_conversations(&args.server, &paths, a.unread),
+        cli::Command::Conversations(ref a) => {
+            run_conversations(&args.server, &paths, a.unread, a.changed)
+        }
         cli::Command::Profiles => run_profiles(&base),
         #[cfg(not(unix))]
         ref other => Err(CliError::NotImplemented(other.name())),
@@ -262,13 +264,20 @@ fn run_conversations(
     server: &url::Url,
     paths: &profile::ProfilePaths,
     only_unread: bool,
+    only_changed: bool,
 ) -> Result<(), CliError> {
     let rt = runtime()?;
     let client = status::http_client()?;
     let mut prompter = prompt::TtyPrompter;
     let session = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
     let unread = message::unread_counts(&session.store)?;
-    conversation::report(&session.store, &unread, only_unread, &mut std::io::stdout())?;
+    conversation::report(
+        &session.store,
+        &unread,
+        only_unread,
+        only_changed,
+        &mut std::io::stdout(),
+    )?;
     Ok(())
 }
 
