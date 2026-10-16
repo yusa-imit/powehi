@@ -1241,6 +1241,7 @@ crates/client/
 | `powehi inbox` | `/v1/messages` 수신 → 복호화 → 저장 → ack | §11.1 |
 | `powehi chat <대화>` | 대화형 REPL, `/v1/ws` 실시간 수신, 재연결 3회 | §7.6 |
 | `powehi verify <대화>` | Safety Number 표시 | §5.6 |
+| `powehi conversations` | 저장된 대화 id·역할 목록 (로컬 전용, 본문·키 미출력) | §7A.3 |
 
 전체 화면 TUI(`ratatui`)는 같은 lib 위에 올리는 후속 작업이며 Phase 7 DoD에 포함하지 않음.
 
