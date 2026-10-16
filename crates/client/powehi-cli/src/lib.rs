@@ -112,7 +112,9 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
         #[cfg(unix)]
         cli::Command::Send(ref c) => run_send(&args.server, &paths, &c.conversation),
         #[cfg(unix)]
-        cli::Command::Read(ref c) => run_read(&args.server, &paths, &c.conversation, c.keep),
+        cli::Command::Read(ref c) => {
+            run_read(&args.server, &paths, &c.conversation, c.keep, c.last)
+        }
         #[cfg(unix)]
         cli::Command::Chat(ref c) => run_chat(&args.server, &paths, &c.conversation),
         #[cfg(unix)]
@@ -231,6 +233,7 @@ fn run_read(
     paths: &profile::ProfilePaths,
     reference: &str,
     keep: bool,
+    last: Option<u32>,
 ) -> Result<(), CliError> {
     let rt = runtime()?;
     let client = status::http_client()?;
@@ -242,7 +245,8 @@ fn run_read(
     }
     let msgs = message::pending(&session.store, group_id)?;
     // Only delete what reached the terminal: a closed pipe must not eat unseen messages.
-    message::show(&session.store, &msgs, keep, &mut std::io::stdout()).map_err(|e| match e {
+    let shown = message::newest(&msgs, last.map(|n| n as usize));
+    message::show(&session.store, shown, keep, &mut std::io::stdout()).map_err(|e| match e {
         message::ShowError::Output => CliError::Stdout,
         message::ShowError::Discard(e) => CliError::Message(e),
     })?;
