@@ -56,7 +56,7 @@ pub enum Command {
     /// Show the Safety Number for a conversation.
     Verify(VerifyArgs),
     /// List the conversations stored in this profile (ids, roles, unread counts).
-    Conversations,
+    Conversations(ConversationsArgs),
     /// List the profile names in the data directory (no password; names only).
     Profiles,
 }
@@ -81,6 +81,13 @@ pub enum InviteCommand {
     },
     /// Redeem an invite link (read from stdin, not argv).
     Redeem,
+}
+
+#[derive(Debug, Args)]
+pub struct ConversationsArgs {
+    /// List only conversations with unread messages.
+    #[arg(long)]
+    pub unread: bool,
 }
 
 #[derive(Debug, Args)]
@@ -115,7 +122,7 @@ impl Command {
             Command::Read(_) => "read",
             Command::Chat(_) => "chat",
             Command::Verify(_) => "verify",
-            Command::Conversations => "conversations",
+            Command::Conversations(_) => "conversations",
             Command::Profiles => "profiles",
         }
     }
