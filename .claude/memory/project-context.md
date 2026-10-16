@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 559 (2026-10-17, FEATURE) — `conversations --unread`
+- Phase 7 DoD all [x]; `conversations --unread` lists only conversations with unread messages (local filter in `conversation::report`). 188 tests pass, clippy clean; no crypto/arch/backend change so no review agent required.
+
 ## Cycle 558 (2026-10-17, FEATURE) — `read --last N`
 - Phase 7 DoD all [x]; `read <conv> --last N` (1..=10000) shows/removes only the newest N via `message::newest`; older stay stored. Local only; no crypto/arch/backend change so no review agent required.
 
