@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 552 (2026-10-16, FEATURE) — CLI user guide
+- Phase 7 DoD all [x]; added `docs/cli.md` (options, quick start, command table, safety notes). Docs only; no review agent required.
+
 ## Cycle 551 (2026-10-16, FEATURE) — `powehi conversations`
 - Phase 7 DoD all [x]; no unchecked item, so added the missing way to discover conversation ids: `conversations` lists `<group id> <role>` from the store (login only unlocks it; no content/keys). Tests: 175 pass, clippy clean. Not crypto/arch/backend so no review agent required.
 
