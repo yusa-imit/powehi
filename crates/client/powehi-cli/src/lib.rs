@@ -115,6 +115,8 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
         cli::Command::Chat(ref c) => run_chat(&args.server, &paths, &c.conversation),
         #[cfg(unix)]
         cli::Command::Verify(ref c) => run_verify(&args.server, &paths, c),
+        #[cfg(unix)]
+        cli::Command::Conversations => run_conversations(&args.server, &paths),
         #[cfg(not(unix))]
         ref other => Err(CliError::NotImplemented(other.name())),
     }
@@ -234,6 +236,17 @@ fn run_read(
     if msgs.is_empty() {
         println!("no new messages");
     }
+    Ok(())
+}
+
+/// `conversations`: logs in to unlock the store, then lists stored conversation ids and roles.
+#[cfg(unix)]
+fn run_conversations(server: &url::Url, paths: &profile::ProfilePaths) -> Result<(), CliError> {
+    let rt = runtime()?;
+    let client = status::http_client()?;
+    let mut prompter = prompt::TtyPrompter;
+    let session = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
+    conversation::report(&session.store, &mut std::io::stdout())?;
     Ok(())
 }
 

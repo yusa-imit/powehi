@@ -55,6 +55,8 @@ pub enum Command {
     Chat(ConversationArg),
     /// Show the Safety Number for a conversation.
     Verify(VerifyArgs),
+    /// List the conversations stored in this profile (ids and roles only).
+    Conversations,
 }
 
 #[derive(Debug, Args)]
@@ -99,6 +101,7 @@ impl Command {
             Command::Read(_) => "read",
             Command::Chat(_) => "chat",
             Command::Verify(_) => "verify",
+            Command::Conversations => "conversations",
         }
     }
 }

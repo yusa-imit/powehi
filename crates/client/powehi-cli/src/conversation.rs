@@ -26,6 +26,8 @@ pub enum ConversationError {
     Malformed,
     #[error("too many conversations in this profile")]
     TooMany,
+    #[error("could not write the conversation list")]
+    Output,
 }
 
 /// Which side of the invite this device was.
@@ -162,6 +164,29 @@ pub fn list(store: &ProfileStore) -> Result<Vec<Uuid>, ConversationError> {
     Ok(out)
 }
 
+/// Writes one line per stored conversation (`<id> <role>`, sorted by id), then a count.
+/// Ids and roles are server-visible metadata; no message text or key material is printed.
+pub fn report(
+    store: &ProfileStore,
+    out: &mut impl std::io::Write,
+) -> Result<(), ConversationError> {
+    let mut ids = list(store)?;
+    ids.sort();
+    assert!(ids.len() <= crate::store::MAX_RECORDS);
+    for id in &ids {
+        let role = match load(store, id)? {
+            Some(c) => c.role,
+            None => return Err(ConversationError::Malformed),
+        };
+        let name = match role {
+            Role::Creator => "creator",
+            Role::Joiner => "joiner",
+        };
+        writeln!(out, "{id} {name}").map_err(|_| ConversationError::Output)?;
+    }
+    writeln!(out, "{} conversation(s)", ids.len()).map_err(|_| ConversationError::Output)
+}
+
 /// Writes (or replaces) the record for `conv.group_id`.
 pub fn save(store: &ProfileStore, conv: &Conversation) -> Result<(), ConversationError> {
     conv.check()?;
@@ -237,6 +262,30 @@ mod tests {
             2,
             "non-conversation records are ignored"
         );
+    }
+
+    #[test]
+    fn report_lists_sorted_ids_and_roles_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let mut out = Vec::new();
+        report(&store, &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "0 conversation(s)\n");
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        save(&store, &joiner(a)).unwrap();
+        save(
+            &store,
+            &Conversation::new(b, Uuid::new_v4(), Role::Creator, None),
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        report(&store, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let mut want = [format!("{a} joiner"), format!("{b} creator")];
+        want.sort();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[..2], want[..]);
+        assert_eq!(lines[2], "2 conversation(s)");
     }
 
     #[test]
