@@ -301,6 +301,33 @@ mod tests {
         assert!(text.contains(&format!("{b} creator\n")));
     }
 
+    struct FailingWriter;
+
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("closed"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn report_ignores_unknown_unread_ids_and_types_write_failures() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let (known, stranger) = (Uuid::new_v4(), Uuid::new_v4());
+        save(&store, &joiner(known)).unwrap();
+        let unread = BTreeMap::from([(stranger, 9)]);
+        let mut out = Vec::new();
+        report(&store, &unread, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains(&stranger.to_string()));
+        assert!(!text.contains("unread"));
+        let err = report(&store, &unread, &mut FailingWriter).unwrap_err();
+        assert!(matches!(err, ConversationError::Output));
+    }
+
     #[test]
     fn rejects_inconsistent_records() {
         let tmp = tempfile::tempdir().unwrap();
