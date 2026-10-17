@@ -120,9 +120,7 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
         #[cfg(unix)]
         cli::Command::Verify(ref c) => run_verify(&args.server, &paths, c),
         #[cfg(unix)]
-        cli::Command::Conversations(ref a) => {
-            run_conversations(&args.server, &paths, a.unread, a.changed, a.role)
-        }
+        cli::Command::Conversations(ref a) => run_conversations(&args.server, &paths, a),
         cli::Command::Profiles => run_profiles(&base),
         #[cfg(not(unix))]
         ref other => Err(CliError::NotImplemented(other.name())),
@@ -263,23 +261,19 @@ fn run_read(
 fn run_conversations(
     server: &url::Url,
     paths: &profile::ProfilePaths,
-    only_unread: bool,
-    only_changed: bool,
-    only_role: Option<conversation::Role>,
+    a: &cli::ConversationsArgs,
 ) -> Result<(), CliError> {
     let rt = runtime()?;
     let client = status::http_client()?;
     let mut prompter = prompt::TtyPrompter;
     let session = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
     let unread = message::unread_counts(&session.store)?;
-    conversation::report(
-        &session.store,
-        &unread,
-        only_unread,
-        only_changed,
-        only_role,
-        &mut std::io::stdout(),
-    )?;
+    let (store, out) = (&session.store, &mut std::io::stdout());
+    if a.count {
+        conversation::count(store, &unread, a.unread, a.changed, a.role, out)?;
+    } else {
+        conversation::report(store, &unread, a.unread, a.changed, a.role, out)?;
+    }
     Ok(())
 }
 

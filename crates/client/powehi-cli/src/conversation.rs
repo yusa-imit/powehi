@@ -166,20 +166,16 @@ pub fn list(store: &ProfileStore) -> Result<Vec<Uuid>, ConversationError> {
     Ok(out)
 }
 
-/// Writes one line per stored conversation (`<id> <role>`, plus ` <n> unread` when `n > 0` and
-/// ` CHANGED` when a verified Safety Number no longer matches (§5.6), sorted by id), then a
-/// count. Ids and roles are server-visible metadata and `n` is a local count; with
-/// `only_unread`, conversations without unread messages are omitted, and with `only_changed`,
-/// those whose Safety Number did not change are, and with `only_role`, those of the other role. No message text or key
-/// material is printed.
-pub fn report(
+/// Selects the conversations matching the filters, sorted by id: `only_unread` keeps those with
+/// unread messages, `only_changed` those whose Safety Number changed, `only_role` those of that
+/// role.
+fn select(
     store: &ProfileStore,
     unread: &BTreeMap<Uuid, usize>,
     only_unread: bool,
     only_changed: bool,
     only_role: Option<Role>,
-    out: &mut impl std::io::Write,
-) -> Result<(), ConversationError> {
+) -> Result<Vec<(Uuid, Role)>, ConversationError> {
     let mut ids = list(store)?;
     ids.sort();
     assert!(ids.len() <= crate::store::MAX_RECORDS);
@@ -189,15 +185,35 @@ pub fn report(
     if only_changed {
         ids.retain(|id| crate::verify::changed_since_verified(store, *id));
     }
-    let mut shown = 0usize;
-    for id in &ids {
-        let role = match load(store, id)? {
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        let role = match load(store, &id)? {
             Some(c) => c.role,
             None => return Err(ConversationError::Malformed),
         };
-        if only_role.is_some_and(|r| r != role) {
-            continue;
+        if only_role.is_none_or(|r| r == role) {
+            out.push((id, role));
         }
+    }
+    Ok(out)
+}
+
+/// Writes one line per stored conversation (`<id> <role>`, plus ` <n> unread` when `n > 0` and
+/// ` CHANGED` when a verified Safety Number no longer matches (§5.6), sorted by id), then a
+/// count. Ids and roles are server-visible metadata and `n` is a local count; with
+/// `only_unread`, conversations without unread messages are omitted, and with `only_changed`,
+/// those whose Safety Number did not change are, and with `only_role`, those of the other
+/// role. No message text or key material is printed.
+pub fn report(
+    store: &ProfileStore,
+    unread: &BTreeMap<Uuid, usize>,
+    only_unread: bool,
+    only_changed: bool,
+    only_role: Option<Role>,
+    out: &mut impl std::io::Write,
+) -> Result<(), ConversationError> {
+    let chosen = select(store, unread, only_unread, only_changed, only_role)?;
+    for (id, role) in &chosen {
         let name = match role {
             Role::Creator => "creator",
             Role::Joiner => "joiner",
@@ -212,9 +228,22 @@ pub fn report(
             n => writeln!(out, "{id} {name} {n} unread{changed}"),
         }
         .map_err(|_| ConversationError::Output)?;
-        shown += 1;
     }
-    writeln!(out, "{shown} conversation(s)").map_err(|_| ConversationError::Output)
+    writeln!(out, "{} conversation(s)", chosen.len()).map_err(|_| ConversationError::Output)
+}
+
+/// Writes only the number of conversations the same filters as [`report`] would list (for
+/// scripts), on one line. Nothing else is printed.
+pub fn count(
+    store: &ProfileStore,
+    unread: &BTreeMap<Uuid, usize>,
+    only_unread: bool,
+    only_changed: bool,
+    only_role: Option<Role>,
+    out: &mut impl std::io::Write,
+) -> Result<(), ConversationError> {
+    let chosen = select(store, unread, only_unread, only_changed, only_role)?;
+    writeln!(out, "{}", chosen.len()).map_err(|_| ConversationError::Output)
 }
 
 /// Writes (or replaces) the record for `conv.group_id`.
@@ -612,5 +641,30 @@ mod tests {
         let c = joiner(Uuid::new_v4());
         let s = format!("{c:?}");
         assert!(!s.contains("pq_decap_key") && !s.contains("pq_encap_key"));
+    }
+
+    #[test]
+    fn count_prints_only_the_filtered_number() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        save(&store, &joiner(a)).unwrap();
+        save(
+            &store,
+            &Conversation::new(b, Uuid::new_v4(), Role::Creator, None),
+        )
+        .unwrap();
+        let unread = BTreeMap::from([(a, 2)]);
+        let run = |u, c, r| {
+            let mut out = Vec::new();
+            count(&store, &unread, u, c, r, &mut out).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        assert_eq!(run(false, false, None), "2\n");
+        assert_eq!(run(true, false, None), "1\n");
+        assert_eq!(run(false, true, None), "0\n");
+        assert_eq!(run(false, false, Some(Role::Creator)), "1\n");
+        let err = count(&store, &unread, false, false, None, &mut FailingWriter).unwrap_err();
+        assert!(matches!(err, ConversationError::Output));
     }
 }

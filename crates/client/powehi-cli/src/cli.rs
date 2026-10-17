@@ -94,6 +94,9 @@ pub struct ConversationsArgs {
     /// List only conversations where you were the creator or the joiner of the invite.
     #[arg(long, value_enum)]
     pub role: Option<crate::conversation::Role>,
+    /// Print only the number of matching conversations.
+    #[arg(long)]
+    pub count: bool,
 }
 
 #[derive(Debug, Args)]
