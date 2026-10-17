@@ -711,4 +711,43 @@ mod tests {
         let err = ids(&store, &unread, false, false, None, &mut FailingWriter).unwrap_err();
         assert!(matches!(err, ConversationError::Output));
     }
+
+    #[test]
+    fn filters_combine_with_and_semantics_in_ids_and_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let (hit, creator, read, unchanged) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        for g in [hit, read, unchanged] {
+            save(&store, &joiner(g)).unwrap();
+        }
+        save(
+            &store,
+            &Conversation::new(creator, Uuid::new_v4(), Role::Creator, None),
+        )
+        .unwrap();
+        for g in [hit, creator, read] {
+            let rec = format!("{}{}", crate::verify::PREFIX, g.hyphenated());
+            store
+                .put(&rec, br#"{"version":1,"number":"1 2 3"}"#)
+                .unwrap();
+        }
+        let unread = BTreeMap::from([(hit, 1), (creator, 3), (unchanged, 2)]);
+        let mut out = Vec::new();
+        ids(&store, &unread, true, true, Some(Role::Joiner), &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), format!("{hit}\n"));
+        let mut out = Vec::new();
+        count(&store, &unread, true, true, Some(Role::Joiner), &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "1\n");
+        let mut out = Vec::new();
+        count(&store, &unread, true, true, Some(Role::Creator), &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "1\n");
+        let mut out = Vec::new();
+        count(&store, &BTreeMap::new(), true, true, None, &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "0\n");
+    }
 }
