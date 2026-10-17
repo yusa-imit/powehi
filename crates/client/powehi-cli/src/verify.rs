@@ -147,6 +147,12 @@ pub fn changed_since_verified(store: &ProfileStore, group_id: Uuid) -> bool {
     }
 }
 
+/// `true` when a confirmation record exists for the conversation. A store error counts as no
+/// record, so `conversations --unverified` over-reports rather than hides a conversation.
+pub fn has_confirmation(store: &ProfileStore, group_id: Uuid) -> bool {
+    matches!(store.get(&record_name(&group_id)), Ok(Some(_)))
+}
+
 /// The one-line warning shown when [`changed_since_verified`] is true.
 pub const CHANGED_WARNING: &str = "warning: the safety number CHANGED since you verified this \
 conversation; run `powehi verify <conversation>` and compare it with your peer before trusting it";

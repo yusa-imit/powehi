@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 572 (2026-10-18, FEATURE) — `conversations --unverified`
+- Phase 7 DoD all [x]; `conversations --unverified` lists only conversations with no recorded Safety Number confirmation (`Page.unverified`, `verify::has_confirmation`). 200 tests pass, clippy clean; local-only, no crypto/arch/backend change so no review agent required.
+
 ## Cycle 571 (2026-10-18, FEATURE→CI fix) — Tauri deny advisories
 - Main CI-red: `cargo deny` on `app/src-tauri` flagged new unmaintained advisories RUSTSEC-2026-0370/0371/0372 (zbus_names/zvariant/zvariant_derive, via tauri-plugin-notification → notify-rust, Linux only). Added documented ignores to `app/src-tauri/deny.toml`; `cargo deny check advisories` ok locally. Config-only, no crypto/arch change.
 

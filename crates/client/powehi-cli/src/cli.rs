@@ -103,6 +103,9 @@ pub struct ConversationsArgs {
     /// List only conversations whose id starts with this (lowercase hex digits and dashes).
     #[arg(long, value_name = "HEX", value_parser = parse_id_prefix)]
     pub prefix: Option<String>,
+    /// List only conversations whose Safety Number you have not confirmed (`verify --confirm`).
+    #[arg(long)]
+    pub unverified: bool,
     /// Print only the number of matching conversations.
     #[arg(long)]
     pub count: bool,
