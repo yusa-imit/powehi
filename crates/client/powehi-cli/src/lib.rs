@@ -269,12 +269,13 @@ fn run_conversations(
     let session = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
     let unread = message::unread_counts(&session.store)?;
     let (store, out) = (&session.store, &mut std::io::stdout());
+    let limit = a.limit.map(|n| n as usize);
     if a.count {
-        conversation::count(store, &unread, a.unread, a.changed, a.role, out)?;
+        conversation::count(store, &unread, a.unread, a.changed, a.role, limit, out)?;
     } else if a.ids {
-        conversation::ids(store, &unread, a.unread, a.changed, a.role, out)?;
+        conversation::ids(store, &unread, a.unread, a.changed, a.role, limit, out)?;
     } else {
-        conversation::report(store, &unread, a.unread, a.changed, a.role, out)?;
+        conversation::report(store, &unread, a.unread, a.changed, a.role, limit, out)?;
     }
     Ok(())
 }
