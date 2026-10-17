@@ -273,6 +273,7 @@ fn run_conversations(
         offset: a.offset.map_or(0, |n| n as usize),
         limit: a.limit.map(|n| n as usize),
         prefix: a.prefix.clone(),
+        unverified: a.unverified,
     };
     if a.count {
         conversation::count(
