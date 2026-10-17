@@ -309,8 +309,8 @@ pub fn ids(
 }
 
 /// Writes the conversations the same filters as [`report`] would list as JSON lines (for
-/// scripts): `{"id":..,"role":"creator"|"joiner","unread":n,"changed":bool}` per line, sorted by
-/// id. Only the metadata `report` prints; no message text or key material.
+/// scripts): `{"id":..,"role":"creator"|"joiner","unread":n,"changed":bool,"verified":bool}`
+/// per line, sorted by id. Only the metadata `report` prints; no message text or key material.
 pub fn json(
     store: &ProfileStore,
     unread: &BTreeMap<Uuid, usize>,
@@ -330,6 +330,7 @@ pub fn json(
             },
             "unread": unread.get(id).copied().unwrap_or(0),
             "changed": crate::verify::changed_since_verified(store, *id),
+            "verified": crate::verify::has_confirmation(store, *id),
         });
         writeln!(out, "{line}").map_err(|_| ConversationError::Output)?;
     }
@@ -843,11 +844,22 @@ mod tests {
         assert_eq!(row_a["role"], "joiner");
         assert_eq!(row_a["unread"], 2);
         assert_eq!(row_a["changed"], false);
+        assert_eq!(row_a["verified"], false);
         let row_b = rows.iter().find(|r| r["id"] == b.to_string()).unwrap();
         assert_eq!(
             (row_b["role"].as_str(), row_b["unread"].as_u64()),
             (Some("creator"), Some(0))
         );
+        let rec = format!("{}{}", crate::verify::PREFIX, b.hyphenated());
+        store
+            .put(&rec, br#"{"version":1,"number":"1 2 3"}"#)
+            .unwrap();
+        let again: Vec<serde_json::Value> = run(false, None)
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let verified_b = again.iter().find(|r| r["id"] == b.to_string()).unwrap();
+        assert_eq!(verified_b["verified"], true);
         assert_eq!(run(true, None).lines().count(), 1);
         assert_eq!(run(false, Some(Role::Creator)).lines().count(), 1);
         let err = json(
