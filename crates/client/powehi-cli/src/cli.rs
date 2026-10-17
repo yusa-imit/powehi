@@ -100,12 +100,27 @@ pub struct ConversationsArgs {
     /// Skip the first N matching conversations (by id); combine with --limit to page.
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=10000))]
     pub offset: Option<u32>,
+    /// List only conversations whose id starts with this (lowercase hex digits and dashes).
+    #[arg(long, value_name = "HEX", value_parser = parse_id_prefix)]
+    pub prefix: Option<String>,
     /// Print only the number of matching conversations.
     #[arg(long)]
     pub count: bool,
     /// Print only the matching conversation ids, one per line.
     #[arg(long, conflicts_with = "count")]
     pub ids: bool,
+}
+
+/// Accepts 1..=36 characters of `[0-9a-f-]`, the alphabet of a hyphenated lowercase UUID.
+fn parse_id_prefix(s: &str) -> Result<String, String> {
+    let ok = (1..=36).contains(&s.len())
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b) || b == b'-');
+    if ok {
+        Ok(s.to_string())
+    } else {
+        Err("expected 1-36 lowercase hex digits or dashes".to_string())
+    }
 }
 
 #[derive(Debug, Args)]
