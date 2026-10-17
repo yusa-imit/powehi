@@ -166,16 +166,31 @@ pub fn list(store: &ProfileStore) -> Result<Vec<Uuid>, ConversationError> {
     Ok(out)
 }
 
+/// A window over the matching conversations (sorted by id): skip the first `offset` matches,
+/// then keep at most `limit` (`Some(0)` keeps none). `Option<usize>` converts to a window with
+/// that limit and no offset.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Page {
+    pub offset: usize,
+    pub limit: Option<usize>,
+}
+
+impl From<Option<usize>> for Page {
+    fn from(limit: Option<usize>) -> Self {
+        Page { offset: 0, limit }
+    }
+}
+
 /// Selects the conversations matching the filters, sorted by id: `only_unread` keeps those with
 /// unread messages, `only_changed` those whose Safety Number changed, `only_role` those of that
-/// role. `limit` keeps at most that many (the first by id; `Some(0)` keeps none).
+/// role. `page` then skips the first `offset` matches and keeps at most `limit` of the rest.
 fn select(
     store: &ProfileStore,
     unread: &BTreeMap<Uuid, usize>,
     only_unread: bool,
     only_changed: bool,
     only_role: Option<Role>,
-    limit: Option<usize>,
+    page: impl Into<Page>,
 ) -> Result<Vec<(Uuid, Role)>, ConversationError> {
     let mut ids = list(store)?;
     ids.sort();
@@ -186,19 +201,27 @@ fn select(
     if only_changed {
         ids.retain(|id| crate::verify::changed_since_verified(store, *id));
     }
+    let page: Page = page.into();
     let mut out = Vec::with_capacity(ids.len());
+    let mut skipped = 0usize;
     for id in ids {
-        if limit.is_some_and(|n| out.len() >= n) {
+        if page.limit.is_some_and(|n| out.len() >= n) {
             break;
         }
         let role = match load(store, &id)? {
             Some(c) => c.role,
             None => return Err(ConversationError::Malformed),
         };
-        if only_role.is_none_or(|r| r == role) {
-            out.push((id, role));
+        if only_role.is_some_and(|r| r != role) {
+            continue;
         }
+        if skipped < page.offset {
+            skipped += 1;
+            continue;
+        }
+        out.push((id, role));
     }
+    assert!(skipped <= page.offset);
     Ok(out)
 }
 
@@ -214,10 +237,10 @@ pub fn report(
     only_unread: bool,
     only_changed: bool,
     only_role: Option<Role>,
-    limit: Option<usize>,
+    page: impl Into<Page>,
     out: &mut impl std::io::Write,
 ) -> Result<(), ConversationError> {
-    let chosen = select(store, unread, only_unread, only_changed, only_role, limit)?;
+    let chosen = select(store, unread, only_unread, only_changed, only_role, page)?;
     for (id, role) in &chosen {
         let name = match role {
             Role::Creator => "creator",
@@ -245,10 +268,10 @@ pub fn count(
     only_unread: bool,
     only_changed: bool,
     only_role: Option<Role>,
-    limit: Option<usize>,
+    page: impl Into<Page>,
     out: &mut impl std::io::Write,
 ) -> Result<(), ConversationError> {
-    let chosen = select(store, unread, only_unread, only_changed, only_role, limit)?;
+    let chosen = select(store, unread, only_unread, only_changed, only_role, page)?;
     writeln!(out, "{}", chosen.len()).map_err(|_| ConversationError::Output)
 }
 
@@ -260,10 +283,10 @@ pub fn ids(
     only_unread: bool,
     only_changed: bool,
     only_role: Option<Role>,
-    limit: Option<usize>,
+    page: impl Into<Page>,
     out: &mut impl std::io::Write,
 ) -> Result<(), ConversationError> {
-    let chosen = select(store, unread, only_unread, only_changed, only_role, limit)?;
+    let chosen = select(store, unread, only_unread, only_changed, only_role, page)?;
     for (id, _) in &chosen {
         writeln!(out, "{id}").map_err(|_| ConversationError::Output)?;
     }
@@ -858,5 +881,49 @@ mod tests {
         .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert_eq!(text, format!("{} joiner\n1 conversation(s)\n", all[0]));
+    }
+
+    #[test]
+    fn offset_skips_matches_after_filters_and_pairs_with_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let mut all = [
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        ];
+        for g in all {
+            save(&store, &joiner(g)).unwrap();
+        }
+        all.sort();
+        let run = |offset, limit| {
+            let mut out = Vec::new();
+            let page = Page { offset, limit };
+            ids(&store, &BTreeMap::new(), false, false, None, page, &mut out).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        assert_eq!(run(1, Some(2)), format!("{}\n{}\n", all[1], all[2]));
+        assert_eq!(run(3, None), format!("{}\n", all[3]));
+        assert_eq!(run(4, None), "");
+        assert_eq!(run(9, Some(1)), "");
+        assert_eq!(run(0, None).lines().count(), 4);
+        // A role filter that matches nothing is not made to match by skipping.
+        let mut out = Vec::new();
+        let page = Page {
+            offset: 1,
+            limit: None,
+        };
+        count(
+            &store,
+            &BTreeMap::new(),
+            false,
+            false,
+            Some(Role::Creator),
+            page,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "0\n");
     }
 }
