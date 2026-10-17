@@ -302,6 +302,34 @@ pub fn ids(
     Ok(())
 }
 
+/// Writes the conversations the same filters as [`report`] would list as JSON lines (for
+/// scripts): `{"id":..,"role":"creator"|"joiner","unread":n,"changed":bool}` per line, sorted by
+/// id. Only the metadata `report` prints; no message text or key material.
+pub fn json(
+    store: &ProfileStore,
+    unread: &BTreeMap<Uuid, usize>,
+    only_unread: bool,
+    only_changed: bool,
+    only_role: Option<Role>,
+    page: impl Into<Page>,
+    out: &mut impl std::io::Write,
+) -> Result<(), ConversationError> {
+    let chosen = select(store, unread, only_unread, only_changed, only_role, page)?;
+    for (id, role) in &chosen {
+        let line = serde_json::json!({
+            "id": id.to_string(),
+            "role": match role {
+                Role::Creator => "creator",
+                Role::Joiner => "joiner",
+            },
+            "unread": unread.get(id).copied().unwrap_or(0),
+            "changed": crate::verify::changed_since_verified(store, *id),
+        });
+        writeln!(out, "{line}").map_err(|_| ConversationError::Output)?;
+    }
+    Ok(())
+}
+
 /// Writes (or replaces) the record for `conv.group_id`.
 pub fn save(store: &ProfileStore, conv: &Conversation) -> Result<(), ConversationError> {
     conv.check()?;
@@ -770,6 +798,53 @@ mod tests {
         assert_eq!(run(false, Some(Role::Creator)), format!("{b}\n"));
         assert_eq!(run(false, Some(Role::Joiner)), format!("{a}\n"));
         let err = ids(
+            &store,
+            &unread,
+            false,
+            false,
+            None,
+            None,
+            &mut FailingWriter,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConversationError::Output));
+    }
+
+    #[test]
+    fn json_prints_one_object_per_filtered_conversation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        save(&store, &joiner(a)).unwrap();
+        save(
+            &store,
+            &Conversation::new(b, Uuid::new_v4(), Role::Creator, None),
+        )
+        .unwrap();
+        let unread = BTreeMap::from([(a, 2)]);
+        let run = |u, r| {
+            let mut out = Vec::new();
+            json(&store, &unread, u, false, r, None, &mut out).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        let all = run(false, None);
+        let rows: Vec<serde_json::Value> = all
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 2);
+        let row_a = rows.iter().find(|r| r["id"] == a.to_string()).unwrap();
+        assert_eq!(row_a["role"], "joiner");
+        assert_eq!(row_a["unread"], 2);
+        assert_eq!(row_a["changed"], false);
+        let row_b = rows.iter().find(|r| r["id"] == b.to_string()).unwrap();
+        assert_eq!(
+            (row_b["role"].as_str(), row_b["unread"].as_u64()),
+            (Some("creator"), Some(0))
+        );
+        assert_eq!(run(true, None).lines().count(), 1);
+        assert_eq!(run(false, Some(Role::Creator)).lines().count(), 1);
+        let err = json(
             &store,
             &unread,
             false,

@@ -109,6 +109,9 @@ pub struct ConversationsArgs {
     /// Print only the matching conversation ids, one per line.
     #[arg(long, conflicts_with = "count")]
     pub ids: bool,
+    /// Print the matching conversations as JSON lines (id, role, unread, changed).
+    #[arg(long, conflicts_with_all = ["count", "ids"])]
+    pub json: bool,
 }
 
 /// Accepts 1..=36 characters of `[0-9a-f-]`, the alphabet of a hyphenated lowercase UUID.

@@ -294,6 +294,8 @@ fn run_conversations(
             limit.clone(),
             out,
         )?;
+    } else if a.json {
+        conversation::json(store, &unread, a.unread, a.changed, a.role, limit, out)?;
     } else {
         conversation::report(store, &unread, a.unread, a.changed, a.role, limit, out)?;
     }

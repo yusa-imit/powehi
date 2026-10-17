@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 569 (2026-10-17, FEATURE) — `conversations --json`
+- Phase 7 DoD all [x]; `conversations --json` prints one JSON object per match (id, role, unread, changed), same filters/paging, conflicts with --count/--ids. 198 tests pass, clippy clean; local-only metadata already printed by `report`, no crypto/arch/backend change so no review agent required.
+
 ## Cycle 568 (2026-10-17, FEATURE) — `conversations --prefix`
 - Phase 7 DoD all [x]; `conversations --prefix HEX` lists only ids starting with it (applied before offset/limit; `Page` gained `prefix`). 197 tests pass, clippy clean; local-only, no crypto/arch/backend change so no review agent required.
 
