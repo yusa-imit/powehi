@@ -121,7 +121,7 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
         cli::Command::Verify(ref c) => run_verify(&args.server, &paths, c),
         #[cfg(unix)]
         cli::Command::Conversations(ref a) => {
-            run_conversations(&args.server, &paths, a.unread, a.changed)
+            run_conversations(&args.server, &paths, a.unread, a.changed, a.role)
         }
         cli::Command::Profiles => run_profiles(&base),
         #[cfg(not(unix))]
@@ -265,6 +265,7 @@ fn run_conversations(
     paths: &profile::ProfilePaths,
     only_unread: bool,
     only_changed: bool,
+    only_role: Option<conversation::Role>,
 ) -> Result<(), CliError> {
     let rt = runtime()?;
     let client = status::http_client()?;
@@ -276,6 +277,7 @@ fn run_conversations(
         &unread,
         only_unread,
         only_changed,
+        only_role,
         &mut std::io::stdout(),
     )?;
     Ok(())

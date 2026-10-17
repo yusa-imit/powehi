@@ -33,7 +33,7 @@ pub enum ConversationError {
 }
 
 /// Which side of the invite this device was.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     /// Redeemed the invite, created the MLS group and sent the Welcome.
@@ -170,13 +170,14 @@ pub fn list(store: &ProfileStore) -> Result<Vec<Uuid>, ConversationError> {
 /// ` CHANGED` when a verified Safety Number no longer matches (§5.6), sorted by id), then a
 /// count. Ids and roles are server-visible metadata and `n` is a local count; with
 /// `only_unread`, conversations without unread messages are omitted, and with `only_changed`,
-/// those whose Safety Number did not change are. No message text or key
+/// those whose Safety Number did not change are, and with `only_role`, those of the other role. No message text or key
 /// material is printed.
 pub fn report(
     store: &ProfileStore,
     unread: &BTreeMap<Uuid, usize>,
     only_unread: bool,
     only_changed: bool,
+    only_role: Option<Role>,
     out: &mut impl std::io::Write,
 ) -> Result<(), ConversationError> {
     let mut ids = list(store)?;
@@ -188,11 +189,15 @@ pub fn report(
     if only_changed {
         ids.retain(|id| crate::verify::changed_since_verified(store, *id));
     }
+    let mut shown = 0usize;
     for id in &ids {
         let role = match load(store, id)? {
             Some(c) => c.role,
             None => return Err(ConversationError::Malformed),
         };
+        if only_role.is_some_and(|r| r != role) {
+            continue;
+        }
         let name = match role {
             Role::Creator => "creator",
             Role::Joiner => "joiner",
@@ -207,8 +212,9 @@ pub fn report(
             n => writeln!(out, "{id} {name} {n} unread{changed}"),
         }
         .map_err(|_| ConversationError::Output)?;
+        shown += 1;
     }
-    writeln!(out, "{} conversation(s)", ids.len()).map_err(|_| ConversationError::Output)
+    writeln!(out, "{shown} conversation(s)").map_err(|_| ConversationError::Output)
 }
 
 /// Writes (or replaces) the record for `conv.group_id`.
@@ -293,7 +299,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = open(&tmp);
         let mut out = Vec::new();
-        report(&store, &BTreeMap::new(), false, false, &mut out).unwrap();
+        report(&store, &BTreeMap::new(), false, false, None, &mut out).unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), "0 conversation(s)\n");
         let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
         save(&store, &joiner(a)).unwrap();
@@ -303,7 +309,7 @@ mod tests {
         )
         .unwrap();
         let mut out = Vec::new();
-        report(&store, &BTreeMap::new(), false, false, &mut out).unwrap();
+        report(&store, &BTreeMap::new(), false, false, None, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         let mut want = [format!("{a} joiner"), format!("{b} creator")];
         want.sort();
@@ -316,6 +322,7 @@ mod tests {
             &BTreeMap::from([(a, 3), (b, 0)]),
             false,
             false,
+            None,
             &mut out,
         )
         .unwrap();
@@ -343,11 +350,11 @@ mod tests {
         save(&store, &joiner(known)).unwrap();
         let unread = BTreeMap::from([(stranger, 9)]);
         let mut out = Vec::new();
-        report(&store, &unread, false, false, &mut out).unwrap();
+        report(&store, &unread, false, false, None, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(!text.contains(&stranger.to_string()));
         assert!(!text.contains("unread"));
-        let err = report(&store, &unread, false, false, &mut FailingWriter).unwrap_err();
+        let err = report(&store, &unread, false, false, None, &mut FailingWriter).unwrap_err();
         assert!(matches!(err, ConversationError::Output));
     }
 
@@ -360,11 +367,11 @@ mod tests {
         save(&store, &joiner(busy)).unwrap();
         let unread = BTreeMap::from([(busy, 2), (quiet, 0)]);
         let mut out = Vec::new();
-        report(&store, &unread, true, false, &mut out).unwrap();
+        report(&store, &unread, true, false, None, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert_eq!(text, format!("{busy} joiner 2 unread\n1 conversation(s)\n"));
         let mut out = Vec::new();
-        report(&store, &BTreeMap::new(), true, false, &mut out).unwrap();
+        report(&store, &BTreeMap::new(), true, false, None, &mut out).unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), "0 conversation(s)\n");
     }
 
@@ -386,6 +393,7 @@ mod tests {
             &BTreeMap::from([(flagged, 2)]),
             false,
             false,
+            None,
             &mut out,
         )
         .unwrap();
@@ -408,7 +416,7 @@ mod tests {
         }
         let unread = BTreeMap::from([(busy_changed, 1)]);
         let mut out = Vec::new();
-        report(&store, &unread, true, false, &mut out).unwrap();
+        report(&store, &unread, true, false, None, &mut out).unwrap();
         assert_eq!(
             String::from_utf8(out).unwrap(),
             format!("{busy_changed} joiner 1 unread CHANGED\n1 conversation(s)\n")
@@ -427,15 +435,56 @@ mod tests {
             .put(&rec, br#"{"version":1,"number":"1 2 3"}"#)
             .unwrap();
         let mut out = Vec::new();
-        report(&store, &BTreeMap::new(), false, true, &mut out).unwrap();
+        report(&store, &BTreeMap::new(), false, true, None, &mut out).unwrap();
         assert_eq!(
             String::from_utf8(out).unwrap(),
             format!("{flagged} joiner CHANGED\n1 conversation(s)\n")
         );
         // Combined with --unread, a changed but fully read conversation is omitted.
         let mut out = Vec::new();
-        report(&store, &BTreeMap::new(), true, true, &mut out).unwrap();
+        report(&store, &BTreeMap::new(), true, true, None, &mut out).unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), "0 conversation(s)\n");
+    }
+
+    #[test]
+    fn role_filter_lists_only_matching_role_and_counts_shown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let (j, c) = (Uuid::new_v4(), Uuid::new_v4());
+        save(&store, &joiner(j)).unwrap();
+        save(
+            &store,
+            &Conversation::new(c, Uuid::new_v4(), Role::Creator, None),
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        report(
+            &store,
+            &BTreeMap::new(),
+            false,
+            false,
+            Some(Role::Creator),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            format!("{c} creator\n1 conversation(s)\n")
+        );
+        let mut out = Vec::new();
+        report(
+            &store,
+            &BTreeMap::new(),
+            false,
+            false,
+            Some(Role::Joiner),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            format!("{j} joiner\n1 conversation(s)\n")
+        );
     }
 
     #[test]
