@@ -97,6 +97,9 @@ pub struct ConversationsArgs {
     /// Print only the number of matching conversations.
     #[arg(long)]
     pub count: bool,
+    /// Print only the matching conversation ids, one per line.
+    #[arg(long, conflicts_with = "count")]
+    pub ids: bool,
 }
 
 #[derive(Debug, Args)]

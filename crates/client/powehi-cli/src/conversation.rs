@@ -246,6 +246,23 @@ pub fn count(
     writeln!(out, "{}", chosen.len()).map_err(|_| ConversationError::Output)
 }
 
+/// Writes only the ids of the conversations the same filters as [`report`] would list, one per
+/// line and sorted (for scripts). No roles, counts or flags are printed.
+pub fn ids(
+    store: &ProfileStore,
+    unread: &BTreeMap<Uuid, usize>,
+    only_unread: bool,
+    only_changed: bool,
+    only_role: Option<Role>,
+    out: &mut impl std::io::Write,
+) -> Result<(), ConversationError> {
+    let chosen = select(store, unread, only_unread, only_changed, only_role)?;
+    for (id, _) in &chosen {
+        writeln!(out, "{id}").map_err(|_| ConversationError::Output)?;
+    }
+    Ok(())
+}
+
 /// Writes (or replaces) the record for `conv.group_id`.
 pub fn save(store: &ProfileStore, conv: &Conversation) -> Result<(), ConversationError> {
     conv.check()?;
@@ -665,6 +682,33 @@ mod tests {
         assert_eq!(run(false, true, None), "0\n");
         assert_eq!(run(false, false, Some(Role::Creator)), "1\n");
         let err = count(&store, &unread, false, false, None, &mut FailingWriter).unwrap_err();
+        assert!(matches!(err, ConversationError::Output));
+    }
+
+    #[test]
+    fn ids_prints_only_sorted_filtered_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        save(&store, &joiner(a)).unwrap();
+        save(
+            &store,
+            &Conversation::new(b, Uuid::new_v4(), Role::Creator, None),
+        )
+        .unwrap();
+        let unread = BTreeMap::from([(a, 2)]);
+        let run = |u, r| {
+            let mut out = Vec::new();
+            ids(&store, &unread, u, false, r, &mut out).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        let mut both = [a, b];
+        both.sort();
+        assert_eq!(run(false, None), format!("{}\n{}\n", both[0], both[1]));
+        assert_eq!(run(true, None), format!("{a}\n"));
+        assert_eq!(run(false, Some(Role::Creator)), format!("{b}\n"));
+        assert_eq!(run(false, Some(Role::Joiner)), format!("{a}\n"));
+        let err = ids(&store, &unread, false, false, None, &mut FailingWriter).unwrap_err();
         assert!(matches!(err, ConversationError::Output));
     }
 }

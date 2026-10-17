@@ -271,6 +271,8 @@ fn run_conversations(
     let (store, out) = (&session.store, &mut std::io::stdout());
     if a.count {
         conversation::count(store, &unread, a.unread, a.changed, a.role, out)?;
+    } else if a.ids {
+        conversation::ids(store, &unread, a.unread, a.changed, a.role, out)?;
     } else {
         conversation::report(store, &unread, a.unread, a.changed, a.role, out)?;
     }
