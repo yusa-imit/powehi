@@ -94,6 +94,9 @@ pub struct ConversationsArgs {
     /// List only conversations where you were the creator or the joiner of the invite.
     #[arg(long, value_enum)]
     pub role: Option<crate::conversation::Role>,
+    /// Show at most N matching conversations (the first by id).
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=10000))]
+    pub limit: Option<u32>,
     /// Print only the number of matching conversations.
     #[arg(long)]
     pub count: bool,
