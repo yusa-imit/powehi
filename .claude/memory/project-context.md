@@ -1592,3 +1592,6 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 
 ## Cycle 562 (FEATURE; Phase 7 all [x])
 - `conversations --role creator|joiner` filter (Role derives clap ValueEnum; count line reflects shown rows). 191 lib tests pass, fmt+clippy clean. UI-only filter over local data, no crypto/server change → no review agents.
+
+## Cycle 565 (STABILIZATION)
+- Main CI green, no `bug` issues, no open PRs. Added `filters_combine_with_and_semantics_in_ids_and_count` (unread+changed+role AND semantics for `ids`/`count`). 194 lib tests pass, fmt+clippy clean. Test-only, no review agents needed.
