@@ -1583,3 +1583,6 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 - Main CI green, no `bug` issues, no open PRs. `cargo audit` + `cargo deny check` clean. Added 1 `conversation::report`
   test (unread entries for unknown ids ignored; failing writer → typed `Output` error). 181 lib tests pass, fmt+clippy clean.
   Test-only, no review agents needed. target/ 19G (<20G, no prune).
+
+## Cycle 562 (FEATURE; Phase 7 all [x])
+- `conversations --role creator|joiner` filter (Role derives clap ValueEnum; count line reflects shown rows). 191 lib tests pass, fmt+clippy clean. UI-only filter over local data, no crypto/server change → no review agents.

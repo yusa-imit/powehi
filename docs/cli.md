@@ -45,7 +45,7 @@ powehi chat <conversation>           # interactive REPL, live delivery
 | `read <conv> [--keep] [--last N]` | Show stored messages, then remove them from the store (`--keep` leaves them; `--last N` handles only the newest N, older ones stay stored) |
 | `chat <conv>` | Interactive REPL; reconnects up to 3 times, then tells you |
 | `verify <conv> [--confirm N]` | Show / record the Safety Number (prd.md §5.6) |
-| `conversations [--unread] [--changed]` | List conversation ids, roles, unread counts and a `CHANGED` flag; `--unread` hides conversations with nothing unread, `--changed` shows only those flagged `CHANGED` |
+| `conversations [--unread] [--changed] [--role R]` | List conversation ids, roles, unread counts and a `CHANGED` flag; `--unread` hides conversations with nothing unread, `--changed` shows only those flagged `CHANGED`, `--role creator` / `--role joiner` shows only conversations where you were that side of the invite |
 | `profiles` | List profile names in the data directory (no password) |
 
 `<conv>` accepts a unique prefix of at least 4 characters.
