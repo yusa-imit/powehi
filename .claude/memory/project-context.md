@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 567 (2026-10-17, FEATURE) — `conversations --offset N`
+- Phase 7 DoD all [x]; `conversations --offset N` skips the first N matches (after filters), pairs with `--limit` for paging. `conversation::Page` (`From<Option<usize>>` keeps old call sites). 196 tests pass, clippy clean; local-only, no crypto/arch/backend change so no review agent required.
+
 ## Cycle 566 (2026-10-17, FEATURE) — `conversations --limit N`
 - Phase 7 DoD all [x]; `conversations --limit N` keeps the first N matches by id (works with --count/--ids). 195 tests pass, clippy clean; local-only, no crypto/arch/backend change so no review agent required.
 

@@ -97,6 +97,9 @@ pub struct ConversationsArgs {
     /// Show at most N matching conversations (the first by id).
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=10000))]
     pub limit: Option<u32>,
+    /// Skip the first N matching conversations (by id); combine with --limit to page.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=10000))]
+    pub offset: Option<u32>,
     /// Print only the number of matching conversations.
     #[arg(long)]
     pub count: bool,
