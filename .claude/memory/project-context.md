@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 571 (2026-10-18, FEATURE→CI fix) — Tauri deny advisories
+- Main CI-red: `cargo deny` on `app/src-tauri` flagged new unmaintained advisories RUSTSEC-2026-0370/0371/0372 (zbus_names/zvariant/zvariant_derive, via tauri-plugin-notification → notify-rust, Linux only). Added documented ignores to `app/src-tauri/deny.toml`; `cargo deny check advisories` ok locally. Config-only, no crypto/arch change.
+
 ## Cycle 570 (2026-10-18, STABILIZATION) — json paging test
 - CI green on main; `cargo audit` (no vulns) and `cargo deny check` clean; no open `bug` issues. Added test `json_honours_prefix_offset_and_limit_in_id_order` (`--json` was only tested without paging/prefix). 199 tests pass, clippy clean; test-only, no review agent required.
 
