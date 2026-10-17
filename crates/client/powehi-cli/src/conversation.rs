@@ -169,15 +169,21 @@ pub fn list(store: &ProfileStore) -> Result<Vec<Uuid>, ConversationError> {
 /// A window over the matching conversations (sorted by id): skip the first `offset` matches,
 /// then keep at most `limit` (`Some(0)` keeps none). `Option<usize>` converts to a window with
 /// that limit and no offset.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Page {
     pub offset: usize,
     pub limit: Option<usize>,
+    /// Keep only conversations whose id starts with this (lowercase hex and dashes).
+    pub prefix: Option<String>,
 }
 
 impl From<Option<usize>> for Page {
     fn from(limit: Option<usize>) -> Self {
-        Page { offset: 0, limit }
+        Page {
+            offset: 0,
+            limit,
+            prefix: None,
+        }
     }
 }
 
@@ -202,6 +208,9 @@ fn select(
         ids.retain(|id| crate::verify::changed_since_verified(store, *id));
     }
     let page: Page = page.into();
+    if let Some(prefix) = &page.prefix {
+        ids.retain(|id| id.to_string().starts_with(prefix.as_str()));
+    }
     let mut out = Vec::with_capacity(ids.len());
     let mut skipped = 0usize;
     for id in ids {
@@ -899,7 +908,11 @@ mod tests {
         all.sort();
         let run = |offset, limit| {
             let mut out = Vec::new();
-            let page = Page { offset, limit };
+            let page = Page {
+                offset,
+                limit,
+                ..Page::default()
+            };
             ids(&store, &BTreeMap::new(), false, false, None, page, &mut out).unwrap();
             String::from_utf8(out).unwrap()
         };
@@ -913,6 +926,7 @@ mod tests {
         let page = Page {
             offset: 1,
             limit: None,
+            prefix: None,
         };
         count(
             &store,
@@ -925,5 +939,31 @@ mod tests {
         )
         .unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), "0\n");
+    }
+
+    #[test]
+    fn prefix_keeps_only_ids_starting_with_it_before_paging() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let a = Uuid::parse_str("aaaa0000-0000-4000-8000-000000000001").unwrap();
+        let b = Uuid::parse_str("aaaa0000-0000-4000-8000-000000000002").unwrap();
+        let c = Uuid::parse_str("bbbb0000-0000-4000-8000-000000000003").unwrap();
+        for g in [a, b, c] {
+            save(&store, &joiner(g)).unwrap();
+        }
+        let run = |prefix: &str, offset| {
+            let mut out = Vec::new();
+            let page = Page {
+                offset,
+                limit: None,
+                prefix: Some(prefix.to_string()),
+            };
+            ids(&store, &BTreeMap::new(), false, false, None, page, &mut out).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        assert_eq!(run("aaaa", 0), format!("{a}\n{b}\n"));
+        assert_eq!(run("aaaa", 1), format!("{b}\n"));
+        assert_eq!(run("bbbb0000-", 0), format!("{c}\n"));
+        assert_eq!(run("cccc", 0), "");
     }
 }

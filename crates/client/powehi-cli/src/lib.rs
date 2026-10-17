@@ -272,11 +272,28 @@ fn run_conversations(
     let limit = conversation::Page {
         offset: a.offset.map_or(0, |n| n as usize),
         limit: a.limit.map(|n| n as usize),
+        prefix: a.prefix.clone(),
     };
     if a.count {
-        conversation::count(store, &unread, a.unread, a.changed, a.role, limit, out)?;
+        conversation::count(
+            store,
+            &unread,
+            a.unread,
+            a.changed,
+            a.role,
+            limit.clone(),
+            out,
+        )?;
     } else if a.ids {
-        conversation::ids(store, &unread, a.unread, a.changed, a.role, limit, out)?;
+        conversation::ids(
+            store,
+            &unread,
+            a.unread,
+            a.changed,
+            a.role,
+            limit.clone(),
+            out,
+        )?;
     } else {
         conversation::report(store, &unread, a.unread, a.changed, a.role, limit, out)?;
     }
