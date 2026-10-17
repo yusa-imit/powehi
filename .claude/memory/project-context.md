@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 570 (2026-10-18, STABILIZATION) — json paging test
+- CI green on main; `cargo audit` (no vulns) and `cargo deny check` clean; no open `bug` issues. Added test `json_honours_prefix_offset_and_limit_in_id_order` (`--json` was only tested without paging/prefix). 199 tests pass, clippy clean; test-only, no review agent required.
+
 ## Cycle 569 (2026-10-17, FEATURE) — `conversations --json`
 - Phase 7 DoD all [x]; `conversations --json` prints one JSON object per match (id, role, unread, changed), same filters/paging, conflicts with --count/--ids. 198 tests pass, clippy clean; local-only metadata already printed by `report`, no crypto/arch/backend change so no review agent required.
 

@@ -1041,4 +1041,40 @@ mod tests {
         assert_eq!(run("bbbb0000-", 0), format!("{c}\n"));
         assert_eq!(run("cccc", 0), "");
     }
+
+    #[test]
+    fn json_honours_prefix_offset_and_limit_in_id_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let id =
+            |n: u8| Uuid::parse_str(&format!("aaaa0000-0000-4000-8000-0000000000{n:02}")).unwrap();
+        let other = Uuid::parse_str("bbbb0000-0000-4000-8000-000000000099").unwrap();
+        for g in [id(3), id(1), id(2), other] {
+            save(&store, &joiner(g)).unwrap();
+        }
+        let unread = BTreeMap::from([(id(2), 5)]);
+        let page = Page {
+            offset: 1,
+            limit: Some(1),
+            prefix: Some("aaaa".to_string()),
+        };
+        let mut out = Vec::new();
+        json(&store, &unread, false, false, None, page, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let rows: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], id(2).to_string());
+        assert_eq!(rows[0]["unread"], 5);
+        let page = Page {
+            offset: 0,
+            limit: Some(0),
+            prefix: None,
+        };
+        let mut out = Vec::new();
+        json(&store, &unread, false, false, None, page, &mut out).unwrap();
+        assert!(out.is_empty());
+    }
 }
