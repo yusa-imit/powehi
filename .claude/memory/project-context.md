@@ -1637,3 +1637,6 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 
 ## Cycle 575 (STABILIZATION)
 - Main CI green, no `bug` issues, no open PRs. `cargo audit` clean, `cargo deny check` ok. Added `verified_and_unverified_together_match_nothing_and_verified_pages` (contradictory filters → empty; `--verified` + offset/limit). 202 lib tests pass, fmt+clippy clean. target/ 16G (no prune). Test-only, no review agents needed.
+
+## Cycle 580 (STABILIZATION)
+- Main CI green, no `bug` issues, no open PRs. `cargo audit` clean, `cargo deny check` ok. Added binary test `whoami_without_an_account_fails_with_empty_stdout` (non-zero exit, empty stdout, stderr message). 4 binary tests pass, fmt+clippy clean. target/ 16G (no prune). Test-only, no review agents needed.
