@@ -101,6 +101,8 @@ invites); `powehi read <conversation>` shows and removes the stored ones; `poweh
 `/v1/ws` with catch-up after reconnects. `powehi verify <conversation> [--confirm "<number>"]` shows
 the Safety Number (prd.md §5.6) and records that you compared it; later key changes report CHANGED.
 
+`powehi whoami` logs in and prints the profile, server, user id and device id (no token or key).
+
 `powehi conversations` is local only (no server call, no message text). Filters combine with AND:
 `--unread`/`--read`, `--changed`/`--unchanged`, `--verified`/`--unverified`, `--role`, `--prefix`;
 paging with `--limit`/`--offset` (by id); output as a table, or `--count`, `--ids`, `--json`.
