@@ -65,18 +65,25 @@ impl ProfilePaths {
 /// Most profiles `list` reports; a directory with more is cut off, never scanned unbounded.
 pub const MAX_LISTED: usize = 256;
 
-/// Writes the names one per line, or only their number when `count` is set.
+/// Writes the names one per line, only their number when `count` is set, or one
+/// `{"name":...}` JSON object per line when `json` is set (the two are exclusive).
 pub fn write_listing(
     names: &[String],
     count: bool,
+    json: bool,
     out: &mut impl std::io::Write,
 ) -> std::io::Result<()> {
     assert!(names.len() <= MAX_LISTED);
+    assert!(!(count && json));
     if count {
         return writeln!(out, "{}", names.len());
     }
     for n in names {
-        writeln!(out, "{n}")?;
+        if json {
+            writeln!(out, "{}", serde_json::json!({ "name": n }))?;
+        } else {
+            writeln!(out, "{n}")?;
+        }
     }
     Ok(())
 }
@@ -116,16 +123,30 @@ mod tests {
     fn listing_prints_names_or_only_the_count() {
         let names = vec!["a".to_string(), "work".to_string()];
         let (mut full, mut counted) = (Vec::new(), Vec::new());
-        write_listing(&names, false, &mut full).unwrap();
-        write_listing(&names, true, &mut counted).unwrap();
+        write_listing(&names, false, false, &mut full).unwrap();
+        write_listing(&names, true, false, &mut counted).unwrap();
         assert_eq!(String::from_utf8(full).unwrap(), "a\nwork\n");
         assert_eq!(String::from_utf8(counted).unwrap(), "2\n");
         let mut none = Vec::new();
-        write_listing(&[], true, &mut none).unwrap();
+        write_listing(&[], true, false, &mut none).unwrap();
         assert_eq!(String::from_utf8(none).unwrap(), "0\n");
     }
 
     use super::*;
+
+    #[test]
+    fn listing_json_prints_one_object_per_profile() {
+        let names = vec!["a".to_string(), "work".to_string()];
+        let mut out = Vec::new();
+        write_listing(&names, false, true, &mut out).unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "{\"name\":\"a\"}\n{\"name\":\"work\"}\n"
+        );
+        let mut none = Vec::new();
+        write_listing(&[], false, true, &mut none).unwrap();
+        assert!(none.is_empty());
+    }
 
     #[test]
     fn list_missing_dir_is_empty() {
