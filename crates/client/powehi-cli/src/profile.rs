@@ -65,6 +65,22 @@ impl ProfilePaths {
 /// Most profiles `list` reports; a directory with more is cut off, never scanned unbounded.
 pub const MAX_LISTED: usize = 256;
 
+/// Writes the names one per line, or only their number when `count` is set.
+pub fn write_listing(
+    names: &[String],
+    count: bool,
+    out: &mut impl std::io::Write,
+) -> std::io::Result<()> {
+    assert!(names.len() <= MAX_LISTED);
+    if count {
+        return writeln!(out, "{}", names.len());
+    }
+    for n in names {
+        writeln!(out, "{n}")?;
+    }
+    Ok(())
+}
+
 /// Names of the profiles under `<base>/powehi`, sorted. Only directories with a valid
 /// profile name count (stray files and odd names are skipped). A missing directory means no
 /// profiles yet. Reads names only: never opens a store, so it needs no password.
@@ -96,6 +112,19 @@ pub fn list(base: &Path) -> Result<Vec<String>, std::io::Error> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn listing_prints_names_or_only_the_count() {
+        let names = vec!["a".to_string(), "work".to_string()];
+        let (mut full, mut counted) = (Vec::new(), Vec::new());
+        write_listing(&names, false, &mut full).unwrap();
+        write_listing(&names, true, &mut counted).unwrap();
+        assert_eq!(String::from_utf8(full).unwrap(), "a\nwork\n");
+        assert_eq!(String::from_utf8(counted).unwrap(), "2\n");
+        let mut none = Vec::new();
+        write_listing(&[], true, &mut none).unwrap();
+        assert_eq!(String::from_utf8(none).unwrap(), "0\n");
+    }
+
     use super::*;
 
     #[test]

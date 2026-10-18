@@ -128,7 +128,7 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
         cli::Command::Conversations(ref a) => run_conversations(&args.server, &paths, a),
         #[cfg(unix)]
         cli::Command::Whoami => run_whoami(&args.server, &args.profile, &paths),
-        cli::Command::Profiles => run_profiles(&base),
+        cli::Command::Profiles(a) => run_profiles(&base, a.count),
         #[cfg(not(unix))]
         ref other => Err(CliError::NotImplemented(other.name())),
     }
@@ -156,12 +156,9 @@ fn run_whoami(
 }
 
 /// `profiles`: local directory listing; opens no store and asks for no password.
-fn run_profiles(base: &std::path::Path) -> Result<(), CliError> {
+fn run_profiles(base: &std::path::Path, count: bool) -> Result<(), CliError> {
     let names = profile::list(base).map_err(|_| CliError::DataDirList)?;
-    for n in &names {
-        println!("{n}");
-    }
-    Ok(())
+    profile::write_listing(&names, count, &mut std::io::stdout()).map_err(|_| CliError::Output)
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime, CliError> {

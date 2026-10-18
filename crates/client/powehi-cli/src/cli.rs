@@ -58,9 +58,16 @@ pub enum Command {
     /// List the conversations stored in this profile (ids, roles, unread counts).
     Conversations(ConversationsArgs),
     /// List the profile names in the data directory (no password; names only).
-    Profiles,
+    Profiles(ProfilesArgs),
     /// Log in and show the profile, server, user id and device id.
     Whoami,
+}
+
+#[derive(Debug, Args)]
+pub struct ProfilesArgs {
+    /// Print only the number of profiles.
+    #[arg(long)]
+    pub count: bool,
 }
 
 #[derive(Debug, Args)]
@@ -173,7 +180,7 @@ impl Command {
             Command::Chat(_) => "chat",
             Command::Verify(_) => "verify",
             Command::Conversations(_) => "conversations",
-            Command::Profiles => "profiles",
+            Command::Profiles(_) => "profiles",
             Command::Whoami => "whoami",
         }
     }
