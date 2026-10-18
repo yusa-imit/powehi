@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 579 (2026-10-18, FEATURE) — `powehi whoami`
+- Phase 7 DoD all [x]; added `whoami` (login, prints profile/server/user id/device id; `whoami::report`). 206 tests pass, clippy clean; ids only, no secrets, no crypto/arch change so no review agent required.
+
 ## Cycle 578 (2026-10-18, FEATURE) — docs sync
 - Phase 7 DoD all [x]; the `conversations` filter surface is saturated, so README CLI section (was stale: said most subcommands unimplemented) and prd §7A command table now describe the real commands/flags. Docs only; no review agent required.
 

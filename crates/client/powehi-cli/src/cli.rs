@@ -59,6 +59,8 @@ pub enum Command {
     Conversations(ConversationsArgs),
     /// List the profile names in the data directory (no password; names only).
     Profiles,
+    /// Log in and show the profile, server, user id and device id.
+    Whoami,
 }
 
 #[derive(Debug, Args)]
@@ -172,6 +174,7 @@ impl Command {
             Command::Verify(_) => "verify",
             Command::Conversations(_) => "conversations",
             Command::Profiles => "profiles",
+            Command::Whoami => "whoami",
         }
     }
 }

@@ -12,7 +12,7 @@ fn help_lists_subcommands() {
     assert!(out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
     for c in [
-        "status", "register", "login", "invite", "send", "inbox", "chat", "verify",
+        "status", "register", "login", "whoami", "invite", "send", "inbox", "chat", "verify",
     ] {
         assert!(s.contains(c), "missing {c}");
     }

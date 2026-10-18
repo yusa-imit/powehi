@@ -36,6 +36,8 @@ pub mod verify;
 #[cfg(unix)]
 pub mod welcome;
 #[cfg(unix)]
+pub mod whoami;
+#[cfg(unix)]
 pub mod ws;
 
 use std::path::PathBuf;
@@ -80,6 +82,9 @@ pub enum CliError {
     #[cfg(unix)]
     #[error("{0}")]
     Identity(#[from] identity::IdentityError),
+    #[cfg(unix)]
+    #[error("could not write to stdout")]
+    Output,
     #[error("could not list the data directory")]
     DataDirList,
     #[error("could not start the async runtime")]
@@ -121,10 +126,33 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
         cli::Command::Verify(ref c) => run_verify(&args.server, &paths, c),
         #[cfg(unix)]
         cli::Command::Conversations(ref a) => run_conversations(&args.server, &paths, a),
+        #[cfg(unix)]
+        cli::Command::Whoami => run_whoami(&args.server, &args.profile, &paths),
         cli::Command::Profiles => run_profiles(&base),
         #[cfg(not(unix))]
         ref other => Err(CliError::NotImplemented(other.name())),
     }
+}
+
+/// `whoami`: logs in (password prompt) and prints the account ids; no token is printed.
+#[cfg(unix)]
+fn run_whoami(
+    server: &url::Url,
+    profile: &str,
+    paths: &profile::ProfilePaths,
+) -> Result<(), CliError> {
+    let rt = runtime()?;
+    let client = status::http_client()?;
+    let mut prompter = prompt::TtyPrompter;
+    let s = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
+    whoami::report(
+        profile,
+        server,
+        s.user_id,
+        s.device_id,
+        &mut std::io::stdout(),
+    )
+    .map_err(|_| CliError::Output)
 }
 
 /// `profiles`: local directory listing; opens no store and asks for no password.
