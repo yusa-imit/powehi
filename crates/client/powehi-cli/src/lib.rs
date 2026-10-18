@@ -274,6 +274,7 @@ fn run_conversations(
         limit: a.limit.map(|n| n as usize),
         prefix: a.prefix.clone(),
         unverified: a.unverified,
+        verified: a.verified,
     };
     if a.count {
         conversation::count(
