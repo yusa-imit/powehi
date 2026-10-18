@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 576 (2026-10-18, FEATURE) — `conversations --read`
+- Phase 7 DoD all [x]; `conversations --read` lists only conversations with no unread messages (`Page.read`, conflicts with --unread). 203 tests pass, clippy clean; local-only filter, no crypto/arch/backend change so no review agent required.
+
 ## Cycle 573 (2026-10-18, FEATURE) — `conversations --json` verified field
 - Phase 7 DoD all [x]; `--json` rows gain `verified` (a Safety Number confirmation exists, `verify::has_confirmation`). 200 tests pass, clippy clean; local-only metadata, no crypto/arch/backend change so no review agent required. Note: `cargo nextest` is not installed locally; use `cargo test -p powehi-cli` (and `export PATH=$HOME/.cargo/bin:$PATH`).
 

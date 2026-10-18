@@ -179,6 +179,8 @@ pub struct Page {
     pub unverified: bool,
     /// Keep only conversations with a recorded Safety Number confirmation (`verify --confirm`).
     pub verified: bool,
+    /// Keep only conversations with no unread messages.
+    pub read: bool,
 }
 
 impl From<Option<usize>> for Page {
@@ -189,6 +191,7 @@ impl From<Option<usize>> for Page {
             prefix: None,
             unverified: false,
             verified: false,
+            read: false,
         }
     }
 }
@@ -216,6 +219,9 @@ fn select(
     let page: Page = page.into();
     if page.unverified {
         ids.retain(|id| !crate::verify::has_confirmation(store, *id));
+    }
+    if page.read {
+        ids.retain(|id| unread.get(id).copied().unwrap_or(0) == 0);
     }
     if page.verified {
         ids.retain(|id| crate::verify::has_confirmation(store, *id));
@@ -1028,6 +1034,7 @@ mod tests {
             prefix: None,
             unverified: false,
             verified: false,
+            read: false,
         };
         count(
             &store,
@@ -1060,6 +1067,7 @@ mod tests {
                 prefix: Some(prefix.to_string()),
                 unverified: false,
                 verified: false,
+                read: false,
             };
             ids(&store, &BTreeMap::new(), false, false, None, page, &mut out).unwrap();
             String::from_utf8(out).unwrap()
@@ -1087,6 +1095,7 @@ mod tests {
             prefix: Some("aaaa".to_string()),
             unverified: false,
             verified: false,
+            read: false,
         };
         let mut out = Vec::new();
         json(&store, &unread, false, false, None, page, &mut out).unwrap();
@@ -1104,6 +1113,7 @@ mod tests {
             prefix: None,
             unverified: false,
             verified: false,
+            read: false,
         };
         let mut out = Vec::new();
         json(&store, &unread, false, false, None, page, &mut out).unwrap();
@@ -1197,5 +1207,22 @@ mod tests {
             String::from_utf8(out).unwrap(),
             format!("{}\n", confirmed[1])
         );
+    }
+
+    #[test]
+    fn read_filter_keeps_only_conversations_without_unread() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let (quiet, busy) = (Uuid::new_v4(), Uuid::new_v4());
+        save(&store, &joiner(quiet)).unwrap();
+        save(&store, &joiner(busy)).unwrap();
+        let unread = BTreeMap::from([(busy, 2)]);
+        let page = Page {
+            read: true,
+            ..Page::default()
+        };
+        let mut out = Vec::new();
+        ids(&store, &unread, false, false, None, page, &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), format!("{quiet}\n"));
     }
 }

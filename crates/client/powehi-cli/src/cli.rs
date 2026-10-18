@@ -88,6 +88,9 @@ pub struct ConversationsArgs {
     /// List only conversations with unread messages.
     #[arg(long)]
     pub unread: bool,
+    /// List only conversations with no unread messages.
+    #[arg(long, conflicts_with = "unread")]
+    pub read: bool,
     /// List only conversations whose verified Safety Number changed (CHANGED).
     #[arg(long)]
     pub changed: bool,
