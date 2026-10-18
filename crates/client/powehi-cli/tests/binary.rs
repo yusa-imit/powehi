@@ -57,3 +57,28 @@ fn whoami_without_an_account_fails_with_empty_stdout() {
     );
     assert!(!out.stderr.is_empty());
 }
+
+#[test]
+fn completions_prints_a_script_without_touching_the_data_dir() {
+    // A relative-free, nonexistent base dir proves no profile/data access happens.
+    let out = powehi()
+        .args([
+            "--data-dir",
+            "/nonexistent-powehi-dir",
+            "completions",
+            "bash",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("powehi") && s.contains("whoami"));
+    assert!(!std::path::Path::new("/nonexistent-powehi-dir").exists());
+}
+
+#[test]
+fn completions_rejects_an_unknown_shell() {
+    let out = powehi().args(["completions", "tcsh"]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+}
