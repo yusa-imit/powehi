@@ -68,6 +68,9 @@ pub struct ProfilesArgs {
     /// Print only the number of profiles.
     #[arg(long)]
     pub count: bool,
+    /// Print one JSON object per profile (`{"name":...}`).
+    #[arg(long, conflicts_with = "count")]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -230,6 +233,13 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("powehi").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn profiles_json_conflicts_with_count() {
+        let c = parse(&["profiles", "--json"]).unwrap();
+        assert!(matches!(c.command, Command::Profiles(ref a) if a.json && !a.count));
+        assert!(parse(&["profiles", "--json", "--count"]).is_err());
     }
 
     #[test]
