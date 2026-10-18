@@ -72,8 +72,8 @@ Testing standards and what gate applies to which layer: `.claude/rules/testing-c
 ## CLI client (`powehi`)
 
 The primary client is the terminal client in `crates/client/powehi-cli` (prd.md §7A).
-`powehi status`, `register`, `login` and `invite create` / `invite redeem` are functional; the
-other subcommands parse but report "not implemented yet".
+Functional subcommands: `status`, `register`, `login`, `invite create` / `invite redeem`, `inbox`,
+`send`, `read`, `chat`, `verify`, `conversations` and `profiles`. Run `powehi --help` for the list.
 
 ```bash
 cargo run -p powehi-cli -- --server http://localhost:8080 status
@@ -94,6 +94,16 @@ Starting a 1:1 conversation: `powehi invite create [--wait <secs>]` prints a lin
 in the link, creates the MLS group and sends the Welcome; with `--wait` the inviter polls for it
 and joins (otherwise the join happens when `inbox` lands). Each conversation is a `conv-<group id>`
 record in the profile store.
+
+Day to day: `powehi inbox` fetches, decrypts and stores new messages (and joins Welcomes from your
+invites); `powehi read <conversation>` shows and removes the stored ones; `powehi send
+<conversation>` reads the body from stdin; `powehi chat <conversation>` is a line REPL over
+`/v1/ws` with catch-up after reconnects. `powehi verify <conversation> [--confirm "<number>"]` shows
+the Safety Number (prd.md §5.6) and records that you compared it; later key changes report CHANGED.
+
+`powehi conversations` is local only (no server call, no message text). Filters combine with AND:
+`--unread`/`--read`, `--changed`/`--unchanged`, `--verified`/`--unverified`, `--role`, `--prefix`;
+paging with `--limit`/`--offset` (by id); output as a table, or `--count`, `--ids`, `--json`.
 
 The library contains an encrypted profile store (`powehi_cli::store`, Unix only): AES-256-GCM
 records under `<data-dir>/powehi/<profile>/` (dir `0700`, files `0600`), keyed from the OPAQUE
