@@ -106,6 +106,9 @@ pub struct ConversationsArgs {
     /// List only conversations whose Safety Number you have not confirmed (`verify --confirm`).
     #[arg(long)]
     pub unverified: bool,
+    /// List only conversations whose Safety Number you have confirmed (`verify --confirm`).
+    #[arg(long, conflicts_with = "unverified")]
+    pub verified: bool,
     /// Print only the number of matching conversations.
     #[arg(long)]
     pub count: bool,

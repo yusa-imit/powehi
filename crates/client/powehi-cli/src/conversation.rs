@@ -177,6 +177,8 @@ pub struct Page {
     pub prefix: Option<String>,
     /// Keep only conversations with no recorded Safety Number confirmation (`verify --confirm`).
     pub unverified: bool,
+    /// Keep only conversations with a recorded Safety Number confirmation (`verify --confirm`).
+    pub verified: bool,
 }
 
 impl From<Option<usize>> for Page {
@@ -186,6 +188,7 @@ impl From<Option<usize>> for Page {
             limit,
             prefix: None,
             unverified: false,
+            verified: false,
         }
     }
 }
@@ -213,6 +216,9 @@ fn select(
     let page: Page = page.into();
     if page.unverified {
         ids.retain(|id| !crate::verify::has_confirmation(store, *id));
+    }
+    if page.verified {
+        ids.retain(|id| crate::verify::has_confirmation(store, *id));
     }
     if let Some(prefix) = &page.prefix {
         ids.retain(|id| id.to_string().starts_with(prefix.as_str()));
@@ -1021,6 +1027,7 @@ mod tests {
             limit: None,
             prefix: None,
             unverified: false,
+            verified: false,
         };
         count(
             &store,
@@ -1052,6 +1059,7 @@ mod tests {
                 limit: None,
                 prefix: Some(prefix.to_string()),
                 unverified: false,
+                verified: false,
             };
             ids(&store, &BTreeMap::new(), false, false, None, page, &mut out).unwrap();
             String::from_utf8(out).unwrap()
@@ -1078,6 +1086,7 @@ mod tests {
             limit: Some(1),
             prefix: Some("aaaa".to_string()),
             unverified: false,
+            verified: false,
         };
         let mut out = Vec::new();
         json(&store, &unread, false, false, None, page, &mut out).unwrap();
@@ -1094,6 +1103,7 @@ mod tests {
             limit: Some(0),
             prefix: None,
             unverified: false,
+            verified: false,
         };
         let mut out = Vec::new();
         json(&store, &unread, false, false, None, page, &mut out).unwrap();
@@ -1121,5 +1131,25 @@ mod tests {
         let mut out = Vec::new();
         ids(&store, &BTreeMap::new(), false, false, None, None, &mut out).unwrap();
         assert_eq!(String::from_utf8(out).unwrap().lines().count(), 2);
+    }
+
+    #[test]
+    fn verified_filter_keeps_only_confirmed_conversations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let (plain, confirmed) = (Uuid::new_v4(), Uuid::new_v4());
+        save(&store, &joiner(plain)).unwrap();
+        save(&store, &joiner(confirmed)).unwrap();
+        let rec = format!("{}{}", crate::verify::PREFIX, confirmed.hyphenated());
+        store
+            .put(&rec, br#"{"version":1,"number":"1 2 3"}"#)
+            .unwrap();
+        let page = Page {
+            verified: true,
+            ..Page::default()
+        };
+        let mut out = Vec::new();
+        ids(&store, &BTreeMap::new(), false, false, None, page, &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), format!("{confirmed}\n"));
     }
 }
