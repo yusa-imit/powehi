@@ -1622,3 +1622,6 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 
 ## Cycle 565 (STABILIZATION)
 - Main CI green, no `bug` issues, no open PRs. Added `filters_combine_with_and_semantics_in_ids_and_count` (unread+changed+role AND semantics for `ids`/`count`). 194 lib tests pass, fmt+clippy clean. Test-only, no review agents needed.
+
+## Cycle 575 (STABILIZATION)
+- Main CI green, no `bug` issues, no open PRs. `cargo audit` clean, `cargo deny check` ok. Added `verified_and_unverified_together_match_nothing_and_verified_pages` (contradictory filters → empty; `--verified` + offset/limit). 202 lib tests pass, fmt+clippy clean. target/ 16G (no prune). Test-only, no review agents needed.
