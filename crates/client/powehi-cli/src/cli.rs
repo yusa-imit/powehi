@@ -94,6 +94,9 @@ pub struct ConversationsArgs {
     /// List only conversations whose verified Safety Number changed (CHANGED).
     #[arg(long)]
     pub changed: bool,
+    /// List only conversations whose Safety Number did not change since you verified it.
+    #[arg(long, conflicts_with = "changed")]
+    pub unchanged: bool,
     /// List only conversations where you were the creator or the joiner of the invite.
     #[arg(long, value_enum)]
     pub role: Option<crate::conversation::Role>,

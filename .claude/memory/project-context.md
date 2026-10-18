@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 577 (2026-10-18, FEATURE) — `conversations --unchanged`
+- Phase 7 DoD all [x]; `conversations --unchanged` omits conversations whose verified Safety Number changed (`Page.unchanged`, conflicts with --changed). 204 tests pass, clippy clean; local-only filter, no crypto/arch/backend change so no review agent required.
+
 ## Cycle 576 (2026-10-18, FEATURE) — `conversations --read`
 - Phase 7 DoD all [x]; `conversations --read` lists only conversations with no unread messages (`Page.read`, conflicts with --unread). 203 tests pass, clippy clean; local-only filter, no crypto/arch/backend change so no review agent required.
 
