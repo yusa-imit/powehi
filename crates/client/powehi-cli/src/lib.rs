@@ -276,6 +276,7 @@ fn run_conversations(
         unverified: a.unverified,
         verified: a.verified,
         read: a.read,
+        unchanged: a.unchanged,
     };
     if a.count {
         conversation::count(

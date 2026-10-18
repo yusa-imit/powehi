@@ -181,6 +181,8 @@ pub struct Page {
     pub verified: bool,
     /// Keep only conversations with no unread messages.
     pub read: bool,
+    /// Keep only conversations whose verified Safety Number did not change.
+    pub unchanged: bool,
 }
 
 impl From<Option<usize>> for Page {
@@ -192,6 +194,7 @@ impl From<Option<usize>> for Page {
             unverified: false,
             verified: false,
             read: false,
+            unchanged: false,
         }
     }
 }
@@ -222,6 +225,9 @@ fn select(
     }
     if page.read {
         ids.retain(|id| unread.get(id).copied().unwrap_or(0) == 0);
+    }
+    if page.unchanged {
+        ids.retain(|id| !crate::verify::changed_since_verified(store, *id));
     }
     if page.verified {
         ids.retain(|id| crate::verify::has_confirmation(store, *id));
@@ -1035,6 +1041,7 @@ mod tests {
             unverified: false,
             verified: false,
             read: false,
+            unchanged: false,
         };
         count(
             &store,
@@ -1068,6 +1075,7 @@ mod tests {
                 unverified: false,
                 verified: false,
                 read: false,
+                unchanged: false,
             };
             ids(&store, &BTreeMap::new(), false, false, None, page, &mut out).unwrap();
             String::from_utf8(out).unwrap()
@@ -1096,6 +1104,7 @@ mod tests {
             unverified: false,
             verified: false,
             read: false,
+            unchanged: false,
         };
         let mut out = Vec::new();
         json(&store, &unread, false, false, None, page, &mut out).unwrap();
@@ -1114,6 +1123,7 @@ mod tests {
             unverified: false,
             verified: false,
             read: false,
+            unchanged: false,
         };
         let mut out = Vec::new();
         json(&store, &unread, false, false, None, page, &mut out).unwrap();
@@ -1224,5 +1234,25 @@ mod tests {
         let mut out = Vec::new();
         ids(&store, &unread, false, false, None, page, &mut out).unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), format!("{quiet}\n"));
+    }
+
+    #[test]
+    fn unchanged_filter_omits_changed_conversations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let (plain, flagged) = (Uuid::new_v4(), Uuid::new_v4());
+        save(&store, &joiner(plain)).unwrap();
+        save(&store, &joiner(flagged)).unwrap();
+        let rec = format!("{}{}", crate::verify::PREFIX, flagged.hyphenated());
+        store
+            .put(&rec, br#"{"version":1,"number":"1 2 3"}"#)
+            .unwrap();
+        let page = Page {
+            unchanged: true,
+            ..Page::default()
+        };
+        let mut out = Vec::new();
+        ids(&store, &BTreeMap::new(), false, false, None, page, &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), format!("{plain}\n"));
     }
 }
