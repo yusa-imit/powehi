@@ -82,7 +82,6 @@ pub enum CliError {
     #[cfg(unix)]
     #[error("{0}")]
     Identity(#[from] identity::IdentityError),
-    #[cfg(unix)]
     #[error("could not write to stdout")]
     Output,
     #[error("could not list the data directory")]
@@ -97,6 +96,9 @@ pub enum CliError {
 /// Runs a parsed command line. `default_data_dir` is injected (the per-user data dir) so
 /// tests stay deterministic.
 pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliError> {
+    if let cli::Command::Completions(ref c) = args.command {
+        return run_completions(c.shell);
+    }
     let base = args
         .data_dir
         .clone()
@@ -128,10 +130,21 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
         cli::Command::Conversations(ref a) => run_conversations(&args.server, &paths, a),
         #[cfg(unix)]
         cli::Command::Whoami(a) => run_whoami(&args.server, &args.profile, &paths, a.json),
+        cli::Command::Completions(ref c) => run_completions(c.shell),
         cli::Command::Profiles(a) => run_profiles(&base, a.count, a.json),
         #[cfg(not(unix))]
         ref other => Err(CliError::NotImplemented(other.name())),
     }
+}
+
+/// `completions`: writes the shell script for the command surface; touches no profile state.
+fn run_completions(shell: clap_complete::Shell) -> Result<(), CliError> {
+    use clap::CommandFactory;
+    let mut cmd = cli::Cli::command();
+    let mut buf = Vec::new();
+    clap_complete::generate(shell, &mut cmd, "powehi", &mut buf);
+    assert!(!buf.is_empty());
+    std::io::Write::write_all(&mut std::io::stdout(), &buf).map_err(|_| CliError::Output)
 }
 
 /// `whoami`: logs in (password prompt) and prints the account ids; no token is printed.

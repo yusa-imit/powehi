@@ -61,6 +61,14 @@ pub enum Command {
     Profiles(ProfilesArgs),
     /// Log in and show the profile, server, user id and device id.
     Whoami(WhoamiArgs),
+    /// Print a shell completion script to stdout (no profile or network access).
+    Completions(CompletionsArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CompletionsArgs {
+    /// Target shell.
+    pub shell: clap_complete::Shell,
 }
 
 #[derive(Debug, Args)]
@@ -192,6 +200,7 @@ impl Command {
             Command::Conversations(_) => "conversations",
             Command::Profiles(_) => "profiles",
             Command::Whoami(_) => "whoami",
+            Command::Completions(_) => "completions",
         }
     }
 }
