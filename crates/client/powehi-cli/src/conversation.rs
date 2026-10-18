@@ -1152,4 +1152,50 @@ mod tests {
         ids(&store, &BTreeMap::new(), false, false, None, page, &mut out).unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), format!("{confirmed}\n"));
     }
+
+    #[test]
+    fn verified_and_unverified_together_match_nothing_and_verified_pages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let mut confirmed = [Uuid::new_v4(), Uuid::new_v4()];
+        confirmed.sort();
+        let plain = Uuid::new_v4();
+        save(&store, &joiner(plain)).unwrap();
+        for id in confirmed {
+            save(&store, &joiner(id)).unwrap();
+            let rec = format!("{}{}", crate::verify::PREFIX, id.hyphenated());
+            store
+                .put(&rec, br#"{"version":1,"number":"1 2 3"}"#)
+                .unwrap();
+        }
+        let both = Page {
+            verified: true,
+            unverified: true,
+            ..Page::default()
+        };
+        let mut out = Vec::new();
+        ids(&store, &BTreeMap::new(), false, false, None, both, &mut out).unwrap();
+        assert!(out.is_empty());
+        let paged = Page {
+            verified: true,
+            offset: 1,
+            limit: Some(1),
+            ..Page::default()
+        };
+        let mut out = Vec::new();
+        ids(
+            &store,
+            &BTreeMap::new(),
+            false,
+            false,
+            None,
+            paged,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            format!("{}\n", confirmed[1])
+        );
+    }
 }
