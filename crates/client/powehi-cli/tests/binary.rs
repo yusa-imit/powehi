@@ -82,3 +82,63 @@ fn completions_rejects_an_unknown_shell() {
     assert!(!out.status.success());
     assert!(out.stdout.is_empty());
 }
+
+/// Fresh data dir holding the given profile directories, under `<base>/powehi/<name>`.
+fn data_dir_with(tag: &str, profiles: &[&str]) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("powehi-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for p in profiles {
+        std::fs::create_dir_all(dir.join("powehi").join(p)).unwrap();
+    }
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn profiles_out(dir: &std::path::Path, extra: &[&str]) -> std::process::Output {
+    powehi()
+        .arg("--data-dir")
+        .arg(dir)
+        .arg("profiles")
+        .args(extra)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn profiles_lists_names_count_and_json_through_the_binary() {
+    let dir = data_dir_with("profiles", &["bob", "alice"]);
+    let plain = profiles_out(&dir, &[]);
+    let count = profiles_out(&dir, &["--count"]);
+    let json = profiles_out(&dir, &["--json"]);
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(String::from_utf8_lossy(&plain.stdout), "alice\nbob\n");
+    assert_eq!(String::from_utf8_lossy(&count.stdout), "2\n");
+    let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&json.stdout)
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["name"], "alice");
+    assert_eq!(lines[1]["name"], "bob");
+}
+
+#[test]
+fn profiles_json_with_count_is_rejected_with_empty_stdout() {
+    let dir = data_dir_with("profiles-conflict", &["alice"]);
+    let out = profiles_out(&dir, &["--json", "--count"]);
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+    assert!(!out.stderr.is_empty());
+}
+
+#[test]
+fn profiles_on_an_empty_data_dir_prints_zero_or_nothing() {
+    let dir = data_dir_with("profiles-empty", &[]);
+    let count = profiles_out(&dir, &["--count"]);
+    let json = profiles_out(&dir, &["--json"]);
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(String::from_utf8_lossy(&count.stdout), "0\n");
+    assert!(json.status.success() && json.stdout.is_empty());
+}
