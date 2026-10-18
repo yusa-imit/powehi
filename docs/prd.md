@@ -1242,7 +1242,7 @@ crates/client/
 | `powehi chat <대화>` | 대화형 REPL, `/v1/ws` 실시간 수신, 재연결 3회 | §7.6 |
 | `powehi verify <대화>` | Safety Number 표시 | §5.6 |
 | `powehi conversations` | 저장된 대화 id·역할 목록 (로컬 전용, 본문·키 미출력). 필터 `--unread/--read --changed/--unchanged --verified/--unverified --role --prefix` (AND), 페이징 `--limit/--offset`, 출력 `--count/--ids/--json` | §7A.3 |
-| `powehi whoami` | 로그인 후 profile·server·user id·device id 출력 (토큰·키 미출력) | §7A.3 |
+| `powehi whoami [--json]` | 로그인 후 profile·server·user id·device id 출력 (토큰·키 미출력) | §7A.3 |
 | `powehi profiles` | 데이터 디렉터리의 profile 이름 목록 (로컬 전용, store를 열지 않음) | §7A.3 |
 
 전체 화면 TUI(`ratatui`)는 같은 lib 위에 올리는 후속 작업이며 Phase 7 DoD에 포함하지 않음.

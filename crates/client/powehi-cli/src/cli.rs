@@ -60,7 +60,14 @@ pub enum Command {
     /// List the profile names in the data directory (no password; names only).
     Profiles(ProfilesArgs),
     /// Log in and show the profile, server, user id and device id.
-    Whoami,
+    Whoami(WhoamiArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct WhoamiArgs {
+    /// Print one JSON object instead of `key: value` lines.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -184,7 +191,7 @@ impl Command {
             Command::Verify(_) => "verify",
             Command::Conversations(_) => "conversations",
             Command::Profiles(_) => "profiles",
-            Command::Whoami => "whoami",
+            Command::Whoami(_) => "whoami",
         }
     }
 }
@@ -240,6 +247,14 @@ mod tests {
         let c = parse(&["profiles", "--json"]).unwrap();
         assert!(matches!(c.command, Command::Profiles(ref a) if a.json && !a.count));
         assert!(parse(&["profiles", "--json", "--count"]).is_err());
+    }
+
+    #[test]
+    fn whoami_json_flag() {
+        let c = parse(&["whoami"]).unwrap();
+        assert!(matches!(c.command, Command::Whoami(ref a) if !a.json));
+        let c = parse(&["whoami", "--json"]).unwrap();
+        assert!(matches!(c.command, Command::Whoami(ref a) if a.json));
     }
 
     #[test]

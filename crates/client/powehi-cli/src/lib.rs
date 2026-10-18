@@ -127,7 +127,7 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
         #[cfg(unix)]
         cli::Command::Conversations(ref a) => run_conversations(&args.server, &paths, a),
         #[cfg(unix)]
-        cli::Command::Whoami => run_whoami(&args.server, &args.profile, &paths),
+        cli::Command::Whoami(a) => run_whoami(&args.server, &args.profile, &paths, a.json),
         cli::Command::Profiles(a) => run_profiles(&base, a.count, a.json),
         #[cfg(not(unix))]
         ref other => Err(CliError::NotImplemented(other.name())),
@@ -140,6 +140,7 @@ fn run_whoami(
     server: &url::Url,
     profile: &str,
     paths: &profile::ProfilePaths,
+    json: bool,
 ) -> Result<(), CliError> {
     let rt = runtime()?;
     let client = status::http_client()?;
@@ -150,6 +151,7 @@ fn run_whoami(
         server,
         s.user_id,
         s.device_id,
+        json,
         &mut std::io::stdout(),
     )
     .map_err(|_| CliError::Output)
