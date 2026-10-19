@@ -444,5 +444,26 @@ pub fn write_joined(
     }
 }
 
+/// Writes the redeem outcome as one JSON object: the conversation id, the `pq_init` result
+/// (`bound`, `peer_classical`, `key_rejected`, `not_sent`) and the public binding or null.
+pub fn write_redeemed(
+    id: Uuid,
+    pq: &PqStatus,
+    out: &mut impl std::io::Write,
+) -> std::io::Result<()> {
+    assert!(!id.is_nil());
+    let (state, binding) = match pq {
+        PqStatus::Bound(b) => ("bound", Some(b.as_str())),
+        PqStatus::PeerClassical => ("peer_classical", None),
+        PqStatus::KeyRejected => ("key_rejected", None),
+        PqStatus::NotSent => ("not_sent", None),
+    };
+    writeln!(
+        out,
+        "{}",
+        serde_json::json!({ "conversation": id.to_string(), "pq": state, "pq_binding": binding })
+    )
+}
+
 #[cfg(test)]
 mod tests;

@@ -127,7 +127,11 @@ pub enum InviteCommand {
         json: bool,
     },
     /// Redeem an invite link (read from stdin, not argv).
-    Redeem,
+    Redeem {
+        /// Print one JSON object (`{"conversation":...,"pq":...,"pq_binding":...}`).
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -214,7 +218,7 @@ impl Command {
             Command::Register => "register",
             Command::Login => "login",
             Command::Invite(InviteCommand::Create { .. }) => "invite create",
-            Command::Invite(InviteCommand::Redeem) => "invite redeem",
+            Command::Invite(InviteCommand::Redeem { .. }) => "invite redeem",
             Command::Send(_) => "send",
             Command::Inbox(_) => "inbox",
             Command::Read(_) => "read",
@@ -383,7 +387,11 @@ mod tests {
                 json: true
             })
         ));
-        assert!(parse(&["invite", "redeem", "--json"]).is_err());
+        let c = parse(&["invite", "redeem", "--json"]).unwrap();
+        assert!(matches!(
+            c.command,
+            Command::Invite(InviteCommand::Redeem { json: true })
+        ));
         assert!(parse(&["invite", "redeem", "abc.def"]).is_err());
     }
 
