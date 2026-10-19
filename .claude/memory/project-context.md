@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 596 (2026-10-20, FEATURE) — `read --since`
+- Phase 7 DoD all [x]; `read --since <unix-seconds>` shows only messages received at/after the cutoff (earlier stay stored); `message::since` (partition_point on oldest-first list), composes with `--last` (cutoff first). "no new messages" now keyed on the shown slice. Tests pass, clippy clean; display filtering only, no crypto/arch/backend change so no review agent required. All `--json` work done (chat is interactive).
+
 ## Cycle 594 (2026-10-20, FEATURE) — `register --json` / `login --json`
 - Phase 7 DoD all [x]; `register`/`login` take `AuthArgs{json}`; `write_auth_report` prints `{"device","key_packages_uploaded"}` (no token/password). 226 lib tests pass, clippy clean; no crypto/arch/backend change so no review agent required. Remaining without --json: chat (interactive).
 
