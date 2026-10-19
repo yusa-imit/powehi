@@ -122,6 +122,9 @@ pub enum InviteCommand {
         /// Seconds to wait for the peer to redeem and send the Welcome (0 = do not wait).
         #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u32).range(0..=900))]
         wait: u32,
+        /// Print JSON objects (`{"invite":...}`, then with --wait `{"conversation":...}`).
+        #[arg(long)]
+        json: bool,
     },
     /// Redeem an invite link (read from stdin, not argv).
     Redeem,
@@ -372,6 +375,15 @@ mod tests {
         assert!(parse(&["invite", "create", "--wait", "900"]).is_ok());
         assert!(parse(&["invite", "create", "--wait", "901"]).is_err());
         assert!(parse(&["invite", "redeem"]).is_ok());
+        let c = parse(&["invite", "create", "--json", "--wait", "5"]).unwrap();
+        assert!(matches!(
+            c.command,
+            Command::Invite(InviteCommand::Create {
+                wait: 5,
+                json: true
+            })
+        ));
+        assert!(parse(&["invite", "redeem", "--json"]).is_err());
         assert!(parse(&["invite", "redeem", "abc.def"]).is_err());
     }
 

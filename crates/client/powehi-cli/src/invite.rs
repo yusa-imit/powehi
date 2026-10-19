@@ -413,5 +413,36 @@ async fn send_welcome(
     Ok(())
 }
 
+/// Writes the freshly created invite link: bare, or as `{"invite":...}` when `json` is set.
+pub fn write_created(link: &str, json: bool, out: &mut impl std::io::Write) -> std::io::Result<()> {
+    assert!(!link.is_empty());
+    if json {
+        return writeln!(out, "{}", serde_json::json!({ "invite": link }));
+    }
+    writeln!(out, "{link}")
+}
+
+/// Writes the outcome of `--wait`: the joined conversation id, or (None) that nobody
+/// redeemed yet; JSON mode prints `{"conversation": id | null}`.
+pub fn write_joined(
+    id: Option<Uuid>,
+    json: bool,
+    out: &mut impl std::io::Write,
+) -> std::io::Result<()> {
+    assert!(id.is_none_or(|i| !i.is_nil()));
+    match (id, json) {
+        (Some(id), false) => writeln!(out, "conversation {id}"),
+        (None, false) => writeln!(
+            out,
+            "no one has redeemed the invite yet; it stays valid for 24 hours"
+        ),
+        (id, true) => writeln!(
+            out,
+            "{}",
+            serde_json::json!({ "conversation": id.map(|i| i.to_string()) })
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests;

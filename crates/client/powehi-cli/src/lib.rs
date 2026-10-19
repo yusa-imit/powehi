@@ -463,12 +463,13 @@ fn run_invite(
     let mut prompter = prompt::TtyPrompter;
     let session = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
     match (cmd, link) {
-        (cli::InviteCommand::Create { wait }, _) => {
+        (cli::InviteCommand::Create { wait, json }, _) => {
             let (url, key_ref) = rt.block_on(invite::create(&client, server, &session))?;
-            println!("{url}");
+            invite::write_created(&url, *json, &mut std::io::stdout())
+                .map_err(|_| CliError::Output)?;
             if *wait > 0 {
                 let w = u64::from(*wait);
-                wait_for_welcome(&rt, &client, server, &session, &key_ref, w)?;
+                wait_for_welcome(&rt, &client, server, &session, &key_ref, w, *json)?;
             }
         }
         (cli::InviteCommand::Redeem, Some(link)) => {
@@ -491,7 +492,9 @@ fn wait_for_welcome(
     session: &auth::Session,
     key_ref: &[u8],
     wait: u64,
+    json: bool,
 ) -> Result<(), CliError> {
+    let out_err = |_| CliError::Output;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
     loop {
         let report = rt.block_on(welcome::join_pending(
@@ -501,8 +504,8 @@ fn wait_for_welcome(
             Some(key_ref),
         ))?;
         if let Some(id) = report.joined.first() {
-            println!("conversation {id}");
-            return Ok(());
+            let mut out = std::io::stdout();
+            return invite::write_joined(Some(*id), json, &mut out).map_err(out_err);
         }
         let poll = std::time::Duration::from_secs(WAIT_POLL_SECS);
         if std::time::Instant::now() + poll >= deadline {
@@ -510,8 +513,7 @@ fn wait_for_welcome(
         }
         std::thread::sleep(poll);
     }
-    println!("no one has redeemed the invite yet; it stays valid for 24 hours");
-    Ok(())
+    invite::write_joined(None, json, &mut std::io::stdout()).map_err(out_err)
 }
 
 fn run_status(server: &url::Url, json: bool) -> Result<(), CliError> {
