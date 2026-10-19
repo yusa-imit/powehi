@@ -142,3 +142,32 @@ fn profiles_on_an_empty_data_dir_prints_zero_or_nothing() {
     assert_eq!(String::from_utf8_lossy(&count.stdout), "0\n");
     assert!(json.status.success() && json.stdout.is_empty());
 }
+
+#[test]
+fn json_commands_without_an_account_fail_with_empty_stdout() {
+    let dir = data_dir_with("json-noacct", &[]);
+    for args in [
+        &["inbox", "--json"][..],
+        &["read", "c1", "--json"][..],
+        &["verify", "c1", "--json"][..],
+    ] {
+        let out = powehi()
+            .args(["--server", "http://127.0.0.1:1", "--data-dir"])
+            .arg(&dir)
+            .args(["--profile", "ghost"])
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "{args:?} must fail without an account"
+        );
+        assert!(
+            out.stdout.is_empty(),
+            "{args:?} must print nothing on failure"
+        );
+        assert!(!out.stderr.is_empty(), "{args:?} must explain on stderr");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
