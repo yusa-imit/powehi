@@ -39,9 +39,9 @@ pub enum Command {
     /// Show server health and detected region.
     Status(StatusArgs),
     /// Register a new account (password read from the TTY).
-    Register,
+    Register(AuthArgs),
     /// Log in (password read from the TTY).
-    Login,
+    Login(AuthArgs),
     /// Create or redeem invite links.
     #[command(subcommand)]
     Invite(InviteCommand),
@@ -63,6 +63,13 @@ pub enum Command {
     Whoami(WhoamiArgs),
     /// Print a shell completion script to stdout (no profile or network access).
     Completions(CompletionsArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AuthArgs {
+    /// Print one JSON object (`{"device":...,"key_packages_uploaded":...}`) instead of text.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -224,8 +231,8 @@ impl Command {
     pub fn name(&self) -> &'static str {
         match self {
             Command::Status(_) => "status",
-            Command::Register => "register",
-            Command::Login => "login",
+            Command::Register(_) => "register",
+            Command::Login(_) => "login",
             Command::Invite(InviteCommand::Create { .. }) => "invite create",
             Command::Invite(InviteCommand::Redeem { .. }) => "invite redeem",
             Command::Send(_) => "send",
@@ -320,6 +327,22 @@ mod tests {
             panic!("not read")
         };
         assert!(a.json && a.keep);
+    }
+
+    #[test]
+    fn register_and_login_json_flag() {
+        for name in ["register", "login"] {
+            let a = match parse(&[name]).unwrap().command {
+                Command::Register(a) | Command::Login(a) => a,
+                other => panic!("{other:?}"),
+            };
+            assert!(!a.json);
+            let a = match parse(&[name, "--json"]).unwrap().command {
+                Command::Register(a) | Command::Login(a) => a,
+                other => panic!("{other:?}"),
+            };
+            assert!(a.json);
+        }
     }
 
     #[test]
