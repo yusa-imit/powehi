@@ -46,7 +46,7 @@ pub enum Command {
     #[command(subcommand)]
     Invite(InviteCommand),
     /// Send a message; the body is read from stdin only.
-    Send(ConversationArg),
+    Send(SendArgs),
     /// Fetch, decrypt, store and acknowledge pending messages.
     Inbox(InboxArgs),
     /// Show stored received messages for a conversation, then remove them from the store.
@@ -205,6 +205,15 @@ pub struct ReadArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct SendArgs {
+    /// Conversation id (or a unique prefix of at least 4 characters).
+    pub conversation: String,
+    /// Print one JSON object (`{"conversation":...}`) instead of the text line.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct ConversationArg {
     /// Conversation id (or a unique prefix of at least 4 characters).
     pub conversation: String,
@@ -311,6 +320,18 @@ mod tests {
             panic!("not read")
         };
         assert!(a.json && a.keep);
+    }
+
+    #[test]
+    fn send_json_flag() {
+        let Command::Send(a) = parse(&["send", "c1"]).unwrap().command else {
+            panic!("not send")
+        };
+        assert!(!a.json);
+        let Command::Send(a) = parse(&["send", "c1", "--json"]).unwrap().command else {
+            panic!("not send")
+        };
+        assert!(a.json && a.conversation == "c1");
     }
 
     #[test]

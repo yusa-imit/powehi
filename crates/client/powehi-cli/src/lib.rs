@@ -117,7 +117,7 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
         #[cfg(unix)]
         cli::Command::Inbox(a) => run_inbox(&args.server, &paths, a.json),
         #[cfg(unix)]
-        cli::Command::Send(ref c) => run_send(&args.server, &paths, &c.conversation),
+        cli::Command::Send(ref c) => run_send(&args.server, &paths, &c.conversation, c.json),
         #[cfg(unix)]
         cli::Command::Read(ref c) => run_read(&args.server, &paths, c),
         #[cfg(unix)]
@@ -250,6 +250,7 @@ fn run_send(
     server: &url::Url,
     paths: &profile::ProfilePaths,
     reference: &str,
+    json: bool,
 ) -> Result<(), CliError> {
     use std::io::Read as _;
     // Read and validate the body before the password prompt so a bad pipe fails fast.
@@ -269,8 +270,7 @@ fn run_send(
     }
     let body = message::check_body(&raw)?;
     rt.block_on(message::send(&client, server, &session, group_id, body))?;
-    println!("sent to conversation {group_id}");
-    Ok(())
+    message::write_sent(group_id, json, &mut std::io::stdout()).map_err(|_| CliError::Output)
 }
 
 /// `read`: shows and removes the stored messages of one conversation. Logging in (OPAQUE)
