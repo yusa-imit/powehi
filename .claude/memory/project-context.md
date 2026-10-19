@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 589 (2026-10-19, FEATURE) — `read --json`
+- Phase 7 DoD all [x]; `read --json` prints one JSON line per message (sender, received_at, text) via `message::display_json`, escaped piecewise straight into stdout (no second plaintext copy; text already sanitized). Combines with `--keep`/`--last`; no "no new messages" line in JSON mode. 218 lib tests pass, clippy clean; output formatting of already-displayed text only, no crypto/arch/backend change so no review agent required.
+
 ## Cycle 588 (2026-10-19, FEATURE) — `inbox --json`
 - Phase 7 DoD all [x]; `inbox --json` prints one object (joined, pq_bindings, stored, skipped) via `inbox::report_json`. 216 lib tests pass, clippy clean; ids/counts/public PQ binding only (already printed by text mode), no crypto/arch/backend change so no review agent required.
 
