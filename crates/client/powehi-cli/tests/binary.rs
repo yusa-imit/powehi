@@ -150,6 +150,12 @@ fn json_commands_without_an_account_fail_with_empty_stdout() {
         &["inbox", "--json"][..],
         &["read", "c1", "--json"][..],
         &["verify", "c1", "--json"][..],
+        &["whoami", "--json"][..],
+        &["login", "--json"][..],
+        &["register", "--json"][..],
+        &["send", "c1", "--json"][..],
+        &["invite", "create", "--json"][..],
+        &["invite", "redeem", "--json"][..],
     ] {
         let out = powehi()
             .args(["--server", "http://127.0.0.1:1", "--data-dir"])

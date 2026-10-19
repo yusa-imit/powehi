@@ -1680,3 +1680,4 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 ## Cycle 585 (STABILIZATION)
 - Main CI green, no `bug` issues, no open PRs. `cargo audit` clean, `cargo deny check` ok. Added 3 binary tests for `profiles` (names/--count/--json through the real binary, `--json --count` rejected with empty stdout, empty data dir). 211 lib + 9 binary tests pass, fmt+clippy clean. target/ 17G (no prune). Test-only, no review agents needed.
 - Cycle 590 (stabilization): audit/deny clean; added json-failure black-box test (inbox/read/verify --json leave stdout empty without account).
+- Cycle 595 (stabilization): audit/deny clean, CI green; extended the json-failure black-box test to whoami/login/register/send/invite create+redeem (PR below).
