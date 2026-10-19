@@ -37,7 +37,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Show server health and detected region.
-    Status,
+    Status(StatusArgs),
     /// Register a new account (password read from the TTY).
     Register,
     /// Log in (password read from the TTY).
@@ -69,6 +69,13 @@ pub enum Command {
 pub struct CompletionsArgs {
     /// Target shell.
     pub shell: clap_complete::Shell,
+}
+
+#[derive(Debug, Args)]
+pub struct StatusArgs {
+    /// Print one JSON object instead of `key:  value` lines.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -187,7 +194,7 @@ impl Command {
     /// Stable command name for messages and logs (never user content).
     pub fn name(&self) -> &'static str {
         match self {
-            Command::Status => "status",
+            Command::Status(_) => "status",
             Command::Register => "register",
             Command::Login => "login",
             Command::Invite(InviteCommand::Create { .. }) => "invite create",
@@ -271,7 +278,9 @@ mod tests {
         let c = parse(&["status"]).unwrap();
         assert_eq!(c.profile, DEFAULT_PROFILE);
         assert_eq!(c.server.as_str(), "https://localhost:8443/");
-        assert!(matches!(c.command, Command::Status));
+        assert!(matches!(c.command, Command::Status(ref a) if !a.json));
+        let c = parse(&["status", "--json"]).unwrap();
+        assert!(matches!(c.command, Command::Status(ref a) if a.json));
     }
 
     #[test]

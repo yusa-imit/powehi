@@ -92,6 +92,31 @@ pub async fn fetch(client: &Client, server: &Url) -> Result<ServerStatus, Status
     })
 }
 
+/// Writes the report: `key:  value` lines, or one JSON object with `--json`.
+pub fn write_report(
+    server: &Url,
+    s: &ServerStatus,
+    json: bool,
+    out: &mut impl std::io::Write,
+) -> std::io::Result<()> {
+    if json {
+        let v = serde_json::json!({
+            "server": server.as_str(),
+            "healthy": s.healthy,
+            "region": s.region_id,
+        });
+        return writeln!(out, "{v}");
+    }
+    writeln!(out, "server:  {server}")?;
+    let health = if s.healthy {
+        "ok"
+    } else {
+        "unexpected response"
+    };
+    writeln!(out, "health:  {health}")?;
+    writeln!(out, "region:  {}", s.region_id)
+}
+
 #[cfg(test)]
 mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -237,5 +262,27 @@ mod tests {
         let s = fetch(&http_client().unwrap(), &url).await.unwrap();
         assert!(!s.healthy);
         assert_eq!(s.region_id, "eu-de-1");
+    }
+
+    #[test]
+    fn report_text_and_json() {
+        let url = Url::parse("https://example.test/").unwrap();
+        let st = ServerStatus {
+            healthy: true,
+            region_id: "eu-1".into(),
+        };
+        let mut t = Vec::new();
+        write_report(&url, &st, false, &mut t).unwrap();
+        assert_eq!(
+            String::from_utf8(t).unwrap(),
+            "server:  https://example.test/\nhealth:  ok\nregion:  eu-1\n"
+        );
+        let mut j = Vec::new();
+        write_report(&url, &st, true, &mut j).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&j).unwrap();
+        assert_eq!(v["healthy"], true);
+        assert_eq!(v["region"], "eu-1");
+        assert_eq!(v["server"], "https://example.test/");
+        assert_eq!(j.iter().filter(|b| **b == b'\n').count(), 1);
     }
 }
