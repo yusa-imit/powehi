@@ -115,7 +115,7 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
         #[cfg(unix)]
         cli::Command::Invite(ref cmd) => run_invite(&args.server, &paths, cmd),
         #[cfg(unix)]
-        cli::Command::Inbox => run_inbox(&args.server, &paths),
+        cli::Command::Inbox(a) => run_inbox(&args.server, &paths, a.json),
         #[cfg(unix)]
         cli::Command::Send(ref c) => run_send(&args.server, &paths, &c.conversation),
         #[cfg(unix)]
@@ -213,24 +213,33 @@ fn run_auth(
 
 /// `inbox`: logs in, joins pending Welcomes and stores new messages; prints counts only.
 #[cfg(unix)]
-fn run_inbox(server: &url::Url, paths: &profile::ProfilePaths) -> Result<(), CliError> {
+fn run_inbox(server: &url::Url, paths: &profile::ProfilePaths, json: bool) -> Result<(), CliError> {
     let rt = runtime()?;
     let client = status::http_client()?;
     let mut prompter = prompt::TtyPrompter;
     let session = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
     let r = rt.block_on(inbox::receive(&client, server, &session))?;
-    for id in &r.joined {
-        println!("joined conversation {id}");
-    }
+    let mut bindings = Vec::with_capacity(r.pq_bound.len());
     for id in &r.pq_bound {
         if let Some(b) = conversation::load(&session.store, id)?
             .as_ref()
             .and_then(|c| c.pq_binding().map(str::to_owned))
         {
-            println!("conversation {id}: post-quantum binding {b} (compare with your peer)");
+            bindings.push((*id, b));
         }
     }
-    println!("{} new message(s) stored", r.stored);
+    if json {
+        inbox::report_json(&mut std::io::stdout().lock(), &r, &bindings)
+            .map_err(|_| CliError::Stdout)?;
+    } else {
+        for id in &r.joined {
+            println!("joined conversation {id}");
+        }
+        for (id, b) in &bindings {
+            println!("conversation {id}: post-quantum binding {b} (compare with your peer)");
+        }
+        println!("{} new message(s) stored", r.stored);
+    }
     if r.skipped > 0 {
         eprintln!("{} envelope(s) skipped", r.skipped);
     }

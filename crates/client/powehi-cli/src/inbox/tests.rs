@@ -435,3 +435,30 @@ fn received_with_bad_trailing_field_is_rejected_and_good_one_still_reads() {
     let missing = format!(r#"{{"group_id":"{g}","body":"6869"}}"#);
     assert!(serde_json::from_str::<Received>(&missing).is_err());
 }
+
+#[test]
+fn report_json_is_one_object_with_ids_and_counts() {
+    let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+    let report = InboxReport {
+        joined: vec![a],
+        stored: 3,
+        pq_bound: vec![b],
+        skipped: 1,
+    };
+    let mut out = Vec::new();
+    report_json(&mut out, &report, &[(b, "0123456789abcdef".to_string())]).unwrap();
+    let text = String::from_utf8(out).unwrap();
+    assert_eq!(text.lines().count(), 1);
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["joined"][0], a.to_string());
+    assert_eq!(v["pq_bindings"][b.to_string()], "0123456789abcdef");
+    assert_eq!(
+        (v["stored"].as_u64(), v["skipped"].as_u64()),
+        (Some(3), Some(1))
+    );
+    let mut empty = Vec::new();
+    report_json(&mut empty, &InboxReport::default(), &[]).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&empty).unwrap();
+    assert_eq!(v["joined"], json!([]));
+    assert_eq!(v["pq_bindings"], json!({}));
+}

@@ -95,7 +95,7 @@ in the link, creates the MLS group and sends the Welcome; with `--wait` the invi
 and joins (otherwise the join happens when `inbox` lands). Each conversation is a `conv-<group id>`
 record in the profile store.
 
-Day to day: `powehi inbox` fetches, decrypts and stores new messages (and joins Welcomes from your
+Day to day: `powehi inbox` (`--json` for scripts) fetches, decrypts and stores new messages (and joins Welcomes from your
 invites); `powehi read <conversation>` shows and removes the stored ones; `powehi send
 <conversation>` reads the body from stdin; `powehi chat <conversation>` is a line REPL over
 `/v1/ws` with catch-up after reconnects. `powehi verify <conversation> [--confirm "<number>"]` shows
