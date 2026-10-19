@@ -305,3 +305,16 @@ fn since_keeps_messages_received_at_or_after_the_cutoff() {
     assert_eq!(newest(since(&msgs, Some(20)), Some(2))[0].received_at, 20);
     assert_eq!(newest(since(&msgs, Some(21)), Some(2)).len(), 1);
 }
+
+#[test]
+fn until_keeps_messages_received_before_the_cutoff() {
+    let msgs: Vec<Pending> = [10, 20, 20, 30].into_iter().map(pending_at).collect();
+    assert_eq!(until(&msgs, None).len(), 4);
+    assert!(until(&msgs, Some(10)).is_empty());
+    assert_eq!(until(&msgs, Some(11)).len(), 1);
+    assert_eq!(until(&msgs, Some(21)).len(), 3);
+    assert_eq!(until(&msgs, Some(31)).len(), 4);
+    assert!(until(&[], Some(5)).is_empty());
+    // Composes with `since`: a half-open window [20, 30).
+    assert_eq!(since(until(&msgs, Some(30)), Some(20)).len(), 2);
+}
