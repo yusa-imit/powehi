@@ -199,6 +199,20 @@ pub fn display(out: &mut impl std::io::Write, msg: &Pending) -> std::io::Result<
     out.flush()
 }
 
+/// Writes the send outcome: the conversation id only (never the body), as text or JSON.
+pub fn write_sent(id: Uuid, json: bool, out: &mut impl std::io::Write) -> std::io::Result<()> {
+    assert!(!id.is_nil());
+    if json {
+        writeln!(
+            out,
+            "{}",
+            serde_json::json!({ "conversation": id.to_string() })
+        )
+    } else {
+        writeln!(out, "sent to conversation {id}")
+    }
+}
+
 /// Writes one message as a JSON line `{"sender","received_at","text"}`. The text is already
 /// sanitized (only `\n` and `\t` remain as controls) and is escaped piecewise straight into
 /// `out`, so no second plaintext copy is built in memory.

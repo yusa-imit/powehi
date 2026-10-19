@@ -266,3 +266,19 @@ async fn show_json_emits_parseable_lines_and_discards_unless_kept() {
     show(&alice.store, &msgs, false, true, &mut Vec::new()).unwrap();
     assert!(pending(&alice.store, gid).unwrap().is_empty());
 }
+
+#[test]
+fn write_sent_text_and_json() {
+    let id = Uuid::from_u128(7);
+    let mut t = Vec::new();
+    write_sent(id, false, &mut t).unwrap();
+    assert_eq!(
+        String::from_utf8(t).unwrap(),
+        format!("sent to conversation {id}\n")
+    );
+    let mut j = Vec::new();
+    write_sent(id, true, &mut j).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&j).unwrap();
+    assert_eq!(v, serde_json::json!({ "conversation": id.to_string() }));
+    assert_eq!(j.iter().filter(|&&b| b == b'\n').count(), 1);
+}
