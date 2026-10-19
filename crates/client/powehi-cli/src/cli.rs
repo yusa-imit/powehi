@@ -103,6 +103,9 @@ pub struct VerifyArgs {
     /// earlier confirmation. The number is public, so it may appear in argv.
     #[arg(long, value_name = "NUMBER")]
     pub confirm: Option<String>,
+    /// Print one JSON object (conversation, safety_number, status) instead of the text report.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -263,6 +266,14 @@ mod tests {
         let c = parse(&["profiles", "--json"]).unwrap();
         assert!(matches!(c.command, Command::Profiles(ref a) if a.json && !a.count));
         assert!(parse(&["profiles", "--json", "--count"]).is_err());
+    }
+
+    #[test]
+    fn verify_json_flag_combines_with_confirm() {
+        let c = parse(&["verify", "abcd"]).unwrap();
+        assert!(matches!(c.command, Command::Verify(ref a) if !a.json));
+        let c = parse(&["verify", "abcd", "--json", "--confirm", "1 2"]).unwrap();
+        assert!(matches!(c.command, Command::Verify(ref a) if a.json && a.confirm.is_some()));
     }
 
     #[test]
