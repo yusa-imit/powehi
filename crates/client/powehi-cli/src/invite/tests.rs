@@ -343,3 +343,41 @@ async fn failed_pq_init_send_records_no_binding() {
     let conv = conversation::load(&bob.store, &gid).unwrap().unwrap();
     assert_eq!(conv.pq_binding(), None);
 }
+
+#[test]
+fn created_report_text_is_the_bare_link_and_json_is_one_object() {
+    let mut out = Vec::new();
+    write_created("https://x.test/i/connect#a.b", false, &mut out).unwrap();
+    assert_eq!(out, b"https://x.test/i/connect#a.b\n");
+    let mut out = Vec::new();
+    write_created("https://x.test/i/connect#a.b", true, &mut out).unwrap();
+    let s = String::from_utf8(out).unwrap();
+    assert_eq!(s.lines().count(), 1);
+    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+    assert_eq!(v["invite"], "https://x.test/i/connect#a.b");
+    assert_eq!(v.as_object().unwrap().len(), 1);
+}
+
+#[test]
+fn joined_report_text_and_json_cover_both_outcomes() {
+    let id = Uuid::from_u128(7);
+    let mut out = Vec::new();
+    write_joined(Some(id), false, &mut out).unwrap();
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        format!("conversation {id}\n")
+    );
+    let mut out = Vec::new();
+    write_joined(Some(id), true, &mut out).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["conversation"], id.to_string());
+    let mut out = Vec::new();
+    write_joined(None, true, &mut out).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert!(v["conversation"].is_null());
+    let mut out = Vec::new();
+    write_joined(None, false, &mut out).unwrap();
+    assert!(String::from_utf8(out)
+        .unwrap()
+        .starts_with("no one has redeemed"));
+}
