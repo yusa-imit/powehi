@@ -109,9 +109,9 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
     match args.command {
         cli::Command::Status(a) => run_status(&args.server, a.json),
         #[cfg(unix)]
-        cli::Command::Register => run_auth(&args.server, &paths, true),
+        cli::Command::Register(ref a) => run_auth(&args.server, &paths, true, a.json),
         #[cfg(unix)]
-        cli::Command::Login => run_auth(&args.server, &paths, false),
+        cli::Command::Login(ref a) => run_auth(&args.server, &paths, false, a.json),
         #[cfg(unix)]
         cli::Command::Invite(ref cmd) => run_invite(&args.server, &paths, cmd),
         #[cfg(unix)]
@@ -188,6 +188,7 @@ fn run_auth(
     server: &url::Url,
     paths: &profile::ProfilePaths,
     register: bool,
+    json: bool,
 ) -> Result<(), CliError> {
     let rt = runtime()?;
     let client = status::http_client()?;
@@ -197,16 +198,76 @@ fn run_auth(
     } else {
         rt.block_on(auth::login(&client, server, paths, &mut prompter))?
     };
-    println!(
-        "{} as device {}",
-        if register { "registered" } else { "logged in" },
-        session.device_id
-    );
     let uploaded = rt.block_on(identity::ensure_key_packages(&client, server, &session))?;
+    write_auth_report(
+        &mut std::io::stdout().lock(),
+        register,
+        session.device_id,
+        uploaded,
+        json,
+    )
+    .map_err(|_| CliError::Stdout)
+}
+
+/// Writes the `register`/`login` result: text lines, or one JSON object (device id and the
+/// number of KeyPackages uploaded; no token or password material).
+fn write_auth_report(
+    out: &mut impl std::io::Write,
+    register: bool,
+    device: uuid::Uuid,
+    uploaded: u64,
+    json: bool,
+) -> std::io::Result<()> {
+    assert!(!device.is_nil());
+    if json {
+        let v =
+            serde_json::json!({ "device": device.to_string(), "key_packages_uploaded": uploaded });
+        return writeln!(out, "{v}");
+    }
+    writeln!(
+        out,
+        "{} as device {device}",
+        if register { "registered" } else { "logged in" }
+    )?;
     if uploaded > 0 {
-        println!("uploaded {uploaded} key packages");
+        writeln!(out, "uploaded {uploaded} key packages")?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod auth_report_tests {
+    use super::write_auth_report;
+
+    #[test]
+    fn text_matches_legacy_lines() {
+        let d = uuid::Uuid::from_u128(7);
+        let mut o = Vec::new();
+        write_auth_report(&mut o, true, d, 3, false).unwrap();
+        assert_eq!(
+            String::from_utf8(o).unwrap(),
+            format!("registered as device {d}\nuploaded 3 key packages\n")
+        );
+        let mut o = Vec::new();
+        write_auth_report(&mut o, false, d, 0, false).unwrap();
+        assert_eq!(
+            String::from_utf8(o).unwrap(),
+            format!("logged in as device {d}\n")
+        );
+    }
+
+    #[test]
+    fn json_is_one_line_with_two_keys() {
+        let d = uuid::Uuid::from_u128(7);
+        let mut o = Vec::new();
+        write_auth_report(&mut o, false, d, 5, true).unwrap();
+        let s = String::from_utf8(o).unwrap();
+        assert_eq!(s.lines().count(), 1);
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["device"], d.to_string());
+        assert_eq!(v["key_packages_uploaded"], 5);
+        assert_eq!(v.as_object().unwrap().len(), 2);
+    }
 }
 
 /// `inbox`: logs in, joins pending Welcomes and stores new messages; prints counts only.
