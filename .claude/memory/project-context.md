@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 593 (2026-10-19, FEATURE) — `send --json`
+- Phase 7 DoD all [x]; `send --json` prints `{"conversation":id}` via `message::write_sent` (id only, never the body). 223 lib tests pass, clippy clean; no crypto/arch/backend change so no review agent required. Remaining without --json: register, login, chat.
+
 ## Cycle 592 (2026-10-19, FEATURE) — `invite redeem --json`
 - Phase 7 DoD all [x]; `invite redeem --json` prints `{"conversation","pq","pq_binding"}` via `invite::write_redeemed` (pq = bound|peer_classical|key_rejected|not_sent; the KeyRejected warning still goes to stderr). 221 lib tests pass, clippy clean; public ids/binding only (already printed by text mode), no crypto/arch/backend change so no review agent required. Remaining without --json: register, login, send, chat (interactive / no stdout payload).
 

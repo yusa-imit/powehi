@@ -1237,7 +1237,7 @@ crates/client/
 | `powehi status` | `/health`, `/v1/region/detect` | §7.6 |
 | `powehi register` / `login` | OPAQUE, 비밀번호는 TTY echo off로 입력 | §5.5 |
 | `powehi invite create` / `redeem` | 초대 링크 → 1:1 그룹 생성, Welcome | §8.3, §4.2 |
-| `powehi send <대화>` | 본문은 stdin에서만 읽음 (argv 금지) | §7A.3 |
+| `powehi send <대화> [--json]` | 본문은 stdin에서만 읽음 (argv 금지) | §7A.3 |
 | `powehi inbox` | `/v1/messages` 수신 → 복호화 → 저장 → ack | §11.1 |
 | `powehi chat <대화>` | 대화형 REPL, `/v1/ws` 실시간 수신, 재연결 3회 | §7.6 |
 | `powehi verify <대화>` | Safety Number 표시 | §5.6 |
