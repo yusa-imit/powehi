@@ -193,10 +193,10 @@ async fn show_removes_shown_messages_unless_keep() {
     inbox::receive(&client(), &url, &alice).await.unwrap();
     let msgs = pending(&alice.store, gid).unwrap();
     let mut out = Vec::new();
-    show(&alice.store, &msgs, true, &mut out).unwrap();
+    show(&alice.store, &msgs, true, false, &mut out).unwrap();
     assert_eq!(pending(&alice.store, gid).unwrap().len(), 2);
     assert!(String::from_utf8(out).unwrap().contains("one"));
-    show(&alice.store, &msgs, false, &mut Vec::new()).unwrap();
+    show(&alice.store, &msgs, false, false, &mut Vec::new()).unwrap();
     assert!(pending(&alice.store, gid).unwrap().is_empty());
 }
 
@@ -216,7 +216,7 @@ async fn show_to_closed_output_keeps_unseen_messages() {
     inbox::receive(&client(), &url, &alice).await.unwrap();
     let msgs = pending(&alice.store, gid).unwrap();
     assert!(matches!(
-        show(&alice.store, &msgs, false, &mut Closed),
+        show(&alice.store, &msgs, false, false, &mut Closed),
         Err(ShowError::Output)
     ));
     assert_eq!(pending(&alice.store, gid).unwrap().len(), 1);
@@ -237,10 +237,32 @@ async fn newest_limits_to_last_messages_and_leaves_older_stored() {
     let tail = newest(&msgs, Some(2));
     assert_eq!(tail.len(), 2);
     let mut out = Vec::new();
-    show(&alice.store, tail, false, &mut out).unwrap();
+    show(&alice.store, tail, false, false, &mut out).unwrap();
     let out = String::from_utf8(out).unwrap();
     assert!(!out.contains("one") && out.contains("two") && out.contains("three"));
     let left = pending(&alice.store, gid).unwrap();
     assert_eq!(left.len(), 1);
     assert_eq!(left[0].text.as_str(), "one");
+}
+
+#[tokio::test]
+async fn show_json_emits_parseable_lines_and_discards_unless_kept() {
+    let (_tmp, alice, bob, url, gid) = pair().await;
+    let body = "q\"uote \\ back\nline\ttab é";
+    send(&client(), &url, &bob, gid, body.as_bytes())
+        .await
+        .unwrap();
+    inbox::receive(&client(), &url, &alice).await.unwrap();
+    let msgs = pending(&alice.store, gid).unwrap();
+    let mut out = Vec::new();
+    show(&alice.store, &msgs, true, true, &mut out).unwrap();
+    assert_eq!(pending(&alice.store, gid).unwrap().len(), 1);
+    let out = String::from_utf8(out).unwrap();
+    assert_eq!(out.lines().count(), 1);
+    let v: serde_json::Value = serde_json::from_str(out.trim_end()).unwrap();
+    assert_eq!(v["text"], body);
+    assert_eq!(v["sender"], bob.device_id.to_string());
+    assert!(v["received_at"].is_u64());
+    show(&alice.store, &msgs, false, true, &mut Vec::new()).unwrap();
+    assert!(pending(&alice.store, gid).unwrap().is_empty());
 }

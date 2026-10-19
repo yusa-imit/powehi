@@ -199,6 +199,31 @@ pub fn display(out: &mut impl std::io::Write, msg: &Pending) -> std::io::Result<
     out.flush()
 }
 
+/// Writes one message as a JSON line `{"sender","received_at","text"}`. The text is already
+/// sanitized (only `\n` and `\t` remain as controls) and is escaped piecewise straight into
+/// `out`, so no second plaintext copy is built in memory.
+pub fn display_json(out: &mut impl std::io::Write, msg: &Pending) -> std::io::Result<()> {
+    write!(
+        out,
+        "{{\"sender\":\"{}\",\"received_at\":{},\"text\":\"",
+        msg.sender, msg.received_at
+    )?;
+    let mut rest = msg.text.as_str();
+    while let Some(i) = rest.find(['"', '\\', '\n', '\t']) {
+        out.write_all(&rest.as_bytes()[..i])?;
+        out.write_all(match rest.as_bytes()[i] {
+            b'"' => b"\\\"",
+            b'\\' => b"\\\\",
+            b'\n' => b"\\n",
+            _ => b"\\t",
+        })?;
+        rest = &rest[i + 1..];
+    }
+    out.write_all(rest.as_bytes())?;
+    writeln!(out, "\"}}")?;
+    out.flush()
+}
+
 /// Why [`show`] stopped: the output closed, or a shown message could not be removed.
 #[derive(Debug)]
 pub enum ShowError {
@@ -212,10 +237,16 @@ pub fn show(
     store: &ProfileStore,
     msgs: &[Pending],
     keep: bool,
+    json: bool,
     out: &mut impl std::io::Write,
 ) -> Result<(), ShowError> {
     for m in msgs {
-        display(out, m).map_err(|_| ShowError::Output)?;
+        let shown = if json {
+            display_json(out, m)
+        } else {
+            display(out, m)
+        };
+        shown.map_err(|_| ShowError::Output)?;
         if !keep {
             discard(store, m).map_err(ShowError::Discard)?;
         }

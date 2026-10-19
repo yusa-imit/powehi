@@ -192,6 +192,9 @@ pub struct ReadArgs {
     /// Show only the newest N messages; older ones stay stored untouched.
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=10000))]
     pub last: Option<u32>,
+    /// Print each message as one JSON line (sender, received_at, text) instead of text.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -289,6 +292,18 @@ mod tests {
         assert!(matches!(c.command, Command::Whoami(ref a) if !a.json));
         let c = parse(&["whoami", "--json"]).unwrap();
         assert!(matches!(c.command, Command::Whoami(ref a) if a.json));
+    }
+
+    #[test]
+    fn read_json_flag() {
+        let Command::Read(a) = parse(&["read", "c1"]).unwrap().command else {
+            panic!("not read")
+        };
+        assert!(!a.json);
+        let Command::Read(a) = parse(&["read", "c1", "--json", "--keep"]).unwrap().command else {
+            panic!("not read")
+        };
+        assert!(a.json && a.keep);
     }
 
     #[test]
