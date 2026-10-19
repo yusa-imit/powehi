@@ -107,7 +107,7 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
     let paths = profile::ProfilePaths::resolve(&base, &args.profile)?;
     debug_assert!(paths.dir.starts_with(&base));
     match args.command {
-        cli::Command::Status => run_status(&args.server),
+        cli::Command::Status(a) => run_status(&args.server, a.json),
         #[cfg(unix)]
         cli::Command::Register => run_auth(&args.server, &paths, true),
         #[cfg(unix)]
@@ -501,21 +501,11 @@ fn wait_for_welcome(
     Ok(())
 }
 
-fn run_status(server: &url::Url) -> Result<(), CliError> {
+fn run_status(server: &url::Url, json: bool) -> Result<(), CliError> {
     let rt = runtime()?;
     let client = status::http_client()?;
     let s = rt.block_on(status::fetch(&client, server))?;
-    println!("server:  {server}");
-    println!(
-        "health:  {}",
-        if s.healthy {
-            "ok"
-        } else {
-            "unexpected response"
-        }
-    );
-    println!("region:  {}", s.region_id);
-    Ok(())
+    status::write_report(server, &s, json, &mut std::io::stdout()).map_err(|_| CliError::Output)
 }
 
 /// Tells the user what the `pq_init` step achieved. The binding is a comparison value only:

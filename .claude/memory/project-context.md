@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 586 (2026-10-19, FEATURE) — `status --json`
+- Phase 7 DoD all [x]; `status --json` prints one object (server/healthy/region) via `status::write_report`. 212 tests pass, clippy clean; public server info only, no crypto/arch/backend change so no review agent required.
+
 ## Cycle 584 (2026-10-19, FEATURE) — `completions <shell>`
 - Phase 7 DoD all [x]; added `completions` (clap_complete 4, prints script, no profile/network access). cargo deny ok, 211 lib + 8 bin tests pass, clippy clean; no crypto/arch/backend change so no review agent required.
 
