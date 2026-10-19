@@ -282,3 +282,26 @@ fn write_sent_text_and_json() {
     assert_eq!(v, serde_json::json!({ "conversation": id.to_string() }));
     assert_eq!(j.iter().filter(|&&b| b == b'\n').count(), 1);
 }
+
+fn pending_at(received_at: u64) -> Pending {
+    Pending {
+        name: format!("rx-{received_at}"),
+        sender: Uuid::from_u128(1),
+        text: Zeroizing::new(String::new()),
+        received_at,
+    }
+}
+
+#[test]
+fn since_keeps_messages_received_at_or_after_the_cutoff() {
+    let msgs: Vec<Pending> = [10, 20, 20, 30].into_iter().map(pending_at).collect();
+    assert_eq!(since(&msgs, None).len(), 4);
+    assert_eq!(since(&msgs, Some(0)).len(), 4);
+    assert_eq!(since(&msgs, Some(20)).len(), 3);
+    assert_eq!(since(&msgs, Some(21)).len(), 1);
+    assert!(since(&msgs, Some(31)).is_empty());
+    assert!(since(&[], Some(5)).is_empty());
+    // Composes with `newest`: the cutoff first, then the tail of what is left.
+    assert_eq!(newest(since(&msgs, Some(20)), Some(2))[0].received_at, 20);
+    assert_eq!(newest(since(&msgs, Some(21)), Some(2)).len(), 1);
+}

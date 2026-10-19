@@ -206,6 +206,10 @@ pub struct ReadArgs {
     /// Show only the newest N messages; older ones stay stored untouched.
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=10000))]
     pub last: Option<u32>,
+    /// Show only messages received at or after this Unix time (seconds); earlier ones stay
+    /// stored untouched. Combines with --last (the cutoff applies first).
+    #[arg(long, value_name = "UNIX_SECONDS")]
+    pub since: Option<u64>,
     /// Print each message as one JSON line (sender, received_at, text) instead of text.
     #[arg(long)]
     pub json: bool,
@@ -327,6 +331,19 @@ mod tests {
             panic!("not read")
         };
         assert!(a.json && a.keep);
+    }
+
+    #[test]
+    fn read_since_flag() {
+        let Command::Read(a) = parse(&["read", "c1", "--since", "1700000000"])
+            .unwrap()
+            .command
+        else {
+            panic!("not read")
+        };
+        assert_eq!(a.since, Some(1_700_000_000));
+        assert!(parse(&["read", "c1", "--since", "-1"]).is_err());
+        assert!(parse(&["read", "c1", "--since", "yesterday"]).is_err());
     }
 
     #[test]
