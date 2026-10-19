@@ -370,8 +370,13 @@ fn run_verify(
         verify::confirm(&session.store, group_id, &number, typed)?;
         state = verify::State::Verified;
     }
-    verify::report(&mut std::io::stdout(), group_id, &number, state)
-        .map_err(|_| CliError::Stdout)?;
+    let mut out = std::io::stdout();
+    let written = if args.json {
+        verify::report_json(&mut out, group_id, &number, state)
+    } else {
+        verify::report(&mut out, group_id, &number, state)
+    };
+    written.map_err(|_| CliError::Stdout)?;
     Ok(())
 }
 

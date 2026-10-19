@@ -157,6 +157,29 @@ pub fn has_confirmation(store: &ProfileStore, group_id: Uuid) -> bool {
 pub const CHANGED_WARNING: &str = "warning: the safety number CHANGED since you verified this \
 conversation; run `powehi verify <conversation>` and compare it with your peer before trusting it";
 
+/// Writes the `verify` report as one JSON object (for scripts):
+/// `{"conversation":..,"safety_number":"dddd ..","status":"verified"|"unverified"|"changed"}`.
+/// The safety number is public by design; no key material or message text is printed.
+pub fn report_json(
+    out: &mut impl std::io::Write,
+    group_id: Uuid,
+    number: &str,
+    state: State,
+) -> std::io::Result<()> {
+    let status = match state {
+        State::Verified => "verified",
+        State::Unverified => "unverified",
+        State::Changed => "changed",
+    };
+    let obj = serde_json::json!({
+        "conversation": group_id.to_string(),
+        "safety_number": number,
+        "status": status,
+    });
+    writeln!(out, "{obj}")?;
+    out.flush()
+}
+
 /// Writes the report for `verify` in the given state.
 pub fn report(
     out: &mut impl std::io::Write,
@@ -356,6 +379,26 @@ mod tests {
             let text = String::from_utf8(out).unwrap();
             assert!(text.contains(word));
             assert_eq!(text.lines().filter(|l| l.starts_with("  ")).count(), 3);
+        }
+    }
+
+    #[test]
+    fn report_json_is_one_object_with_status_per_state() {
+        let n = safety::pairwise(&[1u8; 32], &[2u8; 32]).unwrap();
+        let g = Uuid::new_v4();
+        for (st, word) in [
+            (State::Verified, "verified"),
+            (State::Unverified, "unverified"),
+            (State::Changed, "changed"),
+        ] {
+            let mut out = Vec::new();
+            report_json(&mut out, g, &n, st).unwrap();
+            let text = String::from_utf8(out).unwrap();
+            assert_eq!(text.lines().count(), 1);
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(v["status"], word);
+            assert_eq!(v["conversation"], g.to_string());
+            assert_eq!(v["safety_number"], n);
         }
     }
 }
