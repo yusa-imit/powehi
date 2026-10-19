@@ -210,6 +210,10 @@ pub struct ReadArgs {
     /// stored untouched. Combines with --last (the cutoff applies first).
     #[arg(long, value_name = "UNIX_SECONDS")]
     pub since: Option<u64>,
+    /// Show only messages received before this Unix time (seconds, exclusive); later ones stay
+    /// stored untouched. With --since it selects the window [since, until).
+    #[arg(long, value_name = "UNIX_SECONDS")]
+    pub until: Option<u64>,
     /// Print each message as one JSON line (sender, received_at, text) instead of text.
     #[arg(long)]
     pub json: bool,

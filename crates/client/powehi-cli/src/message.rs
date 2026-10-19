@@ -282,6 +282,20 @@ pub fn since(msgs: &[Pending], cutoff: Option<u64>) -> &[Pending] {
     &msgs[start..]
 }
 
+/// The messages received strictly before `cutoff` (Unix seconds; `None` = all) of an
+/// oldest-first slice. Later ones are not returned, so `show` neither displays nor removes them.
+pub fn until(msgs: &[Pending], cutoff: Option<u64>) -> &[Pending] {
+    let Some(t) = cutoff else {
+        return msgs;
+    };
+    debug_assert!(msgs
+        .windows(2)
+        .all(|w| w[0].received_at <= w[1].received_at));
+    let end = msgs.partition_point(|m| m.received_at < t);
+    assert!(end <= msgs.len());
+    &msgs[..end]
+}
+
 /// The newest `last` messages of an oldest-first slice (`None` = all). Older ones are not
 /// returned, so `show` neither displays nor removes them.
 pub fn newest(msgs: &[Pending], last: Option<usize>) -> &[Pending] {
