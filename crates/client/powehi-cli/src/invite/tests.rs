@@ -381,3 +381,25 @@ fn joined_report_text_and_json_cover_both_outcomes() {
         .unwrap()
         .starts_with("no one has redeemed"));
 }
+
+#[test]
+fn redeemed_report_json_names_every_pq_outcome() {
+    let id = Uuid::from_u128(9);
+    let cases = [
+        (PqStatus::Bound("ab12".into()), "bound", Some("ab12")),
+        (PqStatus::PeerClassical, "peer_classical", None),
+        (PqStatus::KeyRejected, "key_rejected", None),
+        (PqStatus::NotSent, "not_sent", None),
+    ];
+    for (pq, state, binding) in cases {
+        let mut out = Vec::new();
+        write_redeemed(id, &pq, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert_eq!(s.lines().count(), 1);
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["conversation"], id.to_string());
+        assert_eq!(v["pq"], state);
+        assert_eq!(v["pq_binding"].as_str(), binding);
+        assert_eq!(v.as_object().unwrap().len(), 3);
+    }
+}

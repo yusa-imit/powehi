@@ -450,7 +450,7 @@ fn run_invite(
     let client = status::http_client()?;
     // Read the link before the password prompt so a bad paste fails fast.
     let link = match cmd {
-        cli::InviteCommand::Redeem => {
+        cli::InviteCommand::Redeem { .. } => {
             let mut buf = String::new();
             std::io::stdin()
                 .take(invite::MAX_LINK_LEN as u64 + 1)
@@ -472,12 +472,20 @@ fn run_invite(
                 wait_for_welcome(&rt, &client, server, &session, &key_ref, w, *json)?;
             }
         }
-        (cli::InviteCommand::Redeem, Some(link)) => {
+        (cli::InviteCommand::Redeem { json }, Some(link)) => {
             let (id, pq) = rt.block_on(invite::redeem(&client, server, &session, &link))?;
-            println!("conversation {id}");
-            print_pq_status(&pq);
+            if *json {
+                invite::write_redeemed(id, &pq, &mut std::io::stdout())
+                    .map_err(|_| CliError::Output)?;
+                if matches!(pq, invite::PqStatus::KeyRejected) {
+                    print_pq_status(&pq); // the warning goes to stderr, stdout stays JSON
+                }
+            } else {
+                println!("conversation {id}");
+                print_pq_status(&pq);
+            }
         }
-        (cli::InviteCommand::Redeem, None) => return Err(CliError::Stdin),
+        (cli::InviteCommand::Redeem { .. }, None) => return Err(CliError::Stdin),
     }
     Ok(())
 }
