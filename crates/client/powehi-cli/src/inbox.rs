@@ -50,6 +50,28 @@ pub struct InboxReport {
     pub skipped: usize,
 }
 
+/// Writes the [`InboxReport`] as one JSON object (for scripts):
+/// `{"joined":[id..],"pq_bindings":{id:"16-hex"},"stored":n,"skipped":n}`.
+/// Only ids, the public PQ binding and counts are printed, never message text.
+pub fn report_json(
+    out: &mut impl std::io::Write,
+    report: &InboxReport,
+    bindings: &[(Uuid, String)],
+) -> std::io::Result<()> {
+    let pq: serde_json::Map<String, serde_json::Value> = bindings
+        .iter()
+        .map(|(id, b)| (id.to_string(), serde_json::Value::from(b.as_str())))
+        .collect();
+    let obj = serde_json::json!({
+        "joined": report.joined.iter().map(Uuid::to_string).collect::<Vec<_>>(),
+        "pq_bindings": pq,
+        "stored": report.stored,
+        "skipped": report.skipped,
+    });
+    writeln!(out, "{obj}")?;
+    out.flush()
+}
+
 #[derive(Deserialize)]
 struct PqInit {
     #[serde(rename = "type")]

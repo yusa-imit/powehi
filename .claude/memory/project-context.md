@@ -43,6 +43,9 @@ confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the di
 above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 588 (2026-10-19, FEATURE) — `inbox --json`
+- Phase 7 DoD all [x]; `inbox --json` prints one object (joined, pq_bindings, stored, skipped) via `inbox::report_json`. 216 lib tests pass, clippy clean; ids/counts/public PQ binding only (already printed by text mode), no crypto/arch/backend change so no review agent required.
+
 ## Cycle 587 (2026-10-19, FEATURE) — `verify --json`
 - Phase 7 DoD all [x]; `verify --json` prints one object (conversation, safety_number, status) via `verify::report_json`; combines with `--confirm`. 214 lib tests pass, clippy clean; public safety number only (already printed by text mode), no crypto/arch/backend change so no review agent required.
 

@@ -48,7 +48,7 @@ pub enum Command {
     /// Send a message; the body is read from stdin only.
     Send(ConversationArg),
     /// Fetch, decrypt, store and acknowledge pending messages.
-    Inbox,
+    Inbox(InboxArgs),
     /// Show stored received messages for a conversation, then remove them from the store.
     Read(ReadArgs),
     /// Interactive chat REPL with realtime delivery.
@@ -69,6 +69,13 @@ pub enum Command {
 pub struct CompletionsArgs {
     /// Target shell.
     pub shell: clap_complete::Shell,
+}
+
+#[derive(Debug, Args)]
+pub struct InboxArgs {
+    /// Print one JSON object (joined, pq_bindings, stored, skipped) instead of text lines.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -203,7 +210,7 @@ impl Command {
             Command::Invite(InviteCommand::Create { .. }) => "invite create",
             Command::Invite(InviteCommand::Redeem) => "invite redeem",
             Command::Send(_) => "send",
-            Command::Inbox => "inbox",
+            Command::Inbox(_) => "inbox",
             Command::Read(_) => "read",
             Command::Chat(_) => "chat",
             Command::Verify(_) => "verify",
@@ -282,6 +289,14 @@ mod tests {
         assert!(matches!(c.command, Command::Whoami(ref a) if !a.json));
         let c = parse(&["whoami", "--json"]).unwrap();
         assert!(matches!(c.command, Command::Whoami(ref a) if a.json));
+    }
+
+    #[test]
+    fn inbox_json_flag() {
+        let c = parse(&["inbox"]).unwrap();
+        assert!(matches!(c.command, Command::Inbox(ref a) if !a.json));
+        let c = parse(&["inbox", "--json"]).unwrap();
+        assert!(matches!(c.command, Command::Inbox(ref a) if a.json));
     }
 
     #[test]
