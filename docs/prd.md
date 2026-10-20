@@ -1023,6 +1023,7 @@ POST   /v1/auth/login/init            OPAQUE 로그인 1단계 (KE1)
 POST   /v1/auth/login/finish          OPAQUE 로그인 완료 (KE3) → 세션 토큰
 POST   /v1/auth/devices               신규 디바이스 등록 (기존 디바이스 인증 필요)
 DELETE /v1/auth/devices/:id           디바이스 해지
+DELETE /v1/auth/session               호출자 자신의 bearer 토큰 폐기 (멱등, 204)
 ```
 
 #### KeyPackage

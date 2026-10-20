@@ -373,6 +373,28 @@ pub async fn login(
     .await
 }
 
+/// `DELETE /v1/auth/session`: asks the server to forget this session's bearer token (8.4).
+/// The server answers 204 even for a token it no longer knows, so a retry is harmless.
+pub async fn revoke_session(
+    client: &Client,
+    server: &Url,
+    session: &Session,
+) -> Result<(), AuthError> {
+    let url = server
+        .join("/v1/auth/session")
+        .map_err(|_| AuthError::BadResponse)?;
+    let resp = client
+        .delete(url)
+        .header(reqwest::header::AUTHORIZATION, session.bearer().as_str())
+        .send()
+        .await
+        .map_err(|_| AuthError::Unreachable)?;
+    match resp.status() {
+        s if s.is_success() => Ok(()),
+        s => Err(AuthError::HttpStatus(s.as_u16())),
+    }
+}
+
 /// Result of the client side of OPAQUE login, before `login/finish` is sent.
 struct Handshake {
     export_key: Zeroizing<Vec<u8>>,
@@ -914,6 +936,23 @@ mod tests {
                 "single-byte diff at {i} must be seen"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn revoke_session_sends_the_bearer_and_maps_failures() {
+        let st = Arc::new(Mutex::new(crate::testsrv::Backend::default()));
+        let url = crate::testsrv::serve(st.clone()).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let session = crate::testsrv::session(&tmp, "rev", 3);
+        let client = Client::new();
+        revoke_session(&client, &url, &session).await.unwrap();
+        assert_eq!(st.lock().unwrap().calls, ["DELETE /v1/auth/session"]);
+        st.lock().unwrap().fail_revoke = true;
+        let err = revoke_session(&client, &url, &session).await.unwrap_err();
+        assert!(matches!(err, AuthError::HttpStatus(500)));
+        let dead = Url::parse("http://127.0.0.1:1").unwrap();
+        let err = revoke_session(&client, &dead, &session).await.unwrap_err();
+        assert!(matches!(err, AuthError::Unreachable));
     }
 
     #[test]
