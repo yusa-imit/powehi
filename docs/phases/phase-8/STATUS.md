@@ -113,6 +113,12 @@ pointing here. Close the issue in the PR that finishes its item.
   Tests: roll back one record, delete one, mix two snapshots, swap two records,
   migration, password-change rewrap, phrase unlock. Update prd §3.2/§7A.3.
   crypto-reviewer + threat-model-checker.
+  Slice (a) shipped: `store/manifest.rs` (`manifest.mf3`, AEAD-MAC'd tag→SHA-256 list +
+  generation, pending-entry crash recovery, `store-v3` latch against manifest deletion); PHS2
+  stores are adopted at first open. Remaining: (b) DEK/KEK wrap, (c) per-store tag salt.
+  Owner call on the interim downgrade window: issue #133.
+  Done condition for (b): remove the automatic PHS2 adoption (or gate it behind an explicit
+  user action) so deleting the manifest + latch no longer downgrades the store (prd §3.2 ②).
 - [ ] 8.9 KeyPackage orphan pruning (#22) — store a per-batch upload state
   (`prepared` → `sent` → `confirmed`). A batch never sent is deleted at once. A batch
   whose response was lost may already be live on the server, so it, like confirmed

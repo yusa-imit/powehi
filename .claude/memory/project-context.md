@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 609 (2026-10-21, FEATURE) — 8.8 slice (a) store manifest
+`store/manifest.rs`: `manifest.mf3` (AEAD, tag→SHA-256 + generation, pending-entry crash recovery, `store-v3` latch). PHS2 stores adopted at first open. threat-model YELLOW: prd §3.2 now states residuals (any past snapshot replay; manifest+latch deletion downgrade). 8.8b must remove/gate automatic PHS2 adoption. Remaining 8.8: (b) DEK/KEK wrap, (c) tag salt. store_cap test now ~85s (manifest rewrite per put).
+
 ## Cycle 606 (2026-10-21, FEATURE) — 8.6 handle/password normalization
 `powehi_crypto_core::credentials` (trim, `[a-z0-9-]{1,64}` for new handles, NFC password, raw-password login fallback) + `app/src/lib/credentials.ts`; shared vectors in `docs/test-vectors/credential-normalization.json`. CLI `register` rejects bad handles before any request; `login` retries raw only on InvalidCredentials. Server cannot validate handles (hash only). Next: 8.7 certificate pinning.
 
