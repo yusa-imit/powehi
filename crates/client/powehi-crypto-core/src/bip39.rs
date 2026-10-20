@@ -315,6 +315,55 @@ mod tests {
     }
 
     #[test]
+    fn uppercase_words_are_rejected_not_folded() {
+        let m = Mnemonic::from_entropy(&[7u8; 16]).unwrap();
+        let upper = m.to_string().to_uppercase();
+        assert_eq!(
+            Mnemonic::parse_normalized(&upper).unwrap_err(),
+            Bip39Error::UnknownWord
+        );
+    }
+
+    #[test]
+    fn invalid_word_counts_are_rejected() {
+        let phrase = Mnemonic::from_entropy(&[9u8; 16]).unwrap().to_string();
+        let words: Vec<&str> = phrase.split(' ').collect();
+        for n in [0usize, 1, 3, 6, 9, 11, 13, 14, 16, 17, 19, 20, 22, 23, 27] {
+            let cut = (0..n).map(|i| words[i % 12]).collect::<Vec<_>>().join(" ");
+            assert_eq!(
+                Mnemonic::parse_normalized(&cut).unwrap_err(),
+                Bip39Error::WordCount,
+                "{n} words"
+            );
+        }
+    }
+
+    #[test]
+    fn any_whitespace_separates_words() {
+        let m = Mnemonic::from_entropy(&[3u8; 32]).unwrap();
+        let messy = m.to_string().replace(' ', " \t\n  ");
+        let padded = format!("  {messy}\n");
+        let parsed = Mnemonic::parse_normalized(&padded).unwrap();
+        assert_eq!(&*parsed.entropy, &[3u8; 32]);
+    }
+
+    #[test]
+    fn exactly_one_in_sixteen_last_words_verify() {
+        // The final word of a 12-word phrase holds 7 entropy bits and 4
+        // checksum bits, so exactly 2^7 of the 2048 candidates verify.
+        let phrase = Mnemonic::from_entropy(&[0x5a; 16]).unwrap().to_string();
+        let head = phrase.rsplit_once(' ').unwrap().0;
+        let mut ok = 0usize;
+        for last in wordlist() {
+            match Mnemonic::parse_normalized(&format!("{head} {last}")) {
+                Ok(_) => ok += 1,
+                Err(e) => assert_eq!(e, Bip39Error::Checksum),
+            }
+        }
+        assert_eq!(ok, 128);
+    }
+
+    #[test]
     fn debug_does_not_print_words() {
         let m = Mnemonic::from_entropy(&[0u8; 32]).unwrap();
         assert!(!format!("{m:?}").contains("abandon"));
