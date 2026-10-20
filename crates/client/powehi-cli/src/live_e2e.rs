@@ -92,4 +92,9 @@ async fn two_profiles_register_converse_and_verify() {
     // Both sides derive the same Safety Number from the group state alone.
     let a_num = verify::number(&alice.store, gid).unwrap();
     assert_eq!(a_num, verify::number(&bob.store, gid).unwrap());
+
+    // 8.4: revoking ends the session. The token is dead on REST, and a second revoke is a no-op.
+    auth::revoke_session(&client, &url, &alice).await.unwrap();
+    assert!(inbox::receive(&client, &url, &alice).await.is_err());
+    auth::revoke_session(&client, &url, &alice).await.unwrap();
 }

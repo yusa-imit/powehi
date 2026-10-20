@@ -25,6 +25,8 @@ pub struct Backend {
     pub calls: Vec<String>,
     /// Corrupt the key package on redeem (what a malicious server would try).
     pub tamper_redeem: bool,
+    /// Answer `DELETE /v1/auth/session` with a 500.
+    pub fail_revoke: bool,
     /// Answer `POST /v1/messages` with a 500.
     pub fail_messages: bool,
     /// Envelopes per `GET /v1/messages` page; 0 means the real server's 64.
@@ -56,6 +58,8 @@ fn handle(st: &mut Backend, method: &str, path: &str, caller: Uuid, body: &Value
     let (path, query) = path.split_once('?').unwrap_or((path, ""));
     let segs: Vec<&str> = path.trim_matches('/').split('/').collect();
     match (method, segs.as_slice()) {
+        ("DELETE", ["v1", "auth", "session"]) if st.fail_revoke => respond(500, None),
+        ("DELETE", ["v1", "auth", "session"]) => respond(204, None),
         ("POST", ["v1", "invites"]) => {
             let kp: Vec<u8> = serde_json::from_value(body["key_package"].clone()).unwrap();
             let code = Uuid::new_v4().simple().to_string();

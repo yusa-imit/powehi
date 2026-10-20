@@ -158,7 +158,7 @@ fn run_whoami(
     let rt = runtime()?;
     let client = status::http_client()?;
     let mut prompter = prompt::TtyPrompter;
-    let s = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
+    let s = login_scoped(&rt, &client, server, paths, &mut prompter)?;
     whoami::report(
         profile,
         server,
@@ -175,6 +175,56 @@ fn run_profiles(base: &std::path::Path, count: bool, json: bool) -> Result<(), C
     let names = profile::list(base).map_err(|_| CliError::DataDirList)?;
     profile::write_listing(&names, count, json, &mut std::io::stdout())
         .map_err(|_| CliError::Output)
+}
+
+/// A logged-in [`auth::Session`] that revokes its bearer token on the server when dropped (8.4).
+/// Best effort: a failure is a stderr warning and never changes the exit code.
+#[cfg(unix)]
+struct LoggedIn<'a> {
+    session: auth::Session,
+    rt: &'a tokio::runtime::Runtime,
+    client: &'a reqwest::Client,
+    server: &'a url::Url,
+}
+
+#[cfg(unix)]
+impl std::ops::Deref for LoggedIn<'_> {
+    type Target = auth::Session;
+    fn deref(&self) -> &auth::Session {
+        &self.session
+    }
+}
+
+#[cfg(unix)]
+impl Drop for LoggedIn<'_> {
+    fn drop(&mut self) {
+        let done = self.rt.block_on(auth::revoke_session(
+            self.client,
+            self.server,
+            &self.session,
+        ));
+        if done.is_err() {
+            eprintln!("warning: could not end the server session; it expires on its own");
+        }
+    }
+}
+
+/// Logs in and returns a session that is revoked when the command ends.
+#[cfg(unix)]
+fn login_scoped<'a>(
+    rt: &'a tokio::runtime::Runtime,
+    client: &'a reqwest::Client,
+    server: &'a url::Url,
+    paths: &profile::ProfilePaths,
+    prompter: &mut dyn prompt::Prompter,
+) -> Result<LoggedIn<'a>, CliError> {
+    let session = rt.block_on(auth::login(client, server, paths, prompter))?;
+    Ok(LoggedIn {
+        session,
+        rt,
+        client,
+        server,
+    })
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime, CliError> {
@@ -199,6 +249,12 @@ fn run_auth(
         rt.block_on(auth::register(&client, server, paths, &mut prompter))?
     } else {
         rt.block_on(auth::login(&client, server, paths, &mut prompter))?
+    };
+    let session = LoggedIn {
+        session,
+        rt: &rt,
+        client: &client,
+        server,
     };
     let uploaded = rt.block_on(identity::ensure_key_packages(&client, server, &session))?;
     write_auth_report(
@@ -278,7 +334,7 @@ fn run_inbox(server: &url::Url, paths: &profile::ProfilePaths, json: bool) -> Re
     let rt = runtime()?;
     let client = status::http_client()?;
     let mut prompter = prompt::TtyPrompter;
-    let session = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
+    let session = login_scoped(&rt, &client, server, paths, &mut prompter)?;
     let r = rt.block_on(inbox::receive(&client, server, &session))?;
     let mut bindings = Vec::with_capacity(r.pq_bound.len());
     for id in &r.pq_bound {
@@ -326,7 +382,7 @@ fn run_send(
     let rt = runtime()?;
     let client = status::http_client()?;
     let mut prompter = prompt::TtyPrompter;
-    let session = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
+    let session = login_scoped(&rt, &client, server, paths, &mut prompter)?;
     let group_id = message::resolve(&session.store, reference)?;
     if verify::changed_since_verified(&session.store, group_id) {
         eprintln!("{}", verify::CHANGED_WARNING);
@@ -348,7 +404,7 @@ fn run_read(
     let rt = runtime()?;
     let client = status::http_client()?;
     let mut prompter = prompt::TtyPrompter;
-    let session = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
+    let session = login_scoped(&rt, &client, server, paths, &mut prompter)?;
     let group_id = message::resolve(&session.store, reference)?;
     if verify::changed_since_verified(&session.store, group_id) {
         eprintln!("{}", verify::CHANGED_WARNING);
@@ -399,7 +455,7 @@ fn run_conversations(
     let rt = runtime()?;
     let client = status::http_client()?;
     let mut prompter = prompt::TtyPrompter;
-    let session = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
+    let session = login_scoped(&rt, &client, server, paths, &mut prompter)?;
     let unread = message::unread_counts(&session.store)?;
     let (store, out) = (&session.store, &mut std::io::stdout());
     let limit = conversation::Page {
@@ -449,7 +505,7 @@ fn run_verify(
     let rt = runtime()?;
     let client = status::http_client()?;
     let mut prompter = prompt::TtyPrompter;
-    let session = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
+    let session = login_scoped(&rt, &client, server, paths, &mut prompter)?;
     let group_id = message::resolve(&session.store, &args.conversation)?;
     let number = verify::number(&session.store, group_id)?;
     let mut state = verify::state(&session.store, group_id, &number)?;
@@ -482,7 +538,7 @@ fn run_chat(
     let rt = runtime()?;
     let client = status::http_client()?;
     let mut prompter = prompt::TtyPrompter;
-    let session = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
+    let session = login_scoped(&rt, &client, server, paths, &mut prompter)?;
     let group_id = message::resolve(&session.store, reference)?;
     let alt = screen::wanted_on_stdout(false);
     let _signals = alt.then(screen::install_signal_restore);
@@ -548,7 +604,7 @@ fn run_invite(
         cli::InviteCommand::Create { .. } => None,
     };
     let mut prompter = prompt::TtyPrompter;
-    let session = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
+    let session = login_scoped(&rt, &client, server, paths, &mut prompter)?;
     match (cmd, link) {
         (cli::InviteCommand::Create { wait, json }, _) => {
             let (url, key_ref) = rt.block_on(invite::create(&client, server, &session))?;

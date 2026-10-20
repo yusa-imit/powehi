@@ -58,7 +58,7 @@ pointing here. Close the issue in the PR that finishes its item.
   escape sequences; the restore path runs on error.
 
 ### Server and auth
-- [ ] 8.4 Session revoke (#39-4) — `DELETE /v1/auth/session` revokes the caller's
+- [x] 8.4 Session revoke (#39-4) — `DELETE /v1/auth/session` revokes the caller's
   bearer token (idempotent, 204; a revoked token is rejected on REST and on the `/v1/ws`
   upgrade). The CLI calls it when a command that logged in exits (best effort: a
   failure is a stderr warning and never changes the exit code). Tests on both sides.

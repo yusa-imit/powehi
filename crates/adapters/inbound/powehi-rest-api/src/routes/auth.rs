@@ -8,7 +8,7 @@
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{header, HeaderMap, StatusCode},
     Json,
 };
 use metrics::counter;
@@ -146,6 +146,30 @@ pub async fn revoke_device_handler(
             other => ApiError::from(other),
         })?;
     tracing::info!("auth.revoke_device");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /v1/auth/session` — revoke the caller's own bearer token (8.4).
+///
+/// Idempotent: a token that is already revoked, expired or unknown also yields 204, so a
+/// retry after a lost response is safe. Only a missing or malformed `Authorization` header
+/// is rejected (401). The token is never logged. Other sessions of the device are untouched.
+pub async fn revoke_session_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| ApiError::from(DomainError::Unauthorized))?;
+    state
+        .cache
+        .delete(&format!("session:{token}"))
+        .await
+        .map_err(ApiError::from)?;
+    tracing::info!("auth.revoke_session");
     Ok(StatusCode::NO_CONTENT)
 }
 

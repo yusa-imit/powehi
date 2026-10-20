@@ -195,6 +195,10 @@ fn router_inner(
             "/v1/push-subscriptions",
             post(routes::push_subscription::register).delete(routes::push_subscription::unregister),
         )
+        .route(
+            "/v1/auth/session",
+            delete(routes::auth::revoke_session_handler),
+        )
         .route("/v1/invites", post(routes::invite::create))
         .route("/v1/invites/redeem", post(routes::invite::redeem))
         .layer(api_layer);
@@ -3211,6 +3215,87 @@ mod tests {
             cache: test_session_cache(),
             handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
         })
+    }
+
+    fn session_router(cache: Arc<dyn CachePort>) -> Router {
+        router(AppState {
+            region_id: "eu-de-1-test".to_string(),
+            region_tier: powehi_domain::region::Tier::Tier1,
+            auth: Arc::new(MockAuthDeviceSuccess),
+            group: noop_group(),
+            messaging: Arc::new(MockMessaging),
+            key_package: Arc::new(MockKeyPackage),
+            media: Arc::new(MockMedia),
+            push_sub_repo: null_push_sub_repo(),
+            invite: noop_invite(),
+            device_repo: FakeDeviceRepo::new(UserId::new()),
+            cache,
+            handle_rate_limiter: Arc::new(rate_limit::HandleRateLimiter::new()),
+        })
+    }
+
+    async fn status_of(app: &Router, method: &str, uri: &str, auth: Option<&str>) -> StatusCode {
+        let mut req = Request::builder().method(method).uri(uri);
+        if let Some(a) = auth {
+            req = req.header("authorization", a);
+        }
+        app.clone()
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn revoke_session_kills_the_token_and_is_idempotent() {
+        let app = session_router(test_session_cache());
+        let b = bearer();
+        assert_eq!(
+            status_of(&app, "GET", "/v1/auth/devices", Some(&b)).await,
+            StatusCode::OK
+        );
+        let del = status_of(&app, "DELETE", "/v1/auth/session", Some(&b));
+        assert_eq!(del.await, StatusCode::NO_CONTENT);
+        // Negative space: the revoked token no longer authenticates anything.
+        assert_eq!(
+            status_of(&app, "GET", "/v1/auth/devices", Some(&b)).await,
+            StatusCode::UNAUTHORIZED
+        );
+        // Retry after a lost response is still 204.
+        let again = status_of(&app, "DELETE", "/v1/auth/session", Some(&b)).await;
+        assert_eq!(again, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn revoke_session_leaves_other_tokens_alone() {
+        let cache = test_session_cache();
+        cache
+            .set(
+                "session:other",
+                test_device_id().as_uuid().as_bytes().to_vec(),
+                None,
+            )
+            .await
+            .unwrap();
+        let app = session_router(cache);
+        let st = status_of(&app, "DELETE", "/v1/auth/session", Some("Bearer other")).await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        assert_eq!(
+            status_of(&app, "GET", "/v1/auth/devices", Some(&bearer())).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_session_without_bearer_returns_401() {
+        let app = session_router(test_session_cache());
+        for auth in [None, Some("Bearer "), Some("Basic abc")] {
+            assert_eq!(
+                status_of(&app, "DELETE", "/v1/auth/session", auth).await,
+                StatusCode::UNAUTHORIZED,
+                "{auth:?}"
+            );
+        }
     }
 
     #[tokio::test]

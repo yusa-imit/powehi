@@ -1710,3 +1710,7 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 
 ## Cycle 602 (2026-10-20, FEATURE) — Phase 8 item 8.3
 - `powehi-cli::screen`: AltScreen RAII guard (restore on return/error/panic) + SIGINT/SIGTERM handler (async-signal-safe write, re-raise). Used by `chat` and `read` only when stdout is a TTY and no `--json`. `read` on a TTY waits for Enter before leaving (the screen vanishes; messages are deleted after show). 6 unit tests; 235 lib tests pass. Next: 8.4 (session revoke).
+
+## Cycle 603 (2026-10-20, FEATURE) — Phase 8 item 8.4
+- `DELETE /v1/auth/session` (rest-api `revoke_session_handler`): deletes `session:{token}` from the cache, 204 even for unknown/expired tokens, 401 only for a missing/malformed Bearer header; same key backs the WS upgrade. CLI: `auth::revoke_session` + `LoggedIn` Drop guard in lib.rs (best effort, stderr warning only). 3 server tests, 1 CLI test, live E2E asserts the token is dead afterwards. Next: 8.5 (retryable register).
+
