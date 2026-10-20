@@ -21,13 +21,16 @@ use powehi_port_outbound::{
     group_repo::GroupRepository, key_package_repo::KeyPackageRepository, opaque::OpaqueServerPort,
     user_repo::UserRepository,
 };
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use tracing::instrument;
 use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
 
 const REG_TTL: Duration = Duration::from_secs(300);
+/// How long a completed `register_finish` with a client-chosen device id stays replayable
+/// (the client's bounded retry window).
+const REG_DONE_TTL: Duration = Duration::from_secs(60);
 const LOGIN_NONCE_TTL: Duration = Duration::from_secs(300);
 const SESSION_TTL: Duration = Duration::from_secs(86_400);
 /// Buffer added to `device_sessions` set TTL so it outlives any session it tracks.
@@ -217,6 +220,59 @@ impl AuthService {
     }
 }
 
+impl AuthService {
+    /// Replays a completed client-id `register_finish`. Same fingerprint → the original
+    /// response; anything else falls through to the normal path.
+    async fn replay_register(
+        &self,
+        done_key: &str,
+        fingerprint: &[u8],
+        req: &RegistrationFinishRequest,
+    ) -> Result<Option<RegistrationFinishResponse>, DomainError> {
+        let Some(stored) = self.cache.get(done_key).await? else {
+            return Ok(None);
+        };
+        let device_id = req.device_id.clone().ok_or(DomainError::Unauthorized)?;
+        // A mismatch is NOT a distinct error: it falls through to the normal path (the
+        // registration session is consumed → NotFound), so an unauthenticated caller who
+        // does not know the original request cannot probe recent registrations.
+        if !ct_eq(&stored, fingerprint) {
+            return Ok(None);
+        }
+        Ok(Some(RegistrationFinishResponse {
+            user_id: req.user_id.clone(),
+            device_id,
+        }))
+    }
+}
+
+/// SHA-256 over the device id and every enrollment field: what a retry must repeat.
+fn reg_fingerprint(device_id: &DeviceId, req: &RegistrationFinishRequest) -> Vec<u8> {
+    let mut h = Sha256::new();
+    h.update(device_id.as_uuid().as_bytes());
+    // Length-prefixed so field boundaries are unambiguous.
+    for field in [
+        Some(&req.opaque_record),
+        Some(&req.mls_credential),
+        req.recovery_pubkey.as_ref(),
+    ] {
+        match field {
+            Some(f) => {
+                h.update([1u8]);
+                h.update((f.len() as u64).to_be_bytes());
+                h.update(f);
+            }
+            None => h.update([0u8]),
+        }
+    }
+    h.finalize().to_vec()
+}
+
+/// Not secret-dependent (both sides are hashes of data the caller already knows).
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 #[async_trait]
 impl AuthUseCase for AuthService {
     #[instrument(skip(self, req), fields(handle_hash_len = req.handle_hash.len()))]
@@ -243,15 +299,26 @@ impl AuthUseCase for AuthService {
         &self,
         req: RegistrationFinishRequest,
     ) -> Result<RegistrationFinishResponse, DomainError> {
+        let done_key = format!("regdone:{}", req.user_id.as_uuid());
+        let fingerprint = req.device_id.as_ref().map(|d| reg_fingerprint(d, &req));
+        if let Some(fp) = &fingerprint {
+            if let Some(resp) = self.replay_register(&done_key, fp, &req).await? {
+                return Ok(resp);
+            }
+        }
         let password_file = self.opaque.registration_finish(&req.opaque_record)?;
         let cache_key = format!("reg:{}", req.user_id.as_uuid());
         // Atomically consume the registration session — prevents concurrent-finish
         // races and nonce replay within the TTL window (audit finding sec-F1).
-        let handle_hash = self
-            .cache
-            .get_del(&cache_key)
-            .await?
-            .ok_or_else(|| DomainError::NotFound("registration session".into()))?;
+        let Some(handle_hash) = self.cache.get_del(&cache_key).await? else {
+            // A concurrent first attempt may have just finished: recheck the replay record.
+            if let Some(fp) = &fingerprint {
+                if let Some(resp) = self.replay_register(&done_key, fp, &req).await? {
+                    return Ok(resp);
+                }
+            }
+            return Err(DomainError::NotFound("registration session".into()));
+        };
 
         // Reject a malformed recovery_pubkey at enrollment time rather than only
         // failing closed later at restore (security-auditor finding, cycle 303) —
@@ -267,6 +334,13 @@ impl AuthUseCase for AuthService {
             return Err(DomainError::InvalidInput("mls_credential too large".into()));
         }
 
+        // A client-chosen id must not collide with ANY existing device: the repository
+        // save is an upsert, so a collision would overwrite another account's credential.
+        let device_id = req.device_id.clone().unwrap_or_default();
+        if req.device_id.is_some() && self.device_repo.find_by_id(&device_id).await?.is_some() {
+            return Err(DomainError::AlreadyExists("device".into()));
+        }
+
         let mut user = User::registered(req.user_id.clone(), handle_hash, password_file);
         // Enroll the account in §8.5 phrase-based recovery when the client supplied a
         // recovery_pubkey. Absent → user opts out and cannot use the restore path.
@@ -274,11 +348,13 @@ impl AuthUseCase for AuthService {
         self.user_repo.save(&user).await?;
 
         // Create the first device for this user. The client supplies its MLS
-        // credential bytes (raw BasicCredential identity). The server assigns a
-        // fresh DeviceId so the client can present it in subsequent LoginFinishRequests.
-        let device_id = DeviceId::new();
+        // credential bytes (raw BasicCredential identity). The device id is
+        // client-chosen when supplied (retryable), else server-assigned.
         let device = Device::new(device_id.clone(), req.user_id.clone(), req.mls_credential);
         self.device_repo.save(&device).await?;
+        if let Some(fp) = fingerprint {
+            self.cache.set(&done_key, fp, Some(REG_DONE_TTL)).await?;
+        }
 
         Ok(RegistrationFinishResponse {
             user_id: req.user_id,
@@ -1518,12 +1594,117 @@ mod tests {
             opaque_record: vec![2u8; 32],
             mls_credential: vec![],
             recovery_pubkey: None,
+            device_id: None,
         })
         .await
         .unwrap();
         let user = user_repo.find_by_id(&uid).await.unwrap().unwrap();
         assert_eq!(user.handle_hash, handle_hash);
         assert_eq!(user.opaque_password_file, vec![2u8; 32]);
+    }
+
+    async fn init_user(svc: &AuthService) -> UserId {
+        svc.register_init(RegistrationInitRequest {
+            opaque_request: vec![1u8; 32],
+            handle_hash: b"sha256-of-retry".to_vec(),
+        })
+        .await
+        .unwrap()
+        .user_id
+    }
+
+    fn finish_req(uid: &UserId, dev: Option<&DeviceId>, rec: u8) -> RegistrationFinishRequest {
+        RegistrationFinishRequest {
+            user_id: uid.clone(),
+            opaque_record: vec![rec; 32],
+            mls_credential: vec![],
+            recovery_pubkey: None,
+            device_id: dev.cloned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn register_finish_uses_client_device_id_and_replays_on_retry() {
+        let (svc, _, device_repo, _) = make_svc();
+        let uid = init_user(&svc).await;
+        let dev = DeviceId::new();
+        let first = svc
+            .register_finish(finish_req(&uid, Some(&dev), 2))
+            .await
+            .unwrap();
+        assert_eq!(first.device_id, dev);
+        let again = svc
+            .register_finish(finish_req(&uid, Some(&dev), 2))
+            .await
+            .unwrap();
+        assert_eq!((again.user_id, again.device_id), (uid.clone(), dev));
+        assert_eq!(device_repo.find_by_user(&uid).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn register_finish_retry_with_different_record_or_device_is_not_replayed() {
+        let (svc, _, _, _) = make_svc();
+        let uid = init_user(&svc).await;
+        let dev = DeviceId::new();
+        svc.register_finish(finish_req(&uid, Some(&dev), 2))
+            .await
+            .unwrap();
+        for req in [
+            finish_req(&uid, Some(&dev), 3),
+            finish_req(&uid, Some(&DeviceId::new()), 2),
+        ] {
+            let e = svc.register_finish(req).await.unwrap_err();
+            assert!(matches!(e, DomainError::NotFound(_)));
+        }
+    }
+
+    #[tokio::test]
+    async fn register_finish_retry_with_different_recovery_key_is_not_replayed() {
+        let (svc, _, _, _) = make_svc();
+        let uid = init_user(&svc).await;
+        let dev = DeviceId::new();
+        let mut req = finish_req(&uid, Some(&dev), 2);
+        req.recovery_pubkey = Some(vec![7u8; 32]);
+        svc.register_finish(req.clone()).await.unwrap();
+        svc.register_finish(req.clone()).await.unwrap();
+        req.recovery_pubkey = Some(vec![8u8; 32]);
+        let e = svc.register_finish(req).await.unwrap_err();
+        assert!(matches!(e, DomainError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn register_finish_without_device_id_is_not_replayable() {
+        let (svc, _, _, _) = make_svc();
+        let uid = init_user(&svc).await;
+        svc.register_finish(finish_req(&uid, None, 2))
+            .await
+            .unwrap();
+        let e = svc
+            .register_finish(finish_req(&uid, None, 2))
+            .await
+            .unwrap_err();
+        assert!(matches!(e, DomainError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn register_finish_rejects_client_device_id_owned_by_another_user() {
+        let (svc, user_repo, device_repo, _) = make_svc();
+        let first = init_user(&svc).await;
+        let dev = DeviceId::new();
+        svc.register_finish(finish_req(&first, Some(&dev), 2))
+            .await
+            .unwrap();
+        let second = init_user(&svc).await;
+        let e = svc
+            .register_finish(finish_req(&second, Some(&dev), 4))
+            .await
+            .unwrap_err();
+        assert!(matches!(e, DomainError::AlreadyExists(_)));
+        assert!(user_repo.find_by_id(&second).await.unwrap().is_none());
+        assert_eq!(
+            device_repo.find_by_id(&dev).await.unwrap().unwrap().user_id,
+            first
+        );
     }
 
     #[tokio::test]
@@ -1547,6 +1728,7 @@ mod tests {
                 opaque_record: vec![2u8; 32],
                 mls_credential: vec![],
                 recovery_pubkey: Some(vec![0u8; 31]), // one byte short
+                device_id: None,
             })
             .await
             .unwrap_err();
@@ -1574,6 +1756,7 @@ mod tests {
                 opaque_record: vec![2u8; 32],
                 mls_credential: vec![0u8; MAX_MLS_CREDENTIAL_BYTES + 1],
                 recovery_pubkey: None,
+                device_id: None,
             })
             .await
             .unwrap_err();
@@ -1591,6 +1774,7 @@ mod tests {
                 opaque_record: vec![],
                 mls_credential: vec![],
                 recovery_pubkey: None,
+                device_id: None,
             })
             .await
             .unwrap_err();

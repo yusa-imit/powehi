@@ -63,12 +63,16 @@ pointing here. Close the issue in the PR that finishes its item.
   upgrade). The CLI calls it when a command that logged in exits (best effort: a
   failure is a stderr warning and never changes the exit code). Tests on both sides.
   security-auditor.
-- [ ] 8.5 Retryable register (#20) — `register/finish` accepts an optional client-chosen
+- [x] 8.5 Retryable register (#20) — `register/finish` accepts an optional client-chosen
   `device_id` (UUIDv4). A retry with the same user, `device_id` and OPAQUE record
   returns the original response; a different record → conflict error. The CLI picks
   the id before `finish`, retries on a lost response, and shows the recovery phrase
   only after success. Requests without the field behave as today (web unchanged).
   security-auditor + crypto-reviewer.
+  Shipped: the replay fingerprint binds device_id, record, credential and recovery key; a
+  mismatch is indistinguishable from "no session" (no conflict oracle; deviates from the
+  "conflict error" wording by audit finding); replay window 60 s. Follow-up: insert-only
+  device id + revoked-id reuse (need-human issue).
 - [ ] 8.6 Handle and password normalization (#19) — registration accepts only handles
   matching `[a-z0-9-]` (server validation, CLI and web); login still accepts any
   existing handle unchanged so older accounts keep working. Passwords are NFC-
