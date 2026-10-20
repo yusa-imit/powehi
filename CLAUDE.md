@@ -7,7 +7,8 @@ See `/docs/prd.md` for full architecture. See `/docs/orchestration.md` for agent
 ## Current priority: CLI-first (ADR-0006, owner directive 2026-10-08)
 - The primary client is the Rust terminal client `crates/client/powehi-cli` (binary `powehi`).
   Phase 7 is complete (2026-10-14). FEATURE work comes from `docs/phases/phase-8/STATUS.md`,
-  first unchecked item, in order. When no unchecked item is left, do not invent features:
+  first unchecked item, in order; after Phase 8, `docs/phases/phase-9/STATUS.md` (real
+  deployment on AWS Seoul + Cloudflare, ADR-0007). When no unchecked item is left, do not invent features:
   run STABILIZATION work and say so in the summary.
 - The web client `app/` is in maintenance: CI-red, `bug` issues, security fixes only.
   No new web features or UI; Phase 8 touches the web only where a shared server/protocol

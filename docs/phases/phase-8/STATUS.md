@@ -7,7 +7,8 @@ unchecked item, in order. An item too large for one cycle ships in slices
 (note each slice next to the item, as Phase 7 did); the box flips when the
 last slice lands. The web client (`app/`) stays in maintenance (ADR-0006):
 it changes only where a shared server or protocol change below requires it
-(8.6, 8.11), never for new web UI.
+(8.6, 8.11), never for new web UI. When every box below is checked, the queue
+moves to `docs/phases/phase-9/STATUS.md` (real deployment, ADR-0007).
 
 The order matters: 8.8 changes the profile store format, and later items add
 new records to it, so it lands before them. The Commit path (8.14) comes
@@ -83,7 +84,10 @@ pointing here. Close the issue in the PR that finishes its item.
   Cloudflare-managed and rotating; if pinning the leaf is not workable, pin the
   issuing CA intermediates and record that in prd §3.1. If neither fits, open a
   `need-human` issue and move on. Tests: pinned key accepted, a valid but unpinned
-  cert rejected, backup pin accepted. Add a rotation runbook to `docs/`.
+  cert rejected, backup pin accepted. Add a rotation runbook to `docs/`. No domain or
+  production certificate exists until Phase 9 (ADR-0007, issue #118), so ship the
+  mechanism with test pins here; the production pin set is chosen in 9.9. The edge
+  uses Cloudflare-managed certificates whose keys rotate.
   crypto-reviewer + threat-model-checker.
 
 ### Profile store v3 (PHS3)
