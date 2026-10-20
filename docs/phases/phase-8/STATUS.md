@@ -40,7 +40,7 @@ pointing here. Close the issue in the PR that finishes its item.
 ## Definition of Done (in order)
 
 ### Quick hardening
-- [ ] 8.1 Edge TLS 1.3 minimum (#56) — set Cloudflare `min_tls_version = "1.3"` in
+- [x] 8.1 Edge TLS 1.3 minimum (#56) — set Cloudflare `min_tls_version = "1.3"` in
   `infra/terraform/envs/cloudflare/main.tf` and drop the "owner call" comment there.
   Gate: `terraform validate`, `tflint`, `tfsec`, the `infra-test` skill.
 - [ ] 8.2 RustCrypto-only BIP-39 (#13) — replace the `bip39` crate in
