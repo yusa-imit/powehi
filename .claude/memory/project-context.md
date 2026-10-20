@@ -1714,3 +1714,6 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 ## Cycle 603 (2026-10-20, FEATURE) — Phase 8 item 8.4
 - `DELETE /v1/auth/session` (rest-api `revoke_session_handler`): deletes `session:{token}` from the cache, 204 even for unknown/expired tokens, 401 only for a missing/malformed Bearer header; same key backs the WS upgrade. CLI: `auth::revoke_session` + `LoggedIn` Drop guard in lib.rs (best effort, stderr warning only). 3 server tests, 1 CLI test, live E2E asserts the token is dead afterwards. Next: 8.5 (retryable register).
 
+
+## Cycle 604 (2026-10-20, FEATURE) — Phase 8 item 8.5
+- `register/finish` takes optional client `device_id`; replay marker `regdone:{uid}` = SHA-256(device_id, record, credential, recovery key), 60 s TTL; mismatch falls through to NotFound (no oracle); a client id colliding with an existing device → AlreadyExists. CLI picks the id, retries finish ≤3× (transport/404/5xx), checks the echoed ids, shows the phrase only after success. security-auditor + crypto-reviewer findings applied except DB-level insert-only device id + revoked-id reuse (need-human follow-up). Next: 8.6 (handle/password normalization).

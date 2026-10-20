@@ -139,6 +139,8 @@ struct RegFinishReq<'a> {
     opaque_record: &'a [u8],
     mls_credential: &'a [u8],
     recovery_pubkey: &'a [u8],
+    /// Chosen before the first attempt so a retry after a lost response is a replay.
+    device_id: Uuid,
 }
 #[derive(Deserialize)]
 struct RegFinishResp {
@@ -192,6 +194,33 @@ async fn post_json<B: Serialize, R: DeserializeOwned>(
         buf.extend_from_slice(&chunk);
     }
     serde_json::from_slice(&buf).map_err(|_| AuthError::BadResponse)
+}
+
+/// Attempts for an idempotent request (`register/finish` with a client `device_id`).
+const RETRY_ATTEMPTS: u32 = 3;
+const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// `post_json` for an idempotent request: retries a lost response (transport failure, 5xx, or 404 while the first attempt is still
+/// committing).
+async fn post_json_retrying<B: Serialize, R: DeserializeOwned>(
+    client: &Client,
+    server: &Url,
+    path: &str,
+    body: &B,
+) -> Result<R, AuthError> {
+    let mut attempt = 1;
+    loop {
+        let r = post_json(client, server, path, body).await;
+        let retryable = matches!(
+            r,
+            Err(AuthError::Unreachable | AuthError::HttpStatus(404 | 500..=599))
+        );
+        if !retryable || attempt >= RETRY_ATTEMPTS {
+            return r;
+        }
+        attempt += 1;
+        tokio::time::sleep(RETRY_DELAY).await;
+    }
 }
 
 fn handle_hash(handle: &str) -> [u8; HANDLE_HASH_LEN] {
@@ -263,9 +292,9 @@ fn persist_account(
 /// account record and signing key are saved locally, and only then is the phrase shown. Any
 /// later failure (network, rate limit) leaves a profile that `powehi login` can still open.
 ///
-/// Known gap: if the `register/finish` response is lost after the server committed, the account
-/// exists without a local record or a shown phrase; closing it needs an idempotent
-/// `register/finish` on the server (same gap as the web client).
+/// `register/finish` carries a client-chosen `device_id`, so a response lost after the server
+/// committed is retried (bounded) and replayed by the server; the phrase is shown only after
+/// an attempt succeeds.
 pub async fn register(
     client: &Client,
     server: &Url,
@@ -305,7 +334,8 @@ pub async fn register(
         return Err(AuthError::ProfileInUse);
     }
     let material = new_recovery_material()?;
-    let fin: RegFinishResp = post_json(
+    let chosen_device = Uuid::new_v4();
+    let fin: RegFinishResp = post_json_retrying(
         client,
         server,
         "/v1/auth/register/finish",
@@ -314,6 +344,7 @@ pub async fn register(
             opaque_record: &upload,
             mls_credential: &material.label,
             recovery_pubkey: &material.recovery_pub,
+            device_id: chosen_device,
         },
     )
     .await?;
@@ -325,7 +356,7 @@ pub async fn register(
         device_id: fin.device_id,
         mls_label: material.label.clone(),
     };
-    let persisted = if fin.user_id != init.user_id {
+    let persisted = if fin.user_id != init.user_id || fin.device_id != chosen_device {
         Err(AuthError::BadResponse)
     } else {
         persist_account(&store, &account, &material)
@@ -505,6 +536,10 @@ mod tests {
         credentials: Vec<Vec<u8>>,
         bodies: Vec<String>,
         finish_status: u16,
+        /// Number of upcoming `register/finish` calls that commit, then answer HTTP 503.
+        register_lost_responses: u32,
+        /// user_id -> (device_id, opaque_record) of committed registrations.
+        registered: HashMap<Uuid, (Uuid, Vec<u8>)>,
         /// Number of upcoming `login/init` calls to fail with HTTP 429.
         init_failures: u32,
         /// Make this directory read-only when `register/finish` is handled.
@@ -573,21 +608,37 @@ mod tests {
             }
             "/v1/auth/register/finish" => {
                 let uid: Uuid = serde_json::from_value(body["user_id"].clone()).unwrap();
+                let dev: Uuid = serde_json::from_value(body["device_id"].clone()).unwrap();
+                let record = bytes(body, "opaque_record");
+                if let Some((d, r)) = users.registered.get(&uid).cloned() {
+                    if users.register_lost_responses > 0 {
+                        users.register_lost_responses -= 1;
+                        return (503, serde_json::Value::Null);
+                    }
+                    let resp = serde_json::json!({"user_id": uid, "device_id": dev});
+                    let same = d == dev && r == record;
+                    return if same {
+                        (200, resp)
+                    } else {
+                        (409, serde_json::Value::Null)
+                    };
+                }
                 let hash = users.pending_reg.remove(&uid).unwrap();
-                let up =
-                    RegistrationUpload::<Cs>::deserialize(&bytes(body, "opaque_record")).unwrap();
+                let up = RegistrationUpload::<Cs>::deserialize(&record).unwrap();
                 let file = ServerRegistration::<Cs>::finish(up).serialize().to_vec();
                 users.recovery_pubkeys.push(bytes(body, "recovery_pubkey"));
                 users.credentials.push(bytes(body, "mls_credential"));
                 users.by_hash.insert(hash, (uid, file));
+                users.registered.insert(uid, (dev, record));
                 if let Some(d) = &users.lock_dir_on_finish {
                     use std::os::unix::fs::PermissionsExt;
                     fs::set_permissions(d, fs::Permissions::from_mode(0o500)).unwrap();
                 }
-                (
-                    200,
-                    serde_json::json!({"user_id": uid, "device_id": Uuid::new_v4()}),
-                )
+                if users.register_lost_responses > 0 {
+                    users.register_lost_responses -= 1;
+                    return (503, serde_json::Value::Null);
+                }
+                (200, serde_json::json!({"user_id": uid, "device_id": dev}))
             }
             "/v1/auth/login/init" if users.init_failures > 0 => {
                 users.init_failures -= 1;
@@ -837,6 +888,46 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(e, AuthError::Unreachable), "{e:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn register_retries_a_lost_finish_response_and_keeps_one_device() {
+        let m = mock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths(&tmp, "a");
+        let client = crate::status::http_client().unwrap();
+        m.users.lock().unwrap().register_lost_responses = 2;
+        let mut pr = prompter("pw-123456");
+        let s = register(&client, &m.url, &p, &mut pr).await.unwrap();
+        assert_eq!(pr.shown.len(), 1, "phrase shown once, after success");
+        let users = m.users.lock().unwrap();
+        let sent: Vec<serde_json::Value> = users
+            .bodies
+            .iter()
+            .filter_map(|b| serde_json::from_str::<serde_json::Value>(b).ok())
+            .filter(|b| b.get("recovery_pubkey").is_some())
+            .collect();
+        assert_eq!(sent.len(), 3, "two lost responses, then success");
+        assert!(sent.iter().all(|b| b["device_id"] == sent[0]["device_id"]));
+        assert_eq!(users.registered.len(), 1);
+        assert_eq!(
+            s.device_id.to_string(),
+            sent[0]["device_id"].as_str().unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn register_gives_up_after_bounded_retries_without_showing_the_phrase() {
+        let m = mock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let client = crate::status::http_client().unwrap();
+        m.users.lock().unwrap().register_lost_responses = 99;
+        let mut pr = prompter("pw-123456");
+        let e = register(&client, &m.url, &paths(&tmp, "a"), &mut pr)
+            .await
+            .unwrap_err();
+        assert!(matches!(e, AuthError::HttpStatus(503)), "{e:?}");
+        assert!(pr.shown.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]

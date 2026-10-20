@@ -28,6 +28,11 @@ pub struct RegistrationFinishRequest {
     /// still deserialize (clients that don't send it simply opt out of recovery).
     #[serde(default)]
     pub recovery_pubkey: Option<Vec<u8>>,
+    /// Optional client-chosen device id (UUIDv4) that makes this call retryable: a retry
+    /// with the same user, `device_id` and `opaque_record` returns the original response,
+    /// a different record is a conflict. Absent → server assigns the id (not retryable).
+    #[serde(default)]
+    pub device_id: Option<DeviceId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
