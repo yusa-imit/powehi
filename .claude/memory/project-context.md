@@ -1723,3 +1723,6 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 
 ## Cycle 605 (2026-10-20, STABILIZATION)
 - Main CI green, no `bug` issues. `cargo deny check` ok. Added a rest-api test: `DELETE /v1/auth/session` returns 500 (never a false 204) when the cache delete fails and the token stays live. 163 rest-api tests pass, clippy clean. Test-only diff, no review agents needed. target/ 26G, nothing older than 7d to prune. Next FEATURE: 8.6 (handle/password normalization).
+
+## Cycle 607 (2026-10-21, FEATURE → CI-red fix)
+- Main "CI — Frontend" was red after #129 (8.6): Biome import-sort + format in `Login.tsx`. Fixed with `biome check --fix` (format-only; 913 component tests pass). 8.6 item itself already merged; next FEATURE: next unchecked item in phase-8/STATUS.md. Note: run `npx biome check src` before pushing app changes (untracked `src-tauri/gen` schemas trip a full `biome check` locally only).
