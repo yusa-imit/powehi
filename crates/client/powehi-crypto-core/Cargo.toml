@@ -27,6 +27,8 @@ hkdf = { workspace = true }
 ed25519-dalek = { workspace = true }
 # BIP-39 seed derivation: PBKDF2-HMAC-SHA512 (RustCrypto).
 pbkdf2 = { workspace = true }
+# Unicode NFC for passwords (pure Rust, no crypto; issue #19).
+unicode-normalization = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 openmls = { workspace = true }

@@ -8,6 +8,7 @@
 use std::fmt::Write as _;
 use std::fs;
 
+use powehi_crypto_core::credentials::{self, HandleError};
 use powehi_crypto_core::opaque::{self, EXPORT_KEY_LEN};
 use powehi_crypto_core::recovery::{self, RecoveryError};
 use rand::rngs::OsRng;
@@ -48,6 +49,8 @@ pub enum AuthError {
     BadResponse,
     #[error("incorrect handle or password")]
     InvalidCredentials,
+    #[error("invalid handle: {0}")]
+    InvalidHandle(HandleError),
     #[error("this profile already holds an account; pick another --profile")]
     ProfileInUse,
     #[error("this profile has no account; run `powehi register` first")]
@@ -304,9 +307,11 @@ pub async fn register(
     if profile_has_data(paths) {
         return Err(AuthError::ProfileInUse);
     }
-    let handle = prompter.handle()?;
-    let password = prompter.password(true)?;
-    let hash = handle_hash(&handle);
+    // 8.6: new handles are `[a-z0-9-]` and passwords are NFC before OPAQUE.
+    let raw_handle = prompter.handle()?;
+    let handle = credentials::registrable_handle(&raw_handle).map_err(AuthError::InvalidHandle)?;
+    let password = credentials::nfc_password(&prompter.password(true)?);
+    let hash = handle_hash(handle);
     let mut rng = OsRng;
 
     let (state, request) =
@@ -388,9 +393,10 @@ pub async fn login(
     paths: &ProfilePaths,
     prompter: &mut dyn Prompter,
 ) -> Result<Session, AuthError> {
-    let handle = prompter.handle()?;
+    let raw_handle = prompter.handle()?;
+    let hash = handle_hash(credentials::trim_handle(&raw_handle));
     let password = prompter.password(false)?;
-    let hs = login_handshake(client, server, &handle_hash(&handle), &password).await?;
+    let hs = login_with_candidates(client, server, &hash, &password).await?;
     let store = ProfileStore::open(paths, &hs.export_key)?;
     let account = load_account(&store)?;
     crate::identity::seed_provider_floor(&store).map_err(|_| AuthError::Crypto)?;
@@ -424,6 +430,26 @@ pub async fn revoke_session(
         s if s.is_success() => Ok(()),
         s => Err(AuthError::HttpStatus(s.as_u16())),
     }
+}
+
+/// Logs in with the NFC form of the password; when that differs from what was typed and the
+/// login fails, retries once with the typed form (accounts registered before 8.6 used the raw
+/// bytes). Only a credential failure triggers the retry, never a network or server error.
+async fn login_with_candidates(
+    client: &Client,
+    server: &Url,
+    hash: &[u8; HANDLE_HASH_LEN],
+    typed: &str,
+) -> Result<Handshake, AuthError> {
+    let candidates = credentials::password_candidates(typed);
+    let mut last = AuthError::InvalidCredentials;
+    for candidate in &candidates {
+        match login_handshake(client, server, hash, candidate).await {
+            Err(AuthError::InvalidCredentials) => last = AuthError::InvalidCredentials,
+            other => return other,
+        }
+    }
+    Err(last)
 }
 
 /// Result of the client side of OPAQUE login, before `login/finish` is sent.
@@ -781,6 +807,90 @@ mod tests {
             !contains(user.to_string().as_bytes()),
             "ids are encrypted too"
         );
+    }
+
+    /// Registers `handle` with `raw` exactly as typed, the way pre-8.6 clients did.
+    async fn legacy_register(m: &Mock, client: &Client, handle: &str, raw: &str) {
+        let hash = handle_hash(handle);
+        let mut rng = OsRng;
+        let (state, request) = opaque::registration_start(raw.as_bytes(), &mut rng).unwrap();
+        let init: RegInitResp = post_json(
+            client,
+            &m.url,
+            "/v1/auth/register/init",
+            &RegInitReq {
+                handle_hash: &hash,
+                opaque_request: &request,
+            },
+        )
+        .await
+        .unwrap();
+        let (_, upload) =
+            opaque::registration_finish(state, raw.as_bytes(), &init.opaque_response, &mut rng)
+                .unwrap();
+        let material = new_recovery_material().unwrap();
+        let _: RegFinishResp = post_json(
+            client,
+            &m.url,
+            "/v1/auth/register/finish",
+            &RegFinishReq {
+                user_id: init.user_id,
+                opaque_record: &upload,
+                mls_credential: &material.label,
+                recovery_pubkey: &material.recovery_pub,
+                device_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn register_rejects_a_bad_handle_before_any_request() {
+        let m = mock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let client = crate::status::http_client().unwrap();
+        let mut pr = prompter("pw-123456");
+        pr.handle = "Aurora Fox".into();
+        let e = register(&client, &m.url, &paths(&tmp, "a"), &mut pr)
+            .await
+            .unwrap_err();
+        assert!(matches!(e, AuthError::InvalidHandle(_)), "{e:?}");
+        assert!(m.users.lock().unwrap().bodies.is_empty());
+        assert!(pr.shown.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn password_is_nfc_at_register_and_either_form_logs_in() {
+        let m = mock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths(&tmp, "a");
+        let client = crate::status::http_client().unwrap();
+        drop(
+            register(&client, &m.url, &p, &mut prompter("cafe\u{301} pw"))
+                .await
+                .unwrap(),
+        );
+        for typed in ["cafe\u{301} pw", "caf\u{e9} pw"] {
+            let s = login(&client, &m.url, &p, &mut prompter(typed))
+                .await
+                .unwrap();
+            drop(s);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn legacy_raw_password_account_still_logs_in() {
+        let m = mock().await;
+        let client = crate::status::http_client().unwrap();
+        let raw = "cafe\u{301} pw";
+        legacy_register(&m, &client, "old-timer", raw).await;
+        let hash = handle_hash("old-timer");
+        assert!(login_with_candidates(&client, &m.url, &hash, raw)
+            .await
+            .is_ok());
+        let e = login_with_candidates(&client, &m.url, &hash, "caf\u{e9} other").await;
+        assert!(matches!(e, Err(AuthError::InvalidCredentials)));
     }
 
     #[tokio::test(flavor = "multi_thread")]

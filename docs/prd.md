@@ -1302,6 +1302,7 @@ crates/client/
 - 사용자가 생성하는 공개 식별자 (예: `@aurora-fox-2843`)
 - DB에는 `handle_hash`만 저장 (스키마 §10.1 참고)
 - 핸들 자체로는 어떤 PII와도 매핑되지 않음
+- 정규화 (Phase 8.6, #19): 서버는 `handle_hash`만 보므로 핸들 검증은 클라이언트가 한다. 앞뒤의 Unicode `White_Space`와 U+FEFF를 제거한 뒤, **신규 가입**은 `[a-z0-9-]{1,64}`만 허용한다. 로그인은 기존 핸들을 그대로(트림만) 받는다. 비밀번호는 OPAQUE 전에 Unicode NFC로 정규화하고(트림/NFKC 없음), NFC 형태가 입력과 다르고 로그인에 실패하면 원본 입력으로 한 번 재시도한다(레거시 계정). 공유 테스트 벡터: `docs/test-vectors/credential-normalization.json` (Rust `powehi_crypto_core::credentials`, 웹 `app/src/lib/credentials.ts`).
 - 사용자가 알려준 사람만 추가 가능
 
 ### 8.3 초대 링크

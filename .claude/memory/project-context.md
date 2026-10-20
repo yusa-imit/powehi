@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 606 (2026-10-21, FEATURE) — 8.6 handle/password normalization
+`powehi_crypto_core::credentials` (trim, `[a-z0-9-]{1,64}` for new handles, NFC password, raw-password login fallback) + `app/src/lib/credentials.ts`; shared vectors in `docs/test-vectors/credential-normalization.json`. CLI `register` rejects bad handles before any request; `login` retries raw only on InvalidCredentials. Server cannot validate handles (hash only). Next: 8.7 certificate pinning.
+
 ## Cycle 601 (2026-10-20, FEATURE→CI-red fix) — flaky poll-vote test
 Frontend CI red on main after #121 (ChatLayoutPoll "persists a poll vote to Dexie", 1s waitFor on slow runner; passed on the PR). Raised that waitFor timeout to 4s. Next FEATURE cycle: first unchecked item in phase-8 STATUS.md.
 

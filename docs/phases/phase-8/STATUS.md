@@ -73,13 +73,15 @@ pointing here. Close the issue in the PR that finishes its item.
   mismatch is indistinguishable from "no session" (no conflict oracle; deviates from the
   "conflict error" wording by audit finding); replay window 60 s. Follow-up: insert-only
   device id + revoked-id reuse (need-human issue).
-- [ ] 8.6 Handle and password normalization (#19) — registration accepts only handles
+- [x] 8.6 Handle and password normalization (#19) — registration accepts only handles
   matching `[a-z0-9-]` (server validation, CLI and web); login still accepts any
   existing handle unchanged so older accounts keep working. Passwords are NFC-
   normalized before OPAQUE in the CLI and the web; when the NFC form differs from
   the raw input and login fails, retry once with the raw input (legacy accounts).
   Shared test vectors (NFD input, U+FEFF / U+0085 trim cases) run in both Rust and
   Vitest and must give the same OPAQUE input. crypto-reviewer.
+  Shipped: the server stores only `SHA-256(handle)`, so it cannot validate the charset;
+  the CLI and web enforce it (deviates from "server validation"). Trim = White_Space + U+FEFF.
 - [ ] 8.7 Certificate pinning (#39-3, prd §3.1 T2) — SPKI SHA-256 pin set with at least
   one backup pin whose key is not deployed, enforced for reqwest and the WS client
   after normal WebPKI verification (a custom rustls verifier). Pins are compiled in;
