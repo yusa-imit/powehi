@@ -104,7 +104,9 @@ domain is a variable everywhere (`var.domain`); never hard-code `powehi.app`.
   test against `https://api.<domain>`; set the production certificate pin set using the
   8.7 mechanism (or the outcome of its need-human issue); set the CLI `DEFAULT_SERVER`
   to the prod URL and cut a CLI release (9.6). Update prd §12A data residency
-  (KR-home data in Seoul) and close #5.
+  (KR-home data in Seoul) and close #5. Pin strategy: issue #131; when the set becomes
+  non-empty, change the `pinning` test that allows an empty `PRODUCTION_PINS` to require
+  at least two pins.
 
 ### Operations
 - [ ] 9.10 Monitoring and alarms — CloudWatch alarms to the owner by SNS email: running

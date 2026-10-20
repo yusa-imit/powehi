@@ -35,9 +35,10 @@ hmac = { workspace = true }
 sha2 = { workspace = true }
 zeroize = { workspace = true }
 rand = { workspace = true }
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.24", features = ["__rustls-tls"] }
 rustls = { workspace = true }
-webpki-roots = "0.26"
+webpki-roots = "1"
+x509-parser = { workspace = true }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 
 [dev-dependencies]
@@ -45,3 +46,6 @@ opaque-ke = { workspace = true, features = ["ristretto255", "argon2", "serde", "
 tempfile = { workspace = true }
 proptest = { workspace = true }
 openmls = { workspace = true }
+# cert generation for pin tests only
+rcgen = "0.13"
+tokio-rustls = { workspace = true }

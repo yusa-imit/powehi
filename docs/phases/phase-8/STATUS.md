@@ -82,7 +82,7 @@ pointing here. Close the issue in the PR that finishes its item.
   Vitest and must give the same OPAQUE input. crypto-reviewer.
   Shipped: the server stores only `SHA-256(handle)`, so it cannot validate the charset;
   the CLI and web enforce it (deviates from "server validation"). Trim = White_Space + U+FEFF.
-- [ ] 8.7 Certificate pinning (#39-3, prd §3.1 T2) — SPKI SHA-256 pin set with at least
+- [x] 8.7 Certificate pinning (#39-3, prd §3.1 T2) — SPKI SHA-256 pin set with at least
   one backup pin whose key is not deployed, enforced for reqwest and the WS client
   after normal WebPKI verification (a custom rustls verifier). Pins are compiled in;
   loopback/test servers use an explicit test-only override. First find out whether
@@ -95,6 +95,8 @@ pointing here. Close the issue in the PR that finishes its item.
   mechanism with test pins here; the production pin set is chosen in 9.9. The edge
   uses Cloudflare-managed certificates whose keys rotate.
   crypto-reviewer + threat-model-checker.
+  Shipped: `pinning.rs` pins intermediates (Cloudflare leaf keys rotate); production set empty
+  (WebPKI only) until 9.9; runbook `docs/runbooks/cli-pin-rotation.md`.
 
 ### Profile store v3 (PHS3)
 - [ ] 8.8 PHS3 store format (#16, #39 items 1 and 6, #53 item 2) — may ship in slices:

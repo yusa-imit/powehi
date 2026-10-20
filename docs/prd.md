@@ -148,7 +148,7 @@
 | 등급 | 공격자 | 능력 | Pōwehi 대응 |
 |---|---|---|---|
 | T1 | 패시브 네트워크 도청자 (ISP, 카페 WiFi) | TLS 전후 트래픽 관찰 | TLS 1.3 + E2EE |
-| T2 | 액티브 MITM | TLS 인증서 위조 시도 | Certificate Pinning + Safety Numbers |
+| T2 | 액티브 MITM | TLS 인증서 위조 시도 | Certificate Pinning + Safety Numbers (CLI: 메커니즘 구현됨, 운영 핀은 Phase 9 9.9 전까지 비어 있음 — §7A.3) |
 | T3 | 악의적 서버 운영자 | DB 덤프, 트래픽 로그, 코드 백도어 | E2EE + Reproducible Build + Sealed Sender |
 | T4 | 디바이스 압수 | 디바이스 물리 접근 | Local DB 암호화 + Disappearing Messages |
 | T5 | 글로벌 패시브 관찰자 | 전 세계 트래픽 상관관계 분석 | (부분 대응) Padding + 무작위 지연 |
@@ -1282,8 +1282,18 @@ crates/client/
 - **PCS 미제공**: CLI 1:1은 epoch 1에 고정되고 Commit(self-Update 포함)을 보내거나 적용하지 않음.
   hash ratchet 수준의 forward secrecy만 있으며 store가 한 번 침해되면 이후 메시지가 모두 노출됨.
 - **TLS**: rustls + webpki roots, 인증서 검증 항상 활성, `http://`는 loopback만,
-  redirect·환경변수 proxy 미사용, Bearer는 헤더로만. CLI는 TLS 1.3 전용(cycle 528). 서버 edge는 Cloudflare `tls_1_3` 설정은 Terraform으로 고정됨(`infra/terraform/envs/cloudflare/main.tf`), `min_tls_version = 1.3`도 고정되어 edge는 TLS 1.3만 허용(owner 결정 2026-10-20, #56, Phase 8 8.1)). Certificate pinning(§3.1 T2)도 아직 없음 —
-  CLI의 T2 방어는 WebPKI + OPAQUE 상호 인증 + Safety Number.
+  redirect·환경변수 proxy 미사용, Bearer는 헤더로만. CLI는 TLS 1.3 전용(cycle 528). 서버 edge는
+  Cloudflare `tls_1_3`과 `min_tls_version = 1.3`이 Terraform으로 고정되어 TLS 1.3만 허용
+  (`infra/terraform/envs/cloudflare/main.tf`; owner 결정 2026-10-20, #56, Phase 8 8.1).
+  Certificate pinning(§3.1 T2): SPKI SHA-256 핀 집합(최소 2개, 하나는 미배포 백업)을 WebPKI 검증 *이후*
+  추가로 강제하는 custom rustls verifier가 REST와 WS 모두에 적용됨(`powehi-cli/src/pinning.rs`, Phase 8 8.7).
+  핀은 leaf 또는 중간 인증서 키만 가능(서버는 root를 보내지 않음). 중간 인증서 핀은 서버가 보낸 체인의
+  단순 포함이 아니라 "그 인증서만 trust anchor로 둔 재검증이 성공"해야 인정됨(추가 전송된 정상 CA
+  인증서로 핀을 우회하는 공격 방어). 운영 핀 집합은 Phase 9 9.9에서 확정되며 그 전엔 비어 있어 WebPKI만
+  적용됨; 런타임 override 없음. 회전: `docs/runbooks/cli-pin-rotation.md`.
+  잔여 위험: 핀은 신뢰를 "Mozilla 전체 root"에서 "핀한 키의 CA"로 좁힐 뿐, 핀한 CA 자체의 오발급과
+  TLS를 종단하는 Cloudflare는 여전히 신뢰함. Bearer는 OPAQUE 세션 키에 바인딩되지 않아 TLS MITM이
+  성공하면 토큰을 얻을 수 있음(OPAQUE는 비밀번호·export_key만 보호). Cloudflare 관리 인증서의 핀 전략은 need-human 이슈로 추적.
 - **argv**: 대화 id(접두어)와 `--profile`은 argv에 들어가 셸 history와 `ps`에 노출됨(비밀은 아님).
   `echo 본문 | powehi send`는 본문을 history에 남기므로 대화형 입력(Ctrl-D)이나 파일 리다이렉트 사용.
 - **로컬 경로**: `<data_dir>/powehi/`와 profile 디렉터리는 0700이고 소유자 uid가 현재 사용자여야 하며,
