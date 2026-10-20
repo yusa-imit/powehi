@@ -1,11 +1,15 @@
 # Phase 7: CLI Client (Rust) — CLI-first
 
-## Status: IN PROGRESS (owner directive 2026-10-08, ADR-0006)
+## Status: COMPLETE (2026-10-14, 7.11 in PR #40)
 
-**Priority rule**: this phase is the FEATURE-mode work queue. Take the first
-unchecked item, in order. The web client (`app/`) is in maintenance: CI-red,
-`bug` issues, and security fixes only — no new web features until every box
-below is checked. See `docs/decisions/0006-cli-first-client.md`, prd.md §7A.
+**This file is no longer the work queue.** FEATURE work now comes from
+`docs/phases/phase-8/STATUS.md`: take its first unchecked item, in order. Do not
+invent follow-up flags or commands here. The follow-ups below are folded into
+Phase 8 or listed there as out of scope.
+
+Original rule (kept for history): this phase was the FEATURE-mode work queue.
+The web client (`app/`) is in maintenance: CI-red, `bug` issues, and security
+fixes only. See `docs/decisions/0006-cli-first-client.md`, prd.md §7A.
 
 ## Definition of Done (in order)
 - [x] 7.1 Extract `crates/client/powehi-crypto-core` — move `kem`,
