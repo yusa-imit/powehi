@@ -11,10 +11,10 @@ import { EncryptedPowehiDb } from "../db/encrypted-db";
 import { db } from "../db/schema";
 import { useCryptoWorker } from "../hooks/useCryptoWorker";
 import {
+	CredentialRejected,
 	HANDLE_ERROR_TEXT,
 	nfcPassword,
 	passwordCandidates,
-	CredentialRejected,
 	registrableHandle,
 	trimHandle,
 } from "../lib/credentials";
@@ -263,8 +263,7 @@ export function Login() {
 		}
 
 		// 8.6: new handles are [a-z0-9-]; login keeps accepting any existing handle.
-		const canonical =
-			mode === "create-account" ? registrableHandle(handle) : null;
+		const canonical = mode === "create-account" ? registrableHandle(handle) : null;
 		if (canonical && !canonical.ok) {
 			setErrorMsg(HANDLE_ERROR_TEXT[canonical.error]);
 			setPhase("error");
