@@ -18,9 +18,13 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - Every layer has a test gate (rule: testing-conventions).
 
 ## PRIORITY DIRECTIVE — CLI-first (owner, 2026-10-08; ADR-0006) — read before picking work
-- **FEATURE mode takes the first unchecked item in `docs/phases/phase-7/STATUS.md`**, in
-  order (7.1 crypto-core extraction → 7.2 `powehi-cli` skeleton → … → 7.11). This replaces
-  the "Next cycle candidates" list as the FEATURE work source until Phase 7 is complete.
+- **Phase 7 is COMPLETE (2026-10-14). FEATURE mode takes the first unchecked item in
+  `docs/phases/phase-8/STATUS.md`**, in order (8.1 edge TLS → … → 8.23). Its "Owner
+  decisions (2026-10-20)" table settles need-human issues #13 #16 #19 #20 #22 #24 #28 #30
+  #32 #39 #53 #56; apply those decisions, do not re-ask them.
+- Cycles 550-597 (2026-10-16..20) filled the empty queue with unrequested CLI flags
+  (`--json`, `conversations` filters, `read --since/--until`, ...). Do not do that again:
+  with no unchecked item, run STABILIZATION work instead.
 - **Web client `app/` is in maintenance**: CI-red, `bug` issues, security fixes on shipped
   behavior only. Do NOT build new web UI/features. Parked (not closed): issues #1 (SPA
   deploy), #3 (web WS client); candidate items that are web-only (Remove UI, banners).
@@ -39,8 +43,9 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 
 ## Phase status
 Phases 1-6 in `docs/phases/phase-{1..6}/STATUS.md` are complete (every DoD item `[x]`,
-confirmed cycle 425/426). **Phase 7 (CLI client) is IN PROGRESS** — see the directive
-above. The "Next cycle candidates" lists below are now the source only for
+confirmed cycle 425/426). Phase 7 (CLI client) is complete (2026-10-14). **Phase 8 (CLI
+hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — see the
+directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
 ## Cycle 597 (2026-10-20, FEATURE) — `read --until`

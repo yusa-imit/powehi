@@ -2375,11 +2375,21 @@ gantt
 - [x] `powehi-crypto-core` 분리 (이동만, crypto-reviewer PASS, WASM 빌드/Vitest 유지)
 - [x] 암호화 profile store (§7A.3) — 평문 바이트 디스크 미기록 테스트
 - [x] CLI 회원가입/로그인 (OPAQUE) + KeyPackage 업로드
-- [ ] 초대 → 1:1 대화 시작 → 양방향 메시지 송수신 (`send`/`inbox`)
+- [x] 초대 → 1:1 대화 시작 → 양방향 메시지 송수신 (`send`/`inbox`)
 - [x] `powehi chat`: `/v1/ws` 실시간 수신 + 재연결 catch-up
-- [ ] Safety Number 표시
-- [ ] CLI↔CLI E2E: docker-compose 백엔드 대상 두 프로필 왕복 테스트 (CI)
-- [ ] threat-model-checker: CLI 클라이언트 플랫폼 검토 통과
+- [x] Safety Number 표시
+- [x] CLI↔CLI E2E: docker-compose 백엔드 대상 두 프로필 왕복 테스트 (CI)
+- [x] threat-model-checker: CLI 클라이언트 플랫폼 검토 통과
+
+#### Phase 8: CLI 보강 · Commit 경로 · 그룹 · 멀티 디바이스 (소유자 결정 2026-10-20)
+상세 항목과 순서는 `docs/phases/phase-8/STATUS.md`.
+- [ ] 빠른 보강: edge TLS 1.3 최소, RustCrypto-only BIP-39, alternate screen
+- [ ] 서버/인증: session revoke, 재시도 가능한 register, handle/비밀번호 정규화, certificate pinning
+- [ ] PHS3 profile store: MAC manifest + generation, DEK/KEK(export_key, recovery phrase), KeyPackage orphan 정리
+- [ ] 대화 신뢰: peer ↔ MLS credential 바인딩, 서버 측 그룹 가입 동의, `powehi accept`, inbox flood 방어
+- [ ] Commit 수신/적용, self-Update PCS, CHANGED 시 send 차단, 3인 이상 그룹 + MLS Remove
+- [ ] recovery phrase 복원, 멀티 디바이스, 전체 화면 TUI, 미디어 송수신
+- [ ] E2E 게이트 확장 + threat-model-checker 통과
 
 ---
 
@@ -2524,6 +2534,7 @@ gantt
 | **v3 (현재)** | **헥사고날 아키텍처 전환**, **멀티 리전 글로벌 서비스 설계**. 주요 변경: (1) §6 크레이트 구조를 Hexagonal Architecture로 전면 재구성, (2) §4A 멀티 리전 아키텍처 섹션 신설 (3-Tier 토폴로지, gRPC 메시, MLS commit 직렬화, 데이터 거주성), (3) §3 위협 모델에 T7 리전 관할 공격자 + §3.5 멀티 리전 위협 추가, (4) §12A 글로벌 규정 준수 매트릭스 신설, (5) §15 로드맵에 Phase 6: Global Infrastructure 추가, (6) 전 섹션에 걸쳐 멀티 리전 고려사항 반영 |
 | cycle 290 | 미디어 GC ACK 타이밍 정정(threat-model-checker: yellow — merge acceptable with doc update). cycle 289에서 `get_download_url`이 URL 발급 즉시 기록하던 ACK를, 클라이언트의 blobHash 검증 + AES-GCM 복호화 성공 후에만 별도 `POST /v1/media/:id/confirm-download`(신규 엔드포인트, `get_download_url`과 동일한 authz: uploader 또는 group member)가 기록하도록 변경. 새 메타데이터 카테고리나 DB 컬럼은 없음 — `media_acks` 테이블 의미만 "URL 발급됨"에서 "실제 복호화 검증됨"으로 강화됨. §3.4의 GC-타이밍 read-receipt 오라클이 이전보다 약간 더 정밀한 신호(요청만 하고 전송 실패한 경우를 더 이상 포함하지 않음)를 노출하게 되어 §3.3(L182), §3.4(L203), §9.4.3(L1280) 문구를 사실관계에 맞게 정정 |
 | 2026-10-08 | **CLI 우선 전환** (소유자 지시, ADR-0006). §7A CLI 클라이언트 신설 (`powehi-crypto-core` 분리, `powehi-cli`, 암호화 profile store, 터미널 고유 위협), §15.4에 Phase 7 DoD 추가. 웹 클라이언트(§7)는 Phase 7 완료까지 유지보수 모드 |
+| 2026-10-20 | Phase 7 완료(2026-10-14) 반영, §15.4에 **Phase 8** DoD 추가. 소유자가 need-human #13 #16 #19 #20 #22 #24 #28 #30 #32 #39 #53 #56을 결정(결정표: `docs/phases/phase-8/STATUS.md`). 웹은 계속 유지보수 모드 |
 
 ---
 
