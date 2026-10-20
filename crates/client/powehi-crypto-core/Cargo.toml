@@ -25,8 +25,8 @@ aes-gcm = { workspace = true }
 # HKDF-SHA256 (RFC 5869) — derives the MLS Ed25519 signing key from a BIP-39 seed (§8.5).
 hkdf = { workspace = true }
 ed25519-dalek = { workspace = true }
-# BIP-39 mnemonic codes (24-word recovery phrase).
-bip39 = { version = "2", features = ["zeroize"] }
+# BIP-39 seed derivation: PBKDF2-HMAC-SHA512 (RustCrypto).
+pbkdf2 = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 openmls = { workspace = true }

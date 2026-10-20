@@ -44,7 +44,7 @@ pointing here. Close the issue in the PR that finishes its item.
 - [x] 8.1 Edge TLS 1.3 minimum (#56) — set Cloudflare `min_tls_version = "1.3"` in
   `infra/terraform/envs/cloudflare/main.tf` and drop the "owner call" comment there.
   Gate: `terraform validate`, `tflint`, `tfsec`, the `infra-test` skill.
-- [ ] 8.2 RustCrypto-only BIP-39 (#13) — replace the `bip39` crate in
+- [x] 8.2 RustCrypto-only BIP-39 (#13) — replace the `bip39` crate in
   `powehi-crypto-core::recovery` with `sha2` + `pbkdf2` + `hmac` and the embedded
   BIP-39 English wordlist. Tests: the official BIP-39 test vectors (entropy →
   mnemonic → seed), checksum failure → typed error, and a phrase generated before

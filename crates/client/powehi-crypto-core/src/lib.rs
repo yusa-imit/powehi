@@ -6,6 +6,7 @@
 //! Library code never uses `unwrap()`/`expect()` and never logs plaintext,
 //! PII, or ciphertext.
 
+pub mod bip39;
 pub mod kem;
 pub mod kem_credential;
 pub mod media;

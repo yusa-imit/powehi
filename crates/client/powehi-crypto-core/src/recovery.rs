@@ -2,7 +2,7 @@
 //
 // No cryptographic primitives are implemented here.  All work is delegated to
 // audited libraries (rule: crypto-libraries-pinned.md):
-//   - bip39  → BIP-39 mnemonic generation + PBKDF2-HMAC-SHA512 seed derivation
+//   - sha2 + pbkdf2 (RustCrypto) → BIP-39 checksum + PBKDF2-HMAC-SHA512 seed (`crate::bip39`)
 //   - hkdf   → HKDF-SHA256 expansion of the seed to a 32-byte Ed25519 secret
 //   - ed25519-dalek → re-creates the SigningKey from the 32-byte secret
 //
@@ -17,7 +17,7 @@
 //   * No plaintext, password, or key material is ever embedded in an error
 //     (rule: no-plaintext-logging).
 
-use bip39::Mnemonic;
+use crate::bip39::Mnemonic;
 use hkdf::Hkdf;
 use sha2::Sha256;
 use zeroize::Zeroizing;
@@ -99,7 +99,7 @@ pub fn generate_mnemonic() -> Result<Mnemonic, RecoveryError> {
     Mnemonic::from_entropy(&*entropy).map_err(|_| RecoveryError::Mnemonic)
 }
 
-/// Parse and validate a BIP-39 phrase (normalized — handles whitespace + case).
+/// Parse and validate a BIP-39 phrase (whitespace-separated; case-sensitive, lowercase words only).
 ///
 /// Returns `RecoveryError::InvalidPhrase` for any malformed input.  The caller
 /// is responsible for zeroizing the input `&str` if it came from a user-input
@@ -116,19 +116,14 @@ pub fn parse_phrase(phrase: &str) -> Result<Mnemonic, RecoveryError> {
 /// recovery secret.  An empty BIP-39 passphrase is used by design; the 256-bit
 /// entropy of a CSPRNG-generated mnemonic makes brute-force infeasible.
 ///
-/// **Stack-residue caveat (WASM linear memory):** `bip39::Mnemonic::to_seed`
-/// writes a raw `[u8; 64]` onto the stack before we copy it here.  That
-/// intermediate buffer is not automatically zeroed.  This is consistent with
-/// the documented WASM linear-memory caveat for `mls_clear_session` (see
-/// `wasm_exports.rs`).  The output of this function IS wrapped in `Zeroizing`
-/// and wiped on drop.
+/// **Stack-residue caveat:** the returned seed is `Zeroizing`, but the PBKDF2/HMAC
+/// keyed state and SHA-256 block buffer used inside `Mnemonic::to_seed` stay on the
+/// stack un-wiped (see `crate::bip39`); same as the former `bip39` crate, and the WASM
+/// linear-memory caveat for `mls_clear_session` in `wasm_exports.rs` applies.
 ///
 /// Returns a `Zeroizing<[u8; 64]>` so the 64-byte seed is wiped on drop.
 pub fn mnemonic_to_seed(mnemonic: &Mnemonic) -> Zeroizing<[u8; 64]> {
-    let seed = mnemonic.to_seed("");
-    let mut result = Zeroizing::new([0u8; 64]);
-    result.copy_from_slice(&seed);
-    result
+    mnemonic.to_seed()
 }
 
 /// Derive an Ed25519 keypair from the BIP-39 seed using HKDF-SHA256 (RFC 5869)
