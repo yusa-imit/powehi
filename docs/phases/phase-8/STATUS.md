@@ -52,7 +52,7 @@ pointing here. Close the issue in the PR that finishes its item.
   `bitcoin_hashes` leave `Cargo.lock`; `cargo deny check` green. Also fix the
   `getrandom` feature name in `.claude/rules/crypto-libraries-pinned.md` (rule says
   0.3 `wasm_js`, code uses 0.2 `js`). WASM build + Vitest still green. crypto-reviewer.
-- [ ] 8.3 Alternate screen for `chat` and `read` (#39-5) — enter the alternate screen
+- [x] 8.3 Alternate screen for `chat` and `read` (#39-5) — enter the alternate screen
   only when stdout is a TTY and `--json` is off; always restore it on normal exit,
   error, panic and SIGINT/SIGTERM. Tests: piped/`--json` output never contains the
   escape sequences; the restore path runs on error.

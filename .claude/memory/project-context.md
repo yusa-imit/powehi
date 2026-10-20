@@ -1707,3 +1707,6 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 
 ## Cycle 600 (2026-10-20, STABILIZATION)
 - Main CI green, no `bug` issues. `cargo audit` clean, `cargo deny check` ok, clippy clean. Added 4 negative-space tests to `crypto-core::bip39` (uppercase rejected, non-multiple-of-3 word counts, any-whitespace separation, exactly 128/2048 last words verify). 12 bip39 tests pass; crypto-reviewer on the diff. target/ 22G (>20G but nothing older than 7d to prune; no change). Next FEATURE: 8.3 (alternate screen).
+
+## Cycle 602 (2026-10-20, FEATURE) — Phase 8 item 8.3
+- `powehi-cli::screen`: AltScreen RAII guard (restore on return/error/panic) + SIGINT/SIGTERM handler (async-signal-safe write, re-raise). Used by `chat` and `read` only when stdout is a TTY and no `--json`. `read` on a TTY waits for Enter before leaving (the screen vanishes; messages are deleted after show). 6 unit tests; 235 lib tests pass. Next: 8.4 (session revoke).
