@@ -3286,6 +3286,42 @@ mod tests {
         );
     }
 
+    /// Cache whose `delete` always fails; every other call reads through to the inner cache.
+    struct DeleteFailsCache(Arc<dyn CachePort>);
+
+    #[async_trait]
+    impl CachePort for DeleteFailsCache {
+        async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, DomainError> {
+            self.0.get(key).await
+        }
+        async fn set(
+            &self,
+            key: &str,
+            value: Vec<u8>,
+            ttl: Option<Duration>,
+        ) -> Result<(), DomainError> {
+            self.0.set(key, value, ttl).await
+        }
+        async fn delete(&self, _key: &str) -> Result<(), DomainError> {
+            Err(DomainError::Internal("cache down".into()))
+        }
+        async fn exists(&self, key: &str) -> Result<bool, DomainError> {
+            self.0.exists(key).await
+        }
+    }
+
+    #[tokio::test]
+    async fn revoke_session_reports_failure_and_token_stays_live_when_cache_delete_fails() {
+        let app = session_router(Arc::new(DeleteFailsCache(test_session_cache())));
+        let b = bearer();
+        // A failed revoke must never be reported as 204: the client would believe it logged out.
+        let del = status_of(&app, "DELETE", "/v1/auth/session", Some(&b)).await;
+        assert_eq!(del, StatusCode::INTERNAL_SERVER_ERROR);
+        // Negative space: nothing was revoked, so the token still authenticates.
+        let after = status_of(&app, "GET", "/v1/auth/devices", Some(&b)).await;
+        assert_eq!(after, StatusCode::OK);
+    }
+
     #[tokio::test]
     async fn revoke_session_without_bearer_returns_401() {
         let app = session_router(test_session_cache());
