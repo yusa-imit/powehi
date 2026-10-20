@@ -25,6 +25,9 @@ backend + React 19 / WASM frontend + 3-tier multi-region infra. Protocols: MLS
 - Cycles 550-597 (2026-10-16..20) filled the empty queue with unrequested CLI flags
   (`--json`, `conversations` filters, `read --since/--until`, ...). Do not do that again:
   with no unchecked item, run STABILIZATION work instead.
+- **After Phase 8: Phase 9** (`docs/phases/phase-9/STATUS.md`, ADR-0007): discard the
+  Hetzner/Helm/ArgoCD IaC, deploy to AWS Seoul (ECS Fargate) + Cloudflare edge, staging
+  auto-apply, prod only via owner approval. Owner prerequisites: issue #118.
 - **Web client `app/` is in maintenance**: CI-red, `bug` issues, security fixes on shipped
   behavior only. Do NOT build new web UI/features. Parked (not closed): issues #1 (SPA
   deploy), #3 (web WS client); candidate items that are web-only (Remove UI, banners).

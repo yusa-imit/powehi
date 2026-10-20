@@ -1,6 +1,6 @@
 # ADR-0002: Hetzner Cloud + Cloudflare R2
 
-## Status: Accepted
+## Status: Superseded by ADR-0007 (2026-10-20)
 
 ## Context
 Need hosting infrastructure for backend services and blob storage for encrypted media.

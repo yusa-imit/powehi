@@ -1902,6 +1902,8 @@ graph TB
 
 ### 12.3 호스팅 결정 근거
 
+> **2026-10-20: 이 절은 ADR-0007로 대체됨** (AWS 서울 ECS Fargate + Cloudflare edge). 본문 재작성은 Phase 9.1.
+
 **EU: Hetzner Cloud (Frankfurt)**
 
 1. **비용 효율**: 동급 성능 AWS 대비 ~1/5. CAX21(4 vCPU ARM64, 8GB RAM) 약 EUR7.99/월.
@@ -2391,6 +2393,14 @@ gantt
 - [ ] recovery phrase 복원, 멀티 디바이스, 전체 화면 TUI, 미디어 송수신
 - [ ] E2E 게이트 확장 + threat-model-checker 통과
 
+#### Phase 9: 실제 배포 — AWS 서울 + Cloudflare edge (소유자 결정 2026-10-20, ADR-0007)
+Phase 8 완료 후 시작. 상세 항목과 순서는 `docs/phases/phase-9/STATUS.md`, 소유자 사전 작업은 issue #118.
+- [ ] 기존 IaC 폐기 (Hetzner k3s, Helm, ArgoCD, k8s OPA policy, smart-router Worker, 멀티 리전 drill)
+- [ ] OpenTofu 기반 재구성: bootstrap(state, GitHub OIDC, 예산 경보), network/data/edge/service 모듈
+- [ ] CLI 릴리스 바이너리 (GitHub Releases, checksum, cosign 서명, SLSA provenance)
+- [ ] staging(상시, merge 시 자동 apply) + 서버 CD + prod(소유자 승인 후 apply), 서울 리전으로 #5 해소
+- [ ] 모니터링/경보, 백업 복구 drill + 운영 runbook, 배포 아키텍처 보안 게이트
+
 ---
 
 ## 16. 부록 + 변경 이력
@@ -2535,6 +2545,7 @@ gantt
 | cycle 290 | 미디어 GC ACK 타이밍 정정(threat-model-checker: yellow — merge acceptable with doc update). cycle 289에서 `get_download_url`이 URL 발급 즉시 기록하던 ACK를, 클라이언트의 blobHash 검증 + AES-GCM 복호화 성공 후에만 별도 `POST /v1/media/:id/confirm-download`(신규 엔드포인트, `get_download_url`과 동일한 authz: uploader 또는 group member)가 기록하도록 변경. 새 메타데이터 카테고리나 DB 컬럼은 없음 — `media_acks` 테이블 의미만 "URL 발급됨"에서 "실제 복호화 검증됨"으로 강화됨. §3.4의 GC-타이밍 read-receipt 오라클이 이전보다 약간 더 정밀한 신호(요청만 하고 전송 실패한 경우를 더 이상 포함하지 않음)를 노출하게 되어 §3.3(L182), §3.4(L203), §9.4.3(L1280) 문구를 사실관계에 맞게 정정 |
 | 2026-10-08 | **CLI 우선 전환** (소유자 지시, ADR-0006). §7A CLI 클라이언트 신설 (`powehi-crypto-core` 분리, `powehi-cli`, 암호화 profile store, 터미널 고유 위협), §15.4에 Phase 7 DoD 추가. 웹 클라이언트(§7)는 Phase 7 완료까지 유지보수 모드 |
 | 2026-10-20 | Phase 7 완료(2026-10-14) 반영, §15.4에 **Phase 8** DoD 추가. 소유자가 need-human #13 #16 #19 #20 #22 #24 #28 #30 #32 #39 #53 #56을 결정(결정표: `docs/phases/phase-8/STATUS.md`). 웹은 계속 유지보수 모드 |
+| 2026-10-20 | **배포 플랫폼 변경** (소유자 결정, ADR-0007이 ADR-0002를 대체): Hetzner k3s → AWS 서울(ECS Fargate, RDS, ElastiCache) + Cloudflare edge(DNS/TLS/WAF/R2/Tunnel). 단일 리전, staging/prod 상시 2개 환경, 월 약 $150. §15.4에 **Phase 9** DoD 추가. §4A.1/§12.1–§12.4/§12.8/§12.9 본문은 Phase 9.1에서 재작성 |
 
 ---
 
