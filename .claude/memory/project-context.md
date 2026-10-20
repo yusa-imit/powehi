@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 601 (2026-10-20, FEATURE→CI-red fix) — flaky poll-vote test
+Frontend CI red on main after #121 (ChatLayoutPoll "persists a poll vote to Dexie", 1s waitFor on slow runner; passed on the PR). Raised that waitFor timeout to 4s. Next FEATURE cycle: first unchecked item in phase-8 STATUS.md.
+
 ## Cycle 597 (2026-10-20, FEATURE) — `read --until`
 - Phase 7 DoD all [x]; `read --until <unix-seconds>` (exclusive upper bound, `message::until`, composes with `--since` as [since, until) and `--last`). 229 lib tests pass, clippy/fmt clean; display filtering only, no review agent required.
 

@@ -374,15 +374,18 @@ describe("ChatLayout — group poll feature", () => {
 			fireEvent.click(screen.getByTestId("poll-option-0"));
 		});
 
-		await waitFor(async () => {
-			const rows = await db.messages
-				.where("groupId")
-				.equals("44444444-4444-4444-4444-444444444444")
-				.toArray();
-			const pollRow = rows.find((r) => r.pollJson);
-			const poll = JSON.parse(pollRow?.pollJson ?? "{}");
-			expect(poll.options[0].voters).toEqual(["me"]);
-		});
+		await waitFor(
+			async () => {
+				const rows = await db.messages
+					.where("groupId")
+					.equals("44444444-4444-4444-4444-444444444444")
+					.toArray();
+				const pollRow = rows.find((r) => r.pollJson);
+				const poll = JSON.parse(pollRow?.pollJson ?? "{}");
+				expect(poll.options[0].voters).toEqual(["me"]);
+			},
+			{ timeout: 4000 },
+		); // CI runners are slow; default 1000ms flaked on main (run 39372020799)
 	});
 
 	it("rehydrates a persisted poll (incl. votes) from Dexie on mount", async () => {
