@@ -165,4 +165,36 @@ describe("Login — BIP-39 registration flow (§8.5)", () => {
 		expect(calledWithHash).toBeInstanceOf(Uint8Array);
 		expect(JSON.stringify([...calledWithHash])).not.toContain("alice");
 	});
+	it("8.6: rejects a handle outside [a-z0-9-] before any request", async () => {
+		render(<Login />);
+		fireEvent.click(screen.getByText(/new to powehi/i));
+		fireEvent.change(screen.getByLabelText(/handle/i), { target: { value: "Alice B" } });
+		fireEvent.change(screen.getByLabelText(/password/i), { target: { value: "S3cret!pw" } });
+		fireEvent.click(screen.getByRole("button", { name: /create account/i }));
+
+		await waitFor(() => {
+			expect(screen.getByText(/only lowercase a-z, 0-9/i)).toBeInTheDocument();
+		});
+		expect(vi.mocked(AuthModule.regInit)).not.toHaveBeenCalled();
+		expect(opaqueRegistrationStart).not.toHaveBeenCalled();
+	});
+
+	it("8.6: registers with the NFC form of the password", async () => {
+		// The component zeroes its buffer afterwards (F2), so decode at call time.
+		let seen = "";
+		opaqueRegistrationStart.mockImplementation(async (pw: Uint8Array) => {
+			seen = new TextDecoder().decode(pw);
+			return { sessionId: "mock-reg-session", message: new Uint8Array(32) };
+		});
+		render(<Login />);
+		fireEvent.click(screen.getByText(/new to powehi/i));
+		fireEvent.change(screen.getByLabelText(/handle/i), { target: { value: "alice" } });
+		fireEvent.change(screen.getByLabelText(/password/i), { target: { value: "cafe\u0301 pw" } });
+		fireEvent.click(screen.getByRole("button", { name: /create account/i }));
+
+		await waitFor(() => {
+			expect(opaqueRegistrationStart).toHaveBeenCalled();
+		});
+		expect(seen).toBe("caf\u00e9 pw");
+	});
 });

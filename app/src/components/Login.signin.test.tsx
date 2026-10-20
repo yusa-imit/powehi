@@ -223,4 +223,33 @@ describe("Login — sign-in MLS state rehydration", () => {
 			expect(call).not.toMatch(/generation_replay_rejected_secret_marker/);
 		}
 	});
+	it("8.6: retries with the raw password only after an OPAQUE rejection", async () => {
+		await seedIdentity({});
+		const seen: string[] = [];
+		opaqueLoginFinish.mockImplementation(async (_id: string, pw: Uint8Array) => {
+			const text = new TextDecoder().decode(pw);
+			seen.push(text);
+			if (text !== "cafe\u0301") throw new Error("opaque login failed");
+			return { finalization: new Uint8Array(64) };
+		});
+		render(<Login />);
+		fireEvent.change(screen.getByLabelText(/handle/i), { target: { value: "alice" } });
+		fireEvent.change(screen.getByLabelText(/password/i), { target: { value: "cafe\u0301" } });
+		fireEvent.click(screen.getByRole("button", { name: /sign in/i }));
+		await waitFor(() => expect(useAuthStore.getState().phase).toBe("app"));
+		expect(seen).toEqual(["caf\u00e9", "cafe\u0301"]);
+	});
+
+	it("8.6: a server/network error does not trigger a second login attempt", async () => {
+		await seedIdentity({});
+		vi.spyOn(AuthModule, "loginInit").mockRejectedValue(new Error("503"));
+		render(<Login />);
+		fireEvent.change(screen.getByLabelText(/handle/i), { target: { value: "alice" } });
+		fireEvent.change(screen.getByLabelText(/password/i), { target: { value: "cafe\u0301" } });
+		fireEvent.click(screen.getByRole("button", { name: /sign in/i }));
+		await waitFor(() => expect(vi.mocked(AuthModule.loginInit)).toHaveBeenCalled());
+		await new Promise((r) => setTimeout(r, 50));
+		expect(useAuthStore.getState().phase).toBe("login");
+		expect(vi.mocked(AuthModule.loginInit)).toHaveBeenCalledTimes(1);
+	});
 });

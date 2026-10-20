@@ -7,6 +7,7 @@
 //! PII, or ciphertext.
 
 pub mod bip39;
+pub mod credentials;
 pub mod kem;
 pub mod kem_credential;
 pub mod media;

@@ -10,6 +10,14 @@ import {
 import { EncryptedPowehiDb } from "../db/encrypted-db";
 import { db } from "../db/schema";
 import { useCryptoWorker } from "../hooks/useCryptoWorker";
+import {
+	HANDLE_ERROR_TEXT,
+	nfcPassword,
+	passwordCandidates,
+	CredentialRejected,
+	registrableHandle,
+	trimHandle,
+} from "../lib/credentials";
 import { useAuthStore } from "../store/auth";
 import { base64ToUint8Array, uint8ToBase64 } from "../utils/base64";
 import type { MlsIdentityFromPhraseResult } from "../workers/crypto.worker";
@@ -164,11 +172,11 @@ export function Login() {
 		const initResp = await loginInit(handle_hash, ke1);
 
 		// Step 3: OPAQUE login finish — verifies server, worker derives DB key internally.
-		const { finalization: ke3 } = await cryptoWorker.opaqueLoginFinish(
-			sessionId,
-			pw,
-			new Uint8Array(initResp.opaque_ke2),
-		);
+		const { finalization: ke3 } = await cryptoWorker
+			.opaqueLoginFinish(sessionId, pw, new Uint8Array(initResp.opaque_ke2))
+			.catch((err: unknown) => {
+				throw new CredentialRejected(err);
+			});
 
 		// Step 4: server login finish — validates ke3, returns session token
 		const token = await loginFinish(ke3, initResp.login_nonce, device_id);
@@ -198,11 +206,11 @@ export function Login() {
 		// Steps 1–3: OPAQUE login dance, identical to doLogin's.
 		const { sessionId, message: ke1 } = await cryptoWorker.opaqueLoginStart(pw);
 		const initResp = await loginInit(handle_hash, ke1);
-		const { finalization: ke3 } = await cryptoWorker.opaqueLoginFinish(
-			sessionId,
-			pw,
-			new Uint8Array(initResp.opaque_ke2),
-		);
+		const { finalization: ke3 } = await cryptoWorker
+			.opaqueLoginFinish(sessionId, pw, new Uint8Array(initResp.opaque_ke2))
+			.catch((err: unknown) => {
+				throw new CredentialRejected(err);
+			});
 
 		// Derive the same 16-byte public identity label used at original
 		// registration for this phrase — SHA-256(phrase)[0..16] (doRegister's
@@ -254,11 +262,40 @@ export function Login() {
 			return;
 		}
 
+		// 8.6: new handles are [a-z0-9-]; login keeps accepting any existing handle.
+		const canonical =
+			mode === "create-account" ? registrableHandle(handle) : null;
+		if (canonical && !canonical.ok) {
+			setErrorMsg(HANDLE_ERROR_TEXT[canonical.error]);
+			setPhase("error");
+			return;
+		}
+		const handleText = canonical?.ok ? canonical.handle : trimHandle(handle);
+
 		setPhase("loading");
 		setErrorMsg("");
 
 		const encoder = new TextEncoder();
-		const pw = encoder.encode(password);
+		// 8.6: passwords are NFC before OPAQUE. Sign-in also tries the raw input when it
+		// differs, for accounts registered before NFC. Every buffer is zeroed in `finally`.
+		const pwList = (
+			mode === "create-account" ? [nfcPassword(password)] : passwordCandidates(password)
+		).map((p) => encoder.encode(p));
+		const pw = pwList[0];
+		const withPasswordFallback = async <T,>(fn: (p: Uint8Array) => Promise<T>): Promise<T> => {
+			let lastErr: unknown;
+			for (const candidate of pwList) {
+				try {
+					return await fn(candidate);
+				} catch (err) {
+					// Only a client-side OPAQUE rejection (wrong password) is retried; network,
+					// rate-limit and server errors surface at once (no extra login attempts).
+					if (!(err instanceof CredentialRejected)) throw err;
+					lastErr = err.cause;
+				}
+			}
+			throw lastErr;
+		};
 		// F2: clear password from React state immediately after encoding to Uint8Array.
 		setPassword("");
 		// §8.5: capture then clear the recovery-phrase textarea's controlled state
@@ -268,14 +305,14 @@ export function Login() {
 		setRecoveryPhrase("");
 
 		try {
-			const handle_hash = await hashHandle(handle.trim());
+			const handle_hash = await hashHandle(handleText);
 
 			let device_id: string;
 			let token: string;
 			let identityId: string | null = null;
 
 			if (mode === "restore-account") {
-				const result = await doRestoreAccount(pw, handle_hash, phrase);
+				const result = await withPasswordFallback((p) => doRestoreAccount(p, handle_hash, phrase));
 				// No recovery-phrase-confirmation step here (unlike create-account) —
 				// the user already claims to possess the phrase; nothing new to show.
 				login(
@@ -283,7 +320,7 @@ export function Login() {
 					result.token,
 					result.identityId,
 					result.pqDecapKeyHandle,
-					handle.trim(),
+					handleText,
 				);
 				return;
 			}
@@ -305,7 +342,7 @@ export function Login() {
 					token,
 					identityId: identityId ?? undefined,
 					pqDecapKeyHandle: result.pqDecapKeyHandle,
-					myHandle: handle.trim(),
+					myHandle: handleText,
 				};
 				return; // login() called from onConfirmed, not here.
 			}
@@ -317,7 +354,7 @@ export function Login() {
 				return;
 			}
 			device_id = identity.deviceId;
-			({ token } = await doLogin(pw, handle_hash, device_id));
+			({ token } = await withPasswordFallback((p) => doLogin(p, handle_hash, device_id)));
 
 			// Rehydrate MLS state in the WASM worker. Preferred path: restore the full
 			// exported MLS context (identity + provider key store + every group) via
@@ -462,7 +499,7 @@ export function Login() {
 			}
 
 			// Advance to app phase (sign-in path) — DB key was derived inside the crypto worker.
-			login(device_id, token, identityId ?? undefined, pqDecapKeyHandle, handle.trim());
+			login(device_id, token, identityId ?? undefined, pqDecapKeyHandle, handleText);
 		} catch (err) {
 			setPhase("error");
 			if (mode === "restore-account") {
@@ -483,7 +520,7 @@ export function Login() {
 			}
 		} finally {
 			// F2: zero password bytes regardless of success or failure.
-			pw.fill(0);
+			for (const p of pwList) p.fill(0);
 		}
 	};
 
