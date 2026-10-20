@@ -99,6 +99,8 @@ argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 sha2 = "0.10"
 sha3 = "0.10"
 hmac = "0.12"
+# PBKDF2-HMAC-SHA512 for the BIP-39 seed (RustCrypto; replaces the `bip39` crate).
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 # AES-256-GCM AEAD for client-side media encryption (prd.md §9.2).
 # Pure-Rust implementation; compiles on wasm32-unknown-unknown without hardware AES.
 # Approved per crypto-libraries-pinned.md.

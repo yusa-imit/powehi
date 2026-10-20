@@ -44,9 +44,6 @@ hkdf = { workspace = true }
 # recovery-phrase derivation). Used at runtime by `recovery` module; was a
 # dev-dep before §8.5. Approved per crypto-libraries-pinned.md.
 ed25519-dalek = { workspace = true }
-# BIP-39 mnemonic codes (24-word recovery phrase, PBKDF2-HMAC-SHA512 seed).
-# Only consumed by powehi-crypto-wasm so kept as a direct (non-workspace) dep.
-bip39 = "2"
 
 # MLS (RFC 9420) on native: use the audited OpenMLS RustCrypto provider so the
 # crate builds and tests on the host target (not just wasm32).

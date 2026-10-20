@@ -12,9 +12,9 @@ Only use audited, well-known cryptography libraries. Never implement crypto prim
 Approved libraries only:
 - `openmls` >= 0.7.2 (MLS protocol)
 - `opaque-ke` 4.x (OPAQUE aPAKE) — stable, RFC 9807. Migrated 3.0 → 4.0.1 on 2026-07-19; the draft-irtf-cfrg-opaque-16 waiver is retired. PQ-hybrid OPRF (X25519+ML-KEM-768) remains a future upgrade within the 4.x line, gated on ADR-0003 Phase B.
-- RustCrypto crates: `aes-gcm`, `chacha20poly1305`, `x25519-dalek`, `ed25519-dalek`, `argon2`, `hkdf`, `hmac`, `sha2`
+- RustCrypto crates: `aes-gcm`, `chacha20poly1305`, `x25519-dalek`, `ed25519-dalek`, `argon2`, `hkdf`, `hmac`, `pbkdf2` (BIP-39 seed), `sha2`
 - `ml-kem` (post-quantum, when PQ phase begins)
-- `getrandom` with `wasm_js` feature for WASM targets
+- `getrandom` for WASM targets: 0.2 with the `js` feature (what the code uses; the 0.3 name would be `wasm_js`)
 
 Do NOT add:
 - `ring` (conflicts with openmls on WASM) — except as the transitive rustls TLS provider, below
