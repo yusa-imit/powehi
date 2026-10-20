@@ -26,6 +26,8 @@ pub mod message;
 pub mod profile;
 #[cfg(unix)]
 pub mod prompt;
+#[cfg(unix)]
+pub mod screen;
 pub mod status;
 #[cfg(unix)]
 pub mod store;
@@ -352,17 +354,37 @@ fn run_read(
         eprintln!("{}", verify::CHANGED_WARNING);
     }
     let msgs = message::pending(&session.store, group_id)?;
-    // Only delete what reached the terminal: a closed pipe must not eat unseen messages.
+    let alt = screen::wanted_on_stdout(c.json);
+    let _signals = alt.then(screen::install_signal_restore);
+    let _screen = screen::AltScreen::enter(std::io::stdout(), alt).map_err(|_| CliError::Stdout)?;
+    // Only delete what reached the terminal: a closed pipe must not eat unseen messages. On the
+    // alternate screen the output vanishes on exit, so removal waits for the reader's Enter.
     let window = message::until(message::since(&msgs, c.since), c.until);
     let shown = message::newest(window, last.map(|n| n as usize));
-    message::show(&session.store, shown, keep, c.json, &mut std::io::stdout()).map_err(
-        |e| match e {
-            message::ShowError::Output => CliError::Stdout,
-            message::ShowError::Discard(e) => CliError::Message(e),
-        },
-    )?;
+    let show_err = |e| match e {
+        message::ShowError::Output => CliError::Stdout,
+        message::ShowError::Discard(e) => CliError::Message(e),
+    };
+    message::show(
+        &session.store,
+        shown,
+        keep || alt,
+        c.json,
+        &mut std::io::stdout(),
+    )
+    .map_err(show_err)?;
     if shown.is_empty() && !c.json {
         println!("no new messages");
+    }
+    if alt {
+        println!("-- press Enter to close --");
+        let seen = matches!(std::io::stdin().read_line(&mut String::new()), Ok(n) if n > 0);
+        drop(_screen);
+        if seen && !keep {
+            for m in shown {
+                message::discard(&session.store, m)?;
+            }
+        }
     }
     Ok(())
 }
@@ -462,6 +484,9 @@ fn run_chat(
     let mut prompter = prompt::TtyPrompter;
     let session = rt.block_on(auth::login(&client, server, paths, &mut prompter))?;
     let group_id = message::resolve(&session.store, reference)?;
+    let alt = screen::wanted_on_stdout(false);
+    let _signals = alt.then(screen::install_signal_restore);
+    let _screen = screen::AltScreen::enter(std::io::stdout(), alt).map_err(|_| CliError::Stdout)?;
     // The CHANGED alert is printed by `chat::run` itself, at start and after every fetch.
     println!(
         "chat {group_id}: type a line and press Enter; {} to leave",
