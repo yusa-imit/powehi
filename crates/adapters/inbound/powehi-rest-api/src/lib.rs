@@ -144,10 +144,6 @@ fn router_inner(
             "/v1/auth/devices/:id",
             delete(routes::auth::revoke_device_handler),
         )
-        .route(
-            "/v1/auth/session",
-            delete(routes::auth::revoke_session_handler),
-        )
         .layer(auth_layer);
 
     // Authenticated API endpoints — general per-IP rate limit.
@@ -198,6 +194,10 @@ fn router_inner(
         .route(
             "/v1/push-subscriptions",
             post(routes::push_subscription::register).delete(routes::push_subscription::unregister),
+        )
+        .route(
+            "/v1/auth/session",
+            delete(routes::auth::revoke_session_handler),
         )
         .route("/v1/invites", post(routes::invite::create))
         .route("/v1/invites/redeem", post(routes::invite::redeem))
