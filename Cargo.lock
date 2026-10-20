@@ -4185,6 +4185,7 @@ dependencies = [
  "powehi-crypto-core",
  "proptest",
  "rand 0.8.6",
+ "rcgen",
  "reqwest",
  "rustls",
  "serde",
@@ -4193,10 +4194,12 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
  "url",
  "uuid",
  "webpki-roots 0.26.11",
+ "x509-parser",
  "zeroize",
 ]
 

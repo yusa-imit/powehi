@@ -19,6 +19,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::chat::Event;
+use crate::pinning::{self, PinPolicy};
 
 /// Consecutive failed (re)connects before giving up (prd.md §7.6).
 pub const MAX_RETRIES: u32 = 3;
@@ -53,19 +54,11 @@ pub fn is_wake_for(text: &str, group_id: Uuid) -> bool {
 /// Bound on TCP + TLS + upgrade, matching the REST client's request timeout in spirit.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// TLS with the `ring` provider named explicitly (the process-default provider is ambiguous
-/// when another crate in the workspace enables `aws-lc-rs`) and the same Mozilla roots as the
-/// REST client, TLS 1.3 only (7.11 F11). Used for `wss://` only; `ws://` ignores it.
+/// TLS for `wss://` only (`ws://` ignores it): the REST client's roots, TLS 1.3 only and the
+/// same certificate pins (8.7).
 fn tls_connector() -> Option<tokio_tungstenite::Connector> {
-    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
-    let roots = rustls::RootCertStore {
-        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    };
-    let config = rustls::ClientConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .ok()?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let policy = PinPolicy::production().ok()?;
+    let config = pinning::tls_config(pinning::webpki_roots_store(), &policy).ok()?;
     Some(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(
         config,
     )))

@@ -1726,3 +1726,6 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 
 ## Cycle 607 (2026-10-21, FEATURE → CI-red fix)
 - Main "CI — Frontend" was red after #129 (8.6): Biome import-sort + format in `Login.tsx`. Fixed with `biome check --fix` (format-only; 913 component tests pass). 8.6 item itself already merged; next FEATURE: next unchecked item in phase-8/STATUS.md. Note: run `npx biome check src` before pushing app changes (untracked `src-tauri/gen` schemas trip a full `biome check` locally only).
+
+## Cycle 608 (2026-10-21, FEATURE) — 8.7 certificate pinning
+`powehi-cli/src/pinning.rs`: custom rustls verifier = WebPKI first, then SPKI-SHA-256 pin (2..=8 pins) on the *verified* path (a pinned intermediate must work as sole trust anchor for the leaf; threat-model F1 caught the "appended genuine CA" bypass). Used by `status::http_client_with` and the WS connector. `PRODUCTION_PINS` empty → WebPKI only until 9.9; no runtime override. Runbook `docs/runbooks/cli-pin-rotation.md`. Open: need-human #131 (pin strategy for Cloudflare-managed certs, blocks 9.9). Next: 8.8 PHS3 store.

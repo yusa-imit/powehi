@@ -3,9 +3,12 @@
 use std::time::Duration;
 
 use reqwest::Client;
+use rustls::RootCertStore;
 use serde::Deserialize;
 use thiserror::Error;
 use url::Url;
+
+use crate::pinning::{self, PinPolicy};
 
 /// Per-request deadline.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -36,14 +39,21 @@ struct RegionDetect {
 }
 
 /// Builds the HTTP client used for all server calls: bounded timeout, no redirects (a
-/// redirect could move a bearer token to another origin), rustls, TLS 1.3 only (7.11 F11).
+/// redirect could move a bearer token to another origin), rustls, TLS 1.3 only (7.11 F11),
+/// narrowed by the compiled-in certificate pins (8.7).
 pub fn http_client() -> Result<Client, StatusError> {
+    let policy = PinPolicy::production().map_err(|_| StatusError::Unreachable)?;
+    http_client_with(pinning::webpki_roots_store(), &policy)
+}
+
+/// [`http_client`] over explicit roots and pin policy; tests inject a private CA here.
+pub fn http_client_with(roots: RootCertStore, policy: &PinPolicy) -> Result<Client, StatusError> {
+    let tls = pinning::tls_config(roots, policy).map_err(|_| StatusError::Unreachable)?;
     Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
-        .use_rustls_tls()
-        .min_tls_version(reqwest::tls::Version::TLS_1_3)
+        .use_preconfigured_tls(tls)
         .build()
         .map_err(|_| StatusError::Unreachable)
 }
