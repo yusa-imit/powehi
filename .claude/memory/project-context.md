@@ -1735,3 +1735,6 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 
 ## Cycle 610 (2026-10-21, STABILIZATION)
 - CI green, no `bug` issues, `cargo audit` + `cargo deny check` clean. Gap found in the 8.8a manifest codec: `tag_bytes` used `from_str_radix`, which accepts a leading `+` and uppercase, so non-canonical tags could be encoded; now lowercase hex only. Added negative tests (duplicate tag, entry count over cap, bad flag bytes, non-canonical tags). powehi-cli 276 tests pass, clippy clean. target/ 30G → 27G after pruning >7d artifacts. Next FEATURE: 8.8b.
+
+## Cycle 611 (2026-10-21, FEATURE) — 8.8b DEK/KEK key bundle
+- `store/keys.rs`: `keys.wk3` (PHK1) holds a random record/name/manifest bundle sealed under KEK_pw (HKDF export_key) and optional KEK_rc (HKDF BIP-39 seed). `rewrap_password`, `add_recovery_wrap`, `open_with_recovery` (no CLI command uses KEK_rc until 8.18). Register adds the phrase slot before the server call. PHS2 stores need `open_upgrading` after a `[y/N]` (`Prompter::confirm_store_upgrade`); upgraded stores keep export-key-derived keys (no rewrite); keyfile written last. Test fixture: `ProfileStore::open_legacy_fixture`. Remaining 8.8c: `rekey` for upgraded stores. #133 resolved by the explicit gate.

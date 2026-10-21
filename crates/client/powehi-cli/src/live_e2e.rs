@@ -26,6 +26,8 @@ fn prompter(handle: &str, password: &str) -> ScriptedPrompter {
         handle: handle.to_owned(),
         passwords: vec![password.to_owned(); 2],
         shown: Vec::new(),
+        upgrade: false,
+        asked_upgrade: 0,
     }
 }
 
