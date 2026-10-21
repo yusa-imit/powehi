@@ -1753,3 +1753,8 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 ## Cycle 615 (2026-10-21, STABILIZATION) — #139 expired KeyPackages
 - `PgKeyPackageRepository::fetch_one`/`count_available` skip unconsumed rows with `uploaded_at` older than 84 days (MLS lifetime starts at generation ≤ upload, so this is conservative-lenient), so an idle device's dead pool reads empty and the CLI top-up fires. Docker tests are `#[ignore]` locally (no Docker here); new `expired_key_packages_are_neither_counted_nor_fetched` runs in CI. cargo audit/deny clean; target/ 30G → 28G.
 - Next FEATURE: 8.10 peer bound to its MLS credential.
+
+## Cycle 616 (2026-10-21, FEATURE) — 8.10 peer credential recorded
+- `mls_group::peer_credential_identity` (2-member group, non-empty basic credential <=64 bytes); `conv-*` gained `peer_credential` (serde default None = legacy/unknown). Creator reads it from the hash-pinned KeyPackage, joiner from the Welcome tree (skip if unusable). `unverified` notice on send (stderr), chat (output), and a suffix in `conversations` text output.
+- Deviation (reviewed: crypto-reviewer + threat-model-checker yellow): no sender-vs-credential comparison — label is account-level/copyable, no authenticated device binding (prd 3.3 cycle 456). Inviter-side impersonation by a T3 holding the invite KeyPackage documented in prd 8.3. 8.14 must add the peer-leaf successor check (carried in STATUS). No skip-path test for an unusable credential at the CLI layer (core tests cover it).
+- #32 closed with this PR. Next FEATURE: 8.11 server consent for group membership (spec in prd 3.3/6 first).

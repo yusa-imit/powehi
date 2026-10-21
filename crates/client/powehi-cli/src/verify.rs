@@ -153,6 +153,12 @@ pub fn has_confirmation(store: &ProfileStore, group_id: Uuid) -> bool {
     matches!(store.get(&record_name(&group_id)), Ok(Some(_)))
 }
 
+/// The one-line notice shown by `send` and `chat` while the conversation has no confirmation
+/// record (prd.md §5.6, 8.10). A CHANGED conversation has a record, so it gets only the
+/// [`CHANGED_WARNING`].
+pub const UNVERIFIED_WARNING: &str = "warning: this conversation is unverified; run `powehi \
+verify <conversation>` and compare the safety number with your peer over another channel";
+
 /// The one-line warning shown when [`changed_since_verified`] is true.
 pub const CHANGED_WARNING: &str = "warning: the safety number CHANGED since you verified this \
 conversation; run `powehi verify <conversation>` and compare it with your peer before trusting it";

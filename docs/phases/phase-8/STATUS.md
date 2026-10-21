@@ -146,12 +146,18 @@ pointing here. Close the issue in the PR that finishes its item.
   KeyPackages (`invite create`, one per invite) are not batches and keep their marker records.
 
 ### Conversation trust
-- [ ] 8.10 Peer bound to its MLS credential (#32 item 1) — at Welcome join and at
+- [x] 8.10 Peer bound to its MLS credential (#32 item 1) — at Welcome join and at
   redeem, take the peer identity from the peer leaf's credential and reject a
   Welcome whose server-reported sender does not match it; the `conv-*` record keeps
   the credential identity. `send`/`chat` print an "unverified" warning on stderr
   until `verify --confirm` is recorded, and `conversations` shows the state. Close
   #32 (items 2 and 4 were done in Phase 7; item 3 is 8.15). crypto-reviewer.
+  Shipped: `conv-*` stores the peer leaf's credential identity (`peer_credential`; creator from the
+  hash-pinned KeyPackage, joiner from the Welcome tree); unusable credential -> Welcome skipped;
+  `unverified` notice on `send` (stderr) / `chat` (its output) and a suffix in `conversations`. Deviation: the
+  sender-vs-credential comparison is NOT done: the label is an account-level, copyable value with no
+  authenticated device_id binding (prd 3.3 cycle 456), so it would add no security (prd 7A.3,
+  8.3). The binding itself (signature-key level, server-independent) is left for 8.19.
 - [ ] 8.11 Server consent for group membership (#30 option 2, pairs with #24) — adding
   a device to a group creates a *pending* membership. A pending device receives only
   that group's Welcome, and the server neither stores nor fans out other traffic of
@@ -177,6 +183,10 @@ pointing here. Close the issue in the PR that finishes its item.
   §5.6 CHANGED alert fires on a change. Tests across several epochs, including a
   Commit that arrives before the Application messages that follow it.
   crypto-reviewer.
+  Carried over from 8.10 (crypto-reviewer): once Commits apply, a peer Update can change its
+  credential or signature key, silently for a never-verified conversation. 8.14 must check each
+  applied Commit's peer leaf against the stored `peer_credential` (RFC 9420 5.3.1 successor
+  check), anchor the peer's signature key on first sight, and treat legacy `None` as unknown.
 - [ ] 8.15 Post-compromise security (#39 item 2, #32 item 3) — periodic self-Update
   Commits from `send`/`chat` (crypto-lead sets the policy, e.g. age or message
   count, and writes it in prd §5); concurrent-Commit handling per the §4A commit

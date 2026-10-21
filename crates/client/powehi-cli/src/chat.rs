@@ -116,6 +116,10 @@ pub async fn run(
 ) -> std::io::Result<()> {
     let mut realtime = true;
     let mut alerted = false;
+    if !verify::has_confirmation(&session.store, group_id) {
+        // A closed output is detected (and ends the session) by `sync` before it consumes anything.
+        let _ = writeln!(out, "! {}", verify::UNVERIFIED_WARNING).and_then(|()| out.flush());
+    }
     if sync(client, server, session, group_id, &mut alerted, out).await? {
         return Ok(());
     }

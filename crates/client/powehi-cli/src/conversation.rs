@@ -54,6 +54,11 @@ pub struct Conversation {
     /// 16-hex PQ binding (prd.md §5.3 Phase B) once the ML-KEM exchange completed on this side.
     #[serde(default)]
     pq_binding: Option<String>,
+    /// BasicCredential identity of the peer's leaf, taken from the MLS group at join/redeem
+    /// (prd.md §7A.3). An account-level label, not a device id; `None` on records written
+    /// before 8.10.
+    #[serde(default)]
+    peer_credential: Option<Vec<u8>>,
 }
 
 impl Conversation {
@@ -75,7 +80,21 @@ impl Conversation {
             pq_decap_key,
             pq_encap_key,
             pq_binding: None,
+            peer_credential: None,
         }
+    }
+
+    /// Records the peer's credential identity as read from the MLS group.
+    #[must_use]
+    pub fn with_peer_credential(mut self, identity: Vec<u8>) -> Self {
+        debug_assert!(!identity.is_empty());
+        self.peer_credential = Some(identity);
+        self
+    }
+
+    /// The peer's MLS credential identity, if recorded.
+    pub fn peer_credential(&self) -> Option<&[u8]> {
+        self.peer_credential.as_deref()
     }
 
     /// The PQ binding recorded after a successful `pq_init` exchange, if any.
@@ -122,7 +141,10 @@ impl Conversation {
             .pq_binding
             .as_ref()
             .is_none_or(|b| b.len() == 16 && b.bytes().all(|c| c.is_ascii_hexdigit()));
-        if self.version == VERSION && key_ok && role_ok && binding_ok {
+        let credential_ok = self.peer_credential.as_ref().is_none_or(|c| {
+            !c.is_empty() && c.len() <= powehi_crypto_core::mls_group::MAX_CREDENTIAL_IDENTITY_LEN
+        });
+        if self.version == VERSION && key_ok && role_ok && binding_ok && credential_ok {
             Ok(())
         } else {
             Err(ConversationError::Malformed)
@@ -281,6 +303,8 @@ pub fn report(
         };
         let changed = if crate::verify::changed_since_verified(store, *id) {
             " CHANGED"
+        } else if !crate::verify::has_confirmation(store, *id) {
+            " unverified"
         } else {
             ""
         };
@@ -449,7 +473,10 @@ mod tests {
         let mut out = Vec::new();
         report(&store, &BTreeMap::new(), false, false, None, None, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
-        let mut want = [format!("{a} joiner"), format!("{b} creator")];
+        let mut want = [
+            format!("{a} joiner unverified"),
+            format!("{b} creator unverified"),
+        ];
         want.sort();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[..2], want[..]);
@@ -466,8 +493,8 @@ mod tests {
         )
         .unwrap();
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains(&format!("{a} joiner 3 unread\n")));
-        assert!(text.contains(&format!("{b} creator\n")));
+        assert!(text.contains(&format!("{a} joiner 3 unread unverified\n")));
+        assert!(text.contains(&format!("{b} creator unverified\n")));
     }
 
     struct FailingWriter;
@@ -517,7 +544,10 @@ mod tests {
         let mut out = Vec::new();
         report(&store, &unread, true, false, None, None, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
-        assert_eq!(text, format!("{busy} joiner 2 unread\n1 conversation(s)\n"));
+        assert_eq!(
+            text,
+            format!("{busy} joiner 2 unread unverified\n1 conversation(s)\n")
+        );
         let mut out = Vec::new();
         report(&store, &BTreeMap::new(), true, false, None, None, &mut out).unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), "0 conversation(s)\n");
@@ -548,7 +578,7 @@ mod tests {
         .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains(&format!("{flagged} joiner 2 unread CHANGED\n")));
-        assert!(text.contains(&format!("{plain} joiner\n")));
+        assert!(text.contains(&format!("{plain} joiner unverified\n")));
     }
 
     #[test]
@@ -619,7 +649,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            format!("{c} creator\n1 conversation(s)\n")
+            format!("{c} creator unverified\n1 conversation(s)\n")
         );
         let mut out = Vec::new();
         report(
@@ -634,7 +664,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            format!("{j} joiner\n1 conversation(s)\n")
+            format!("{j} joiner unverified\n1 conversation(s)\n")
         );
     }
 
@@ -1000,7 +1030,10 @@ mod tests {
         )
         .unwrap();
         let text = String::from_utf8(out).unwrap();
-        assert_eq!(text, format!("{} joiner\n1 conversation(s)\n", all[0]));
+        assert_eq!(
+            text,
+            format!("{} joiner unverified\n1 conversation(s)\n", all[0])
+        );
     }
 
     #[test]
@@ -1254,5 +1287,40 @@ mod tests {
         let mut out = Vec::new();
         ids(&store, &BTreeMap::new(), false, false, None, page, &mut out).unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), format!("{plain}\n"));
+    }
+
+    #[test]
+    fn peer_credential_round_trips_and_legacy_records_load_without_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let gid = Uuid::new_v4();
+        let conv = joiner(gid).with_peer_credential(vec![5u8; 16]);
+        save(&store, &conv).unwrap();
+        let loaded = load(&store, &gid).unwrap().unwrap();
+        assert_eq!(loaded.peer_credential(), Some([5u8; 16].as_slice()));
+
+        // A record written before 8.10 has no such field.
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&store.get(&record_name(&gid)).unwrap().unwrap()).unwrap();
+        v.as_object_mut()
+            .unwrap()
+            .remove("peer_credential")
+            .unwrap();
+        store
+            .put(&record_name(&gid), v.to_string().as_bytes())
+            .unwrap();
+        assert_eq!(load(&store, &gid).unwrap().unwrap().peer_credential(), None);
+
+        // An empty or oversize identity is malformed.
+        for bad in [vec![], vec![1u8; 65]] {
+            v["peer_credential"] = serde_json::json!(bad);
+            store
+                .put(&record_name(&gid), v.to_string().as_bytes())
+                .unwrap();
+            assert!(matches!(
+                load(&store, &gid),
+                Err(ConversationError::Malformed)
+            ));
+        }
     }
 }
