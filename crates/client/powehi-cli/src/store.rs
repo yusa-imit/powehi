@@ -4,24 +4,33 @@
 //! `tag` is the hex of `HMAC-SHA256(name_key, name)[..16]` (threat-model F1: record names such
 //! as a group or envelope id never reach the directory listing). The real name travels inside
 //! the ciphertext (`len || name || payload`). The record key is
-//! `HKDF-SHA256(ikm = OPAQUE export_key, info = KEY_INFO)`; the info label is CLI-specific so
-//! it is domain-separated from the web DB key (§7.4), and `name_key` uses its own label. The
+//! `HKDF-SHA256(ikm = OPAQUE export_key, info = KEY_INFO)` for an upgraded store (`keys`: a new
+//! store has random keys); the info label is CLI-specific so it is domain-separated from the
+//! web DB key (§7.4), and `name_key` uses its own label. The
 //! AEAD AAD binds `MAGIC || profile || tag`, so a record file renamed to another tag fails
 //! authentication, and so does one moved between profiles. A decrypted name must hash back to
 //! its file's tag. `<name>.rec` files (format `PHS1`, plain names) are migrated at `open`.
 //!
 //! A MAC'd manifest (`manifest.mf3`, see `manifest`) lists every record's tag and file hash under
 //! a monotonic generation, so `open` and `get` reject a rolled-back, deleted, extra or swapped
-//! record. Residual risks (prd §3.2): a wholesale snapshot replay, and deleting the manifest
-//! together with the `store-v3` latch, which makes the store look like a pre-manifest one. One process may hold a profile open at a time (an
-//! exclusive `flock` on `.lock`), which keeps writers from clobbering each other.
-//! The record key is fixed for the account's OPAQUE registration, so the GCM random-nonce
-//! budget (NIST SP 800-38D §8.3, 2^32 invocations) is cumulative over the account lifetime;
-//! the separate manifest key has its own budget, spent faster (two seals per mutation, one more
-//! per settle or adoption).
+//! record. One process may hold a profile open at a time (an exclusive `flock` on `.lock`),
+//! which keeps writers from clobbering each other.
+//!
+//! Keys (8.8b, `keys`): the record, name-tag and manifest keys are a per-store bundle sealed in
+//! `keys.wk3` under a password KEK (from the `export_key`) and optionally a recovery-phrase KEK.
+//! A store without that file but with records is a pre-`PHS3` store: `open` refuses it
+//! (`UpgradeRequired`) and only `open_upgrading`, which the CLI calls after the user confirms,
+//! converts it. So deleting the manifest and latch of a current store cannot silently make it
+//! look pre-manifest; a store whose key file is deleted fails to open. Residual risks (prd §3.2):
+//! a wholesale snapshot replay, and a user who confirms the upgrade of a store whose key file,
+//! manifest and latch were all deleted (only possible while its keys are the `export_key`-derived
+//! ones of an upgraded store).
+//! The record key lives as long as the store, so the GCM random-nonce budget (NIST SP 800-38D
+//! §8.3, 2^32 invocations) is cumulative over the store's lifetime; the separate manifest key
+//! has its own budget, spent faster (two seals per mutation, one more per settle or adoption).
 //! Key hygiene: the AES key schedule is zeroized on drop (`aes/zeroize`); the HKDF/HMAC
 //! internals and the GHASH subkey held by the cipher are not zeroized (upstream) and may linger
-//! in memory. Further hardening (owner checks, DEK/KEK, key canary) is tracked in issue #16.
+//! in memory.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -43,7 +52,11 @@ use zeroize::Zeroizing;
 
 use crate::profile::ProfilePaths;
 
+mod keys;
 mod manifest;
+
+pub use keys::RecoveryKek;
+use keys::{Bundle, KeyFile, PasswordKek, KEYFILE, KEYFILE_MAX_LEN};
 
 /// File magic and format version.
 const MAGIC: &[u8; 4] = b"PHS2";
@@ -112,6 +125,16 @@ pub enum StoreError {
     ManifestMissing,
     #[error("the store manifest is malformed or from another profile")]
     ManifestCorrupt,
+    #[error("this profile uses the pre-PHS3 store format; it is converted only after you confirm the upgrade")]
+    UpgradeRequired,
+    #[error("the store key file is missing (do not delete files to work around this)")]
+    KeyfileMissing,
+    #[error("the store key file is malformed")]
+    KeyfileCorrupt,
+    #[error("this store's keys still derive from the old export key; a password change cannot retire them until the store is rekeyed")]
+    RekeyRequired,
+    #[error("the store has no recovery-phrase key slot yet")]
+    NoRecoveryWrap,
     #[error("record file {tag}.{EXT} is listed in the manifest but missing")]
     RecordMissing { tag: String },
     #[error("record file {tag}.{EXT} is not listed in the manifest")]
@@ -161,12 +184,17 @@ struct Manifest {
     pending: Option<Pending>,
 }
 
-/// Handle to one profile directory plus its derived record key. The AES key is zeroized on drop (the HMAC state is not).
+/// Handle to one profile directory plus its key bundle. The AES key is zeroized on drop (the HMAC state is not).
 pub struct ProfileStore {
     dir: PathBuf,
     profile: String,
     cipher: Aes256Gcm,
     manifest_cipher: Aes256Gcm,
+    /// The store's keys, kept to reseal them on a password change.
+    bundle: Bundle,
+    /// The keys are the `export_key`-derived ones of an upgraded store, so a new password would
+    /// not retire them (`rewrap_password` refuses).
+    derived_keys: bool,
     manifest: Mutex<Manifest>,
     /// Serializes the pending → record → settled sequence of one mutation.
     write_lock: Mutex<()>,
@@ -306,16 +334,110 @@ fn create_private_dir(dir: &Path) -> Result<(), StoreError> {
     check_private_dir(dir)
 }
 
+/// How `open_as` proves the caller may read the store.
+#[derive(Clone, Copy)]
+enum Unlock<'a> {
+    Password(&'a [u8]),
+    Recovery(&'a RecoveryKek),
+}
+
+/// What `start` still has to do after the key bundle is known.
+enum Flow {
+    /// The key file already holds the bundle.
+    Keyed,
+    /// A new store: write the key file before anything else.
+    Fresh(PasswordKek),
+    /// A pre-`PHS3` store: adopt, then write the key file once every record has authenticated.
+    /// `None` (test fixtures) skips the key file.
+    Upgrade(Option<PasswordKek>),
+}
+
+/// Reads a private regular file of at most `max` bytes (no symlink, no FIFO hang); a longer one
+/// is `too_big`.
+fn read_private_file(path: &Path, max: usize, too_big: StoreError) -> Result<Vec<u8>, StoreError> {
+    let mut f = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| match e.raw_os_error() {
+            Some(libc::ELOOP) => StoreError::InsecurePath,
+            _ => e.into(),
+        })?;
+    let md = f.metadata()?;
+    if !md.is_file() || md.mode() & 0o077 != 0 {
+        return Err(StoreError::InsecurePath);
+    }
+    if md.len() > max as u64 {
+        return Err(too_big);
+    }
+    let mut bytes = Vec::with_capacity(md.len() as usize);
+    Read::by_ref(&mut f)
+        .take(md.len())
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 impl ProfileStore {
-    /// Opens (creating with mode 0700 if absent) the profile directory and derives the key.
-    /// `export_key` is borrowed; the caller zeroizes its own copy. Legacy `PHS1` records are
-    /// re-encrypted under opaque file names before this returns.
+    /// Opens (creating with mode 0700 if absent) the profile directory and unlocks the key
+    /// bundle with the password KEK. `export_key` is borrowed; the caller zeroizes its own copy.
+    /// A pre-`PHS3` store is refused with `UpgradeRequired` (see `open_upgrading`).
     pub fn open(paths: &ProfilePaths, export_key: &[u8]) -> Result<Self, StoreError> {
-        let key = derive_key(export_key)?;
-        let name_key = expand(export_key, NAME_KEY_INFO)?;
-        let name_mac = <Hmac<Sha256> as Mac>::new_from_slice(name_key.as_ref())
-            .map_err(|_| StoreError::BadKeyLength)?;
-        let manifest_key = expand(export_key, MANIFEST_KEY_INFO)?;
+        Self::open_as(paths, Unlock::Password(export_key), false)
+    }
+
+    /// Like `open`, but converts a pre-`PHS3` store (`PHS1` files, a manifest-less or key-file-less
+    /// `PHS2` store): it keeps its export-key-derived keys, adopts or checks the manifest and
+    /// writes the key file last, once every record has authenticated. Call it only after the
+    /// user confirmed the upgrade.
+    pub fn open_upgrading(paths: &ProfilePaths, export_key: &[u8]) -> Result<Self, StoreError> {
+        Self::open_as(paths, Unlock::Password(export_key), true)
+    }
+
+    /// Opens with the recovery-phrase KEK, for a store whose password path is lost. Needs the
+    /// recovery slot (`add_recovery_wrap`); a store without one is `NoRecoveryWrap`.
+    pub fn open_with_recovery(paths: &ProfilePaths, kek: &RecoveryKek) -> Result<Self, StoreError> {
+        Self::open_as(paths, Unlock::Recovery(kek), false)
+    }
+
+    fn open_as(
+        paths: &ProfilePaths,
+        unlock: Unlock<'_>,
+        upgrade: bool,
+    ) -> Result<Self, StoreError> {
+        let pw = match unlock {
+            Unlock::Password(ek) => Some(PasswordKek::new(ek)?),
+            Unlock::Recovery(_) => None,
+        };
+        let (profile, lock) = Self::prepare(paths)?;
+        let keyfile = Self::read_keyfile(&paths.dir)?;
+        let has_files = Self::has_store_files(&paths.dir)?;
+        let mut derived_keys = false;
+        let (bundle, flow) = match (keyfile, unlock, pw) {
+            (Some(kf), Unlock::Password(ek), Some(pw)) => {
+                let bundle = kf.unlock_password(&profile, &pw)?;
+                derived_keys = bundle.same_keys(&Bundle::derived(ek)?);
+                (bundle, Flow::Keyed)
+            }
+            (Some(kf), Unlock::Recovery(rc), _) => (kf.unlock_recovery(&profile, rc)?, Flow::Keyed),
+            (None, Unlock::Recovery(_), _) => return Err(StoreError::KeyfileMissing),
+            (None, Unlock::Password(ek), Some(pw)) if has_files => {
+                if !upgrade {
+                    return Err(StoreError::UpgradeRequired);
+                }
+                derived_keys = true;
+                (Bundle::derived(ek)?, Flow::Upgrade(Some(pw)))
+            }
+            (None, Unlock::Password(_), Some(pw)) => (Bundle::random()?, Flow::Fresh(pw)),
+            (Some(_), Unlock::Password(_), None) => return Err(StoreError::Corrupt),
+            (None, Unlock::Password(_), None) => return Err(StoreError::Corrupt),
+        };
+        let mut store = Self::build(paths, profile, lock, bundle)?;
+        store.derived_keys = derived_keys;
+        store.start(flow)
+    }
+
+    /// Creates the directory, validates the profile name and takes the profile lock.
+    fn prepare(paths: &ProfilePaths) -> Result<(String, File), StoreError> {
         create_private_dir(&paths.dir)?;
         let profile = paths
             .dir
@@ -335,13 +457,25 @@ impl ProfileStore {
             std::fs::TryLockError::WouldBlock => StoreError::Locked,
             std::fs::TryLockError::Error(e) => StoreError::from(e),
         })?;
-        debug_assert!(key.iter().any(|&b| b != 0));
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_ref()));
-        let store = Self {
+        Ok((profile, lock))
+    }
+
+    fn build(
+        paths: &ProfilePaths,
+        profile: String,
+        lock: File,
+        bundle: Bundle,
+    ) -> Result<Self, StoreError> {
+        let name_mac = <Hmac<Sha256> as Mac>::new_from_slice(bundle.name())
+            .map_err(|_| StoreError::BadKeyLength)?;
+        debug_assert!(bundle.record().iter().any(|&b| b != 0));
+        Ok(Self {
             dir: paths.dir.clone(),
             profile,
-            cipher,
-            manifest_cipher: Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(manifest_key.as_ref())),
+            cipher: Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(bundle.record())),
+            manifest_cipher: Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(bundle.manifest())),
+            bundle,
+            derived_keys: false,
             manifest: Mutex::new(Manifest::default()),
             write_lock: Mutex::new(()),
             poisoned: std::sync::atomic::AtomicBool::new(false),
@@ -349,11 +483,136 @@ impl ProfileStore {
             index: Mutex::new(BTreeSet::new()),
             provider_floor: AtomicU64::new(0),
             _lock: lock,
-        };
-        let found = store.load_index()?;
-        store.load_manifest(&found)?;
-        store.migrate_legacy()?;
-        Ok(store)
+        })
+    }
+
+    /// Loads and authenticates the store. A fresh store gets its key file before anything else; an
+    /// upgraded one gets it last, so a wrong password never leaves a key file behind.
+    fn start(self, flow: Flow) -> Result<Self, StoreError> {
+        let upgrading = matches!(flow, Flow::Upgrade(_));
+        let mut flow = flow;
+        if let Flow::Fresh(pw) = &flow {
+            self.write_keyfile(&KeyFile::new(&self.profile, &self.bundle, pw, None)?)?;
+        }
+        let found = self.load_index()?;
+        if upgrading && found.is_empty() {
+            self.authenticate_first_legacy()?;
+        }
+        self.load_manifest(&found, upgrading)?;
+        self.migrate_legacy(upgrading)?;
+        if let Flow::Upgrade(pw) = &mut flow {
+            if let Some(pw) = pw.take() {
+                self.write_keyfile(&KeyFile::new(&self.profile, &self.bundle, &pw, None)?)?;
+            }
+        }
+        Ok(self)
+    }
+
+    /// Test fixture: a keyless store with `export_key`-derived keys, what a pre-`PHS3` version left
+    /// behind. `open` refuses it; `open_upgrading` converts it.
+    #[cfg(test)]
+    pub(crate) fn open_legacy_fixture(
+        paths: &ProfilePaths,
+        export_key: &[u8],
+    ) -> Result<Self, StoreError> {
+        let (profile, lock) = Self::prepare(paths)?;
+        let mut store = Self::build(paths, profile, lock, Bundle::derived(export_key)?)?;
+        store.derived_keys = true;
+        store.start(Flow::Upgrade(None))
+    }
+
+    /// An upgrade of a store with no `PHS2` record yet (`PHS1` files only) would otherwise write
+    /// a manifest and latch before any key was checked, so a wrong key would poison the
+    /// directory. Authenticates the first legacy record, if there is no manifest, before that.
+    fn authenticate_first_legacy(&self) -> Result<(), StoreError> {
+        if fs::symlink_metadata(self.dir.join(MANIFEST_FILE)).is_ok() {
+            return Ok(());
+        }
+        let mut first: Option<String> = None;
+        for entry in fs::read_dir(&self.dir)? {
+            let file = entry?.file_name();
+            let stem = file.to_str().and_then(|f| f.strip_suffix(".rec"));
+            if let Some(stem) = stem.filter(|s| validate_record_name(s).is_ok()) {
+                if first.as_deref().is_none_or(|f| stem < f) {
+                    first = Some(stem.to_owned());
+                }
+            }
+        }
+        match first {
+            Some(name) => self
+                .read_file(
+                    &self.dir.join(format!("{name}.{LEGACY_EXT}")),
+                    LEGACY_MAGIC,
+                    &name,
+                )
+                .map(drop),
+            None => Ok(()),
+        }
+    }
+
+    /// Whether the directory holds anything a store would: records, a manifest or `PHS1` files.
+    fn has_store_files(dir: &Path) -> Result<bool, StoreError> {
+        for entry in fs::read_dir(dir)? {
+            let file = entry?.file_name();
+            let Some(file) = file.to_str() else { continue };
+            let record = file.strip_suffix(".rc2").is_some_and(is_tag)
+                || file
+                    .strip_suffix(".rec")
+                    .is_some_and(|stem| validate_record_name(stem).is_ok());
+            if record || file == MANIFEST_FILE {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn read_keyfile(dir: &Path) -> Result<Option<KeyFile>, StoreError> {
+        match read_private_file(
+            &dir.join(KEYFILE),
+            KEYFILE_MAX_LEN,
+            StoreError::KeyfileCorrupt,
+        ) {
+            Ok(bytes) => KeyFile::decode(&bytes).map(Some),
+            Err(StoreError::Io(ErrorKind::NotFound)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn write_keyfile(&self, kf: &KeyFile) -> Result<(), StoreError> {
+        self.atomic_write(KEYFILE, &kf.encode())?;
+        File::open(&self.dir)?.sync_all()?;
+        Ok(())
+    }
+
+    /// Reseals the key bundle under the key of a new password (`new_export_key`), keeping the
+    /// recovery slot. No record is rewritten: the old password's KEK stops opening the store
+    /// (a copy of the old `keys.wk3` still does, as with any snapshot, prd §3.2 ①). An upgraded
+    /// store is refused (`RekeyRequired`): its keys are a function of the old `export_key`, so
+    /// resealing them would only look like a rotation.
+    pub fn rewrap_password(&self, new_export_key: &[u8]) -> Result<(), StoreError> {
+        if self.derived_keys {
+            return Err(StoreError::RekeyRequired);
+        }
+        let pw = PasswordKek::new(new_export_key)?;
+        let _one_at_a_time = self.write_lock.lock().map_err(|_| StoreError::Corrupt)?;
+        check_private_dir(&self.dir)?;
+        let current = Self::read_keyfile(&self.dir)?.ok_or(StoreError::KeyfileMissing)?;
+        self.write_keyfile(&current.with_password(&self.profile, &self.bundle, &pw)?)
+    }
+
+    /// Adds (or replaces) the recovery-phrase slot, so `open_with_recovery` can unlock the store.
+    pub fn add_recovery_wrap(&self, kek: &RecoveryKek) -> Result<(), StoreError> {
+        let _one_at_a_time = self.write_lock.lock().map_err(|_| StoreError::Corrupt)?;
+        check_private_dir(&self.dir)?;
+        let current = Self::read_keyfile(&self.dir)?.ok_or(StoreError::KeyfileMissing)?;
+        self.write_keyfile(&current.with_recovery(&self.profile, &self.bundle, kek)?)
+    }
+
+    /// Whether the key file carries a recovery slot.
+    pub fn has_recovery_wrap(&self) -> Result<bool, StoreError> {
+        check_private_dir(&self.dir)?;
+        let kf = Self::read_keyfile(&self.dir)?.ok_or(StoreError::KeyfileMissing)?;
+        Ok(kf.has_recovery())
     }
 
     /// Lowest provider-state generation this process will accept on reload.
@@ -399,14 +658,18 @@ impl ProfileStore {
     /// Reads and verifies the manifest against the record files found by `load_index`. A
     /// manifest-less store is adopted (a `PHS2` store being upgraded) unless it holds the
     /// `MANIFEST_LATCH` record, which proves a manifest was deleted.
-    fn load_manifest(&self, found: &BTreeMap<String, [u8; HASH_LEN]>) -> Result<(), StoreError> {
+    fn load_manifest(
+        &self,
+        found: &BTreeMap<String, [u8; HASH_LEN]>,
+        may_adopt: bool,
+    ) -> Result<(), StoreError> {
         let blob = match self.read_manifest_blob() {
             Ok(b) => Some(b),
             Err(StoreError::Io(ErrorKind::NotFound)) => None,
             Err(e) => return Err(e),
         };
         let Some(blob) = blob else {
-            if self.index()?.contains(MANIFEST_LATCH) {
+            if self.index()?.contains(MANIFEST_LATCH) || (!found.is_empty() && !may_adopt) {
                 return Err(StoreError::ManifestMissing);
             }
             if !found.is_empty() {
@@ -460,25 +723,12 @@ impl ProfileStore {
     }
 
     fn read_manifest_blob(&self) -> Result<Vec<u8>, StoreError> {
-        let path = self.dir.join(MANIFEST_FILE);
-        let mut f = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(&path)
-            .map_err(|e| match e.raw_os_error() {
-                Some(libc::ELOOP) => StoreError::InsecurePath,
-                _ => e.into(),
-            })?;
-        let md = f.metadata()?;
-        if !md.is_file() || md.mode() & 0o077 != 0 {
-            return Err(StoreError::InsecurePath);
-        }
-        if md.len() > (MAX_MANIFEST_LEN + MANIFEST_MAGIC.len() + NONCE_LEN + TAG_LEN) as u64 {
-            return Err(StoreError::ManifestCorrupt);
-        }
-        let mut blob = Vec::with_capacity(md.len() as usize);
-        Read::by_ref(&mut f).take(md.len()).read_to_end(&mut blob)?;
-        Ok(blob)
+        let max = MAX_MANIFEST_LEN + MANIFEST_MAGIC.len() + NONCE_LEN + TAG_LEN;
+        read_private_file(
+            &self.dir.join(MANIFEST_FILE),
+            max,
+            StoreError::ManifestCorrupt,
+        )
     }
 
     /// Atomically replaces the manifest file, then adopts `next` in memory.
@@ -500,7 +750,7 @@ impl ProfileStore {
     /// crash between write and delete leaves both; the new record wins). Once the store holds
     /// the `MARKER` record the import window is closed: stray `.rec` files (for example planted
     /// from an old backup) are deleted unread. Stale `<name>.rec.tmp` files are always removed.
-    fn migrate_legacy(&self) -> Result<(), StoreError> {
+    fn migrate_legacy(&self, may_import: bool) -> Result<(), StoreError> {
         let mut legacy = Vec::new();
         for entry in fs::read_dir(&self.dir)? {
             let file = entry?.file_name();
@@ -519,7 +769,7 @@ impl ProfileStore {
             }
         }
         legacy.sort();
-        let closed = self.index()?.contains(MARKER);
+        let closed = !may_import || self.index()?.contains(MARKER);
         let mut imported = false;
         for name in legacy {
             let path = self.dir.join(format!("{name}.{LEGACY_EXT}"));
@@ -1242,6 +1492,10 @@ mod tests {
         assert!(matches!(s.remove("a"), Err(StoreError::InsecurePath)));
     }
 
+    fn legacy_open(paths: &ProfilePaths, ek: &[u8]) -> Result<ProfileStore, StoreError> {
+        ProfileStore::open_legacy_fixture(paths, ek)
+    }
+
     fn legacy_record(dir: &Path, key: &[u8], profile: &str, name: &str, pt: &[u8]) {
         let k = derive_key(key).unwrap();
         let c = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(k.as_ref()));
@@ -1285,13 +1539,22 @@ mod tests {
     fn legacy_records_are_migrated_at_open() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = ProfilePaths::resolve(tmp.path(), "work").unwrap();
-        drop(ProfileStore::open(&paths, &EK).unwrap());
+        create_private_dir(&paths.dir).unwrap();
         legacy_record(&paths.dir, &EK, "work", "identity", b"old-secret");
         legacy_record(&paths.dir, &EK, "work", "conv-abc", b"");
-        let s = ProfileStore::open(&paths, &EK).unwrap();
+        assert!(matches!(
+            ProfileStore::open(&paths, &EK),
+            Err(StoreError::UpgradeRequired)
+        ));
+        assert!(!paths.dir.join(KEYFILE).exists());
+        let s = ProfileStore::open_upgrading(&paths, &EK).unwrap();
+        assert!(paths.dir.join(KEYFILE).exists());
         assert!(!paths.dir.join("identity.rec").exists());
         assert!(!paths.dir.join("conv-abc.rec").exists());
         assert_eq!(s.names().unwrap(), vec!["conv-abc", "identity"]);
+        assert_eq!(&**s.get("identity").unwrap().unwrap(), b"old-secret");
+        drop(s);
+        let s = ProfileStore::open(&paths, &EK).unwrap();
         assert_eq!(&**s.get("identity").unwrap().unwrap(), b"old-secret");
     }
 
@@ -1299,18 +1562,21 @@ mod tests {
     fn migration_prefers_existing_new_record_and_rejects_wrong_key() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = ProfilePaths::resolve(tmp.path(), "work").unwrap();
-        let s = ProfileStore::open(&paths, &EK).unwrap();
+        let s = legacy_open(&paths, &EK).unwrap();
         s.put("a", b"new").unwrap();
         drop(s);
         legacy_record(&paths.dir, &EK, "work", "a", b"stale");
-        let s = ProfileStore::open(&paths, &EK).unwrap();
-        assert_eq!(&**s.get("a").unwrap().unwrap(), b"new");
-        assert!(!paths.dir.join("a.rec").exists());
-        drop(s);
         legacy_record(&paths.dir, &EK, "work", "b", b"x");
-        let err = ProfileStore::open(&paths, &[9u8; 32]).unwrap_err();
+        let err = ProfileStore::open_upgrading(&paths, &[9u8; 32]).unwrap_err();
         assert!(matches!(err.root(), StoreError::Authentication));
         assert!(paths.dir.join("b.rec").exists());
+        assert!(
+            !paths.dir.join(KEYFILE).exists(),
+            "a wrong key must not leave a key file"
+        );
+        let s = ProfileStore::open_upgrading(&paths, &EK).unwrap();
+        assert_eq!(&**s.get("a").unwrap().unwrap(), b"new");
+        assert!(!paths.dir.join("a.rec").exists());
     }
 
     #[test]
@@ -1334,7 +1600,7 @@ mod tests {
     fn legacy_import_window_closes_once_the_store_has_records() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = ProfilePaths::resolve(tmp.path(), "work").unwrap();
-        let s = ProfileStore::open(&paths, &EK).unwrap();
+        let s = legacy_open(&paths, &EK).unwrap();
         s.put("a", b"new").unwrap();
         s.put("gone", b"x").unwrap();
         s.remove("gone").unwrap();
@@ -1342,7 +1608,7 @@ mod tests {
         legacy_record(&paths.dir, &EK, "work", "gone", b"resurrected");
         legacy_record(&paths.dir, &EK, "work", "a", b"stale");
         fs::write(paths.dir.join("rx-1.rec.tmp"), b"junk").unwrap();
-        let s = ProfileStore::open(&paths, &EK).unwrap();
+        let s = ProfileStore::open_upgrading(&paths, &EK).unwrap();
         assert!(s.get("gone").unwrap().is_none());
         assert_eq!(&**s.get("a").unwrap().unwrap(), b"new");
         assert_eq!(s.names().unwrap(), vec!["a"]);
@@ -1363,11 +1629,12 @@ mod tests {
         let bad = paths.dir.join("m.rec");
         fs::write(&bad, b"damaged").unwrap();
         fs::set_permissions(&bad, fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(ProfileStore::open(&paths, &EK).is_err());
+        assert!(ProfileStore::open_upgrading(&paths, &EK).is_err());
         assert!(!marker.exists(), "failed migration must not latch");
+        assert!(!paths.dir.join(KEYFILE).exists());
         assert!(paths.dir.join("z.rec").exists());
         fs::remove_file(&bad).unwrap();
-        let s = ProfileStore::open(&paths, &EK).unwrap();
+        let s = ProfileStore::open_upgrading(&paths, &EK).unwrap();
         assert_eq!(s.names().unwrap(), vec!["a", "z"]);
         assert_eq!(&**s.get("z").unwrap().unwrap(), b"z");
         assert!(marker.exists());
@@ -1375,7 +1642,7 @@ mod tests {
 
     /// Creates the profile dir and returns where its marker record would live.
     fn drop_and_marker_path(paths: &ProfilePaths) -> PathBuf {
-        let s = ProfileStore::open(paths, &EK).unwrap();
+        let s = legacy_open(paths, &EK).unwrap();
         let p = s.record_path(MARKER);
         drop(s);
         p
@@ -1385,11 +1652,11 @@ mod tests {
     fn full_legacy_store_migrates_and_marker_is_reserved() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = ProfilePaths::resolve(tmp.path(), "work").unwrap();
-        drop(ProfileStore::open(&paths, &EK).unwrap());
+        create_private_dir(&paths.dir).unwrap();
         for i in 0..40 {
             legacy_record(&paths.dir, &EK, "work", &format!("r{i}"), b"x");
         }
-        let s = ProfileStore::open(&paths, &EK).unwrap();
+        let s = ProfileStore::open_upgrading(&paths, &EK).unwrap();
         assert_eq!(s.names().unwrap().len(), 40);
         for i in 40..MAX_RECORDS {
             s.index().unwrap().insert(format!("fake{i}"));
@@ -1413,17 +1680,17 @@ mod tests {
     fn legacy_name_swap_and_transplant_fail_to_authenticate() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = ProfilePaths::resolve(tmp.path(), "work").unwrap();
-        drop(ProfileStore::open(&paths, &EK).unwrap());
+        create_private_dir(&paths.dir).unwrap();
         legacy_record(&paths.dir, &EK, "work", "a", b"x");
         fs::rename(paths.dir.join("a.rec"), paths.dir.join("b.rec")).unwrap();
         assert!(matches!(
-            ProfileStore::open(&paths, &EK),
+            ProfileStore::open_upgrading(&paths, &EK),
             Err(StoreError::Authentication)
         ));
         // A PHS1 blob moved to an opaque name is not a PHS2 record.
         let s_tag = format!("{:032x}.rc2", 5);
         fs::rename(paths.dir.join("b.rec"), paths.dir.join(&s_tag)).unwrap();
-        let err = ProfileStore::open(&paths, &EK).unwrap_err();
+        let err = ProfileStore::open_upgrading(&paths, &EK).unwrap_err();
         assert!(matches!(err.root(), StoreError::Corrupt));
     }
 
@@ -1431,13 +1698,13 @@ mod tests {
     fn unauthenticated_new_record_blocks_legacy_deletion() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = ProfilePaths::resolve(tmp.path(), "work").unwrap();
-        let s = ProfileStore::open(&paths, &EK).unwrap();
+        let s = legacy_open(&paths, &EK).unwrap();
         let junk = s.record_path("a");
         drop(s);
         legacy_record(&paths.dir, &EK, "work", "a", b"only-copy");
         fs::write(&junk, b"not a record").unwrap();
         fs::set_permissions(&junk, fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(ProfileStore::open(&paths, &EK).is_err());
+        assert!(ProfileStore::open_upgrading(&paths, &EK).is_err());
         assert!(paths.dir.join("a.rec").exists());
     }
 
@@ -1576,14 +1843,19 @@ mod tests {
     }
 
     #[test]
-    fn pre_manifest_store_is_adopted_then_protected() {
+    fn pre_manifest_store_is_adopted_only_on_upgrade_then_protected() {
         let tmp = tempfile::tempdir().unwrap();
-        let (a, _) = two_record_store(&tmp);
-        // Make it look like a PHS2 store: no manifest, no latch record.
-        let latch = open(&tmp, &EK).unwrap().record_path(MANIFEST_LATCH);
+        let paths = ProfilePaths::resolve(tmp.path(), "work").unwrap();
+        let s = legacy_open(&paths, &EK).unwrap();
+        s.put("a", b"one").unwrap();
+        s.put("b", b"two").unwrap();
+        let (a, latch) = (s.record_path("a"), s.record_path(MANIFEST_LATCH));
+        drop(s);
+        // Make it look like a PHS2 store: no manifest, no latch record, no key file.
         fs::remove_file(latch).unwrap();
         fs::remove_file(manifest_path(&tmp)).unwrap();
-        let s = open(&tmp, &EK).unwrap();
+        assert!(matches!(open(&tmp, &EK), Err(StoreError::UpgradeRequired)));
+        let s = ProfileStore::open_upgrading(&paths, &EK).unwrap();
         assert_eq!(&**s.get("a").unwrap().unwrap(), b"one");
         assert_eq!(s.names().unwrap(), vec!["a", "b"]);
         drop(s);
@@ -1964,5 +2236,247 @@ mod tests {
             s.put("p", &data).unwrap();
             proptest::prop_assert_eq!(&**s.get("p").unwrap().unwrap(), &data[..]);
         }
+    }
+
+    const SEED: [u8; 64] = [0x5a; 64];
+
+    fn keyfile_path(tmp: &tempfile::TempDir) -> PathBuf {
+        tmp.path().join("powehi").join("work").join(KEYFILE)
+    }
+
+    #[test]
+    fn a_new_store_has_its_own_random_keys_and_a_private_key_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp, &EK).unwrap();
+        s.put("a", b"one").unwrap();
+        let mode = fs::metadata(keyfile_path(&tmp))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        // The record key is not the export-key-derived one, so the export key alone is no longer
+        // enough to decrypt a record.
+        assert_ne!(s.bundle.record(), &derive_key(&EK).unwrap()[..]);
+        assert_ne!(s.bundle.name(), &expand(&EK, NAME_KEY_INFO).unwrap()[..]);
+        assert_ne!(
+            s.bundle.manifest(),
+            &expand(&EK, MANIFEST_KEY_INFO).unwrap()[..]
+        );
+        let other = tempfile::tempdir().unwrap();
+        let t = open(&other, &EK).unwrap();
+        assert_ne!(s.bundle.record(), t.bundle.record());
+        assert_ne!(
+            s.record_path("a").file_name(),
+            t.record_path("a").file_name()
+        );
+    }
+
+    #[test]
+    fn upgraded_stores_keep_the_keys_they_had() {
+        let b = Bundle::derived(&EK).unwrap();
+        assert_eq!(hex(b.record()), KAT_KEY);
+        let mac = <Hmac<Sha256> as Mac>::new_from_slice(b.name()).unwrap();
+        assert_eq!(tag_of(&mac, "identity"), KAT_TAG);
+        assert_eq!(b.manifest(), &expand(&EK, MANIFEST_KEY_INFO).unwrap()[..]);
+    }
+
+    #[test]
+    fn password_change_reseals_the_bundle_and_leaves_records_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp, &EK).unwrap();
+        s.put("a", b"one").unwrap();
+        let record = fs::read(s.record_path("a")).unwrap();
+        let manifest = fs::read(manifest_path(&tmp)).unwrap();
+        let before = fs::read(keyfile_path(&tmp)).unwrap();
+        let new_ek = [9u8; 32];
+        s.rewrap_password(&new_ek).unwrap();
+        assert_ne!(before, fs::read(keyfile_path(&tmp)).unwrap());
+        assert_eq!(record, fs::read(s.record_path("a")).unwrap());
+        assert_eq!(manifest, fs::read(manifest_path(&tmp)).unwrap());
+        drop(s);
+        let err = open(&tmp, &EK).unwrap_err();
+        assert!(matches!(err, StoreError::Authentication), "{err:?}");
+        let s = open(&tmp, &new_ek).unwrap();
+        assert_eq!(&**s.get("a").unwrap().unwrap(), b"one");
+        s.put("b", b"two").unwrap();
+    }
+
+    #[test]
+    fn the_recovery_phrase_unlocks_the_store_without_the_password() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = ProfilePaths::resolve(tmp.path(), "work").unwrap();
+        let rc = RecoveryKek::from_seed(&SEED).unwrap();
+        let s = open(&tmp, &EK).unwrap();
+        s.put("a", b"one").unwrap();
+        assert!(!s.has_recovery_wrap().unwrap());
+        drop(s);
+        // No recovery slot yet.
+        let err = ProfileStore::open_with_recovery(&paths, &rc).unwrap_err();
+        assert!(matches!(err, StoreError::NoRecoveryWrap), "{err:?}");
+        let s = open(&tmp, &EK).unwrap();
+        s.add_recovery_wrap(&rc).unwrap();
+        assert!(s.has_recovery_wrap().unwrap());
+        drop(s);
+        let s = ProfileStore::open_with_recovery(&paths, &rc).unwrap();
+        assert_eq!(&**s.get("a").unwrap().unwrap(), b"one");
+        // A new password later: the recovery slot survives the rewrap.
+        s.rewrap_password(&[9u8; 32]).unwrap();
+        drop(s);
+        assert!(ProfileStore::open_with_recovery(&paths, &rc).is_ok());
+        assert!(open(&tmp, &[9u8; 32]).is_ok());
+        let wrong = RecoveryKek::from_seed(&[0x5b; 64]).unwrap();
+        let err = ProfileStore::open_with_recovery(&paths, &wrong).unwrap_err();
+        assert!(matches!(err, StoreError::Authentication), "{err:?}");
+    }
+
+    #[test]
+    fn a_deleted_key_file_is_never_silently_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = ProfilePaths::resolve(tmp.path(), "work").unwrap();
+        let rc = RecoveryKek::from_seed(&SEED).unwrap();
+        let s = open(&tmp, &EK).unwrap();
+        s.put("a", b"one").unwrap();
+        drop(s);
+        fs::remove_file(keyfile_path(&tmp)).unwrap();
+        assert!(matches!(open(&tmp, &EK), Err(StoreError::UpgradeRequired)));
+        assert!(matches!(
+            ProfileStore::open_with_recovery(&paths, &rc),
+            Err(StoreError::KeyfileMissing)
+        ));
+        // Even a confirmed upgrade cannot read records sealed under the lost random keys, and
+        // it leaves no key file behind.
+        let err = ProfileStore::open_upgrading(&paths, &EK).unwrap_err();
+        assert!(matches!(err.root(), StoreError::Authentication), "{err:?}");
+        assert!(!keyfile_path(&tmp).exists());
+    }
+
+    #[test]
+    fn a_current_store_never_adopts_a_manifest_less_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (a, _) = two_record_store(&tmp);
+        let latch = open(&tmp, &EK).unwrap().record_path(MANIFEST_LATCH);
+        fs::remove_file(latch).unwrap();
+        fs::remove_file(manifest_path(&tmp)).unwrap();
+        assert!(matches!(open(&tmp, &EK), Err(StoreError::ManifestMissing)));
+        assert!(a.exists());
+    }
+
+    #[test]
+    fn key_file_tampering_and_transplants_are_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = ProfilePaths::resolve(tmp.path(), "work").unwrap();
+        let rc = RecoveryKek::from_seed(&SEED).unwrap();
+        let s = open(&tmp, &EK).unwrap();
+        s.add_recovery_wrap(&rc).unwrap();
+        drop(s);
+        let path = keyfile_path(&tmp);
+        let orig = fs::read(&path).unwrap();
+        for i in 0..orig.len() {
+            let mut b = orig.clone();
+            b[i] ^= 1;
+            fs::write(&path, &b).unwrap();
+            let r = open(&tmp, &EK).map(drop);
+            let q = ProfileStore::open_with_recovery(&paths, &rc).map(drop);
+            // Every flipped byte breaks at least one slot; none may open with wrong keys.
+            assert!(r.is_err() || q.is_err(), "byte {i}");
+        }
+        for bad in [
+            &orig[..orig.len() - 1],
+            &[orig.as_slice(), &[0]].concat()[..],
+            b"PHK1",
+        ] {
+            fs::write(&path, bad).unwrap();
+            assert!(matches!(open(&tmp, &EK), Err(StoreError::KeyfileCorrupt)));
+        }
+        // The password slot presented as the recovery slot (and the reverse) fails.
+        let head = MAGIC.len() + keys::BUNDLE_LEN + NONCE_LEN + TAG_LEN;
+        let mut swapped = orig.clone();
+        swapped.copy_within(MAGIC.len()..head, head + 1);
+        fs::write(&path, &swapped).unwrap();
+        let err = ProfileStore::open_with_recovery(&paths, &rc).unwrap_err();
+        assert!(matches!(err, StoreError::Authentication), "{err:?}");
+        // A key file from another profile.
+        fs::write(&path, &orig).unwrap();
+        let other = ProfilePaths::resolve(tmp.path(), "other").unwrap();
+        drop(ProfileStore::open(&other, &EK).unwrap());
+        fs::copy(&path, other.dir.join(KEYFILE)).unwrap();
+        let err = ProfileStore::open(&other, &EK).unwrap_err();
+        assert!(matches!(err, StoreError::Authentication), "{err:?}");
+    }
+
+    #[test]
+    fn a_wrong_key_cannot_poison_a_phs1_only_upgrade() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = ProfilePaths::resolve(tmp.path(), "work").unwrap();
+        create_private_dir(&paths.dir).unwrap();
+        legacy_record(&paths.dir, &EK, "work", "identity", b"old");
+        let err = ProfileStore::open_upgrading(&paths, &[9u8; 32]).unwrap_err();
+        assert!(matches!(err, StoreError::Authentication), "{err:?}");
+        for f in [MANIFEST_FILE, KEYFILE] {
+            assert!(!paths.dir.join(f).exists(), "{f} written under a wrong key");
+        }
+        let s = ProfileStore::open_upgrading(&paths, &EK).unwrap();
+        assert_eq!(&**s.get("identity").unwrap().unwrap(), b"old");
+    }
+
+    #[test]
+    fn upgraded_stores_refuse_a_password_rewrap_but_new_ones_allow_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = ProfilePaths::resolve(tmp.path(), "work").unwrap();
+        drop(legacy_open(&paths, &EK).unwrap());
+        let s = ProfileStore::open_upgrading(&paths, &EK).unwrap();
+        assert!(matches!(
+            s.rewrap_password(&[9u8; 32]),
+            Err(StoreError::RekeyRequired)
+        ));
+        drop(s);
+        // Still detected on a later plain open of the upgraded store.
+        let s = ProfileStore::open(&paths, &EK).unwrap();
+        assert!(matches!(
+            s.rewrap_password(&[9u8; 32]),
+            Err(StoreError::RekeyRequired)
+        ));
+        let fresh = tempfile::tempdir().unwrap();
+        assert!(open(&fresh, &EK)
+            .unwrap()
+            .rewrap_password(&[9u8; 32])
+            .is_ok());
+    }
+
+    #[test]
+    fn has_recovery_wrap_reports_a_missing_key_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp, &EK).unwrap();
+        fs::remove_file(keyfile_path(&tmp)).unwrap();
+        assert!(matches!(
+            s.has_recovery_wrap(),
+            Err(StoreError::KeyfileMissing)
+        ));
+    }
+
+    #[test]
+    fn key_file_must_be_a_private_regular_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        drop(open(&tmp, &EK).unwrap());
+        let path = keyfile_path(&tmp);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(matches!(open(&tmp, &EK), Err(StoreError::InsecurePath)));
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let real = path.with_extension("real");
+        fs::rename(&path, &real).unwrap();
+        std::os::unix::fs::symlink(&real, &path).unwrap();
+        assert!(matches!(open(&tmp, &EK), Err(StoreError::InsecurePath)));
+    }
+
+    #[test]
+    fn key_file_holds_no_plaintext_key_material() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp, &EK).unwrap();
+        let bytes = fs::read(keyfile_path(&tmp)).unwrap();
+        for key in [s.bundle.record(), s.bundle.name(), s.bundle.manifest()] {
+            assert!(!bytes.windows(key.len()).any(|w| w == key));
+        }
+        assert!(bytes.len() <= KEYFILE_MAX_LEN);
+        assert!(!bytes.windows(EK.len()).any(|w| w == EK));
     }
 }

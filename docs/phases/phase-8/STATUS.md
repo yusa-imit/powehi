@@ -117,6 +117,14 @@ pointing here. Close the issue in the PR that finishes its item.
   generation, pending-entry crash recovery, `store-v3` latch against manifest deletion); PHS2
   stores are adopted at first open. Remaining: (b) DEK/KEK wrap, (c) per-store tag salt.
   Owner call on the interim downgrade window: issue #133.
+  Slice (b) shipped: `store/keys.rs` (`keys.wk3`: random record/name/manifest bundle sealed under
+  KEK_pw and an optional KEK_rc; `rewrap_password`, `add_recovery_wrap`, `open_with_recovery`);
+  register adds the phrase slot; PHS2 adoption now needs `open_upgrading` after a `[y/N]`
+  confirmation (closes the #133 window). Upgraded stores keep their export-key-derived keys (no
+  record rewrite). New stores get a random name-tag key, which covers (c) for them. No CLI
+  command uses KEK_rc yet (8.18 `restore`). Remaining slice (c): a `rekey` that moves an
+  upgraded store onto a fresh random bundle (new tag key included), so a password change also
+  retires the old export-key-derived keys.
   Done condition for (b): remove the automatic PHS2 adoption (or gate it behind an explicit
   user action) so deleting the manifest + latch no longer downgrades the store (prd §3.2 ②).
 - [ ] 8.9 KeyPackage orphan pruning (#22) — store a per-batch upload state

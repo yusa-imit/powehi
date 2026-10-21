@@ -23,7 +23,7 @@ use zeroize::Zeroizing;
 
 use crate::profile::ProfilePaths;
 use crate::prompt::{PromptError, Prompter};
-use crate::store::{ProfileStore, StoreError};
+use crate::store::{ProfileStore, RecoveryKek, StoreError};
 
 /// Responses from the auth endpoints are small OPAQUE blobs; anything larger is rejected.
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
@@ -257,6 +257,8 @@ struct RecoveryMaterial {
     recovery_pub: [u8; 32],
     signing_priv: Zeroizing<[u8; 32]>,
     label: Vec<u8>,
+    /// Key that seals the profile store's keys under the phrase (8.8b).
+    store_kek: RecoveryKek,
 }
 
 fn new_recovery_material() -> Result<RecoveryMaterial, AuthError> {
@@ -269,11 +271,13 @@ fn new_recovery_material() -> Result<RecoveryMaterial, AuthError> {
     let (_auth_priv, recovery_pub) = recovery::derive_recovery_auth_keypair(&seed[..])?;
     let (signing_priv, _signing_pub) = recovery::derive_signing_keypair(&seed[..])?;
     let label = mls_label(&phrase);
+    let store_kek = RecoveryKek::from_seed(&seed[..])?;
     Ok(RecoveryMaterial {
         phrase,
         recovery_pub,
         signing_priv,
         label,
+        store_kek,
     })
 }
 
@@ -339,6 +343,8 @@ pub async fn register(
         return Err(AuthError::ProfileInUse);
     }
     let material = new_recovery_material()?;
+    // Before the server commits anything: the phrase can then reopen this store from the start.
+    store.add_recovery_wrap(&material.store_kek)?;
     let chosen_device = Uuid::new_v4();
     let fin: RegFinishResp = post_json_retrying(
         client,
@@ -386,6 +392,29 @@ pub async fn register(
     .await
 }
 
+/// Opens the profile store. A pre-`PHS3` store is converted only after the user confirms (8.8):
+/// the old format could be re-created by deleting files, so it is never adopted silently.
+fn open_for_login(
+    paths: &ProfilePaths,
+    export_key: &[u8],
+    prompter: &mut dyn Prompter,
+) -> Result<ProfileStore, AuthError> {
+    // Only `register` creates a store; login on an empty profile must not seal one to this account.
+    if !profile_has_data(paths) {
+        return Err(AuthError::NotRegistered);
+    }
+    match ProfileStore::open(paths, export_key) {
+        Err(StoreError::UpgradeRequired) => {
+            if prompter.confirm_store_upgrade()? {
+                Ok(ProfileStore::open_upgrading(paths, export_key)?)
+            } else {
+                Err(StoreError::UpgradeRequired.into())
+            }
+        }
+        other => Ok(other?),
+    }
+}
+
 /// Logs in with the handle and password, returning a session.
 pub async fn login(
     client: &Client,
@@ -397,7 +426,7 @@ pub async fn login(
     let hash = handle_hash(credentials::trim_handle(&raw_handle));
     let password = prompter.password(false)?;
     let hs = login_with_candidates(client, server, &hash, &password).await?;
-    let store = ProfileStore::open(paths, &hs.export_key)?;
+    let store = open_for_login(paths, &hs.export_key, prompter)?;
     let account = load_account(&store)?;
     crate::identity::seed_provider_floor(&store).map_err(|_| AuthError::Crypto)?;
     finish_login(
@@ -738,6 +767,8 @@ mod tests {
             handle: "aurora-fox-2843".into(),
             passwords: vec![pw.to_owned()],
             shown: vec![],
+            upgrade: false,
+            asked_upgrade: 0,
         }
     }
 
@@ -792,6 +823,14 @@ mod tests {
         );
         let (user, device) = (s.user_id, s.device_id);
         drop(s);
+        // The phrase alone reopens the store (8.8b): register sealed the store keys under it.
+        let kek = RecoveryKek::from_seed(&seed[..]).unwrap();
+        let by_phrase = ProfileStore::open_with_recovery(&p, &kek).unwrap();
+        assert_eq!(
+            &**by_phrase.get(MLS_SIGNING_RECORD).unwrap().unwrap(),
+            &sign_priv[..]
+        );
+        drop(by_phrase);
 
         let mut pr = prompter("correct horse battery");
         let s = login(&client, &m.url, &p, &mut pr).await.unwrap();
@@ -877,6 +916,78 @@ mod tests {
                 .unwrap();
             drop(s);
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn legacy_store_is_upgraded_only_after_the_user_confirms() {
+        let m = mock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let client = crate::status::http_client().unwrap();
+        let (src, old) = (paths(&tmp, "src"), paths(&tmp, "old"));
+        let s = register(&client, &m.url, &src, &mut prompter("pw-123456"))
+            .await
+            .unwrap();
+        let account = s.store.get(ACCOUNT_RECORD).unwrap().unwrap();
+        let signing = s.store.get(MLS_SIGNING_RECORD).unwrap().unwrap();
+        drop(s);
+        // The same account as an older version stored it: export-key-derived keys, no key file.
+        let hs = login_handshake(
+            &client,
+            &m.url,
+            &handle_hash("aurora-fox-2843"),
+            "pw-123456",
+        )
+        .await
+        .unwrap();
+        let fixture = ProfileStore::open_legacy_fixture(&old, &hs.export_key).unwrap();
+        fixture.put(ACCOUNT_RECORD, &account).unwrap();
+        fixture.put(MLS_SIGNING_RECORD, &signing).unwrap();
+        drop(fixture);
+        let key_file = old.dir.join("keys.wk3");
+
+        let mut no = prompter("pw-123456");
+        let e = login(&client, &m.url, &old, &mut no).await.unwrap_err();
+        assert!(
+            matches!(e, AuthError::Store(StoreError::UpgradeRequired)),
+            "{e:?}"
+        );
+        assert_eq!(no.asked_upgrade, 1);
+        assert!(!key_file.exists(), "declining leaves the store untouched");
+
+        let mut yes = prompter("pw-123456");
+        yes.upgrade = true;
+        drop(login(&client, &m.url, &old, &mut yes).await.unwrap());
+        assert_eq!(yes.asked_upgrade, 1);
+        assert!(key_file.exists());
+
+        let mut again = prompter("pw-123456");
+        drop(login(&client, &m.url, &old, &mut again).await.unwrap());
+        assert_eq!(
+            again.asked_upgrade, 0,
+            "an upgraded store is not asked again"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn login_on_an_empty_profile_creates_no_store() {
+        let m = mock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let client = crate::status::http_client().unwrap();
+        let reg = paths(&tmp, "reg");
+        drop(
+            register(&client, &m.url, &reg, &mut prompter("pw-123456"))
+                .await
+                .unwrap(),
+        );
+        let empty = paths(&tmp, "empty");
+        let e = login(&client, &m.url, &empty, &mut prompter("pw-123456"))
+            .await
+            .unwrap_err();
+        assert!(matches!(e, AuthError::NotRegistered), "{e:?}");
+        assert!(
+            !profile_has_data(&empty),
+            "no key file or manifest was created"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
