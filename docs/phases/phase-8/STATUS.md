@@ -99,7 +99,7 @@ pointing here. Close the issue in the PR that finishes its item.
   (WebPKI only) until 9.9; runbook `docs/runbooks/cli-pin-rotation.md`.
 
 ### Profile store v3 (PHS3)
-- [ ] 8.8 PHS3 store format (#16, #39 items 1 and 6, #53 item 2) — may ship in slices:
+- [x] 8.8 PHS3 store format (#16, #39 items 1 and 6, #53 item 2) — may ship in slices:
   (a) a MAC'd manifest that lists every record tag with its ciphertext hash and a
   monotonic generation, rewritten atomically on each mutation; `open` rejects a
   missing, extra, stale or swapped record with a typed error, so deleting
@@ -125,6 +125,14 @@ pointing here. Close the issue in the PR that finishes its item.
   command uses KEK_rc yet (8.18 `restore`). Remaining slice (c): a `rekey` that moves an
   upgraded store onto a fresh random bundle (new tag key included), so a password change also
   retires the old export-key-derived keys.
+  Slice (c) shipped: `store/rekey.rs` — `ProfileStore::rekey` re-encrypts an upgraded store into
+  `rekey.new/` under a fresh random bundle (new tag key, so new file names), commits with the
+  `rekey.go` tag journal, and `open` rolls the switch forward (idempotent; a crash before the
+  journal discards the staging dir). `login` rekeys any store with derived keys and no recovery slot, so a password
+  change then retires them. Stores with a recovery slot need the phrase KEK (left for 8.18): a recovery-opened handle cannot
+  tell derived from random keys, so `rewrap_password` refuses it (`RekeyRequired`); 8.18's `restore`
+  must persist or re-derive that fact before it rewraps, and needs a rekey that works without the
+  old export key.
   Done condition for (b): remove the automatic PHS2 adoption (or gate it behind an explicit
   user action) so deleting the manifest + latch no longer downgrades the store (prd §3.2 ②).
 - [ ] 8.9 KeyPackage orphan pruning (#22) — store a per-batch upload state

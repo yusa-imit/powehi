@@ -1738,3 +1738,10 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 
 ## Cycle 611 (2026-10-21, FEATURE) — 8.8b DEK/KEK key bundle
 - `store/keys.rs`: `keys.wk3` (PHK1) holds a random record/name/manifest bundle sealed under KEK_pw (HKDF export_key) and optional KEK_rc (HKDF BIP-39 seed). `rewrap_password`, `add_recovery_wrap`, `open_with_recovery` (no CLI command uses KEK_rc until 8.18). Register adds the phrase slot before the server call. PHS2 stores need `open_upgrading` after a `[y/N]` (`Prompter::confirm_store_upgrade`); upgraded stores keep export-key-derived keys (no rewrite); keyfile written last. Test fixture: `ProfileStore::open_legacy_fixture`. Remaining 8.8c: `rekey` for upgraded stores. #133 resolved by the explicit gate.
+
+## Cycle 613 (2026-10-21, FEATURE) — 8.8c rekey (closes 8.8)
+- `store/rekey.rs`: `ProfileStore::rekey` re-encrypts an upgraded store into `rekey.new/` under a fresh random bundle, `rekey.go` journal (sealed under the new manifest key, PHJ1) is the commit point, `open` rolls forward. `login` rekeys AFTER `login/finish` (crypto-reviewer: not inside the init→finish window). Records are staged in new-tag order (threat-model M1: mtime/inode order must not follow name order).
+- Reviews: threat-model YELLOW → docs/ordering fixes applied; crypto-reviewer needs-rework → added dir fsync before staging removal, moved rekey after KE3, +2 crash tests. powehi-cli 316 lib tests pass, clippy/fmt clean.
+- Non-blocking crypto-reviewer leftovers (do in 8.18): journal shares the manifest key (derive a subkey), journal does not bind the staged recovery slot, `rekey(Some(rc))` seals an unverified recovery KEK, `rekey.go.tmp` not cleaned after a crash, no replay-full-staging pin test.
+- A WIP snapshot of the interrupted earlier attempt is on branch `wip/store-rekey-8-8c` (superseded; safe to delete).
+- Next FEATURE: 8.9 KeyPackage orphan pruning.

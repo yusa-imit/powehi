@@ -16,6 +16,9 @@
 //! record. One process may hold a profile open at a time (an exclusive `flock` on `.lock`),
 //! which keeps writers from clobbering each other.
 //!
+//! Rekey (8.8c, `rekey`): an upgraded store is re-encrypted under a fresh bundle at login, through
+//! a staging directory and a roll-forward journal that `open` finishes after a crash.
+//!
 //! Keys (8.8b, `keys`): the record, name-tag and manifest keys are a per-store bundle sealed in
 //! `keys.wk3` under a password KEK (from the `export_key`) and optionally a recovery-phrase KEK.
 //! A store without that file but with records is a pre-`PHS3` store: `open` refuses it
@@ -54,6 +57,7 @@ use crate::profile::ProfilePaths;
 
 mod keys;
 mod manifest;
+mod rekey;
 
 pub use keys::RecoveryKek;
 use keys::{Bundle, KeyFile, PasswordKek, KEYFILE, KEYFILE_MAX_LEN};
@@ -133,6 +137,12 @@ pub enum StoreError {
     KeyfileCorrupt,
     #[error("this store's keys still derive from the old export key; a password change cannot retire them until the store is rekeyed")]
     RekeyRequired,
+    #[error("the store has a recovery-phrase key slot; enter the phrase to rekey it")]
+    RecoveryPhraseRequired,
+    #[error(
+        "the interrupted-rekey journal is malformed (do not delete files to work around this)"
+    )]
+    RekeyJournalCorrupt,
     #[error("the store has no recovery-phrase key slot yet")]
     NoRecoveryWrap,
     #[error("record file {tag}.{EXT} is listed in the manifest but missing")]
@@ -195,6 +205,8 @@ pub struct ProfileStore {
     /// The keys are the `export_key`-derived ones of an upgraded store, so a new password would
     /// not retire them (`rewrap_password` refuses).
     derived_keys: bool,
+    /// Opened with the recovery phrase: no `export_key` to tell whether the keys are derived.
+    by_recovery: bool,
     manifest: Mutex<Manifest>,
     /// Serializes the pending → record → settled sequence of one mutation.
     write_lock: Mutex<()>,
@@ -409,6 +421,11 @@ impl ProfileStore {
             Unlock::Recovery(_) => None,
         };
         let (profile, lock) = Self::prepare(paths)?;
+        rekey::recover(&paths.dir, &profile, &|kf, profile| match (unlock, &pw) {
+            (Unlock::Password(_), Some(pw)) => kf.unlock_password(profile, pw),
+            (Unlock::Recovery(rc), _) => kf.unlock_recovery(profile, rc),
+            (Unlock::Password(_), None) => Err(StoreError::Corrupt),
+        })?;
         let keyfile = Self::read_keyfile(&paths.dir)?;
         let has_files = Self::has_store_files(&paths.dir)?;
         let mut derived_keys = false;
@@ -433,6 +450,7 @@ impl ProfileStore {
         };
         let mut store = Self::build(paths, profile, lock, bundle)?;
         store.derived_keys = derived_keys;
+        store.by_recovery = matches!(unlock, Unlock::Recovery(_));
         store.start(flow)
     }
 
@@ -476,6 +494,7 @@ impl ProfileStore {
             manifest_cipher: Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(bundle.manifest())),
             bundle,
             derived_keys: false,
+            by_recovery: false,
             manifest: Mutex::new(Manifest::default()),
             write_lock: Mutex::new(()),
             poisoned: std::sync::atomic::AtomicBool::new(false),
@@ -590,7 +609,9 @@ impl ProfileStore {
     /// store is refused (`RekeyRequired`): its keys are a function of the old `export_key`, so
     /// resealing them would only look like a rotation.
     pub fn rewrap_password(&self, new_export_key: &[u8]) -> Result<(), StoreError> {
-        if self.derived_keys {
+        // A recovery-opened store cannot tell derived keys from random ones: refuse until the
+        // restore flow (8.18) can check that.
+        if self.derived_keys || self.by_recovery {
             return Err(StoreError::RekeyRequired);
         }
         let pw = PasswordKek::new(new_export_key)?;
@@ -2319,9 +2340,18 @@ mod tests {
         drop(s);
         let s = ProfileStore::open_with_recovery(&paths, &rc).unwrap();
         assert_eq!(&**s.get("a").unwrap().unwrap(), b"one");
-        // A new password later: the recovery slot survives the rewrap.
-        s.rewrap_password(&[9u8; 32]).unwrap();
+        // A recovery-opened handle cannot tell derived keys from random ones (no export key), so
+        // it refuses to rewrap until 8.18's restore can.
+        assert!(matches!(
+            s.rewrap_password(&[9u8; 32]),
+            Err(StoreError::RekeyRequired)
+        ));
         drop(s);
+        // A new password later: the recovery slot survives the rewrap.
+        open(&tmp, &EK)
+            .unwrap()
+            .rewrap_password(&[9u8; 32])
+            .unwrap();
         assert!(ProfileStore::open_with_recovery(&paths, &rc).is_ok());
         assert!(open(&tmp, &[9u8; 32]).is_ok());
         let wrong = RecoveryKek::from_seed(&[0x5b; 64]).unwrap();

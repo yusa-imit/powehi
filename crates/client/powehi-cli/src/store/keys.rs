@@ -8,7 +8,8 @@
 //!
 //! A store upgraded from `PHS2` keeps the keys it already had: its bundle is the old
 //! `export_key`-derived triple, so no record is re-encrypted. Those keys stay tied to the old
-//! `export_key` until a rekey exists; only stores created by this version have independent keys.
+//! `export_key` until `ProfileStore::rekey` (8.8c, run at login) moves them onto a fresh random
+//! bundle; only stores created by this version, or rekeyed, have independent keys.
 //!
 //! Each slot is `nonce(12) || AES-256-GCM(bundle(96))` with AAD `PHK1 || kind || len(profile) ||
 //! profile`, so a slot moved to another profile, or the password slot presented as the recovery

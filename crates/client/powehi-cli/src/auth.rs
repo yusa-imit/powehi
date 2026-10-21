@@ -388,6 +388,7 @@ pub async fn register(
         store,
         (account.user_id, account.device_id),
         hs,
+        None,
     )
     .await
 }
@@ -403,16 +404,17 @@ fn open_for_login(
     if !profile_has_data(paths) {
         return Err(AuthError::NotRegistered);
     }
-    match ProfileStore::open(paths, export_key) {
+    let store = match ProfileStore::open(paths, export_key) {
         Err(StoreError::UpgradeRequired) => {
             if prompter.confirm_store_upgrade()? {
-                Ok(ProfileStore::open_upgrading(paths, export_key)?)
+                ProfileStore::open_upgrading(paths, export_key)?
             } else {
-                Err(StoreError::UpgradeRequired.into())
+                return Err(StoreError::UpgradeRequired.into());
             }
         }
-        other => Ok(other?),
-    }
+        other => other?,
+    };
+    Ok(store)
 }
 
 /// Logs in with the handle and password, returning a session.
@@ -435,6 +437,7 @@ pub async fn login(
         store,
         (account.user_id, account.device_id),
         hs,
+        Some(paths),
     )
     .await
 }
@@ -529,6 +532,7 @@ async fn finish_login(
     store: ProfileStore,
     (user_id, device_id): (Uuid, Uuid),
     hs: Handshake,
+    rekey_in: Option<&ProfilePaths>,
 ) -> Result<Session, AuthError> {
     if user_id != hs.init.user_id {
         return Err(AuthError::AccountMismatch);
@@ -554,6 +558,24 @@ async fn finish_login(
     if token.is_empty() || token.len() > 4096 || !visible(&token) {
         return Err(AuthError::BadResponse);
     }
+    // An upgraded store still has keys that are a function of the export key: move it onto fresh
+    // random ones (8.8c) so a later password change retires them. This runs after KE3 is sent, so
+    // the server sees no store-sized gap inside the handshake and the login nonce cannot expire.
+    // (A store that already has a recovery slot needs the phrase to be rekeyed: `restore`, 8.18.)
+    let store = match rekey_in {
+        Some(paths) if store.needs_rekey() && !store.has_recovery_wrap()? => {
+            match store.rekey(paths, &hs.export_key, None) {
+                Ok(rekeyed) => rekeyed,
+                Err(e) => {
+                    // Before the journal the old store is intact; after it, `open` rolls the
+                    // switch forward. Either way reopening gives a usable store.
+                    eprintln!("warning: could not move the profile store to fresh keys yet ({e})");
+                    ProfileStore::open(paths, &hs.export_key)?
+                }
+            }
+        }
+        _ => store,
+    };
     Ok(Session {
         user_id,
         device_id,
@@ -959,6 +981,9 @@ mod tests {
         drop(login(&client, &m.url, &old, &mut yes).await.unwrap());
         assert_eq!(yes.asked_upgrade, 1);
         assert!(key_file.exists());
+        let store = ProfileStore::open(&old, &hs.export_key).unwrap();
+        assert!(!store.needs_rekey(), "login rekeys an upgraded store");
+        drop(store);
 
         let mut again = prompter("pw-123456");
         drop(login(&client, &m.url, &old, &mut again).await.unwrap());
