@@ -155,3 +155,15 @@ async fn a_held_group_is_refused_with_or_without_its_conversation_record() {
     assert!(matches!(held, Err(JoinOutcome::Skip)));
     assert!(check_group_not_held(&alice.store, &fresh(), Uuid::new_v4()).is_ok());
 }
+
+#[tokio::test]
+async fn joined_conversation_records_the_peers_credential_identity() {
+    let (_tmp, alice, _state, url, gid) = pending_welcome().await;
+    let report = join_pending(&client(), &url, &alice, None).await.unwrap();
+    assert_eq!(report.joined, vec![gid]);
+    let conv = crate::conversation::load(&alice.store, &gid)
+        .unwrap()
+        .unwrap();
+    // Bob's test session carries the label [2; 16] (testsrv::session).
+    assert_eq!(conv.peer_credential(), Some([2u8; 16].as_slice()));
+}

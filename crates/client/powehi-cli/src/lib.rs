@@ -388,6 +388,9 @@ fn run_send(
     if verify::changed_since_verified(&session.store, group_id) {
         eprintln!("{}", verify::CHANGED_WARNING);
     }
+    if !verify::has_confirmation(&session.store, group_id) {
+        eprintln!("{}", verify::UNVERIFIED_WARNING);
+    }
     let body = message::check_body(&raw)?;
     rt.block_on(message::send(&client, server, &session, group_id, body))?;
     message::write_sent(group_id, json, &mut std::io::stdout()).map_err(|_| CliError::Output)

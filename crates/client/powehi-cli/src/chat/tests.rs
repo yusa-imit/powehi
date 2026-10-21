@@ -273,3 +273,14 @@ async fn changed_alert_is_printed_once_and_rearmed_after_it_clears() {
     alert_if_changed(&p.alice, p.gid, &mut alerted, &mut out).unwrap();
     assert!(!alerted);
 }
+
+#[tokio::test]
+async fn unverified_notice_is_printed_until_the_number_is_confirmed() {
+    let p = pair().await;
+    let text = chat_as_alice(&p, vec![]).await;
+    assert!(text.contains(verify::UNVERIFIED_WARNING), "{text:?}");
+    let n = verify::number(&p.alice.store, p.gid).unwrap();
+    verify::confirm(&p.alice.store, p.gid, &n, &n).unwrap();
+    let text = chat_as_alice(&p, vec![]).await;
+    assert!(!text.contains("unverified"), "{text:?}");
+}

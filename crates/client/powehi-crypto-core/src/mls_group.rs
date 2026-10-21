@@ -1675,6 +1675,28 @@ pub fn is_fresh_pair(group: &MlsGroup) -> bool {
     group.epoch().as_u64() == 1 && group.members().count() == 2
 }
 
+/// Longest credential identity [`peer_credential_identity`] returns (the CLI/web labels are 16).
+pub const MAX_CREDENTIAL_IDENTITY_LEN: usize = 64;
+
+/// The BasicCredential identity bytes of the OTHER leaf of a two-member `group`, or `None`
+/// unless the group has exactly two members, `own_signature_key` is one of them, and the other
+/// leaf carries a non-empty basic credential of at most [`MAX_CREDENTIAL_IDENTITY_LEN`] bytes.
+/// The identity is the account-level label (not a device id), so it is self-asserted and
+/// copyable: a change is a signal, a match proves nothing, and it is never an authentication
+/// input (prd.md §3.3, cycle 456). Trust rests on the signature-key Safety Number (§5.6).
+pub fn peer_credential_identity(group: &MlsGroup, own_signature_key: &[u8]) -> Option<Vec<u8>> {
+    let members: Vec<_> = group.members().take(3).collect();
+    if members.len() != 2 || !members.iter().any(|m| m.signature_key == own_signature_key) {
+        return None;
+    }
+    let peer = members
+        .iter()
+        .find(|m| m.signature_key != own_signature_key)?;
+    let basic = BasicCredential::try_from(peer.credential.clone()).ok()?;
+    let id = basic.identity();
+    (!id.is_empty() && id.len() <= MAX_CREDENTIAL_IDENTITY_LEN).then(|| id.to_vec())
+}
+
 /// Restores a group the provider's storage already holds, by its MLS group id bytes.
 /// `Ok(None)` means the provider has no such group; `Err` means stored state is unreadable.
 ///
@@ -2048,6 +2070,63 @@ mod tests {
         // Bob never saw the first Welcome here; Ghost's Welcome shows the 3-member tree.
         let joined = join_group(&welcome, &c).unwrap();
         assert!(!is_fresh_pair(&joined));
+    }
+
+    #[test]
+    fn test_peer_credential_identity_reads_the_other_leaf_of_a_pair() {
+        let (a, b, c) = (
+            OpenMlsRustCrypto::default(),
+            OpenMlsRustCrypto::default(),
+            OpenMlsRustCrypto::default(),
+        );
+        let (alice, bob, ghost) = (
+            generate_identity(b"alice", &a).unwrap(),
+            generate_identity(b"bob", &b).unwrap(),
+            generate_identity(b"ghost", &c).unwrap(),
+        );
+        let alice_key = alice.signer.to_public_vec();
+        let bob_key = bob.signer.to_public_vec();
+        let mut group = create_group(&alice, &a).unwrap();
+        assert_eq!(peer_credential_identity(&group, &alice_key), None, "solo");
+        let kp_b = generate_pq_key_package(&bob, &b).unwrap();
+        let welcome =
+            add_member_from_bytes(&mut group, &alice.signer, &kp_b.key_package, &a).unwrap();
+        let joined = join_group(&welcome, &b).unwrap();
+        assert_eq!(
+            peer_credential_identity(&group, &alice_key).as_deref(),
+            Some(b"bob".as_slice())
+        );
+        assert_eq!(
+            peer_credential_identity(&joined, &bob_key).as_deref(),
+            Some(b"alice".as_slice())
+        );
+        assert_eq!(
+            peer_credential_identity(&group, &[7u8; 32]),
+            None,
+            "own key must be one of the two leaves"
+        );
+        let kp_g = generate_pq_key_package(&ghost, &c).unwrap();
+        add_member_from_bytes(&mut group, &alice.signer, &kp_g.key_package, &a).unwrap();
+        assert_eq!(peer_credential_identity(&group, &alice_key), None, "three");
+    }
+
+    #[test]
+    fn test_peer_credential_identity_rejects_empty_and_oversize_labels() {
+        for label in [vec![], vec![9u8; MAX_CREDENTIAL_IDENTITY_LEN + 1]] {
+            let (a, b) = (OpenMlsRustCrypto::default(), OpenMlsRustCrypto::default());
+            let alice = generate_identity(b"alice", &a).unwrap();
+            let bob = generate_identity(&label, &b).unwrap();
+            let mut group = create_group(&alice, &a).unwrap();
+            let kp = generate_pq_key_package(&bob, &b).unwrap();
+            add_member_from_bytes(&mut group, &alice.signer, &kp.key_package, &a).unwrap();
+            let key = alice.signer.to_public_vec();
+            assert_eq!(
+                peer_credential_identity(&group, &key),
+                None,
+                "{}",
+                label.len()
+            );
+        }
     }
 
     #[test]

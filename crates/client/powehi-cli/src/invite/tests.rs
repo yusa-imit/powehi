@@ -90,6 +90,8 @@ async fn invite_to_joined_conversation_end_to_end() {
     let bob_conv = conversation::load(&bob.store, &group_id).unwrap().unwrap();
     assert_eq!(bob_conv.role, Role::Creator);
     assert_eq!(bob_conv.peer_device_id, alice.device_id);
+    // The inviter's credential comes from the hash-pinned KeyPackage (test label [1; 16]).
+    assert_eq!(bob_conv.peer_credential(), Some([1u8; 16].as_slice()));
 
     let report = welcome::join_pending(&client(), &url, &alice, Some(&key_ref))
         .await
@@ -101,6 +103,7 @@ async fn invite_to_joined_conversation_end_to_end() {
         .unwrap();
     assert_eq!(conv.role, Role::Joiner);
     assert_eq!(conv.peer_device_id, bob.device_id);
+    assert_eq!(conv.peer_credential(), Some([2u8; 16].as_slice()));
     assert!(conv.pq_decap_key().is_some());
     // The consumed KeyPackage's key moved into the conversation and left `pq-keys`.
     assert_eq!(state.lock().unwrap().welcome_count(), 0, "welcome acked");

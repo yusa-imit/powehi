@@ -230,9 +230,16 @@ pub async fn redeem(
     if pinned.device_id == session.device_id {
         return Err(InviteError::SelfInvite);
     }
-    let (group_id, welcome, pq_init, pq_state) = build_group(session, &pinned.key_package)?;
+    let BuiltGroup {
+        group_id,
+        welcome,
+        pq_init,
+        pq_state,
+        peer_credential,
+    } = build_group(session, &pinned.key_package)?;
     post_registration(client, server, session, group_id, pinned.device_id).await?;
-    let mut conv = Conversation::new(group_id, pinned.device_id, Role::Creator, None);
+    let mut conv = Conversation::new(group_id, pinned.device_id, Role::Creator, None)
+        .with_peer_credential(peer_credential);
     conversation::save(&session.store, &conv)?;
     send_welcome(
         client,
@@ -342,12 +349,18 @@ pub(crate) async fn send_application(
     Ok(())
 }
 
+struct BuiltGroup {
+    group_id: Uuid,
+    welcome: Vec<u8>,
+    pq_init: Option<PqInit>,
+    pq_state: PqState,
+    peer_credential: Vec<u8>,
+}
+
 /// Creates the MLS group with the inviter added; persists the provider. Returns the group's
-/// UUID (its 16-byte MLS id), the serialized Welcome and the `pq_init` message when PQ applies.
-fn build_group(
-    session: &Session,
-    key_package: &[u8],
-) -> Result<(Uuid, Vec<u8>, Option<PqInit>, PqState), InviteError> {
+/// UUID (its 16-byte MLS id), the serialized Welcome, the `pq_init` message when PQ applies and
+/// the inviter's credential identity.
+fn build_group(session: &Session, key_package: &[u8]) -> Result<BuiltGroup, InviteError> {
     let mut local = LocalIdentity::load(&session.store)?;
     let mut group = mls_group::create_group(&local.identity, &local.provider)?;
     let welcome = mls_group::add_member_from_bytes(
@@ -358,9 +371,20 @@ fn build_group(
     )?;
     debug_assert_eq!(group.epoch().as_u64(), 1);
     let group_id = Uuid::from_slice(group.group_id().as_slice()).map_err(|_| InviteError::Mls)?;
+    // The inviter's leaf comes from the hash-pinned KeyPackage, so this is the identity the
+    // link vouched for (prd.md §7A.3).
+    let own_key = local.identity.signer.to_public_vec();
+    let peer_credential =
+        mls_group::peer_credential_identity(&group, &own_key).ok_or(InviteError::Mls)?;
     let (pq_init, pq_state) = make_pq_init(&mut group, &local, key_package, group_id);
     local.save(&session.store)?;
-    Ok((group_id, welcome, pq_init, pq_state))
+    Ok(BuiltGroup {
+        group_id,
+        welcome,
+        pq_init,
+        pq_state,
+        peer_credential,
+    })
 }
 
 /// Registers the group and the inviter as a member (epoch 1) with the Delivery Service.

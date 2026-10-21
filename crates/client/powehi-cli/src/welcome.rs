@@ -222,12 +222,18 @@ fn join_one(
     if group_id != env.group_id {
         return Err(JoinOutcome::Skip);
     }
+    // The peer is whoever the Welcome's tree seats next to us; the server's `sender` label is
+    // kept for routing only and cannot be tied to a credential (prd.md §3.3, cycle 456).
+    let own_key = local.identity.signer.to_public_vec();
+    let peer_credential =
+        mls_group::peer_credential_identity(&group, &own_key).ok_or(JoinOutcome::Skip)?;
     let conv = Conversation::new(
         group_id,
         env.sender,
         Role::Joiner,
         Some((dk, binding.encap_key.clone())),
-    );
+    )
+    .with_peer_credential(peer_credential);
     let fatal = |e: InviteError| JoinOutcome::Fatal(e);
     // Conversation record first, then MLS state, then prune: a crash in between leaves the
     // KeyPackage and its key intact so the same Welcome can be joined again.

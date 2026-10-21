@@ -202,7 +202,7 @@
 
 - 메시지 내용
 - 미디어 내용
-- **MLS LeafNode 암호화 자료** (그룹 멤버의 공개 키, 서명 키, credential bytes): 서버는 `(group_id, device_id)` 매핑은 알지만 MLS GroupContext 내의 암호화된 신원 자료는 알지 못함
+- **MLS LeafNode 암호화 자료** (그룹 멤버의 공개 키, 서명 키, credential bytes): 서버는 `(group_id, device_id)` 매핑은 알지만 MLS GroupContext 내의 암호화된 신원 자료는 알지 못함 — **정정 (8.10):** Welcome 안의 ratchet tree는 서버가 읽지 못하더라도(Commit 전송 형식에 따라 달라질 수 있음), KeyPackage 업로드로 device_id ↔ 서명 키 ↔ credential label 매핑은 관찰할 수 있음. 서버(T3)는 이 매핑을 증명할 수 없고 클라이언트도 신뢰하지 않음.
 - 사용자의 연락처 목록
 - 발신자가 누구인지 (Sealed Sender 적용 시 — 단, 후술하는 한계 있음)
 
@@ -1301,6 +1301,8 @@ crates/client/
 - **로컬 경로**: `<data_dir>/powehi/`와 profile 디렉터리는 0700이고 소유자 uid가 현재 사용자여야 하며,
   부모가 group/other 쓰기 가능하면 거부함(과거 umask 기본값으로 만들어진 소유자 본인의 부모는 0700으로 조인다). 그 위 `data_dir`은 신뢰한다고 가정하며 macOS ACL은 확인하지 않음(경로 기반 TOCTOU는 #16과 함께 dirfd 방식으로 해소 예정).
 
+- **피어 credential 기록 (8.10):** `conv-*` record에 상대 leaf의 BasicCredential identity(`SHA-256(phrase)[..16]`, 계정 단위 공개 label)를 저장한다. creator는 링크 해시로 pin된 KeyPackage에서, joiner는 Welcome tree에서 가져온다(후자는 인증되지 않음, §8.3). 이 label은 self-asserted·복사 가능하고 같은 phrase의 모든 device가 같은 값이므로 인증 입력도 device 식별자도 아니다. 서버가 보고하는 Welcome `sender`와는 비교하지 않는다(인증된 device_id ↔ credential 바인딩이 없음, §3.3 cycle 456; plan 문구에서 의도적으로 벗어남). 신뢰 근거는 서명 키 기반 Safety Number(§5.6)뿐이며, `verified-*` record가 없으면 `send`/`chat`/`conversations`가 unverified를 표시한다(전송은 막지 않음; 8.16은 CHANGED만 차단한다). 사용할 수 있는 credential이 없는 Welcome은 join·ack하지 않는다. 8.10 이전 record의 값은 `None`(알 수 없음)이며 일치로 취급하지 않는다. 서버에 보이는 정보는 변하지 않는다.
+
 ---
 
 ## 8. 연락처 발견 (Contact Discovery)
@@ -1344,6 +1346,8 @@ fragment의 해시와 비교한다 — 일치하지 않으면 `mlsCreateGroup`/`
 방어 범위 밖이며 — code와 hash를 한 쌍으로 함께 위조하면 자기 일관적인 가짜 초대를 만들 수 있다.
 이는 §8.4의 대면 QR 교환(신뢰할 수 있는 채널 가정)과 이후의 Safety Number 검증이 다루는 T2 영역으로,
 이번 변경으로 새로 생기거나 악화된 gap이 아니다.
+
+**초대자 측 사칭 (8.10 threat-model-checker):** 해시 pin은 redeemer만 보호한다. T3는 보유 중인 초대자 KeyPackage로 직접 Welcome을 만들어 `sender`와 credential label을 redeemer의 것으로 꾸밀 수 있고, 먼저 배달된 Welcome이 채택된다(진짜 Welcome은 KeyPackage 소진으로 skip). 결과는 초대자에 대한 redeemer 사칭이며, 저장된 label로는 탐지되지 않고 Safety Number(§5.6)만 탐지한다. CLI는 확인 전까지 unverified를 표시한다.
 
 ### 8.4 QR 코드
 
