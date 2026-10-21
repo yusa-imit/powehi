@@ -113,6 +113,15 @@ pointing here. Close the issue in the PR that finishes its item.
   Tests: roll back one record, delete one, mix two snapshots, swap two records,
   migration, password-change rewrap, phrase unlock. Update prd §3.2/§7A.3.
   crypto-reviewer + threat-model-checker.
+  Slice (b1) shipped: non-Application envelopes (Commit, Proposal, other) that are not from the peer
+  of a held conversation, and Welcomes `join_invited` skipped (`JoinReport.unusable`), are acked after
+  the same 24 h grace; a held conversation's peer Commit is left for 8.14. Still remaining: the
+  persistent fetch cursor and the epoch-aware failure count (below).
+  Security-auditor carry-overs: a peer in a held conversation can flood unackable Commits/Proposals
+  (30-day retention) and starve every conversation, so 8.14 must ack or cap them; the tracker is
+  shared by four kinds and can saturate (a per-kind quota is needed); a clock rollback leaves
+  `first_seen > now` entries that never expire; 8.14 must not let Application envelopes of a newer
+  epoch burn their failure count before the Commit applies.
   Slice (a) shipped: `store/manifest.rs` (`manifest.mf3`, AEAD-MAC'd tag→SHA-256 list +
   generation, pending-entry crash recovery, `store-v3` latch against manifest deletion); PHS2
   stores are adopted at first open. Remaining: (b) DEK/KEK wrap, (c) per-store tag salt.

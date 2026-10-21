@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 621 (2026-10-22, FEATURE) — 8.13 slice (b1)
+Junk Commit/Proposal and skipped Welcomes (`JoinReport.unusable`) acked after the 24 h grace via the junk tracker; peer Commits in held conversations left for 8.14. Remaining for 8.13: persistent fetch cursor, epoch-aware failure count (needs distinct "epoch ahead" error in crypto-core).
+
 ## Cycle 619 (2026-10-22, FEATURE) — 8.13 slice (a) inbox junk tracker
 `inbox/junk.rs` + `receive_at(now)`; see STATUS.md 8.13 for the shipped/remaining split. Reviews: crypto-reviewer needs-rework -> fixed (fail closed on request load, no expect, drop needs 24h age too); security-auditor findings fixed (full tracker refuses, age pruning, non-fatal tracker I/O). openmls debug_assert panics on a tampered AEAD tag in debug builds, so a tampered-copy test cannot run in debug. Open: server `send_welcome` does not check the target (issue filed).
 
