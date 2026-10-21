@@ -18,12 +18,13 @@ use rand::RngCore;
 
 use super::{
     Manifest, Pending, StoreError, HASH_LEN, MANIFEST_MAGIC, MAX_MANIFEST_LEN, NONCE_LEN,
-    RAW_TAG_LEN, TAG_HEX_LEN,
+    RAW_TAG_LEN,
 };
 
 /// Tag (32 lowercase hex) → 16 raw bytes; `None` if it is not a tag.
 fn tag_bytes(tag: &str) -> Option<[u8; RAW_TAG_LEN]> {
-    if tag.len() != TAG_HEX_LEN {
+    // `from_str_radix` accepts a leading `+` and uppercase; a tag is exactly lowercase hex.
+    if !super::is_tag(tag) {
         return None;
     }
     let mut out = [0u8; RAW_TAG_LEN];
