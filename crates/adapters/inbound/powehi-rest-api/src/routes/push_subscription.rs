@@ -312,6 +312,12 @@ mod tests {
         ) -> Result<(), DomainError> {
             unimplemented!()
         }
+        async fn accept_membership(&self, _: &DeviceId, _: &GroupId) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn decline_membership(&self, _: &DeviceId, _: &GroupId) -> Result<(), DomainError> {
+            Ok(())
+        }
         async fn remove_member(
             &self,
             _: &DeviceId,

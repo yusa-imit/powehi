@@ -124,6 +124,23 @@ impl GroupRepository for FakeGroupRepo {
     async fn add_member(&self, _member: &GroupMember) -> Result<(), DomainError> {
         unimplemented!()
     }
+    async fn add_pending(&self, _member: &GroupMember) -> Result<(), DomainError> {
+        Ok(())
+    }
+    async fn accept_pending(
+        &self,
+        _group_id: &GroupId,
+        _device_id: &DeviceId,
+    ) -> Result<bool, DomainError> {
+        Ok(false)
+    }
+    async fn decline_pending(
+        &self,
+        _group_id: &GroupId,
+        _device_id: &DeviceId,
+    ) -> Result<bool, DomainError> {
+        Ok(false)
+    }
     async fn remove_member(
         &self,
         _group_id: &GroupId,

@@ -6,7 +6,10 @@ use powehi_domain::{
     group::{Epoch, Group, GroupId, GroupMember},
     region::RegionId,
 };
-use powehi_port_outbound::group_repo::GroupRepository;
+use powehi_port_outbound::group_repo::{
+    GroupRepository, PENDING_MEMBERSHIP_MAX_PER_DEVICE, PENDING_MEMBERSHIP_MAX_PER_GROUP,
+    PENDING_MEMBERSHIP_PURGE_BATCH, PENDING_MEMBERSHIP_TTL_DAYS,
+};
 use sqlx::postgres::PgPool;
 use uuid::Uuid;
 
@@ -243,18 +246,138 @@ impl GroupRepository for PgGroupRepository {
         Ok(())
     }
 
+    async fn add_pending(&self, member: &GroupMember) -> Result<(), DomainError> {
+        let mut tx = self.pool.begin().await.map_err(map_err)?;
+        // Lock order is device row, then group row, everywhere: serializes concurrent adds of
+        // one device (per-device cap) and into one group (per-group cap).
+        sqlx::query("SELECT 1 FROM devices WHERE id = $1 FOR UPDATE")
+            .bind(member.device_id.as_uuid())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_err)?;
+        sqlx::query("SELECT 1 FROM groups WHERE id = $1 FOR UPDATE")
+            .bind(member.group_id.as_uuid())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_err)?;
+        // Opportunistic, bounded purge of expired rows anywhere (no scheduler needed).
+        sqlx::query(
+            "DELETE FROM pending_memberships WHERE ctid IN (
+                 SELECT ctid FROM pending_memberships
+                 WHERE created_at < NOW() - make_interval(days => $1::int) LIMIT $2)",
+        )
+        .bind(PENDING_MEMBERSHIP_TTL_DAYS as i32)
+        .bind(PENDING_MEMBERSHIP_PURGE_BATCH)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_err)?;
+        let (active, pending, per_group): (bool, bool, i64) = sqlx::query_as(
+            "SELECT
+                 EXISTS (SELECT 1 FROM group_members WHERE group_id = $1 AND device_id = $2),
+                 EXISTS (SELECT 1 FROM pending_memberships WHERE group_id = $1 AND device_id = $2),
+                 (SELECT COUNT(*) FROM pending_memberships
+                  WHERE group_id = $1
+                    AND created_at >= NOW() - make_interval(days => $3::int))",
+        )
+        .bind(member.group_id.as_uuid())
+        .bind(member.device_id.as_uuid())
+        .bind(PENDING_MEMBERSHIP_TTL_DAYS as i32)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_err)?;
+        if active || pending {
+            return Ok(());
+        }
+        if per_group >= PENDING_MEMBERSHIP_MAX_PER_GROUP {
+            return Err(DomainError::InvalidInput(
+                "too many pending memberships".into(),
+            ));
+        }
+        // Per-device cap by eviction, never rejection: a hostile member filling the victim's
+        // slots cannot lock the victim out of later (legitimate) adds, and the add never
+        // reveals how many pending rows the victim holds.
+        sqlx::query(
+            "DELETE FROM pending_memberships WHERE ctid IN (
+                 SELECT ctid FROM pending_memberships WHERE device_id = $1
+                 ORDER BY created_at DESC OFFSET $2)",
+        )
+        .bind(member.device_id.as_uuid())
+        .bind(PENDING_MEMBERSHIP_MAX_PER_DEVICE - 1)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_err)?;
+        sqlx::query(
+            "INSERT INTO pending_memberships (group_id, device_id, joined_at_epoch)
+             VALUES ($1, $2, $3)",
+        )
+        .bind(member.group_id.as_uuid())
+        .bind(member.device_id.as_uuid())
+        .bind(member.joined_at_epoch.0 as i64)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_err)?;
+        tx.commit().await.map_err(map_err)
+    }
+
+    async fn accept_pending(
+        &self,
+        group_id: &GroupId,
+        device_id: &DeviceId,
+    ) -> Result<bool, DomainError> {
+        let moved = sqlx::query(
+            "WITH taken AS (
+                 DELETE FROM pending_memberships
+                 WHERE group_id = $1 AND device_id = $2
+                   AND created_at >= NOW() - make_interval(days => $3::int)
+                 RETURNING group_id, device_id, joined_at_epoch
+             )
+             INSERT INTO group_members (group_id, device_id, joined_at_epoch)
+             SELECT group_id, device_id, joined_at_epoch FROM taken
+             ON CONFLICT (group_id, device_id) DO NOTHING",
+        )
+        .bind(group_id.as_uuid())
+        .bind(device_id.as_uuid())
+        .bind(PENDING_MEMBERSHIP_TTL_DAYS as i32)
+        .execute(&self.pool)
+        .await
+        .map_err(map_err)?;
+        Ok(moved.rows_affected() == 1)
+    }
+
+    async fn decline_pending(
+        &self,
+        group_id: &GroupId,
+        device_id: &DeviceId,
+    ) -> Result<bool, DomainError> {
+        let done =
+            sqlx::query("DELETE FROM pending_memberships WHERE group_id = $1 AND device_id = $2")
+                .bind(group_id.as_uuid())
+                .bind(device_id.as_uuid())
+                .execute(&self.pool)
+                .await
+                .map_err(map_err)?;
+        Ok(done.rows_affected() == 1)
+    }
+
     async fn remove_member(
         &self,
         group_id: &GroupId,
         device_id: &DeviceId,
     ) -> Result<(), DomainError> {
-        sqlx::query("DELETE FROM group_members WHERE group_id = $1 AND device_id = $2")
+        // Pending row first, in one transaction: an accept racing the removal can then only
+        // find nothing, never re-seat the device after the member row is gone.
+        let mut tx = self.pool.begin().await.map_err(map_err)?;
+        for table in ["pending_memberships", "group_members"] {
+            sqlx::query(&format!(
+                "DELETE FROM {table} WHERE group_id = $1 AND device_id = $2"
+            ))
             .bind(group_id.as_uuid())
             .bind(device_id.as_uuid())
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(map_err)?;
-        Ok(())
+        }
+        tx.commit().await.map_err(map_err)
     }
 
     async fn list_members(&self, group_id: &GroupId) -> Result<Vec<GroupMember>, DomainError> {

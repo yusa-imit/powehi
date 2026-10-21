@@ -66,6 +66,19 @@ export async function addMember(
 }
 
 /**
+ * POST /v1/groups/:groupId/accept — consent to this device's pending membership
+ * (prd §3.3). Called right after a Welcome is joined; idempotent server-side.
+ */
+export async function acceptMembership(token: string, groupId: string): Promise<void> {
+	assertOpaqueId(groupId, "group_id");
+	const resp = await fetch(`${API_BASE}/groups/${encodeURIComponent(groupId)}/accept`, {
+		method: "POST",
+		headers: authHeaders(token),
+	});
+	await throwOnError(resp);
+}
+
+/**
  * DELETE /v1/groups/:groupId/members/:deviceId — remove a device from the group.
  * Caller must be an existing group member.
  */

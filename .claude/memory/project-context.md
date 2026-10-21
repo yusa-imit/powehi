@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 617 (2026-10-22, FEATURE) — 8.11 server consent for group membership
+`pending_memberships` (migration 0023): `add_member` records pending; device calls `POST /v1/groups/:gid/accept|decline`. CLI `welcome::accept_membership` and web poller accept after join. threat-model first RED (per-device cap = lockout, retention claim false, expired rows in group cap, remove/accept race) -> fixed: per-device cap evicts oldest, TTL 7d + bounded lazy purge, unexpired-only group cap, remove_member one tx pending-first, device row lock. security-auditor YELLOW findings same set. Known gaps: no self-listing of pending rows (8.12), accept failure after persisted join relies on 8.12 re-run, peer-sync upsert bypasses consent (pre-existing), web accept not checked vs joined group id. PG IT test is #[ignore] (no Docker locally) - CI runs it.
+
 ## Cycle 609 (2026-10-21, FEATURE) — 8.8 slice (a) store manifest
 `store/manifest.rs`: `manifest.mf3` (AEAD, tag→SHA-256 + generation, pending-entry crash recovery, `store-v3` latch). PHS2 stores adopted at first open. threat-model YELLOW: prd §3.2 now states residuals (any past snapshot replay; manifest+latch deletion downgrade). 8.8b must remove/gate automatic PHS2 adoption. Remaining 8.8: (b) DEK/KEK wrap, (c) tag salt. store_cap test now ~85s (manifest rewrite per put).
 

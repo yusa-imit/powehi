@@ -6,6 +6,16 @@ use powehi_domain::{
     group::{Epoch, Group, GroupId, GroupMember},
 };
 
+/// Most pending memberships one device may hold at once (bounds table growth
+/// from a hostile member spamming adds at a victim).
+pub const PENDING_MEMBERSHIP_MAX_PER_DEVICE: i64 = 64;
+/// Most pending memberships one group may hold at once.
+pub const PENDING_MEMBERSHIP_MAX_PER_GROUP: i64 = 256;
+/// A pending membership older than this can no longer be accepted and is purged lazily.
+pub const PENDING_MEMBERSHIP_TTL_DAYS: i64 = 7;
+/// Expired pending rows purged per `add_pending` call (bounded housekeeping).
+pub const PENDING_MEMBERSHIP_PURGE_BATCH: i64 = 100;
+
 #[async_trait]
 pub trait GroupRepository: Send + Sync {
     /// Upsert a group's `home_region` and `epoch`.
@@ -111,6 +121,31 @@ pub trait GroupRepository: Send + Sync {
         device_id: &DeviceId,
     ) -> Result<Option<Group>, DomainError>;
     async fn add_member(&self, member: &GroupMember) -> Result<(), DomainError>;
+    /// Record `member` as a *pending* member of its group (8.11 consent).
+    ///
+    /// A pending device is not a member: it appears in no roster, receives no
+    /// fan-out and passes no membership check until
+    /// [`GroupRepository::accept_pending`]. A no-op when the device is already
+    /// an active member or already pending (the original row, and its
+    /// `created_at`, survive a retry). A bounded batch of expired rows is
+    /// purged first. Over [`PENDING_MEMBERSHIP_MAX_PER_GROUP`] the call fails with
+    /// `InvalidInput`; over [`PENDING_MEMBERSHIP_MAX_PER_DEVICE`] the device's OLDEST pending
+    /// rows are evicted instead (a hostile member must not be able to lock a victim out).
+    async fn add_pending(&self, member: &GroupMember) -> Result<(), DomainError>;
+    /// Atomically turn `device_id`'s unexpired pending row for `group_id` into
+    /// a `group_members` row. Returns `false` when there is no such row.
+    async fn accept_pending(
+        &self,
+        group_id: &GroupId,
+        device_id: &DeviceId,
+    ) -> Result<bool, DomainError>;
+    /// Delete `device_id`'s pending row for `group_id`. Returns `false` when
+    /// there was none.
+    async fn decline_pending(
+        &self,
+        group_id: &GroupId,
+        device_id: &DeviceId,
+    ) -> Result<bool, DomainError>;
     async fn remove_member(
         &self,
         group_id: &GroupId,

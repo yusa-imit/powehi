@@ -1,5 +1,6 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as GroupsModule from "../api/groups";
 import * as MessagesModule from "../api/messages";
 import type { Envelope } from "../api/messages";
 import { useAuthStore } from "../store/auth";
@@ -18,10 +19,12 @@ const mockWorker = {
 
 let pollSpy: MockInstance<typeof MessagesModule.pollMessages>;
 let ackSpy: MockInstance<typeof MessagesModule.ackMessage>;
+let acceptSpy: MockInstance<typeof GroupsModule.acceptMembership>;
 
 beforeEach(() => {
 	pollSpy = vi.spyOn(MessagesModule, "pollMessages").mockResolvedValue([] as Envelope[]);
 	ackSpy = vi.spyOn(MessagesModule, "ackMessage").mockResolvedValue(undefined);
+	acceptSpy = vi.spyOn(GroupsModule, "acceptMembership").mockResolvedValue(undefined);
 
 	vi.spyOn(CryptoWorkerHook, "useCryptoWorker").mockReturnValue(
 		mockWorker as unknown as ReturnType<typeof CryptoWorkerHook.useCryptoWorker>,
@@ -80,6 +83,36 @@ describe("useWelcomePoller", () => {
 		await waitFor(() => {
 			expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID);
 		});
+		await act(async () => {
+			unmount();
+		});
+	});
+
+	it("accepts the pending server membership after joining a Welcome", async () => {
+		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
+
+		const { unmount } = renderHook(() => useWelcomePoller(IDENTITY_ID, vi.fn()));
+
+		await waitFor(() => {
+			expect(acceptSpy).toHaveBeenCalledWith(TOKEN, JOINED_GROUP_ID);
+		});
+		await act(async () => {
+			unmount();
+		});
+	});
+
+	it("still fires onNewGroup and acks when accept keeps failing", async () => {
+		acceptSpy.mockRejectedValue(new Error("http_500"));
+		pollSpy.mockResolvedValueOnce([makeEnvelope()]);
+
+		const received: NewGroupEvent[] = [];
+		const { unmount } = renderHook(() => useWelcomePoller(IDENTITY_ID, (e) => received.push(e)));
+
+		await waitFor(() => {
+			expect(ackSpy).toHaveBeenCalledWith(TOKEN, ENV_ID);
+		});
+		expect(received).toHaveLength(1);
+		expect(acceptSpy).toHaveBeenCalledTimes(3);
 		await act(async () => {
 			unmount();
 		});

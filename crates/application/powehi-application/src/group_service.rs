@@ -93,7 +93,38 @@ impl GroupUseCase for GroupService {
             device_id: device_id.clone(),
             joined_at_epoch: epoch,
         };
-        self.group_repo.add_member(&member).await
+        // Consent (8.11): the new device is only pending until it accepts.
+        self.group_repo.add_pending(&member).await
+    }
+
+    #[instrument(skip(self), fields(caller = %caller, group_id = %group_id))]
+    async fn accept_membership(
+        &self,
+        caller: &DeviceId,
+        group_id: &GroupId,
+    ) -> Result<(), DomainError> {
+        if self.group_repo.accept_pending(group_id, caller).await? {
+            return Ok(());
+        }
+        // A retry after a lost response finds no pending row but an active member.
+        match self
+            .group_repo
+            .get_epoch_if_member(group_id, caller)
+            .await?
+        {
+            Some(_) => Ok(()),
+            None => Err(DomainError::Unauthorized),
+        }
+    }
+
+    #[instrument(skip(self), fields(caller = %caller, group_id = %group_id))]
+    async fn decline_membership(
+        &self,
+        caller: &DeviceId,
+        group_id: &GroupId,
+    ) -> Result<(), DomainError> {
+        self.group_repo.decline_pending(group_id, caller).await?;
+        Ok(())
     }
 
     #[instrument(skip(self), fields(caller = %caller, group_id = %group_id, device_id = %device_id))]
@@ -244,6 +275,7 @@ mod tests {
         groups: Mutex<HashMap<GroupId, Group>>,
         members: Mutex<Vec<GroupMember>>,
         pending: Mutex<Vec<(GroupId, DeviceId, Epoch)>>,
+        pending_members: Mutex<Vec<GroupMember>>,
     }
     impl FakeGroupRepo {
         fn new() -> Arc<Self> {
@@ -251,6 +283,7 @@ mod tests {
                 groups: Mutex::new(HashMap::new()),
                 members: Mutex::new(vec![]),
                 pending: Mutex::new(vec![]),
+                pending_members: Mutex::new(vec![]),
             })
         }
     }
@@ -337,6 +370,36 @@ mod tests {
         async fn add_member(&self, member: &GroupMember) -> Result<(), DomainError> {
             self.members.lock().unwrap().push(member.clone());
             Ok(())
+        }
+        async fn add_pending(&self, member: &GroupMember) -> Result<(), DomainError> {
+            self.pending_members.lock().unwrap().push(member.clone());
+            Ok(())
+        }
+        async fn accept_pending(
+            &self,
+            group_id: &GroupId,
+            device_id: &DeviceId,
+        ) -> Result<bool, DomainError> {
+            let mut p = self.pending_members.lock().unwrap();
+            let Some(i) = p
+                .iter()
+                .position(|m| &m.group_id == group_id && &m.device_id == device_id)
+            else {
+                return Ok(false);
+            };
+            let m = p.remove(i);
+            self.members.lock().unwrap().push(m);
+            Ok(true)
+        }
+        async fn decline_pending(
+            &self,
+            group_id: &GroupId,
+            device_id: &DeviceId,
+        ) -> Result<bool, DomainError> {
+            let mut p = self.pending_members.lock().unwrap();
+            let before = p.len();
+            p.retain(|m| !(&m.group_id == group_id && &m.device_id == device_id));
+            Ok(p.len() != before)
         }
         async fn remove_member(
             &self,
@@ -476,6 +539,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn add_member_is_pending_until_the_device_accepts() {
+        let repo = FakeGroupRepo::new();
+        let svc = make_svc(repo.clone());
+        let creator = DeviceId::new();
+        let newcomer = DeviceId::new();
+        let group_id = GroupId::new();
+
+        svc.create_group(&creator, group_id.clone()).await.unwrap();
+        svc.add_member(&creator, &group_id, &newcomer, Epoch(3))
+            .await
+            .unwrap();
+
+        // Pending: not on the roster, so no fan-out and no membership reads.
+        let roster = svc.list_members(&creator, &group_id).await.unwrap();
+        assert_eq!(roster.len(), 1);
+        assert!(matches!(
+            svc.list_members(&newcomer, &group_id).await,
+            Err(DomainError::Unauthorized)
+        ));
+
+        svc.accept_membership(&newcomer, &group_id).await.unwrap();
+        let roster = svc.list_members(&creator, &group_id).await.unwrap();
+        let joined = roster.iter().find(|m| m.device_id == newcomer).unwrap();
+        assert_eq!(joined.joined_at_epoch, Epoch(3));
+    }
+
+    #[tokio::test]
+    async fn accept_membership_is_idempotent_for_a_member_and_rejects_a_stranger() {
+        let repo = FakeGroupRepo::new();
+        let svc = make_svc(repo.clone());
+        let creator = DeviceId::new();
+        let newcomer = DeviceId::new();
+        let group_id = GroupId::new();
+        svc.create_group(&creator, group_id.clone()).await.unwrap();
+        svc.add_member(&creator, &group_id, &newcomer, Epoch(1))
+            .await
+            .unwrap();
+
+        svc.accept_membership(&newcomer, &group_id).await.unwrap();
+        svc.accept_membership(&newcomer, &group_id).await.unwrap();
+        svc.accept_membership(&creator, &group_id).await.unwrap();
+        assert_eq!(repo.list_members(&group_id).await.unwrap().len(), 2);
+
+        // No pending row, not a member: same answer as an unknown group.
+        let stranger = DeviceId::new();
+        assert!(matches!(
+            svc.accept_membership(&stranger, &group_id).await,
+            Err(DomainError::Unauthorized)
+        ));
+        assert!(matches!(
+            svc.accept_membership(&stranger, &GroupId::new()).await,
+            Err(DomainError::Unauthorized)
+        ));
+    }
+
+    #[tokio::test]
+    async fn decline_membership_drops_the_pending_row_and_blocks_a_later_accept() {
+        let repo = FakeGroupRepo::new();
+        let svc = make_svc(repo.clone());
+        let creator = DeviceId::new();
+        let newcomer = DeviceId::new();
+        let group_id = GroupId::new();
+        svc.create_group(&creator, group_id.clone()).await.unwrap();
+        svc.add_member(&creator, &group_id, &newcomer, Epoch(1))
+            .await
+            .unwrap();
+
+        svc.decline_membership(&newcomer, &group_id).await.unwrap();
+        // Idempotent, and no existence oracle for a stranger.
+        svc.decline_membership(&newcomer, &group_id).await.unwrap();
+        svc.decline_membership(&DeviceId::new(), &GroupId::new())
+            .await
+            .unwrap();
+        assert!(matches!(
+            svc.accept_membership(&newcomer, &group_id).await,
+            Err(DomainError::Unauthorized)
+        ));
+        assert_eq!(repo.list_members(&group_id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn add_member_appends_to_group() {
         let repo = FakeGroupRepo::new();
         let svc = make_svc(repo.clone());
@@ -487,6 +631,7 @@ mod tests {
         svc.add_member(&creator, &group_id, &newcomer, Epoch(3))
             .await
             .unwrap();
+        svc.accept_membership(&newcomer, &group_id).await.unwrap();
 
         let members = repo.list_members(&group_id).await.unwrap();
         assert_eq!(members.len(), 2);
@@ -855,6 +1000,7 @@ mod tests {
         svc.add_member(&owner, &group_id, &device_b, Epoch(1))
             .await
             .unwrap();
+        svc.accept_membership(&device_b, &group_id).await.unwrap();
 
         let mut members = svc.list_members(&owner, &group_id).await.unwrap();
         members.sort_by_key(|m| m.device_id.as_uuid());
