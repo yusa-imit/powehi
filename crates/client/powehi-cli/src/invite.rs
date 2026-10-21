@@ -162,7 +162,8 @@ struct RedeemResp {
 /// Creates an invite and returns the shareable link and the pinned KeyPackage's ref.
 ///
 /// The KeyPackage's private half is persisted before the server sees the public half. If the
-/// upload fails the package is an unused local orphan (see issue #22 for the pruning policy).
+/// upload fails the package is an unused local orphan. Invite KeyPackages are not tracked as
+/// upload batches (8.9 covers the pool only); pruning them is a follow-up to issue #22.
 pub async fn create(
     client: &Client,
     server: &Url,

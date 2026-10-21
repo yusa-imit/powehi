@@ -1574,6 +1574,54 @@ pub fn welcome_pq_binding(
     Err(MlsError::Membership)
 }
 
+/// Byte length of a KeyPackageRef (SHA-256 ciphersuite, RFC 9420 §5.2).
+pub const KEY_PACKAGE_REF_LEN: usize = 32;
+
+/// Deletes the private bundle (init key, encryption key, KeyPackage) stored for `key_package_ref`,
+/// so a KeyPackage that will never be used again stops holding secret key material. Absent refs
+/// are a no-op. Errors with [`MlsError::KeyPackage`] when the ref is not [`KEY_PACKAGE_REF_LEN`]
+/// bytes (a caller contract violation, never user data).
+///
+/// `key_package` bundles are the only per-package records openmls writes: the leaf encryption key
+/// pair lives inside the bundle (`KeyPackageBuilder::build`), so nothing else needs deleting.
+pub fn delete_key_package(
+    provider: &impl OpenMlsProvider,
+    key_package_ref: &[u8],
+) -> Result<(), MlsError> {
+    use openmls_traits::storage::StorageProvider as _;
+    let hash_ref = key_package_ref_from_bytes(key_package_ref)?;
+    provider
+        .storage()
+        .delete_key_package(&hash_ref)
+        .map_err(|_| MlsError::KeyPackage)
+}
+
+/// Whether `provider` still holds the private bundle for `key_package_ref`.
+pub fn holds_key_package(
+    provider: &impl OpenMlsProvider,
+    key_package_ref: &[u8],
+) -> Result<bool, MlsError> {
+    use openmls_traits::storage::StorageProvider as _;
+    let hash_ref = key_package_ref_from_bytes(key_package_ref)?;
+    let stored: Option<KeyPackageBundle> = provider
+        .storage()
+        .key_package(&hash_ref)
+        .map_err(|_| MlsError::KeyPackage)?;
+    Ok(stored.is_some())
+}
+
+/// `HashReference::from_slice` is test-only in openmls; the TLS form is a one-byte length prefix
+/// (32 < 64, RFC 9420 §2.1.2) followed by the bytes.
+fn key_package_ref_from_bytes(bytes: &[u8]) -> Result<KeyPackageRef, MlsError> {
+    if bytes.len() != KEY_PACKAGE_REF_LEN {
+        return Err(MlsError::KeyPackage);
+    }
+    let mut tls = Vec::with_capacity(1 + KEY_PACKAGE_REF_LEN);
+    tls.push(KEY_PACKAGE_REF_LEN as u8);
+    tls.extend_from_slice(bytes);
+    KeyPackageRef::tls_deserialize_exact(&tls).map_err(|_| MlsError::Codec)
+}
+
 /// Extracts the ML-KEM encapsulation key from `key_package_bytes` for the group's one other
 /// member. `Ok(None)` means the package carries no PQ extension (a classical-only peer). A
 /// present-but-invalid extension (wrong length, unreduced key per FIPS 203 §7.2, bad signature)
@@ -1866,6 +1914,34 @@ mod tests {
 
     /// The binding names the consumed KeyPackage and its published ek, read from local
     /// storage before the join; a Welcome for a package we never held is rejected.
+    #[test]
+    fn test_delete_key_package_removes_bundle_and_blocks_welcome_claim() {
+        let (a_prov, b_prov) = (OpenMlsRustCrypto::default(), OpenMlsRustCrypto::default());
+        let alice = generate_identity(b"alice", &a_prov).unwrap();
+        let bob = generate_identity(b"bob", &b_prov).unwrap();
+        let pq = generate_pq_key_package(&bob, &b_prov).unwrap();
+        let held = |p: &OpenMlsRustCrypto| holds_key_package(p, &pq.key_package_ref).unwrap();
+        assert!(held(&b_prov));
+        // Absent and malformed refs: no-op and typed error.
+        delete_key_package(&b_prov, &[7u8; KEY_PACKAGE_REF_LEN]).unwrap();
+        assert!(held(&b_prov), "unrelated ref must not touch the bundle");
+        assert!(matches!(
+            delete_key_package(&b_prov, &[7u8; 31]),
+            Err(MlsError::KeyPackage)
+        ));
+        let mut group = create_group(&alice, &a_prov).unwrap();
+        let welcome =
+            add_member_from_bytes(&mut group, &alice.signer, &pq.key_package, &a_prov).unwrap();
+        delete_key_package(&b_prov, &pq.key_package_ref).unwrap();
+        assert!(!held(&b_prov));
+        delete_key_package(&b_prov, &pq.key_package_ref).unwrap(); // idempotent
+        assert!(matches!(
+            welcome_pq_binding(&welcome, &b_prov),
+            Err(MlsError::Membership)
+        ));
+        assert!(join_group(&welcome, &b_prov).is_err());
+    }
+
     #[test]
     fn test_welcome_pq_binding_matches_stored_package_and_precedes_join() {
         let (a_prov, b_prov, c_prov) = (

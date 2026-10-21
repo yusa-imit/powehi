@@ -1745,3 +1745,7 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 - Non-blocking crypto-reviewer leftovers (do in 8.18): journal shares the manifest key (derive a subkey), journal does not bind the staged recovery slot, `rekey(Some(rc))` seals an unverified recovery KEK, `rekey.go.tmp` not cleaned after a crash, no replay-full-staging pin test.
 - A WIP snapshot of the interrupted earlier attempt is on branch `wip/store-rekey-8-8c` (superseded; safe to delete).
 - Next FEATURE: 8.9 KeyPackage orphan pruning.
+
+## Cycle 614 (2026-10-21, FEATURE) — 8.9 KeyPackage orphan pruning
+- `identity/batches.rs`: `kp-batches` record (Prepared/Sent/Confirmed + unix-seconds stamp, refs per batch). Top-up prunes first (local only): Prepared deleted at once, Sent/Confirmed after 98 days, consumed refs forgotten. `Sent` is marked BEFORE each request leaves. crypto-core gained `delete_key_package` / `holds_key_package`. Invite KeyPackages (`invite create`) are not tracked as batches (their marker records are the remaining #22 residue).
+- Next FEATURE: 8.10 peer bound to its MLS credential.

@@ -8,6 +8,10 @@
 //! KeyPackage is uploaded, so the server never hands out a package whose private half is lost.
 //! KeyPackage bytes and keys are never logged or printed.
 
+mod batches;
+
+use batches::BatchState;
+
 use powehi_crypto_core::kem;
 use powehi_crypto_core::mls_group::{self, MlsError, PqKeyPackage, Provider, PQ_EXT_ENCAP_KEY_LEN};
 use reqwest::Client;
@@ -64,6 +68,8 @@ pub enum IdentityError {
     TooManyLocalKeys,
     #[error("MLS operation failed")]
     Mls,
+    #[error("system clock is not set")]
+    Clock,
     #[error("profile MLS state was rolled back or deleted during this session")]
     StateRollback,
 }
@@ -290,6 +296,9 @@ pub async fn server_count(
     Ok(r.count)
 }
 
+/// Public KeyPackage bytes and their refs, in generation order.
+type Generated = (Vec<Vec<u8>>, Vec<[u8; REF_LEN]>);
+
 /// Generates `n` PQ KeyPackages, persists their private halves, and returns the public bytes.
 /// Nothing is uploaded here; callers upload only after this returns.
 pub(crate) fn generate_and_persist(
@@ -297,11 +306,32 @@ pub(crate) fn generate_and_persist(
     local: &mut LocalIdentity,
     n: usize,
 ) -> Result<Vec<Vec<u8>>, IdentityError> {
+    Ok(generate_inner(store, local, n, false)?.0)
+}
+
+/// [`generate_and_persist`] that also records the packages as `Prepared` upload batches and
+/// returns their refs, for the pool top-up (8.9). The batch record is written first so a crash
+/// can leave refs without keys, or bundles without a decapsulation key; pruning cleans both.
+fn generate_batched(
+    store: &ProfileStore,
+    local: &mut LocalIdentity,
+    n: usize,
+) -> Result<Generated, IdentityError> {
+    generate_inner(store, local, n, true)
+}
+
+fn generate_inner(
+    store: &ProfileStore,
+    local: &mut LocalIdentity,
+    n: usize,
+    track: bool,
+) -> Result<Generated, IdentityError> {
     let mut keys = PqKeys::load(store)?;
     if keys.entries.len() + n > MAX_PQ_KEYS {
         return Err(IdentityError::TooManyLocalKeys);
     }
     let mut packages = Vec::with_capacity(n);
+    let mut refs = Vec::with_capacity(n);
     for _ in 0..n {
         let PqKeyPackage {
             key_package,
@@ -313,30 +343,54 @@ pub(crate) fn generate_and_persist(
         let key_ref =
             <[u8; REF_LEN]>::try_from(&key_package_ref[..]).map_err(|_| IdentityError::Mls)?;
         keys.entries.push((key_ref, decap_key));
+        refs.push(key_ref);
         packages.push(key_package);
+    }
+    if track {
+        batches::record_prepared(store, &refs)?;
     }
     local.save(store)?;
     keys.save(store)?;
-    Ok(packages)
+    Ok((packages, refs))
+}
+
+fn unix_now() -> Result<u64, IdentityError> {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) if d.as_secs() > 0 => Ok(d.as_secs()),
+        _ => Err(IdentityError::Clock),
+    }
 }
 
 /// Tops the server's KeyPackage pool up to [`TARGET_COUNT`] when it has fallen below
-/// [`LOW_WATERMARK`]. Returns how many were uploaded.
+/// [`LOW_WATERMARK`]. Returns how many were uploaded. Orphaned local keys from earlier failed
+/// uploads are pruned first (see [`batches`]), so they free room under [`MAX_PQ_KEYS`].
 pub async fn ensure_key_packages(
     client: &Client,
     server: &Url,
     session: &Session,
 ) -> Result<u64, IdentityError> {
+    ensure_key_packages_at(client, server, session, unix_now()?).await
+}
+
+async fn ensure_key_packages_at(
+    client: &Client,
+    server: &Url,
+    session: &Session,
+    now: u64,
+) -> Result<u64, IdentityError> {
+    batches::prune(&session.store, now)?;
     let have = server_count(client, server, session).await?;
     if have >= LOW_WATERMARK {
         return Ok(0);
     }
     let need = (TARGET_COUNT - have) as usize;
     let mut local = LocalIdentity::load(&session.store)?;
-    let packages = generate_and_persist(&session.store, &mut local, need)?;
+    let (packages, refs) = generate_batched(&session.store, &mut local, need)?;
     drop(local);
     let mut uploaded = 0u64;
-    for batch in packages.chunks(UPLOAD_BATCH) {
+    for (batch, batch_refs) in packages.chunks(UPLOAD_BATCH).zip(refs.chunks(UPLOAD_BATCH)) {
+        // Marked before the request leaves: if the response is lost the batch may be live.
+        batches::set_state(&session.store, &batch_refs[0], BatchState::Sent, now)?;
         let url = kp_url(server, session, "")?;
         let body = serde_json::to_vec(&UploadReq { packages: batch })
             .map_err(|_| IdentityError::BadResponse)?;
@@ -348,6 +402,7 @@ pub async fn ensure_key_packages(
         if r.ids.len() != batch.len() {
             return Err(IdentityError::BadResponse);
         }
+        batches::set_state(&session.store, &batch_refs[0], BatchState::Confirmed, now)?;
         uploaded += batch.len() as u64;
     }
     debug_assert_eq!(uploaded as usize, need);
@@ -712,5 +767,171 @@ mod tests {
             PqKeys::load(&session.store).unwrap().entries.len() as u64,
             TARGET_COUNT
         );
+    }
+
+    const T0: u64 = 1_800_000_000;
+
+    fn bundle_held(store: &ProfileStore, key_ref: &[u8; REF_LEN]) -> bool {
+        let local = LocalIdentity::load(store).unwrap();
+        mls_group::holds_key_package(&local.provider, key_ref).unwrap()
+    }
+
+    fn states(store: &ProfileStore) -> Vec<(batches::BatchState, usize)> {
+        let b = batches::Batches::load(store).unwrap();
+        b.list.iter().map(|b| (b.state, b.refs.len())).collect()
+    }
+
+    #[tokio::test]
+    async fn failed_upload_leaves_one_sent_batch_and_prepared_rest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = Session::for_test(seeded(&tmp), Uuid::new_v4(), TOKEN);
+        let state = Arc::new(Mutex::new(Seen {
+            upload_status: 500,
+            ..Seen::default()
+        }));
+        let url = serve(state.clone()).await;
+        ensure_key_packages_at(&client(), &url, &session, T0)
+            .await
+            .unwrap_err();
+        let want = [(BatchState::Sent, UPLOAD_BATCH)]
+            .into_iter()
+            .chain([(BatchState::Prepared, UPLOAD_BATCH); 4])
+            .collect::<Vec<_>>();
+        assert_eq!(states(&session.store), want);
+        let kept = batches::Batches::load(&session.store).unwrap();
+        let (sent, prepared) = (kept.list[0].refs[0], kept.list[1].refs[0]);
+
+        // Next top-up: the never-sent batches go at once, the possibly-live one stays.
+        state.lock().unwrap().upload_status = 200;
+        ensure_key_packages_at(&client(), &url, &session, T0 + 60)
+            .await
+            .unwrap();
+        assert!(bundle_held(&session.store, &sent));
+        assert!(!bundle_held(&session.store, &prepared));
+        assert!(pq_key_for(&session.store, &prepared).unwrap().is_none());
+        assert!(pq_key_for(&session.store, &sent).unwrap().is_some());
+        let got = states(&session.store);
+        assert_eq!(got[0], (BatchState::Sent, UPLOAD_BATCH));
+        assert!(got[1..].iter().all(|(s, _)| *s == BatchState::Confirmed));
+        assert_eq!(
+            PqKeys::load(&session.store).unwrap().entries.len(),
+            UPLOAD_BATCH + TARGET_COUNT as usize
+        );
+    }
+
+    #[tokio::test]
+    async fn sent_and_confirmed_batches_expire_only_after_retention() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = Session::for_test(seeded(&tmp), Uuid::new_v4(), TOKEN);
+        let state = Arc::new(Mutex::new(Seen {
+            upload_status: 200,
+            count_value: LOW_WATERMARK,
+            ..Seen::default()
+        }));
+        let url = serve(state.clone()).await;
+        state.lock().unwrap().count_value = 0;
+        ensure_key_packages_at(&client(), &url, &session, T0)
+            .await
+            .unwrap();
+        let confirmed = batches::Batches::load(&session.store).unwrap();
+        assert_eq!(confirmed.list.len(), 5);
+        let first = confirmed.list[0].refs[0];
+        state.lock().unwrap().count_value = TARGET_COUNT; // healthy: prune only
+        let almost = T0 + batches::RETENTION_SECS - 1;
+        ensure_key_packages_at(&client(), &url, &session, almost)
+            .await
+            .unwrap();
+        assert_eq!(batches::Batches::load(&session.store).unwrap(), confirmed);
+        assert!(bundle_held(&session.store, &first));
+        ensure_key_packages_at(&client(), &url, &session, almost + 1)
+            .await
+            .unwrap();
+        assert!(batches::Batches::load(&session.store)
+            .unwrap()
+            .list
+            .is_empty());
+        assert!(store_lacks(&session.store, BATCHES_RECORD_NAME));
+        assert!(PqKeys::load(&session.store).unwrap().entries.is_empty());
+        assert!(!bundle_held(&session.store, &first));
+    }
+
+    const BATCHES_RECORD_NAME: &str = batches::BATCHES_RECORD;
+
+    fn store_lacks(store: &ProfileStore, name: &str) -> bool {
+        store.get(name).unwrap().is_none()
+    }
+
+    #[tokio::test]
+    async fn consumed_package_is_forgotten_without_deleting_its_batch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = Session::for_test(seeded(&tmp), Uuid::new_v4(), TOKEN);
+        let state = Arc::new(Mutex::new(Seen {
+            upload_status: 200,
+            ..Seen::default()
+        }));
+        let url = serve(state.clone()).await;
+        ensure_key_packages_at(&client(), &url, &session, T0)
+            .await
+            .unwrap();
+        let first = batches::Batches::load(&session.store).unwrap().list[0].refs[0];
+        prune_pq_key(&session.store, &first).unwrap(); // what a joined Welcome does
+        state.lock().unwrap().count_value = TARGET_COUNT;
+        ensure_key_packages_at(&client(), &url, &session, T0 + 1)
+            .await
+            .unwrap();
+        let got = states(&session.store);
+        assert_eq!(got[0], (BatchState::Confirmed, UPLOAD_BATCH - 1));
+        assert_eq!(got.len(), 5);
+    }
+
+    #[test]
+    fn crash_between_provider_save_and_key_save_is_pruned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = seeded(&tmp);
+        let mut local = LocalIdentity::load(&store).unwrap();
+        generate_batched(&store, &mut local, 3).unwrap();
+        let refs: Vec<[u8; REF_LEN]> = PqKeys::load(&store)
+            .unwrap()
+            .entries
+            .iter()
+            .map(|(r, _)| *r)
+            .collect();
+        // Crash: the decapsulation keys never reached disk.
+        PqKeys {
+            entries: Vec::new(),
+        }
+        .save(&store)
+        .unwrap();
+        assert!(refs.iter().all(|r| bundle_held(&store, r)));
+        batches::prune(&store, T0).unwrap();
+        assert!(refs.iter().all(|r| !bundle_held(&store, r)));
+        assert!(batches::Batches::load(&store).unwrap().list.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pruning_frees_room_under_the_local_key_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = Session::for_test(seeded(&tmp), Uuid::new_v4(), TOKEN);
+        let mut local = LocalIdentity::load(&session.store).unwrap();
+        // Simulates a crash after persisting keys but before any request: all Prepared.
+        let (_, refs) = generate_batched(&session.store, &mut local, 50).unwrap();
+        drop(local);
+        assert_eq!(
+            PqKeys::load(&session.store).unwrap().entries.len(),
+            refs.len()
+        );
+        let state = Arc::new(Mutex::new(Seen {
+            upload_status: 200,
+            ..Seen::default()
+        }));
+        let url = serve(state).await;
+        ensure_key_packages_at(&client(), &url, &session, T0)
+            .await
+            .unwrap();
+        let held = PqKeys::load(&session.store).unwrap();
+        assert_eq!(held.entries.len(), TARGET_COUNT as usize);
+        assert!(refs
+            .iter()
+            .all(|r| !held.entries.iter().any(|(k, _)| k == r)));
     }
 }

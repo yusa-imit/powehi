@@ -135,11 +135,15 @@ pointing here. Close the issue in the PR that finishes its item.
   old export key.
   Done condition for (b): remove the automatic PHS2 adoption (or gate it behind an explicit
   user action) so deleting the manifest + latch no longer downgrades the store (prd §3.2 ②).
-- [ ] 8.9 KeyPackage orphan pruning (#22) — store a per-batch upload state
+- [x] 8.9 KeyPackage orphan pruning (#22) — store a per-batch upload state
   (`prepared` → `sent` → `confirmed`). A batch never sent is deleted at once. A batch
   whose response was lost may already be live on the server, so it, like confirmed
   but unconsumed packages, is deleted only after 84 days + 14 days slack. Top-up
   prunes before checking the 400 cap. No new server-visible metadata. crypto-reviewer.
+  Shipped: `identity/batches.rs` (`kp-batches` record, `Prepared`/`Sent`/`Confirmed`, 98-day
+  retention, consumed refs forgotten), `ensure_key_packages` prunes first and marks `Sent`
+  before each request; `mls_group::delete_key_package` removes the openmls bundle. Invite
+  KeyPackages (`invite create`, one per invite) are not batches and keep their marker records.
 
 ### Conversation trust
 - [ ] 8.10 Peer bound to its MLS credential (#32 item 1) — at Welcome join and at
