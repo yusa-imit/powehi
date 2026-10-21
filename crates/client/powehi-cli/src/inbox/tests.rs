@@ -464,3 +464,118 @@ fn report_json_is_one_object_with_ids_and_counts() {
     assert_eq!(v["joined"], json!([]));
     assert_eq!(v["pq_bindings"], json!({}));
 }
+
+fn junk_envelope(p: &Pair, group: Uuid, sender: Uuid) -> Uuid {
+    let id = Uuid::new_v4();
+    p.state.lock().unwrap().inbox.push(json!({
+        "id": id, "group_id": group, "sender": sender,
+        "recipient": p.alice.device_id.to_string(),
+        "message_type": "Application", "ciphertext": [1, 2, 3],
+    }));
+    id
+}
+
+fn inbox_len(p: &Pair) -> usize {
+    p.state.lock().unwrap().inbox.len()
+}
+
+#[tokio::test]
+async fn unknown_group_and_wrong_sender_envelopes_are_acked_after_the_grace() {
+    let (_tmp, p) = pair().await;
+    receive(&client(), &p.url, &p.alice).await.unwrap();
+    junk_envelope(&p, Uuid::new_v4(), p.bob.device_id);
+    junk_envelope(&p, p.gid, Uuid::new_v4());
+    let t0 = 1_000_000;
+    receive_at(&client(), &p.url, &p.alice, t0).await.unwrap();
+    receive_at(
+        &client(),
+        &p.url,
+        &p.alice,
+        t0 + junk::UNKNOWN_GRACE_SECS - 1,
+    )
+    .await
+    .unwrap();
+    assert_eq!(inbox_len(&p), 2, "kept through the grace");
+    receive_at(&client(), &p.url, &p.alice, t0 + junk::UNKNOWN_GRACE_SECS)
+        .await
+        .unwrap();
+    assert_eq!(inbox_len(&p), 0, "acked once the grace ran out");
+    let tracker = junk::Tracker::load(&p.alice.store).unwrap();
+    assert_eq!(tracker.len(), 0, "forgotten after the ack");
+}
+
+#[tokio::test]
+async fn undecryptable_envelope_from_the_peer_is_acked_after_n_failures_and_the_grace() {
+    let (_tmp, p) = pair().await;
+    receive(&client(), &p.url, &p.alice).await.unwrap();
+    junk_envelope(&p, p.gid, p.bob.device_id);
+    let t0 = 1_000_000;
+    // Many quick runs (chat polls every few seconds) never drop it inside the grace.
+    for _ in 0..(junk::MAX_DECRYPT_FAILURES * 2) {
+        receive_at(&client(), &p.url, &p.alice, t0).await.unwrap();
+        assert_eq!(inbox_len(&p), 1);
+    }
+    receive_at(&client(), &p.url, &p.alice, t0 + junk::UNKNOWN_GRACE_SECS)
+        .await
+        .unwrap();
+    assert_eq!(inbox_len(&p), 0);
+}
+
+#[tokio::test]
+async fn a_flooding_peer_cannot_starve_a_later_real_message() {
+    let (_tmp, p) = pair().await;
+    receive(&client(), &p.url, &p.alice).await.unwrap();
+    for _ in 0..(MAX_PER_CONVERSATION * 2) {
+        junk_envelope(&p, p.gid, p.bob.device_id);
+    }
+    let real = bob_sends(&p, b"real");
+    // The junk sorts before the real message by id; the budget leaves the rest for later runs.
+    let mut stored = 0;
+    for run in 0..(2 * junk::MAX_DECRYPT_FAILURES + 2) {
+        stored += receive_at(
+            &client(),
+            &p.url,
+            &p.alice,
+            5 + u64::from(run) * junk::UNKNOWN_GRACE_SECS,
+        )
+        .await
+        .unwrap()
+        .stored;
+    }
+    assert_eq!(stored, 1);
+    let name = format!("{RX_PREFIX}{}", real.hyphenated());
+    assert!(p.alice.store.get(&name).unwrap().is_some());
+}
+
+#[test]
+fn tracker_is_bounded_and_keeps_the_oldest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let s = session(&tmp, "alice", 1);
+    let mut t = junk::Tracker::default();
+    let first = Uuid::new_v4();
+    assert!(!t.unknown_expired(first, 1));
+    for i in 0..(junk::MAX_TRACKED as u64 + 10) {
+        t.unknown_expired(Uuid::new_v4(), 2 + i);
+    }
+    assert_eq!(t.len(), junk::MAX_TRACKED);
+    t.save(&s.store).unwrap();
+    let mut again = junk::Tracker::load(&s.store).unwrap();
+    assert_eq!(again.len(), junk::MAX_TRACKED);
+    // The oldest entry survives a full tracker and still reaches its grace.
+    assert!(again.unknown_expired(first, 1 + junk::UNKNOWN_GRACE_SECS));
+}
+
+#[test]
+fn stale_tracker_entries_are_pruned() {
+    let mut t = junk::Tracker::default();
+    for _ in 0..junk::MAX_TRACKED {
+        t.unknown_expired(Uuid::new_v4(), 10);
+    }
+    t.prune(10 + junk::ENTRY_MAX_AGE_SECS);
+    assert_eq!(t.len(), 0);
+    assert!(
+        !t.unknown_expired(Uuid::new_v4(), 10 + junk::ENTRY_MAX_AGE_SECS),
+        "room again"
+    );
+    assert_eq!(t.len(), 1);
+}

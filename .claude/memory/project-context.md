@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 619 (2026-10-22, FEATURE) — 8.13 slice (a) inbox junk tracker
+`inbox/junk.rs` + `receive_at(now)`; see STATUS.md 8.13 for the shipped/remaining split. Reviews: crypto-reviewer needs-rework -> fixed (fail closed on request load, no expect, drop needs 24h age too); security-auditor findings fixed (full tracker refuses, age pruning, non-fatal tracker I/O). openmls debug_assert panics on a tampered AEAD tag in debug builds, so a tampered-copy test cannot run in debug. Open: server `send_welcome` does not check the target (issue filed).
+
 ## Cycle 618 (2026-10-22, FEATURE) — 8.12 pending requests and `powehi accept`
 `requests.rs`: pool-KP Welcomes -> `req-<group>` records (cap 32, 5d TTL), `requests`/`accept`/`decline` commands, `join_one` reused unchanged (pq key lookup now precedes the invite-marker check; returns `JoinOutcome::Request`). prd 3.3 + 7A command table updated. Next: 8.13 inbox flood defenses.
 
