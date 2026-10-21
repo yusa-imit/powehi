@@ -441,6 +441,7 @@ fn report_json_is_one_object_with_ids_and_counts() {
     let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
     let report = InboxReport {
         joined: vec![a],
+        requests: 2,
         stored: 3,
         pq_bound: vec![b],
         skipped: 1,
@@ -452,6 +453,7 @@ fn report_json_is_one_object_with_ids_and_counts() {
     let v: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(v["joined"][0], a.to_string());
     assert_eq!(v["pq_bindings"][b.to_string()], "0123456789abcdef");
+    assert_eq!(v["requests"], 2);
     assert_eq!(
         (v["stored"].as_u64(), v["skipped"].as_u64()),
         (Some(3), Some(1))

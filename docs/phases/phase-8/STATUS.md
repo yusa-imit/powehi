@@ -172,11 +172,16 @@ pointing here. Close the issue in the PR that finishes its item.
   consent: the CLI (`welcome::accept_membership`, 3 attempts) and the web poller call accept
   right after a successful join. A failed accept after a persisted join leaves the device
   without group traffic until 8.12's `powehi accept` can re-run it (CLI warns on stderr).
-- [ ] 8.12 Pending requests and `powehi accept` (#24) — `inbox` keeps Welcomes that are
+- [x] 8.12 Pending requests and `powehi accept` (#24) — `inbox` keeps Welcomes that are
   not for the user's own invite KeyPackages as pending requests (sender, group,
   received time; capped) in the store. `powehi requests` lists them, `powehi accept
   <id>` joins and calls the 8.11 accept, `powehi decline <id>` drops and declines.
   Invite Welcomes still auto-join. Close #24. crypto-reviewer.
+  Shipped: `requests.rs` keeps a pool-KeyPackage Welcome as `req-<group id>` (<=32, Welcome <=64 KiB,
+  one per KeyPackageRef, 5-day local TTL pruned at `inbox` with Welcome ack + key retirement, Welcome left unacked while pending); only Welcomes whose
+  KeyPackage we really hold a PQ key for count. `accept` reuses `join_one` unchanged (all checks apply),
+  then acks, calls server accept, drops the request; a re-run after a failed confirm retries only the
+  confirm. `decline` (refused after a join) calls server decline first, retires the KeyPackage keys, acks, drops. `inbox` reports the new count.
 - [ ] 8.13 Inbox flood defenses (#30 client part) — a persistent per-device fetch
   cursor in the store; envelopes for groups we neither hold nor have a pending
   request for are acked after a 24 h grace; envelopes from a known peer that fail to

@@ -391,6 +391,12 @@ pub fn save(store: &ProfileStore, conv: &Conversation) -> Result<(), Conversatio
     Ok(())
 }
 
+/// Deletes a stored conversation record (absent is a no-op).
+pub(crate) fn remove(store: &ProfileStore, group_id: &Uuid) -> Result<(), ConversationError> {
+    store.remove(&record_name(group_id))?;
+    Ok(())
+}
+
 pub fn load(
     store: &ProfileStore,
     group_id: &Uuid,

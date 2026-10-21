@@ -28,6 +28,8 @@ pub mod profile;
 #[cfg(unix)]
 pub mod prompt;
 #[cfg(unix)]
+pub mod requests;
+#[cfg(unix)]
 pub mod screen;
 pub mod status;
 #[cfg(unix)]
@@ -67,6 +69,9 @@ pub enum CliError {
     #[cfg(unix)]
     #[error("{0}")]
     Conversation(#[from] conversation::ConversationError),
+    #[cfg(unix)]
+    #[error("{0}")]
+    Request(#[from] requests::RequestError),
     #[cfg(unix)]
     #[error("{0}")]
     Message(#[from] message::MessageError),
@@ -119,6 +124,12 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
         cli::Command::Invite(ref cmd) => run_invite(&args.server, &paths, cmd),
         #[cfg(unix)]
         cli::Command::Inbox(a) => run_inbox(&args.server, &paths, a.json),
+        #[cfg(unix)]
+        cli::Command::Requests(ref a) => run_requests(&args.server, &paths, a.json),
+        #[cfg(unix)]
+        cli::Command::Accept(ref a) => run_request_answer(&args.server, &paths, &a.request, true),
+        #[cfg(unix)]
+        cli::Command::Decline(ref a) => run_request_answer(&args.server, &paths, &a.request, false),
         #[cfg(unix)]
         cli::Command::Send(ref c) => run_send(&args.server, &paths, &c.conversation, c.json),
         #[cfg(unix)]
@@ -356,10 +367,60 @@ fn run_inbox(server: &url::Url, paths: &profile::ProfilePaths, json: bool) -> Re
         for (id, b) in &bindings {
             println!("conversation {id}: post-quantum binding {b} (compare with your peer)");
         }
+        if r.requests > 0 {
+            println!(
+                "{} new conversation request(s): `powehi requests`, then `accept` or `decline`",
+                r.requests
+            );
+        }
         println!("{} new message(s) stored", r.stored);
     }
     if r.skipped > 0 {
         eprintln!("{} envelope(s) skipped", r.skipped);
+    }
+    Ok(())
+}
+
+/// `requests`: lists pending conversation requests from the profile store.
+#[cfg(unix)]
+fn run_requests(
+    server: &url::Url,
+    paths: &profile::ProfilePaths,
+    json: bool,
+) -> Result<(), CliError> {
+    let rt = runtime()?;
+    let client = status::http_client()?;
+    let mut prompter = prompt::TtyPrompter;
+    let session = login_scoped(&rt, &client, server, paths, &mut prompter)?;
+    let reqs = requests::list(&session.store)?;
+    requests::report(
+        &mut std::io::stdout().lock(),
+        &reqs,
+        requests::now_secs(),
+        json,
+    )
+    .map_err(|_| CliError::Output)
+}
+
+/// `accept` / `decline`: answers one pending request.
+#[cfg(unix)]
+fn run_request_answer(
+    server: &url::Url,
+    paths: &profile::ProfilePaths,
+    reference: &str,
+    accept: bool,
+) -> Result<(), CliError> {
+    let rt = runtime()?;
+    let client = status::http_client()?;
+    let mut prompter = prompt::TtyPrompter;
+    let session = login_scoped(&rt, &client, server, paths, &mut prompter)?;
+    let id = requests::resolve(&session.store, reference)?;
+    if accept {
+        rt.block_on(requests::accept(&client, server, &session, id))?;
+        println!("joined conversation {id}");
+    } else {
+        rt.block_on(requests::decline(&client, server, &session, id))?;
+        println!("declined request {id}");
     }
     Ok(())
 }
