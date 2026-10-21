@@ -1732,3 +1732,6 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 
 ## Cycle 608 (2026-10-21, FEATURE) — 8.7 certificate pinning
 `powehi-cli/src/pinning.rs`: custom rustls verifier = WebPKI first, then SPKI-SHA-256 pin (2..=8 pins) on the *verified* path (a pinned intermediate must work as sole trust anchor for the leaf; threat-model F1 caught the "appended genuine CA" bypass). Used by `status::http_client_with` and the WS connector. `PRODUCTION_PINS` empty → WebPKI only until 9.9; no runtime override. Runbook `docs/runbooks/cli-pin-rotation.md`. Open: need-human #131 (pin strategy for Cloudflare-managed certs, blocks 9.9). Next: 8.8 PHS3 store.
+
+## Cycle 610 (2026-10-21, STABILIZATION)
+- CI green, no `bug` issues, `cargo audit` + `cargo deny check` clean. Gap found in the 8.8a manifest codec: `tag_bytes` used `from_str_radix`, which accepts a leading `+` and uppercase, so non-canonical tags could be encoded; now lowercase hex only. Added negative tests (duplicate tag, entry count over cap, bad flag bytes, non-canonical tags). powehi-cli 276 tests pass, clippy clean. target/ 30G → 27G after pruning >7d artifacts. Next FEATURE: 8.8b.
