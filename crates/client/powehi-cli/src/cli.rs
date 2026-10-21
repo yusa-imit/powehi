@@ -49,6 +49,12 @@ pub enum Command {
     Send(SendArgs),
     /// Fetch, decrypt, store and acknowledge pending messages.
     Inbox(InboxArgs),
+    /// List pending conversation requests (Welcomes from devices you did not invite).
+    Requests(RequestsArgs),
+    /// Join a pending conversation request and confirm the membership with the server.
+    Accept(RequestArg),
+    /// Drop a pending conversation request and decline it on the server.
+    Decline(RequestArg),
     /// Show stored received messages for a conversation, then remove them from the store.
     Read(ReadArgs),
     /// Interactive chat REPL with realtime delivery.
@@ -83,6 +89,19 @@ pub struct InboxArgs {
     /// Print one JSON object (joined, pq_bindings, stored, skipped) instead of text lines.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RequestsArgs {
+    /// Print one JSON object per request (`{"id":...,"from":...,"received_at":...}`).
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RequestArg {
+    /// Request id (or a unique prefix of at least 4 characters).
+    pub request: String,
 }
 
 #[derive(Debug, Args)]
@@ -245,6 +264,9 @@ impl Command {
             Command::Invite(InviteCommand::Redeem { .. }) => "invite redeem",
             Command::Send(_) => "send",
             Command::Inbox(_) => "inbox",
+            Command::Requests(_) => "requests",
+            Command::Accept(_) => "accept",
+            Command::Decline(_) => "decline",
             Command::Read(_) => "read",
             Command::Chat(_) => "chat",
             Command::Verify(_) => "verify",
@@ -484,6 +506,25 @@ mod tests {
             panic!("not read");
         };
         assert!(a.keep);
+    }
+
+    #[test]
+    fn request_commands_parse() {
+        assert!(
+            matches!(parse(&["requests"]).unwrap().command, Command::Requests(ref a) if !a.json)
+        );
+        assert!(
+            matches!(parse(&["requests", "--json"]).unwrap().command, Command::Requests(ref a) if a.json)
+        );
+        let Command::Accept(a) = parse(&["accept", "abcd"]).unwrap().command else {
+            panic!("accept");
+        };
+        assert_eq!(a.request, "abcd");
+        assert!(matches!(
+            parse(&["decline", "abcd"]).unwrap().command,
+            Command::Decline(_)
+        ));
+        assert!(parse(&["accept"]).is_err());
     }
 
     #[test]

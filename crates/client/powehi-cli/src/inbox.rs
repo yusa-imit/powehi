@@ -1,6 +1,7 @@
 //! `powehi inbox`: fetch, decrypt, store and acknowledge pending messages (prd.md §7A.2).
 //!
-//! Welcomes are joined first (`welcome::join_invited`: invite KeyPackages only, issue #24). Application envelopes are accepted
+//! Welcomes are joined first (`welcome::join_invited`: invite KeyPackages only; Welcomes for pool
+//! KeyPackages become pending requests, issue #24). Application envelopes are accepted
 //! only for a stored 1:1 conversation and only from its peer device. The joiner's first peer
 //! message may be the `pq_init` ML-KEM ciphertext (prd.md §5.3 Phase B): it is decapsulated
 //! with the single-use key from the `conv-*` record, which is then discarded; the result is a
@@ -19,6 +20,7 @@ use crate::auth::Session;
 use crate::conversation::{self, Role};
 use crate::identity::LocalIdentity;
 use crate::invite::InviteError;
+use crate::requests;
 use crate::store::ProfileStore;
 use crate::welcome;
 
@@ -42,6 +44,8 @@ pub(crate) const RX_PREFIX: &str = "rx-";
 pub struct InboxReport {
     /// Conversations joined from Welcomes, by group id.
     pub joined: Vec<Uuid>,
+    /// New pending requests kept from Welcomes for pool KeyPackages (`powehi requests`).
+    pub requests: usize,
     /// Messages decrypted and stored.
     pub stored: usize,
     /// Conversations whose `pq_init` completed (the 16-hex binding is on the conv record).
@@ -51,7 +55,7 @@ pub struct InboxReport {
 }
 
 /// Writes the [`InboxReport`] as one JSON object (for scripts):
-/// `{"joined":[id..],"pq_bindings":{id:"16-hex"},"stored":n,"skipped":n}`.
+/// `{"joined":[id..],"pq_bindings":{id:"16-hex"},"requests":n,"stored":n,"skipped":n}`.
 /// Only ids, the public PQ binding and counts are printed, never message text.
 pub fn report_json(
     out: &mut impl std::io::Write,
@@ -65,6 +69,7 @@ pub fn report_json(
     let obj = serde_json::json!({
         "joined": report.joined.iter().map(Uuid::to_string).collect::<Vec<_>>(),
         "pq_bindings": pq,
+        "requests": report.requests,
         "stored": report.stored,
         "skipped": report.skipped,
     });
@@ -170,9 +175,16 @@ pub async fn receive(
     server: &Url,
     session: &Session,
 ) -> Result<InboxReport, InviteError> {
+    // Expired requests go first so their slots are free for newly arrived Welcomes.
+    if let Ok(dropped) = requests::prune_expired(&session.store, requests::now_secs()) {
+        for envelope in dropped {
+            let _ = welcome::ack(client, server, session, envelope).await;
+        }
+    }
     let joined = welcome::join_invited(client, server, session).await?;
     let mut report = InboxReport {
         joined: joined.joined,
+        requests: joined.requested,
         ..InboxReport::default()
     };
     let items = welcome::fetch_pending(client, server, session).await?;

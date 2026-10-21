@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 618 (2026-10-22, FEATURE) — 8.12 pending requests and `powehi accept`
+`requests.rs`: pool-KP Welcomes -> `req-<group>` records (cap 32, 5d TTL), `requests`/`accept`/`decline` commands, `join_one` reused unchanged (pq key lookup now precedes the invite-marker check; returns `JoinOutcome::Request`). prd 3.3 + 7A command table updated. Next: 8.13 inbox flood defenses.
+
 ## Cycle 617 (2026-10-22, FEATURE) — 8.11 server consent for group membership
 `pending_memberships` (migration 0023): `add_member` records pending; device calls `POST /v1/groups/:gid/accept|decline`. CLI `welcome::accept_membership` and web poller accept after join. threat-model first RED (per-device cap = lockout, retention claim false, expired rows in group cap, remove/accept race) -> fixed: per-device cap evicts oldest, TTL 7d + bounded lazy purge, unexpired-only group cap, remove_member one tx pending-first, device row lock. security-auditor YELLOW findings same set. Known gaps: no self-listing of pending rows (8.12), accept failure after persisted join relies on 8.12 re-run, peer-sync upsert bypasses consent (pre-existing), web accept not checked vs joined group id. PG IT test is #[ignore] (no Docker locally) - CI runs it.
 

@@ -16,6 +16,7 @@ use crate::auth::Session;
 use crate::conversation::{self, Conversation, ConversationError, Role};
 use crate::identity::{self, IdentityError, LocalIdentity};
 use crate::invite::InviteError;
+use crate::requests;
 
 /// Largest `GET /v1/messages` page accepted. Welcomes are a few KB each as JSON integer arrays.
 pub const MAX_POLL_BYTES: usize = 16 * 1024 * 1024;
@@ -31,6 +32,8 @@ pub struct JoinReport {
     pub joined: Vec<Uuid>,
     /// Welcomes left unacked: no matching local KeyPackage, bad key, or a mismatched group.
     pub skipped: usize,
+    /// Welcomes for our pool KeyPackages newly kept as pending requests (8.12).
+    pub requested: usize,
 }
 
 /// Pages fetched per call. The server returns at most 64 envelopes per page in ascending
@@ -104,8 +107,8 @@ pub async fn join_pending(
 }
 
 /// Like [`join_pending`] but joins only Welcomes that consume a KeyPackage minted by
-/// `invite create` (issue #24, interim policy): a pool KeyPackage is handed to any
-/// authenticated device, so a stranger's Welcome for one stays unjoined and unacked.
+/// `invite create` (issue #24): a pool KeyPackage is handed to any authenticated device, so a
+/// Welcome for one stays unjoined and unacked and is kept as a pending request (8.12).
 pub async fn join_invited(
     client: &Client,
     server: &Url,
@@ -141,6 +144,22 @@ async fn join_filtered(
             ciphertext,
         };
         match join_one(session, &env, only_ref, invites_only) {
+            Err(JoinOutcome::Request(binding_ref)) => {
+                let req = requests::Request::new(
+                    group_id,
+                    sender,
+                    id,
+                    requests::now_secs(),
+                    binding_ref,
+                    env.ciphertext,
+                );
+                match requests::save_new(&session.store, &req) {
+                    Ok(true) => report.requested += 1,
+                    Ok(false) => report.skipped += 1,
+                    Err(requests::RequestError::Store(e)) => return Err(e.into()),
+                    Err(_) => report.skipped += 1,
+                }
+            }
             Ok(group_id) => {
                 report.joined.push(group_id);
                 // The join is already persisted; a failed ack only leaves a stale envelope
@@ -162,15 +181,17 @@ async fn join_filtered(
     Ok(report)
 }
 
-struct Joinable {
-    group_id: Uuid,
-    sender: Uuid,
-    ciphertext: Vec<u8>,
+pub(crate) struct Joinable {
+    pub(crate) group_id: Uuid,
+    pub(crate) sender: Uuid,
+    pub(crate) ciphertext: Vec<u8>,
 }
 
-enum JoinOutcome {
+pub(crate) enum JoinOutcome {
     /// This Welcome cannot be joined; leave it for server-side expiry and carry on.
     Skip,
+    /// A valid Welcome for one of our pool KeyPackages: not joined without the user's say-so.
+    Request(Vec<u8>),
     /// Local storage failed; stop rather than risk acking over lost state.
     Fatal(InviteError),
 }
@@ -200,7 +221,7 @@ fn check_group_not_held(
     }
 }
 
-fn join_one(
+pub(crate) fn join_one(
     session: &Session,
     env: &Joinable,
     only_ref: Option<&[u8]>,
@@ -215,11 +236,11 @@ fn join_one(
     if only_ref.is_some_and(|r| r != binding.key_package_ref.as_slice()) {
         return Err(JoinOutcome::Skip);
     }
-    if invites_only && !invite_marker_exists(&session.store, &binding.key_package_ref)? {
-        return Err(JoinOutcome::Skip);
-    }
     let dk =
         identity::pq_key_for(&session.store, &binding.key_package_ref)?.ok_or(JoinOutcome::Skip)?;
+    if invites_only && !invite_marker_exists(&session.store, &binding.key_package_ref)? {
+        return Err(JoinOutcome::Request(binding.key_package_ref.clone()));
+    }
     kem::validate_decap_key(&dk, &binding.encap_key).map_err(|_| JoinOutcome::Skip)?;
     let group =
         mls_group::join_group(&env.ciphertext, &local.provider).map_err(|_| JoinOutcome::Skip)?;
