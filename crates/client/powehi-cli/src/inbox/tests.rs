@@ -615,3 +615,56 @@ fn tracker_record_is_removed_when_emptied_and_garbage_loads_empty() {
     s.store.put(junk::RECORD, b"not json").unwrap();
     assert_eq!(junk::Tracker::load(&s.store).unwrap().len(), 0);
 }
+
+fn typed_envelope(p: &Pair, kind: &str, group: Uuid, sender: Uuid) -> Uuid {
+    let id = Uuid::new_v4();
+    p.state.lock().unwrap().inbox.push(json!({
+        "id": id, "group_id": group, "sender": sender,
+        "recipient": p.alice.device_id.to_string(),
+        "message_type": kind, "ciphertext": [1, 2, 3],
+    }));
+    id
+}
+
+#[tokio::test]
+async fn junk_commit_proposal_and_welcome_are_acked_after_the_grace() {
+    let (_tmp, p) = pair().await;
+    receive(&client(), &p.url, &p.alice).await.unwrap();
+    typed_envelope(&p, "Commit", Uuid::new_v4(), p.bob.device_id);
+    typed_envelope(&p, "Proposal", p.gid, Uuid::new_v4());
+    typed_envelope(&p, "Welcome", Uuid::new_v4(), p.bob.device_id);
+    let t0 = 1_000_000;
+    receive_at(&client(), &p.url, &p.alice, t0).await.unwrap();
+    receive_at(
+        &client(),
+        &p.url,
+        &p.alice,
+        t0 + junk::UNKNOWN_GRACE_SECS - 1,
+    )
+    .await
+    .unwrap();
+    assert_eq!(inbox_len(&p), 3, "kept through the grace");
+    receive_at(&client(), &p.url, &p.alice, t0 + junk::UNKNOWN_GRACE_SECS)
+        .await
+        .unwrap();
+    assert_eq!(inbox_len(&p), 0, "acked once the grace ran out");
+    assert_eq!(junk::Tracker::load(&p.alice.store).unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn a_commit_from_the_peer_of_a_held_conversation_is_never_acked_here() {
+    let (_tmp, p) = pair().await;
+    receive(&client(), &p.url, &p.alice).await.unwrap();
+    typed_envelope(&p, "Commit", p.gid, p.bob.device_id);
+    let t0 = 1_000_000;
+    receive_at(&client(), &p.url, &p.alice, t0).await.unwrap();
+    receive_at(
+        &client(),
+        &p.url,
+        &p.alice,
+        t0 + 10 * junk::UNKNOWN_GRACE_SECS,
+    )
+    .await
+    .unwrap();
+    assert_eq!(inbox_len(&p), 1, "left for the Commit path (8.14)");
+}

@@ -204,18 +204,41 @@ async fn receive_at(
         ..InboxReport::default()
     };
     let items = welcome::fetch_pending(client, server, session).await?;
+    // A local cache of timers: unreadable or unwritable must never fail the run.
+    let mut tracker = junk::Tracker::load(&session.store).unwrap_or_default();
+    tracker.prune(now);
+    // Welcomes that cannot be joined (no such KeyPackage, bad key, group already held) would
+    // sit in the fetch window until the server expires them: ack them after the grace.
+    for id in joined.unusable {
+        if tracker.unknown_expired(id, now)
+            && welcome::ack(client, server, session, id).await.is_ok()
+        {
+            tracker.forget(id);
+        }
+    }
     // Only real work (a decrypt attempt on a known conversation) spends the per-run budget;
     // envelopes for unknown groups or other senders are free local lookups, so a stranger's
     // junk broadcasts cannot crowd real messages out of the run.
     let mut attempts = 0;
-    // A local cache of timers: unreadable or unwritable must never fail the run.
-    let mut tracker = junk::Tracker::load(&session.store).unwrap_or_default();
-    tracker.prune(now);
     let mut per_conv: std::collections::HashMap<Uuid, usize> = std::collections::HashMap::new();
-    for env in items
-        .into_iter()
-        .filter(|e| e.message_type == "Application")
-    {
+    for env in items {
+        if env.message_type == "Welcome" {
+            continue;
+        }
+        if env.message_type != "Application" {
+            // Commit, Proposal or anything else: the Commit path is 8.14, so one from our
+            // peer in a held conversation waits; the rest is acked after the grace.
+            if let Some(id) = env.id {
+                if !is_peer_traffic(session, env.group_id, env.sender)
+                    && tracker.unknown_expired(id, now)
+                    && welcome::ack(client, server, session, id).await.is_ok()
+                {
+                    tracker.forget(id);
+                }
+            }
+            report.skipped += 1;
+            continue;
+        }
         if attempts >= MAX_MESSAGES_PER_RUN {
             break;
         }
@@ -238,7 +261,13 @@ async fn receive_at(
             report.skipped += 1;
             continue;
         }
-        let outcome = process_one(session, id, group_id, sender, &ct)?;
+        let outcome = match process_one(session, id, group_id, sender, &ct) {
+            Ok(o) => o,
+            Err(e) => {
+                let _ = tracker.save(&session.store);
+                return Err(e);
+            }
+        };
         if !matches!(outcome, Outcome::Ignored | Outcome::Unknown) {
             *used += 1;
         }
@@ -285,6 +314,18 @@ async fn receive_at(
     }
     let _ = tracker.save(&session.store);
     Ok(report)
+}
+
+/// True when `group_id` is a stored conversation and `sender` is its peer device.
+fn is_peer_traffic(session: &Session, group_id: Option<Uuid>, sender: Option<Uuid>) -> bool {
+    let (Some(group_id), Some(sender)) = (group_id, sender) else {
+        return false;
+    };
+    // Fail closed: an unreadable record counts as peer traffic, which is never acked here.
+    match conversation::load(&session.store, &group_id) {
+        Ok(conv) => conv.is_some_and(|c| c.peer_device_id == sender),
+        Err(_) => true,
+    }
 }
 
 fn process_one(

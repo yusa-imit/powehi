@@ -34,7 +34,12 @@ pub struct JoinReport {
     pub skipped: usize,
     /// Welcomes for our pool KeyPackages newly kept as pending requests (8.12).
     pub requested: usize,
+    /// Ids of the skipped Welcomes (at most [`MAX_UNUSABLE`]): `inbox` acks them after a grace.
+    pub unusable: Vec<Uuid>,
 }
+
+/// Cap on [`JoinReport::unusable`]; a fetch window holds at most `MAX_PAGES * 128` envelopes.
+pub(crate) const MAX_UNUSABLE: usize = 512;
 
 /// Pages fetched per call. The server returns at most 64 envelopes per page in ascending
 /// `(created_at, id)` order and never skips acked ones, so un-acked skipped envelopes at the
@@ -155,9 +160,19 @@ async fn join_filtered(
                 );
                 match requests::save_new(&session.store, &req) {
                     Ok(true) => report.requested += 1,
-                    Ok(false) => report.skipped += 1,
                     Err(requests::RequestError::Store(e)) => return Err(e.into()),
-                    Err(_) => report.skipped += 1,
+                    // Duplicate, over the cap or oversized: not kept, so `inbox` acks it after
+                    // the grace, unless it is the envelope of the request already kept.
+                    Ok(false) | Err(_) => {
+                        report.skipped += 1;
+                        let kept = requests::load(&session.store, &group_id)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|r| r.envelope_id == id);
+                        if !kept && report.unusable.len() < MAX_UNUSABLE {
+                            report.unusable.push(id);
+                        }
+                    }
                 }
             }
             Ok(group_id) => {
@@ -174,7 +189,12 @@ async fn join_filtered(
                     eprintln!("warning: could not confirm membership with the server; group traffic may not arrive");
                 }
             }
-            Err(JoinOutcome::Skip) => report.skipped += 1,
+            Err(JoinOutcome::Skip) => {
+                report.skipped += 1;
+                if report.unusable.len() < MAX_UNUSABLE {
+                    report.unusable.push(id);
+                }
+            }
             Err(JoinOutcome::Fatal(e)) => return Err(e),
         }
     }
