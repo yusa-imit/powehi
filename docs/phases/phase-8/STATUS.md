@@ -188,6 +188,15 @@ pointing here. Close the issue in the PR that finishes its item.
   decrypt N times are acked and dropped; a per-conversation decrypt budget so one
   peer cannot starve the others. Test with a junk-flood fixture. Close #30.
   crypto-reviewer + security-auditor.
+  Slice (a) shipped: `inbox/junk.rs` (`inbox-junk` record: envelope id + first-seen + fail count, 512
+  entries, new ids refused when full, entries pruned after 8 days). Unknown-group / wrong-sender
+  envelopes are acked after a 24 h local grace; a known peer's undecryptable envelope after 5
+  failures *and* the same grace (a message from an epoch we cannot apply yet must survive until
+  8.14); 16 decrypt attempts per conversation per run. Remaining slice (b): the persistent fetch
+  cursor (it must not advance past envelopes the per-conversation cap deferred), Commit/Proposal and
+  junk-Welcome envelopes (never acked today), and an epoch-aware failure count. Requirement for
+  8.14: `mls_group::decrypt_message` folds wrong-epoch and AEAD errors into one `Decrypt`; give
+  "epoch ahead of ours" its own error so it is never counted as a failure.
 
 ### Commit path, PCS, groups
 - [ ] 8.14 CLI Commit receive/apply — incoming Commits apply through the ADR-0005

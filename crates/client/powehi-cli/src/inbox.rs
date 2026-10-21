@@ -38,6 +38,8 @@ const EPHEMERAL_TYPES: [&str; 5] = [
 /// Cap on stored, not yet displayed messages. `store::MAX_RECORDS` is 4096; conversations
 /// (256), key packages and misc records need the remainder.
 pub const MAX_STORED_MESSAGES: usize = 2048;
+/// Decrypt attempts per conversation in one run, so one peer cannot starve the others.
+pub const MAX_PER_CONVERSATION: usize = 16;
 pub(crate) const RX_PREFIX: &str = "rx-";
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -165,8 +167,12 @@ enum Outcome {
     Skip,
     /// Consumed protocol or ephemeral traffic that is not a message (acked, not stored).
     Dropped,
-    /// Not ours to process (unknown conversation or not from its peer); costs no budget.
+    /// A pending request's group: nothing to do yet; costs no budget.
     Ignored,
+    /// Not ours (unknown group, or not from the conversation's peer): acked after a grace.
+    Unknown,
+    /// A known peer's envelope that did not decrypt: acked after repeated failures.
+    Undecryptable,
 }
 
 /// Joins pending Welcomes, then processes pending Application messages.
@@ -175,8 +181,18 @@ pub async fn receive(
     server: &Url,
     session: &Session,
 ) -> Result<InboxReport, InviteError> {
+    receive_at(client, server, session, requests::now_secs()).await
+}
+
+/// [`receive`] with the clock injected (seconds since the Unix epoch).
+async fn receive_at(
+    client: &Client,
+    server: &Url,
+    session: &Session,
+    now: u64,
+) -> Result<InboxReport, InviteError> {
     // Expired requests go first so their slots are free for newly arrived Welcomes.
-    if let Ok(dropped) = requests::prune_expired(&session.store, requests::now_secs()) {
+    if let Ok(dropped) = requests::prune_expired(&session.store, now) {
         for envelope in dropped {
             let _ = welcome::ack(client, server, session, envelope).await;
         }
@@ -192,6 +208,10 @@ pub async fn receive(
     // envelopes for unknown groups or other senders are free local lookups, so a stranger's
     // junk broadcasts cannot crowd real messages out of the run.
     let mut attempts = 0;
+    // A local cache of timers: unreadable or unwritable must never fail the run.
+    let mut tracker = junk::Tracker::load(&session.store).unwrap_or_default();
+    tracker.prune(now);
+    let mut per_conv: std::collections::HashMap<Uuid, usize> = std::collections::HashMap::new();
     for env in items
         .into_iter()
         .filter(|e| e.message_type == "Application")
@@ -209,30 +229,61 @@ pub async fn receive(
             // Our own broadcast echoed back: never decryptable here, never needed again.
             attempts += 1;
             let _ = welcome::ack(client, server, session, id).await;
+            tracker.forget(id);
             continue;
         }
-        match process_one(session, id, group_id, sender, &ct)? {
+        // One peer cannot use the whole run: the rest of its envelopes wait for the next one.
+        let used = per_conv.entry(group_id).or_insert(0);
+        if *used >= MAX_PER_CONVERSATION {
+            report.skipped += 1;
+            continue;
+        }
+        let outcome = process_one(session, id, group_id, sender, &ct)?;
+        if !matches!(outcome, Outcome::Ignored | Outcome::Unknown) {
+            *used += 1;
+        }
+        match outcome {
             Outcome::Ignored => report.skipped += 1,
+            Outcome::Unknown => {
+                report.skipped += 1;
+                if tracker.unknown_expired(id, now)
+                    && welcome::ack(client, server, session, id).await.is_ok()
+                {
+                    tracker.forget(id);
+                }
+            }
+            Outcome::Undecryptable => {
+                attempts += 1;
+                report.skipped += 1;
+                if tracker.failed(id, now)
+                    && welcome::ack(client, server, session, id).await.is_ok()
+                {
+                    tracker.forget(id);
+                }
+            }
             Outcome::Skip => {
                 attempts += 1;
                 report.skipped += 1;
             }
             Outcome::Dropped => {
                 attempts += 1;
+                tracker.forget(id);
                 let _ = welcome::ack(client, server, session, id).await;
             }
             done => {
                 attempts += 1;
+                tracker.forget(id);
                 match done {
                     Outcome::PqBound => report.pq_bound.push(group_id),
                     _ => report.stored += 1,
                 }
                 // Already persisted; a failed ack only leaves a duplicate that fails to
-                // decrypt (and is skipped) until server-side expiry.
+                // decrypt (and is dropped by the junk tracker) later.
                 let _ = welcome::ack(client, server, session, id).await;
             }
         }
     }
+    let _ = tracker.save(&session.store);
     Ok(report)
 }
 
@@ -245,10 +296,16 @@ fn process_one(
 ) -> Result<Outcome, InviteError> {
     let store = &session.store;
     let Some(mut conv) = conversation::load(store, &group_id)? else {
-        return Ok(Outcome::Ignored);
+        return Ok(
+            if requests::load(store, &group_id).ok().flatten().is_some() {
+                Outcome::Ignored
+            } else {
+                Outcome::Unknown
+            },
+        );
     };
     if conv.peer_device_id != sender {
-        return Ok(Outcome::Ignored);
+        return Ok(Outcome::Unknown);
     }
     if stored_count(store)? >= MAX_STORED_MESSAGES {
         return Ok(Outcome::Skip);
@@ -268,7 +325,7 @@ fn process_one(
     let Ok(plain): Result<Zeroizing<Vec<u8>>, _> =
         mls_group::decrypt_message(&mut group, ciphertext, &local.provider)
     else {
-        return Ok(Outcome::Skip);
+        return Ok(Outcome::Undecryptable);
     };
     let awaiting_pq = conv.role == Role::Joiner && conv.pq_decap_key().is_some();
     if awaiting_pq {
@@ -348,6 +405,7 @@ fn stored_count(store: &ProfileStore) -> Result<usize, InviteError> {
 }
 
 mod body_hex;
+mod junk;
 
 #[cfg(test)]
 mod tests;
