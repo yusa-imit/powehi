@@ -32,6 +32,15 @@ impl From<KeyPackageRow> for KeyPackage {
     }
 }
 
+/// Server-side KeyPackage lifetime. A package's MLS `Lifetime` starts at generation, which is at
+/// or before `uploaded_at`, so a row older than this is expired (inviters reject it with
+/// `InvalidLifetime`). `fetch_one` and `count_available` skip such rows so an idle device's dead
+/// pool is neither handed out nor counted toward the CLI's top-up watermark (issue #139).
+const KEY_PACKAGE_LIFETIME_DAYS: i32 = 84;
+/// Rows are served only while younger than this: one day short of the lifetime, covering the gap
+/// between generation and upload and client/server clock skew.
+const KEY_PACKAGE_SERVE_DAYS: i32 = KEY_PACKAGE_LIFETIME_DAYS - 1;
+
 pub struct PgKeyPackageRepository {
     pool: PgPool,
 }
@@ -45,6 +54,18 @@ impl PgKeyPackageRepository {
 #[async_trait]
 impl KeyPackageRepository for PgKeyPackageRepository {
     async fn save(&self, kp: &KeyPackage) -> Result<(), DomainError> {
+        // Expired rows no longer count toward the per-device cap, so drop this device's here:
+        // storage stays bounded by the cap per lifetime window. Deleting an expired row is
+        // fail-closed (`mark_consumed` reads `NotFound` like `AlreadyConsumed`).
+        sqlx::query(
+            "DELETE FROM key_packages
+             WHERE device_id = $1 AND uploaded_at <= now() - make_interval(days => $2)",
+        )
+        .bind(kp.device_id.as_uuid())
+        .bind(KEY_PACKAGE_LIFETIME_DAYS)
+        .execute(&self.pool)
+        .await
+        .map_err(map_err)?;
         sqlx::query(
             "INSERT INTO key_packages (id, device_id, data, uploaded_at, consumed)
              VALUES ($1, $2, $3, $4, $5)
@@ -69,6 +90,7 @@ impl KeyPackageRepository for PgKeyPackageRepository {
              WHERE id = (
                  SELECT id FROM key_packages
                  WHERE device_id = $1 AND consumed = FALSE
+                   AND uploaded_at > now() - make_interval(days => $2)
                  ORDER BY uploaded_at ASC
                  LIMIT 1
                  FOR UPDATE SKIP LOCKED
@@ -76,6 +98,7 @@ impl KeyPackageRepository for PgKeyPackageRepository {
              RETURNING id, device_id, data, uploaded_at, consumed",
         )
         .bind(device_id.as_uuid())
+        .bind(KEY_PACKAGE_SERVE_DAYS)
         .fetch_optional(&self.pool)
         .await
         .map_err(map_err)?;
@@ -84,9 +107,12 @@ impl KeyPackageRepository for PgKeyPackageRepository {
 
     async fn count_available(&self, device_id: &DeviceId) -> Result<u64, DomainError> {
         let row: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM key_packages WHERE device_id = $1 AND consumed = FALSE",
+            "SELECT COUNT(*) FROM key_packages
+             WHERE device_id = $1 AND consumed = FALSE
+               AND uploaded_at > now() - make_interval(days => $2)",
         )
         .bind(device_id.as_uuid())
+        .bind(KEY_PACKAGE_SERVE_DAYS)
         .fetch_one(&self.pool)
         .await
         .map_err(map_err)?;

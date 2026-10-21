@@ -683,6 +683,40 @@ async fn delete_consumed_older_than_only_sweeps_old_consumed_rows() {
     );
 }
 
+/// Issue #139: an unconsumed package past the 84-day lifetime is neither counted nor handed out,
+/// so an idle device's dead pool reads as empty and the CLI's top-up fires.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn expired_key_packages_are_neither_counted_nor_fetched() {
+    let (_c, pool) = setup().await;
+    let device = insert_device(&pool, insert_user(&pool).await).await;
+    let repo = PgKeyPackageRepository::new(pool.clone());
+
+    let expired = insert_key_package(&pool, device.clone(), false).await;
+    backdate_key_package(&pool, &expired, Utc::now() - chrono::Duration::days(85)).await;
+    assert_eq!(repo.count_available(&device).await.expect("count"), 0);
+    assert!(repo.fetch_one(&device).await.expect("fetch").is_none());
+
+    let fresh = insert_key_package(&pool, device.clone(), false).await;
+    backdate_key_package(&pool, &fresh, Utc::now() - chrono::Duration::days(82)).await;
+    assert_eq!(repo.count_available(&device).await.expect("count"), 1);
+    let got = repo
+        .fetch_one(&device)
+        .await
+        .expect("fetch")
+        .expect("fresh package");
+    assert_eq!(got.id, fresh, "the expired row must never be returned");
+
+    // A save by the same device drops its expired rows, so storage stays bounded.
+    insert_key_package(&pool, device.clone(), false).await;
+    let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM key_packages WHERE id = $1")
+        .bind(expired.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .expect("count expired");
+    assert_eq!(left, 0, "save must delete the device's expired rows");
+}
+
 /// The `limit` bound is respected, mirroring
 /// `sweep_stale_pending_removals_respects_limit_and_resumes_next_tick`: plant
 /// more eligible (old, consumed) rows than `limit`, confirm exactly `limit`
