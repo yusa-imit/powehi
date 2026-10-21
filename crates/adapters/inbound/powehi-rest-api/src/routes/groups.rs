@@ -78,6 +78,35 @@ pub async fn add_member(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /v1/groups/:group_id/accept`
+///
+/// The caller accepts its own pending membership (8.11). 204 on success or
+/// when already a member; 401 otherwise (no existence oracle).
+pub async fn accept_membership(
+    State(state): State<AppState>,
+    AuthenticatedDevice(caller): AuthenticatedDevice,
+    Path(raw_group_id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let group_id = GroupId::from(raw_group_id);
+    tracing::info!(caller = %caller, group_id = %group_id, "groups.accept_membership");
+    state.group.accept_membership(&caller, &group_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /v1/groups/:group_id/decline`
+///
+/// The caller drops its own pending membership (8.11). Always 204.
+pub async fn decline_membership(
+    State(state): State<AppState>,
+    AuthenticatedDevice(caller): AuthenticatedDevice,
+    Path(raw_group_id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let group_id = GroupId::from(raw_group_id);
+    tracing::info!(caller = %caller, group_id = %group_id, "groups.decline_membership");
+    state.group.decline_membership(&caller, &group_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// `DELETE /v1/groups/:group_id/members/:device_id`
 ///
 /// Removes `device_id` from `group_id`.  The caller must already be a member

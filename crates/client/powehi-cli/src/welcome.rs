@@ -22,6 +22,8 @@ pub const MAX_POLL_BYTES: usize = 16 * 1024 * 1024;
 /// Welcomes processed per call; the rest are picked up on the next call.
 pub const MAX_WELCOMES_PER_RUN: usize = 16;
 const ACK_BODY: usize = 4 * 1024;
+/// Attempts at the idempotent accept call before the join is reported as unconfirmed.
+const ACCEPT_ATTEMPTS: usize = 3;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct JoinReport {
@@ -144,6 +146,14 @@ async fn join_filtered(
                 // The join is already persisted; a failed ack only leaves a stale envelope
                 // that is skipped (its KeyPackage is consumed) until server-side expiry.
                 let _ = ack(client, server, session, id).await;
+                // Consent (prd 3.3, 8.11): joining is our consent to the server-side
+                // membership, which stays pending until we say so.
+                if accept_membership(client, server, session, group_id)
+                    .await
+                    .is_err()
+                {
+                    eprintln!("warning: could not confirm membership with the server; group traffic may not arrive");
+                }
             }
             Err(JoinOutcome::Skip) => report.skipped += 1,
             Err(JoinOutcome::Fatal(e)) => return Err(e),
@@ -263,6 +273,28 @@ fn invite_marker_exists(
         .get(&invite_marker(key_ref))
         .map(|v| v.is_some())
         .map_err(|e| JoinOutcome::Fatal(IdentityError::from(e).into()))
+}
+
+/// Tell the server this device consents to its pending membership in `group_id`. Idempotent
+/// server-side (204 for an existing member); retried because a lost response is the only way
+/// the join and the consent can end up out of step.
+pub(crate) async fn accept_membership(
+    client: &Client,
+    server: &Url,
+    session: &Session,
+    group_id: Uuid,
+) -> Result<(), InviteError> {
+    let url = server
+        .join(&format!("/v1/groups/{group_id}/accept"))
+        .map_err(|_| InviteError::BadResponse)?;
+    let mut last = None;
+    for _ in 0..ACCEPT_ATTEMPTS {
+        match identity::send_raw(client.post(url.clone()), session, ACK_BODY).await {
+            Ok(_) => return Ok(()),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.map_or(InviteError::BadResponse, InviteError::from))
 }
 
 pub(crate) async fn ack(

@@ -19,6 +19,24 @@ pub trait GroupUseCase: Send + Sync {
         epoch: Epoch,
     ) -> Result<(), DomainError>;
 
+    /// Consent (8.11): the caller accepts its own *pending* membership in
+    /// `group_id`, becoming a member. Idempotent for an existing member.
+    /// A caller with no pending row and no membership gets `Unauthorized`,
+    /// indistinguishable from an unknown group.
+    async fn accept_membership(
+        &self,
+        caller: &DeviceId,
+        group_id: &GroupId,
+    ) -> Result<(), DomainError>;
+
+    /// Consent (8.11): the caller drops its own pending membership. Idempotent
+    /// success even when none exists (no existence oracle).
+    async fn decline_membership(
+        &self,
+        caller: &DeviceId,
+        group_id: &GroupId,
+    ) -> Result<(), DomainError>;
+
     /// Remove `device_id` from `group_id`. `caller` must already be a member
     /// of the group; fails with `Unauthorized` otherwise (fail-closed).
     async fn remove_member(

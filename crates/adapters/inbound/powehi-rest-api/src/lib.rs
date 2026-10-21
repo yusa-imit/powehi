@@ -154,6 +154,14 @@ fn router_inner(
             post(routes::groups::add_member).delete(routes::groups::remove_member),
         )
         .route(
+            "/v1/groups/:group_id/accept",
+            post(routes::groups::accept_membership),
+        )
+        .route(
+            "/v1/groups/:group_id/decline",
+            post(routes::groups::decline_membership),
+        )
+        .route(
             "/v1/groups/:group_id/pending-removals",
             get(routes::groups::list_pending_removals),
         )
@@ -592,6 +600,12 @@ mod tests {
         ) -> Result<(), DomainError> {
             Ok(())
         }
+        async fn accept_membership(&self, _: &DeviceId, _: &GroupId) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn decline_membership(&self, _: &DeviceId, _: &GroupId) -> Result<(), DomainError> {
+            Ok(())
+        }
         async fn remove_member(
             &self,
             _caller: &DeviceId,
@@ -654,6 +668,12 @@ mod tests {
         ) -> Result<(), DomainError> {
             Err(DomainError::Unauthorized)
         }
+        async fn accept_membership(&self, _: &DeviceId, _: &GroupId) -> Result<(), DomainError> {
+            Err(DomainError::Unauthorized)
+        }
+        async fn decline_membership(&self, _: &DeviceId, _: &GroupId) -> Result<(), DomainError> {
+            Ok(())
+        }
         async fn remove_member(
             &self,
             _caller: &DeviceId,
@@ -706,6 +726,12 @@ mod tests {
             _device_id: &DeviceId,
             _epoch: powehi_domain::group::Epoch,
         ) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn accept_membership(&self, _: &DeviceId, _: &GroupId) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn decline_membership(&self, _: &DeviceId, _: &GroupId) -> Result<(), DomainError> {
             Ok(())
         }
         async fn remove_member(
@@ -775,6 +801,12 @@ mod tests {
             _device_id: &DeviceId,
             _epoch: powehi_domain::group::Epoch,
         ) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn accept_membership(&self, _: &DeviceId, _: &GroupId) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn decline_membership(&self, _: &DeviceId, _: &GroupId) -> Result<(), DomainError> {
             Ok(())
         }
         async fn remove_member(
@@ -2662,6 +2694,62 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    // ── POST /v1/groups/:group_id/{accept,decline} tests (8.11) ──────────────
+
+    #[tokio::test]
+    async fn accept_and_decline_without_token_return_401() {
+        for action in ["accept", "decline"] {
+            let group_id = uuid::Uuid::new_v4();
+            let resp = test_router()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/v1/groups/{group_id}/{action}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{action}");
+        }
+    }
+
+    #[tokio::test]
+    async fn accept_and_decline_with_token_return_204() {
+        for action in ["accept", "decline"] {
+            let group_id = uuid::Uuid::new_v4();
+            let resp = groups_router()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/v1/groups/{group_id}/{action}"))
+                        .header("authorization", bearer())
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NO_CONTENT, "{action}");
+        }
+    }
+
+    #[tokio::test]
+    async fn accept_without_a_pending_membership_returns_401() {
+        let group_id = uuid::Uuid::new_v4();
+        let resp = groups_router_unauthorized()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/groups/{group_id}/accept"))
+                    .header("authorization", bearer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     // ── POST /v1/groups/:group_id/members/:device_id tests ───────────────────

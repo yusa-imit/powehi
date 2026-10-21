@@ -27,6 +27,7 @@
  */
 
 import { useEffect, useRef } from "react";
+import { acceptMembership } from "../api/groups";
 import { type Envelope, ackMessage, pollMessages } from "../api/messages";
 import { useAuthStore } from "../store/auth";
 import { useCryptoWorker } from "./useCryptoWorker";
@@ -125,6 +126,18 @@ export function useWelcomePoller(
 			try {
 				const welcomeBytes = new Uint8Array(env.ciphertext);
 				const { groupId } = await cryptoWorker.mlsJoinGroup(identityId, welcomeBytes);
+				// Server-side membership stays pending until this device consents (8.11).
+				// Best effort with retries: accept is idempotent and a failure must not
+				// undo the join that already happened.
+				for (let attempt = 0; attempt < 3; attempt++) {
+					if (
+						await acceptMembership(sessionToken, env.group_id).then(
+							() => true,
+							() => false,
+						)
+					)
+						break;
+				}
 				onNewGroupRef.current({ groupId, senderDeviceId: env.sender });
 				await ackMessage(sessionToken, env.id).catch(() => {});
 			} catch (err) {

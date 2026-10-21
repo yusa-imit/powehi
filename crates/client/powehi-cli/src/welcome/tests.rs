@@ -38,6 +38,15 @@ async fn tampered_decap_key_is_skipped_unacked_and_not_joined() {
         1,
         "left for expiry, not acked"
     );
+    assert!(
+        !state
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .any(|c| c.ends_with("/accept")),
+        "a Welcome we did not join is never consented to"
+    );
     assert!(crate::conversation::list(&alice.store).unwrap().is_empty());
     assert_eq!(
         alice.store.get(PQ_KEYS_RECORD).unwrap().unwrap().to_vec(),
@@ -166,4 +175,13 @@ async fn joined_conversation_records_the_peers_credential_identity() {
         .unwrap();
     // Bob's test session carries the label [2; 16] (testsrv::session).
     assert_eq!(conv.peer_credential(), Some([2u8; 16].as_slice()));
+}
+
+#[tokio::test]
+async fn joining_confirms_the_pending_membership_with_the_server() {
+    let (_tmp, alice, state, url, gid) = pending_welcome().await;
+    join_pending(&client(), &url, &alice, None).await.unwrap();
+    let calls = state.lock().unwrap().calls.clone();
+    let accept = format!("POST /v1/groups/{gid}/accept");
+    assert_eq!(calls.iter().filter(|c| **c == accept).count(), 1);
 }

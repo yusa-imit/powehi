@@ -2734,3 +2734,96 @@ async fn sweep_stale_pending_removals_never_sweeps_a_row_whose_group_epoch_never
          after a sweep it correctly declined to touch"
     );
 }
+
+// ── Pending memberships (8.11 consent) ───────────────────────────────────────
+
+/// A pending device is invisible to every membership read and to the
+/// broadcast poll until it accepts; accept moves it into `group_members`
+/// once, decline and expiry drop it, and the per-device cap holds.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers)"]
+async fn pending_membership_grants_nothing_until_accepted() {
+    use powehi_port_outbound::group_repo::PENDING_MEMBERSHIP_MAX_PER_DEVICE;
+    let (_c, pool) = setup().await;
+    let repo = PgGroupRepository::new(pool.clone());
+    let user = insert_user(&pool).await;
+    let owner = insert_device(&pool, user.clone()).await;
+    let guest = insert_device(&pool, insert_user(&pool).await).await;
+    let group_id = insert_group(&pool).await;
+    join_group(&pool, group_id.clone(), owner.clone()).await;
+
+    let member = GroupMember {
+        group_id: group_id.clone(),
+        device_id: guest.clone(),
+        joined_at_epoch: Epoch(2),
+    };
+    repo.add_pending(&member).await.expect("add_pending");
+    repo.add_pending(&member).await.expect("retry is a no-op");
+    assert!(repo
+        .get_epoch_if_member(&group_id, &guest)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(repo.list_members(&group_id).await.unwrap().len(), 1);
+    assert!(repo
+        .list_groups_for_device(&guest)
+        .await
+        .unwrap()
+        .is_empty());
+
+    assert!(repo.accept_pending(&group_id, &guest).await.unwrap());
+    assert!(!repo.accept_pending(&group_id, &guest).await.unwrap());
+    let members = repo.list_members(&group_id).await.unwrap();
+    let joined = members.iter().find(|m| m.device_id == guest).unwrap();
+    assert_eq!(joined.joined_at_epoch, Epoch(2));
+    // An active member is never re-added as pending.
+    repo.add_pending(&member).await.unwrap();
+    assert!(!repo.decline_pending(&group_id, &guest).await.unwrap());
+
+    // Decline, expiry and remove all clear a pending row.
+    let other = insert_device(&pool, insert_user(&pool).await).await;
+    let m2 = GroupMember {
+        device_id: other.clone(),
+        ..member.clone()
+    };
+    repo.add_pending(&m2).await.unwrap();
+    assert!(repo.decline_pending(&group_id, &other).await.unwrap());
+    repo.add_pending(&m2).await.unwrap();
+    sqlx::query("UPDATE pending_memberships SET created_at = NOW() - INTERVAL '31 days'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(!repo.accept_pending(&group_id, &other).await.unwrap());
+    repo.add_pending(&m2).await.unwrap();
+    repo.remove_member(&group_id, &other).await.unwrap();
+    assert!(!repo.accept_pending(&group_id, &other).await.unwrap());
+
+    // Per-device cap by eviction: a flooded victim is never locked out and keeps exactly the cap.
+    let victim = insert_device(&pool, insert_user(&pool).await).await;
+    let mut groups = vec![];
+    for _ in 0..=PENDING_MEMBERSHIP_MAX_PER_DEVICE {
+        let g = insert_group(&pool).await;
+        repo.add_pending(&GroupMember {
+            group_id: g.clone(),
+            device_id: victim.clone(),
+            joined_at_epoch: Epoch(0),
+        })
+        .await
+        .unwrap();
+        groups.push(g);
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let held: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM pending_memberships WHERE device_id = $1")
+            .bind(victim.as_uuid())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(held, PENDING_MEMBERSHIP_MAX_PER_DEVICE);
+    // The oldest was evicted, the newest is acceptable.
+    assert!(!repo.accept_pending(&groups[0], &victim).await.unwrap());
+    assert!(repo
+        .accept_pending(groups.last().unwrap(), &victim)
+        .await
+        .unwrap());
+}

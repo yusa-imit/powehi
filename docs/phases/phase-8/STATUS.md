@@ -158,13 +158,20 @@ pointing here. Close the issue in the PR that finishes its item.
   sender-vs-credential comparison is NOT done: the label is an account-level, copyable value with no
   authenticated device_id binding (prd 3.3 cycle 456), so it would add no security (prd 7A.3,
   8.3). The binding itself (signature-key level, server-independent) is left for 8.19.
-- [ ] 8.11 Server consent for group membership (#30 option 2, pairs with #24) — adding
+- [x] 8.11 Server consent for group membership (#30 option 2, pairs with #24) — adding
   a device to a group creates a *pending* membership. A pending device receives only
   that group's Welcome, and the server neither stores nor fans out other traffic of
   the group for it until it accepts (or declines) through a new endpoint. A redeemed
   invite counts as consent for its own group. The web client calls accept right
   after it auto-joins (no UI change). Spec it in prd §3.3/§6 first.
   threat-model-checker (new server-visible state) + security-auditor.
+  Shipped: `pending_memberships` table (migration 0023) instead of a flag on `group_members`, so
+  every existing fan-out/poll/ACL query excludes pending devices by construction. `add_member`
+  now only records a pending row (64/device by evicting the oldest, 256/group, 7-day TTL with bounded lazy purge); the device calls
+  `POST /v1/groups/:gid/accept` (idempotent; 401 with no oracle) or `/decline`. Invite redeem =
+  consent: the CLI (`welcome::accept_membership`, 3 attempts) and the web poller call accept
+  right after a successful join. A failed accept after a persisted join leaves the device
+  without group traffic until 8.12's `powehi accept` can re-run it (CLI warns on stderr).
 - [ ] 8.12 Pending requests and `powehi accept` (#24) — `inbox` keeps Welcomes that are
   not for the user's own invite KeyPackages as pending requests (sender, group,
   received time; capped) in the store. `powehi requests` lists them, `powehi accept

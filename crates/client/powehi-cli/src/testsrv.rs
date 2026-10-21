@@ -93,6 +93,7 @@ fn handle(st: &mut Backend, method: &str, path: &str, caller: Uuid, body: &Value
             ));
             respond(204, None)
         }
+        ("POST", ["v1", "groups", _, "accept"]) => respond(204, None),
         ("POST", ["v1", "messages", "welcome"]) => {
             st.inbox.push(json!({
                 "id": Uuid::new_v4(),
