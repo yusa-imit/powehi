@@ -1734,6 +1734,91 @@ mod tests {
         }
     }
 
+    fn sample_manifest_bytes(pending: bool) -> Vec<u8> {
+        let mut m = Manifest {
+            generation: 3,
+            ..Manifest::default()
+        };
+        m.entries
+            .insert(tag_hex(&[1u8; RAW_TAG_LEN]), [2u8; HASH_LEN]);
+        if pending {
+            m.pending = Some(Pending {
+                tag: tag_hex(&[1u8; RAW_TAG_LEN]),
+                old: None,
+            });
+        }
+        m.encode().unwrap()
+    }
+
+    #[test]
+    fn manifest_decode_refuses_malformed_encodings() {
+        // Duplicate tag: two identical entries.
+        let mut dup = Vec::new();
+        dup.extend_from_slice(&1u64.to_be_bytes());
+        dup.extend_from_slice(&2u32.to_be_bytes());
+        for _ in 0..2 {
+            dup.extend_from_slice(&[1u8; RAW_TAG_LEN]);
+            dup.extend_from_slice(&[2u8; HASH_LEN]);
+        }
+        dup.push(0);
+        assert!(matches!(
+            Manifest::decode(&dup),
+            Err(StoreError::ManifestCorrupt)
+        ));
+        // Entry count over the record cap is refused before any allocation per entry.
+        let mut huge = Vec::new();
+        huge.extend_from_slice(&1u64.to_be_bytes());
+        huge.extend_from_slice(&u32::MAX.to_be_bytes());
+        assert!(matches!(
+            Manifest::decode(&huge),
+            Err(StoreError::ManifestCorrupt)
+        ));
+        // Unknown pending / has_old flag bytes.
+        let plain = sample_manifest_bytes(false);
+        let mut flag = plain.clone();
+        *flag.last_mut().unwrap() = 2;
+        assert!(matches!(
+            Manifest::decode(&flag),
+            Err(StoreError::ManifestCorrupt)
+        ));
+        let mut pend = sample_manifest_bytes(true);
+        *pend.last_mut().unwrap() = 2;
+        assert!(matches!(
+            Manifest::decode(&pend),
+            Err(StoreError::ManifestCorrupt)
+        ));
+        assert!(matches!(
+            Manifest::decode(&[]),
+            Err(StoreError::ManifestCorrupt)
+        ));
+    }
+
+    #[test]
+    fn manifest_encode_refuses_non_canonical_tags() {
+        for bad in [
+            "+f".repeat(16),
+            "AB".repeat(16),
+            "ab".repeat(15),
+            "zz".repeat(16),
+        ] {
+            let mut m = Manifest::default();
+            m.entries.insert(bad.clone(), [0u8; HASH_LEN]);
+            assert!(m.encode().is_err(), "{bad}");
+            let p = Manifest {
+                pending: Some(Pending {
+                    tag: bad.clone(),
+                    old: None,
+                }),
+                ..Manifest::default()
+            };
+            assert!(p.encode().is_err(), "pending {bad}");
+        }
+        let mixed = format!("F{}", "0".repeat(31));
+        let mut m = Manifest::default();
+        m.entries.insert(mixed, [0u8; HASH_LEN]);
+        assert!(m.encode().is_err());
+    }
+
     #[test]
     fn rollback_during_a_failed_put_is_not_certified() {
         let tmp = tempfile::tempdir().unwrap();
