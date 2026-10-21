@@ -579,3 +579,39 @@ fn stale_tracker_entries_are_pruned() {
     );
     assert_eq!(t.len(), 1);
 }
+
+#[test]
+fn decrypt_failures_give_up_only_after_both_count_and_grace() {
+    let mut t = junk::Tracker::default();
+    let id = Uuid::new_v4();
+    // Plenty of failures inside the grace: kept, a late Commit may still make it readable.
+    for _ in 0..(junk::MAX_DECRYPT_FAILURES * 2) {
+        assert!(!t.failed(id, 5));
+    }
+    // Grace elapsed: the next failure gives up.
+    assert!(t.failed(id, 5 + junk::UNKNOWN_GRACE_SECS));
+    // Grace elapsed but too few failures: kept.
+    let fresh = Uuid::new_v4();
+    for _ in 0..(junk::MAX_DECRYPT_FAILURES - 1) {
+        assert!(!t.failed(fresh, 5));
+    }
+    assert!(!t.failed(fresh, 5 + junk::UNKNOWN_GRACE_SECS - 1));
+    assert!(t.failed(fresh, 5 + junk::UNKNOWN_GRACE_SECS));
+}
+
+#[test]
+fn tracker_record_is_removed_when_emptied_and_garbage_loads_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let s = session(&tmp, "alice", 1);
+    let id = Uuid::new_v4();
+    let mut t = junk::Tracker::default();
+    t.unknown_expired(id, 1);
+    t.save(&s.store).unwrap();
+    assert!(s.store.get(junk::RECORD).unwrap().is_some());
+    t.forget(id);
+    t.save(&s.store).unwrap();
+    assert!(s.store.get(junk::RECORD).unwrap().is_none());
+
+    s.store.put(junk::RECORD, b"not json").unwrap();
+    assert_eq!(junk::Tracker::load(&s.store).unwrap().len(), 0);
+}

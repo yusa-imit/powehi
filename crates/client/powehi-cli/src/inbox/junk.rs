@@ -6,8 +6,8 @@
 //! [`UNKNOWN_GRACE_SECS`] have passed since we first saw them, so a Welcome that is merely late
 //! is not lost), and envelopes of a known conversation that fail to decrypt (acked after
 //! [`MAX_DECRYPT_FAILURES`] attempts *and* the same grace: a message from an epoch we cannot
-//! apply yet, before 8.14's Commit path, must not be dropped within seconds). Entries hold only the server-chosen envelope id and
-//! counters: no content, no ciphertext.
+//! apply yet, before 8.14's Commit path, must not be dropped within seconds). Entries hold
+//! only the server-chosen envelope id and counters: no content, no ciphertext.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -108,8 +108,7 @@ impl Tracker {
     }
 
     /// Records one failed decrypt. True once [`MAX_DECRYPT_FAILURES`] failed and the grace ran
-    /// out (ack, then forget). An
-    /// untracked id (tracker full) never reaches it.
+    /// out (ack, then forget). An untracked id (tracker full) never reaches it.
     pub(super) fn failed(&mut self, id: Uuid, now: u64) -> bool {
         let Some(e) = self.slot(id, now) else {
             return false;
