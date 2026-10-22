@@ -50,6 +50,14 @@ pub enum MlsError {
     /// Decrypting / processing an incoming message failed.
     #[error("mls decrypt error")]
     Decrypt,
+    /// The message is for a group epoch later than this device's: a Commit it has not yet
+    /// applied is still ahead of it. Read from the cleartext epoch field BEFORE any decrypt, so
+    /// nothing is consumed. Not a failure of the message itself: a caller must hold it (or
+    /// apply the missing Commit first) and never count it toward a give-up threshold. Only
+    /// returned for a message of THIS group while the group is active; openmls ValSem003 already
+    /// rejects a future epoch before touching any secret, this variant only classifies it.
+    #[error("mls epoch ahead error")]
+    EpochAhead,
     /// Serializing or deserializing a wire message failed.
     #[error("mls codec error")]
     Codec,
@@ -595,6 +603,20 @@ pub fn encrypt_message(
     out.to_bytes().map_err(|_| MlsError::Codec)
 }
 
+/// [`MlsError::EpochAhead`] when `message` is for this (active) group at a later epoch than ours.
+/// Classification only: openmls ValSem003 already rejects a future epoch before any secret is
+/// touched. Group id and activity are checked first so the variant means exactly "a Commit of
+/// this group is missing"; anything else falls through to openmls and surfaces as `Decrypt`.
+fn check_not_ahead(group: &MlsGroup, message: &ProtocolMessage) -> Result<(), MlsError> {
+    if message.group_id() == group.group_id()
+        && group.is_active()
+        && message.epoch().as_u64() > group.epoch().as_u64()
+    {
+        return Err(MlsError::EpochAhead);
+    }
+    Ok(())
+}
+
 /// Decrypt a serialized MLS application message and return the plaintext.
 ///
 /// The returned buffer is wiped on drop; openmls's internal decrypted copy (plaintext plus
@@ -617,6 +639,7 @@ pub fn decrypt_message(
     if protocol_message.content_type() != ContentType::Application {
         return Err(MlsError::UnexpectedMessage);
     }
+    check_not_ahead(group, &protocol_message)?;
     let processed = group
         .process_message(provider, protocol_message)
         .map_err(|_| MlsError::Decrypt)?;
@@ -1137,7 +1160,8 @@ pub fn abort_remove_member(
 ///     Read both variants' doc comments for the full split, why they must
 ///     not be treated the same by a consumer loop, and the (now much
 ///     narrower) remaining bound.
-///     Every other signal (genuine validation failures, wrong-epoch commits,
+///     A Commit for a later epoch than ours is [`MlsError::EpochAhead`] (cleartext epoch, same
+///     group, checked before any decrypt). Every other signal (genuine validation failures, past-epoch commits,
 ///     `NoPastEpochData` from this group's `max_past_epochs(0)` setting,
 ///     secret-reuse rejections) deliberately remains [`MlsError::Decrypt`]:
 ///     those are all "do not treat this as applied", and giving each its own
@@ -1275,6 +1299,7 @@ fn stage_incoming_commit(
     if protocol_message.content_type() != ContentType::Commit {
         return Err(MlsError::UnexpectedMessage);
     }
+    check_not_ahead(group, &protocol_message)?;
     let processed = group
         .process_message(provider, protocol_message)
         .map_err(classify_process_message_error)?;
@@ -1409,8 +1434,8 @@ pub struct StagedCommitInfo {
 /// [`MlsError::OwnCommitPending`] for a Commit this device authored per
 /// openmls's own unverified pre-merge signal, [`MlsError::OwnCommit`] when
 /// `hash_own_commit(commit_bytes)` instead matches `last_own_commit`
-/// (post-merge case, hash-verified by this crate), and [`MlsError::Decrypt`]
-/// for everything else.
+/// (post-merge case, hash-verified by this crate), [`MlsError::EpochAhead`] for a Commit of a
+/// later epoch than ours, and [`MlsError::Decrypt`] for everything else.
 pub fn inspect_incoming_commit(
     group: &mut MlsGroup,
     commit_bytes: &[u8],
@@ -3682,6 +3707,107 @@ mod tests {
             "decrypt_message must recover the exact original plaintext after the misrouted \
              process_incoming_commit call was cleanly rejected by the content-type guard"
         );
+    }
+
+    /// A message from an epoch the receiver has not reached yet is `EpochAhead`, not `Decrypt`,
+    /// and consumes nothing: after applying the missing Commit it decrypts.
+    #[test]
+    fn test_epoch_ahead_message_is_distinct_and_consumes_nothing() {
+        let alice_provider = OpenMlsRustCrypto::default();
+        let bob_provider = OpenMlsRustCrypto::default();
+        let charlie_provider = OpenMlsRustCrypto::default();
+        let alice = generate_identity(b"alice", &alice_provider).unwrap();
+        let bob = generate_identity(b"bob", &bob_provider).unwrap();
+        let charlie = generate_identity(b"charlie", &charlie_provider).unwrap();
+        let bob_kp = generate_key_package(&bob, &bob_provider).unwrap();
+        let charlie_kp = generate_key_package(&charlie, &charlie_provider).unwrap();
+        let mut alice_group = create_group(&alice, &alice_provider).unwrap();
+        let welcome = add_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_kp.key_package().clone(),
+            &alice_provider,
+        )
+        .unwrap();
+        let mut bob_group = join_group(&welcome, &bob_provider).unwrap();
+        let (commit, _w, _gi) = alice_group
+            .add_members(
+                &alice_provider,
+                &alice.signer,
+                &[charlie_kp.key_package().clone()],
+            )
+            .unwrap();
+        alice_group.merge_pending_commit(&alice_provider).unwrap();
+        let commit_bytes = commit.to_bytes().unwrap();
+        let ct =
+            encrypt_message(&mut alice_group, &alice.signer, b"later", &alice_provider).unwrap();
+
+        let epoch = bob_group.epoch().as_u64();
+        let early = decrypt_message(&mut bob_group, &ct, &bob_provider);
+        assert!(matches!(early, Err(MlsError::EpochAhead)));
+        assert_eq!(bob_group.epoch().as_u64(), epoch);
+        // The missing Commit applies, after which the held message decrypts.
+        process_incoming_commit(&mut bob_group, &commit_bytes, &bob_provider, None).unwrap();
+        let plain = decrypt_message(&mut bob_group, &ct, &bob_provider).unwrap();
+        assert_eq!(plain.as_slice(), b"later");
+        // Negative space: the same Commit again is now behind us, an ordinary Decrypt failure.
+        let replay = process_incoming_commit(&mut bob_group, &commit_bytes, &bob_provider, None);
+        assert!(matches!(replay, Err(MlsError::Decrypt)));
+    }
+
+    /// A Commit built on an epoch we have not reached is `EpochAhead` on both receive paths,
+    /// changes nothing, and applies once the missing Commit has been applied.
+    #[test]
+    fn test_epoch_ahead_commit_on_both_receive_paths() {
+        let (ap, bp, cp) = (
+            OpenMlsRustCrypto::default(),
+            OpenMlsRustCrypto::default(),
+            OpenMlsRustCrypto::default(),
+        );
+        let alice = generate_identity(b"alice", &ap).unwrap();
+        let bob = generate_identity(b"bob", &bp).unwrap();
+        let carol = generate_identity(b"carol", &cp).unwrap();
+        let dave_p = OpenMlsRustCrypto::default();
+        let dave = generate_identity(b"dave", &dave_p).unwrap();
+        let bob_kp = generate_key_package(&bob, &bp).unwrap();
+        let carol_kp = generate_key_package(&carol, &cp).unwrap();
+        let dave_kp = generate_key_package(&dave, &dave_p).unwrap();
+        let mut alice_group = create_group(&alice, &ap).unwrap();
+        let welcome = add_member(
+            &mut alice_group,
+            &alice.signer,
+            bob_kp.key_package().clone(),
+            &ap,
+        )
+        .unwrap();
+        let mut bob_group = join_group(&welcome, &bp).unwrap();
+        let mut commits = Vec::new();
+        for kp in [carol_kp, dave_kp] {
+            let (c, _w, _g) = alice_group
+                .add_members(&ap, &alice.signer, &[kp.key_package().clone()])
+                .unwrap();
+            alice_group.merge_pending_commit(&ap).unwrap();
+            commits.push(c.to_bytes().unwrap());
+        }
+        let epoch = bob_group.epoch().as_u64();
+        // Second Commit first: one epoch ahead of Bob.
+        assert!(matches!(
+            process_incoming_commit(&mut bob_group, &commits[1], &bp, None),
+            Err(MlsError::EpochAhead)
+        ));
+        assert!(matches!(
+            inspect_incoming_commit(&mut bob_group, &commits[1], &bp, None),
+            Err(MlsError::EpochAhead)
+        ));
+        assert_eq!(bob_group.epoch().as_u64(), epoch);
+        process_incoming_commit(&mut bob_group, &commits[0], &bp, None).unwrap();
+        process_incoming_commit(&mut bob_group, &commits[1], &bp, None).unwrap();
+        assert_eq!(bob_group.epoch(), alice_group.epoch());
+        // Negative space: a past-epoch Commit is an ordinary Decrypt failure, not EpochAhead.
+        assert!(matches!(
+            process_incoming_commit(&mut bob_group, &commits[0], &bp, None),
+            Err(MlsError::Decrypt)
+        ));
     }
 
     /// Mirror of [`test_process_incoming_commit_rejects_application_message`]:

@@ -173,6 +173,9 @@ enum Outcome {
     Unknown,
     /// A known peer's envelope that did not decrypt: acked after repeated failures.
     Undecryptable,
+    /// A known peer's envelope from an epoch we have not reached (a Commit is missing): held,
+    /// never counted as a failure, acked only after the grace.
+    Ahead,
 }
 
 /// Joins pending Welcomes, then processes pending Application messages.
@@ -307,6 +310,16 @@ async fn receive_at(
                     tracker.forget(id);
                 }
             }
+            Outcome::Ahead => {
+                attempts += 1;
+                report.skipped += 1;
+                // Not a failure: the Commit that makes it readable may still arrive.
+                if tracker.unknown_expired(id, now)
+                    && welcome::ack(client, server, session, id).await.is_ok()
+                {
+                    tracker.forget(id);
+                }
+            }
             Outcome::Skip => {
                 deferred = true;
                 attempts += 1;
@@ -388,11 +401,12 @@ fn process_one(
     if !mls_group::is_fresh_pair(&group) {
         return Ok(Outcome::Skip);
     }
-    let Ok(plain): Result<Zeroizing<Vec<u8>>, _> =
-        mls_group::decrypt_message(&mut group, ciphertext, &local.provider)
-    else {
-        return Ok(Outcome::Undecryptable);
-    };
+    let plain: Zeroizing<Vec<u8>> =
+        match mls_group::decrypt_message(&mut group, ciphertext, &local.provider) {
+            Ok(p) => p,
+            Err(mls_group::MlsError::EpochAhead) => return Ok(Outcome::Ahead),
+            Err(_) => return Ok(Outcome::Undecryptable),
+        };
     let awaiting_pq = conv.role == Role::Joiner && conv.pq_decap_key().is_some();
     if awaiting_pq {
         if let Some(binding) = pq_binding(&conv, &plain, group_id) {
