@@ -965,6 +965,44 @@ async fn a_held_ahead_envelope_keeps_the_cursor_at_the_head_across_a_full_window
 }
 
 #[tokio::test]
+async fn a_held_ahead_envelope_stops_pinning_the_cursor_after_the_bound() {
+    let (_tmp, p) = pair().await;
+    receive(&client(), &p.url, &p.alice).await.unwrap();
+    p.state.lock().unwrap().page_limit = 2;
+    let ahead = bob_sends_from_next_epoch(&p);
+    {
+        let mut st = p.state.lock().unwrap();
+        let e = st
+            .inbox
+            .iter_mut()
+            .find(|e| e["id"].as_str() == Some(&ahead.to_string()))
+            .unwrap();
+        e["id"] = json!("00000000-0000-0000-0000-000000000001");
+    }
+    stamped_junk(&p, 2 * welcome::MAX_PAGES + 2);
+    let t0 = 1_000_000;
+    receive_at(&client(), &p.url, &p.alice, t0).await.unwrap();
+    assert!(cursor::load(&p.alice.store).is_none());
+    // Still within the bound: pinned.
+    receive_at(&client(), &p.url, &p.alice, t0 + junk::AHEAD_PIN_SECS - 1)
+        .await
+        .unwrap();
+    assert!(cursor::load(&p.alice.store).is_none());
+    // Past it: one peer-sent envelope no longer hides the rest of the queue (#30).
+    receive_at(&client(), &p.url, &p.alice, t0 + junk::AHEAD_PIN_SECS)
+        .await
+        .unwrap();
+    assert!(
+        cursor::load(&p.alice.store).is_some(),
+        "the cursor must move past an Ahead envelope held beyond the bound"
+    );
+    assert!(
+        inbox_len(&p) > 0,
+        "the envelope itself stays until its grace"
+    );
+}
+
+#[tokio::test]
 async fn a_commit_never_overtakes_messages_deferred_by_the_conversation_cap() {
     let (_tmp, p) = pair().await;
     receive(&client(), &p.url, &p.alice).await.unwrap();

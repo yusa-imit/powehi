@@ -17,6 +17,11 @@ use crate::store::{ProfileStore, StoreError};
 pub(super) const RECORD: &str = "inbox-junk";
 /// How long an envelope for an unknown group is kept before it is acked and dropped.
 pub(super) const UNKNOWN_GRACE_SECS: u64 = 24 * 60 * 60;
+/// How long one held "epoch ahead" envelope may keep the fetch cursor at the head. Past it the
+/// cursor moves on (the envelope is seen again at the next head rescan), so a single envelope
+/// from a peer cannot hide the rest of a long queue for the whole grace.
+pub(super) const AHEAD_PIN_SECS: u64 = 60 * 60;
+const _: () = assert!(AHEAD_PIN_SECS < UNKNOWN_GRACE_SECS);
 /// Decrypt attempts on a known conversation before the envelope is acked and dropped.
 pub(super) const MAX_DECRYPT_FAILURES: u32 = 5;
 /// Tracked envelopes: at least one full fetch window (`MAX_PAGES` x `MAX_PAGE_ENVELOPES`).
@@ -105,6 +110,14 @@ impl Tracker {
     pub(super) fn unknown_expired(&mut self, id: Uuid, now: u64) -> bool {
         self.slot(id, now)
             .is_some_and(|e| now.saturating_sub(e.first_seen) >= UNKNOWN_GRACE_SECS)
+    }
+
+    /// Records a sighting of an envelope held for a missing Commit. True while it is younger
+    /// than [`AHEAD_PIN_SECS`] (the fetch cursor stays put); an untracked id (tracker full)
+    /// never pins, so a full tracker cannot freeze the cursor.
+    pub(super) fn ahead_pins(&mut self, id: Uuid, now: u64) -> bool {
+        self.slot(id, now)
+            .is_some_and(|e| now.saturating_sub(e.first_seen) < AHEAD_PIN_SECS)
     }
 
     /// Records one failed decrypt. True once [`MAX_DECRYPT_FAILURES`] failed and the grace ran
