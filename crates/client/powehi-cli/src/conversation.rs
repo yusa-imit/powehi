@@ -59,6 +59,10 @@ pub struct Conversation {
     /// before 8.10.
     #[serde(default)]
     peer_credential: Option<Vec<u8>>,
+    /// The peer's MLS signature key, pinned the first time a Commit is applied (8.14): every
+    /// later Commit must leave it unchanged. `None` until then.
+    #[serde(default)]
+    peer_signature_key: Option<Vec<u8>>,
 }
 
 impl Conversation {
@@ -81,6 +85,7 @@ impl Conversation {
             pq_encap_key,
             pq_binding: None,
             peer_credential: None,
+            peer_signature_key: None,
         }
     }
 
@@ -95,6 +100,20 @@ impl Conversation {
     /// The peer's MLS credential identity, if recorded.
     pub fn peer_credential(&self) -> Option<&[u8]> {
         self.peer_credential.as_deref()
+    }
+
+    /// The pinned peer signature key, if a Commit was ever applied.
+    pub fn peer_signature_key(&self) -> Option<&[u8]> {
+        self.peer_signature_key.as_deref()
+    }
+
+    /// Pins the peer's signature key (32 bytes). Pinned once: a second, different key is a bug.
+    pub fn pin_peer_signature_key(&mut self, key: Vec<u8>) -> Result<(), ConversationError> {
+        if key.len() != 32 || self.peer_signature_key.as_ref().is_some_and(|k| *k != key) {
+            return Err(ConversationError::Malformed);
+        }
+        self.peer_signature_key = Some(key);
+        Ok(())
     }
 
     /// The PQ binding recorded after a successful `pq_init` exchange, if any.
@@ -144,7 +163,11 @@ impl Conversation {
         let credential_ok = self.peer_credential.as_ref().is_none_or(|c| {
             !c.is_empty() && c.len() <= powehi_crypto_core::mls_group::MAX_CREDENTIAL_IDENTITY_LEN
         });
-        if self.version == VERSION && key_ok && role_ok && binding_ok && credential_ok {
+        let sig_ok = self
+            .peer_signature_key
+            .as_ref()
+            .is_none_or(|k| k.len() == 32);
+        if self.version == VERSION && key_ok && role_ok && binding_ok && credential_ok && sig_ok {
             Ok(())
         } else {
             Err(ConversationError::Malformed)

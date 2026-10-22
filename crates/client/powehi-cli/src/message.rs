@@ -125,8 +125,8 @@ pub async fn send(
     let mut local = LocalIdentity::load(store)?;
     let mut group = mls_group::load_group(group_id.as_bytes(), &local.provider)?
         .ok_or(MessageError::GroupUnusable)?;
-    // Same 1:1 invariant the receive path relies on (no Commit is ever applied here).
-    if !mls_group::is_fresh_pair(&group) {
+    // Same 1:1 invariant the receive path relies on (only pair-preserving Commits are applied).
+    if !mls_group::is_pair_with(&group, &local.identity.signer.to_public_vec()) {
         return Err(MessageError::GroupUnusable);
     }
     let ct = mls_group::encrypt_message(&mut group, &local.identity.signer, body, &local.provider)?;

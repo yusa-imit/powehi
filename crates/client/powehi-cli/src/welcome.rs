@@ -51,7 +51,7 @@ const MAX_PAGE_ENVELOPES: usize = 128;
 const MAX_CURSOR_LEN: usize = 64;
 
 /// Typed (not `Value`) so a hostile page cannot blow up memory: ~1 byte per ciphertext byte.
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub(crate) struct Envelope {
     pub message_type: String,
     pub id: Option<Uuid>,

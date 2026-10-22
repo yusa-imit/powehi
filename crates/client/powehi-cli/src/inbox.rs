@@ -52,6 +52,10 @@ pub struct InboxReport {
     pub stored: usize,
     /// Conversations whose `pq_init` completed (the 16-hex binding is on the conv record).
     pub pq_bound: Vec<Uuid>,
+    /// Peer Commits applied (the conversation's epoch advanced).
+    pub commits: usize,
+    /// Peer Commits refused by the pair policy; the peer's later messages will not decrypt.
+    pub forked: usize,
     /// Envelopes left alone: unknown group, wrong sender, undecryptable, or store full.
     pub skipped: usize,
 }
@@ -239,8 +243,50 @@ async fn receive_at(
     // junk broadcasts cannot crowd real messages out of the run.
     let mut attempts = 0;
     let mut per_conv: std::collections::HashMap<Uuid, usize> = std::collections::HashMap::new();
-    for env in items {
+    // Application envelopes from an epoch we have not reached yet, kept for a retry right after
+    // the Commit that makes them readable (groups keep no past epochs, so order matters).
+    let mut held: Vec<welcome::Envelope> = Vec::new();
+    let mut blocked: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    let mut queue: std::collections::VecDeque<welcome::Envelope> = items.into();
+    while let Some(env) = queue.pop_front() {
         if env.message_type == "Welcome" {
+            continue;
+        }
+        if env.message_type == "Commit" {
+            // Head-of-line: an envelope of this group already waits for the next run (cap or
+            // full store), and the Commit would advance the epoch past it (no past epochs).
+            if attempts >= MAX_MESSAGES_PER_RUN {
+                deferred = true;
+                break;
+            }
+            attempts += 1;
+            if env.group_id.is_some_and(|g| blocked.contains(&g)) {
+                deferred = true;
+                report.skipped += 1;
+                continue;
+            }
+            let applied =
+                match handle_commit(client, server, session, &env, &mut tracker, now).await {
+                    Ok(a) => a,
+                    Err(e) => {
+                        let _ = tracker.save(&session.store);
+                        return Err(e);
+                    }
+                };
+            if applied == Applied::Forked {
+                report.forked += 1;
+            }
+            if let Applied::Yes(group_id) = applied {
+                report.commits += 1;
+                let (retry, keep): (Vec<_>, Vec<_>) =
+                    held.into_iter().partition(|h| h.group_id == Some(group_id));
+                held = keep;
+                for h in retry.into_iter().rev() {
+                    queue.push_front(h);
+                }
+            } else {
+                report.skipped += 1;
+            }
             continue;
         }
         if env.message_type != "Application" {
@@ -262,7 +308,7 @@ async fn receive_at(
             break;
         }
         let (Some(id), Some(group_id), Some(sender), Some(ct)) =
-            (env.id, env.group_id, env.sender, env.ciphertext)
+            (env.id, env.group_id, env.sender, env.ciphertext.as_deref())
         else {
             report.skipped += 1;
             continue;
@@ -277,11 +323,12 @@ async fn receive_at(
         // One peer cannot use the whole run: the rest of its envelopes wait for the next one.
         let used = per_conv.entry(group_id).or_insert(0);
         if *used >= MAX_PER_CONVERSATION {
+            blocked.insert(group_id);
             deferred = true;
             report.skipped += 1;
             continue;
         }
-        let outcome = match process_one(session, id, group_id, sender, &ct) {
+        let outcome = match process_one(session, id, group_id, sender, ct) {
             Ok(o) => o,
             Err(e) => {
                 let _ = tracker.save(&session.store);
@@ -313,6 +360,9 @@ async fn receive_at(
             Outcome::Ahead => {
                 attempts += 1;
                 report.skipped += 1;
+                if held.len() < MAX_MESSAGES_PER_RUN {
+                    held.push(env.clone());
+                }
                 // Not a failure: the Commit that makes it readable may still arrive.
                 if tracker.unknown_expired(id, now)
                     && welcome::ack(client, server, session, id).await.is_ok()
@@ -321,6 +371,7 @@ async fn receive_at(
                 }
             }
             Outcome::Skip => {
+                blocked.insert(group_id);
                 deferred = true;
                 attempts += 1;
                 report.skipped += 1;
@@ -343,6 +394,8 @@ async fn receive_at(
             }
         }
     }
+    // A held envelope still waits for its Commit: keep the cursor so it is seen again.
+    deferred |= !held.is_empty();
     let _ = tracker.save(&session.store);
     // Window exhausted and nothing deferred: resume behind it. End of queue: back to the head.
     // Deferred work keeps the old cursor so it is seen again.
@@ -352,6 +405,61 @@ async fn receive_at(
         cursor::save(&session.store, None);
     }
     Ok(report)
+}
+
+/// A Commit envelope. [`Applied::Yes`] when it was applied (the epoch advanced). Own echoes are
+/// acked at once; a peer Commit that cannot apply yet (later epoch) is held and acked only
+/// after the grace; one that is refused or invalid counts as a failure (acked after repeated
+/// failures and the grace); anything not from a held conversation's peer is acked after the
+/// grace as junk.
+async fn handle_commit(
+    client: &Client,
+    server: &Url,
+    session: &Session,
+    env: &welcome::Envelope,
+    tracker: &mut junk::Tracker,
+    now: u64,
+) -> Result<Applied, InviteError> {
+    let (Some(id), Some(group_id), Some(sender), Some(ct)) =
+        (env.id, env.group_id, env.sender, env.ciphertext.as_deref())
+    else {
+        return Ok(Applied::No);
+    };
+    if sender == session.device_id {
+        let _ = welcome::ack(client, server, session, id).await;
+        tracker.forget(id);
+        return Ok(Applied::No);
+    }
+    let outcome = if is_peer_traffic(session, Some(group_id), Some(sender)) {
+        commit::apply(session, group_id, sender, ct)?
+    } else {
+        commit::Outcome::Unknown
+    };
+    let mut forked = false;
+    let expired = match outcome {
+        commit::Outcome::Applied => {
+            tracker.forget(id);
+            let _ = welcome::ack(client, server, session, id).await;
+            return Ok(Applied::Yes(group_id));
+        }
+        commit::Outcome::Refused => tracker.failed(id, now),
+        commit::Outcome::Forked => {
+            forked = true;
+            tracker.failed(id, now)
+        }
+        commit::Outcome::Ahead | commit::Outcome::Unknown => tracker.unknown_expired(id, now),
+    };
+    if expired && welcome::ack(client, server, session, id).await.is_ok() {
+        tracker.forget(id);
+    }
+    Ok(if forked { Applied::Forked } else { Applied::No })
+}
+
+#[derive(PartialEq, Eq)]
+enum Applied {
+    Yes(Uuid),
+    No,
+    Forked,
 }
 
 /// True when `group_id` is a stored conversation and `sender` is its peer device.
@@ -395,10 +503,10 @@ fn process_one(
     let Some(mut group) = mls_group::load_group(group_id.as_bytes(), &local.provider)? else {
         return Ok(Outcome::Skip);
     };
-    // Sender authentication rests on the group being exactly the original pair at epoch 1
-    // (RFC 9420 §6.3.2: no Commit is ever applied here), so every application message is
-    // from the peer; `decrypt_message` does not expose the sender leaf.
-    if !mls_group::is_fresh_pair(&group) {
+    // Sender authentication rests on the group being exactly this pair (only Commits that
+    // keep it a pair are applied, `mls_group::apply_pair_commit`), so every application
+    // message is from the peer; `decrypt_message` does not expose the sender leaf.
+    if !mls_group::is_pair_with(&group, &local.identity.signer.to_public_vec()) {
         return Ok(Outcome::Skip);
     }
     let plain: Zeroizing<Vec<u8>> =
@@ -485,6 +593,7 @@ fn stored_count(store: &ProfileStore) -> Result<usize, InviteError> {
 }
 
 mod body_hex;
+mod commit;
 mod cursor;
 mod junk;
 

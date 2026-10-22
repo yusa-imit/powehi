@@ -229,6 +229,21 @@ pointing here. Close the issue in the PR that finishes its item.
   credential or signature key, silently for a never-verified conversation. 8.14 must check each
   applied Commit's peer leaf against the stored `peer_credential` (RFC 9420 5.3.1 successor
   check), anchor the peer's signature key on first sight, and treat legacy `None` as unknown.
+  Slice (a) shipped: `MlsError::EpochAhead`. Slice (b) shipped: `mls_group::apply_pair_commit`
+  (ADR-0005 one-shot merge behind a pair policy: committer is the peer leaf, no Add/Remove, the
+  update-path leaf keeps the peer signature key and, when recorded, the credential identity) and
+  `inbox/commit.rs`. The peer signature key is pinned on the `conv-*` record at the first applied
+  Commit, so the §5.6 safety number cannot change through the Commit path (the CHANGED alert
+  still recomputes it on every `read`/`send`); `send` and the receive path use `is_pair_with`
+  (any epoch) instead of `is_fresh_pair`. Application envelopes from a later epoch are held and
+  retried right after the Commit applies in the same run. Only a pure self-Update (no proposals,
+  update path keeping key and credential) applies; anything else is refused and reported as
+  `forked` (acked after failures + grace) until 8.17. A Commit never overtakes a same-group
+  envelope deferred by a cap (head-of-line); ADR-0005 amended. Crypto-reviewer carry-overs:
+  a persisted forked/removed conversation state, a Proposal ack policy, GCE/PSK/ReInit refusal
+  tests. Remaining before the box flips: the cross-run case
+  (a held Ahead envelope behind the saved fetch cursor is only revisited at the next head
+  rescan) and a `commits` count in the `inbox` text/JSON output.
 - [ ] 8.15 Post-compromise security (#39 item 2, #32 item 3) — periodic self-Update
   Commits from `send`/`chat` (crypto-lead sets the policy, e.g. age or message
   count, and writes it in prd §5); concurrent-Commit handling per the §4A commit
