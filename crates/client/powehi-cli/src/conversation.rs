@@ -818,6 +818,54 @@ mod tests {
     }
 
     #[test]
+    fn peer_signature_key_pins_once_and_survives_a_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let g = Uuid::new_v4();
+        let mut c = joiner(g);
+        assert!(c.peer_signature_key().is_none());
+        // Wrong lengths are refused and pin nothing.
+        for len in [0usize, 31, 33] {
+            assert!(matches!(
+                c.pin_peer_signature_key(vec![1; len]),
+                Err(ConversationError::Malformed)
+            ));
+            assert!(c.peer_signature_key().is_none());
+        }
+        c.pin_peer_signature_key(vec![1; 32]).unwrap();
+        // Re-pinning the same key is idempotent; a different one is refused and keeps the first.
+        c.pin_peer_signature_key(vec![1; 32]).unwrap();
+        assert!(matches!(
+            c.pin_peer_signature_key(vec![2; 32]),
+            Err(ConversationError::Malformed)
+        ));
+        assert_eq!(c.peer_signature_key(), Some([1u8; 32].as_slice()));
+        save(&store, &c).unwrap();
+        let got = load(&store, &g).unwrap().unwrap();
+        assert_eq!(got.peer_signature_key(), Some([1u8; 32].as_slice()));
+    }
+
+    #[test]
+    fn a_stored_record_with_a_wrong_size_signature_key_is_malformed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let g = Uuid::new_v4();
+        let mut c = joiner(g);
+        c.peer_signature_key = Some(vec![9; 31]);
+        assert!(matches!(
+            save(&store, &c),
+            Err(ConversationError::Malformed)
+        ));
+        store
+            .put(&record_name(&g), &serde_json::to_vec(&c).unwrap())
+            .unwrap();
+        assert!(matches!(
+            load(&store, &g),
+            Err(ConversationError::Malformed)
+        ));
+    }
+
+    #[test]
     fn debug_never_prints_the_key() {
         let c = joiner(Uuid::new_v4());
         let s = format!("{c:?}");
