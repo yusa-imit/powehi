@@ -2384,8 +2384,7 @@ mod tests {
 
     #[test]
     fn test_apply_pair_commit_refuses_a_by_reference_commit() {
-        let ((a, alice, mut ag), (b, bob, mut bg)) = joined_pair();
-        let ak = alice.signer.to_public_vec();
+        let ((a, _, mut ag), (b, bob, mut bg)) = joined_pair();
         // Bob commits to a proposal Alice never received: valid MLS for Bob, but Alice cannot
         // resolve the reference. That is a pair-policy refusal (forked), not a replay.
         let c = OpenMlsRustCrypto::default();
