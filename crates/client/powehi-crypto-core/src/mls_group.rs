@@ -62,6 +62,13 @@ pub enum MlsError {
     /// is not from the peer, or would change the peer's signature key or credential.
     #[error("mls pair commit refused")]
     PairCommitRefused,
+    /// A Commit references a proposal this device never stored (RFC 9420 §12.4 `ProposalOrRef`,
+    /// §12.4.2 processing). Returned by [`inspect_incoming_commit`] and [`process_incoming_commit`]
+    /// (so also by the WASM `mls_process_commit`, where the web consumer treats the unknown
+    /// message as a no-ack failure, like `Decrypt` before it). [`apply_pair_commit`] folds it
+    /// into [`MlsError::PairCommitRefused`] because a pair never stores peer proposals.
+    #[error("mls commit missing proposal")]
+    CommitMissingProposal,
     /// Serializing or deserializing a wire message failed.
     #[error("mls codec error")]
     Codec,
@@ -1132,7 +1139,7 @@ pub fn abort_remove_member(
 ///     refusing a Commit is terminal for these bytes — see
 ///     [`inspect_incoming_commit`]'s "discard is quarantine, not undo" section.
 /// (e) **No support for proposal-by-reference (RFC 9420 §12.4).** This
-///     function treats `ProcessedMessageContent::ProposalMessage` as
+///     function (a by-reference failure is [`MlsError::CommitMissingProposal`]) treats `ProcessedMessageContent::ProposalMessage` as
 ///     [`MlsError::UnexpectedMessage`] rather than calling
 ///     [`MlsGroup::store_pending_proposal`]. A Commit that references a
 ///     previously-sent standalone Proposal (`ProposalOrRef::Reference`) will
@@ -1165,7 +1172,8 @@ pub fn abort_remove_member(
 ///     not be treated the same by a consumer loop, and the (now much
 ///     narrower) remaining bound.
 ///     A Commit for a later epoch than ours is [`MlsError::EpochAhead`] (cleartext epoch, same
-///     group, checked before any decrypt). Every other signal (genuine validation failures, past-epoch commits,
+///     group, checked before any decrypt); one citing a proposal we never stored is
+///     [`MlsError::CommitMissingProposal`]. Every other signal (genuine validation failures, past-epoch commits,
 ///     `NoPastEpochData` from this group's `max_past_epochs(0)` setting,
 ///     secret-reuse rejections) deliberately remains [`MlsError::Decrypt`]:
 ///     those are all "do not treat this as applied", and giving each its own
@@ -1325,10 +1333,10 @@ fn stage_incoming_commit(
 /// crate's own hash-verified post-merge tracking) and for the limit of the
 /// detection.
 ///
-/// Every other failure — genuine validation failures, wrong-epoch commits,
-/// `NoPastEpochData`, secret reuse, storage errors — deliberately stays
-/// [`MlsError::Decrypt`], preserving the pre-existing behaviour of every
-/// caller. The error itself is dropped rather than embedded: openmls error
+/// A Commit citing an unknown proposal reference maps to
+/// [`MlsError::CommitMissingProposal`]; every other failure — genuine validation failures,
+/// wrong-epoch commits, `NoPastEpochData`, secret reuse, storage errors — deliberately stays
+/// [`MlsError::Decrypt`]. The error itself is dropped rather than embedded: openmls error
 /// values can carry message-derived detail, and this crate's errors are
 /// content-free by construction (rule: no-plaintext-logging).
 fn classify_process_message_error<StorageError>(
@@ -1338,6 +1346,9 @@ fn classify_process_message_error<StorageError>(
         ProcessMessageError::ValidationError(ValidationError::CannotDecryptOwnMessage)
         | ProcessMessageError::InvalidCommit(StageCommitError::OwnCommit) => {
             MlsError::OwnCommitPending
+        }
+        ProcessMessageError::InvalidCommit(StageCommitError::MissingProposal) => {
+            MlsError::CommitMissingProposal
         }
         _ => MlsError::Decrypt,
     }
@@ -1439,7 +1450,8 @@ pub struct StagedCommitInfo {
 /// openmls's own unverified pre-merge signal, [`MlsError::OwnCommit`] when
 /// `hash_own_commit(commit_bytes)` instead matches `last_own_commit`
 /// (post-merge case, hash-verified by this crate), [`MlsError::EpochAhead`] for a Commit of a
-/// later epoch than ours, and [`MlsError::Decrypt`] for everything else.
+/// later epoch than ours, [`MlsError::CommitMissingProposal`] for a by-reference proposal
+/// we never stored, and [`MlsError::Decrypt`] for everything else.
 pub fn inspect_incoming_commit(
     group: &mut MlsGroup,
     commit_bytes: &[u8],
@@ -1756,7 +1768,10 @@ pub fn apply_pair_commit(
     if anchor.is_some_and(|a| a != peer_key.as_slice()) {
         return Err(MlsError::PairCommitRefused);
     }
-    let (staged, info) = inspect_incoming_commit(group, commit_bytes, provider, None)?;
+    let (staged, info) = match inspect_incoming_commit(group, commit_bytes, provider, None) {
+        Err(MlsError::CommitMissingProposal) => return Err(MlsError::PairCommitRefused),
+        other => other?,
+    };
     // Allowlist (RFC 9420 §12.4): a pure self-Update, i.e. an empty proposal list and an update
     // path from the peer's own leaf. Anything else (Add, Remove, GroupContextExtensions, PSK,
     // ReInit, by-reference Update) is refused.
@@ -2365,6 +2380,48 @@ mod tests {
         let e = apply_pair_commit(&mut ag, &bytes, &a, &ak, None, None).unwrap_err();
         assert!(matches!(e, MlsError::PairCommitRefused), "{e:?}");
         assert_eq!(ag.epoch().as_u64(), 1, "a PSK Commit merges nothing");
+    }
+
+    #[test]
+    fn test_apply_pair_commit_refuses_a_by_reference_commit() {
+        let ((a, alice, mut ag), (b, bob, mut bg)) = joined_pair();
+        let ak = alice.signer.to_public_vec();
+        // Bob commits to a proposal Alice never received: valid MLS for Bob, but Alice cannot
+        // resolve the reference. That is a pair-policy refusal (forked), not a replay.
+        let c = OpenMlsRustCrypto::default();
+        let carol = generate_identity(b"carol", &c).unwrap();
+        let kp = generate_pq_key_package(&carol, &c).unwrap();
+        let msg = MlsMessageIn::tls_deserialize_exact(&kp.key_package).unwrap();
+        let MlsMessageBodyIn::KeyPackage(kp_in) = msg.extract() else {
+            panic!("not a key package");
+        };
+        let kp = kp_in.validate(b.crypto(), ProtocolVersion::Mls10).unwrap();
+        bg.propose_add_member(&b, &bob.signer, &kp).unwrap();
+        let (commit, _w, _gi) = bg.commit_to_pending_proposals(&b, &bob.signer).unwrap();
+        bg.merge_pending_commit(&b).unwrap();
+        let bytes = commit.to_bytes().unwrap();
+        // The classification itself, so the test cannot pass through the allowlist instead.
+        let e = inspect_incoming_commit(&mut ag, &bytes, &a, None).err();
+        assert!(matches!(e, Some(MlsError::CommitMissingProposal)), "{e:?}");
+        let ((a, alice, mut ag), (b, bob, mut bg)) = joined_pair();
+        let ak = alice.signer.to_public_vec();
+        let kp = generate_pq_key_package(&generate_identity(b"carol", &b).unwrap(), &b).unwrap();
+        let msg = MlsMessageIn::tls_deserialize_exact(&kp.key_package).unwrap();
+        let MlsMessageBodyIn::KeyPackage(kp_in) = msg.extract() else {
+            panic!("not a key package");
+        };
+        let kp = kp_in.validate(b.crypto(), ProtocolVersion::Mls10).unwrap();
+        bg.propose_add_member(&b, &bob.signer, &kp).unwrap();
+        let (commit, _w, _gi) = bg.commit_to_pending_proposals(&b, &bob.signer).unwrap();
+        bg.merge_pending_commit(&b).unwrap();
+        let bytes = commit.to_bytes().unwrap();
+        let e = apply_pair_commit(&mut ag, &bytes, &a, &ak, None, None).unwrap_err();
+        assert!(matches!(e, MlsError::PairCommitRefused), "{e:?}");
+        assert_eq!(
+            ag.epoch().as_u64(),
+            1,
+            "a by-reference Commit merges nothing"
+        );
     }
 
     #[test]
