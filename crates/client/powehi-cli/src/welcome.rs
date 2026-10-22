@@ -61,23 +61,61 @@ pub(crate) struct Envelope {
     created_at: Option<String>,
 }
 
-/// Fetches up to [`MAX_PAGES`] pages of pending envelopes, following the server's
-/// `(since, since_id)` keyset cursor taken from the last envelope of each page.
+/// A position in the server's `(created_at, id)` keyset order: fetch resumes after it.
+#[derive(serde::Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub(crate) struct Cursor {
+    pub since: String,
+    pub since_id: Uuid,
+}
+
+impl Cursor {
+    /// True for a cursor the server could have issued (bounded RFC 3339 characters only).
+    pub(crate) fn is_sane(&self) -> bool {
+        !self.since.is_empty()
+            && self.since.len() <= MAX_CURSOR_LEN
+            && self
+                .since
+                .bytes()
+                .all(|b| b.is_ascii_digit() || matches!(b, b'-' | b':' | b'T' | b'Z' | b'.' | b'+'))
+    }
+}
+
+/// What one fetch saw: the envelopes, the cursor after the last one, and whether the page
+/// budget ran out before the server's queue did (more may wait beyond `next`).
+pub(crate) struct Window {
+    pub items: Vec<Envelope>,
+    pub next: Option<Cursor>,
+    pub more: bool,
+}
+
+/// Fetches up to [`MAX_PAGES`] pages of pending envelopes from the head of the queue.
 pub(crate) async fn fetch_pending(
     client: &Client,
     server: &Url,
     session: &Session,
 ) -> Result<Vec<Envelope>, InviteError> {
+    Ok(fetch_from(client, server, session, None).await?.items)
+}
+
+/// [`fetch_pending`] resuming after `start`, following the server's `(since, since_id)` keyset
+/// cursor taken from the last envelope of each page.
+pub(crate) async fn fetch_from(
+    client: &Client,
+    server: &Url,
+    session: &Session,
+    start: Option<Cursor>,
+) -> Result<Window, InviteError> {
     let mut all: Vec<Envelope> = Vec::new();
-    let mut cursor: Option<(String, Uuid)> = None;
-    for _ in 0..MAX_PAGES {
+    let mut cursor = start.filter(Cursor::is_sane);
+    let mut more = false;
+    for page_no in 0..MAX_PAGES {
         let mut url = server
             .join("/v1/messages")
             .map_err(|_| InviteError::BadResponse)?;
-        if let Some((since, since_id)) = &cursor {
+        if let Some(c) = &cursor {
             url.query_pairs_mut()
-                .append_pair("since", since)
-                .append_pair("since_id", &since_id.to_string());
+                .append_pair("since", &c.since)
+                .append_pair("since_id", &c.since_id.to_string());
         }
         let raw = identity::send_raw(client.get(url), session, MAX_POLL_BYTES).await?;
         let page: Vec<Envelope> =
@@ -87,16 +125,28 @@ pub(crate) async fn fetch_pending(
         }
         let next = page
             .last()
-            .and_then(|e| Some((e.created_at.clone()?, e.id?)))
-            .filter(|(since, _)| since.len() <= MAX_CURSOR_LEN);
+            .and_then(|e| {
+                Some(Cursor {
+                    since: e.created_at.clone()?,
+                    since_id: e.id?,
+                })
+            })
+            .filter(Cursor::is_sane);
         all.extend(page);
         match next {
             // No progress (server ignored the cursor, or no timestamp): stop, don't spin.
-            Some(n) if cursor.as_ref() != Some(&n) => cursor = Some(n),
+            Some(n) if cursor.as_ref() != Some(&n) => {
+                cursor = Some(n);
+                more = page_no + 1 == MAX_PAGES;
+            }
             _ => break,
         }
     }
-    Ok(all)
+    Ok(Window {
+        items: all,
+        next: cursor,
+        more,
+    })
 }
 
 /// Permissive: no invite-marker check (inbox must use [`join_invited`]). Fetches pending envelopes and joins every Welcome addressed to one of our KeyPackages, or,
