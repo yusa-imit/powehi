@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 629 (2026-10-22, FEATURE) — 8.14 slice (f), box stays open
+Held Ahead envelope pins the fetch cursor for at most 1 h (`junk::AHEAD_PIN_SECS`, `Tracker::ahead_pins`). CLI-inbox logic only, no crypto touched. Still open for 8.14: persisted forked/removed state + Proposal ack policy (may move to 8.17), ReInit receive refusal test. Then flip 8.13 + 8.14.
+
 ## Cycle 628 (2026-10-22, FEATURE) — 8.14 slice (e), box stays open
 Test only: PSK-Commit refusal in crypto-core (ReInit receive-side refusal untested: openmls 0.8.1 builder drops ReInit). Still open for 8.14: bound the Ahead-pinned cursor (item 1), persisted forked state + Proposal ack policy (item 3, may move to 8.17).
 

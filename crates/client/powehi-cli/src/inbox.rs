@@ -228,6 +228,8 @@ async fn receive_at(
     let (items, next, more) = (window.items, window.next, window.more);
     // True once an envelope was held back (run caps): the cursor must not move past it.
     let mut deferred = false;
+    // True while a held Ahead envelope is young enough to keep the cursor at the head.
+    let mut ahead_pinned = false;
     // A local cache of timers: unreadable or unwritable must never fail the run.
     let mut tracker = junk::Tracker::load(&session.store).unwrap_or_default();
     tracker.prune(now);
@@ -365,6 +367,7 @@ async fn receive_at(
                 if held.len() < MAX_MESSAGES_PER_RUN {
                     held.push(env.clone());
                 }
+                ahead_pinned |= tracker.ahead_pins(id, now);
                 // Not a failure: the Commit that makes it readable may still arrive.
                 if tracker.unknown_expired(id, now)
                     && welcome::ack(client, server, session, id).await.is_ok()
@@ -396,8 +399,9 @@ async fn receive_at(
             }
         }
     }
-    // A held envelope still waits for its Commit: keep the cursor so it is seen again.
-    deferred |= !held.is_empty();
+    // A young held envelope still waits for its Commit: keep the cursor so it is seen again.
+    // Past the bound it is revisited at the next head rescan instead (#30).
+    deferred |= ahead_pinned;
     let _ = tracker.save(&session.store);
     // Window exhausted and nothing deferred: resume behind it. End of queue: back to the head.
     // Deferred work keeps the old cursor so it is seen again.
