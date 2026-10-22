@@ -294,10 +294,13 @@ async fn receive_at(
             continue;
         }
         if env.message_type != "Application" {
-            // Commit, Proposal or anything else: the Commit path is 8.14, so one from our
-            // peer in a held conversation waits; the rest is acked after the grace.
+            // A pair conversation never applies Proposals (the pair policy takes only a peer's
+            // self-Update Commit), so a peer Proposal is dead weight: acked after the same
+            // grace as any other junk. Anything else from our peer waits; the rest is acked
+            // after the grace.
             if let Some(id) = env.id {
-                if !is_peer_traffic(session, env.group_id, env.sender)
+                if (env.message_type == "Proposal"
+                    || !is_peer_traffic(session, env.group_id, env.sender))
                     && tracker.unknown_expired(id, now)
                     && welcome::ack(client, server, session, id).await.is_ok()
                 {

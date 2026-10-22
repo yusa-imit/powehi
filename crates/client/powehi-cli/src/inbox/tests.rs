@@ -662,6 +662,31 @@ async fn junk_commit_proposal_and_welcome_are_acked_after_the_grace() {
 }
 
 #[tokio::test]
+async fn a_peer_proposal_is_acked_after_the_grace_and_never_applied() {
+    let (_tmp, p) = pair().await;
+    receive(&client(), &p.url, &p.alice).await.unwrap();
+    let epoch = alice_epoch(&p);
+    typed_envelope(&p, "Proposal", p.gid, p.bob.device_id);
+    let t0 = 1_000_000;
+    receive_at(&client(), &p.url, &p.alice, t0).await.unwrap();
+    receive_at(
+        &client(),
+        &p.url,
+        &p.alice,
+        t0 + junk::UNKNOWN_GRACE_SECS - 1,
+    )
+    .await
+    .unwrap();
+    assert_eq!(inbox_len(&p), 1, "kept through the grace");
+    receive_at(&client(), &p.url, &p.alice, t0 + junk::UNKNOWN_GRACE_SECS)
+        .await
+        .unwrap();
+    assert_eq!(inbox_len(&p), 0, "acked once the grace ran out");
+    assert_eq!(alice_epoch(&p), epoch, "a Proposal never moves the epoch");
+    assert_eq!(junk::Tracker::load(&p.alice.store).unwrap().len(), 0);
+}
+
+#[tokio::test]
 async fn an_unappliable_commit_from_the_peer_is_acked_only_after_failures_and_the_grace() {
     let (_tmp, p) = pair().await;
     receive(&client(), &p.url, &p.alice).await.unwrap();
