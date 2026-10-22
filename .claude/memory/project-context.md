@@ -1782,3 +1782,6 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 - 8.13 slice b2: persistent inbox fetch cursor (`inbox/cursor.rs`, `welcome::fetch_from`). Resumes behind a fully-used fetch window when nothing was deferred; cleared at end of queue. Remaining for 8.13: epoch-aware failure count, which waits on 8.14's "epoch ahead" error. powehi-cli 355 tests pass. Next: 8.14 (Commit receive/apply).
 
 - 8.14 slice (b) (PR pending, cycle 624): CLI applies a peer's pure self-Update Commit (`mls_group::apply_pair_commit`, `inbox/commit.rs`), peer signature key pinned on `conv-*`, held Ahead messages retried after the Commit, head-of-line deferral, ADR-0005 amended. Remaining for 8.14: persisted forked state, Proposal ack policy, GCE/PSK/ReInit tests, cross-run Ahead, `commits`/`forked` in inbox output.
+
+## Cycle 625 (2026-10-22, STABILIZATION)
+- cargo audit / deny clean; main CI green. Added unit tests for `Conversation::pin_peer_signature_key` (length, idempotent re-pin, conflicting pin, round trip, malformed stored key). powehi-cli 362 tests pass. target/ pruned 35G -> 34G (mtime>7d only).
