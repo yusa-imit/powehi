@@ -445,6 +445,8 @@ fn report_json_is_one_object_with_ids_and_counts() {
         stored: 3,
         pq_bound: vec![b],
         skipped: 1,
+        commits: 0,
+        forked: 0,
     };
     let mut out = Vec::new();
     report_json(&mut out, &report, &[(b, "0123456789abcdef".to_string())]).unwrap();
@@ -652,21 +654,154 @@ async fn junk_commit_proposal_and_welcome_are_acked_after_the_grace() {
 }
 
 #[tokio::test]
-async fn a_commit_from_the_peer_of_a_held_conversation_is_never_acked_here() {
+async fn an_unappliable_commit_from_the_peer_is_acked_only_after_failures_and_the_grace() {
     let (_tmp, p) = pair().await;
     receive(&client(), &p.url, &p.alice).await.unwrap();
     typed_envelope(&p, "Commit", p.gid, p.bob.device_id);
     let t0 = 1_000_000;
-    receive_at(&client(), &p.url, &p.alice, t0).await.unwrap();
-    receive_at(
-        &client(),
-        &p.url,
-        &p.alice,
-        t0 + 10 * junk::UNKNOWN_GRACE_SECS,
-    )
-    .await
-    .unwrap();
-    assert_eq!(inbox_len(&p), 1, "left for the Commit path (8.14)");
+    for i in 0..junk::MAX_DECRYPT_FAILURES {
+        receive_at(&client(), &p.url, &p.alice, t0 + i as u64)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        inbox_len(&p),
+        1,
+        "failures alone do not ack inside the grace"
+    );
+    receive_at(&client(), &p.url, &p.alice, t0 + junk::UNKNOWN_GRACE_SECS)
+        .await
+        .unwrap();
+    assert_eq!(inbox_len(&p), 0);
+}
+
+/// Bob self-updates (a real Commit, merged on his side) and queues it for Alice.
+fn bob_commits(p: &Pair) -> Uuid {
+    let mut local = LocalIdentity::load(&p.bob.store).unwrap();
+    let mut group = mls_group::load_group(p.gid.as_bytes(), &local.provider)
+        .unwrap()
+        .unwrap();
+    let bundle = group
+        .self_update(
+            &local.provider,
+            &local.identity.signer,
+            openmls::prelude::LeafNodeParameters::default(),
+        )
+        .unwrap();
+    let ct = bundle.into_commit().to_bytes().unwrap();
+    group.merge_pending_commit(&local.provider).unwrap();
+    local.save(&p.bob.store).unwrap();
+    push_ordered(p, "Commit", ct)
+}
+
+fn push_ordered(p: &Pair, kind: &str, ct: Vec<u8>) -> Uuid {
+    let mut st = p.state.lock().unwrap();
+    let id = Uuid::from_u128(
+        (u128::MAX << 64) | (st.inbox.len() as u128 + st.calls.len() as u128 * 1000),
+    );
+    st.inbox.push(json!({
+        "id": id, "group_id": p.gid, "sender": p.bob.device_id,
+        "recipient": p.alice.device_id.to_string(),
+        "message_type": kind, "ciphertext": ct,
+    }));
+    id
+}
+
+fn alice_epoch(p: &Pair) -> u64 {
+    let local = LocalIdentity::load(&p.alice.store).unwrap();
+    mls_group::load_group(p.gid.as_bytes(), &local.provider)
+        .unwrap()
+        .unwrap()
+        .epoch()
+        .as_u64()
+}
+
+#[tokio::test]
+async fn peer_commits_apply_across_epochs_and_messages_after_them_decrypt() {
+    let (_tmp, p) = pair().await;
+    receive(&client(), &p.url, &p.alice).await.unwrap();
+    assert_eq!(alice_epoch(&p), 1);
+    assert!(conversation::load(&p.alice.store, &p.gid)
+        .unwrap()
+        .unwrap()
+        .peer_signature_key()
+        .is_none());
+    bob_sends(&p, b"epoch one");
+    bob_commits(&p);
+    bob_sends(&p, b"epoch two");
+    bob_commits(&p);
+    bob_sends(&p, b"epoch three");
+    let r = receive(&client(), &p.url, &p.alice).await.unwrap();
+    assert_eq!((r.commits, r.stored, r.skipped), (2, 3, 0));
+    assert_eq!(alice_epoch(&p), 3);
+    assert_eq!(inbox_len(&p), 0, "all acked");
+    let conv = conversation::load(&p.alice.store, &p.gid).unwrap().unwrap();
+    let local = LocalIdentity::load(&p.alice.store).unwrap();
+    let group = mls_group::load_group(p.gid.as_bytes(), &local.provider)
+        .unwrap()
+        .unwrap();
+    let bob_key = group
+        .members()
+        .find(|m| m.signature_key != local.identity.signer.to_public_vec())
+        .unwrap()
+        .signature_key;
+    assert_eq!(conv.peer_signature_key(), Some(bob_key.as_slice()));
+    // The safety number is a function of the two signature keys: unchanged by the Commits.
+    assert!(!crate::verify::changed_since_verified(
+        &p.alice.store,
+        p.gid
+    ));
+}
+
+#[tokio::test]
+async fn an_application_message_before_its_commit_is_held_then_read_after_it_applies() {
+    let (_tmp, p) = pair().await;
+    receive(&client(), &p.url, &p.alice).await.unwrap();
+    // Bob commits, then sends; the server hands Alice the message first.
+    let commit = bob_commits(&p);
+    bob_sends(&p, b"after the commit");
+    {
+        let mut st = p.state.lock().unwrap();
+        let last = st.inbox.len() - 1;
+        st.inbox.swap(0, last);
+        let _ = commit;
+    }
+    let r = receive(&client(), &p.url, &p.alice).await.unwrap();
+    assert_eq!((r.commits, r.stored), (1, 1));
+    assert_eq!(alice_epoch(&p), 2);
+    assert_eq!(inbox_len(&p), 0);
+}
+
+#[tokio::test]
+async fn a_commit_that_adds_a_member_is_refused_and_the_epoch_stays() {
+    let (_tmp, p) = pair().await;
+    receive(&client(), &p.url, &p.alice).await.unwrap();
+    // Bob adds a third member through the real core path.
+    let carol_tmp = tempfile::tempdir().unwrap();
+    let carol = session(&carol_tmp, "carol", 3);
+    let kp = {
+        let mut local = LocalIdentity::load(&carol.store).unwrap();
+        let bundle = mls_group::generate_key_package(&local.identity, &local.provider).unwrap();
+        local.save(&carol.store).unwrap();
+        bundle.key_package().clone()
+    };
+    let mut local = LocalIdentity::load(&p.bob.store).unwrap();
+    let mut group = mls_group::load_group(p.gid.as_bytes(), &local.provider)
+        .unwrap()
+        .unwrap();
+    let (commit, _welcome, _gi) = group
+        .add_members(&local.provider, &local.identity.signer, &[kp])
+        .unwrap();
+    group.merge_pending_commit(&local.provider).unwrap();
+    local.save(&p.bob.store).unwrap();
+    push_ordered(&p, "Commit", commit.to_bytes().unwrap());
+    let r = receive(&client(), &p.url, &p.alice).await.unwrap();
+    assert_eq!(r.commits, 0);
+    assert_eq!(
+        alice_epoch(&p),
+        1,
+        "the pair is never turned into a group here"
+    );
 }
 
 fn stamped_junk(p: &Pair, n: usize) {
@@ -793,4 +928,24 @@ async fn epoch_ahead_envelope_is_held_uncounted_and_acked_only_after_the_grace()
         .await
         .unwrap();
     assert_eq!(inbox_len(&p), 0);
+}
+
+#[tokio::test]
+async fn a_commit_never_overtakes_messages_deferred_by_the_conversation_cap() {
+    let (_tmp, p) = pair().await;
+    receive(&client(), &p.url, &p.alice).await.unwrap();
+    for i in 0..MAX_PER_CONVERSATION + 2 {
+        bob_sends(&p, format!("m{i}").as_bytes());
+    }
+    bob_commits(&p);
+    let r = receive(&client(), &p.url, &p.alice).await.unwrap();
+    assert_eq!((r.stored, r.commits), (MAX_PER_CONVERSATION, 0));
+    assert_eq!(
+        alice_epoch(&p),
+        1,
+        "the Commit waits behind the deferred messages"
+    );
+    let r = receive(&client(), &p.url, &p.alice).await.unwrap();
+    assert_eq!((r.stored, r.commits), (2, 1));
+    assert_eq!(alice_epoch(&p), 2);
 }

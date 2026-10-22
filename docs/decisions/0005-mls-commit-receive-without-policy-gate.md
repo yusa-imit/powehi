@@ -151,3 +151,15 @@ second, inconsistent policy.
 - `docs/prd.md` and this ADR are now the canonical reference the
   `mls_process_commit`/`mls_inspect_commit` doc comments in
   `wasm_exports.rs` point to — keep them in sync if this decision changes.
+
+## Amendment (2026-10-22, 8.14): the CLI applies a pair policy
+
+The CLI (`powehi-cli`, 1:1 conversations only) does not match `useMessages.ts`. It uses the
+two-phase inspect + merge inside one synchronous call (`mls_group::apply_pair_commit`; no window
+between the two, and nothing is persisted on a refusal) and merges only an allowlisted Commit:
+from the peer's leaf, no proposals, an update path whose new leaf keeps the peer's signature key
+and credential. Add/Remove and everything else is refused until groups land (8.17), which will
+re-open this ADR for a shared group policy. A refusal is reported as `forked` and the
+conversation stops decrypting; a Commit also never overtakes a same-group envelope deferred to
+the next run (the head-of-line rule this ADR's accepted risk #2 relies on). Consequence for the
+§5.6 CHANGED alert: the safety number cannot change through the Commit path.

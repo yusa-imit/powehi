@@ -58,6 +58,10 @@ pub enum MlsError {
     /// rejects a future epoch before touching any secret, this variant only classifies it.
     #[error("mls epoch ahead error")]
     EpochAhead,
+    /// A Commit in a 1:1 group that [`apply_pair_commit`] refuses: it adds or removes a member,
+    /// is not from the peer, or would change the peer's signature key or credential.
+    #[error("mls pair commit refused")]
+    PairCommitRefused,
     /// Serializing or deserializing a wire message failed.
     #[error("mls codec error")]
     Codec,
@@ -1700,6 +1704,100 @@ pub fn is_fresh_pair(group: &MlsGroup) -> bool {
     group.epoch().as_u64() == 1 && group.members().count() == 2
 }
 
+/// `true` when `group` is active, has exactly two members, and `own_signature_key` is one of
+/// them: the shape of a 1:1 conversation at any epoch (unlike [`is_fresh_pair`], which pins
+/// epoch 1). With two members every Application message is from the other leaf.
+pub fn is_pair_with(group: &MlsGroup, own_signature_key: &[u8]) -> bool {
+    if !group.is_active() {
+        return false;
+    }
+    let members: Vec<_> = group.members().take(3).collect();
+    members.len() == 2 && members.iter().any(|m| m.signature_key == own_signature_key)
+}
+
+/// What [`apply_pair_commit`] merged: the new epoch and the peer's signature key (unchanged).
+#[derive(Debug, PartialEq, Eq)]
+pub struct PairCommitApplied {
+    pub epoch: u64,
+    pub peer_signature_key: Vec<u8>,
+}
+
+/// Applies a Commit received in a 1:1 group, through the ADR-0005 one-shot merge, only if it
+/// keeps the group a pair with the same peer: the committer is the peer's leaf, no member is
+/// added or removed, and the peer's new leaf (RFC 9420 §7.3 / §5.3.1 successor check) keeps
+/// its signature key and, when `peer_credential` is `Some`, its BasicCredential identity.
+/// `anchor` is the signature key the caller pinned for the peer earlier; when `Some` the
+/// group's current peer key must match it. Nothing is merged on any refusal. Add/Remove
+/// Commits (groups, 8.17) are refused here with [`MlsError::PairCommitRefused`].
+///
+/// On any `Err` the in-memory `group` may have spent secrets decrypting the Commit: discard it
+/// and reload from storage (the CLI does, per envelope).
+///
+/// Epoch errors pass through from [`inspect_incoming_commit`]: [`MlsError::EpochAhead`] for a
+/// later epoch, [`MlsError::Decrypt`] for a past or invalid one.
+pub fn apply_pair_commit(
+    group: &mut MlsGroup,
+    commit_bytes: &[u8],
+    provider: &impl OpenMlsProvider,
+    own_signature_key: &[u8],
+    anchor: Option<&[u8]>,
+    peer_credential: Option<&[u8]>,
+) -> Result<PairCommitApplied, MlsError> {
+    if !is_pair_with(group, own_signature_key) {
+        return Err(MlsError::PairCommitRefused);
+    }
+    let Some((peer_leaf, peer_key, peer_cred)) = group
+        .members()
+        .find(|m| m.signature_key != own_signature_key)
+        .map(|m| (m.index.u32(), m.signature_key, m.credential))
+    else {
+        return Err(MlsError::PairCommitRefused);
+    };
+    if anchor.is_some_and(|a| a != peer_key.as_slice()) {
+        return Err(MlsError::PairCommitRefused);
+    }
+    let (staged, info) = inspect_incoming_commit(group, commit_bytes, provider, None)?;
+    // Allowlist (RFC 9420 §12.4): a pure self-Update, i.e. an empty proposal list and an update
+    // path from the peer's own leaf. Anything else (Add, Remove, GroupContextExtensions, PSK,
+    // ReInit, by-reference Update) is refused.
+    if info.committer_leaf_index != Some(peer_leaf)
+        || staged.queued_proposals().next().is_some()
+        || !info.added_credentials.is_empty()
+        || !info.removed_leaf_indices.is_empty()
+        || info.self_removed
+    {
+        return Err(MlsError::PairCommitRefused);
+    }
+    // §7.3 / §5.3.1 successor check: a path is required, and the new leaf keeps the peer's
+    // signature key and credential (compared with the group's current one even when no label
+    // was recorded; the recorded label, if any, must match too).
+    let leaf = staged
+        .update_path_leaf_node()
+        .ok_or(MlsError::PairCommitRefused)?;
+    if leaf.signature_key().as_slice() != peer_key.as_slice() || *leaf.credential() != peer_cred {
+        return Err(MlsError::PairCommitRefused);
+    }
+    if let Some(expected) = peer_credential {
+        let basic = BasicCredential::try_from(leaf.credential().clone())
+            .map_err(|_| MlsError::PairCommitRefused)?;
+        if basic.identity() != expected {
+            return Err(MlsError::PairCommitRefused);
+        }
+    }
+    let epoch = merge_inspected_commit(group, staged, provider)?;
+    // Postcondition: still the same pair, and the epoch really advanced by one.
+    debug_assert_eq!(epoch, info.prior_epoch + 1);
+    if !is_pair_with(group, own_signature_key)
+        || !group.members().any(|m| m.signature_key == peer_key)
+    {
+        return Err(MlsError::PairCommitRefused);
+    }
+    Ok(PairCommitApplied {
+        epoch,
+        peer_signature_key: peer_key,
+    })
+}
+
 /// Longest credential identity [`peer_credential_identity`] returns (the CLI/web labels are 16).
 pub const MAX_CREDENTIAL_IDENTITY_LEN: usize = 64;
 
@@ -2133,6 +2231,89 @@ mod tests {
         let kp_g = generate_pq_key_package(&ghost, &c).unwrap();
         add_member_from_bytes(&mut group, &alice.signer, &kp_g.key_package, &a).unwrap();
         assert_eq!(peer_credential_identity(&group, &alice_key), None, "three");
+    }
+
+    /// Alice's and Bob's providers and groups for a joined pair.
+    fn joined_pair() -> (
+        (OpenMlsRustCrypto, Identity, MlsGroup),
+        (OpenMlsRustCrypto, Identity, MlsGroup),
+    ) {
+        let (a, b) = (OpenMlsRustCrypto::default(), OpenMlsRustCrypto::default());
+        let alice = generate_identity(b"alice", &a).unwrap();
+        let bob = generate_identity(b"bob", &b).unwrap();
+        let mut ag = create_group(&alice, &a).unwrap();
+        let kp = generate_pq_key_package(&bob, &b).unwrap();
+        let w = add_member_from_bytes(&mut ag, &alice.signer, &kp.key_package, &a).unwrap();
+        let bg = join_group(&w, &b).unwrap();
+        ((a, alice, ag), (b, bob, bg))
+    }
+
+    fn self_update_commit(p: &OpenMlsRustCrypto, id: &Identity, g: &mut MlsGroup) -> Vec<u8> {
+        let bundle = g
+            .self_update(p, &id.signer, LeafNodeParameters::default())
+            .unwrap();
+        let bytes = bundle.into_commit().to_bytes().unwrap();
+        g.merge_pending_commit(p).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn test_apply_pair_commit_merges_a_peer_update_and_refuses_the_rest() {
+        // Wrong pins are refused without merging: a different anchor, a different label. A
+        // refusal after decrypting spends the in-memory secrets, so each case gets a fresh pair
+        // (the CLI likewise reloads state per envelope and saves only on success).
+        for (anchor, cred) in [
+            (Some([9u8; 32].as_slice()), None),
+            (None, Some(b"mallory".as_slice())),
+        ] {
+            let ((a, alice, mut ag), (b, bob, mut bg)) = joined_pair();
+            let ak = alice.signer.to_public_vec();
+            let c = self_update_commit(&b, &bob, &mut bg);
+            let e = apply_pair_commit(&mut ag, &c, &a, &ak, anchor, cred).unwrap_err();
+            assert!(matches!(e, MlsError::PairCommitRefused));
+            assert_eq!(ag.epoch().as_u64(), 1, "refusal merges nothing");
+        }
+        let ((a, alice, mut ag), (b, bob, mut bg)) = joined_pair();
+        let (ak, bk) = (alice.signer.to_public_vec(), bob.signer.to_public_vec());
+        assert!(is_pair_with(&ag, &ak) && !is_pair_with(&ag, &[7u8; 32]));
+        let c1 = self_update_commit(&b, &bob, &mut bg);
+        let done = apply_pair_commit(&mut ag, &c1, &a, &ak, Some(&bk), Some(b"bob")).unwrap();
+        assert_eq!((done.epoch, done.peer_signature_key), (2, bk.clone()));
+        // A replay is a past-epoch Commit: an ordinary failure, nothing changes.
+        let e = apply_pair_commit(&mut ag, &c1, &a, &ak, None, None).unwrap_err();
+        assert!(matches!(e, MlsError::Decrypt), "{e:?}");
+        // A Commit two epochs on, with the first missing, is "ahead", not a failure.
+        let _skipped = self_update_commit(&b, &bob, &mut bg);
+        let c3 = self_update_commit(&b, &bob, &mut bg);
+        let e = apply_pair_commit(&mut ag, &c3, &a, &ak, None, None).unwrap_err();
+        assert!(matches!(e, MlsError::EpochAhead), "{e:?}");
+        // Our own Commit echoed back is not the peer's.
+        let mine = self_update_commit(&a, &alice, &mut ag);
+        let e = apply_pair_commit(&mut bg, &mine, &b, &bk, None, None);
+        assert!(matches!(
+            e,
+            Err(MlsError::Decrypt | MlsError::PairCommitRefused)
+        ));
+    }
+
+    #[test]
+    fn test_apply_pair_commit_refuses_a_commit_that_adds_a_member() {
+        let ((a, alice, mut ag), (b, bob, mut bg)) = joined_pair();
+        let ak = alice.signer.to_public_vec();
+        let c = OpenMlsRustCrypto::default();
+        let carol = generate_identity(b"carol", &c).unwrap();
+        let kp = generate_pq_key_package(&carol, &c).unwrap();
+        let msg = MlsMessageIn::tls_deserialize_exact(&kp.key_package).unwrap();
+        let MlsMessageBodyIn::KeyPackage(kp_in) = msg.extract() else {
+            panic!("not a key package");
+        };
+        let kp = kp_in.validate(b.crypto(), ProtocolVersion::Mls10).unwrap();
+        let (commit, _w, _gi) = bg.add_members(&b, &bob.signer, &[kp]).unwrap();
+        bg.merge_pending_commit(&b).unwrap();
+        let bytes = commit.to_bytes().unwrap();
+        let e = apply_pair_commit(&mut ag, &bytes, &a, &ak, None, None).unwrap_err();
+        assert!(matches!(e, MlsError::PairCommitRefused), "{e:?}");
+        assert_eq!(ag.epoch().as_u64(), 1);
     }
 
     #[test]
