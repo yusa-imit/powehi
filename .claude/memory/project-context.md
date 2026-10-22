@@ -1797,3 +1797,6 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 
 ## Cycle 625 (2026-10-22, STABILIZATION)
 - cargo audit / deny clean; main CI green. Added unit tests for `Conversation::pin_peer_signature_key` (length, idempotent re-pin, conflicting pin, round trip, malformed stored key). powehi-cli 362 tests pass. target/ pruned 35G -> 34G (mtime>7d only).
+
+## Cycle 630 (2026-10-23, STABILIZATION)
+- cargo audit / deny clean; main CI green; no open `bug` issues. Added direct unit tests for `Manifest::verify` (pending create/update/delete matrix, missing/stale/unlisted refusals) in `store/manifest.rs`. powehi-cli 369 tests pass, clippy clean. No crypto code changed, so no reviewer pass was needed. `cargo nextest` is not installed locally; `cargo test` is used.

@@ -220,3 +220,101 @@ fn take<'a>(b: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
     *b = rest;
     Some(head)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const H1: [u8; HASH_LEN] = [1; HASH_LEN];
+    const H2: [u8; HASH_LEN] = [2; HASH_LEN];
+
+    fn manifest(entries: &[(&str, [u8; HASH_LEN])], pending: Option<Pending>) -> Manifest {
+        Manifest {
+            generation: 1,
+            entries: entries.iter().map(|(t, h)| ((*t).to_owned(), *h)).collect(),
+            pending,
+        }
+    }
+
+    fn found(files: &[(&str, [u8; HASH_LEN])]) -> BTreeMap<String, [u8; HASH_LEN]> {
+        files.iter().map(|(t, h)| ((*t).to_owned(), *h)).collect()
+    }
+
+    fn pend(tag: &str, old: Option<[u8; HASH_LEN]>) -> Option<Pending> {
+        Some(Pending {
+            tag: tag.to_owned(),
+            old,
+        })
+    }
+
+    #[test]
+    fn verify_accepts_an_exact_match() {
+        let m = manifest(&[(A, H1)], None);
+        assert!(m.verify(&found(&[(A, H1)])).is_ok());
+    }
+
+    #[test]
+    fn verify_without_pending_refuses_missing_stale_and_unlisted() {
+        let m = manifest(&[(A, H1)], None);
+        assert!(matches!(
+            m.verify(&found(&[])),
+            Err(StoreError::RecordMissing { .. })
+        ));
+        assert!(matches!(
+            m.verify(&found(&[(A, H2)])),
+            Err(StoreError::RecordStale { .. })
+        ));
+        assert!(matches!(
+            m.verify(&found(&[(A, H1), (B, H1)])),
+            Err(StoreError::RecordUnlisted { .. })
+        ));
+    }
+
+    #[test]
+    fn pending_create_excuses_only_its_own_missing_file() {
+        let m = manifest(&[(A, H1), (B, H2)], pend(B, None));
+        assert!(m.verify(&found(&[(A, H1)])).is_ok(), "crash before write");
+        assert!(
+            m.verify(&found(&[(A, H1), (B, H2)])).is_ok(),
+            "crash after write"
+        );
+        // The other record going missing is not excused.
+        assert!(matches!(
+            m.verify(&found(&[(B, H2)])),
+            Err(StoreError::RecordMissing { .. })
+        ));
+    }
+
+    #[test]
+    fn pending_update_accepts_exactly_the_previous_hash() {
+        let m = manifest(&[(A, H2)], pend(A, Some(H1)));
+        assert!(m.verify(&found(&[(A, H1)])).is_ok(), "old version");
+        assert!(m.verify(&found(&[(A, H2)])).is_ok(), "new version");
+        assert!(matches!(
+            m.verify(&found(&[(A, [3; HASH_LEN])])),
+            Err(StoreError::RecordStale { .. })
+        ));
+        // An update (old is Some) does not excuse a missing file.
+        assert!(matches!(
+            m.verify(&found(&[])),
+            Err(StoreError::RecordMissing { .. })
+        ));
+    }
+
+    #[test]
+    fn pending_delete_accepts_the_old_file_only_with_the_old_hash() {
+        let m = manifest(&[], pend(A, Some(H1)));
+        assert!(m.verify(&found(&[])).is_ok(), "file already gone");
+        assert!(m.verify(&found(&[(A, H1)])).is_ok(), "file still there");
+        assert!(matches!(
+            m.verify(&found(&[(A, H2)])),
+            Err(StoreError::RecordUnlisted { .. })
+        ));
+        assert!(matches!(
+            m.verify(&found(&[(B, H1)])),
+            Err(StoreError::RecordUnlisted { .. })
+        ));
+    }
+}
