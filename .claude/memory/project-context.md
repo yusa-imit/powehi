@@ -1774,3 +1774,6 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 ## Cycle 620 (2026-10-22, STABILIZATION)
 - CI green on main; `cargo audit`, `cargo deny`, clippy clean; powehi-cli 349 tests pass. Added tracker unit tests (decrypt give-up needs both count and grace; emptied record removed; garbage record loads empty) and fixed two wrapped doc comments in `inbox/junk.rs`. cargo is not on the cron PATH: use `export PATH=$HOME/.cargo/bin:$PATH`; cargo-nextest is not installed (use `cargo test`).
 - Open need-human: #145 (send_welcome unicast starvation, recommendation: require pending membership), #138, #131, #128, #125, #118, #53, #39, #16. Next FEATURE: first unchecked item in phase-8 STATUS (8.13 slice b / 8.14).
+
+## Cycle 622 (2026-10-22, FEATURE)
+- 8.13 slice b2: persistent inbox fetch cursor (`inbox/cursor.rs`, `welcome::fetch_from`). Resumes behind a fully-used fetch window when nothing was deferred; cleared at end of queue. Remaining for 8.13: epoch-aware failure count, which waits on 8.14's "epoch ahead" error. powehi-cli 355 tests pass. Next: 8.14 (Commit receive/apply).

@@ -117,6 +117,14 @@ pointing here. Close the issue in the PR that finishes its item.
   of a held conversation, and Welcomes `join_invited` skipped (`JoinReport.unusable`), are acked after
   the same 24 h grace; a held conversation's peer Commit is left for 8.14. Still remaining: the
   persistent fetch cursor and the epoch-aware failure count (below).
+  Slice (b2) shipped: `inbox/cursor.rs` (`inbox-cursor` record, a `(created_at, id)` position). A run
+  that used all its fetch pages and deferred nothing resumes behind that window next time; a run that
+  reaches the end of the queue clears it, so the head's grace-expired junk is revisited. Deferred
+  work (run caps) keeps the old cursor. Still remaining: the epoch-aware failure count (needs 8.14's
+  distinct "epoch ahead" error); the box flips with 8.14.
+  Known limits (security-auditor): the cursor resumes at most 4 runs in a row, then the head is
+  rescanned; a held peer flooding undecryptable envelopes defers the cursor (cap) until its junk
+  graces out; `join_invited` still scans only the head, so Welcomes behind a junk backlog wait.
   Security-auditor carry-overs: a peer in a held conversation can flood unackable Commits/Proposals
   (30-day retention) and starve every conversation, so 8.14 must ack or cap them; the tracker is
   shared by four kinds and can saturate (a per-kind quota is needed); a clock rollback leaves

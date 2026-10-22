@@ -203,7 +203,22 @@ async fn receive_at(
         requests: joined.requested,
         ..InboxReport::default()
     };
-    let items = welcome::fetch_pending(client, server, session).await?;
+    let saved = cursor::load(&session.store);
+    let resumed = saved.is_some();
+    let hops = saved.as_ref().map_or(0, |(_, h)| *h);
+    let window = match welcome::fetch_from(client, server, session, saved.map(|(c, _)| c)).await {
+        Ok(w) => w,
+        Err(e) => {
+            // A cursor the server rejects must not wedge the inbox: retry from the head.
+            if resumed {
+                cursor::save(&session.store, None);
+            }
+            return Err(e);
+        }
+    };
+    let (items, next, more) = (window.items, window.next, window.more);
+    // True once an envelope was held back (run caps): the cursor must not move past it.
+    let mut deferred = false;
     // A local cache of timers: unreadable or unwritable must never fail the run.
     let mut tracker = junk::Tracker::load(&session.store).unwrap_or_default();
     tracker.prune(now);
@@ -240,6 +255,7 @@ async fn receive_at(
             continue;
         }
         if attempts >= MAX_MESSAGES_PER_RUN {
+            deferred = true;
             break;
         }
         let (Some(id), Some(group_id), Some(sender), Some(ct)) =
@@ -258,6 +274,7 @@ async fn receive_at(
         // One peer cannot use the whole run: the rest of its envelopes wait for the next one.
         let used = per_conv.entry(group_id).or_insert(0);
         if *used >= MAX_PER_CONVERSATION {
+            deferred = true;
             report.skipped += 1;
             continue;
         }
@@ -291,6 +308,7 @@ async fn receive_at(
                 }
             }
             Outcome::Skip => {
+                deferred = true;
                 attempts += 1;
                 report.skipped += 1;
             }
@@ -313,6 +331,13 @@ async fn receive_at(
         }
     }
     let _ = tracker.save(&session.store);
+    // Window exhausted and nothing deferred: resume behind it. End of queue: back to the head.
+    // Deferred work keeps the old cursor so it is seen again.
+    if more && !deferred {
+        cursor::save(&session.store, next.as_ref().map(|c| (c, hops + 1)));
+    } else if !more {
+        cursor::save(&session.store, None);
+    }
     Ok(report)
 }
 
@@ -446,6 +471,7 @@ fn stored_count(store: &ProfileStore) -> Result<usize, InviteError> {
 }
 
 mod body_hex;
+mod cursor;
 mod junk;
 
 #[cfg(test)]

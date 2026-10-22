@@ -668,3 +668,88 @@ async fn a_commit_from_the_peer_of_a_held_conversation_is_never_acked_here() {
     .unwrap();
     assert_eq!(inbox_len(&p), 1, "left for the Commit path (8.14)");
 }
+
+fn stamped_junk(p: &Pair, n: usize) {
+    for _ in 0..n {
+        let id = junk_envelope(p, Uuid::new_v4(), p.bob.device_id);
+        let mut st = p.state.lock().unwrap();
+        let e = st
+            .inbox
+            .iter_mut()
+            .find(|e| e["id"].as_str() == Some(&id.to_string()))
+            .unwrap();
+        e["created_at"] = json!("2026-10-09T00:00:00Z");
+    }
+}
+
+#[tokio::test]
+async fn cursor_resumes_past_a_junk_backlog_longer_than_the_fetch_window() {
+    let (_tmp, p) = pair().await;
+    receive(&client(), &p.url, &p.alice).await.unwrap();
+    p.state.lock().unwrap().page_limit = 2;
+    let window = 2 * welcome::MAX_PAGES;
+    stamped_junk(&p, window + 2);
+    let real = bob_sends(&p, b"behind the backlog");
+    let t0 = 1_000_000;
+    let first = receive_at(&client(), &p.url, &p.alice, t0).await.unwrap();
+    assert_eq!(
+        first.stored, 0,
+        "the real message is beyond the first window"
+    );
+    assert!(cursor::load(&p.alice.store).is_some(), "cursor saved");
+    let second = receive_at(&client(), &p.url, &p.alice, t0 + 1)
+        .await
+        .unwrap();
+    assert_eq!(second.stored, 1, "the resumed fetch reaches it");
+    let name = format!("{RX_PREFIX}{}", real.hyphenated());
+    assert!(p.alice.store.get(&name).unwrap().is_some());
+    assert!(
+        cursor::load(&p.alice.store).is_none(),
+        "end of queue clears it"
+    );
+    // Back at the head, the grace-expired junk is finally acked.
+    // The backlog is two windows long: head, then the resumed position.
+    for _ in 0..2 {
+        receive_at(
+            &client(),
+            &p.url,
+            &p.alice,
+            t0 + junk::UNKNOWN_GRACE_SECS + 2,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(inbox_len(&p), 0);
+}
+
+#[test]
+fn garbage_or_oversize_cursor_record_loads_as_none() {
+    let tmp = tempfile::tempdir().unwrap();
+    let s = session(&tmp, "alice", 1);
+    s.store.put(cursor::RECORD, b"not json").unwrap();
+    assert!(cursor::load(&s.store).is_none());
+    s.store.put(cursor::RECORD, &[b'x'; 1024]).unwrap();
+    assert!(cursor::load(&s.store).is_none());
+    let c = welcome::Cursor {
+        since: "2026-10-09T00:00:00Z".into(),
+        since_id: Uuid::new_v4(),
+    };
+    cursor::save(&s.store, Some((&c, 0)));
+    assert_eq!(cursor::load(&s.store), Some((c.clone(), 0)));
+    cursor::save(&s.store, Some((&c, cursor::MAX_HOPS)));
+    assert!(
+        cursor::load(&s.store).is_none(),
+        "out of hops restarts at the head"
+    );
+    let bad = welcome::Cursor {
+        since: "\u{1}".repeat(40),
+        since_id: Uuid::new_v4(),
+    };
+    cursor::save(&s.store, Some((&bad, 0)));
+    assert!(
+        s.store.get(cursor::RECORD).unwrap().is_none(),
+        "control chars never stored"
+    );
+    cursor::save(&s.store, None);
+    assert!(cursor::load(&s.store).is_none());
+}
