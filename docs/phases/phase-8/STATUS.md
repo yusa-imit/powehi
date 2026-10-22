@@ -249,8 +249,8 @@ pointing here. Close the issue in the PR that finishes its item.
   without that line) and the held list cannot overflow (each Ahead spends one of the 64 run
   attempts). GCE-Commit refusal test added to crypto-core. Still open before the box flips
   (crypto-reviewer): (1) DONE (slice f): a held Ahead envelope pins the cursor only for `AHEAD_PIN_SECS` (1 h, tracker
-  first-seen); afterwards the cursor advances and the envelope is revisited at the head rescan; (2) DONE (slice e): PSK-Commit refusal test; the test fails if the empty-proposal check is removed (mutation-checked). ReInit: the openmls 0.8.1 Commit builder silently drops ReInit proposals, so a ReInit Commit cannot be produced with it; on receive the allowlist refuses it, but no test covers that yet; (3) a persisted forked/removed
-  conversation state and a Proposal ack policy (may move to 8.17).
+  first-seen); afterwards the cursor advances and the envelope is revisited at the head rescan; (2) DONE (slice e): PSK-Commit refusal test; the test fails if the empty-proposal check is removed (mutation-checked). ReInit: the openmls 0.8.1 Commit builder silently drops ReInit proposals, so a ReInit Commit cannot be produced with it; on receive the allowlist refuses it, but no test covers that yet; (3) Proposal ack policy DONE (slice g): a peer Proposal is acked after the 24 h grace (the pair policy never applies one; test mutation-checked); a persisted forked/removed
+  conversation state moves to 8.17 (needs Remove). crypto-reviewer pass; follow-ups: a peer by-reference Commit maps to `Refused`, not `Forked` (crypto-core test or `ProposalNotFound`→`PairCommitRefused`); 8.17 groups must store by-reference Proposals before acking them; dispatch on the cleartext `content_type` instead of the server's `message_type` label.
 - [ ] 8.15 Post-compromise security (#39 item 2, #32 item 3) — periodic self-Update
   Commits from `send`/`chat` (crypto-lead sets the policy, e.g. age or message
   count, and writes it in prd §5); concurrent-Commit handling per the §4A commit
