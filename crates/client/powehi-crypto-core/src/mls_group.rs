@@ -2317,6 +2317,24 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_pair_commit_refuses_a_group_context_extensions_commit() {
+        let ((a, alice, mut ag), (b, bob, mut bg)) = joined_pair();
+        let ak = alice.signer.to_public_vec();
+        let ext = Extensions::single(Extension::RequiredCapabilities(
+            RequiredCapabilitiesExtension::new(&[], &[], &[]),
+        ))
+        .unwrap();
+        let (commit, _w, _gi) = bg
+            .update_group_context_extensions(&b, ext, &bob.signer)
+            .unwrap();
+        bg.merge_pending_commit(&b).unwrap();
+        let bytes = commit.to_bytes().unwrap();
+        let e = apply_pair_commit(&mut ag, &bytes, &a, &ak, None, None).unwrap_err();
+        assert!(matches!(e, MlsError::PairCommitRefused), "{e:?}");
+        assert_eq!(ag.epoch().as_u64(), 1, "a GCE Commit merges nothing");
+    }
+
+    #[test]
     fn test_peer_credential_identity_rejects_empty_and_oversize_labels() {
         for label in [vec![], vec![9u8; MAX_CREDENTIAL_IDENTITY_LEN + 1]] {
             let (a, b) = (OpenMlsRustCrypto::default(), OpenMlsRustCrypto::default());

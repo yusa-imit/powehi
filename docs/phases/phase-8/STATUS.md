@@ -244,6 +244,15 @@ pointing here. Close the issue in the PR that finishes its item.
   tests. Remaining before the box flips: the cross-run case
   (a held Ahead envelope behind the saved fetch cursor is only revisited at the next head
   rescan). Slice (c) shipped: `inbox` text/JSON output reports `commits` and `forked`.
+  Slice (d) shipped: tests only. A held Ahead envelope sets `deferred`, so the cursor stays at the
+  head (test `a_held_ahead_envelope_keeps_the_cursor_at_the_head_across_a_full_window`; it fails
+  without that line) and the held list cannot overflow (each Ahead spends one of the 64 run
+  attempts). GCE-Commit refusal test added to crypto-core. Still open before the box flips
+  (crypto-reviewer): (1) one peer-sent Ahead envelope pins the cursor for up to the 24 h grace,
+  hiding everything past the window again (#30): decide a bound, e.g. let the cursor advance
+  once the Ahead has been held for N runs; (2) PSK/ReInit refusal tests (openmls 0.8.1 exposes
+  `CommitBuilder::add_proposal` and `PreSharedKeyProposal::new`); (3) a persisted forked/removed
+  conversation state and a Proposal ack policy (may move to 8.17).
 - [ ] 8.15 Post-compromise security (#39 item 2, #32 item 3) — periodic self-Update
   Commits from `send`/`chat` (crypto-lead sets the policy, e.g. age or message
   count, and writes it in prd §5); concurrent-Commit handling per the §4A commit
