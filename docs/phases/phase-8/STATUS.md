@@ -257,6 +257,12 @@ pointing here. Close the issue in the PR that finishes its item.
   count, and writes it in prd §5); concurrent-Commit handling per the §4A commit
   serialization. PCS regression test: a leaked epoch secret cannot read messages
   after the update. crypto-reviewer + threat-model-checker.
+  Slice (a) shipped: crypto-core `stage_pair_self_update` / `confirm_pair_self_update` /
+  `abort_pair_self_update` (stage, send, merge only after the server accepts; pair-only, no queued
+  proposals) and the PCS regression test (control: a leaked state follows a peer's update; Alice's own rotates her leaf key and
+  the leaked copy cannot follow). Contract: save state before sending, abort only on definite
+  rejection (crypto-reviewer). Remaining: the CLI policy (age/message count, prd §5), send/chat wiring with the
+  commit-serialization retry, a CLI-level test, threat-model-checker.
 - [ ] 8.16 CHANGED blocks send (#53 item 1) — `send`/`chat` refuse a conversation
   whose verified safety number is CHANGED unless `--allow-changed` is given; the
   refusal says how to re-verify. Close #53. crypto-reviewer.

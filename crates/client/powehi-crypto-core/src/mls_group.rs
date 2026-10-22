@@ -1813,6 +1813,76 @@ pub fn apply_pair_commit(
     })
 }
 
+/// Stage a self-Update Commit in a 1:1 `group` (8.15, prd §5 PCS): fresh leaf encryption key and
+/// update path, no proposals. Returns the Commit wire bytes and the epoch it was staged at.
+/// Nothing is merged: send the bytes, and call [`confirm_pair_self_update`] once the server has
+/// accepted them, or [`abort_pair_self_update`] if not (`max_past_epochs(0)` means a merged
+/// Commit nobody received strands this device; see [`stage_remove_member`]).
+///
+/// Refused with [`MlsError::PairCommitRefused`] unless the group is a pair with
+/// `own_signature_key`, and with [`MlsError::PendingProposals`] if the proposal store is not
+/// empty (the builder would fold queued proposals into the Commit). A staged Commit already
+/// pending is an error from openmls, mapped to [`MlsError::Membership`]. On any `Err` discard the
+/// in-memory group and reload it from storage.
+///
+/// Caller contract (crypto-reviewer): (1) save the provider state after staging and BEFORE the
+/// bytes leave the device: a restaged Commit from an older snapshot reuses the handshake-ratchet
+/// generation, so two different ciphertexts would share key and nonce, and a Commit the server
+/// accepted but this device never persisted strands it. (2) Abort only on a definite server
+/// rejection, never on a timeout (aborting an accepted Commit strands the device). (3) Save again
+/// after an abort. `prior_epoch` is the local epoch, not the server's `expected_epoch`. Heals
+/// HPKE/epoch secrets against a passive attacker only: the signature key is kept (so the §5.6
+/// pin holds), and a snapshot taken between stage and confirm already holds the next epoch.
+pub fn stage_pair_self_update(
+    group: &mut MlsGroup,
+    signer: &SignatureKeyPair,
+    own_signature_key: &[u8],
+    provider: &impl OpenMlsProvider,
+) -> Result<(Vec<u8>, u64), MlsError> {
+    if !is_pair_with(group, own_signature_key) || signer.to_public_vec() != own_signature_key {
+        return Err(MlsError::PairCommitRefused);
+    }
+    if group.pending_proposals().next().is_some() {
+        return Err(MlsError::PendingProposals);
+    }
+    let prior_epoch = group.epoch().as_u64();
+    let bundle = group
+        .self_update(provider, signer, LeafNodeParameters::default())
+        .map_err(|_| MlsError::Membership)?;
+    if bundle.welcome().is_some() {
+        let _ = group.clear_pending_commit(provider.storage());
+        return Err(MlsError::Membership);
+    }
+    let bytes = bundle
+        .into_commit()
+        .to_bytes()
+        .map_err(|_| MlsError::Codec)?;
+    assert_eq!(
+        group.epoch().as_u64(),
+        prior_epoch,
+        "staging must not advance the epoch"
+    );
+    Ok((bytes, prior_epoch))
+}
+
+/// Merge the Commit staged by [`stage_pair_self_update`], advancing one epoch.
+/// [`MlsError::NoPendingCommit`] when nothing is staged.
+pub fn confirm_pair_self_update(
+    group: &mut MlsGroup,
+    provider: &impl OpenMlsProvider,
+) -> Result<(), MlsError> {
+    confirm_remove_member(group, provider)
+}
+
+/// Drop the Commit staged by [`stage_pair_self_update`]; the epoch is unchanged.
+/// [`MlsError::NoPendingCommit`] when nothing is staged.
+pub fn abort_pair_self_update(
+    group: &mut MlsGroup,
+    provider: &impl OpenMlsProvider,
+) -> Result<(), MlsError> {
+    abort_remove_member(group, provider)
+}
+
 /// Longest credential identity [`peer_credential_identity`] returns (the CLI/web labels are 16).
 pub const MAX_CREDENTIAL_IDENTITY_LEN: usize = 64;
 
@@ -2270,6 +2340,99 @@ mod tests {
         let bytes = bundle.into_commit().to_bytes().unwrap();
         g.merge_pending_commit(p).unwrap();
         bytes
+    }
+
+    #[test]
+    fn test_pair_self_update_stages_confirms_and_aborts() {
+        let ((a, alice, mut ag), (b, bob, mut bg)) = joined_pair();
+        let (ak, bk) = (alice.signer.to_public_vec(), bob.signer.to_public_vec());
+        // Wrong key pair or a foreign signer is refused; nothing staged.
+        let e = stage_pair_self_update(&mut ag, &alice.signer, &[7u8; 32], &a).unwrap_err();
+        assert!(matches!(e, MlsError::PairCommitRefused));
+        let e = stage_pair_self_update(&mut ag, &bob.signer, &ak, &a).unwrap_err();
+        assert!(matches!(e, MlsError::PairCommitRefused));
+        assert!(matches!(
+            confirm_pair_self_update(&mut ag, &a),
+            Err(MlsError::NoPendingCommit)
+        ));
+        // Abort leaves the epoch; a second stage then works and a second concurrent one fails.
+        let (_c, epoch) = stage_pair_self_update(&mut ag, &alice.signer, &ak, &a).unwrap();
+        assert_eq!((epoch, ag.epoch().as_u64()), (1, 1));
+        let e = stage_pair_self_update(&mut ag, &alice.signer, &ak, &a).unwrap_err();
+        assert!(matches!(e, MlsError::Membership), "{e:?}");
+        abort_pair_self_update(&mut ag, &a).unwrap();
+        assert!(matches!(
+            abort_pair_self_update(&mut ag, &a),
+            Err(MlsError::NoPendingCommit)
+        ));
+        let (c, _) = stage_pair_self_update(&mut ag, &alice.signer, &ak, &a).unwrap();
+        confirm_pair_self_update(&mut ag, &a).unwrap();
+        assert_eq!(ag.epoch().as_u64(), 2);
+        // The peer's pair policy accepts it.
+        let done = apply_pair_commit(&mut bg, &c, &b, &bk, Some(&ak), Some(b"alice")).unwrap();
+        assert_eq!(done.epoch, 2);
+        let ct = encrypt_message(&mut bg, &bob.signer, b"hi", &b).unwrap();
+        assert_eq!(decrypt_message(&mut ag, &ct, &a).unwrap().as_slice(), b"hi");
+    }
+
+    /// PCS (8.15, RFC 9420 §16.6): a leaked copy of Alice's full state follows a PEER's
+    /// self-Update (control: Bob's update does not heal Alice), but not Alice's own.
+    #[test]
+    fn test_pair_self_update_heals_a_leaked_state() {
+        let ((a, alice, mut ag), (b, bob, mut bg)) = joined_pair();
+        let (ak, bk) = (alice.signer.to_public_vec(), bob.signer.to_public_vec());
+        let leaked = export_provider_state(&a, 1).unwrap();
+        let (thief, _) = import_provider_state(&leaked, 0).unwrap();
+        let gid = ag.group_id().as_slice().to_vec();
+        let mut tg = load_group(&gid, &thief).unwrap().unwrap();
+        // Control: Bob updates, Alice and the thief both follow and the thief reads epoch 2.
+        let (cb, _) = stage_pair_self_update(&mut bg, &bob.signer, &bk, &b).unwrap();
+        confirm_pair_self_update(&mut bg, &b).unwrap();
+        apply_pair_commit(&mut ag, &cb, &a, &ak, None, None).unwrap();
+        apply_pair_commit(&mut tg, &cb, &thief, &ak, None, None).unwrap();
+        let ct = encrypt_message(&mut bg, &bob.signer, b"epoch2", &b).unwrap();
+        assert_eq!(
+            decrypt_message(&mut tg, &ct, &thief).unwrap().as_slice(),
+            b"epoch2"
+        );
+        let _ = decrypt_message(&mut ag, &ct, &a).unwrap();
+        // Now Alice updates: her leaf encryption key rotates, the thief cannot follow
+        // (it is a copy of her own leaf, so openmls calls the Commit its own) and stays behind.
+        let old_key = ag.own_leaf_node().unwrap().encryption_key().clone();
+        let (ca, _) = stage_pair_self_update(&mut ag, &alice.signer, &ak, &a).unwrap();
+        confirm_pair_self_update(&mut ag, &a).unwrap();
+        assert_ne!(*ag.own_leaf_node().unwrap().encryption_key(), old_key);
+        apply_pair_commit(&mut bg, &ca, &b, &bk, None, None).unwrap();
+        let e = apply_pair_commit(&mut tg, &ca, &thief, &ak, None, None).unwrap_err();
+        assert!(matches!(e, MlsError::OwnCommitPending), "{e:?}");
+        let after = encrypt_message(&mut bg, &bob.signer, b"epoch3", &b).unwrap();
+        let e = decrypt_message(&mut tg, &after, &thief).unwrap_err();
+        assert!(matches!(e, MlsError::EpochAhead), "{e:?}");
+        assert_eq!(
+            decrypt_message(&mut ag, &after, &a).unwrap().as_slice(),
+            b"epoch3"
+        );
+        assert_ne!(
+            *tg.own_leaf_node().unwrap().encryption_key(),
+            *ag.own_leaf_node().unwrap().encryption_key()
+        );
+    }
+
+    #[test]
+    fn test_pair_self_update_refuses_queued_proposals_and_groups() {
+        let ((a, alice, mut ag), (_b, _bob, _bg)) = joined_pair();
+        let ak = alice.signer.to_public_vec();
+        let ghost = generate_identity(b"ghost", &a).unwrap();
+        let kp = generate_key_package(&ghost, &a).unwrap();
+        ag.propose_add_member(&a, &alice.signer, kp.key_package())
+            .unwrap();
+        let e = stage_pair_self_update(&mut ag, &alice.signer, &ak, &a).unwrap_err();
+        assert!(matches!(e, MlsError::PendingProposals), "{e:?}");
+        ag.clear_pending_proposals(a.storage()).unwrap();
+        let kp = generate_pq_key_package(&ghost, &a).unwrap();
+        add_member_from_bytes(&mut ag, &alice.signer, &kp.key_package, &a).unwrap();
+        let e = stage_pair_self_update(&mut ag, &alice.signer, &ak, &a).unwrap_err();
+        assert!(matches!(e, MlsError::PairCommitRefused), "{e:?}");
     }
 
     #[test]
