@@ -1292,6 +1292,8 @@ pub fn mls_remove_member_abort(identity_id: &str, group_id: &str) -> Result<(), 
 /// - `mls own commit error` (`MlsError::OwnCommit`) — this crate's own
 ///   hash-verified post-merge tracking. Safe to treat as "already applied,
 ///   nothing to merge" and ack.
+/// - `mls epoch ahead error` (`MlsError::EpochAhead`) — the Commit is for a later epoch than
+///   this group's: an earlier Commit is missing. Hold it; do not ack or count it as a failure.
 ///
 /// Read both variants' doc comments in `mls_group.rs` for the limit — the
 /// pre-merge signal only holds while the own commit is still at the CURRENT

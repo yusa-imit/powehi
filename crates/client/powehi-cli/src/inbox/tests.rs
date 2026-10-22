@@ -753,3 +753,44 @@ fn garbage_or_oversize_cursor_record_loads_as_none() {
     cursor::save(&s.store, None);
     assert!(cursor::load(&s.store).is_none());
 }
+
+/// Bob commits locally (adds a third member) and encrypts at the new epoch, queueing the
+/// message for Alice, who never receives the Commit.
+fn bob_sends_from_next_epoch(p: &Pair) -> Uuid {
+    let tmp = tempfile::tempdir().unwrap();
+    let carol = session(&tmp, "carol", 3);
+    let mut carol_local = LocalIdentity::load(&carol.store).unwrap();
+    let carol_kp =
+        mls_group::generate_key_package(&carol_local.identity, &carol_local.provider).unwrap();
+    carol_local.save(&carol.store).unwrap();
+    let mut local = LocalIdentity::load(&p.bob.store).unwrap();
+    let mut group = mls_group::load_group(p.gid.as_bytes(), &local.provider)
+        .unwrap()
+        .unwrap();
+    mls_group::add_member(
+        &mut group,
+        &local.identity.signer,
+        carol_kp.key_package().clone(),
+        &local.provider,
+    )
+    .unwrap();
+    local.save(&p.bob.store).unwrap();
+    bob_sends(p, b"from the future")
+}
+
+#[tokio::test]
+async fn epoch_ahead_envelope_is_held_uncounted_and_acked_only_after_the_grace() {
+    let (_tmp, p) = pair().await;
+    receive(&client(), &p.url, &p.alice).await.unwrap();
+    bob_sends_from_next_epoch(&p);
+    let t0 = 1_000_000;
+    receive_at(&client(), &p.url, &p.alice, t0).await.unwrap();
+    assert_eq!(inbox_len(&p), 1, "held inside the grace");
+    assert!(rx_names(&p.alice).is_empty());
+    // One observation is enough after the grace: it is never counted as a decrypt failure,
+    // yet it cannot sit in the inbox forever either.
+    receive_at(&client(), &p.url, &p.alice, t0 + junk::UNKNOWN_GRACE_SECS)
+        .await
+        .unwrap();
+    assert_eq!(inbox_len(&p), 0);
+}

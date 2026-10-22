@@ -214,6 +214,10 @@ pointing here. Close the issue in the PR that finishes its item.
   junk-Welcome envelopes (never acked today), and an epoch-aware failure count. Requirement for
   8.14: `mls_group::decrypt_message` folds wrong-epoch and AEAD errors into one `Decrypt`; give
   "epoch ahead of ours" its own error so it is never counted as a failure.
+  Epoch-ahead part shipped with 8.14 slice (a): `MlsError::EpochAhead` (cleartext epoch, checked before
+  any decrypt) is held, never counted, and acked after the 24 h grace (`Outcome::Ahead`).
+  For slice (b) (crypto-reviewer): groups use `max_past_epochs(0)`, so a held Ahead message must be retried right after the
+  missing Commit applies and before any later one; `Ahead` does not set `deferred`, so apply Commits before the cursor moves on.
 
 ### Commit path, PCS, groups
 - [ ] 8.14 CLI Commit receive/apply — incoming Commits apply through the ADR-0005
