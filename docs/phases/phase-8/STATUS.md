@@ -243,7 +243,7 @@ pointing here. Close the issue in the PR that finishes its item.
   a persisted forked/removed conversation state, a Proposal ack policy, GCE/PSK/ReInit refusal
   tests. Remaining before the box flips: the cross-run case
   (a held Ahead envelope behind the saved fetch cursor is only revisited at the next head
-  rescan) and a `commits` count in the `inbox` text/JSON output.
+  rescan). Slice (c) shipped: `inbox` text/JSON output reports `commits` and `forked`.
 - [ ] 8.15 Post-compromise security (#39 item 2, #32 item 3) — periodic self-Update
   Commits from `send`/`chat` (crypto-lead sets the policy, e.g. age or message
   count, and writes it in prd §5); concurrent-Commit handling per the §4A commit

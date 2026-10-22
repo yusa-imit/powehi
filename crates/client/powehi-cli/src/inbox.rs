@@ -61,7 +61,7 @@ pub struct InboxReport {
 }
 
 /// Writes the [`InboxReport`] as one JSON object (for scripts):
-/// `{"joined":[id..],"pq_bindings":{id:"16-hex"},"requests":n,"stored":n,"skipped":n}`.
+/// `{"joined":[id..],"pq_bindings":{id:"16-hex"},"requests":n,"commits":n,"forked":n,"stored":n,"skipped":n}`.
 /// Only ids, the public PQ binding and counts are printed, never message text.
 pub fn report_json(
     out: &mut impl std::io::Write,
@@ -76,6 +76,8 @@ pub fn report_json(
         "joined": report.joined.iter().map(Uuid::to_string).collect::<Vec<_>>(),
         "pq_bindings": pq,
         "requests": report.requests,
+        "commits": report.commits,
+        "forked": report.forked,
         "stored": report.stored,
         "skipped": report.skipped,
     });
