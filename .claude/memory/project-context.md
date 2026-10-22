@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 627 (2026-10-22, FEATURE) — 8.14 slice (d), box stays open
+Tests only: GCE-Commit refusal (crypto-core) and held-Ahead-pins-cursor (CLI). crypto-reviewer open items: Ahead envelope pins the cursor up to 24 h (bound it), PSK/ReInit tests (CommitBuilder::add_proposal exists), forked state + Proposal ack policy. Next: finish those, then flip 8.14.
+
 ## Cycle 626 (2026-10-22, FEATURE) — 8.14 slice (c)
 `inbox` text/JSON now report `commits` and `forked`. Remaining for 8.14 (box stays open): cross-run held-Ahead envelope behind the saved cursor; crypto-reviewer carry-overs (persisted forked state, Proposal ack policy, GCE/PSK/ReInit refusal tests).
 

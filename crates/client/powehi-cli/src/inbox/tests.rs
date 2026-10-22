@@ -939,6 +939,32 @@ async fn epoch_ahead_envelope_is_held_uncounted_and_acked_only_after_the_grace()
 }
 
 #[tokio::test]
+async fn a_held_ahead_envelope_keeps_the_cursor_at_the_head_across_a_full_window() {
+    let (_tmp, p) = pair().await;
+    receive(&client(), &p.url, &p.alice).await.unwrap();
+    p.state.lock().unwrap().page_limit = 2;
+    let ahead = bob_sends_from_next_epoch(&p);
+    {
+        let mut st = p.state.lock().unwrap();
+        let e = st
+            .inbox
+            .iter_mut()
+            .find(|e| e["id"].as_str() == Some(&ahead.to_string()))
+            .unwrap();
+        // The test server pages in id order: the smallest id is the head of the first window.
+        e["id"] = json!("00000000-0000-0000-0000-000000000001");
+    }
+    stamped_junk(&p, 2 * welcome::MAX_PAGES + 2);
+    let t0 = 1_000_000;
+    receive_at(&client(), &p.url, &p.alice, t0).await.unwrap();
+    assert!(
+        cursor::load(&p.alice.store).is_none(),
+        "the cursor must not move past an envelope still waiting for its Commit"
+    );
+    assert!(inbox_len(&p) > 0);
+}
+
+#[tokio::test]
 async fn a_commit_never_overtakes_messages_deferred_by_the_conversation_cap() {
     let (_tmp, p) = pair().await;
     receive(&client(), &p.url, &p.alice).await.unwrap();
