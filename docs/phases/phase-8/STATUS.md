@@ -199,7 +199,7 @@ pointing here. Close the issue in the PR that finishes its item.
   KeyPackage we really hold a PQ key for count. `accept` reuses `join_one` unchanged (all checks apply),
   then acks, calls server accept, drops the request; a re-run after a failed confirm retries only the
   confirm. `decline` (refused after a join) calls server decline first, retires the KeyPackage keys, acks, drops. `inbox` reports the new count.
-- [ ] 8.13 Inbox flood defenses (#30 client part) — a persistent per-device fetch
+- [x] 8.13 Inbox flood defenses (#30 client part) — a persistent per-device fetch
   cursor in the store; envelopes for groups we neither hold nor have a pending
   request for are acked after a 24 h grace; envelopes from a known peer that fail to
   decrypt N times are acked and dropped; a per-conversation decrypt budget so one
@@ -220,7 +220,7 @@ pointing here. Close the issue in the PR that finishes its item.
   missing Commit applies and before any later one; `Ahead` does not set `deferred`, so apply Commits before the cursor moves on.
 
 ### Commit path, PCS, groups
-- [ ] 8.14 CLI Commit receive/apply — incoming Commits apply through the ADR-0005
+- [x] 8.14 CLI Commit receive/apply — incoming Commits apply through the ADR-0005
   one-shot merge; the epoch is persisted; the safety number is recomputed and the
   §5.6 CHANGED alert fires on a change. Tests across several epochs, including a
   Commit that arrives before the Application messages that follow it.
@@ -251,6 +251,7 @@ pointing here. Close the issue in the PR that finishes its item.
   (crypto-reviewer): (1) DONE (slice f): a held Ahead envelope pins the cursor only for `AHEAD_PIN_SECS` (1 h, tracker
   first-seen); afterwards the cursor advances and the envelope is revisited at the head rescan; (2) DONE (slice e): PSK-Commit refusal test; the test fails if the empty-proposal check is removed (mutation-checked). ReInit: the openmls 0.8.1 Commit builder silently drops ReInit proposals, so a ReInit Commit cannot be produced with it; on receive the allowlist refuses it, but no test covers that yet; (3) Proposal ack policy DONE (slice g): a peer Proposal is acked after the 24 h grace (the pair policy never applies one; test mutation-checked); a persisted forked/removed
   conversation state moves to 8.17 (needs Remove). crypto-reviewer pass; follow-ups: a peer by-reference Commit maps to `Refused`, not `Forked` (crypto-core test or `ProposalNotFound`→`PairCommitRefused`); 8.17 groups must store by-reference Proposals before acking them; dispatch on the cleartext `content_type` instead of the server's `message_type` label.
+  Slice (h) shipped (box flipped): a by-reference peer Commit maps to `Forked` (`MlsError::CommitMissingProposal`, folded into `PairCommitRefused` by `apply_pair_commit`; test fails without the mapping). Carried to 8.17: ReInit refusal test (openmls cannot build one), `content_type` dispatch, by-reference Proposal storage.
 - [ ] 8.15 Post-compromise security (#39 item 2, #32 item 3) — periodic self-Update
   Commits from `send`/`chat` (crypto-lead sets the policy, e.g. age or message
   count, and writes it in prd §5); concurrent-Commit handling per the §4A commit

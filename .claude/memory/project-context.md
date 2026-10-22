@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 632 (2026-10-23, FEATURE) — 8.14 slice (h), 8.13 + 8.14 boxes flipped
+By-reference peer Commit maps to `Forked` (`MlsError::CommitMissingProposal` folded into `PairCommitRefused`). Carried to 8.17: ReInit receive test, content_type dispatch, by-ref Proposal storage. Next unchecked: 8.15 (PCS).
+
 ## Cycle 631 (2026-10-23, FEATURE) — 8.14 slice (g), box stays open
 Peer Proposal acked after the 24 h grace (`inbox.rs`, test `a_peer_proposal_is_acked_after_the_grace_and_never_applied`, mutation-checked). Persisted forked state moved to 8.17. Only the ReInit receive-refusal test is left before flipping 8.13 + 8.14 (openmls 0.8.1 cannot build one; decide: hand-craft or accept allowlist-only).
 
