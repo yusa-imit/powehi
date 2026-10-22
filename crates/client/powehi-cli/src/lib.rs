@@ -373,6 +373,15 @@ fn run_inbox(server: &url::Url, paths: &profile::ProfilePaths, json: bool) -> Re
                 r.requests
             );
         }
+        if r.commits > 0 {
+            println!("{} peer key update(s) applied", r.commits);
+        }
+        if r.forked > 0 {
+            println!(
+                "{} peer commit(s) refused: that conversation can no longer be read",
+                r.forked
+            );
+        }
         println!("{} new message(s) stored", r.stored);
     }
     if r.skipped > 0 {

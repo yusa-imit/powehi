@@ -445,8 +445,8 @@ fn report_json_is_one_object_with_ids_and_counts() {
         stored: 3,
         pq_bound: vec![b],
         skipped: 1,
-        commits: 0,
-        forked: 0,
+        commits: 4,
+        forked: 5,
     };
     let mut out = Vec::new();
     report_json(&mut out, &report, &[(b, "0123456789abcdef".to_string())]).unwrap();
@@ -457,6 +457,10 @@ fn report_json_is_one_object_with_ids_and_counts() {
     assert_eq!(v["pq_bindings"][b.to_string()], "0123456789abcdef");
     assert_eq!(v["requests"], 2);
     assert_eq!(
+        (v["commits"].as_u64(), v["forked"].as_u64()),
+        (Some(4), Some(5))
+    );
+    assert_eq!(
         (v["stored"].as_u64(), v["skipped"].as_u64()),
         (Some(3), Some(1))
     );
@@ -465,6 +469,10 @@ fn report_json_is_one_object_with_ids_and_counts() {
     let v: serde_json::Value = serde_json::from_slice(&empty).unwrap();
     assert_eq!(v["joined"], json!([]));
     assert_eq!(v["pq_bindings"], json!({}));
+    assert_eq!(
+        (v["commits"].as_u64(), v["forked"].as_u64()),
+        (Some(0), Some(0))
+    );
 }
 
 fn junk_envelope(p: &Pair, group: Uuid, sender: Uuid) -> Uuid {
