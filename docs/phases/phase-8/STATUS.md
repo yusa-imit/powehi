@@ -250,8 +250,7 @@ pointing here. Close the issue in the PR that finishes its item.
   attempts). GCE-Commit refusal test added to crypto-core. Still open before the box flips
   (crypto-reviewer): (1) one peer-sent Ahead envelope pins the cursor for up to the 24 h grace,
   hiding everything past the window again (#30): decide a bound, e.g. let the cursor advance
-  once the Ahead has been held for N runs; (2) PSK/ReInit refusal tests (openmls 0.8.1 exposes
-  `CommitBuilder::add_proposal` and `PreSharedKeyProposal::new`); (3) a persisted forked/removed
+  once the Ahead has been held for N runs; (2) DONE (slice e): PSK-Commit refusal test; the test fails if the empty-proposal check is removed (mutation-checked). ReInit: the openmls 0.8.1 Commit builder silently drops ReInit proposals, so a ReInit Commit cannot be produced with it; on receive the allowlist refuses it, but no test covers that yet; (3) a persisted forked/removed
   conversation state and a Proposal ack policy (may move to 8.17).
 - [ ] 8.15 Post-compromise security (#39 item 2, #32 item 3) — periodic self-Update
   Commits from `send`/`chat` (crypto-lead sets the policy, e.g. age or message
