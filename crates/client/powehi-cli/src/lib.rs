@@ -23,6 +23,7 @@ pub mod invite;
 mod live_e2e;
 #[cfg(unix)]
 pub mod message;
+pub mod pcs;
 pub mod pinning;
 pub mod profile;
 #[cfg(unix)]

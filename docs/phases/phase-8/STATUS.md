@@ -261,8 +261,12 @@ pointing here. Close the issue in the PR that finishes its item.
   `abort_pair_self_update` (stage, send, merge only after the server accepts; pair-only, no queued
   proposals) and the PCS regression test (control: a leaked state follows a peer's update; Alice's own rotates her leaf key and
   the leaked copy cannot follow). Contract: save state before sending, abort only on definite
-  rejection (crypto-reviewer). Remaining: the CLI policy (age/message count, prd §5), send/chat wiring with the
-  commit-serialization retry, a CLI-level test, threat-model-checker.
+  rejection (crypto-reviewer). Slice (b) shipped: policy in prd §5.3A and `pcs::update_due` (50
+  messages or 7 days of key age once a send happened), persisted counters on `conv-*`
+  (`note_sent`/`note_self_update`, serde-default for old records), `invite::send_commit` returning
+  `CommitOutcome` (Accepted only on 2xx with epoch = expected+1; Rejected = 4xx except 408;
+  everything else Unknown), test-server commit route. crypto-reviewer (needs-rework, fixed): Rejected only on a FIRST post and a whitelist of pre-store statuses; `expected_epoch` is the server epoch; Unknown resolves only by byte-comparing the stored epoch+1 envelope. Open for later slices: NotSent variant, age clock for pre-8.15 records, receive-only devices never rotate (need-human). Remaining: send/chat wiring (stage, save,
+  post, confirm/abort; recovery of an Unknown outcome), a CLI-level test, threat-model-checker.
 - [ ] 8.16 CHANGED blocks send (#53 item 1) — `send`/`chat` refuse a conversation
   whose verified safety number is CHANGED unless `--allow-changed` is given; the
   refusal says how to re-verify. Close #53. crypto-reviewer.

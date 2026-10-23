@@ -406,3 +406,58 @@ fn redeemed_report_json_names_every_pq_outcome() {
         assert_eq!(v.as_object().unwrap().len(), 3);
     }
 }
+
+#[test]
+fn only_a_known_pre_store_status_on_a_first_post_is_a_commit_rejection() {
+    for code in [400, 401, 404, 409, 413, 415, 422, 429] {
+        assert_eq!(
+            commit_status_outcome(code, false),
+            CommitOutcome::Rejected,
+            "{code}"
+        );
+        assert_eq!(
+            commit_status_outcome(code, true),
+            CommitOutcome::Unknown,
+            "{code}"
+        );
+    }
+    for code in [301, 403, 408, 410, 499, 500, 502, 503, 504, 600] {
+        assert_eq!(
+            commit_status_outcome(code, false),
+            CommitOutcome::Unknown,
+            "{code}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn send_commit_maps_the_server_answer_to_an_outcome() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = session(&tmp, "alice", 1);
+    let state = Arc::new(Mutex::new(Backend::default()));
+    let url = serve(state.clone()).await;
+    let group = Uuid::new_v4();
+    let http = client();
+    let post = |epoch| send_commit(&http, &url, &alice, group, b"opaque", epoch, false);
+    assert_eq!(post(4).await, CommitOutcome::Accepted);
+    state.lock().unwrap().commit_reply_epoch = Some(9);
+    assert_eq!(
+        post(4).await,
+        CommitOutcome::Unknown,
+        "a wrong epoch is not an acceptance"
+    );
+    {
+        let mut st = state.lock().unwrap();
+        st.commit_reply_epoch = None;
+        st.commit_status = 409;
+    }
+    assert_eq!(post(4).await, CommitOutcome::Rejected);
+    assert_eq!(
+        send_commit(&http, &url, &alice, group, b"opaque", 4, true).await,
+        CommitOutcome::Unknown,
+        "a 409 on a re-post is not a rejection"
+    );
+    state.lock().unwrap().commit_status = 503;
+    assert_eq!(post(4).await, CommitOutcome::Unknown);
+    assert_eq!(state.lock().unwrap().commits, vec![4; 5]);
+}
