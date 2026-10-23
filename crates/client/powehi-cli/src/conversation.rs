@@ -63,6 +63,14 @@ pub struct Conversation {
     /// later Commit must leave it unchanged. `None` until then.
     #[serde(default)]
     peer_signature_key: Option<Vec<u8>>,
+    /// Application messages this device sent since its last self-Update Commit (8.15 policy
+    /// counter). Saturates; reset by [`Conversation::note_self_update`].
+    #[serde(default)]
+    sent_since_update: u32,
+    /// Unix seconds when this device last rotated its own leaf, or first sent without ever
+    /// having done so. `None` until the first send after 8.15.
+    #[serde(default)]
+    last_update_at: Option<u64>,
 }
 
 impl Conversation {
@@ -86,7 +94,37 @@ impl Conversation {
             pq_binding: None,
             peer_credential: None,
             peer_signature_key: None,
+            sent_since_update: 0,
+            last_update_at: None,
         }
+    }
+
+    /// Application messages sent since this device last rotated its leaf key.
+    pub fn sent_since_update(&self) -> u32 {
+        self.sent_since_update
+    }
+
+    /// Unix seconds of the last own self-Update (or the first send that started the clock).
+    pub fn last_update_at(&self) -> Option<u64> {
+        self.last_update_at
+    }
+
+    /// Counts one sent Application message; starts the age clock at `now` on the first send.
+    pub fn note_sent(&mut self, now: u64) {
+        self.sent_since_update = self.sent_since_update.saturating_add(1);
+        self.last_update_at.get_or_insert(now);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_sent_for_test(&mut self, n: u32) {
+        self.sent_since_update = n;
+    }
+
+    /// Records a confirmed own self-Update at `now`: counter back to zero, clock restarted.
+    pub fn note_self_update(&mut self, now: u64) {
+        self.sent_since_update = 0;
+        self.last_update_at = Some(now);
+        debug_assert!(self.sent_since_update == 0);
     }
 
     /// Records the peer's credential identity as read from the MLS group.
@@ -454,6 +492,28 @@ mod tests {
             Role::Joiner,
             Some((pair.decap_key, pair.encap_key)),
         )
+    }
+
+    #[test]
+    fn rotation_counters_survive_a_round_trip_and_default_on_old_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let g = Uuid::new_v4();
+        let mut c = Conversation::new(g, Uuid::new_v4(), Role::Creator, None);
+        assert_eq!((c.sent_since_update(), c.last_update_at()), (0, None));
+        c.note_sent(42);
+        c.note_sent(99);
+        save(&store, &c).unwrap();
+        let got = load(&store, &g).unwrap().unwrap();
+        assert_eq!(
+            (got.sent_since_update(), got.last_update_at()),
+            (2, Some(42))
+        );
+        let mut v: serde_json::Value = serde_json::to_value(&got).unwrap();
+        v.as_object_mut().unwrap().remove("sent_since_update");
+        v.as_object_mut().unwrap().remove("last_update_at");
+        let old: Conversation = serde_json::from_value(v).unwrap();
+        assert_eq!((old.sent_since_update(), old.last_update_at()), (0, None));
     }
 
     #[test]

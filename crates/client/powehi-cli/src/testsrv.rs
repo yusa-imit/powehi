@@ -29,6 +29,12 @@ pub struct Backend {
     pub fail_revoke: bool,
     /// Answer `POST /v1/messages` with a 500.
     pub fail_messages: bool,
+    /// Status for `POST /v1/messages/commit`; 0 means 200 with `expected_epoch + 1`.
+    pub commit_status: u16,
+    /// Epoch the 200 reply carries instead of `expected_epoch + 1` (a misbehaving server).
+    pub commit_reply_epoch: Option<u64>,
+    /// `expected_epoch` of every Commit posted.
+    pub commits: Vec<u64>,
     /// Envelopes per `GET /v1/messages` page; 0 means the real server's 64.
     pub page_limit: usize,
 }
@@ -107,6 +113,17 @@ fn handle(st: &mut Backend, method: &str, path: &str, caller: Uuid, body: &Value
                 "expires_at": null,
             }));
             respond(204, None)
+        }
+        ("POST", ["v1", "messages", "commit"]) => {
+            let expected = body["expected_epoch"].as_u64().unwrap();
+            st.commits.push(expected);
+            match st.commit_status {
+                0 => respond(
+                    200,
+                    Some(json!({ "epoch": st.commit_reply_epoch.unwrap_or(expected + 1) })),
+                ),
+                code => respond(code, None),
+            }
         }
         ("POST", ["v1", "messages"]) if st.fail_messages => respond(500, None),
         ("POST", ["v1", "messages"]) => {

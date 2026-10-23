@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 634 (2026-10-23, FEATURE) — 8.15 slice (b), box stays open
+Policy + plumbing, not wired into send yet: `pcs.rs` (50 msgs / 7 d), conv counters, `invite::send_commit` → `CommitOutcome`, prd §5.3A. Next: wire send/chat; the hard part is recovering an Unknown outcome (staged Commit persisted, server may have taken it) — design it before wiring; threat-model-checker.
+
 ## Cycle 633 (2026-10-23, FEATURE) — 8.15 slice (a), box stays open
 crypto-core `stage_pair_self_update`/`confirm_`/`abort_pair_self_update` + PCS leaked-state test. Next slices: CLI policy (age/message count; write prd §5), send/chat wiring with commit-serialization retry, threat-model-checker.
 

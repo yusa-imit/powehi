@@ -717,6 +717,12 @@ POWEHI_PQ_KEM_EXT_TYPE extension payload (1,248 bytes):
   bytes [1184..1247] — Ed25519 signature (MLS identity key로 encap key에 서명)
 ```
 
+### 5.3A CLI PCS 로테이션 정책 (Phase 8 · 8.15)
+
+CLI는 1:1 대화에서 `send`/`chat`이 **Application 메시지를 보내기 직전**, 아래 둘 중 하나가 참이면 자기 leaf 키를 self-Update Commit으로 교체한다 (`powehi-cli/src/pcs.rs`): (1) 현재 leaf 키로 보낸 메시지가 **50개** 이상, (2) 그 키로 이미 한 번 이상 보냈고 키 나이가 **7일** 이상. 유휴 대화는 로테이션하지 않는다(보호할 새 메시지가 없음). 카운터와 시계는 `conv-*` 레코드(암호화된 프로필 저장소)에만 있으며 서버에 노출되는 값은 없다 — Commit 자체와 `expected_epoch`(§4A.5)는 이미 서버가 보는 메타데이터다.
+
+Commit 결과 처리: stage → 상태 저장 → 전송 → **서버가 확정 수락(2xx, epoch = expected+1)하면 merge**, **같은 bytes의 *첫* POST에 대해서만, 서버가 저장 전에 내는 상태(400/401/404/409/413/415/422/429)를 확정 거절로 보고 abort**(서버 CAS는 멱등이 아니라 이미 저장된 Commit의 재POST도 409를 돌려주므로 재POST의 409는 증거가 아님), 타임아웃·5xx·그 외 상태·형식 오류는 *불명*으로 두고 merge도 abort도 하지 않는다(수락된 Commit을 abort하면 `max_past_epochs(0)` 때문에 장치가 고립됨). 동시 Commit 충돌(409)은 이번 메시지 전송을 막지 않고 다음 전송에서 재시도한다. `expected_epoch`는 로컬 MLS epoch가 아니라 **서버 그룹 epoch**(수락된 Commit 수; 막 가입한 pair는 0)다. *불명* 해소 규칙(crypto-reviewer gate): epoch+1에 저장된 Commit envelope(poll은 자기 broadcast도 돌려준다)이 staged bytes와 바이트 단위로 같으면 confirm, 다른 멤버의 것이면 abort, epoch가 아직 N이면 계속 불명 — epoch 조회만으로 abort하지 않는다(늦게 저장될 수 있음). send/chat 배선과 해소 구현은 8.15 후속 슬라이스.
+
 ### 5.4 MLS Delivery Service의 책임
 
 서버가 수행해야 할 것 (모두 ciphertext만 다룸):

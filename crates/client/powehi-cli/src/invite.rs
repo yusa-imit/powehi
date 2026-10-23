@@ -349,6 +349,78 @@ pub(crate) async fn send_application(
     Ok(())
 }
 
+/// What the Delivery Service did with a posted self-Update Commit (8.15). Only a definite
+/// answer lets the caller merge or abort; anything else leaves the staged Commit alone.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CommitOutcome {
+    /// 2xx with the epoch the Commit created (`expected_epoch + 1`): merge it.
+    Accepted,
+    /// The server refused the FIRST post of these bytes with a status it only issues before
+    /// storing anything (see [`commit_status_outcome`]): abort it.
+    Rejected,
+    /// Timeout, transport error, 5xx, 408, other status or a malformed 2xx: the Commit may have
+    /// landed (or may land late). Neither merge nor abort; aborting an accepted Commit strands
+    /// the device. Resolve only by finding the stored Commit envelope at epoch + 1 (its bytes
+    /// equal the staged ones: confirm; another member's: abort); never by an epoch probe alone.
+    Unknown,
+}
+
+/// Maps a failed response status to a [`CommitOutcome`]. The server's CAS is not idempotent: a
+/// re-post of bytes it already stored answers 409, which then proves nothing, so a `resend`
+/// never yields `Rejected`. On a first post only the statuses the server issues before the
+/// ledger transaction count (400/415/422 body, 401 auth/membership, 404 group, 409 CAS lost,
+/// 413 size, 429 rate limit); anything else, including other 4xx, is `Unknown`.
+fn commit_status_outcome(status: u16, resend: bool) -> CommitOutcome {
+    match status {
+        400 | 401 | 404 | 409 | 413 | 415 | 422 | 429 if !resend => CommitOutcome::Rejected,
+        _ => CommitOutcome::Unknown,
+    }
+}
+
+/// Posts a staged self-Update Commit. `expected_epoch` is the SERVER's group epoch (the CAS
+/// precondition of prd.md §4A.5), not the local MLS epoch: the server counts only accepted
+/// Commits, so a freshly joined pair is at 0 while MLS is at 1. `resend` is true for any post
+/// after the first of the same bytes. The body never leaves this function.
+pub async fn send_commit(
+    client: &Client,
+    server: &Url,
+    session: &Session,
+    group_id: Uuid,
+    commit: &[u8],
+    expected_epoch: u64,
+    resend: bool,
+) -> CommitOutcome {
+    #[derive(Serialize)]
+    struct CommitReq<'a> {
+        group_id: Uuid,
+        commit: &'a [u8],
+        expected_epoch: u64,
+    }
+    #[derive(Deserialize)]
+    struct CommitResp {
+        epoch: u64,
+    }
+    let Ok(url) = api(server, "/v1/messages/commit") else {
+        return CommitOutcome::Unknown;
+    };
+    let body = CommitReq {
+        group_id,
+        commit,
+        expected_epoch,
+    };
+    let Ok(req) = json_post(client, url, &body) else {
+        return CommitOutcome::Unknown;
+    };
+    match identity::send_raw(req, session, SMALL_BODY).await {
+        Ok(raw) => match serde_json::from_slice::<CommitResp>(&raw) {
+            Ok(r) if r.epoch == expected_epoch.saturating_add(1) => CommitOutcome::Accepted,
+            _ => CommitOutcome::Unknown,
+        },
+        Err(IdentityError::HttpStatus(code)) => commit_status_outcome(code, resend),
+        Err(_) => CommitOutcome::Unknown,
+    }
+}
+
 struct BuiltGroup {
     group_id: Uuid,
     welcome: Vec<u8>,
