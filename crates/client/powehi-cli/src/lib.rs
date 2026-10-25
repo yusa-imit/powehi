@@ -132,11 +132,19 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
         #[cfg(unix)]
         cli::Command::Decline(ref a) => run_request_answer(&args.server, &paths, &a.request, false),
         #[cfg(unix)]
-        cli::Command::Send(ref c) => run_send(&args.server, &paths, &c.conversation, c.json),
+        cli::Command::Send(ref c) => run_send(
+            &args.server,
+            &paths,
+            &c.conversation,
+            c.json,
+            c.allow_changed,
+        ),
         #[cfg(unix)]
         cli::Command::Read(ref c) => run_read(&args.server, &paths, c),
         #[cfg(unix)]
-        cli::Command::Chat(ref c) => run_chat(&args.server, &paths, &c.conversation),
+        cli::Command::Chat(ref c) => {
+            run_chat(&args.server, &paths, &c.conversation, c.allow_changed)
+        }
         #[cfg(unix)]
         cli::Command::Verify(ref c) => run_verify(&args.server, &paths, c),
         #[cfg(unix)]
@@ -442,6 +450,7 @@ fn run_send(
     paths: &profile::ProfilePaths,
     reference: &str,
     json: bool,
+    allow_changed: bool,
 ) -> Result<(), CliError> {
     use std::io::Read as _;
     // Read and validate the body before the password prompt so a bad pipe fails fast.
@@ -456,14 +465,21 @@ fn run_send(
     let mut prompter = prompt::TtyPrompter;
     let session = login_scoped(&rt, &client, server, paths, &mut prompter)?;
     let group_id = message::resolve(&session.store, reference)?;
-    if verify::changed_since_verified(&session.store, group_id) {
+    if allow_changed && verify::changed_since_verified(&session.store, group_id) {
         eprintln!("{}", verify::CHANGED_WARNING);
     }
     if !verify::has_confirmation(&session.store, group_id) {
         eprintln!("{}", verify::UNVERIFIED_WARNING);
     }
     let body = message::check_body(&raw)?;
-    rt.block_on(message::send(&client, server, &session, group_id, body))?;
+    rt.block_on(message::send_with(
+        &client,
+        server,
+        &session,
+        group_id,
+        body,
+        allow_changed,
+    ))?;
     message::write_sent(group_id, json, &mut std::io::stdout()).map_err(|_| CliError::Output)
 }
 
@@ -609,6 +625,7 @@ fn run_chat(
     server: &url::Url,
     paths: &profile::ProfilePaths,
     reference: &str,
+    allow_changed: bool,
 ) -> Result<(), CliError> {
     let rt = runtime()?;
     let client = status::http_client()?;
@@ -642,7 +659,10 @@ fn run_chat(
             group_id,
             &mut rx,
             &mut std::io::stdout(),
-            chat::Polling::default(),
+            chat::Options {
+                allow_changed,
+                ..chat::Options::default()
+            },
         )
         .await;
         ws.abort();

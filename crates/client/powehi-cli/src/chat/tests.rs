@@ -10,9 +10,10 @@ fn client() -> Client {
     crate::status::http_client().unwrap()
 }
 
-const FAST: Polling = Polling {
+const FAST: Options = Options {
     safety_net: Duration::from_secs(30),
     fallback: Duration::from_millis(20),
+    allow_changed: false,
 };
 
 struct Pair {
@@ -283,4 +284,35 @@ async fn unverified_notice_is_printed_until_the_number_is_confirmed() {
     verify::confirm(&p.alice.store, p.gid, &n, &n).unwrap();
     let text = chat_as_alice(&p, vec![]).await;
     assert!(!text.contains("unverified"), "{text:?}");
+}
+
+#[tokio::test]
+async fn changed_conversation_line_is_not_sent_without_allow_changed() {
+    let p = pair().await;
+    p.alice
+        .store
+        .put(&format!("verified-{}", p.gid.hyphenated()), b"x")
+        .unwrap();
+    let mut blocked = Vec::new();
+    send_line(
+        &client(),
+        &p.url,
+        &p.alice,
+        p.gid,
+        "hi",
+        false,
+        &mut blocked,
+    )
+    .await
+    .unwrap();
+    let text = String::from_utf8(blocked).unwrap();
+    assert!(
+        text.contains("! not sent:") && text.contains("--allow-changed"),
+        "{text:?}"
+    );
+    let mut allowed = Vec::new();
+    send_line(&client(), &p.url, &p.alice, p.gid, "hi", true, &mut allowed)
+        .await
+        .unwrap();
+    assert!(allowed.is_empty(), "{allowed:?}");
 }
