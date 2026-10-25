@@ -274,6 +274,15 @@ pointing here. Close the issue in the PR that finishes its item.
   Remaining: (d) wiring in send/chat with an exclusive profile lock, gate Application encrypt on a pending Commit,
   gate the own-echo ack on no `pcs-` record, behind/ahead split with a warning; (e) recovery of `Unresolved`
   (stale record = discard, never repost; 24 h Ahead-grace interaction); threat-model-checker.
+  Slice (d) PARTIAL (cycle 637): `send` refuses while a `pcs-` record exists and counts each send at
+  encrypt time (inert until rotation is wired). The live trigger (`rotate` from `send`/`chat`) was NOT
+  shipped: crypto-reviewer failed it because d without e can lock a conversation for good after one
+  503, and an Ahead envelope for a group with a `pcs-` record would be acked after the 24 h grace
+  (message loss + fork). Must land together with (e): hold Ahead envelopes while a `pcs-` record
+  exists; gate on the Commit echo (handle_commit acks it today), not the Application echo; drain the
+  inbox before rotating; treat OutOfSync / Rejected(409) as "do not send Application this epoch";
+  add an `openmls` `pending_commit()` check before encrypt; server lookup of our Commit by epoch
+  (a peer ack deletes the broadcast, so the echo cannot be the proof).
 - [ ] 8.16 CHANGED blocks send (#53 item 1) — `send`/`chat` refuse a conversation
   whose verified safety number is CHANGED unless `--allow-changed` is given; the
   refusal says how to re-verify. Close #53. crypto-reviewer.
