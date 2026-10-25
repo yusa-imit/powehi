@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 641 (2026-10-26, FEATURE) — 8.17 slice (a); 8.15 still blocked on #166
+`safety::group` + `GroupSafetyError` in crypto-core, moved verbatim from the WASM crate (domain `powehi-group-safety-number-v1`, cap 512, KAT `096245...`); WASM delegates. crypto-reviewer first said needs-rework for a new domain (CLI vs web mismatch) — lesson: reuse shipped constructions. Next: CLI group roster/verify, then `group create/add/remove`.
+
 ## Cycle 639 (2026-10-25, FEATURE) — 8.16 shipped (8.15 skipped: blocked on #166)
 `send`/`chat` refuse a CHANGED conversation (`MessageError::Changed`, gate in `message::send_with`, before any key or counter is spent); `--allow-changed` overrides. `chat::Polling` became `chat::Options` (+`allow_changed`). #166 commented: re-post is indistinguishable from a lost CAS (both 409) and Commit envelopes are deleted after all-ack, so the proposal is a per-(group, epoch) Commit digest in the ledger + member-only GET. Next unchecked: 8.15 d+e (needs #166), else 8.17.
 

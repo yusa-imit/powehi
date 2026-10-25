@@ -1,13 +1,37 @@
-//! Pairwise Safety Number (prd.md §5.6), shared by the WASM worker and the CLI.
+//! Pairwise and group Safety Numbers (prd.md §5.6), shared by the WASM worker and the CLI.
 //!
 //! Moved verbatim from `powehi-crypto-wasm`; the known-answer test pins the construction so
-//! both clients keep producing the same number for the same two signature keys.
+//! both clients keep producing the same number for the same keys.
 
 use sha2::{Digest, Sha512};
 
 /// Domain-separation prefix for the safety number derivation (prd.md §5.6).
 /// Pinning the construction version here makes any future format change detectable.
 const SAFETY_NUMBER_DOMAIN: &[u8] = b"powehi-safety-number-v1";
+
+/// Domain separator of the group construction: a different prefix keeps a group number from
+/// ever colliding with a pairwise one over the same keys. Frozen: it is the construction the
+/// web client already shows, so the CLI must produce the same number for the same roster.
+const GROUP_SAFETY_NUMBER_DOMAIN: &[u8] = b"powehi-group-safety-number-v1";
+
+/// Most members a group safety number covers (bounds the hash input). Callers must bound the
+/// collection itself, e.g. `group.members().take(GROUP_MAX_MEMBERS + 1)`.
+pub const GROUP_MAX_MEMBERS: usize = 512;
+
+/// Why [`group`] refused a roster. `TooMany` means "cannot be verified", not tampering; the
+/// UI must render it apart from a mismatch. `DuplicateKey` breaks RFC 9420 §7.3 (unique
+/// `signature_key`) and must be treated as an anomaly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum GroupSafetyError {
+    #[error("group safety number requires at least 2 members")]
+    TooFew,
+    #[error("group safety number: too many members")]
+    TooMany,
+    #[error("safety number keys must be exactly 32 bytes")]
+    BadKeyLength,
+    #[error("group safety number keys must be distinct")]
+    DuplicateKey,
+}
 
 /// Render a SHA-512 digest as the 12-group decimal safety number format
 /// (prd.md §5.6 "숫자 6자리 그룹"): 12 six-digit decimal groups, space-separated,
@@ -61,6 +85,44 @@ pub fn pairwise(key_a: &[u8], key_b: &[u8]) -> Result<String, &'static str> {
     Ok(digits_from_hash(&hash))
 }
 
+/// Safety number of a group (prd.md §5.6, 8.17): the digest of every member's 32-byte Ed25519
+/// signature key, so all members who see the same roster read the same number. Order-independent.
+/// It fingerprints the roster only: no group id, epoch or credential label, so it does not
+/// detect a fork that keeps the same members (that is the epoch authenticator's job).
+///
+/// Construction: SHA-512(DOMAIN || 0x00 || count u32 BE || (len u32 BE || key)...) over the
+/// keys sorted lexicographically. Fails closed on fewer than 2 keys, more than
+/// [`GROUP_MAX_MEMBERS`], a key that is not 32 bytes, or a duplicate key.
+///
+/// Caller contract: pass the keys of the local, active ratchet tree (own leaf included), never
+/// a server-reported list; choose pairwise vs group by conversation kind, not member count.
+pub fn group(keys: &[&[u8]]) -> Result<String, GroupSafetyError> {
+    if keys.len() < 2 {
+        return Err(GroupSafetyError::TooFew);
+    }
+    if keys.len() > GROUP_MAX_MEMBERS {
+        return Err(GroupSafetyError::TooMany);
+    }
+    if keys.iter().any(|k| k.len() != 32) {
+        return Err(GroupSafetyError::BadKeyLength);
+    }
+    let mut sorted: Vec<&[u8]> = keys.to_vec();
+    sorted.sort_unstable();
+    if sorted.windows(2).any(|w| w[0] == w[1]) {
+        return Err(GroupSafetyError::DuplicateKey);
+    }
+    let mut h = Sha512::new();
+    h.update(GROUP_SAFETY_NUMBER_DOMAIN);
+    h.update([0u8]);
+    h.update((sorted.len() as u32).to_be_bytes());
+    for key in sorted {
+        h.update((key.len() as u32).to_be_bytes());
+        h.update(key);
+    }
+    let hash: [u8; 64] = h.finalize().into();
+    Ok(digits_from_hash(&hash))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,6 +152,76 @@ mod tests {
         assert_eq!(
             pairwise(&[1u8; 32], &[2u8; 32]).unwrap(),
             "689053 337949 184798 288064 134849 362568 560227 765408 921198 315305 693006 807986"
+        );
+    }
+
+    #[test]
+    fn group_is_order_independent_and_distinct_from_pairwise() {
+        let (a, b, c) = ([1u8; 32], [2u8; 32], [3u8; 32]);
+        let sn = group(&[&a, &b, &c]).unwrap();
+        assert_eq!(sn, group(&[&c, &a, &b]).unwrap());
+        assert_eq!(sn.len(), 83);
+        assert_ne!(sn, group(&[&a, &b]).unwrap());
+        assert_ne!(group(&[&a, &b]).unwrap(), pairwise(&a, &b).unwrap());
+        assert_ne!(sn, group(&[&a, &b, &[4u8; 32]]).unwrap());
+    }
+
+    #[test]
+    fn group_rejects_bad_rosters() {
+        let (a, b) = ([1u8; 32], [2u8; 32]);
+        assert!(group(&[]).is_err());
+        assert!(group(&[&a]).is_err());
+        assert!(group(&[&a, &a]).is_err());
+        assert!(group(&[&a, &b, &a]).is_err());
+        assert!(group(&[&a, &[2u8; 31]]).is_err());
+        let keys: Vec<[u8; 32]> = (0..=GROUP_MAX_MEMBERS as u32)
+            .map(|i| {
+                let mut k = [0u8; 32];
+                k[..4].copy_from_slice(&i.to_be_bytes());
+                k
+            })
+            .collect();
+        let refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+        assert!(group(&refs).is_err());
+        assert!(group(&refs[..GROUP_MAX_MEMBERS]).is_ok());
+    }
+
+    /// Same vector as the WASM crate's frozen group KAT: a change here breaks cross-client checks.
+    #[test]
+    fn group_known_answer() {
+        let sn = group(&[&[0x33u8; 32], &[0x22u8; 32], &[0x11u8; 32]]).unwrap();
+        assert_eq!(
+            sn,
+            "096245 143897 685064 159306 343313 225158 468638 270220 280240 781420 559783 744730"
+        );
+    }
+
+    #[test]
+    fn group_errors_are_typed() {
+        let a = [1u8; 32];
+        assert_eq!(group(&[&a]), Err(GroupSafetyError::TooFew));
+        assert_eq!(group(&[&a, &a]), Err(GroupSafetyError::DuplicateKey));
+        assert_eq!(
+            group(&[&a, &[2u8; 33]]),
+            Err(GroupSafetyError::BadKeyLength)
+        );
+        assert_eq!(
+            group(&[&a, &[2u8; 31]]),
+            Err(GroupSafetyError::BadKeyLength)
+        );
+        let keys: Vec<[u8; 32]> = (0..=GROUP_MAX_MEMBERS as u32)
+            .map(|i| {
+                let mut k = [0u8; 32];
+                k[..4].copy_from_slice(&i.to_be_bytes());
+                k
+            })
+            .collect();
+        let refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+        assert_eq!(group(&refs), Err(GroupSafetyError::TooMany));
+        // The web client matches this exact string to render "too many members".
+        assert_eq!(
+            GroupSafetyError::TooMany.to_string(),
+            "group safety number: too many members"
         );
     }
 }

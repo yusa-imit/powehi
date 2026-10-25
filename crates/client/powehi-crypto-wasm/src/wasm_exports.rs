@@ -2229,22 +2229,7 @@ pub fn mls_import_state(state_bytes: &[u8], min_generation: f64) -> Result<JsVal
 
 // ── Safety Numbers ─────────────────────────────────────────────────────────────
 
-use powehi_crypto_core::safety::{
-    digits_from_hash as safety_number_digits_from_hash, pairwise as compute_safety_number_inner,
-};
-
-/// Domain-separation prefix for the N-party group safety number (prd.md §5.6).
-/// Deliberately distinct from the pairwise domain in `powehi_crypto_core::safety`: this distinct string,
-/// not the member-count field below, is what makes a 2-member group's output
-/// unable to collide with (or be confused for) the pairwise construction's
-/// output on the same two keys — with fixed-length (32-byte), length-prefixed
-/// operands the pairwise encoding is already injective on its own, so two
-/// different domain strings alone are sufficient. The count field's actual
-/// job (see `compute_group_safety_number_inner`) is only to stop groups of
-/// *different* sizes from colliding with each other via key reordering or
-/// prefix extension — it is defense-in-depth for that case, not what
-/// separates the group construction from the pairwise one.
-const GROUP_SAFETY_NUMBER_DOMAIN: &[u8] = b"powehi-group-safety-number-v1";
+use powehi_crypto_core::safety::pairwise as compute_safety_number_inner;
 
 /// Upper bound on members a group safety number will hash over, enforced by
 /// bounding the *collection* from live MLS group state (see
@@ -2266,7 +2251,7 @@ const GROUP_SAFETY_NUMBER_DOMAIN: &[u8] = b"powehi-group-safety-number-v1";
 /// consumer of this export MUST render that case ("too many members to
 /// verify") distinctly from "verification failed" — the two are not the same
 /// finding and must not be presented identically to a user.
-const MAX_GROUP_SAFETY_NUMBER_MEMBERS: usize = 512;
+const MAX_GROUP_SAFETY_NUMBER_MEMBERS: usize = powehi_crypto_core::safety::GROUP_MAX_MEMBERS;
 
 /// Inner computation for an N-party group safety number — testable without js_sys.
 ///
@@ -2280,39 +2265,27 @@ const MAX_GROUP_SAFETY_NUMBER_MEMBERS: usize = 512;
 /// different sizes cannot collide via key reordering or prefix extension
 /// (defense-in-depth on top of the domain string, which is what actually
 /// separates this construction from the pairwise one — see
-/// `GROUP_SAFETY_NUMBER_DOMAIN`'s doc comment).
+/// the core module's domain constant).
 ///
-/// A duplicate key in `keys` is not rejected here: RFC 9420 §7.8 requires
-/// `signature_key` uniqueness among a group's members, so a valid MLS group
-/// state can never produce one, and the length-prefixed count field means a
-/// duplicate could not silently collide with a same-size distinct-key group
-/// regardless. This function does not re-validate that MLS-layer invariant.
+/// The construction lives in `powehi_crypto_core::safety::group` (one path for web and CLI).
+/// A duplicate key is rejected (RFC 9420 §7.3 requires unique `signature_key`s).
 fn compute_group_safety_number_inner(keys: &[Vec<u8>]) -> Result<String, &'static str> {
-    use sha2::{Digest, Sha512};
-    if keys.len() < 2 {
-        return Err("group safety number requires at least 2 members");
-    }
-    if keys.len() > MAX_GROUP_SAFETY_NUMBER_MEMBERS {
-        return Err("group safety number: too many members");
-    }
-    if keys.iter().any(|k| k.len() != 32) {
-        return Err("safety number keys must be exactly 32 bytes");
-    }
-    // Sort lexicographically for order-independence (any permutation of the
-    // same key set hashes identically). All operands are public keys — no
-    // timing side-channel concern, same as the pairwise construction above.
-    let mut sorted: Vec<&[u8]> = keys.iter().map(Vec::as_slice).collect();
-    sorted.sort_unstable();
-    let mut h = Sha512::new();
-    h.update(GROUP_SAFETY_NUMBER_DOMAIN);
-    h.update([0u8]);
-    h.update((sorted.len() as u32).to_be_bytes());
-    for k in &sorted {
-        h.update((k.len() as u32).to_be_bytes());
-        h.update(k);
-    }
-    let hash: [u8; 64] = h.finalize().into();
-    Ok(safety_number_digits_from_hash(&hash))
+    let refs: Vec<&[u8]> = keys.iter().map(Vec::as_slice).collect();
+    powehi_crypto_core::safety::group(&refs).map_err(|e| match e {
+        powehi_crypto_core::safety::GroupSafetyError::TooFew => {
+            "group safety number requires at least 2 members"
+        }
+        // The web client string-matches this literal to render "too many members".
+        powehi_crypto_core::safety::GroupSafetyError::TooMany => {
+            "group safety number: too many members"
+        }
+        powehi_crypto_core::safety::GroupSafetyError::BadKeyLength => {
+            "safety number keys must be exactly 32 bytes"
+        }
+        powehi_crypto_core::safety::GroupSafetyError::DuplicateKey => {
+            "group safety number keys must be distinct"
+        }
+    })
 }
 
 /// One row of `mls_group_members_inner` output: the public, per-member identity
@@ -6555,7 +6528,7 @@ mod tests {
     /// Known-answer test: a frozen SHA-512 domain-separated vector for a fixed
     /// 3-key set. Locks in the exact byte layout (domain || 0x00 || count ||
     /// len-prefixed sorted keys) so a future refactor that touches
-    /// `compute_group_safety_number_inner` or `safety_number_digits_from_hash`
+    /// `compute_group_safety_number_inner` or the core digest rendering
     /// cannot silently change every already-verified group safety number
     /// while the other (behavioral, not byte-exact) tests stay green.
     #[test]
@@ -6565,6 +6538,15 @@ mod tests {
         assert_eq!(
             sn,
             "096245 143897 685064 159306 343313 225158 468638 270220 280240 781420 559783 744730"
+        );
+    }
+
+    #[test]
+    fn test_group_safety_number_rejects_duplicate_key() {
+        let k = vec![0x01u8; 32];
+        assert_eq!(
+            compute_group_safety_number_inner(&[k.clone(), k]),
+            Err("group safety number keys must be distinct")
         );
     }
 
