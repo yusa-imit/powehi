@@ -763,6 +763,7 @@ UX:
 - 숫자 6자리 그룹 (전화 통화 등으로 음성 비교)
 - 최초 1회 검증 → "verified" 상태 표시
 - identity 키 변경 시 (디바이스 재등록 등) 즉시 alert
+- CLI (8.16): 검증된 번호가 CHANGED(저장된 확인 record와 불일치, record를 읽을 수 없음, 또는 현재 번호를 다시 계산할 수 없음)이면 `send`/`chat`은 암호화 전에 거부하고(키·카운터 소모 없음, message POST 없음; 로그인·수신 등 다른 요청은 그대로이므로 서버는 "전송이 멈췄다"는 것만 관찰할 수 있으며 이는 사용자가 단순히 보내지 않는 경우와 구분되지 않는다) `powehi verify`로 재검증하라고 안내한다. `--allow-changed`를 명시해야만 전송하며(매 실행마다, 저장되지 않음) 이때 `send`는 stderr에, `chat`은 CHANGED로 바뀔 때 한 번 출력 화면에 경고를 낸다. Unverified(record 없음)는 경고만 하고 막지 않는다. `verified-*` record 삭제는 manifest(8.8a)가 탐지하며 fail-closed로 CHANGED가 된다.
 
 ---
 

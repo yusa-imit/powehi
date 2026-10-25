@@ -56,6 +56,11 @@ pub enum MessageError {
     Mls,
     #[error("a key rotation for this conversation is unresolved; nothing was sent")]
     RotationPending,
+    #[error(
+        "the safety number CHANGED since you verified this conversation; nothing was sent. Run \
+         `powehi verify <conversation>` and compare it with your peer, or pass --allow-changed"
+    )]
+    Changed,
 }
 
 impl From<mls_group::MlsError> for MessageError {
@@ -114,7 +119,7 @@ pub fn check_body(raw: &[u8]) -> Result<&[u8], MessageError> {
     Ok(body)
 }
 
-/// Encrypts `body` into the conversation and posts it. The caller has run [`check_body`].
+/// [`send_with`] that refuses a CHANGED conversation (the default, prd §5.6, 8.16).
 pub async fn send(
     client: &Client,
     server: &Url,
@@ -122,9 +127,26 @@ pub async fn send(
     group_id: Uuid,
     body: &[u8],
 ) -> Result<(), MessageError> {
+    send_with(client, server, session, group_id, body, false).await
+}
+
+/// Encrypts `body` into the conversation and posts it. The caller has run [`check_body`].
+/// A conversation whose verified safety number CHANGED (or whose record cannot be read) is
+/// refused before any key is spent unless `allow_changed` is set (`--allow-changed`).
+pub async fn send_with(
+    client: &Client,
+    server: &Url,
+    session: &Session,
+    group_id: Uuid,
+    body: &[u8],
+    allow_changed: bool,
+) -> Result<(), MessageError> {
     debug_assert!(body.len() <= MAX_BODY_LEN && std::str::from_utf8(body).is_ok());
     let store = &session.store;
     conversation::load(store, &group_id)?.ok_or(MessageError::NoSuchConversation)?;
+    if !allow_changed && crate::verify::changed_since_verified(store, group_id) {
+        return Err(MessageError::Changed);
+    }
     let now = unix_secs();
     // A staged self-Update Commit not yet resolved: no Application message may go out in this
     // epoch until it is (prd §5.3A).

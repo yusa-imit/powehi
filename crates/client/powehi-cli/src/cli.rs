@@ -58,7 +58,7 @@ pub enum Command {
     /// Show stored received messages for a conversation, then remove them from the store.
     Read(ReadArgs),
     /// Interactive chat REPL with realtime delivery.
-    Chat(ConversationArg),
+    Chat(ChatArgs),
     /// Show the Safety Number for a conversation.
     Verify(VerifyArgs),
     /// List the conversations stored in this profile (ids, roles, unread counts).
@@ -245,6 +245,18 @@ pub struct SendArgs {
     /// Print one JSON object (`{"conversation":...}`) instead of the text line.
     #[arg(long)]
     pub json: bool,
+    /// Send even though the verified safety number CHANGED (default: refuse).
+    #[arg(long)]
+    pub allow_changed: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ChatArgs {
+    /// Conversation id (or a unique prefix of at least 4 characters).
+    pub conversation: String,
+    /// Send even though the verified safety number CHANGED (default: refuse).
+    #[arg(long)]
+    pub allow_changed: bool,
 }
 
 #[derive(Debug, Args)]
@@ -386,6 +398,26 @@ mod tests {
             };
             assert!(a.json);
         }
+    }
+
+    #[test]
+    fn allow_changed_flag_on_send_and_chat() {
+        let Command::Send(a) = parse(&["send", "c1"]).unwrap().command else {
+            panic!("not send")
+        };
+        assert!(!a.allow_changed);
+        let Command::Send(a) = parse(&["send", "c1", "--allow-changed"]).unwrap().command else {
+            panic!("not send")
+        };
+        assert!(a.allow_changed);
+        let Command::Chat(a) = parse(&["chat", "c1"]).unwrap().command else {
+            panic!("not chat")
+        };
+        assert!(!a.allow_changed);
+        let Command::Chat(a) = parse(&["chat", "c1", "--allow-changed"]).unwrap().command else {
+            panic!("not chat")
+        };
+        assert!(a.allow_changed);
     }
 
     #[test]

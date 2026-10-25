@@ -290,9 +290,10 @@ pointing here. Close the issue in the PR that finishes its item.
   per-conv budget; real ceiling is the 30 d server retention, not junk.rs's 7 d), a recovery path
   that clears an unreadable record and surfaces it, a grace-clock restart on resolve, an exclusive
   profile lock in the inbox, and a testsrv that excludes the sender from the required-ack set.
-- [ ] 8.16 CHANGED blocks send (#53 item 1) — `send`/`chat` refuse a conversation
+- [x] 8.16 CHANGED blocks send (#53 item 1) — `send`/`chat` refuse a conversation
   whose verified safety number is CHANGED unless `--allow-changed` is given; the
   refusal says how to re-verify. Close #53. crypto-reviewer.
+  Shipped cycle 639 (gate in `message::send_with`, fail-closed). Contract for 8.15 wiring: the CHANGED gate runs before `pcs::rotate`, and the number is re-evaluated against the same group snapshot after the inbox drain. For 8.17: a pair with a verified record that grows beyond two members must stay CHANGED (fail closed), not drop to Unverified.
 - [ ] 8.17 Groups of three or more and MLS Remove (#2, CLI side) — `group create`,
   `group add`, `group remove` with a real Remove Commit that advances the epoch;
   the group variant of the §5.6 safety number. A server `RemovalRequired` /

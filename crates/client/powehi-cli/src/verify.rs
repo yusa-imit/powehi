@@ -134,7 +134,8 @@ fn store_record(store: &ProfileStore, group_id: Uuid, number: &str) -> Result<()
 
 /// The §5.6 alert for commands that touch a conversation (`read`, `send`, `chat`): `true` when
 /// a confirmation record exists (or cannot be read) and the current number cannot be shown to
-/// match it. It warns, it never blocks. Only an absent record, or a record matching the
+/// match it. It is the predicate of the `send`/`chat` gate (8.16): it MUST stay fail-closed, never
+/// relax an error arm to `false`. Only an absent record, or a record matching the
 /// recomputed number, is silent: any store error or unrecomputable number alerts.
 pub fn changed_since_verified(store: &ProfileStore, group_id: Uuid) -> bool {
     match store.get(&record_name(&group_id)) {

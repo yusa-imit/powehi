@@ -83,6 +83,67 @@ async fn send_to_unknown_conversation_fails_without_calls() {
 }
 
 #[tokio::test]
+async fn changed_conversation_refuses_send_unless_allowed() {
+    let (_tmp, alice, bob, url, gid) = pair().await;
+    // A record that does not match the recomputed number is the CHANGED state (§5.6).
+    bob.store
+        .put(&format!("verified-{}", gid.hyphenated()), b"x")
+        .unwrap();
+    let r = send(&client(), &url, &bob, gid, b"blocked").await;
+    assert!(matches!(r, Err(MessageError::Changed)), "{r:?}");
+    let got = inbox::receive(&client(), &url, &alice).await.unwrap();
+    assert_eq!(got.stored, 0, "nothing reached the server");
+    let sent = conversation::load(&bob.store, &gid)
+        .unwrap()
+        .unwrap()
+        .sent_since_update();
+    assert_eq!(sent, 0, "no key was spent");
+    send_with(&client(), &url, &bob, gid, b"override", true)
+        .await
+        .unwrap();
+    assert_eq!(
+        inbox::receive(&client(), &url, &alice)
+            .await
+            .unwrap()
+            .stored,
+        1
+    );
+}
+
+#[tokio::test]
+async fn well_formed_record_with_another_number_refuses_send() {
+    let (_tmp, alice, bob, url, gid) = pair().await;
+    let other = powehi_crypto_core::safety::pairwise(&[1u8; 32], &[2u8; 32]).unwrap();
+    let rec = serde_json::json!({"version": 1, "number": other});
+    bob.store
+        .put(
+            &format!("verified-{}", gid.hyphenated()),
+            rec.to_string().as_bytes(),
+        )
+        .unwrap();
+    let r = send(&client(), &url, &bob, gid, b"blocked").await;
+    assert!(matches!(r, Err(MessageError::Changed)), "{r:?}");
+    assert_eq!(
+        inbox::receive(&client(), &url, &alice)
+            .await
+            .unwrap()
+            .stored,
+        0
+    );
+}
+
+#[tokio::test]
+async fn verified_or_unverified_conversation_still_sends() {
+    let (_tmp, _alice, bob, url, gid) = pair().await;
+    send(&client(), &url, &bob, gid, b"unverified is only a warning")
+        .await
+        .unwrap();
+    let n = crate::verify::number(&bob.store, gid).unwrap();
+    crate::verify::confirm(&bob.store, gid, &n, &n).unwrap();
+    send(&client(), &url, &bob, gid, b"verified").await.unwrap();
+}
+
+#[tokio::test]
 async fn resolve_accepts_full_id_and_unique_prefix_only() {
     let (_tmp, alice, _bob, _url, gid) = pair().await;
     let full = gid.hyphenated().to_string();

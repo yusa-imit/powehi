@@ -47,18 +47,21 @@ impl std::fmt::Debug for Event {
     }
 }
 
-/// Poll intervals: a safety net while realtime works, a fallback once it is lost.
+/// Run options: poll intervals (a safety net while realtime works, a fallback once it is
+/// lost) and whether a CHANGED conversation may still be sent to (`--allow-changed`).
 #[derive(Clone, Copy)]
-pub struct Polling {
+pub struct Options {
     pub safety_net: Duration,
     pub fallback: Duration,
+    pub allow_changed: bool,
 }
 
-impl Default for Polling {
+impl Default for Options {
     fn default() -> Self {
         Self {
             safety_net: Duration::from_secs(60),
             fallback: Duration::from_secs(5),
+            allow_changed: false,
         }
     }
 }
@@ -112,7 +115,7 @@ pub async fn run(
     group_id: Uuid,
     events: &mut Receiver<Event>,
     out: &mut impl Write,
-    polling: Polling,
+    options: Options,
 ) -> std::io::Result<()> {
     let mut realtime = true;
     let mut alerted = false;
@@ -125,9 +128,9 @@ pub async fn run(
     }
     for _ in 0..MAX_EVENTS {
         let wait = if realtime {
-            polling.safety_net
+            options.safety_net
         } else {
-            polling.fallback
+            options.fallback
         };
         let event = match timeout(wait, events.recv()).await {
             Err(_) => Event::Wake,
@@ -157,7 +160,16 @@ pub async fn run(
                 if text.trim().is_empty() {
                     continue;
                 }
-                send_line(client, server, session, group_id, text, out).await?;
+                send_line(
+                    client,
+                    server,
+                    session,
+                    group_id,
+                    text,
+                    options.allow_changed,
+                    out,
+                )
+                .await?;
             }
         }
     }
@@ -170,10 +182,13 @@ async fn send_line(
     session: &Session,
     group_id: Uuid,
     text: &str,
+    allow_changed: bool,
     out: &mut impl Write,
 ) -> std::io::Result<()> {
     let result = match message::check_body(text.as_bytes()) {
-        Ok(body) => message::send(client, server, session, group_id, body).await,
+        Ok(body) => {
+            message::send_with(client, server, session, group_id, body, allow_changed).await
+        }
         Err(e) => Err(e),
     };
     if let Err(e) = result {
