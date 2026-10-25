@@ -371,8 +371,10 @@ async fn receive_at(
                     held.push(env.clone());
                 }
                 ahead_pinned |= tracker.ahead_pins(id, now);
-                // Not a failure: the Commit that makes it readable may still arrive.
-                if tracker.unknown_expired(id, now)
+                // Not a failure: the Commit that makes it readable may still arrive. While our
+                // own Commit is unresolved (`pcs-` record) the gap may be that Commit: never ack.
+                if !pcs_unresolved(session, group_id)
+                    && tracker.unknown_expired(id, now)
                     && welcome::ack(client, server, session, id).await.is_ok()
                 {
                     tracker.forget(id);
@@ -417,7 +419,7 @@ async fn receive_at(
 }
 
 /// A Commit envelope. [`Applied::Yes`] when it was applied (the epoch advanced). Own echoes are
-/// acked at once; a peer Commit that cannot apply yet (later epoch) is held and acked only
+/// acked at once (the sender is not in the server's required-ack set); a peer Commit that cannot apply yet (later epoch) is held and acked only
 /// after the grace; one that is refused or invalid counts as a failure (acked after repeated
 /// failures and the grace); anything not from a held conversation's peer is acked after the
 /// grace as junk.
@@ -445,6 +447,7 @@ async fn handle_commit(
         commit::Outcome::Unknown
     };
     let mut forked = false;
+    let ahead = matches!(outcome, commit::Outcome::Ahead);
     let expired = match outcome {
         commit::Outcome::Applied => {
             tracker.forget(id);
@@ -458,7 +461,11 @@ async fn handle_commit(
         }
         commit::Outcome::Ahead | commit::Outcome::Unknown => tracker.unknown_expired(id, now),
     };
-    if expired && welcome::ack(client, server, session, id).await.is_ok() {
+    // A Commit from a later epoch may only be readable after our own unresolved Commit merges
+    // (one Commit per epoch, RFC 9420 §14): hold it. Refused/Forked/Unknown never become
+    // applicable by that, so they keep the normal grace.
+    let hold = ahead && pcs_unresolved(session, group_id);
+    if expired && !hold && welcome::ack(client, server, session, id).await.is_ok() {
         tracker.forget(id);
     }
     Ok(if forked { Applied::Forked } else { Applied::No })
@@ -469,6 +476,12 @@ enum Applied {
     Yes(Uuid),
     No,
     Forked,
+}
+
+/// True while a self-Update Commit of `group_id` is unresolved. Fail closed: an unreadable store
+/// counts as unresolved, so nothing is acked on a guess.
+fn pcs_unresolved(session: &Session, group_id: Uuid) -> bool {
+    crate::pcs::has_pending(&session.store, group_id).unwrap_or(true)
 }
 
 /// True when `group_id` is a stored conversation and `sender` is its peer device.

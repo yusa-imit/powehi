@@ -964,6 +964,30 @@ async fn epoch_ahead_envelope_is_held_uncounted_and_acked_only_after_the_grace()
 }
 
 #[tokio::test]
+async fn an_ahead_envelope_is_never_acked_while_a_rotation_record_exists() {
+    let (_tmp, p) = pair().await;
+    receive(&client(), &p.url, &p.alice).await.unwrap();
+    bob_sends_from_next_epoch(&p);
+    let name = format!("{}{}", crate::pcs::PENDING_PREFIX, p.gid.hyphenated());
+    p.alice.store.put(&name, &[0u8; 9]).unwrap();
+    let t0 = 1_000_000;
+    receive_at(&client(), &p.url, &p.alice, t0).await.unwrap();
+    receive_at(
+        &client(),
+        &p.url,
+        &p.alice,
+        t0 + 10 * junk::UNKNOWN_GRACE_SECS,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        inbox_len(&p),
+        1,
+        "held past the grace while our Commit is unresolved"
+    );
+}
+
+#[tokio::test]
 async fn a_held_ahead_envelope_keeps_the_cursor_at_the_head_across_a_full_window() {
     let (_tmp, p) = pair().await;
     receive(&client(), &p.url, &p.alice).await.unwrap();
