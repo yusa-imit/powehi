@@ -33,6 +33,8 @@ pub struct Backend {
     pub commit_status: u16,
     /// Epoch the 200 reply carries instead of `expected_epoch + 1` (a misbehaving server).
     pub commit_reply_epoch: Option<u64>,
+    /// Epoch `GET /v1/groups/{id}/epoch` reports.
+    pub group_epoch: u64,
     /// `expected_epoch` of every Commit posted.
     pub commits: Vec<u64>,
     /// Envelopes per `GET /v1/messages` page; 0 means the real server's 64.
@@ -113,6 +115,9 @@ fn handle(st: &mut Backend, method: &str, path: &str, caller: Uuid, body: &Value
                 "expires_at": null,
             }));
             respond(204, None)
+        }
+        ("GET", ["v1", "groups", _, "epoch"]) => {
+            respond(200, Some(json!({ "epoch": st.group_epoch })))
         }
         ("POST", ["v1", "messages", "commit"]) => {
             let expected = body["expected_epoch"].as_u64().unwrap();

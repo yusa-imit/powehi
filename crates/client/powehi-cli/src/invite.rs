@@ -421,6 +421,24 @@ pub async fn send_commit(
     }
 }
 
+/// The Delivery Service's accepted-Commit counter for `group_id`: the `expected_epoch` of the
+/// next Commit post (prd.md §4A.5). A CAS token and a go/no-go check for staging only, never an input to MLS state.
+pub async fn group_epoch(
+    client: &Client,
+    server: &Url,
+    session: &Session,
+    group_id: Uuid,
+) -> Result<u64, InviteError> {
+    #[derive(Deserialize)]
+    struct EpochResp {
+        epoch: u64,
+    }
+    let url = api(server, &format!("/v1/groups/{group_id}/epoch"))?;
+    let raw = identity::send_raw(client.get(url), session, SMALL_BODY).await?;
+    let resp: EpochResp = serde_json::from_slice(&raw).map_err(|_| InviteError::BadResponse)?;
+    Ok(resp.epoch)
+}
+
 struct BuiltGroup {
     group_id: Uuid,
     welcome: Vec<u8>,
