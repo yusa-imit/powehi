@@ -117,6 +117,20 @@
 # Revisit when openmls_rust_crypto / hpke-rs release versions on libcrux-kem >=0.0.10, or if
 # "libcrux" ever activates (the tree queries above must keep printing nothing). The PQ-enablement
 # cycle must re-open this waiver first — hybrid KEM key decoding is exactly the affected path.
+# RUSTSEC-2026-0387: crypto-bigint 0.5.5 — timing variability in nominally constant-time ops
+# (subtraction, division, Montgomery multiplication); the advisory covers every version < 0.7.6.
+# Impact: partly REACHABLE. crypto-bigint 0.5.5 is pulled by elliptic-curve 0.13.8 (p256/p384/k256,
+# voprf) and directly by aws-sigv4 1.4.4 (workspace `sigv4a` feature).
+#  - Executed on a long-term secret: powehi-webpush VAPID ES256 signing (p256 0.13 scalar ops) on
+#    the server. The only remote signal is push delivery latency.
+#  - Compiled in, likely unexecuted: aws-sigv4 sigv4a in powehi-server (R2 uses plain SigV4).
+#  - Not executed: MLS (suite 0x0001, X25519/Ed25519) and OPAQUE (Ristretto255) run on
+#    curve25519-dalek; the P-256/384/K-256 code in hpke-rs-rust-crypto, openmls_basic_credential
+#    and voprf is compiled in but unused.
+# No fix can be taken: the patched line needs elliptic-curve/p256 0.14, which openmls_rust_crypto
+# 0.5.1 and opaque-ke 4.0.1 do not use. Temporary waiver, tracked in issue #163 (opened
+# 2026-10-25) with mitigations: webpush to p256 0.14, drop sigv4a, ciphersuite-rejection test.
+# Revisit when openmls_rust_crypto / opaque-ke move to elliptic-curve 0.14.
 #
 ignore = [
     "RUSTSEC-2023-0071",
@@ -133,4 +147,5 @@ ignore = [
     "RUSTSEC-2026-0253",
     "RUSTSEC-2026-0330",
     "RUSTSEC-2026-0331",
+    "RUSTSEC-2026-0387",
 ]

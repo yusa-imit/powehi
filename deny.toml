@@ -48,6 +48,7 @@ ignore = [
     { id = "RUSTSEC-2026-0207", reason = "libcrux-sha3 shake256 compiled in but only called from openmls_rust_crypto-unreachable PQ KEM branches (X-Wing/ML-KEM); see .cargo/audit.toml for full trace" },
     { id = "RUSTSEC-2026-0208", reason = "libcrux-sha3 AVX2 shake256 compiled in but only called from openmls_rust_crypto-unreachable PQ KEM branches; hpke-rs's own call lengths (32/64) are also outside the buggy range; see .cargo/audit.toml" },
     { id = "RUSTSEC-2026-0212", reason = "libcrux-secrets reachable only via libcrux-sha3, which is only called from openmls_rust_crypto-unreachable PQ KEM branches; see .cargo/audit.toml for full trace" },
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 executed only by server VAPID signing (p256 0.13); fix needs elliptic-curve 0.14, no upgrade path; temporary, see .cargo/audit.toml and issue #163" },
 ]
 
 [licenses]
