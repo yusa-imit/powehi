@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 643 (2026-10-26, FEATURE) — 8.17 slice (b1); 8.15 still blocked on #166 (no owner answer)
+`Kind` pair|group on `conv-*` (group = record version 2, old binaries reject), `verify::number_of` dispatches on it via pure `number_from_keys`. crypto-reviewer needs-rework (test gaps, cap order, typed DuplicateKey, downgrade) fixed. Lesson: put roster rules in a pure fn so 512/513 and grown-pair cases are unit-testable. Next: `group create` (authenticated Kind source), then add/remove; carried list in STATUS 8.17.
+
 ## Cycle 641 (2026-10-26, FEATURE) — 8.17 slice (a); 8.15 still blocked on #166
 `safety::group` + `GroupSafetyError` in crypto-core, moved verbatim from the WASM crate (domain `powehi-group-safety-number-v1`, cap 512, KAT `096245...`); WASM delegates. crypto-reviewer first said needs-rework for a new domain (CLI vs web mismatch) — lesson: reuse shipped constructions. Next: CLI group roster/verify, then `group create/add/remove`.
 

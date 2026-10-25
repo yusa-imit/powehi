@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::conversation::{self, ConversationError};
+use crate::conversation::{self, ConversationError, Kind};
 use crate::identity::{IdentityError, LocalIdentity};
 use crate::store::{ProfileStore, StoreError};
 
@@ -37,6 +37,10 @@ pub enum VerifyError {
     NumberMismatch,
     #[error("MLS operation failed")]
     Mls,
+    #[error("the group has too many members for a safety number")]
+    TooMany,
+    #[error("two members share a signature key; this conversation is inconsistent")]
+    DuplicateKey,
 }
 
 impl From<mls_group::MlsError> for VerifyError {
@@ -66,30 +70,63 @@ fn record_name(group_id: &Uuid) -> String {
     format!("{PREFIX}{}", group_id.hyphenated())
 }
 
-/// The Safety Number of the pair in `group`, from its two signature keys. `own_key` must be
-/// one of them and the group must still include this device.
-pub fn number_of(group: &mls_group::Group, own_key: &[u8]) -> Result<String, VerifyError> {
+/// The Safety Number of `group` from its members' signature keys, by conversation `kind`
+/// (never by member count: a 2-member group must show the group number the web shows). `own_key`
+/// must be a member and the group must still include this device.
+pub fn number_of(
+    group: &mls_group::Group,
+    own_key: &[u8],
+    kind: Kind,
+) -> Result<String, VerifyError> {
     if !mls_group::group_is_active(group) {
         return Err(VerifyError::GroupUnusable);
     }
-    let keys: Vec<Vec<u8>> = group.members().take(3).map(|m| m.signature_key).collect();
-    if keys.len() != 2
-        || keys.iter().any(|k| k.len() != KEY_LEN)
-        || !keys.iter().any(|k| k == own_key)
-        || keys[0] == keys[1]
-    {
+    let keys: Vec<Vec<u8>> = group
+        .members()
+        .take(safety::GROUP_MAX_MEMBERS + 1)
+        .map(|m| m.signature_key)
+        .collect();
+    number_from_keys(&keys, own_key, kind)
+}
+
+/// The pure part of [`number_of`]: `keys` is the roster (at most `GROUP_MAX_MEMBERS + 1` read).
+fn number_from_keys(keys: &[Vec<u8>], own_key: &[u8], kind: Kind) -> Result<String, VerifyError> {
+    // The cap is judged before anything else so it never depends on where our leaf sits.
+    if kind == Kind::Group && keys.len() > safety::GROUP_MAX_MEMBERS {
+        return Err(VerifyError::TooMany);
+    }
+    if keys.iter().any(|k| k.len() != KEY_LEN) || !keys.iter().any(|k| k == own_key) {
         return Err(VerifyError::GroupUnusable);
     }
-    safety::pairwise(&keys[0], &keys[1]).map_err(|_| VerifyError::GroupUnusable)
+    match kind {
+        // A pair that grew past two members is no longer comparable: fail closed (8.16).
+        Kind::Pair if keys.len() != 2 => Err(VerifyError::GroupUnusable),
+        Kind::Pair if keys[0] == keys[1] => Err(VerifyError::DuplicateKey),
+        Kind::Pair => safety::pairwise(&keys[0], &keys[1]).map_err(|_| VerifyError::GroupUnusable),
+        Kind::Group => {
+            let refs: Vec<&[u8]> = keys.iter().map(Vec::as_slice).collect();
+            safety::group(&refs).map_err(group_error)
+        }
+    }
+}
+
+fn group_error(e: safety::GroupSafetyError) -> VerifyError {
+    match e {
+        safety::GroupSafetyError::TooMany => VerifyError::TooMany,
+        safety::GroupSafetyError::DuplicateKey => VerifyError::DuplicateKey,
+        safety::GroupSafetyError::TooFew | safety::GroupSafetyError::BadKeyLength => {
+            VerifyError::GroupUnusable
+        }
+    }
 }
 
 /// Computes the number for a stored conversation.
 pub fn number(store: &ProfileStore, group_id: Uuid) -> Result<String, VerifyError> {
-    conversation::load(store, &group_id)?.ok_or(VerifyError::NoSuchConversation)?;
+    let conv = conversation::load(store, &group_id)?.ok_or(VerifyError::NoSuchConversation)?;
     let local = LocalIdentity::load(store)?;
     let group = mls_group::load_group(group_id.as_bytes(), &local.provider)?
         .ok_or(VerifyError::GroupUnusable)?;
-    number_of(&group, &local.identity.signer.to_public_vec())
+    number_of(&group, &local.identity.signer.to_public_vec(), conv.kind())
 }
 
 /// Compares `current` with the stored confirmation. A record that fails authentication or
@@ -246,6 +283,68 @@ mod tests {
         assert_eq!(a.len(), 83);
     }
 
+    #[test]
+    fn roster_rules_by_kind() {
+        let k = |i: u8| vec![i; 32];
+        let own = k(1);
+        // A pair grown to three members fails closed; the same roster is a valid group.
+        let three = vec![k(1), k(2), k(3)];
+        assert!(matches!(
+            number_from_keys(&three, &own, Kind::Pair),
+            Err(VerifyError::GroupUnusable)
+        ));
+        let refs: Vec<&[u8]> = three.iter().map(Vec::as_slice).collect();
+        assert_eq!(
+            number_from_keys(&three, &own, Kind::Group).unwrap(),
+            safety::group(&refs).unwrap()
+        );
+        // Duplicates keep their own type on both paths' group side.
+        assert!(matches!(
+            number_from_keys(&[k(1), k(2), k(2)], &own, Kind::Group),
+            Err(VerifyError::DuplicateKey)
+        ));
+        assert!(matches!(
+            number_from_keys(&[k(1), k(1)], &own, Kind::Pair),
+            Err(VerifyError::DuplicateKey)
+        ));
+        // 512 members verify, 513 are TooMany even when our key is not in the list.
+        let roster = |n: usize| -> Vec<Vec<u8>> {
+            (0..n)
+                .map(|i| {
+                    let mut v = vec![0u8; 32];
+                    v[..8].copy_from_slice(&(i as u64 + 1).to_le_bytes());
+                    v
+                })
+                .collect()
+        };
+        let own = roster(1).remove(0);
+        assert!(number_from_keys(&roster(512), &own, Kind::Group).is_ok());
+        assert!(matches!(
+            number_from_keys(&roster(513), &own, Kind::Group),
+            Err(VerifyError::TooMany)
+        ));
+        assert!(matches!(
+            number_from_keys(&roster(513)[1..], &own, Kind::Group),
+            Err(VerifyError::GroupUnusable)
+        ));
+    }
+
+    #[tokio::test]
+    async fn kind_decides_the_construction_not_member_count() {
+        let (_tmp, alice, _bob, gid) = pair().await;
+        let local = LocalIdentity::load(&alice.store).unwrap();
+        let own = local.identity.signer.to_public_vec();
+        let group = mls_group::load_group(gid.as_bytes(), &local.provider)
+            .unwrap()
+            .unwrap();
+        let pair_n = number_of(&group, &own, Kind::Pair).unwrap();
+        let group_n = number_of(&group, &own, Kind::Group).unwrap();
+        assert_ne!(pair_n, group_n);
+        let keys: Vec<Vec<u8>> = group.members().map(|m| m.signature_key).collect();
+        let refs: Vec<&[u8]> = keys.iter().map(Vec::as_slice).collect();
+        assert_eq!(group_n, safety::group(&refs).unwrap());
+    }
+
     #[tokio::test]
     async fn non_member_key_has_no_number() {
         let (_tmp, alice, _bob, gid) = pair().await;
@@ -254,10 +353,10 @@ mod tests {
         let group = mls_group::load_group(gid.as_bytes(), &local.provider)
             .unwrap()
             .unwrap();
-        assert!(number_of(&group, &own).is_ok());
+        assert!(number_of(&group, &own, Kind::Pair).is_ok());
         // A key that is not in the pair is refused, never a number over foreign keys.
         assert!(matches!(
-            number_of(&group, &[7u8; 32]),
+            number_of(&group, &[7u8; 32], Kind::Pair),
             Err(VerifyError::GroupUnusable)
         ));
     }

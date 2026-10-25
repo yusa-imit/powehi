@@ -1,6 +1,6 @@
 //! Per-conversation records in the encrypted profile store (prd.md §7A.3).
 //!
-//! One record `conv-<group uuid>` per 1:1 conversation holds the server-visible ids and, for the
+//! One record `conv-<group uuid>` per conversation (pair or group, see [`Kind`]) holds the server-visible ids and, for the
 //! side that joined by Welcome, the ML-KEM decapsulation key moved out of `pq-keys` once its
 //! KeyPackage was consumed. The MLS group state itself lives in the `mls-provider` record.
 
@@ -19,6 +19,8 @@ use crate::store::{ProfileStore, StoreError};
 pub const MAX_CONVERSATIONS: usize = 256;
 const PREFIX: &str = "conv-";
 const VERSION: u8 = 1;
+/// Written only for [`Kind::Group`] records (see [`Conversation::into_group`]).
+const GROUP_VERSION: u8 = 2;
 
 #[derive(Debug, Error)]
 pub enum ConversationError {
@@ -42,12 +44,27 @@ pub enum Role {
     Joiner,
 }
 
+/// What the conversation is, fixed at creation (8.17): decides which safety number applies
+/// (`safety::pairwise` for a pair, `safety::group` for a group) however many members it has.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    /// A 1:1 conversation made by invite; records written before 8.17 are all pairs.
+    #[default]
+    Pair,
+    /// A group made by `group create`.
+    Group,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Conversation {
     version: u8,
     pub group_id: Uuid,
     pub peer_device_id: Uuid,
     pub role: Role,
+    /// Pair or group; absent on records written before 8.17, which are pairs.
+    #[serde(default)]
+    kind: Kind,
     pq_decap_key: Option<Vec<u8>>,
     /// The published ek the key above must match; public, re-checked on every load.
     pq_encap_key: Option<Vec<u8>>,
@@ -89,6 +106,7 @@ impl Conversation {
             group_id,
             peer_device_id,
             role,
+            kind: Kind::Pair,
             pq_decap_key,
             pq_encap_key,
             pq_binding: None,
@@ -97,6 +115,21 @@ impl Conversation {
             sent_since_update: 0,
             last_update_at: None,
         }
+    }
+
+    /// Pair or group.
+    pub fn kind(&self) -> Kind {
+        self.kind
+    }
+
+    /// Marks a freshly built record as a group, at creation only. A group record carries
+    /// `version` 2 so a pre-8.17 binary rejects it instead of rewriting it without `kind`.
+    #[must_use]
+    pub fn into_group(mut self) -> Self {
+        debug_assert!(self.kind == Kind::Pair && self.sent_since_update == 0);
+        self.kind = Kind::Group;
+        self.version = GROUP_VERSION;
+        self
     }
 
     /// Application messages sent since this device last rotated its leaf key.
@@ -205,7 +238,11 @@ impl Conversation {
             .peer_signature_key
             .as_ref()
             .is_none_or(|k| k.len() == 32);
-        if self.version == VERSION && key_ok && role_ok && binding_ok && credential_ok && sig_ok {
+        let version_ok = match self.kind {
+            Kind::Pair => self.version == VERSION,
+            Kind::Group => self.version == GROUP_VERSION,
+        };
+        if version_ok && key_ok && role_ok && binding_ok && credential_ok && sig_ok {
             Ok(())
         } else {
             Err(ConversationError::Malformed)
@@ -492,6 +529,27 @@ mod tests {
             Role::Joiner,
             Some((pair.decap_key, pair.encap_key)),
         )
+    }
+
+    #[test]
+    fn kind_defaults_to_pair_for_old_records_and_roundtrips() {
+        let c = joiner(Uuid::new_v4());
+        assert_eq!(c.kind(), Kind::Pair);
+        let mut v: serde_json::Value = serde_json::to_value(&c).unwrap();
+        v.as_object_mut().unwrap().remove("kind");
+        let old: Conversation = serde_json::from_value(v).unwrap();
+        assert_eq!(old.kind(), Kind::Pair);
+        let g = joiner(Uuid::new_v4()).into_group();
+        let back: Conversation = serde_json::from_slice(&serde_json::to_vec(&g).unwrap()).unwrap();
+        assert_eq!(back.kind(), Kind::Group);
+        // Stripping `kind` (what an old binary would do) must not turn a group into a pair.
+        let mut stripped = serde_json::to_value(&g).unwrap();
+        stripped.as_object_mut().unwrap().remove("kind");
+        let down: Conversation = serde_json::from_value(stripped).unwrap();
+        assert!(down.check().is_err());
+        let mut bad = serde_json::to_value(&c).unwrap();
+        bad["kind"] = "triple".into();
+        assert!(serde_json::from_value::<Conversation>(bad).is_err());
     }
 
     #[test]
