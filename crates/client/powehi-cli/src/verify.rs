@@ -76,6 +76,7 @@ pub fn number_of(group: &mls_group::Group, own_key: &[u8]) -> Result<String, Ver
     if keys.len() != 2
         || keys.iter().any(|k| k.len() != KEY_LEN)
         || !keys.iter().any(|k| k == own_key)
+        || keys[0] == keys[1]
     {
         return Err(VerifyError::GroupUnusable);
     }
@@ -243,6 +244,22 @@ mod tests {
         let b = number(&bob.store, gid).unwrap();
         assert_eq!(a, b);
         assert_eq!(a.len(), 83);
+    }
+
+    #[tokio::test]
+    async fn non_member_key_has_no_number() {
+        let (_tmp, alice, _bob, gid) = pair().await;
+        let local = LocalIdentity::load(&alice.store).unwrap();
+        let own = local.identity.signer.to_public_vec();
+        let group = mls_group::load_group(gid.as_bytes(), &local.provider)
+            .unwrap()
+            .unwrap();
+        assert!(number_of(&group, &own).is_ok());
+        // A key that is not in the pair is refused, never a number over foreign keys.
+        assert!(matches!(
+            number_of(&group, &[7u8; 32]),
+            Err(VerifyError::GroupUnusable)
+        ));
     }
 
     #[tokio::test]
