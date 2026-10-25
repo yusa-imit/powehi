@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 638 (2026-10-25, FEATURE) — 8.15 slice (d2), box stays open
+Inbox holds Ahead Application/Commit envelopes while a `pcs-` record exists. crypto-reviewer needs-rework fixed (gate narrowed to Ahead, echo gate dropped); wiring blockers listed in phase-8/STATUS.md 8.15. Live rotation still waits on #166 (no owner answer).
+
 ## Cycle 637 (2026-10-25, FEATURE) — 8.15 slice (d) partial, box stays open
 Only the inert parts shipped (send gate on `pcs-` record, send counter at encrypt time). Live trigger withheld after crypto-reviewer FAIL; the findings and the required (d)+(e) bundle are in phase-8/STATUS.md under 8.15. Next: do (d)+(e) as one PR; the server "Commit by epoch" lookup needs a decision (need-human issue).
 

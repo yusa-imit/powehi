@@ -283,6 +283,13 @@ pointing here. Close the issue in the PR that finishes its item.
   inbox before rotating; treat OutOfSync / Rejected(409) as "do not send Application this epoch";
   add an `openmls` `pending_commit()` check before encrypt; server lookup of our Commit by epoch
   (a peer ack deletes the broadcast, so the echo cannot be the proof).
+  Slice (d2) shipped (cycle 638): while a `pcs-` record exists the inbox never acks an Ahead
+  Application envelope or an Ahead peer Commit after the grace (fail closed on an unreadable store);
+  the own-echo ack is unchanged (sender is not in the required-ack set, so the echo is no proof).
+  crypto-reviewer findings carried as WIRING BLOCKERS: the hold needs a bound (attempt / tracker /
+  per-conv budget; real ceiling is the 30 d server retention, not junk.rs's 7 d), a recovery path
+  that clears an unreadable record and surfaces it, a grace-clock restart on resolve, an exclusive
+  profile lock in the inbox, and a testsrv that excludes the sender from the required-ack set.
 - [ ] 8.16 CHANGED blocks send (#53 item 1) — `send`/`chat` refuse a conversation
   whose verified safety number is CHANGED unless `--allow-changed` is given; the
   refusal says how to re-verify. Close #53. crypto-reviewer.
