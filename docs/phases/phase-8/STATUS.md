@@ -306,6 +306,13 @@ pointing here. Close the issue in the PR that finishes its item.
   crypto-reviewer: needs-rework (first draft used a new domain), fixed. Remaining: CLI roster
   and `verify` for groups, `group create/add/remove`, Remove PCS test, threat-model-checker.
   8.15 stays blocked on #166 (owner approval of the commit-digest lookup).
+  Cycle 642: CLI `verify` for 3+ members NOT shipped. crypto-reviewer: dispatching on member
+  count breaks the `safety::group` contract (choose by conversation kind; web does) and a
+  2-member group would show a number that never matches the web. Slice (b) therefore needs an
+  authenticated `kind` (pair|group) on the `conv-*` record, landing with `group create`; then
+  `verify::number_of` dispatches on it, keeps `TooMany`/`DuplicateKey` as typed errors, tests the
+  512/513 cap and the 8.16 gate (`send_with` -> `Changed`) on a grown pair. Only the pair-path
+  duplicate-key refusal shipped.
 
 ### Multi-device and recovery
 - [ ] 8.18 Recovery-phrase restore — `powehi restore` sets up a new machine from the

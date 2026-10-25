@@ -1830,3 +1830,6 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 
 ## Cycle 640 (2026-10-26, STABILIZATION)
 - main CI green; `cargo audit`/`cargo deny` ok, clippy clean, 392 powehi-cli tests pass. Strengthened the 8.16 chat test: a refused CHANGED line delivers nothing, an `--allow-changed` line is delivered. target/ was 38G, pruned.
+
+## Cycle 642 (2026-10-26, FEATURE) — 8.17 slice (b) deferred
+crypto-reviewer rejected member-count dispatch for the group safety number; needs a stored conversation `kind` with `group create`. Shipped only a pair-path guard (identical keys refused) + STATUS note. Lesson: do not wire group numbers before the group conversation model exists.
