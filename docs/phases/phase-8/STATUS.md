@@ -300,6 +300,12 @@ pointing here. Close the issue in the PR that finishes its item.
   pending-removal signal is shown as a prompt and never removes on its own (it is a
   request, not a proof: prd §3.5.1 T3). PCS regression test for Remove. The web
   side of #2 stays parked. crypto-reviewer + threat-model-checker.
+  Slice (a) shipped (cycle 641): `safety::group` + typed `GroupSafetyError` in crypto-core, the
+  construction moved verbatim from the WASM crate (domain, 512 cap and KAT unchanged; WASM now
+  delegates, so web and CLI show the same number; duplicates rejected per RFC 9420 §7.3).
+  crypto-reviewer: needs-rework (first draft used a new domain), fixed. Remaining: CLI roster
+  and `verify` for groups, `group create/add/remove`, Remove PCS test, threat-model-checker.
+  8.15 stays blocked on #166 (owner approval of the commit-digest lookup).
 
 ### Multi-device and recovery
 - [ ] 8.18 Recovery-phrase restore — `powehi restore` sets up a new machine from the
