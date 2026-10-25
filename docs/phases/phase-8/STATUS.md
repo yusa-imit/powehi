@@ -313,6 +313,15 @@ pointing here. Close the issue in the PR that finishes its item.
   `verify::number_of` dispatches on it, keeps `TooMany`/`DuplicateKey` as typed errors, tests the
   512/513 cap and the 8.16 gate (`send_with` -> `Changed`) on a grown pair. Only the pair-path
   duplicate-key refusal shipped.
+  Cycle 643 slice (b1): `Kind` (pair|group) on the `conv-*` record; group records are written at
+  `version` 2 (`Conversation::into_group`) so a pre-8.17 binary rejects them instead of stripping
+  `kind`; `verify::number_of` dispatches on `Kind`, judges the 512 cap first (`TooMany`), keeps
+  `DuplicateKey` typed. crypto-reviewer needs-rework fixed (pure `number_from_keys` tests: grown pair
+  fails closed, 512/513, duplicates). Still open for `group create`: an integration test that a grown
+  pair gives `MessageError::Changed` through `send_with`; `Kind` of a joiner must come from authenticated
+  MLS state (GroupContext extension), never the server label or member count; `apply_pair_commit`,
+  `is_pair_with`, `is_fresh_pair` and the signature-key pin must dispatch on `Kind`; a Welcome must not
+  overwrite an existing `conv-*` record's kind; `report()` wording for groups.
 
 ### Multi-device and recovery
 - [ ] 8.18 Recovery-phrase restore — `powehi restore` sets up a new machine from the
