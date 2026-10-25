@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pair_with_a_duplicated_signature_key_has_no_number() {
+    async fn non_member_key_has_no_number() {
         let (_tmp, alice, _bob, gid) = pair().await;
         let local = LocalIdentity::load(&alice.store).unwrap();
         let own = local.identity.signer.to_public_vec();
@@ -255,7 +255,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(number_of(&group, &own).is_ok());
-        // Not a member of the pair: refused, never a number over foreign keys.
+        // A key that is not in the pair is refused, never a number over foreign keys.
         assert!(matches!(
             number_of(&group, &[7u8; 32]),
             Err(VerifyError::GroupUnusable)
