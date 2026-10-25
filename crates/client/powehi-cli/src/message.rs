@@ -22,6 +22,7 @@ use crate::conversation::{self, ConversationError};
 use crate::identity::{IdentityError, LocalIdentity};
 use crate::inbox::{Received, RX_PREFIX};
 use crate::invite::{self, InviteError};
+use crate::pcs;
 use crate::store::{ProfileStore, StoreError};
 
 /// Longest message body `send` accepts (bytes of UTF-8), well under the server envelope cap.
@@ -53,6 +54,8 @@ pub enum MessageError {
     GroupUnusable,
     #[error("MLS operation failed")]
     Mls,
+    #[error("a key rotation for this conversation is unresolved; nothing was sent")]
+    RotationPending,
 }
 
 impl From<mls_group::MlsError> for MessageError {
@@ -122,6 +125,12 @@ pub async fn send(
     debug_assert!(body.len() <= MAX_BODY_LEN && std::str::from_utf8(body).is_ok());
     let store = &session.store;
     conversation::load(store, &group_id)?.ok_or(MessageError::NoSuchConversation)?;
+    let now = unix_secs();
+    // A staged self-Update Commit not yet resolved: no Application message may go out in this
+    // epoch until it is (prd §5.3A).
+    if pcs::has_pending(store, group_id)? {
+        return Err(MessageError::RotationPending);
+    }
     let mut local = LocalIdentity::load(store)?;
     let mut group = mls_group::load_group(group_id.as_bytes(), &local.provider)?
         .ok_or(MessageError::GroupUnusable)?;
@@ -131,8 +140,20 @@ pub async fn send(
     }
     let ct = mls_group::encrypt_message(&mut group, &local.identity.signer, body, &local.provider)?;
     local.save(store)?;
+    // Policy counter, counted once the key is spent (a failed POST still used a ratchet step);
+    // a failure here delays the next rotation by one message at most.
+    if let Ok(Some(mut conv)) = conversation::load(store, &group_id) {
+        conv.note_sent(now);
+        let _ = conversation::save(store, &conv);
+    }
     invite::send_application(client, server, session, group_id, &ct).await?;
     Ok(())
+}
+
+fn unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Number of stored (unread) messages per conversation; groups with none are absent.

@@ -91,6 +91,11 @@ fn pending_name(group_id: Uuid) -> String {
     format!("{PENDING_PREFIX}{}", group_id.hyphenated())
 }
 
+/// True when an unresolved self-Update Commit record exists for the group.
+pub fn has_pending(store: &crate::store::ProfileStore, group_id: Uuid) -> Result<bool, StoreError> {
+    Ok(store.get(&pending_name(group_id))?.is_some())
+}
+
 /// Rotates this device's leaf key with a self-Update Commit (prd §5.3A). Order matters
 /// (crypto-reviewer, 8.15a/c): the server epoch is read and checked against the local epoch
 /// BEFORE staging; the Commit bytes and the staged state are saved BEFORE the bytes leave the
@@ -306,6 +311,36 @@ mod tests {
         let r = rotate(&client(), &url, &alice, Uuid::new_v4(), 1).await;
         assert!(matches!(r, Err(RotateError::NoSuchConversation)));
         assert_eq!(state.lock().unwrap().calls.len(), n);
+    }
+
+    #[tokio::test]
+    async fn send_counts_the_message_even_when_the_post_fails() {
+        let (_t, alice, _bob, _url, gid, _state) = pair().await;
+        let dead = Url::parse("http://127.0.0.1:1").unwrap();
+        let r = crate::message::send(&client(), &dead, &alice, gid, b"x").await;
+        assert!(r.is_err());
+        let c = conversation::load(&alice.store, &gid).unwrap().unwrap();
+        assert_eq!(c.sent_since_update(), 1);
+    }
+
+    #[tokio::test]
+    async fn send_refuses_while_a_rotation_record_exists() {
+        let (_t, alice, _bob, url, gid, state) = pair().await;
+        alice.store.put(&pending_name(gid), &[0u8; 9]).unwrap();
+        let n = state.lock().unwrap().calls.len();
+        let r = crate::message::send(&client(), &url, &alice, gid, b"nope").await;
+        assert!(matches!(
+            r,
+            Err(crate::message::MessageError::RotationPending)
+        ));
+        assert_eq!(state.lock().unwrap().calls.len(), n);
+        assert_eq!(
+            conversation::load(&alice.store, &gid)
+                .unwrap()
+                .unwrap()
+                .sent_since_update(),
+            0
+        );
     }
 
     fn conv() -> Conversation {
