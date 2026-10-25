@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 636 (2026-10-25, FEATURE) — 8.15 slice (c), box stays open
+`pcs::rotate` + `invite::group_epoch` (PR pending number below); not yet called by send/chat. Fail-closed unless local epoch == server epoch + 1; `pcs-<gid>` record before post; post-send failures = `Unresolved`. crypto-reviewer needs-rework then pass. Next: slice (d) wiring (exclusive profile lock, encrypt gate on pending Commit, own-echo ack gate, behind/ahead warning), slice (e) recovery, threat-model-checker. Test env: `cargo test` (no nextest locally), `export PATH=$HOME/.cargo/bin:$PATH`.
+
 ## Cycle 634 (2026-10-23, FEATURE) — 8.15 slice (b), box stays open
 Policy + plumbing, not wired into send yet: `pcs.rs` (50 msgs / 7 d), conv counters, `invite::send_commit` → `CommitOutcome`, prd §5.3A. Next: wire send/chat; the hard part is recovering an Unknown outcome (staged Commit persisted, server may have taken it) — design it before wiring; threat-model-checker.
 

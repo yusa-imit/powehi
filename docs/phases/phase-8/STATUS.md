@@ -267,6 +267,13 @@ pointing here. Close the issue in the PR that finishes its item.
   `CommitOutcome` (Accepted only on 2xx with epoch = expected+1; Rejected = 4xx except 408;
   everything else Unknown), test-server commit route. crypto-reviewer (needs-rework, fixed): Rejected only on a FIRST post and a whitelist of pre-store statuses; `expected_epoch` is the server epoch; Unknown resolves only by byte-comparing the stored epoch+1 envelope. Open for later slices: NotSent variant, age clock for pre-8.15 records, receive-only devices never rotate (need-human). Remaining: send/chat wiring (stage, save,
   post, confirm/abort; recovery of an Unknown outcome), a CLI-level test, threat-model-checker.
+  Slice (c) shipped: `pcs::rotate` (not yet called by send/chat) and `invite::group_epoch`: fail-closed
+  unless local epoch == server epoch + 1 (`OutOfSync`), `pcs-<gid>` record (server epoch + Commit bytes)
+  written before the staged save and the post, every post-send failure `Unresolved`; 5 CLI tests.
+  crypto-reviewer: needs-rework (stale-epoch fork, bytes not durable, post-send Err) fixed, then pass.
+  Remaining: (d) wiring in send/chat with an exclusive profile lock, gate Application encrypt on a pending Commit,
+  gate the own-echo ack on no `pcs-` record, behind/ahead split with a warning; (e) recovery of `Unresolved`
+  (stale record = discard, never repost; 24 h Ahead-grace interaction); threat-model-checker.
 - [ ] 8.16 CHANGED blocks send (#53 item 1) — `send`/`chat` refuse a conversation
   whose verified safety number is CHANGED unless `--allow-changed` is given; the
   refusal says how to re-verify. Close #53. crypto-reviewer.
