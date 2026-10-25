@@ -310,9 +310,13 @@ async fn changed_conversation_line_is_not_sent_without_allow_changed() {
         text.contains("! not sent:") && text.contains("--allow-changed"),
         "{text:?}"
     );
+    let r = inbox::receive(&client(), &p.url, &p.bob).await.unwrap();
+    assert_eq!(r.stored, 0, "a refused line must not reach the peer");
     let mut allowed = Vec::new();
     send_line(&client(), &p.url, &p.alice, p.gid, "hi", true, &mut allowed)
         .await
         .unwrap();
     assert!(allowed.is_empty(), "{allowed:?}");
+    let r = inbox::receive(&client(), &p.url, &p.bob).await.unwrap();
+    assert_eq!(r.stored, 1, "the overridden line is delivered");
 }
