@@ -129,7 +129,13 @@ async fn interrupted_join_is_finished_by_the_same_welcome() {
     use crate::conversation::{self, Conversation, Role};
     // Crash window: conversation record saved, MLS state not yet.
     let (_tmp, alice, _state, url, gid) = pending_welcome().await;
-    let stale = Conversation::new(gid, Uuid::new_v4(), Role::Creator, None);
+    let pair = powehi_crypto_core::kem::generate();
+    let stale = Conversation::new(
+        gid,
+        Uuid::new_v4(),
+        Role::Joiner,
+        Some((pair.decap_key, pair.encap_key)),
+    );
     conversation::save(&alice.store, &stale).unwrap();
     let report = join_pending(&client(), &url, &alice, None).await.unwrap();
     assert_eq!(report.joined, vec![gid]);
@@ -201,6 +207,123 @@ fn a_two_member_group_welcome_is_not_a_pair() {
             m::is_fresh_pair(&joined),
             "the member count alone cannot tell them apart"
         );
-        assert_eq!(ensure_pair_kind(&joined).is_ok(), joins);
+        assert_eq!(matches!(welcome_kind(&joined), Ok(GroupKind::Pair)), joins);
     }
+}
+
+/// Alice makes a group and adds Bob through his invite; returns (bob, alice, url, group id).
+async fn group_welcome_for_bob() -> (tempfile::TempDir, Session, Session, Url, Uuid) {
+    let tmp = tempfile::tempdir().unwrap();
+    let (alice, bob) = (session(&tmp, "alice", 1), session(&tmp, "bob", 2));
+    let state = Arc::new(Mutex::new(Backend::default()));
+    let url = serve(state).await;
+    let gid = crate::group::create(&client(), &url, &alice).await.unwrap();
+    let (link, _) = invite::create(&client(), &url, &bob).await.unwrap();
+    let link = invite::parse_link(&link).unwrap();
+    crate::group::add(&client(), &url, &alice, gid, &link)
+        .await
+        .unwrap();
+    (tmp, alice, bob, url, gid)
+}
+
+#[tokio::test]
+async fn a_group_welcome_is_never_joined_without_accept() {
+    let (_tmp, _alice, bob, url, gid) = group_welcome_for_bob().await;
+    // Bob's own invite KeyPackage was consumed, yet neither join path takes the group.
+    let report = join_invited(&client(), &url, &bob).await.unwrap();
+    assert!(report.joined.is_empty());
+    assert_eq!(report.requested, 1);
+    let report = join_pending(&client(), &url, &bob, None).await.unwrap();
+    assert!(report.joined.is_empty());
+    assert!(crate::conversation::load(&bob.store, &gid)
+        .unwrap()
+        .is_none());
+    assert!(crate::requests::load(&bob.store, &gid).unwrap().is_some());
+}
+
+#[tokio::test]
+async fn accepting_a_group_welcome_joins_as_a_group_conversation() {
+    use crate::conversation::Kind;
+    let (_tmp, alice, bob, url, gid) = group_welcome_for_bob().await;
+    join_invited(&client(), &url, &bob).await.unwrap();
+    crate::requests::accept(&client(), &url, &bob, gid)
+        .await
+        .unwrap();
+    let conv = crate::conversation::load(&bob.store, &gid)
+        .unwrap()
+        .unwrap();
+    assert_eq!(conv.kind(), Kind::Group);
+    assert_eq!(conv.role, Role::Joiner);
+    assert!(conv.peer_credential().is_none());
+    let local = LocalIdentity::load(&bob.store).unwrap();
+    let g = mls_group::load_group(gid.as_bytes(), &local.provider)
+        .unwrap()
+        .unwrap();
+    assert_eq!(g.members().count(), 2);
+    assert_eq!(g.epoch().as_u64(), 1);
+    // Group traffic still never sends or verifies as a pair.
+    let sent = crate::message::send(&client(), &url, &bob, gid, b"hi").await;
+    assert!(matches!(
+        sent,
+        Err(crate::message::MessageError::GroupSendUnsupported)
+    ));
+    let _ = alice;
+}
+
+#[tokio::test]
+async fn a_leftover_record_of_another_kind_or_role_is_not_finished_by_a_welcome() {
+    use crate::conversation::{self, Conversation, Role};
+    // Pair Welcome, stale Group record (and a stale Creator pair record): both refused.
+    let (_tmp, alice, _state, url, gid) = pending_welcome().await;
+    let stale = Conversation::new(gid, Uuid::new_v4(), Role::Joiner, None).into_group();
+    conversation::save(&alice.store, &stale).unwrap();
+    assert!(join_pending(&client(), &url, &alice, None)
+        .await
+        .unwrap()
+        .joined
+        .is_empty());
+    let stale = Conversation::new(gid, Uuid::new_v4(), Role::Creator, None);
+    conversation::save(&alice.store, &stale).unwrap();
+    assert!(join_pending(&client(), &url, &alice, None)
+        .await
+        .unwrap()
+        .joined
+        .is_empty());
+    // Group Welcome, stale Pair record: accept refuses.
+    let (_tmp, _alice, bob, url, gid) = group_welcome_for_bob().await;
+    join_invited(&client(), &url, &bob).await.unwrap();
+    let pair = powehi_crypto_core::kem::generate();
+    let stale = Conversation::new(
+        gid,
+        Uuid::new_v4(),
+        Role::Joiner,
+        Some((pair.decap_key, pair.encap_key)),
+    );
+    conversation::save(&bob.store, &stale).unwrap();
+    assert!(crate::requests::accept(&client(), &url, &bob, gid)
+        .await
+        .is_err());
+    let conv = conversation::load(&bob.store, &gid).unwrap().unwrap();
+    assert_eq!(conv.kind(), crate::conversation::Kind::Pair);
+}
+
+#[test]
+fn group_shape_needs_own_key_and_a_group_record_carries_no_pair_state() {
+    use powehi_crypto_core::mls_group::{self as m, GroupKind, Provider};
+    let (ap, bp) = (Provider::default(), Provider::default());
+    let alice = m::generate_identity(b"alice", &ap).unwrap();
+    let bob = m::generate_identity(b"bob", &bp).unwrap();
+    let pq = m::generate_pq_key_package(&bob, &bp).unwrap();
+    let mut g = m::create_group_of_kind(&alice, &ap, GroupKind::Group).unwrap();
+    let w = m::add_member_from_bytes(&mut g, &alice.signer, &pq.key_package, &ap).unwrap();
+    let joined = m::join_group(&w, &bp).unwrap();
+    assert!(ensure_group_shape(&joined, &bob.signer.to_public_vec()).is_ok());
+    assert!(ensure_group_shape(&joined, &[9u8; 32]).is_err());
+    let with_cred =
+        conversation::Conversation::new(Uuid::new_v4(), Uuid::new_v4(), Role::Joiner, None)
+            .with_peer_credential(vec![1, 2])
+            .into_group();
+    let dir = tempfile::tempdir().unwrap();
+    let s = session(&dir, "x", 5);
+    assert!(conversation::save(&s.store, &with_cred).is_err());
 }

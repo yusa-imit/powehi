@@ -270,7 +270,7 @@ pub async fn accept(
         sender: req.sender,
         ciphertext: req.welcome.clone(),
     };
-    match welcome::join_one(session, &env, None, false) {
+    match welcome::join_one(session, &env, None, false, true) {
         Ok(_) => {}
         Err(welcome::JoinOutcome::Fatal(e)) => return Err(e.into()),
         Err(_) if held(session, group_id)? => {}

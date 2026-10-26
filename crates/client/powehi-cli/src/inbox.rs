@@ -497,7 +497,12 @@ fn is_group_conversation(session: &Session, group_id: Option<Uuid>) -> bool {
         return false;
     };
     match conversation::load(&session.store, &group_id) {
-        Ok(conv) => conv.is_some_and(|c| c.kind() == Kind::Group),
+        Ok(Some(c)) => c.kind() == Kind::Group,
+        // Not joined yet: a pending request (up to 5 days) keeps its group's traffic unacked,
+        // or a late `accept` would join a Welcome epoch the other members have left.
+        Ok(None) => requests::load(&session.store, &group_id)
+            .map(|r| r.is_some())
+            .unwrap_or(true),
         Err(_) => true,
     }
 }

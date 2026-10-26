@@ -223,9 +223,16 @@ impl Conversation {
             _ => false,
         };
         // A joiner holds its key until `pq_init` arrives, then only the binding remains.
-        let role_ok = match self.role {
-            Role::Creator => self.pq_decap_key.is_none(),
-            Role::Joiner => self.pq_decap_key.is_some() || self.pq_binding.is_some(),
+        // A group has no pair ML-KEM state on either side (its PQ story is a later slice).
+        let role_ok = match (self.kind, self.role) {
+            (Kind::Group, _) => {
+                self.pq_decap_key.is_none()
+                    && self.pq_binding.is_none()
+                    && self.peer_credential.is_none()
+                    && self.peer_signature_key.is_none()
+            }
+            (Kind::Pair, Role::Creator) => self.pq_decap_key.is_none(),
+            (Kind::Pair, Role::Joiner) => self.pq_decap_key.is_some() || self.pq_binding.is_some(),
         };
         let binding_ok = self
             .pq_binding
