@@ -1839,3 +1839,7 @@ Cycles 453-484: `.claude/memory/archive/project-context-cycles-453-484.md`
 
 ## Cycle 642 (2026-10-26, FEATURE) — 8.17 slice (b) deferred
 crypto-reviewer rejected member-count dispatch for the group safety number; needs a stored conversation `kind` with `group create`. Shipped only a pair-path guard (identical keys refused) + STATUS note. Lesson: do not wire group numbers before the group conversation model exists.
+
+## Stabilization 645 (2026-10-26)
+- main CI green; clippy, cargo audit, cargo deny clean; powehi-cli 397 + crypto-core tests green.
+- Added proptests for safety::pairwise symmetry and safety::group order-independence / member-swap detection (test-only).

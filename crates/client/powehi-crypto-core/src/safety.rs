@@ -224,4 +224,31 @@ mod tests {
             "group safety number: too many members"
         );
     }
+
+    proptest::proptest! {
+        #[test]
+        fn pairwise_is_symmetric(a in proptest::array::uniform32(0u8..), b in proptest::array::uniform32(0u8..)) {
+            proptest::prop_assert_eq!(pairwise(&a, &b), pairwise(&b, &a));
+        }
+
+        #[test]
+        fn group_ignores_order_and_detects_a_swapped_member(
+            keys in proptest::collection::hash_set(proptest::array::uniform32(0u8..), 3..12),
+            replacement in proptest::array::uniform32(0u8..),
+            rot in 0usize..12,
+        ) {
+            let mut keys: Vec<[u8; 32]> = keys.into_iter().collect();
+            keys.sort_unstable();
+            let refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+            let base = group(&refs).unwrap();
+            let mut rotated = refs.clone();
+            rotated.rotate_left(rot % refs.len());
+            proptest::prop_assert_eq!(&base, &group(&rotated).unwrap());
+            if !keys.contains(&replacement) {
+                let mut swapped = refs.clone();
+                swapped[0] = replacement.as_slice();
+                proptest::prop_assert_ne!(&base, &group(&swapped).unwrap());
+            }
+        }
+    }
 }
