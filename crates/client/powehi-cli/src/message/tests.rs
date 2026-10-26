@@ -111,6 +111,37 @@ async fn changed_conversation_refuses_send_unless_allowed() {
 }
 
 #[tokio::test]
+async fn verified_pair_that_grew_is_changed_and_refuses_send() {
+    let (_tmp, _alice, bob, url, gid) = pair().await;
+    let n = crate::verify::number(&bob.store, gid).unwrap();
+    crate::verify::confirm(&bob.store, gid, &n, &n).unwrap();
+    assert!(!crate::verify::changed_since_verified(&bob.store, gid));
+    // A third member joins the MLS group behind the pair record's back (8.17 fail-closed).
+    let mut local = LocalIdentity::load(&bob.store).unwrap();
+    let mut group = mls_group::load_group(gid.as_bytes(), &local.provider)
+        .unwrap()
+        .unwrap();
+    let carol = mls_group::generate_identity(b"carol", &local.provider).unwrap();
+    let kp = mls_group::generate_key_package(&carol, &local.provider).unwrap();
+    mls_group::add_member(
+        &mut group,
+        &local.identity.signer,
+        kp.key_package().clone(),
+        &local.provider,
+    )
+    .unwrap();
+    local.save(&bob.store).unwrap();
+    assert!(crate::verify::changed_since_verified(&bob.store, gid));
+    let r = send(&client(), &url, &bob, gid, b"blocked").await;
+    assert!(matches!(r, Err(MessageError::Changed)), "{r:?}");
+    let sent = conversation::load(&bob.store, &gid)
+        .unwrap()
+        .unwrap()
+        .sent_since_update();
+    assert_eq!(sent, 0, "no key was spent");
+}
+
+#[tokio::test]
 async fn well_formed_record_with_another_number_refuses_send() {
     let (_tmp, alice, bob, url, gid) = pair().await;
     let other = powehi_crypto_core::safety::pairwise(&[1u8; 32], &[2u8; 32]).unwrap();

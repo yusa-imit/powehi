@@ -322,6 +322,8 @@ pointing here. Close the issue in the PR that finishes its item.
   MLS state (GroupContext extension), never the server label or member count; `apply_pair_commit`,
   `is_pair_with`, `is_fresh_pair` and the signature-key pin must dispatch on `Kind`; a Welcome must not
   overwrite an existing `conv-*` record's kind; `report()` wording for groups.
+  Cycle 644 (b2): the grown-pair integration test shipped (`verified_pair_that_grew_is_changed_and_refuses_send`:
+  a verified pair with a third MLS member is CHANGED and `send` returns `MessageError::Changed`, no key spent).
 
 ### Multi-device and recovery
 - [ ] 8.18 Recovery-phrase restore — `powehi restore` sets up a new machine from the
