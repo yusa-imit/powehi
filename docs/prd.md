@@ -717,6 +717,12 @@ POWEHI_PQ_KEM_EXT_TYPE extension payload (1,248 bytes):
   bytes [1184..1247] — Ed25519 signature (MLS identity key로 encap key에 서명)
 ```
 
+### 5.3B 그룹 종류 GroupContext extension (Phase 8 · 8.17)
+`0xF002` (RFC 9420 §17.3 private-use)는 GroupContext extension이며 그룹에만 존재한다. payload는 1바이트 `0x01` = group.
+extension이 없으면 pair(8.17 이전 그룹 전부)이고, 그 외 payload는 fail-closed로 거부한다. GroupContext에 있으므로
+key schedule과 confirmation tag에 묶여 서버가 바꿀 수 없다. 참가자는 Welcome에서 종류를 읽으며(멤버 수·서버 라벨 아님),
+safety number 방식(pairwise vs group)을 이것으로 결정한다. PQ KeyPackage는 leaf capabilities에 0xF002를 선언해야 그룹에 추가된다.
+
 ### 5.3A CLI PCS 로테이션 정책 (Phase 8 · 8.15)
 
 CLI는 1:1 대화에서 `send`/`chat`이 **Application 메시지를 보내기 직전**, 아래 둘 중 하나가 참이면 자기 leaf 키를 self-Update Commit으로 교체한다 (`powehi-cli/src/pcs.rs`): (1) 현재 leaf 키로 보낸 메시지가 **50개** 이상, (2) 그 키로 이미 한 번 이상 보냈고 키 나이가 **7일** 이상. 유휴 대화는 로테이션하지 않는다(보호할 새 메시지가 없음). 카운터와 시계는 `conv-*` 레코드(암호화된 프로필 저장소)에만 있으며 서버에 노출되는 값은 없다 — Commit 자체와 `expected_epoch`(§4A.5)는 이미 서버가 보는 메타데이터다.

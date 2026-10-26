@@ -291,6 +291,16 @@ fn check_group_not_held(
     }
 }
 
+/// The kind comes from the authenticated GroupContext, never from the member count (8.17): a
+/// group Welcome that happens to seat two members is not a pair, and an unreadable kind is
+/// refused. Group joins arrive with `group create`.
+fn ensure_pair_kind(group: &mls_group::Group) -> Result<(), JoinOutcome> {
+    match mls_group::group_kind(group) {
+        Ok(mls_group::GroupKind::Pair) => Ok(()),
+        Ok(mls_group::GroupKind::Group) | Err(_) => Err(JoinOutcome::Skip),
+    }
+}
+
 pub(crate) fn join_one(
     session: &Session,
     env: &Joinable,
@@ -319,6 +329,7 @@ pub(crate) fn join_one(
     if !mls_group::is_fresh_pair(&group) {
         return Err(JoinOutcome::Skip);
     }
+    ensure_pair_kind(&group)?;
     // The server labels envelopes; the MLS group id inside the Welcome is authoritative.
     if group_id != env.group_id {
         return Err(JoinOutcome::Skip);
