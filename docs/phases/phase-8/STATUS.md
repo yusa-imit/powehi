@@ -336,6 +336,9 @@ pointing here. Close the issue in the PR that finishes its item.
   now says kind is integrity-only. Carried to `group add`: sender auth by MLS leaf, not the DS label (`process_one`,
   `commit::apply` would ack every other member's traffic); explicit `Kind::Group` guards in `is_peer_traffic`; MLS epoch
   0 = server 0 for groups (pairs are +1); group ML-KEM story (T6); RequiredCapabilities(0xF002); `conversations` should show kind.
+  Cycle 648 (slice d1): crypto-core `stage_group_add` / `confirm_group_add` / `abort_group_add` (kind-Group only, own-leaf
+  signer, validated KeyPackage, no queued proposals; nothing merged until the server accepts). Test covers 3 members,
+  abort, pair/foreign-signer/junk refusals. Next: CLI `group add` (fetch KeyPackage, stage, `send_commit`, Welcome, confirm) with the carried list above.
 
 ### Multi-device and recovery
 - [ ] 8.18 Recovery-phrase restore — `powehi restore` sets up a new machine from the

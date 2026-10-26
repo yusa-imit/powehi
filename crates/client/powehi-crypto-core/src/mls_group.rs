@@ -1948,6 +1948,103 @@ pub fn abort_pair_self_update(
     abort_remove_member(group, provider)
 }
 
+/// The Commit and Welcome of a staged group Add, and the epoch the Commit was staged at.
+pub struct StagedGroupAdd {
+    /// Serialized Commit for the existing members (Delivery Service broadcast).
+    pub commit: Vec<u8>,
+    /// Serialized Welcome for the new member.
+    pub welcome: Vec<u8>,
+    /// Local epoch when staged; the Commit moves the group to `prior_epoch + 1`.
+    pub prior_epoch: u64,
+}
+
+impl std::fmt::Debug for StagedGroupAdd {
+    // Redacted: the fields are ciphertext and must not reach logs.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StagedGroupAdd")
+            .field("prior_epoch", &self.prior_epoch)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Stage an Add of one member to a [`GroupKind::Group`] (8.17 `group add`). Nothing is merged:
+/// send the Commit, then call [`confirm_group_add`] once the server accepted it, or
+/// [`abort_group_add`] on a definite rejection. The caller contract of
+/// [`stage_pair_self_update`] applies (save before sending, abort only on definite rejection).
+///
+/// Caller contract (crypto-reviewer): (a) send the Welcome ONLY after the Commit was accepted
+/// (`confirm_group_add`), and discard it if the stage is aborted: a Welcome for an epoch that
+/// never existed burns the joiner's KeyPackage (RFC 9420 §14, §16.8). (b) `key_package_bytes`
+/// are only checked here for a valid self-signature, which proves nothing about WHO owns them:
+/// the caller must pin them first (hash or verified signature key), or a server-substituted
+/// KeyPackage adds a ghost member. `prior_epoch` is the local epoch, not the server's
+/// `expected_epoch`.
+///
+/// `key_package_bytes` are deserialized and signature-validated here. Refused with
+/// [`MlsError::Membership`] unless the group's authenticated kind is `Group` and `signer` is this
+/// group's own leaf key, and with [`MlsError::PendingProposals`] if the proposal store is not
+/// empty (the builder would fold queued proposals into the Commit). On any `Err` discard the
+/// in-memory group and reload it from storage.
+pub fn stage_group_add(
+    group: &mut MlsGroup,
+    signer: &SignatureKeyPair,
+    key_package_bytes: &[u8],
+    provider: &impl OpenMlsProvider,
+) -> Result<StagedGroupAdd, MlsError> {
+    if group_kind(group)? != GroupKind::Group
+        || group.own_leaf().map(|l| l.signature_key().as_slice()) != Some(&signer.to_public_vec())
+    {
+        return Err(MlsError::Membership);
+    }
+    if group.pending_proposals().next().is_some() {
+        return Err(MlsError::PendingProposals);
+    }
+    let msg =
+        MlsMessageIn::tls_deserialize_exact(key_package_bytes).map_err(|_| MlsError::Codec)?;
+    let MlsMessageBodyIn::KeyPackage(kp_in) = msg.extract() else {
+        return Err(MlsError::Codec);
+    };
+    let kp = kp_in
+        .validate(provider.crypto(), ProtocolVersion::Mls10)
+        .map_err(|_| MlsError::KeyPackage)?;
+    let prior_epoch = group.epoch().as_u64();
+    let (commit, welcome, _info) = group
+        .add_members(provider, signer, &[kp])
+        .map_err(|_| MlsError::Membership)?;
+    let (Ok(commit), Ok(welcome)) = (commit.to_bytes(), welcome.to_bytes()) else {
+        let _ = group.clear_pending_commit(provider.storage());
+        return Err(MlsError::Codec);
+    };
+    let staged = StagedGroupAdd {
+        commit,
+        welcome,
+        prior_epoch,
+    };
+    assert_eq!(
+        group.epoch().as_u64(),
+        prior_epoch,
+        "staging must not advance the epoch"
+    );
+    assert!(group.pending_commit().is_some());
+    Ok(staged)
+}
+
+/// Merge the Add staged by [`stage_group_add`]. [`MlsError::NoPendingCommit`] when none.
+pub fn confirm_group_add(
+    group: &mut MlsGroup,
+    provider: &impl OpenMlsProvider,
+) -> Result<(), MlsError> {
+    confirm_remove_member(group, provider)
+}
+
+/// Drop the Add staged by [`stage_group_add`]. [`MlsError::NoPendingCommit`] when none.
+pub fn abort_group_add(
+    group: &mut MlsGroup,
+    provider: &impl OpenMlsProvider,
+) -> Result<(), MlsError> {
+    abort_remove_member(group, provider)
+}
+
 /// Longest credential identity [`peer_credential_identity`] returns (the CLI/web labels are 16).
 pub const MAX_CREDENTIAL_IDENTITY_LEN: usize = 64;
 
@@ -2240,6 +2337,66 @@ mod tests {
 
         let pair = create_group(&alice, &a_prov).unwrap();
         assert_eq!(group_kind(&pair).unwrap(), GroupKind::Pair);
+    }
+
+    /// 8.17: a staged group Add advances nothing until confirmed; a third member joins with the
+    /// kind intact and the existing member follows the Commit; abort restores the epoch.
+    #[test]
+    fn group_add_stages_confirms_aborts_and_refuses_pairs() {
+        let (a, b, c) = (
+            OpenMlsRustCrypto::default(),
+            OpenMlsRustCrypto::default(),
+            OpenMlsRustCrypto::default(),
+        );
+        let alice = generate_identity(b"alice", &a).unwrap();
+        let bob = generate_identity(b"bob", &b).unwrap();
+        let carol = generate_identity(b"carol", &c).unwrap();
+        let mut ag = create_group_of_kind(&alice, &a, GroupKind::Group).unwrap();
+        let bkp = generate_pq_key_package(&bob, &b).unwrap();
+        let s = stage_group_add(&mut ag, &alice.signer, &bkp.key_package, &a).unwrap();
+        assert_eq!((s.prior_epoch, ag.epoch().as_u64()), (0, 0));
+        // A second concurrent stage fails; abort restores a stageable group.
+        let ckp = generate_pq_key_package(&carol, &c).unwrap();
+        assert!(stage_group_add(&mut ag, &alice.signer, &ckp.key_package, &a).is_err());
+        abort_group_add(&mut ag, &a).unwrap();
+        assert!(matches!(
+            abort_group_add(&mut ag, &a),
+            Err(MlsError::NoPendingCommit)
+        ));
+        let s = stage_group_add(&mut ag, &alice.signer, &bkp.key_package, &a).unwrap();
+        confirm_group_add(&mut ag, &a).unwrap();
+        assert_eq!(ag.epoch().as_u64(), 1);
+        let mut bg = join_group(&s.welcome, &b).unwrap();
+        assert_eq!(group_kind(&bg).unwrap(), GroupKind::Group);
+        // Third member: Bob follows the Commit, Carol joins from the Welcome.
+        let s2 = stage_group_add(&mut ag, &alice.signer, &ckp.key_package, &a).unwrap();
+        confirm_group_add(&mut ag, &a).unwrap();
+        process_incoming_commit(&mut bg, &s2.commit, &b, None).unwrap();
+        let cg = join_group(&s2.welcome, &c).unwrap();
+        assert_eq!(
+            (
+                ag.epoch().as_u64(),
+                bg.epoch().as_u64(),
+                cg.epoch().as_u64()
+            ),
+            (2, 2, 2)
+        );
+        assert_eq!(cg.members().count(), 3);
+        // Pairs, foreign signers, classical KeyPackages and garbage are refused with exact errors.
+        let d = OpenMlsRustCrypto::default();
+        let dave = generate_identity(b"dave", &d).unwrap();
+        let dkp = generate_pq_key_package(&dave, &d).unwrap();
+        let mut pair = create_group(&alice, &a).unwrap();
+        let e = stage_group_add(&mut pair, &alice.signer, &dkp.key_package, &a).unwrap_err();
+        assert!(matches!(e, MlsError::Membership), "{e:?}");
+        let e = stage_group_add(&mut ag, &bob.signer, &dkp.key_package, &a).unwrap_err();
+        assert!(matches!(e, MlsError::Membership), "{e:?}");
+        let plain = generate_key_package(&dave, &d).unwrap();
+        let plain = MlsMessageOut::from(plain).to_bytes().unwrap();
+        assert!(stage_group_add(&mut ag, &alice.signer, &plain, &a).is_err());
+        let e = stage_group_add(&mut ag, &alice.signer, b"junk", &a).unwrap_err();
+        assert!(matches!(e, MlsError::Codec), "{e:?}");
+        assert!(ag.pending_commit().is_none());
     }
 
     /// A kind extension with an unknown payload is refused, never read as Pair or Group.
