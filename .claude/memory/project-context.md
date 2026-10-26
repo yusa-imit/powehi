@@ -1859,3 +1859,6 @@ Authenticated group kind (GroupContext ext 0xF002, prd §5.3B) in crypto-core + 
 
 ## Cycle 651 (FEATURE) — 8.17 slice e
 Group joiner in `welcome.rs`: kind from GroupContext, group Welcomes only join via `accept`, group conv records have no pair PQ state, `ensure_resumable` blocks kind/role confusion on leftover records, inbox holds traffic of groups with a pending request. 8.15 still blocked on #166. Carried list in phase-8 STATUS 8.17. Next: group send/receive (MLS-leaf sender auth) or `group remove`.
+
+## Cycle 652 (FEATURE) — 8.17 slice f
+Request Welcome cap 256 KiB (server limit), `commit::apply` Kind::Pair guard. Still carried for 8.17: group send/receive with MLS-leaf sender auth, `group remove`, RequiredCapabilities(0xF002), `conversations` kind, Kind cross-check on load, group PQ story (T6).

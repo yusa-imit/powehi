@@ -24,8 +24,11 @@ use crate::welcome::{self, Joinable};
 
 /// Requests kept at once; later ones stay on the server (unacked) until a slot frees up.
 pub const MAX_REQUESTS: usize = 32;
-/// Longest Welcome kept; a two-member Welcome is a few KB.
-pub const MAX_WELCOME_LEN: usize = 64 * 1024;
+/// Longest Welcome kept: the Delivery Service's own limit, so a large group's Welcome (8.17,
+/// up to 512 members) is never accepted by the server and then dropped here.
+pub const MAX_WELCOME_LEN: usize = 256 * 1024;
+// One request is one record, and serde_json writes each byte as up to 4 characters.
+const _: () = assert!(4 * MAX_WELCOME_LEN + 1024 <= crate::store::MAX_RECORD_LEN);
 /// Shorter than the server's 7-day pending-membership TTL, which counts from the add rather
 /// than from our receipt: the margin covers a device that was offline for a while.
 pub const REQUEST_TTL_SECS: u64 = 5 * 24 * 60 * 60;

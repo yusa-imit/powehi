@@ -38,7 +38,8 @@ pub(super) fn apply(
     let Some(mut conv) = conversation::load(store, &group_id)? else {
         return Ok(Outcome::Unknown);
     };
-    if conv.peer_device_id != sender {
+    // Group Commits are never applied here: `peer_device_id` of a group record is our own id.
+    if conv.kind() != conversation::Kind::Pair || conv.peer_device_id != sender {
         return Ok(Outcome::Unknown);
     }
     // A fresh provider per envelope: a refused Commit must leave no half-advanced state.

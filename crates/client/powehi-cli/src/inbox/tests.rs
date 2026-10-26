@@ -837,6 +837,19 @@ async fn a_commit_that_adds_a_member_is_refused_and_the_epoch_stays() {
     );
 }
 
+#[tokio::test]
+async fn a_group_record_never_takes_a_peer_commit() {
+    let (_tmp, p) = pair().await;
+    // A group record names our own device as `peer_device_id`; even a Commit "from" it is unknown.
+    let gid = Uuid::new_v4();
+    let own = p.alice.device_id;
+    let rec =
+        conversation::Conversation::new(gid, own, conversation::Role::Creator, None).into_group();
+    conversation::save(&p.alice.store, &rec).unwrap();
+    let out = commit::apply(&p.alice, gid, own, b"not a commit").unwrap();
+    assert!(matches!(out, commit::Outcome::Unknown));
+}
+
 fn stamped_junk(p: &Pair, n: usize) {
     for _ in 0..n {
         let id = junk_envelope(p, Uuid::new_v4(), p.bob.device_id);
