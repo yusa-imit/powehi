@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 647 (2026-10-26, FEATURE) — 8.17 slice (c2) `group create`; 8.15 still blocked on #166
+`powehi group create` (`group.rs`, `invite::register_group` split out): solo kind-Group MLS group, cap checked before any state, record `peer_device_id` = own device. crypto-reviewer caught my `cfg(unix)` slip on `hardening` (fixed; lesson: check `git diff` of lib.rs after scripted edits). threat-model yellow, prd §5.3B updated. Next: `group add` (carried list in STATUS 8.17: MLS-leaf sender auth first).
+
 ## Cycle 644 (2026-10-26, FEATURE) — 8.17 slice (b2); 8.15 still blocked on #166
 Test-only: a verified pair grown to 3 MLS members is CHANGED and `send` returns `Changed` with no key spent (fail-closed via `number_of` error). Carried list in STATUS 8.17 shrinks by that item. Next: `group create` with an authenticated Kind source.
 

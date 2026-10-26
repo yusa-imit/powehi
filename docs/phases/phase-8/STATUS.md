@@ -330,6 +330,12 @@ pointing here. Close the issue in the PR that finishes its item.
   postcondition `group_kind` unchanged); cross-check `conv-*` Kind vs `group_kind` on load; `is_pair_with` callers (`message.rs`,
   `inbox.rs`, `pcs.rs`) dispatch on Kind; RequiredCapabilities(0xF002) in group GCE; typed errors for bad kind vs peer lacking
   group support; threat-model-checker.
+  Cycle 647 (slice c2): `powehi group create` (`group.rs`): kind-Group MLS group, cap checked first, MLS state saved,
+  `POST /v1/groups`, then the `conv-*` record (`peer_device_id` = own device id; solo group refuses send/verify/PCS).
+  crypto-reviewer: one blocking finding (a `cfg(unix)` slip on `hardening`), fixed. threat-model-checker: yellow, prd §5.3B
+  now says kind is integrity-only. Carried to `group add`: sender auth by MLS leaf, not the DS label (`process_one`,
+  `commit::apply` would ack every other member's traffic); explicit `Kind::Group` guards in `is_peer_traffic`; MLS epoch
+  0 = server 0 for groups (pairs are +1); group ML-KEM story (T6); RequiredCapabilities(0xF002); `conversations` should show kind.
 
 ### Multi-device and recovery
 - [ ] 8.18 Recovery-phrase restore — `powehi restore` sets up a new machine from the

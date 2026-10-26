@@ -477,6 +477,22 @@ fn build_group(session: &Session, key_package: &[u8]) -> Result<BuiltGroup, Invi
     })
 }
 
+/// Registers the group with the Delivery Service; the caller becomes its first member.
+pub(crate) async fn register_group(
+    client: &Client,
+    server: &Url,
+    session: &Session,
+    group_id: Uuid,
+) -> Result<(), InviteError> {
+    #[derive(Serialize)]
+    struct GroupReq {
+        group_id: Uuid,
+    }
+    let req = json_post(client, api(server, "/v1/groups")?, &GroupReq { group_id })?;
+    identity::send_raw(req, session, SMALL_BODY).await?;
+    Ok(())
+}
+
 /// Registers the group and the inviter as a member (epoch 1) with the Delivery Service.
 async fn post_registration(
     client: &Client,
@@ -486,15 +502,10 @@ async fn post_registration(
     peer: Uuid,
 ) -> Result<(), InviteError> {
     #[derive(Serialize)]
-    struct GroupReq {
-        group_id: Uuid,
-    }
-    #[derive(Serialize)]
     struct MemberReq {
         epoch: u64,
     }
-    let req = json_post(client, api(server, "/v1/groups")?, &GroupReq { group_id })?;
-    identity::send_raw(req, session, SMALL_BODY).await?;
+    register_group(client, server, session, group_id).await?;
     let path = format!("/v1/groups/{group_id}/members/{peer}");
     let req = json_post(client, api(server, &path)?, &MemberReq { epoch: 1 })?;
     identity::send_raw(req, session, SMALL_BODY).await?;

@@ -45,6 +45,9 @@ pub enum Command {
     /// Create or redeem invite links.
     #[command(subcommand)]
     Invite(InviteCommand),
+    /// Create and manage groups.
+    #[command(subcommand)]
+    Group(GroupCommand),
     /// Send a message; the body is read from stdin only.
     Send(SendArgs),
     /// Fetch, decrypt, store and acknowledge pending messages.
@@ -155,6 +158,16 @@ pub enum InviteCommand {
     /// Redeem an invite link (read from stdin, not argv).
     Redeem {
         /// Print one JSON object (`{"conversation":...,"pq":...,"pq_binding":...}`).
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GroupCommand {
+    /// Create a group with yourself as the only member.
+    Create {
+        /// Print one JSON object (`{"conversation":...}`).
         #[arg(long)]
         json: bool,
     },
@@ -274,6 +287,7 @@ impl Command {
             Command::Login(_) => "login",
             Command::Invite(InviteCommand::Create { .. }) => "invite create",
             Command::Invite(InviteCommand::Redeem { .. }) => "invite redeem",
+            Command::Group(GroupCommand::Create { .. }) => "group create",
             Command::Send(_) => "send",
             Command::Inbox(_) => "inbox",
             Command::Requests(_) => "requests",
@@ -512,6 +526,17 @@ mod tests {
             Command::Invite(InviteCommand::Redeem { json: true })
         ));
         assert!(parse(&["invite", "redeem", "abc.def"]).is_err());
+    }
+
+    #[test]
+    fn group_create_takes_no_arguments_but_json() {
+        assert!(parse(&["group", "create"]).is_ok());
+        let c = parse(&["group", "create", "--json"]).unwrap();
+        assert!(matches!(
+            c.command,
+            Command::Group(GroupCommand::Create { json: true })
+        ));
+        assert!(parse(&["group", "create", "name"]).is_err());
     }
 
     #[test]

@@ -12,6 +12,8 @@ pub mod cli;
 #[cfg(unix)]
 pub mod conversation;
 #[cfg(unix)]
+pub mod group;
+#[cfg(unix)]
 pub mod hardening;
 #[cfg(unix)]
 pub mod identity;
@@ -123,6 +125,8 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
         cli::Command::Login(ref a) => run_auth(&args.server, &paths, false, a.json),
         #[cfg(unix)]
         cli::Command::Invite(ref cmd) => run_invite(&args.server, &paths, cmd),
+        #[cfg(unix)]
+        cli::Command::Group(ref cmd) => run_group(&args.server, &paths, cmd),
         #[cfg(unix)]
         cli::Command::Inbox(a) => run_inbox(&args.server, &paths, a.json),
         #[cfg(unix)]
@@ -724,6 +728,27 @@ fn run_invite(
             }
         }
         (cli::InviteCommand::Redeem { .. }, None) => return Err(CliError::Stdin),
+    }
+    Ok(())
+}
+
+/// `group create`: logs in (password from the TTY) and creates a group of kind `Group`.
+#[cfg(unix)]
+fn run_group(
+    server: &url::Url,
+    paths: &profile::ProfilePaths,
+    cmd: &cli::GroupCommand,
+) -> Result<(), CliError> {
+    let rt = runtime()?;
+    let client = status::http_client()?;
+    let mut prompter = prompt::TtyPrompter;
+    let session = login_scoped(&rt, &client, server, paths, &mut prompter)?;
+    let cli::GroupCommand::Create { json } = cmd;
+    let id = rt.block_on(group::create(&client, server, &session))?;
+    if *json {
+        println!("{}", serde_json::json!({ "conversation": id }));
+    } else {
+        println!("conversation {id}");
     }
     Ok(())
 }
