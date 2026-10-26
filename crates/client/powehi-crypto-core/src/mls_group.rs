@@ -2045,6 +2045,65 @@ pub fn abort_group_add(
     abort_remove_member(group, provider)
 }
 
+/// Stage a Remove of the member at `leaf_index` from a [`GroupKind::Group`] (8.17 `group remove`).
+/// Returns the Commit bytes and the local epoch it was staged at (the Commit moves the group to
+/// `prior_epoch + 1`). The stage/confirm/abort contract of [`stage_remove_member`] applies: save
+/// before sending, [`confirm_group_remove`] only after the server accepted the Commit,
+/// [`abort_group_remove`] only on a definite rejection.
+///
+/// Refused with [`MlsError::Membership`] unless the group's authenticated kind is `Group`,
+/// `signer` is this group's own leaf key, and `leaf_index` is an occupied leaf other than our own
+/// (no self-removal: leaving is a different protocol step). A pair is never shrunk this way: its
+/// kind is `Pair`, so the kind check refuses it. Queued proposals are refused with
+/// [`MlsError::PendingProposals`].
+///
+/// Caller contract (crypto-reviewer): (1) the contract of [`stage_pair_self_update`] applies in
+/// full: save the staged state before sending; never re-stage from an older snapshot after a
+/// stage (the handshake ratchet generation would be reused, RFC 9420 §6.3.1, §9.1); after an abort
+/// save again; on any `Err` discard the in-memory group and reload from storage. (2) `leaf_index`
+/// must be looked up in THIS group's `members()` at stage time by credential or signature key,
+/// never taken from server data, and never reused after a Commit merges: Add fills the leftmost
+/// blank leaf (RFC 9420 §12.1.1), so an index can name a different person later. Removing
+/// ourselves is refused (RFC 9420 §12.2). (3) The evicted member still processes the Commit
+/// (epoch + 1, group Inactive); its client must delete the group state when `!is_active`.
+pub fn stage_group_remove(
+    group: &mut MlsGroup,
+    signer: &SignatureKeyPair,
+    leaf_index: u32,
+    provider: &impl OpenMlsProvider,
+) -> Result<(Vec<u8>, u64), MlsError> {
+    if group_kind(group)? != GroupKind::Group
+        || group.own_leaf().map(|l| l.signature_key().as_slice()) != Some(&signer.to_public_vec())
+        || !group.members().any(|m| m.index.u32() == leaf_index)
+    {
+        return Err(MlsError::Membership);
+    }
+    let (commit, prior_epoch) = stage_remove_member(group, signer, leaf_index, provider)?;
+    assert_eq!(
+        group.epoch().as_u64(),
+        prior_epoch,
+        "staging must not advance the epoch"
+    );
+    assert!(group.pending_commit().is_some());
+    Ok((commit, prior_epoch))
+}
+
+/// Merge the Remove staged by [`stage_group_remove`]. [`MlsError::NoPendingCommit`] when none.
+pub fn confirm_group_remove(
+    group: &mut MlsGroup,
+    provider: &impl OpenMlsProvider,
+) -> Result<(), MlsError> {
+    confirm_remove_member(group, provider)
+}
+
+/// Drop the Remove staged by [`stage_group_remove`]. [`MlsError::NoPendingCommit`] when none.
+pub fn abort_group_remove(
+    group: &mut MlsGroup,
+    provider: &impl OpenMlsProvider,
+) -> Result<(), MlsError> {
+    abort_remove_member(group, provider)
+}
+
 /// Longest credential identity [`peer_credential_identity`] returns (the CLI/web labels are 16).
 pub const MAX_CREDENTIAL_IDENTITY_LEN: usize = 64;
 
@@ -2337,6 +2396,104 @@ mod tests {
 
         let pair = create_group(&alice, &a_prov).unwrap();
         assert_eq!(group_kind(&pair).unwrap(), GroupKind::Pair);
+    }
+
+    /// 8.17: a group Remove evicts a member; the removed member cannot read the next epoch while
+    /// the remaining member follows; self, unknown leaves and pairs are refused.
+    #[test]
+    fn group_remove_evicts_and_refuses_bad_targets() {
+        let (a, b, c) = (
+            OpenMlsRustCrypto::default(),
+            OpenMlsRustCrypto::default(),
+            OpenMlsRustCrypto::default(),
+        );
+        let alice = generate_identity(b"alice", &a).unwrap();
+        let bob = generate_identity(b"bob", &b).unwrap();
+        let carol = generate_identity(b"carol", &c).unwrap();
+        let mut ag = create_group_of_kind(&alice, &a, GroupKind::Group).unwrap();
+        let bkp = generate_pq_key_package(&bob, &b).unwrap();
+        let s = stage_group_add(&mut ag, &alice.signer, &bkp.key_package, &a).unwrap();
+        confirm_group_add(&mut ag, &a).unwrap();
+        let mut bg = join_group(&s.welcome, &b).unwrap();
+        let ckp = generate_pq_key_package(&carol, &c).unwrap();
+        let s2 = stage_group_add(&mut ag, &alice.signer, &ckp.key_package, &a).unwrap();
+        confirm_group_add(&mut ag, &a).unwrap();
+        process_incoming_commit(&mut bg, &s2.commit, &b, None).unwrap();
+        let mut cg = join_group(&s2.welcome, &c).unwrap();
+        let carol_leaf = cg.own_leaf_index().u32();
+        let own = ag.own_leaf_index().u32();
+
+        for bad in [own, 99] {
+            assert!(matches!(
+                stage_group_remove(&mut ag, &alice.signer, bad, &a),
+                Err(MlsError::Membership)
+            ));
+        }
+        assert!(matches!(
+            stage_group_remove(&mut ag, &bob.signer, carol_leaf, &a),
+            Err(MlsError::Membership)
+        ));
+        let (commit, prior) = stage_group_remove(&mut ag, &alice.signer, carol_leaf, &a).unwrap();
+        assert_eq!((prior, ag.epoch().as_u64()), (2, 2));
+        abort_group_remove(&mut ag, &a).unwrap();
+        let (commit2, _) = stage_group_remove(&mut ag, &alice.signer, carol_leaf, &a).unwrap();
+        drop(commit);
+        confirm_group_remove(&mut ag, &a).unwrap();
+        assert_eq!(ag.epoch().as_u64(), 3);
+        process_incoming_commit(&mut bg, &commit2, &b, None).unwrap();
+        assert_eq!(bg.epoch().as_u64(), 3);
+        assert_eq!(ag.members().count(), 2);
+        // openmls processes the Remove for the evicted member too (epoch 3, group Inactive), so
+        // "followed" is not the property: it must be inactive and unable to read epoch-3 traffic.
+        assert_eq!(group_kind(&ag).unwrap(), GroupKind::Group);
+        assert_eq!(
+            ag.epoch_authenticator().as_slice(),
+            bg.epoch_authenticator().as_slice()
+        );
+        let evicted = process_incoming_commit(&mut cg, &commit2, &c, None);
+        assert!(matches!(evicted, Ok(3)), "{evicted:?}");
+        assert!(!cg.is_active());
+        let msg = encrypt_message(&mut ag, &alice.signer, b"epoch three", &a).unwrap();
+        assert_eq!(
+            &**decrypt_message(&mut bg, &msg, &b).unwrap(),
+            b"epoch three"
+        );
+        assert!(decrypt_message(&mut cg, &msg, &c).is_err());
+        // Re-removing the vacated (in range, now blank) leaf is refused.
+        assert!(matches!(
+            stage_group_remove(&mut ag, &alice.signer, carol_leaf, &a),
+            Err(MlsError::Membership)
+        ));
+        assert!(ag.pending_commit().is_none());
+
+        // A pair (kind Pair) is refused by the kind guard even for a real peer leaf.
+        let mut pair = create_group(&alice, &a).unwrap();
+        let pkp = generate_pq_key_package(&bob, &b).unwrap();
+        pair.add_members(
+            &a,
+            &alice.signer,
+            &[{
+                let m = MlsMessageIn::tls_deserialize_exact(&pkp.key_package).unwrap();
+                let MlsMessageBodyIn::KeyPackage(k) = m.extract() else {
+                    panic!()
+                };
+                k.validate(a.crypto(), ProtocolVersion::Mls10).unwrap()
+            }],
+        )
+        .unwrap();
+        pair.merge_pending_commit(&a).unwrap();
+        let peer = pair
+            .members()
+            .find(|m| m.index != pair.own_leaf_index())
+            .unwrap()
+            .index
+            .u32();
+        assert!(matches!(
+            stage_group_remove(&mut pair, &alice.signer, peer, &a),
+            Err(MlsError::Membership)
+        ));
+        assert!(pair.pending_commit().is_none());
+        assert_eq!(pair.members().count(), 2);
     }
 
     /// 8.17: a staged group Add advances nothing until confirmed; a third member joins with the
