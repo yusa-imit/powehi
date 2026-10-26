@@ -1843,3 +1843,6 @@ crypto-reviewer rejected member-count dispatch for the group safety number; need
 ## Stabilization 645 (2026-10-26)
 - main CI green; clippy, cargo audit, cargo deny clean; powehi-cli 397 + crypto-core tests green.
 - Added proptests for safety::pairwise symmetry and safety::group order-independence / member-swap detection (test-only).
+
+## Cycle 647 (2026-10-26, FEATURE) — 8.17 slice c1
+Authenticated group kind (GroupContext ext 0xF002, prd §5.3B) in crypto-core + joiner skips non-Pair Welcomes. 8.15 still blocked on #166 (no owner answer). Next: `group create` with the carried contracts listed in STATUS 8.17.

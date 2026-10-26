@@ -185,3 +185,22 @@ async fn joining_confirms_the_pending_membership_with_the_server() {
     let accept = format!("POST /v1/groups/{gid}/accept");
     assert_eq!(calls.iter().filter(|c| **c == accept).count(), 1);
 }
+
+#[test]
+fn a_two_member_group_welcome_is_not_a_pair() {
+    use powehi_crypto_core::mls_group::{self as m, GroupKind, Provider};
+    let (ap, bp) = (Provider::default(), Provider::default());
+    let alice = m::generate_identity(b"alice", &ap).unwrap();
+    let bob = m::generate_identity(b"bob", &bp).unwrap();
+    for (kind, joins) in [(GroupKind::Pair, true), (GroupKind::Group, false)] {
+        let pq = m::generate_pq_key_package(&bob, &bp).unwrap();
+        let mut g = m::create_group_of_kind(&alice, &ap, kind).unwrap();
+        let w = m::add_member_from_bytes(&mut g, &alice.signer, &pq.key_package, &ap).unwrap();
+        let joined = m::join_group(&w, &bp).unwrap();
+        assert!(
+            m::is_fresh_pair(&joined),
+            "the member count alone cannot tell them apart"
+        );
+        assert_eq!(ensure_pair_kind(&joined).is_ok(), joins);
+    }
+}

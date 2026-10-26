@@ -515,7 +515,11 @@ pub fn generate_key_package_with_pq_ext(
     let capabilities = Capabilities::new(
         None, // versions: use default
         None, // ciphersuites: use default
-        Some(&[ExtensionType::Unknown(POWEHI_PQ_KEM_EXT_TYPE)]),
+        Some(&[
+            ExtensionType::Unknown(POWEHI_PQ_KEM_EXT_TYPE),
+            // Lets this device be added to (or join) a group (8.17).
+            ExtensionType::Unknown(POWEHI_GROUP_KIND_EXT_TYPE),
+        ]),
         None, // proposals: use default
         None, // credentials: use default
     );
@@ -574,12 +578,41 @@ pub fn generate_pq_key_package(
     })
 }
 
-/// Create a new MLS group with `creator` as the sole member.
+/// Create a new MLS group with `creator` as the sole member. A pair (no kind extension).
 pub fn create_group(
     creator: &Identity,
     provider: &impl OpenMlsProvider,
 ) -> Result<MlsGroup, MlsError> {
-    let config = MlsGroupCreateConfig::builder()
+    create_group_of_kind(creator, provider, GroupKind::Pair)
+}
+
+/// Extension type ID of the Powehi group-kind GroupContext extension (8.17). Private-use range
+/// (RFC 9420 §17.3). Present only on groups; its payload is [`GROUP_KIND_GROUP`].
+pub const POWEHI_GROUP_KIND_EXT_TYPE: u16 = 0xF002;
+
+/// Payload byte of the group-kind extension for a [`GroupKind::Group`].
+const GROUP_KIND_GROUP: u8 = 1;
+
+/// What a conversation is, authenticated by the MLS GroupContext (so a joiner learns it from the
+/// Welcome and no server label or member count can change it): decides which safety number
+/// applies (`safety::pairwise` or `safety::group`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupKind {
+    /// A 1:1 conversation. Carries no extension, as every group made before 8.17.
+    Pair,
+    /// A group made by `group create`; carries the group-kind extension.
+    Group,
+}
+
+/// [`create_group`] with an explicit kind. A [`GroupKind::Group`] puts the kind extension in the
+/// GroupContext and declares support for it in the creator's leaf; members added later must
+/// declare it too (PQ KeyPackages do), or the Add is refused.
+pub fn create_group_of_kind(
+    creator: &Identity,
+    provider: &impl OpenMlsProvider,
+    kind: GroupKind,
+) -> Result<MlsGroup, MlsError> {
+    let builder = MlsGroupCreateConfig::builder()
         .ciphersuite(CIPHERSUITE)
         // Ratchet-tree extension keeps Welcome messages self-contained, which is
         // what the worker/DS need (no out-of-band tree distribution).
@@ -589,8 +622,28 @@ pub fn create_group(
         // If out-of-order delivery requires a wider window in the future, this
         // MUST be re-evaluated through the threat-model-checker first.
         .max_past_epochs(0)
-        .padding_size(PADDING_SIZE)
-        .build();
+        .padding_size(PADDING_SIZE);
+    let config = match kind {
+        GroupKind::Pair => builder.build(),
+        GroupKind::Group => {
+            let ext = Extension::Unknown(
+                POWEHI_GROUP_KIND_EXT_TYPE,
+                UnknownExtension(vec![GROUP_KIND_GROUP]),
+            );
+            let exts =
+                Extensions::<GroupContext>::single(ext).map_err(|_| MlsError::GroupCreation)?;
+            builder
+                .with_group_context_extensions(exts)
+                .capabilities(Capabilities::new(
+                    None,
+                    None,
+                    Some(&[ExtensionType::Unknown(POWEHI_GROUP_KIND_EXT_TYPE)]),
+                    None,
+                    None,
+                ))
+                .build()
+        }
+    };
     MlsGroup::new(
         provider,
         &creator.signer,
@@ -598,6 +651,18 @@ pub fn create_group(
         creator.credential_with_key.clone(),
     )
     .map_err(|_| MlsError::GroupCreation)
+}
+
+/// The kind the group's GroupContext declares. No kind extension means a pair; a kind extension
+/// with any payload other than the one defined byte is an error (fail closed, never a guess).
+pub fn group_kind(group: &MlsGroup) -> Result<GroupKind, MlsError> {
+    match group.extensions().unknown(POWEHI_GROUP_KIND_EXT_TYPE) {
+        None => Ok(GroupKind::Pair),
+        Some(UnknownExtension(payload)) if payload.as_slice() == [GROUP_KIND_GROUP] => {
+            Ok(GroupKind::Group)
+        }
+        Some(_) => Err(MlsError::Membership),
+    }
 }
 
 /// Encrypt `plaintext` as an MLS application message and return the serialized
@@ -2113,6 +2178,101 @@ pub fn import_provider_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Payloads other than the one defined byte are refused, and a KeyPackage that does not
+    /// declare the kind extension cannot be added to a group (the group is left untouched).
+    #[test]
+    fn group_kind_payloads_and_undeclared_key_packages_fail_closed() {
+        let (a_prov, b_prov) = (OpenMlsRustCrypto::default(), OpenMlsRustCrypto::default());
+        let alice = generate_identity(b"alice", &a_prov).unwrap();
+        let bob = generate_identity(b"bob", &b_prov).unwrap();
+        for bad in [vec![], vec![0], vec![1, 1]] {
+            let config = MlsGroupCreateConfig::builder()
+                .ciphersuite(CIPHERSUITE)
+                .with_group_context_extensions(
+                    Extensions::<GroupContext>::single(Extension::Unknown(
+                        POWEHI_GROUP_KIND_EXT_TYPE,
+                        UnknownExtension(bad),
+                    ))
+                    .unwrap(),
+                )
+                .capabilities(Capabilities::new(
+                    None,
+                    None,
+                    Some(&[ExtensionType::Unknown(POWEHI_GROUP_KIND_EXT_TYPE)]),
+                    None,
+                    None,
+                ))
+                .build();
+            let g = MlsGroup::new(
+                &a_prov,
+                &alice.signer,
+                &config,
+                alice.credential_with_key.clone(),
+            )
+            .unwrap();
+            assert!(matches!(group_kind(&g), Err(MlsError::Membership)));
+        }
+        let plain = generate_key_package(&bob, &b_prov).unwrap();
+        let mut group = create_group_of_kind(&alice, &a_prov, GroupKind::Group).unwrap();
+        let epoch = group.epoch().as_u64();
+        let bytes = MlsMessageOut::from(plain).to_bytes().unwrap();
+        assert!(add_member_from_bytes(&mut group, &alice.signer, &bytes, &a_prov).is_err());
+        assert_eq!(group.epoch().as_u64(), epoch);
+        assert!(group.pending_commit().is_none());
+        assert_eq!(group.members().count(), 1);
+    }
+
+    /// 8.17: the group kind is authenticated by the GroupContext. A group's kind survives the
+    /// Welcome, a pair has none, and a PQ KeyPackage can join a group.
+    #[test]
+    fn group_kind_travels_in_the_group_context_through_a_welcome() {
+        let (a_prov, b_prov) = (OpenMlsRustCrypto::default(), OpenMlsRustCrypto::default());
+        let alice = generate_identity(b"alice", &a_prov).unwrap();
+        let bob = generate_identity(b"bob", &b_prov).unwrap();
+        let pq = generate_pq_key_package(&bob, &b_prov).unwrap();
+        let mut group = create_group_of_kind(&alice, &a_prov, GroupKind::Group).unwrap();
+        assert_eq!(group_kind(&group).unwrap(), GroupKind::Group);
+        let welcome =
+            add_member_from_bytes(&mut group, &alice.signer, &pq.key_package, &a_prov).unwrap();
+        let joined = join_group(&welcome, &b_prov).unwrap();
+        assert_eq!(group_kind(&joined).unwrap(), GroupKind::Group);
+
+        let pair = create_group(&alice, &a_prov).unwrap();
+        assert_eq!(group_kind(&pair).unwrap(), GroupKind::Pair);
+    }
+
+    /// A kind extension with an unknown payload is refused, never read as Pair or Group.
+    #[test]
+    fn group_kind_refuses_an_unknown_payload() {
+        let a_prov = OpenMlsRustCrypto::default();
+        let alice = generate_identity(b"alice", &a_prov).unwrap();
+        let config = MlsGroupCreateConfig::builder()
+            .ciphersuite(CIPHERSUITE)
+            .with_group_context_extensions(
+                Extensions::<GroupContext>::single(Extension::Unknown(
+                    POWEHI_GROUP_KIND_EXT_TYPE,
+                    UnknownExtension(vec![9]),
+                ))
+                .unwrap(),
+            )
+            .capabilities(Capabilities::new(
+                None,
+                None,
+                Some(&[ExtensionType::Unknown(POWEHI_GROUP_KIND_EXT_TYPE)]),
+                None,
+                None,
+            ))
+            .build();
+        let group = MlsGroup::new(
+            &a_prov,
+            &alice.signer,
+            &config,
+            alice.credential_with_key.clone(),
+        )
+        .unwrap();
+        assert!(matches!(group_kind(&group), Err(MlsError::Membership)));
+    }
 
     /// Pins `MlsError::OwnCommit`'s `Display` string against
     /// `app/src/workers/cryptoWorkerErrors.ts`'s `MLS_OWN_COMMIT_ERROR`

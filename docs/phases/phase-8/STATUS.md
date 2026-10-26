@@ -324,6 +324,12 @@ pointing here. Close the issue in the PR that finishes its item.
   overwrite an existing `conv-*` record's kind; `report()` wording for groups.
   Cycle 644 (b2): the grown-pair integration test shipped (`verified_pair_that_grew_is_changed_and_refuses_send`:
   a verified pair with a third MLS member is CHANGED and `send` returns `MessageError::Changed`, no key spent).
+  Cycle 647 (slice c1): authenticated kind in crypto-core: GroupContext ext 0xF002 (prd §5.3B), `create_group_of_kind`,
+  `group_kind` (absent=Pair, payload [1]=Group, else error), PQ KeyPackages declare 0xF002; `welcome::join_one` skips any
+  non-Pair Welcome (crypto-reviewer blocking finding). Carried to `group create`: group commit allowlist (Add/Remove/path-Update only,
+  postcondition `group_kind` unchanged); cross-check `conv-*` Kind vs `group_kind` on load; `is_pair_with` callers (`message.rs`,
+  `inbox.rs`, `pcs.rs`) dispatch on Kind; RequiredCapabilities(0xF002) in group GCE; typed errors for bad kind vs peer lacking
+  group support; threat-model-checker.
 
 ### Multi-device and recovery
 - [ ] 8.18 Recovery-phrase restore — `powehi restore` sets up a new machine from the
