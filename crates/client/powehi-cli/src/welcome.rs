@@ -6,6 +6,7 @@
 //! use it, (3) joins, (4) moves the key into the conversation record and prunes it from
 //! `pq-keys`, and only then (5) acks the envelope. Welcome bytes are never logged.
 
+use powehi_crypto_core::safety::GROUP_MAX_MEMBERS;
 use powehi_crypto_core::{kem, mls_group};
 use reqwest::Client;
 use serde::Deserialize;
@@ -198,7 +199,7 @@ async fn join_filtered(
             sender,
             ciphertext,
         };
-        match join_one(session, &env, only_ref, invites_only) {
+        match join_one(session, &env, only_ref, invites_only, false) {
             Err(JoinOutcome::Request(binding_ref)) => {
                 let req = requests::Request::new(
                     group_id,
@@ -293,11 +294,44 @@ fn check_group_not_held(
 
 /// The kind comes from the authenticated GroupContext, never from the member count (8.17): a
 /// group Welcome that happens to seat two members is not a pair, and an unreadable kind is
-/// refused. Group joins arrive with `group create`.
-fn ensure_pair_kind(group: &mls_group::Group) -> Result<(), JoinOutcome> {
-    match mls_group::group_kind(group) {
-        Ok(mls_group::GroupKind::Pair) => Ok(()),
-        Ok(mls_group::GroupKind::Group) | Err(_) => Err(JoinOutcome::Skip),
+/// refused.
+fn welcome_kind(group: &mls_group::Group) -> Result<mls_group::GroupKind, JoinOutcome> {
+    mls_group::group_kind(group).map_err(|_| JoinOutcome::Skip)
+}
+
+/// A group Welcome seats us among 2..=512 active members at epoch 1 or later (the Add that
+/// seated us advanced it); anything else is not a group we can hold.
+fn ensure_group_shape(group: &mls_group::Group, own_key: &[u8]) -> Result<(), JoinOutcome> {
+    let cap = GROUP_MAX_MEMBERS;
+    let members: Vec<_> = group.members().take(cap + 1).collect();
+    let ok = group.is_active()
+        && group.epoch().as_u64() >= 1
+        && (2..=cap).contains(&members.len())
+        && members.iter().any(|m| m.signature_key == own_key);
+    if ok {
+        Ok(())
+    } else {
+        Err(JoinOutcome::Skip)
+    }
+}
+
+/// A leftover record (crash between the two saves) may only be finished by a Welcome of the
+/// same kind, as a joiner: a Welcome can never turn a pair record into a group or back.
+fn ensure_resumable(
+    store: &crate::store::ProfileStore,
+    group_id: Uuid,
+    kind: mls_group::GroupKind,
+) -> Result<(), JoinOutcome> {
+    let want = match kind {
+        mls_group::GroupKind::Pair => conversation::Kind::Pair,
+        mls_group::GroupKind::Group => conversation::Kind::Group,
+    };
+    match conversation::load(store, &group_id) {
+        Ok(None) => Ok(()),
+        Ok(Some(c)) if c.kind() == want && c.role == Role::Joiner => Ok(()),
+        Ok(Some(_)) => Err(JoinOutcome::Skip),
+        Err(ConversationError::Store(e)) => Err(JoinOutcome::Fatal(e.into())),
+        Err(_) => Err(JoinOutcome::Skip),
     }
 }
 
@@ -306,6 +340,7 @@ pub(crate) fn join_one(
     env: &Joinable,
     only_ref: Option<&[u8]>,
     invites_only: bool,
+    allow_group: bool,
 ) -> Result<Uuid, JoinOutcome> {
     // A fresh provider per Welcome: a rejected join must not leave state in memory that a
     // later successful `save` would persist.
@@ -325,27 +360,47 @@ pub(crate) fn join_one(
     let group =
         mls_group::join_group(&env.ciphertext, &local.provider).map_err(|_| JoinOutcome::Skip)?;
     let group_id = Uuid::from_slice(group.group_id().as_slice()).map_err(|_| JoinOutcome::Skip)?;
-    // 1:1 only: a Welcome that seats extra members (a ghost) is not our conversation.
-    if !mls_group::is_fresh_pair(&group) {
-        return Err(JoinOutcome::Skip);
-    }
-    ensure_pair_kind(&group)?;
+    let kind = welcome_kind(&group)?;
+    let own_key = local.identity.signer.to_public_vec();
     // The server labels envelopes; the MLS group id inside the Welcome is authoritative.
     if group_id != env.group_id {
         return Err(JoinOutcome::Skip);
     }
+    match kind {
+        // 1:1 only: a Welcome that seats extra members (a ghost) is not our conversation.
+        mls_group::GroupKind::Pair if !mls_group::is_fresh_pair(&group) => {
+            return Err(JoinOutcome::Skip)
+        }
+        mls_group::GroupKind::Pair => {}
+        mls_group::GroupKind::Group => {
+            ensure_group_shape(&group, &own_key)?;
+            // Being added to a group is never automatic, whatever KeyPackage it consumed: only
+            // `accept` (the user's say-so) joins one.
+            if !allow_group {
+                return Err(JoinOutcome::Request(binding.key_package_ref.clone()));
+            }
+        }
+    }
+    ensure_resumable(&session.store, group_id, kind)?;
     // The peer is whoever the Welcome's tree seats next to us; the server's `sender` label is
     // kept for routing only and cannot be tied to a credential (prd.md §3.3, cycle 456).
-    let own_key = local.identity.signer.to_public_vec();
-    let peer_credential =
-        mls_group::peer_credential_identity(&group, &own_key).ok_or(JoinOutcome::Skip)?;
-    let conv = Conversation::new(
-        group_id,
-        env.sender,
-        Role::Joiner,
-        Some((dk, binding.encap_key.clone())),
-    )
-    .with_peer_credential(peer_credential);
+    let conv = match kind {
+        mls_group::GroupKind::Pair => {
+            let peer_credential =
+                mls_group::peer_credential_identity(&group, &own_key).ok_or(JoinOutcome::Skip)?;
+            Conversation::new(
+                group_id,
+                env.sender,
+                Role::Joiner,
+                Some((dk, binding.encap_key.clone())),
+            )
+            .with_peer_credential(peer_credential)
+        }
+        // No pair ML-KEM state and no single peer: the group PQ story is a later slice.
+        mls_group::GroupKind::Group => {
+            Conversation::new(group_id, env.sender, Role::Joiner, None).into_group()
+        }
+    };
     let fatal = |e: InviteError| JoinOutcome::Fatal(e);
     // Conversation record first, then MLS state, then prune: a crash in between leaves the
     // KeyPackage and its key intact so the same Welcome can be joined again.

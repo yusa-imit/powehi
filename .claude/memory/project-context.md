@@ -1856,3 +1856,6 @@ crypto-reviewer rejected member-count dispatch for the group safety number; need
 ## Cycle 647 (2026-10-26, FEATURE) — 8.17 slice c1
 Authenticated group kind (GroupContext ext 0xF002, prd §5.3B) in crypto-core + joiner skips non-Pair Welcomes. 8.15 still blocked on #166 (no owner answer). Next: `group create` with the carried contracts listed in STATUS 8.17.
 - Stabilization 650 (PR pending): test group_add_refuses_queued_proposals; cargo audit/deny green; CI green on main.
+
+## Cycle 651 (FEATURE) — 8.17 slice e
+Group joiner in `welcome.rs`: kind from GroupContext, group Welcomes only join via `accept`, group conv records have no pair PQ state, `ensure_resumable` blocks kind/role confusion on leftover records, inbox holds traffic of groups with a pending request. 8.15 still blocked on #166. Carried list in phase-8 STATUS 8.17. Next: group send/receive (MLS-leaf sender auth) or `group remove`.
