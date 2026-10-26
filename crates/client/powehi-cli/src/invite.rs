@@ -154,9 +154,9 @@ struct RedeemReq<'a> {
     code: &'a str,
 }
 #[derive(Deserialize)]
-struct RedeemResp {
-    device_id: Uuid,
-    key_package: Vec<u8>,
+pub(crate) struct Pinned {
+    pub(crate) device_id: Uuid,
+    pub(crate) key_package: Vec<u8>,
 }
 
 /// Creates an invite and returns the shareable link and the pinned KeyPackage's ref.
@@ -192,20 +192,15 @@ pub async fn create(
     Ok((build_link(server, &resp.code, &kp_hash)?, key_ref))
 }
 
-/// Redeems an invite: verifies the pinned KeyPackage, creates the group, adds the inviter,
-/// registers both with the server and sends the Welcome, then (when the inviter's KeyPackage
-/// carries a verified ML-KEM key) the `pq_init` message. Returns the new conversation id and
-/// how the PQ exchange went.
-///
-/// Order matters for crash safety: MLS state is saved before any server call that depends on
-/// it, and the conversation record before the Welcome leaves, so a lost response never leaves
-/// the peer in a group this device cannot find.
-pub async fn redeem(
+/// Redeems the link's one-time code and returns the pinned KeyPackage owner and bytes, after
+/// the origin check and the SHA-256 check against the hash from the link (which the server
+/// never sees). The code is consumed on the server by this call.
+pub(crate) async fn fetch_pinned(
     client: &Client,
     server: &Url,
     session: &Session,
     link: &InviteLink,
-) -> Result<(Uuid, PqStatus), InviteError> {
+) -> Result<Pinned, InviteError> {
     if link
         .origin
         .as_ref()
@@ -223,10 +218,28 @@ pub async fn redeem(
         Err(IdentityError::HttpStatus(404)) => return Err(InviteError::NotFound),
         Err(e) => return Err(e.into()),
     };
-    let pinned: RedeemResp = serde_json::from_slice(&raw).map_err(|_| InviteError::BadResponse)?;
+    let pinned: Pinned = serde_json::from_slice(&raw).map_err(|_| InviteError::BadResponse)?;
     if hex(&Sha256::digest(&pinned.key_package)) != link.kp_hash {
         return Err(InviteError::HashMismatch);
     }
+    Ok(pinned)
+}
+
+/// Redeems an invite: verifies the pinned KeyPackage, creates the group, adds the inviter,
+/// registers both with the server and sends the Welcome, then (when the inviter's KeyPackage
+/// carries a verified ML-KEM key) the `pq_init` message. Returns the new conversation id and
+/// how the PQ exchange went.
+///
+/// Order matters for crash safety: MLS state is saved before any server call that depends on
+/// it, and the conversation record before the Welcome leaves, so a lost response never leaves
+/// the peer in a group this device cannot find.
+pub async fn redeem(
+    client: &Client,
+    server: &Url,
+    session: &Session,
+    link: &InviteLink,
+) -> Result<(Uuid, PqStatus), InviteError> {
+    let pinned = fetch_pinned(client, server, session, link).await?;
     if pinned.device_id == session.device_id {
         return Err(InviteError::SelfInvite);
     }
@@ -501,18 +514,30 @@ async fn post_registration(
     group_id: Uuid,
     peer: Uuid,
 ) -> Result<(), InviteError> {
+    register_group(client, server, session, group_id).await?;
+    post_member(client, server, session, group_id, peer, 1).await
+}
+
+/// Registers `peer` as a (pending, prd.md 8.11) member of `group_id` joined at `epoch`.
+pub(crate) async fn post_member(
+    client: &Client,
+    server: &Url,
+    session: &Session,
+    group_id: Uuid,
+    peer: Uuid,
+    epoch: u64,
+) -> Result<(), InviteError> {
     #[derive(Serialize)]
     struct MemberReq {
         epoch: u64,
     }
-    register_group(client, server, session, group_id).await?;
     let path = format!("/v1/groups/{group_id}/members/{peer}");
-    let req = json_post(client, api(server, &path)?, &MemberReq { epoch: 1 })?;
+    let req = json_post(client, api(server, &path)?, &MemberReq { epoch })?;
     identity::send_raw(req, session, SMALL_BODY).await?;
     Ok(())
 }
 
-async fn send_welcome(
+pub(crate) async fn send_welcome(
     client: &Client,
     server: &Url,
     session: &Session,

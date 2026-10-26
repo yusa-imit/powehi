@@ -29,6 +29,8 @@ pub struct Backend {
     pub fail_revoke: bool,
     /// Answer `POST /v1/messages` with a 500.
     pub fail_messages: bool,
+    /// Answer `POST /v1/messages/welcome` with a 500.
+    pub fail_welcome: bool,
     /// Status for `POST /v1/messages/commit`; 0 means 200 with `expected_epoch + 1`.
     pub commit_status: u16,
     /// Epoch the 200 reply carries instead of `expected_epoch + 1` (a misbehaving server).
@@ -102,6 +104,7 @@ fn handle(st: &mut Backend, method: &str, path: &str, caller: Uuid, body: &Value
             respond(204, None)
         }
         ("POST", ["v1", "groups", _, "accept" | "decline"]) => respond(204, None),
+        ("POST", ["v1", "messages", "welcome"]) if st.fail_welcome => respond(500, None),
         ("POST", ["v1", "messages", "welcome"]) => {
             st.inbox.push(json!({
                 "id": Uuid::new_v4(),

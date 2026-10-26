@@ -1070,3 +1070,29 @@ async fn a_commit_never_overtakes_messages_deferred_by_the_conversation_cap() {
     assert_eq!((r.stored, r.commits), (2, 1));
     assert_eq!(alice_epoch(&p), 2);
 }
+
+/// Group traffic is never acked as junk or applied as a peer's: other members' Commits,
+/// Proposals and messages stay on the server long past the grace (8.17 `group add`).
+#[tokio::test]
+async fn group_conversation_traffic_is_never_acked_or_applied() {
+    let (_tmp, p) = pair().await;
+    let gid = crate::group::create(&client(), &p.url, &p.alice)
+        .await
+        .unwrap();
+    let other = Uuid::new_v4();
+    for kind in ["Commit", "Proposal", "Application"] {
+        p.state.lock().unwrap().inbox.push(json!({
+            "id": Uuid::new_v4(), "group_id": gid, "sender": other,
+            "recipient": p.alice.device_id.to_string(),
+            "message_type": kind, "ciphertext": [1, 2, 3],
+        }));
+    }
+    let t0 = 1_000_000;
+    for step in [0, 1, junk::UNKNOWN_GRACE_SECS, 3 * junk::UNKNOWN_GRACE_SECS] {
+        receive_at(&client(), &p.url, &p.alice, t0 + step)
+            .await
+            .unwrap();
+    }
+    assert_eq!(inbox_len(&p), 3, "nothing of a group is acked");
+    assert!(conversation::load(&p.alice.store, &gid).unwrap().is_some());
+}
