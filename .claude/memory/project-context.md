@@ -1862,3 +1862,6 @@ Group joiner in `welcome.rs`: kind from GroupContext, group Welcomes only join v
 
 ## Cycle 652 (FEATURE) — 8.17 slice f
 Request Welcome cap 256 KiB (server limit), `commit::apply` Kind::Pair guard. Still carried for 8.17: group send/receive with MLS-leaf sender auth, `group remove`, RequiredCapabilities(0xF002), `conversations` kind, Kind cross-check on load, group PQ story (T6).
+
+## Cycle 653 (FEATURE) — 8.17 slice g1
+crypto-core `stage_group_remove`/`confirm`/`abort` (kind-Group, own signer, occupied non-self leaf) + eviction test. 8.15 still blocked on #166. Next: CLI `group remove` (`grem-<gid>` record), then group send/receive.
