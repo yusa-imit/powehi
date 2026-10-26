@@ -2399,6 +2399,25 @@ mod tests {
         assert!(ag.pending_commit().is_none());
     }
 
+    /// 8.17: a queued proposal must not be folded into a group Add Commit.
+    #[test]
+    fn group_add_refuses_queued_proposals() {
+        let (a, b) = (OpenMlsRustCrypto::default(), OpenMlsRustCrypto::default());
+        let alice = generate_identity(b"alice", &a).unwrap();
+        let bob = generate_identity(b"bob", &b).unwrap();
+        let mut ag = create_group_of_kind(&alice, &a, GroupKind::Group).unwrap();
+        let ghost = generate_identity(b"ghost", &a).unwrap();
+        let gkp = generate_key_package(&ghost, &a).unwrap();
+        ag.propose_add_member(&a, &alice.signer, gkp.key_package())
+            .unwrap();
+        let bkp = generate_pq_key_package(&bob, &b).unwrap();
+        let e = stage_group_add(&mut ag, &alice.signer, &bkp.key_package, &a).unwrap_err();
+        assert!(matches!(e, MlsError::PendingProposals), "{e:?}");
+        assert!(ag.pending_commit().is_none());
+        ag.clear_pending_proposals(a.storage()).unwrap();
+        stage_group_add(&mut ag, &alice.signer, &bkp.key_package, &a).unwrap();
+    }
+
     /// A kind extension with an unknown payload is refused, never read as Pair or Group.
     #[test]
     fn group_kind_refuses_an_unknown_payload() {
