@@ -84,6 +84,16 @@ fn oversized_and_empty_welcomes_are_not_stored() {
 }
 
 #[test]
+fn a_welcome_at_the_server_limit_is_stored() {
+    let (_tmp, store) = open_store();
+    let mut max = req(1, 10);
+    max.welcome = vec![7; MAX_WELCOME_LEN];
+    assert_eq!(MAX_WELCOME_LEN, 256 * 1024);
+    assert!(save_new(&store, &max).unwrap());
+    assert_eq!(list(&store).unwrap()[0].welcome.len(), MAX_WELCOME_LEN);
+}
+
+#[test]
 fn expired_and_malformed_requests_are_pruned() {
     let tmp = tempfile::tempdir().unwrap();
     let store = session(&tmp, "alice", 1).store;
