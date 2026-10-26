@@ -24,6 +24,8 @@ use crate::identity::{IdentityError, LocalIdentity};
 use crate::invite::{self, CommitOutcome, InviteError, InviteLink};
 use crate::store::StoreError;
 
+pub mod remove;
+
 /// Why `group add` did not (fully) succeed. Messages carry no secrets.
 #[derive(Debug, Error)]
 pub enum GroupError {
@@ -49,11 +51,11 @@ pub enum GroupError {
     EpochMismatch,
     #[error("this invite belongs to this device; give the link of the person to add")]
     SelfInvite,
-    #[error("an earlier add to this group is unresolved; no further add until it is resolved")]
+    #[error("an earlier add or remove in this group is unresolved; no further change until it is resolved")]
     Unresolved,
-    #[error("the server refused the add; nothing was changed (retry with a new invite)")]
+    #[error("the server refused the change; nothing was changed (check the epoch and retry)")]
     Rejected,
-    #[error("the server's answer to the add is unknown; it may have taken effect (unresolved)")]
+    #[error("the server's answer is unknown; the change (add or remove) may have taken effect")]
     Unknown,
     #[error(
         "the member was added but the Welcome was not delivered; it is saved, retry with \
@@ -70,6 +72,10 @@ pub enum GroupError {
     ResumeEpoch,
     #[error("no add is waiting for its Welcome in this group")]
     NothingToResume,
+    #[error("no single member with that signature key in this group (see `group members`)")]
+    NoSuchMember,
+    #[error("you cannot remove yourself from a group this way")]
+    RemoveSelf,
     #[error("the add was refused by MLS (the key package is invalid or already a member)")]
     AddRefused,
     #[error("MLS operation failed")]
@@ -196,17 +202,18 @@ pub async fn create(client: &Client, server: &Url, session: &Session) -> Result<
 }
 
 /// Checked local state for an add: the group, our identity and the server epoch.
-struct AddPrep {
-    local: LocalIdentity,
-    group: mls_group::Group,
-    server_epoch: u64,
+pub(crate) struct AddPrep {
+    pub(crate) local: LocalIdentity,
+    pub(crate) group: mls_group::Group,
+    pub(crate) server_epoch: u64,
 }
 
-async fn prepare_add(
+pub(crate) async fn prepare_add(
     client: &Client,
     server: &Url,
     session: &Session,
     group_id: Uuid,
+    check_cap: bool,
 ) -> Result<AddPrep, GroupError> {
     let store = &session.store;
     let conv = conversation::load(store, &group_id)?.ok_or(GroupError::NoSuchGroup)?;
@@ -218,6 +225,9 @@ async fn prepare_add(
         Some(p) if p.state == STATE_ACCEPTED => return Err(GroupError::WelcomePending),
         Some(_) => return Err(GroupError::Unresolved),
     }
+    if store.get(&remove::pending_name(group_id))?.is_some() {
+        return Err(GroupError::Unresolved);
+    }
     let local = LocalIdentity::load(store)?;
     let group = mls_group::load_group(group_id.as_bytes(), &local.provider)?
         .filter(|g| g.is_active())
@@ -226,7 +236,7 @@ async fn prepare_add(
     if mls_group::group_kind(&group)? != GroupKind::Group {
         return Err(GroupError::NotAGroup);
     }
-    if group.members().take(GROUP_MAX_MEMBERS).count() >= GROUP_MAX_MEMBERS {
+    if check_cap && group.members().take(GROUP_MAX_MEMBERS).count() >= GROUP_MAX_MEMBERS {
         return Err(GroupError::TooMany);
     }
     let server_epoch = invite::group_epoch(client, server, session, group_id).await?;
@@ -260,7 +270,7 @@ pub async fn add(
         mut local,
         mut group,
         server_epoch,
-    } = prepare_add(client, server, session, group_id).await?;
+    } = prepare_add(client, server, session, group_id, true).await?;
     let pinned = invite::fetch_pinned(client, server, session, link).await?;
     if pinned.device_id == session.device_id {
         return Err(GroupError::SelfInvite);

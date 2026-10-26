@@ -755,7 +755,10 @@ fn run_group(
                 .map_err(|_| CliError::Stdin)?;
             Some(invite::parse_link(&buf)?)
         }
-        cli::GroupCommand::Create { .. } | cli::GroupCommand::Add { resume: true, .. } => None,
+        cli::GroupCommand::Create { .. }
+        | cli::GroupCommand::Add { resume: true, .. }
+        | cli::GroupCommand::Remove { .. }
+        | cli::GroupCommand::Members { .. } => None,
     };
     let mut prompter = prompt::TtyPrompter;
     let session = login_scoped(&rt, &client, server, paths, &mut prompter)?;
@@ -784,6 +787,25 @@ fn run_group(
                 (false, None) => return Err(CliError::Stdin),
             };
             group::write_added(*group_id, epoch, *json, &mut std::io::stdout())
+                .map_err(|_| CliError::Output)?;
+        }
+        (
+            cli::GroupCommand::Remove {
+                group_id,
+                key,
+                json,
+            },
+            _,
+        ) => {
+            let epoch = rt.block_on(group::remove::remove(
+                &client, server, &session, *group_id, key,
+            ))?;
+            group::remove::write_removed(*group_id, key, epoch, *json, &mut std::io::stdout())
+                .map_err(|_| CliError::Output)?;
+        }
+        (cli::GroupCommand::Members { group_id, json }, _) => {
+            let list = group::remove::members(&session, *group_id)?;
+            group::remove::write_members(&list, *json, &mut std::io::stdout())
                 .map_err(|_| CliError::Output)?;
         }
     }
