@@ -218,3 +218,57 @@ async fn a_pending_add_blocks_remove_and_a_pair_is_refused() {
         Err(GroupError::NotAGroup)
     ));
 }
+
+#[tokio::test]
+async fn an_uppercase_key_resolves_and_empty_or_oversized_keys_are_refused() {
+    let w = world(1).await;
+    let before = w.state.lock().unwrap().commits.len();
+    for bad in [String::new(), "a".repeat(MAX_KEY_HEX + 1)] {
+        let e = remove(&client(), &w.url, &w.alice, w.gid, &bad)
+            .await
+            .unwrap_err();
+        assert!(matches!(e, GroupError::NoSuchMember));
+    }
+    assert_eq!(w.state.lock().unwrap().commits.len(), before);
+    let upper = key_of(&w, 1).to_ascii_uppercase();
+    let epoch = remove(&client(), &w.url, &w.alice, w.gid, &upper)
+        .await
+        .unwrap();
+    assert_eq!(epoch, 2);
+    assert_eq!(epoch_and_count(&w), (2, 1));
+}
+
+#[test]
+fn members_and_removed_render_text_and_json() {
+    let list = vec![
+        Member {
+            leaf: 0,
+            key_hex: "aa".into(),
+            is_self: true,
+        },
+        Member {
+            leaf: 2,
+            key_hex: "bb".into(),
+            is_self: false,
+        },
+    ];
+    let mut out = Vec::new();
+    write_members(&list, false, &mut out).unwrap();
+    assert_eq!(String::from_utf8(out).unwrap(), "0\taa (you)\n2\tbb\n");
+    let mut out = Vec::new();
+    write_members(&list, true, &mut out).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v[0]["self"], true);
+    assert_eq!(v[1]["leaf"], 2);
+    assert_eq!(v[1]["key"], "bb");
+    let gid = Uuid::from_bytes([7; 16]);
+    let mut out = Vec::new();
+    write_removed(gid, "bb", 3, true, &mut out).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["removed"], "bb");
+    assert_eq!(v["epoch"], 3);
+    assert_eq!(v["server_notified"], false);
+    let mut out = Vec::new();
+    write_removed(gid, "bb", 3, false, &mut out).unwrap();
+    assert!(String::from_utf8(out).unwrap().contains("not told yet"));
+}

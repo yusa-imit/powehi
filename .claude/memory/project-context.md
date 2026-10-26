@@ -1868,3 +1868,6 @@ crypto-core `stage_group_remove`/`confirm`/`abort` (kind-Group, own signer, occu
 
 ## Cycle 654 (FEATURE) — 8.17 slice g2
 CLI `group remove <GID> <KEY_HEX>` + `group members` (target = full signature key hex resolved to one leaf at stage time; `grem-` record; Unknown blocks add/remove). Server DELETE member NOT called yet (no authenticated device->leaf map). 8.15 still blocked on #166. Next: group send/receive with MLS-leaf sender auth, grem/gadd resolver, server removal prompt, Remove PCS test, threat-model-checker record.
+
+## Cycle 655 (STABILIZATION)
+cargo audit/deny clean (only #163 waiver). CI green, no bug issues. Added `group remove` tests: uppercase key, empty/oversized key refused pre-post, `members`/`removed` text+JSON rendering. powehi-cli 435 pass. Next FEATURE: group send/receive (see cycle 654).
