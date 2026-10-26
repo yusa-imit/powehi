@@ -339,6 +339,7 @@ pointing here. Close the issue in the PR that finishes its item.
   Cycle 648 (slice d1): crypto-core `stage_group_add` / `confirm_group_add` / `abort_group_add` (kind-Group only, own-leaf
   signer, validated KeyPackage, no queued proposals; nothing merged until the server accepts). Test covers 3 members,
   abort, pair/foreign-signer/junk refusals. Next: CLI `group add` (fetch KeyPackage, stage, `send_commit`, Welcome, confirm) with the carried list above.
+  Cycle 649 (slice d2): `powehi group add <GROUP_ID>` (link on stdin) and `--resume`. Pinned KeyPackage hash-checked, MLS epoch == server epoch, 512 cap, `gadd-<gid>` record (epoch||commit||state||peer||member epoch||Welcome) saved before the Commit posts; Accepted merges first, then post_member + Welcome; failed Welcome is retried by `--resume` (which merges a staged commit after a crash). Kind::Group guards in `send`, `pcs::rotate` and the inbox (group traffic never acked/applied). crypto-reviewer: two rounds, all blocking findings fixed. Carried: resolver for `Unknown`/state-0 records (compare stored epoch+1 envelope); joiner (`welcome::join_one` still skips group Welcomes, so the added member cannot join; output says so; join must tolerate duplicate Welcomes); group send/receive with MLS-leaf sender auth; inbox starvation by unacked group envelopes; `group remove`; RequiredCapabilities(0xF002); `conversations` kind; Kind cross-check on load.
 
 ### Multi-device and recovery
 - [ ] 8.18 Recovery-phrase restore — `powehi restore` sets up a new machine from the

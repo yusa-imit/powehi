@@ -18,7 +18,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::auth::Session;
-use crate::conversation::{self, ConversationError};
+use crate::conversation::{self, ConversationError, Kind};
 use crate::identity::{IdentityError, LocalIdentity};
 use crate::inbox::{Received, RX_PREFIX};
 use crate::invite::{self, InviteError};
@@ -52,6 +52,8 @@ pub enum MessageError {
     TooLong,
     #[error("the conversation's group state is unusable; it cannot send")]
     GroupUnusable,
+    #[error("sending to a group is not supported yet")]
+    GroupSendUnsupported,
     #[error("MLS operation failed")]
     Mls,
     #[error("a key rotation for this conversation is unresolved; nothing was sent")]
@@ -143,7 +145,12 @@ pub async fn send_with(
 ) -> Result<(), MessageError> {
     debug_assert!(body.len() <= MAX_BODY_LEN && std::str::from_utf8(body).is_ok());
     let store = &session.store;
-    conversation::load(store, &group_id)?.ok_or(MessageError::NoSuchConversation)?;
+    let conv = conversation::load(store, &group_id)?.ok_or(MessageError::NoSuchConversation)?;
+    // Group send is not built yet (8.17 later slice): a group, even one that currently has two
+    // members, must never go through the pair path, whose "the other leaf" rule would be wrong.
+    if conv.kind() != Kind::Pair {
+        return Err(MessageError::GroupSendUnsupported);
+    }
     if !allow_changed && crate::verify::changed_since_verified(store, group_id) {
         return Err(MessageError::Changed);
     }

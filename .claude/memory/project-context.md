@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 649 (2026-10-26, FEATURE) — 8.17 slice (d2) CLI `group add`; 8.15 still blocked on #166
+`group add`/`--resume` in `group.rs` with durable `gadd-` record (Welcome kept for retry). Kind::Group guards in send/pcs/inbox. crypto-reviewer two rounds. Next: group joiner (`welcome::join_one`), `Unknown` resolver, group send/receive, `group remove`.
+
 ## Cycle 648 (2026-10-26, FEATURE) — 8.17 slice (d1) crypto-core staged group Add; 8.15 still blocked on #166
 `stage_group_add`/`confirm_group_add`/`abort_group_add` in `mls_group.rs` (reuses confirm/abort of the stage-remove trio). Next: CLI `group add` using them.
 

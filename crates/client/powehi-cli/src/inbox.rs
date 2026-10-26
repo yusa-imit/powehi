@@ -17,7 +17,7 @@ use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::auth::Session;
-use crate::conversation::{self, Role};
+use crate::conversation::{self, Kind, Role};
 use crate::identity::LocalIdentity;
 use crate::invite::InviteError;
 use crate::requests;
@@ -299,8 +299,9 @@ async fn receive_at(
             // grace as any other junk. Anything else from our peer waits; the rest is acked
             // after the grace.
             if let Some(id) = env.id {
-                if (env.message_type == "Proposal"
-                    || !is_peer_traffic(session, env.group_id, env.sender))
+                if !is_group_conversation(session, env.group_id)
+                    && (env.message_type == "Proposal"
+                        || !is_peer_traffic(session, env.group_id, env.sender))
                     && tracker.unknown_expired(id, now)
                     && welcome::ack(client, server, session, id).await.is_ok()
                 {
@@ -441,6 +442,9 @@ async fn handle_commit(
         tracker.forget(id);
         return Ok(Applied::No);
     }
+    if is_group_conversation(session, Some(group_id)) {
+        return Ok(Applied::No);
+    }
     let outcome = if is_peer_traffic(session, Some(group_id), Some(sender)) {
         commit::apply(session, group_id, sender, ct)?
     } else {
@@ -484,14 +488,28 @@ fn pcs_unresolved(session: &Session, group_id: Uuid) -> bool {
     crate::pcs::has_pending(&session.store, group_id).unwrap_or(true)
 }
 
-/// True when `group_id` is a stored conversation and `sender` is its peer device.
+/// True when `group_id` is a stored group-kind conversation. Fail closed: an unreadable record
+/// counts as a group, so nothing of it is acked on a guess. Group traffic is not applied or
+/// acked until group receive lands (8.17), because another member's Commit or message is not
+/// "the peer's" and must not be dropped as junk.
+fn is_group_conversation(session: &Session, group_id: Option<Uuid>) -> bool {
+    let Some(group_id) = group_id else {
+        return false;
+    };
+    match conversation::load(&session.store, &group_id) {
+        Ok(conv) => conv.is_some_and(|c| c.kind() == Kind::Group),
+        Err(_) => true,
+    }
+}
+
+/// True when `group_id` is a stored pair conversation and `sender` is its peer device.
 fn is_peer_traffic(session: &Session, group_id: Option<Uuid>, sender: Option<Uuid>) -> bool {
     let (Some(group_id), Some(sender)) = (group_id, sender) else {
         return false;
     };
     // Fail closed: an unreadable record counts as peer traffic, which is never acked here.
     match conversation::load(&session.store, &group_id) {
-        Ok(conv) => conv.is_some_and(|c| c.peer_device_id == sender),
+        Ok(conv) => conv.is_some_and(|c| c.kind() == Kind::Pair && c.peer_device_id == sender),
         Err(_) => true,
     }
 }
@@ -513,6 +531,11 @@ fn process_one(
             },
         );
     };
+    if conv.kind() != Kind::Pair {
+        // Not the peer's: never decrypted as a pair message and never acked (see
+        // `is_group_conversation`).
+        return Ok(Outcome::Ignored);
+    }
     if conv.peer_device_id != sender {
         return Ok(Outcome::Unknown);
     }

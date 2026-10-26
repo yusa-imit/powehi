@@ -71,6 +71,9 @@ pub enum CliError {
     Invite(#[from] invite::InviteError),
     #[cfg(unix)]
     #[error("{0}")]
+    Group(#[from] group::GroupError),
+    #[cfg(unix)]
+    #[error("{0}")]
     Conversation(#[from] conversation::ConversationError),
     #[cfg(unix)]
     #[error("{0}")]
@@ -732,23 +735,57 @@ fn run_invite(
     Ok(())
 }
 
-/// `group create`: logs in (password from the TTY) and creates a group of kind `Group`.
+/// `group create` / `group add`: logs in (password from the TTY) and runs the group flow. The
+/// `add` link is read from stdin before the password prompt, like `invite redeem`.
 #[cfg(unix)]
 fn run_group(
     server: &url::Url,
     paths: &profile::ProfilePaths,
     cmd: &cli::GroupCommand,
 ) -> Result<(), CliError> {
+    use std::io::Read as _;
     let rt = runtime()?;
     let client = status::http_client()?;
+    let link = match cmd {
+        cli::GroupCommand::Add { resume: false, .. } => {
+            let mut buf = String::new();
+            std::io::stdin()
+                .take(invite::MAX_LINK_LEN as u64 + 1)
+                .read_to_string(&mut buf)
+                .map_err(|_| CliError::Stdin)?;
+            Some(invite::parse_link(&buf)?)
+        }
+        cli::GroupCommand::Create { .. } | cli::GroupCommand::Add { resume: true, .. } => None,
+    };
     let mut prompter = prompt::TtyPrompter;
     let session = login_scoped(&rt, &client, server, paths, &mut prompter)?;
-    let cli::GroupCommand::Create { json } = cmd;
-    let id = rt.block_on(group::create(&client, server, &session))?;
-    if *json {
-        println!("{}", serde_json::json!({ "conversation": id }));
-    } else {
-        println!("conversation {id}");
+    match (cmd, link) {
+        (cli::GroupCommand::Create { json }, _) => {
+            let id = rt.block_on(group::create(&client, server, &session))?;
+            if *json {
+                println!("{}", serde_json::json!({ "conversation": id }));
+            } else {
+                println!("conversation {id}");
+            }
+        }
+        (
+            cli::GroupCommand::Add {
+                group_id,
+                json,
+                resume,
+            },
+            link,
+        ) => {
+            let epoch = match (resume, link) {
+                (true, _) => rt.block_on(group::resume(&client, server, &session, *group_id))?,
+                (false, Some(l)) => {
+                    rt.block_on(group::add(&client, server, &session, *group_id, &l))?
+                }
+                (false, None) => return Err(CliError::Stdin),
+            };
+            group::write_added(*group_id, epoch, *json, &mut std::io::stdout())
+                .map_err(|_| CliError::Output)?;
+        }
     }
     Ok(())
 }

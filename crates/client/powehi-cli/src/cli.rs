@@ -171,6 +171,17 @@ pub enum GroupCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Add the owner of an invite link (read from stdin, not argv) to a group you are in.
+    Add {
+        /// The group's conversation id.
+        group_id: uuid::Uuid,
+        /// Do not read a link: re-send the saved Welcome of an add whose delivery failed.
+        #[arg(long)]
+        resume: bool,
+        /// Print one JSON object (`{"conversation":...,"epoch":...,"joinable":false}`).
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -288,6 +299,7 @@ impl Command {
             Command::Invite(InviteCommand::Create { .. }) => "invite create",
             Command::Invite(InviteCommand::Redeem { .. }) => "invite redeem",
             Command::Group(GroupCommand::Create { .. }) => "group create",
+            Command::Group(GroupCommand::Add { .. }) => "group add",
             Command::Send(_) => "send",
             Command::Inbox(_) => "inbox",
             Command::Requests(_) => "requests",
@@ -537,6 +549,29 @@ mod tests {
             Command::Group(GroupCommand::Create { json: true })
         ));
         assert!(parse(&["group", "create", "name"]).is_err());
+    }
+
+    #[test]
+    fn group_add_takes_a_group_id_and_no_link_argument() {
+        let id = "6f1f3f0e-8b57-4c63-9f0a-2f6a3d3c9a11";
+        let c = parse(&["group", "add", id, "--json"]).unwrap();
+        assert!(matches!(
+            c.command,
+            Command::Group(GroupCommand::Add {
+                json: true,
+                resume: false,
+                ..
+            })
+        ));
+        let c = parse(&["group", "add", id, "--resume"]).unwrap();
+        assert!(matches!(
+            c.command,
+            Command::Group(GroupCommand::Add { resume: true, .. })
+        ));
+        assert_eq!(c.command.name(), "group add");
+        assert!(parse(&["group", "add"]).is_err());
+        assert!(parse(&["group", "add", "not-a-uuid"]).is_err());
+        assert!(parse(&["group", "add", id, "abc.def"]).is_err());
     }
 
     #[test]

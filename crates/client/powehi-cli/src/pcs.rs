@@ -117,7 +117,11 @@ pub async fn rotate(
     if store.get(&name)?.is_some() {
         return Ok(Rotation::Unresolved);
     }
-    conversation::load(store, &group_id)?.ok_or(RotateError::NoSuchConversation)?;
+    let conv = conversation::load(store, &group_id)?.ok_or(RotateError::NoSuchConversation)?;
+    // The pair self-Update policy is pair-only; a group never rotates through it.
+    if conv.kind() != conversation::Kind::Pair {
+        return Err(RotateError::GroupUnusable);
+    }
     let mut local = LocalIdentity::load(store)?;
     let mut group = mls_group::load_group(group_id.as_bytes(), &local.provider)?
         .ok_or(RotateError::GroupUnusable)?;
