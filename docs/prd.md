@@ -722,6 +722,7 @@ POWEHI_PQ_KEM_EXT_TYPE extension payload (1,248 bytes):
 extension이 없으면 pair(8.17 이전 그룹 전부)이고, 그 외 payload는 fail-closed로 거부한다. GroupContext에 있으므로
 key schedule과 confirmation tag에 묶여 서버가 바꿀 수 없다. 참가자는 Welcome에서 종류를 읽으며(멤버 수·서버 라벨 아님),
 safety number 방식(pairwise vs group)을 이것으로 결정한다. PQ KeyPackage는 leaf capabilities에 0xF002를 선언해야 그룹에 추가된다.
+0xF002는 무결성만 보호하며 기밀성은 아니다: 서버는 등록 패턴(`POST /v1/groups` 뒤 멤버 추가 유무)과 멤버 수로 대화가 pair인지 group인지 추론할 수 있다(fan-out에 멤버십이 필요하므로 불가피, §3.3). `group create`는 서버에 `{group_id}` 하나만 보내고 새 필드를 만들지 않는다.
 
 ### 5.3A CLI PCS 로테이션 정책 (Phase 8 · 8.15)
 
