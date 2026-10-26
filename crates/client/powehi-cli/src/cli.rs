@@ -182,6 +182,24 @@ pub enum GroupCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Remove a member (by signature key hex from `group members`) with an MLS Remove Commit.
+    Remove {
+        /// The group's conversation id.
+        group_id: uuid::Uuid,
+        /// The member's full signature key in hex, as `group members` prints it.
+        key: String,
+        /// Print one JSON object (`{"conversation":...,"epoch":...}`).
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the group's members (leaf index and signature key) from local state.
+    Members {
+        /// The group's conversation id.
+        group_id: uuid::Uuid,
+        /// Print a JSON array.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -300,6 +318,8 @@ impl Command {
             Command::Invite(InviteCommand::Redeem { .. }) => "invite redeem",
             Command::Group(GroupCommand::Create { .. }) => "group create",
             Command::Group(GroupCommand::Add { .. }) => "group add",
+            Command::Group(GroupCommand::Remove { .. }) => "group remove",
+            Command::Group(GroupCommand::Members { .. }) => "group members",
             Command::Send(_) => "send",
             Command::Inbox(_) => "inbox",
             Command::Requests(_) => "requests",

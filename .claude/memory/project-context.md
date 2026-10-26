@@ -1865,3 +1865,6 @@ Request Welcome cap 256 KiB (server limit), `commit::apply` Kind::Pair guard. St
 
 ## Cycle 653 (FEATURE) — 8.17 slice g1
 crypto-core `stage_group_remove`/`confirm`/`abort` (kind-Group, own signer, occupied non-self leaf) + eviction test. 8.15 still blocked on #166. Next: CLI `group remove` (`grem-<gid>` record), then group send/receive.
+
+## Cycle 654 (FEATURE) — 8.17 slice g2
+CLI `group remove <GID> <KEY_HEX>` + `group members` (target = full signature key hex resolved to one leaf at stage time; `grem-` record; Unknown blocks add/remove). Server DELETE member NOT called yet (no authenticated device->leaf map). 8.15 still blocked on #166. Next: group send/receive with MLS-leaf sender auth, grem/gadd resolver, server removal prompt, Remove PCS test, threat-model-checker record.
