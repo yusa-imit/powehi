@@ -641,6 +641,38 @@ mod commit_tests {
     }
 
     #[tokio::test]
+    async fn the_inbox_applies_a_members_commit_and_acks_it_but_holds_a_foreign_one() {
+        let (tmp, alice, bob, url, state, gid) = alice_and_bob().await;
+        let carol = session(&tmp, "carol", 3);
+        let (link, _) = invite::create(&client(), &url, &carol).await.unwrap();
+        add(&client(), &url, &alice, gid, &parse_link(&link).unwrap())
+            .await
+            .unwrap();
+        let commit = state.lock().unwrap().commit_bytes.last().unwrap().clone();
+        let push = |kind: &str, ct: &[u8]| {
+            state.lock().unwrap().inbox.push(serde_json::json!({
+                "id": Uuid::new_v4(), "group_id": gid, "sender": alice.device_id,
+                "recipient": bob.device_id.to_string(),
+                "message_type": kind, "ciphertext": ct,
+            }));
+        };
+        // Garbage is not acked at once (junk grace), and does not touch the group.
+        push("Commit", b"junk");
+        let before = state.lock().unwrap().inbox.len();
+        crate::inbox::receive(&client(), &url, &bob).await.unwrap();
+        assert_eq!(members_of(&bob, gid), Some(2));
+        assert!(state.lock().unwrap().inbox.len() <= before);
+        push("Commit", &commit);
+        let r = crate::inbox::receive(&client(), &url, &bob).await.unwrap();
+        assert_eq!(r.commits, 1);
+        assert_eq!(members_of(&bob, gid), Some(3));
+        let held = (state.lock().unwrap().inbox.iter())
+            .filter(|e| e["message_type"] == "Commit")
+            .count();
+        assert_eq!(held, 1, "the applied Commit is acked, the junk one is held");
+    }
+
+    #[tokio::test]
     async fn a_remove_commit_for_this_device_deletes_its_group_state() {
         let (tmp, alice, bob, url, state, gid) = alice_and_bob().await;
         let carol = session(&tmp, "carol", 3);
