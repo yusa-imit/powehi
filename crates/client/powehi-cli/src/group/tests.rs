@@ -235,6 +235,23 @@ mod add_tests {
         assert!(w.state.lock().unwrap().commits.is_empty());
     }
 
+    #[tokio::test]
+    async fn resume_refuses_an_unknown_group_and_a_pair_conversation() {
+        let w = world().await;
+        let err = resume(&client(), &w.url, &w.alice, Uuid::new_v4())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GroupError::NoSuchGroup));
+        let (l, _) = invite::create(&client(), &w.url, &w.bob).await.unwrap();
+        let (pair, _) = invite::redeem(&client(), &w.url, &w.alice, &parse_link(&l).unwrap())
+            .await
+            .unwrap();
+        let before = w.state.lock().unwrap().welcome_count();
+        let err = resume(&client(), &w.url, &w.alice, pair).await.unwrap_err();
+        assert!(matches!(err, GroupError::NotAGroup));
+        assert_eq!(w.state.lock().unwrap().welcome_count(), before);
+    }
+
     /// A two-member kind-Group whose stored record lies and says Pair.
     async fn pair_record_over_two_member_group() -> World {
         let w = world().await;
