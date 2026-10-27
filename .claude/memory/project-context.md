@@ -1877,3 +1877,6 @@ cargo audit/deny clean (only #163 waiver). CI green, no bug issues. Added `group
 
 ## Cycle 658 (FEATURE) — 8.17 slice i
 `Conversation::agrees_with` kind cross-check (record vs GroupContext) on verify/send/rotate/inbox/commit paths, fail closed; crypto-reviewer needs-rework fixed (inbox paths + 5-path test). powehi-cli 440+10 green. Carried: `group add --resume` gate, GCE-proposal allowlist, ack routing. 8.15 still blocked on #166.
+
+## Cycle 659 (FEATURE) — 8.17 slice j
+`group add --resume` kind gate in `settle_local_epoch` (record vs GroupContext, before any merge/Welcome). powehi-cli 442 tests green, clippy clean; crypto-reviewer needs-rework (ordering test) fixed. Carried: group commit allowlist with group receive, ack routing by record kind.

@@ -364,6 +364,11 @@ fn settle_local_epoch(
     let mut group = mls_group::load_group(group_id.as_bytes(), &local.provider)?
         .filter(|g| g.is_active())
         .ok_or(GroupError::NotMember)?;
+    // The record's kind is unauthenticated: the GroupContext decides before anything merges.
+    let conv = conversation::load(&session.store, &group_id)?.ok_or(GroupError::NoSuchGroup)?;
+    if !conv.agrees_with(&group) || mls_group::group_kind(&group)? != GroupKind::Group {
+        return Err(GroupError::NotAGroup);
+    }
     let epoch = group.epoch().as_u64();
     if group.pending_commit().is_some() && epoch.checked_add(1) == Some(rec.member_epoch) {
         mls_group::confirm_group_add(&mut group, &local.provider)?;

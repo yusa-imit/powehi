@@ -350,6 +350,8 @@ pointing here. Close the issue in the PR that finishes its item.
 
   Cycle 658 (slice i): `Conversation::agrees_with` cross-checks the record's kind against the authenticated GroupContext kind (fail closed, also on an unreadable extension) in `verify::number`, `send_with`, `pcs::rotate`, inbox `process_one` (held, never acked) and `commit::apply`. Test: a Pair record over a 2-member kind-Group state is refused on all five paths. crypto-reviewer: needs-rework (inbox paths, test coverage), fixed. Carried: `group add --resume` gate, GCE proposals must be refused by the group commit allowlist (kind flip), ack routing keyed on the record kind only. Carried list from slice (g3) minus Kind cross-check.
 
+  Cycle 659 (slice j): `group add --resume` (`settle_local_epoch`) cross-checks the record kind against the GroupContext before any merge or Welcome delivery (`NotAGroup`). Test: a Group record over a pair state with a staged self-update (merge branch would otherwise run) is refused, nothing merged or aborted. crypto-reviewer: needs-rework (test did not prove ordering), fixed. Carried: group commit allowlist (GCE kind flip) with group receive, ack routing keyed on record kind.
+
 ### Multi-device and recovery
 - [ ] 8.18 Recovery-phrase restore — `powehi restore` sets up a new machine from the
   recovery phrase: the MLS identity is phrase-derived, so the same signing key comes
