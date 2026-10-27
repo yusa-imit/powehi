@@ -1891,3 +1891,6 @@ cargo audit/deny clean (only #163 waiver). CI green, no bug issues. Added `group
 
 ## Cycle 662 (FEATURE) — 8.17 slice l
 CLI `group::commit::apply` (group counterpart of `inbox/commit.rs`) + crypto-core `delete_inactive_group` (also deletes the previous-epoch EpochKeyPairs that openmls `delete` leaves behind). Not yet wired into the inbox. crypto-reviewer needs-rework fixed. Next: inbox wiring (ack routing keyed on record kind), group send/receive with MLS-leaf sender auth.
+
+## Stabilization 665
+cargo audit/deny clean (only waived RUSTSEC-2026-0387), CI green, no bug issues. Added `an_evicted_member_cannot_send_and_posts_nothing` (group send after Remove → GroupUnusable, nothing posted). 449 powehi-cli lib tests pass. target/ 31G (nothing older than 7d to prune).

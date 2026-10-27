@@ -757,6 +757,30 @@ mod commit_tests {
     }
 
     #[tokio::test]
+    async fn an_evicted_member_cannot_send_and_posts_nothing() {
+        let (_tmp, alice, bob, url, state, gid) = alice_and_bob().await;
+        let bob_key = LocalIdentity::load(&bob.store)
+            .unwrap()
+            .identity
+            .signer
+            .to_public_vec();
+        let hex: String = bob_key.iter().map(|b| format!("{b:02x}")).collect();
+        remove::remove(&client(), &url, &alice, gid, &hex)
+            .await
+            .unwrap();
+        let rm = state.lock().unwrap().commit_bytes.last().unwrap().clone();
+        assert_eq!(apply(&bob, gid, &rm).unwrap(), Outcome::Evicted);
+        state.lock().unwrap().group_epoch = 2;
+        let posted = state.lock().unwrap().inbox.len();
+        let err = crate::message::send(&client(), &url, &bob, gid, b"hi").await;
+        assert!(
+            matches!(err, Err(crate::message::MessageError::GroupUnusable)),
+            "{err:?}"
+        );
+        assert_eq!(state.lock().unwrap().inbox.len(), posted);
+    }
+
+    #[tokio::test]
     async fn garbage_is_refused_without_touching_state() {
         let (_tmp, _alice, bob, _url, _state, gid) = alice_and_bob().await;
         assert_eq!(apply(&bob, gid, b"x").unwrap(), Outcome::Refused);
