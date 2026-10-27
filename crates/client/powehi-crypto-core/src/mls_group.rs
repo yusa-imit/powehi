@@ -733,6 +733,59 @@ pub fn decrypt_message(
     }
 }
 
+/// A decrypted group application message and the signature key of the member leaf that sent it.
+pub struct GroupMessage {
+    pub plaintext: zeroize::Zeroizing<Vec<u8>>,
+    /// The sender's MLS signature public key, taken from the authenticated leaf (RFC 9420 §6.1, leaf signature),
+    /// never from a Delivery Service label.
+    pub sender_key: Vec<u8>,
+}
+
+/// [`decrypt_message`] for a kind-Group conversation, also returning the authenticated sender.
+/// Refuses (before any secret is touched) a group that is not an active kind-Group.
+pub fn decrypt_group_message(
+    group: &mut MlsGroup,
+    ciphertext: &[u8],
+    provider: &impl OpenMlsProvider,
+) -> Result<GroupMessage, MlsError> {
+    if !matches!(group_kind(group), Ok(GroupKind::Group)) || !group.is_active() {
+        return Err(MlsError::UnexpectedMessage);
+    }
+    let message = MlsMessageIn::tls_deserialize_exact(ciphertext).map_err(|_| MlsError::Codec)?;
+    let protocol_message: ProtocolMessage = message
+        .try_into_protocol_message()
+        .map_err(|_| MlsError::Codec)?;
+    if protocol_message.content_type() != ContentType::Application {
+        return Err(MlsError::UnexpectedMessage);
+    }
+    check_not_ahead(group, &protocol_message)?;
+    let processed = group
+        .process_message(provider, protocol_message)
+        .map_err(|_| MlsError::Decrypt)?;
+    let Sender::Member(leaf) = processed.sender().clone() else {
+        return Err(MlsError::UnexpectedMessage);
+    };
+    // The leaf index is looked up in the current tree: only valid for the current epoch
+    // (past epochs are not kept, `max_past_epochs(0)`; a wider window would need the old tree).
+    if processed.epoch() != group.epoch() {
+        return Err(MlsError::Decrypt);
+    }
+    let Some(sender_key) = group
+        .members()
+        .find(|m| m.index == leaf)
+        .map(|m| m.signature_key)
+    else {
+        return Err(MlsError::Decrypt);
+    };
+    match processed.into_content() {
+        ProcessedMessageContent::ApplicationMessage(app) => Ok(GroupMessage {
+            plaintext: zeroize::Zeroizing::new(app.into_bytes()),
+            sender_key,
+        }),
+        _ => Err(MlsError::UnexpectedMessage),
+    }
+}
+
 /// Add `member_kp` to `group`, committing and merging the change locally. This
 /// advances the group to the next epoch. Returns the serialized `Welcome`
 /// message that the new member needs to join (via [`join_group`]).
@@ -2602,6 +2655,46 @@ mod tests {
         ));
         assert!(pair.pending_commit().is_none());
         assert_eq!(pair.members().count(), 2);
+    }
+
+    /// 8.17: group decrypt returns the authenticated sender leaf key and refuses pairs.
+    #[test]
+    fn decrypt_group_message_authenticates_sender_leaf() {
+        let (a, b, c) = (
+            OpenMlsRustCrypto::default(),
+            OpenMlsRustCrypto::default(),
+            OpenMlsRustCrypto::default(),
+        );
+        let alice = generate_identity(b"alice", &a).unwrap();
+        let bob = generate_identity(b"bob", &b).unwrap();
+        let carol = generate_identity(b"carol", &c).unwrap();
+        let mut ag = create_group_of_kind(&alice, &a, GroupKind::Group).unwrap();
+        let bkp = generate_pq_key_package(&bob, &b).unwrap();
+        let s = stage_group_add(&mut ag, &alice.signer, &bkp.key_package, &a).unwrap();
+        confirm_group_add(&mut ag, &a).unwrap();
+        let mut bg = join_group(&s.welcome, &b).unwrap();
+        let ckp = generate_pq_key_package(&carol, &c).unwrap();
+        let s2 = stage_group_add(&mut ag, &alice.signer, &ckp.key_package, &a).unwrap();
+        confirm_group_add(&mut ag, &a).unwrap();
+        apply_group_commit(&mut bg, &s2.commit, &b).unwrap();
+        let mut cg = join_group(&s2.welcome, &c).unwrap();
+
+        let msg = encrypt_message(&mut bg, &bob.signer, b"from bob", &b).unwrap();
+        let got = decrypt_group_message(&mut ag, &msg, &a).unwrap();
+        assert_eq!(&**got.plaintext, b"from bob");
+        assert_eq!(got.sender_key, bob.signer.to_public_vec());
+        assert_ne!(got.sender_key, alice.signer.to_public_vec());
+        let got = decrypt_group_message(&mut cg, &msg, &c).unwrap();
+        assert_eq!(got.sender_key, bob.signer.to_public_vec());
+        // Replay: the ratchet generation is spent.
+        assert!(decrypt_group_message(&mut cg, &msg, &c).is_err());
+
+        // A kind-Pair group is refused before any secret is touched.
+        let mut pair = create_group(&alice, &a).unwrap();
+        assert!(matches!(
+            decrypt_group_message(&mut pair, &msg, &a),
+            Err(MlsError::UnexpectedMessage)
+        ));
     }
 
     /// 8.17: `apply_group_commit` merges Add and Remove Commits from members and refuses pairs.

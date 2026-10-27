@@ -41,6 +41,8 @@ pub const MAX_STORED_MESSAGES: usize = 2048;
 /// Decrypt attempts per conversation in one run, so one peer cannot starve the others.
 pub const MAX_PER_CONVERSATION: usize = 16;
 pub(crate) const RX_PREFIX: &str = "rx-";
+/// Longest signature public key stored with a group message (an uncompressed P-256 point).
+const MAX_SENDER_KEY_BYTES: usize = 65;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct InboxReport {
@@ -102,6 +104,8 @@ struct RawReceived {
     body: WipedBody,
     #[serde(default)]
     received_at: u64,
+    #[serde(default)]
+    sender_key: Option<String>,
 }
 
 struct WipedBody(Vec<u8>);
@@ -125,6 +129,7 @@ impl From<RawReceived> for Received {
             sender: raw.sender,
             body: std::mem::take(&mut raw.body.0),
             received_at: raw.received_at,
+            sender_key: raw.sender_key,
         }
     }
 }
@@ -139,11 +144,16 @@ pub(crate) struct Received {
     /// Local receive time, nanoseconds since the Unix epoch; orders display (0 = unknown).
     #[serde(default)]
     pub(crate) received_at: u64,
+    /// Group messages only: hex of the sending member's MLS signature key, read from the
+    /// authenticated leaf. `sender` is then only the Delivery Service's (unauthenticated) label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sender_key: Option<String>,
 }
 
 impl Received {
-    /// Fixed JSON overhead: two hyphenated UUIDs, `received_at`, keys and punctuation.
-    const JSON_OVERHEAD: usize = 192;
+    /// Fixed JSON overhead: two hyphenated UUIDs, `received_at`, keys and punctuation, plus a
+    /// `sender_key` of at most [`MAX_SENDER_KEY_BYTES`] bytes in hex.
+    const JSON_OVERHEAD: usize = 192 + 32 + 2 * MAX_SENDER_KEY_BYTES;
 
     /// The stored JSON, written into a buffer sized up front so it never reallocates: a
     /// growing `Vec` would leave unwiped copies of the body behind (hex doubles it, and
@@ -194,7 +204,7 @@ pub async fn receive(
 }
 
 /// [`receive`] with the clock injected (seconds since the Unix epoch).
-async fn receive_at(
+pub(crate) async fn receive_at(
     client: &Client,
     server: &Url,
     session: &Session,
@@ -524,10 +534,11 @@ enum Applied {
     Forked,
 }
 
-/// True while a self-Update Commit of `group_id` is unresolved. Fail closed: an unreadable store
-/// counts as unresolved, so nothing is acked on a guess.
+/// True while a self-Update Commit (or a group Add/Remove Commit) of `group_id` is unresolved.
+/// Fail closed: an unreadable store counts as unresolved, so nothing is acked on a guess.
 fn pcs_unresolved(session: &Session, group_id: Uuid) -> bool {
     crate::pcs::has_pending(&session.store, group_id).unwrap_or(true)
+        || crate::group::has_pending_commit(&session.store, group_id)
 }
 
 /// True when `group_id` is a stored group-kind conversation. Fail closed: an unreadable record
@@ -578,10 +589,8 @@ fn process_one(
             },
         );
     };
-    if conv.kind() != Kind::Pair {
-        // Not the peer's: never decrypted as a pair message and never acked (see
-        // `is_group_conversation`).
-        return Ok(Outcome::Ignored);
+    if conv.kind() == Kind::Group {
+        return process_group_one(session, &conv, id, sender, ciphertext);
     }
     if conv.peer_device_id != sender {
         return Ok(Outcome::Unknown);
@@ -624,25 +633,92 @@ fn process_one(
         local.save(store)?;
         return Ok(Outcome::Dropped);
     }
+    store_received(store, &mut local, id, group_id, sender, &plain, None)
+}
+
+/// Writes the `rx-*` record for one decrypted message, then the ratchet. The envelope id is
+/// server-chosen: a stored message is never overwritten with different bytes.
+fn store_received(
+    store: &ProfileStore,
+    local: &mut LocalIdentity,
+    id: Uuid,
+    group_id: Uuid,
+    sender: Uuid,
+    plain: &[u8],
+    sender_key: Option<String>,
+) -> Result<Outcome, InviteError> {
     let name = format!("{RX_PREFIX}{}", id.hyphenated());
     let rec = Received {
         group_id,
         sender,
         body: plain.to_vec(),
         received_at: now_nanos(),
+        sender_key: sender_key.clone(),
     }
     .encode()
     .map_err(|_| InviteError::BadResponse)?;
-    // The envelope id is server-chosen: never overwrite a stored message with different bytes.
     match store.get(&name)? {
         // A re-run after a crash between `put` and the MLS save: same content (the receive
         // time legitimately differs), so fall through to save the ratchet and ack.
-        Some(old) if !same_message(&old, &plain, group_id, sender) => return Ok(Outcome::Skip),
+        Some(old) if !same_message(&old, plain, group_id, sender, sender_key.as_deref()) => {
+            return Ok(Outcome::Skip)
+        }
         Some(_) => {}
         None => store.put(&name, &rec)?,
     }
     local.save(store)?;
     Ok(Outcome::Stored)
+}
+
+/// An Application message of a kind-Group conversation. The sender is the MLS leaf that signed
+/// it (`decrypt_group_message`), never the DS label; the record keeps that key. Held (never
+/// acked) while the record disagrees with the authenticated kind or the group is not loadable;
+/// ephemeral types are dropped, no pair PQ handling applies.
+fn process_group_one(
+    session: &Session,
+    conv: &conversation::Conversation,
+    id: Uuid,
+    sender: Uuid,
+    ciphertext: &[u8],
+) -> Result<Outcome, InviteError> {
+    let store = &session.store;
+    let group_id = conv.group_id;
+    if stored_count(store)? >= MAX_STORED_MESSAGES {
+        return Ok(Outcome::Skip);
+    }
+    let mut local = LocalIdentity::load(store)?;
+    let Some(mut group) = mls_group::load_group(group_id.as_bytes(), &local.provider)? else {
+        return Ok(Outcome::Skip);
+    };
+    if !conv.agrees_with(&group) {
+        return Ok(Outcome::Skip);
+    }
+    let msg = match mls_group::decrypt_group_message(&mut group, ciphertext, &local.provider) {
+        Ok(m) => m,
+        Err(mls_group::MlsError::EpochAhead) => return Ok(Outcome::Ahead),
+        Err(_) => return Ok(Outcome::Undecryptable),
+    };
+    if msg.sender_key.len() > MAX_SENDER_KEY_BYTES {
+        return Ok(Outcome::Undecryptable);
+    }
+    if msg.sender_key == local.identity.signer.to_public_vec() {
+        // Unreachable today (openmls refuses its own messages first); kept as a backstop.
+        return Ok(Outcome::Undecryptable);
+    }
+    let key_hex = crate::invite::hex(&msg.sender_key);
+    if is_ephemeral(&msg.plaintext) {
+        local.save(store)?;
+        return Ok(Outcome::Dropped);
+    }
+    store_received(
+        store,
+        &mut local,
+        id,
+        group_id,
+        sender,
+        &msg.plaintext,
+        Some(key_hex),
+    )
 }
 
 /// The binding when `plain` is a well-formed `pq_init` that decapsulates with the stored key.
@@ -657,9 +733,19 @@ fn pq_binding(conv: &conversation::Conversation, plain: &[u8], group_id: Uuid) -
 }
 
 /// True when the stored record `old` holds exactly this group, sender and plaintext.
-fn same_message(old: &[u8], plain: &[u8], group_id: Uuid, sender: Uuid) -> bool {
-    serde_json::from_slice::<Received>(old)
-        .is_ok_and(|r| r.group_id == group_id && r.sender == sender && r.body == plain)
+fn same_message(
+    old: &[u8],
+    plain: &[u8],
+    group_id: Uuid,
+    sender: Uuid,
+    sender_key: Option<&str>,
+) -> bool {
+    serde_json::from_slice::<Received>(old).is_ok_and(|r| {
+        r.group_id == group_id
+            && r.sender == sender
+            && r.body == plain
+            && r.sender_key.as_deref() == sender_key
+    })
 }
 
 /// True for a JSON object whose `type` is one of [`EPHEMERAL_TYPES`].
