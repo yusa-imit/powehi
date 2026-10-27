@@ -5,7 +5,7 @@
 //! sender is not "the peer": it must be a member, which the allowlist checks by MLS leaf, never
 //! by the Delivery Service's sender label. A fresh provider per envelope, so a refused Commit
 //! leaves no half-advanced state; a Commit that removes this device deletes the group state.
-//! Not yet called from the inbox (group receive wiring is a later slice).
+//! Called from the inbox (`handle_group_commit`).
 
 use powehi_crypto_core::mls_group::{self, MlsError};
 use uuid::Uuid;

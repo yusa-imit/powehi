@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 663 (2026-10-27, FEATURE) — 8.17 slice (m) inbox applies group Commits; 8.15 still blocked on #166
+`inbox::handle_group_commit` routes Kind::Group Commits to `group::commit::apply` (Applied/Evicted acked; Unresolved/Unknown/pending-request held; Refused/Forked/Ahead use junk grace). crypto-reviewer needs-rework (stale never-acked test, no Unresolved/pending-request tests) fixed. Next: group send/receive with MLS-leaf sender auth, RequiredCapabilities(0xF002).
+
 ## Cycle 649 (2026-10-26, FEATURE) — 8.17 slice (d2) CLI `group add`; 8.15 still blocked on #166
 `group add`/`--resume` in `group.rs` with durable `gadd-` record (Welcome kept for retry). Kind::Group guards in send/pcs/inbox. crypto-reviewer two rounds. Next: group joiner (`welcome::join_one`), `Unknown` resolver, group send/receive, `group remove`.
 

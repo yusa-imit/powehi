@@ -443,7 +443,7 @@ async fn handle_commit(
         return Ok(Applied::No);
     }
     if is_group_conversation(session, Some(group_id)) {
-        return Ok(Applied::No);
+        return handle_group_commit(client, server, session, id, group_id, ct, tracker, now).await;
     }
     let outcome = if is_peer_traffic(session, Some(group_id), Some(sender)) {
         commit::apply(session, group_id, sender, ct)?
@@ -470,6 +470,48 @@ async fn handle_commit(
     // applicable by that, so they keep the normal grace.
     let hold = ahead && pcs_unresolved(session, group_id);
     if expired && !hold && welcome::ack(client, server, session, id).await.is_ok() {
+        tracker.forget(id);
+    }
+    Ok(if forked { Applied::Forked } else { Applied::No })
+}
+
+/// A Commit for a stored group conversation. The committer is judged by its MLS leaf inside
+/// `group::commit::apply`, never by the server's sender label. Applied or evicted: acked.
+/// Unresolved (our own Commit is pending), unknown or pending-request groups: held and never
+/// acked, so nothing is dropped on a guess. Ahead/refused/forked keep the junk grace.
+#[allow(clippy::too_many_arguments)]
+async fn handle_group_commit(
+    client: &Client,
+    server: &Url,
+    session: &Session,
+    id: Uuid,
+    group_id: Uuid,
+    ct: &[u8],
+    tracker: &mut junk::Tracker,
+    now: u64,
+) -> Result<Applied, InviteError> {
+    use crate::group::commit::Outcome;
+    let outcome = match conversation::load(&session.store, &group_id) {
+        Ok(Some(_)) => crate::group::commit::apply(session, group_id, ct)?,
+        // A pending request or unreadable record: held, never acked.
+        _ => return Ok(Applied::No),
+    };
+    let mut forked = false;
+    let expired = match outcome {
+        Outcome::Applied { .. } | Outcome::Evicted => {
+            tracker.forget(id);
+            let _ = welcome::ack(client, server, session, id).await;
+            return Ok(Applied::Yes(group_id));
+        }
+        Outcome::Unresolved | Outcome::Unknown => return Ok(Applied::No),
+        Outcome::Refused => tracker.failed(id, now),
+        Outcome::Forked => {
+            forked = true;
+            tracker.failed(id, now)
+        }
+        Outcome::Ahead => tracker.unknown_expired(id, now),
+    };
+    if expired && welcome::ack(client, server, session, id).await.is_ok() {
         tracker.forget(id);
     }
     Ok(if forked { Applied::Forked } else { Applied::No })

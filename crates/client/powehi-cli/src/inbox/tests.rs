@@ -1084,10 +1084,11 @@ async fn a_commit_never_overtakes_messages_deferred_by_the_conversation_cap() {
     assert_eq!(alice_epoch(&p), 2);
 }
 
-/// Group traffic is never acked as junk or applied as a peer's: other members' Commits,
-/// Proposals and messages stay on the server long past the grace (8.17 `group add`).
+/// Other members' Proposals and messages stay on the server long past the grace (group
+/// receive is not wired); a junk Commit takes the failure path like the pair path: acked only
+/// after `MAX_DECRYPT_FAILURES` failures *and* the grace.
 #[tokio::test]
-async fn group_conversation_traffic_is_never_acked_or_applied() {
+async fn group_proposals_and_messages_are_held_and_a_junk_commit_is_acked_after_the_grace() {
     let (_tmp, p) = pair().await;
     let gid = crate::group::create(&client(), &p.url, &p.alice)
         .await
@@ -1101,13 +1102,92 @@ async fn group_conversation_traffic_is_never_acked_or_applied() {
         }));
     }
     let t0 = 1_000_000;
-    for step in [0, 1, junk::UNKNOWN_GRACE_SECS, 3 * junk::UNKNOWN_GRACE_SECS] {
+    for _ in 0..=junk::MAX_DECRYPT_FAILURES {
+        receive_at(&client(), &p.url, &p.alice, t0).await.unwrap();
+    }
+    assert_eq!(inbox_len(&p), 3, "failures alone never ack");
+    for step in [junk::UNKNOWN_GRACE_SECS, 3 * junk::UNKNOWN_GRACE_SECS] {
         receive_at(&client(), &p.url, &p.alice, t0 + step)
             .await
             .unwrap();
     }
-    assert_eq!(inbox_len(&p), 3, "nothing of a group is acked");
+    let left: Vec<_> = p
+        .state
+        .lock()
+        .unwrap()
+        .inbox
+        .iter()
+        .map(|e| e["message_type"].clone())
+        .collect();
+    assert!(!left.contains(&json!("Commit")), "the junk Commit is acked");
+    assert_eq!(left.len(), 2, "Proposal and Application are held");
     assert!(conversation::load(&p.alice.store, &gid).unwrap().is_some());
+}
+
+/// A group Commit is held, never acked, while this device has its own unresolved Commit: the
+/// drop would be a permanent fork (no past epochs are kept).
+#[tokio::test]
+async fn a_group_commit_is_held_while_our_own_commit_is_unresolved() {
+    let (_tmp, p) = pair().await;
+    let gid = crate::group::create(&client(), &p.url, &p.alice)
+        .await
+        .unwrap();
+    p.alice
+        .store
+        .put(&format!("gadd-{}", gid.hyphenated()), b"x")
+        .unwrap();
+    p.state.lock().unwrap().inbox.push(json!({
+        "id": Uuid::new_v4(), "group_id": gid, "sender": Uuid::new_v4(),
+        "recipient": p.alice.device_id.to_string(),
+        "message_type": "Commit", "ciphertext": [1, 2, 3],
+    }));
+    let t0 = 1_000_000;
+    for _ in 0..=junk::MAX_DECRYPT_FAILURES {
+        receive_at(&client(), &p.url, &p.alice, t0).await.unwrap();
+    }
+    receive_at(
+        &client(),
+        &p.url,
+        &p.alice,
+        t0 + 3 * junk::UNKNOWN_GRACE_SECS,
+    )
+    .await
+    .unwrap();
+    assert_eq!(inbox_len(&p), 1, "held through failures and the grace");
+}
+
+/// A Commit for a group with only a pending request (Welcome not accepted yet) is held.
+#[tokio::test]
+async fn a_commit_for_a_pending_request_group_is_held() {
+    let (_tmp, p) = pair().await;
+    let gid = Uuid::new_v4();
+    let req = crate::requests::Request::new(
+        gid,
+        p.bob.device_id,
+        Uuid::new_v4(),
+        1_000_000,
+        vec![1],
+        vec![2],
+    );
+    assert!(crate::requests::save_new(&p.alice.store, &req).unwrap());
+    p.state.lock().unwrap().inbox.push(json!({
+        "id": Uuid::new_v4(), "group_id": gid, "sender": p.bob.device_id,
+        "recipient": p.alice.device_id.to_string(),
+        "message_type": "Commit", "ciphertext": [1, 2, 3],
+    }));
+    let t0 = 1_000_000;
+    for _ in 0..=junk::MAX_DECRYPT_FAILURES {
+        receive_at(&client(), &p.url, &p.alice, t0).await.unwrap();
+    }
+    receive_at(
+        &client(),
+        &p.url,
+        &p.alice,
+        t0 + 3 * junk::UNKNOWN_GRACE_SECS,
+    )
+    .await
+    .unwrap();
+    assert_eq!(inbox_len(&p), 1);
 }
 
 #[tokio::test]
