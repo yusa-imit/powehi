@@ -70,10 +70,7 @@ async fn a_solo_group_refuses_send() {
     let id = create(&client, &url, &alice).await.unwrap();
 
     let err = crate::message::send(&client, &url, &alice, id, b"hi").await;
-    assert!(matches!(
-        err,
-        Err(crate::message::MessageError::GroupSendUnsupported)
-    ));
+    assert!(matches!(err, Err(crate::message::MessageError::GroupAlone)));
 }
 
 mod add_tests {
@@ -299,17 +296,64 @@ mod add_tests {
     }
 
     #[tokio::test]
-    async fn a_two_member_group_still_refuses_send() {
+    async fn a_two_member_group_sends_and_an_unresolved_add_blocks_it() {
         let w = world().await;
         let link = link_of(&w, &w.bob).await;
         add(&client(), &w.url, &w.alice, w.gid, &link)
             .await
             .unwrap();
-        // Two members now: still not a pair for send.
+        w.state.lock().unwrap().group_epoch = 1;
+        crate::message::send(&client(), &w.url, &w.alice, w.gid, b"hi")
+            .await
+            .unwrap();
+        // A record that does not match the recomputed number is CHANGED: refused, nothing posted.
+        let posted = w.state.lock().unwrap().inbox.len();
+        w.alice
+            .store
+            .put(&format!("verified-{}", w.gid.hyphenated()), b"x")
+            .unwrap();
+        let err = crate::message::send(&client(), &w.url, &w.alice, w.gid, b"hi").await;
+        assert!(
+            matches!(err, Err(crate::message::MessageError::Changed)),
+            "{err:?}"
+        );
+        assert_eq!(w.state.lock().unwrap().inbox.len(), posted);
+        w.alice
+            .store
+            .remove(&format!("verified-{}", w.gid.hyphenated()))
+            .unwrap();
+        // A server epoch ahead of ours: refused, nothing posted.
+        w.state.lock().unwrap().group_epoch = 2;
+        let err = crate::message::send(&client(), &w.url, &w.alice, w.gid, b"hi").await;
+        assert!(
+            matches!(err, Err(crate::message::MessageError::GroupBehind)),
+            "{err:?}"
+        );
+        assert_eq!(w.state.lock().unwrap().inbox.len(), posted);
+        w.state.lock().unwrap().group_epoch = 1;
+        // An unresolved Add record blocks too.
+        w.alice
+            .store
+            .put(&format!("gadd-{}", w.gid.hyphenated()), b"x")
+            .unwrap();
         let err = crate::message::send(&client(), &w.url, &w.alice, w.gid, b"hi").await;
         assert!(matches!(
             err,
-            Err(crate::message::MessageError::GroupSendUnsupported)
+            Err(crate::message::MessageError::GroupCommitPending)
+        ));
+        w.alice
+            .store
+            .remove(&format!("gadd-{}", w.gid.hyphenated()))
+            .unwrap();
+        // An unresolved Remove record blocks any Application message (fail closed).
+        w.alice
+            .store
+            .put(&crate::group::remove::pending_name(w.gid), b"x")
+            .unwrap();
+        let err = crate::message::send(&client(), &w.url, &w.alice, w.gid, b"hi").await;
+        assert!(matches!(
+            err,
+            Err(crate::message::MessageError::GroupCommitPending)
         ));
     }
 
