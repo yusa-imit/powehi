@@ -52,8 +52,12 @@ pub enum MessageError {
     TooLong,
     #[error("the conversation's group state is unusable; it cannot send")]
     GroupUnusable,
-    #[error("sending to a group is not supported yet")]
-    GroupSendUnsupported,
+    #[error("the group has no other member yet; nothing was sent")]
+    GroupAlone,
+    #[error("this device is behind the group's epoch; run `powehi inbox` first; nothing was sent")]
+    GroupBehind,
+    #[error("an Add or Remove for this group is unresolved (or the store is unreadable); nothing was sent")]
+    GroupCommitPending,
     #[error("MLS operation failed")]
     Mls,
     #[error("a key rotation for this conversation is unresolved; nothing was sent")]
@@ -146,10 +150,9 @@ pub async fn send_with(
     debug_assert!(body.len() <= MAX_BODY_LEN && std::str::from_utf8(body).is_ok());
     let store = &session.store;
     let conv = conversation::load(store, &group_id)?.ok_or(MessageError::NoSuchConversation)?;
-    // Group send is not built yet (8.17 later slice): a group, even one that currently has two
-    // members, must never go through the pair path, whose "the other leaf" rule would be wrong.
-    if conv.kind() != Kind::Pair {
-        return Err(MessageError::GroupSendUnsupported);
+    // A group never goes through the pair path, whose "the other leaf" rule would be wrong.
+    if conv.kind() == Kind::Group {
+        return send_group(client, server, session, group_id, body, allow_changed).await;
     }
     if !allow_changed && crate::verify::changed_since_verified(store, group_id) {
         return Err(MessageError::Changed);
@@ -178,6 +181,51 @@ pub async fn send_with(
         conv.note_sent(now);
         let _ = conversation::save(store, &conv);
     }
+    invite::send_application(client, server, session, group_id, &ct).await?;
+    Ok(())
+}
+
+/// Group variant of [`send_with`] (8.17 slice n1): the group must still be an active kind-Group
+/// MLS group with at least one other member and no unresolved Add/Remove, the CHANGED gate
+/// applies as for pairs (prd §5.6), and the local epoch must equal the server's so a member
+/// removed by a Commit we have not applied yet cannot read the message (RFC 9420 §15.2).
+/// Receivers authenticate the sender by MLS leaf, not by the server label (later slice).
+async fn send_group(
+    client: &Client,
+    server: &Url,
+    session: &Session,
+    group_id: Uuid,
+    body: &[u8],
+    allow_changed: bool,
+) -> Result<(), MessageError> {
+    let store = &session.store;
+    if !allow_changed && crate::verify::changed_since_verified(store, group_id) {
+        return Err(MessageError::Changed);
+    }
+    if crate::group::has_pending_commit(store, group_id) {
+        return Err(MessageError::GroupCommitPending);
+    }
+    let mut local = LocalIdentity::load(store)?;
+    let mut group = mls_group::load_group(group_id.as_bytes(), &local.provider)?
+        .filter(|g| g.is_active())
+        .ok_or(MessageError::GroupUnusable)?;
+    let conv = conversation::load(store, &group_id)?.ok_or(MessageError::NoSuchConversation)?;
+    if conv.kind() != Kind::Group || !conv.agrees_with(&group) {
+        return Err(MessageError::GroupUnusable);
+    }
+    if group.pending_commit().is_some() {
+        return Err(MessageError::GroupCommitPending);
+    }
+    if group.members().take(2).count() < 2 {
+        return Err(MessageError::GroupAlone);
+    }
+    // Groups: MLS epoch 0 is server epoch 0 (pairs are offset by one).
+    let server_epoch = invite::group_epoch(client, server, session, group_id).await?;
+    if group.epoch().as_u64() != server_epoch {
+        return Err(MessageError::GroupBehind);
+    }
+    let ct = mls_group::encrypt_message(&mut group, &local.identity.signer, body, &local.provider)?;
+    local.save(store)?;
     invite::send_application(client, server, session, group_id, &ct).await?;
     Ok(())
 }

@@ -358,6 +358,8 @@ pointing here. Close the issue in the PR that finishes its item.
 
   Cycle 663 (slice m): inbox wiring of the group Commit path: `handle_group_commit` applies a member's Commit to a kind-Group record via `group::commit::apply` (MLS-leaf sender auth, not the DS label). Applied/Evicted are acked; Unresolved/Unknown/pending-request groups are held unacked; Refused/Forked/Ahead keep the junk grace. Test: Add Commit applied and acked through `receive`, junk held. Carried: group send/receive of application messages with MLS-leaf sender auth, Proposal ack routing for groups, RequiredCapabilities(0xF002), removed/added keys in `GroupCommitApplied`.
 
+  Cycle 664 (slice n1): group SEND: `message::send_group` for a kind-Group record (active MLS group, authenticated kind agrees, >= 2 members else `GroupAlone`, any `gadd-`/`grem-` record blocks with `GroupCommitPending`, ratchet saved before the POST, CHANGED gate, local epoch must equal the server epoch else `GroupBehind`). crypto-reviewer: needs-rework (CHANGED gate, epoch check) fixed. Receivers do not decrypt group Application messages yet. Carried: group receive with MLS-leaf sender auth (crypto-core decrypt returning the sender's signature key), Proposal ack routing for groups, RequiredCapabilities(0xF002), removed/added keys in `GroupCommitApplied`.
+
 ### Multi-device and recovery
 - [ ] 8.18 Recovery-phrase restore — `powehi restore` sets up a new machine from the
   recovery phrase: the MLS identity is phrase-derived, so the same signing key comes

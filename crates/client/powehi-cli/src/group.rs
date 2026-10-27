@@ -167,6 +167,14 @@ impl PendingAdd {
     }
 }
 
+/// True while a `gadd-` or `grem-` record of `group_id` exists (an Add or Remove Commit not yet
+/// resolved) or the store cannot be read: no Application message may go out in that epoch
+/// (fail closed, same rule as the pair `pcs::has_pending`).
+pub(crate) fn has_pending_commit(store: &crate::store::ProfileStore, group_id: Uuid) -> bool {
+    let present = |name: String| store.get(&name).map_or(true, |r| r.is_some());
+    present(pending_name(group_id)) || present(remove::pending_name(group_id))
+}
+
 fn load_pending(
     store: &crate::store::ProfileStore,
     gid: Uuid,

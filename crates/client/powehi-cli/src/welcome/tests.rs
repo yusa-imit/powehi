@@ -216,13 +216,15 @@ async fn group_welcome_for_bob() -> (tempfile::TempDir, Session, Session, Url, U
     let tmp = tempfile::tempdir().unwrap();
     let (alice, bob) = (session(&tmp, "alice", 1), session(&tmp, "bob", 2));
     let state = Arc::new(Mutex::new(Backend::default()));
-    let url = serve(state).await;
+    let url = serve(state.clone()).await;
     let gid = crate::group::create(&client(), &url, &alice).await.unwrap();
     let (link, _) = invite::create(&client(), &url, &bob).await.unwrap();
     let link = invite::parse_link(&link).unwrap();
     crate::group::add(&client(), &url, &alice, gid, &link)
         .await
         .unwrap();
+    // The stub does not advance its epoch on a Commit; the group is at epoch 1 now.
+    state.lock().unwrap().group_epoch = 1;
     (tmp, alice, bob, url, gid)
 }
 
@@ -261,12 +263,10 @@ async fn accepting_a_group_welcome_joins_as_a_group_conversation() {
         .unwrap();
     assert_eq!(g.members().count(), 2);
     assert_eq!(g.epoch().as_u64(), 1);
-    // Group traffic still never sends or verifies as a pair.
-    let sent = crate::message::send(&client(), &url, &bob, gid, b"hi").await;
-    assert!(matches!(
-        sent,
-        Err(crate::message::MessageError::GroupSendUnsupported)
-    ));
+    // A joined group sends through the group path, never the pair path.
+    crate::message::send(&client(), &url, &bob, gid, b"hi")
+        .await
+        .unwrap();
     let _ = alice;
 }
 
