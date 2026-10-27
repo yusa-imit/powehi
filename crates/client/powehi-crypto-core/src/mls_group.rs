@@ -62,6 +62,12 @@ pub enum MlsError {
     /// is not from the peer, or would change the peer's signature key or credential.
     #[error("mls pair commit refused")]
     PairCommitRefused,
+    /// A Commit in a kind-Group conversation that [`apply_group_commit`] refuses: the group is
+    /// not a kind-Group, the committer is unknown, the Commit carries anything but inline Add/Remove
+    /// proposals and an update path (GroupContextExtensions, PSK, ReInit, Update), or the
+    /// committer's own leaf would change its signature key or credential.
+    #[error("mls group commit refused")]
+    GroupCommitRefused,
     /// A Commit references a proposal this device never stored (RFC 9420 §12.4 `ProposalOrRef`,
     /// §12.4.2 processing). Returned by [`inspect_incoming_commit`] and [`process_incoming_commit`]
     /// (so also by the WASM `mls_process_commit`, where the web consumer treats the unknown
@@ -1878,6 +1884,83 @@ pub fn apply_pair_commit(
     })
 }
 
+/// What [`apply_group_commit`] merged.
+#[derive(Debug, PartialEq, Eq)]
+pub struct GroupCommitApplied {
+    /// The new local epoch.
+    pub epoch: u64,
+    /// Members the Commit added.
+    pub added: usize,
+    /// Members the Commit removed.
+    pub removed: usize,
+}
+
+/// Applies a Commit received in a kind-Group conversation through the ADR-0005 one-shot merge,
+/// only if it stays inside the group allowlist: a committer that is a current member, proposals
+/// limited to Add and Remove (so no GroupContextExtensions proposal can flip the kind, and no
+/// PSK, ReInit or by-reference Update), and, when an update path is present, a committer leaf
+/// that keeps the committer's signature key and credential (RFC 9420 §5.3.1 successor check).
+/// Proposals must be inline and sent by a member. An empty proposal list with an update path (a
+/// pure self-Update, the PCS rotation of prd §5) is allowed.
+///
+/// A refusal before the inspect step (not a kind-Group, inactive) consumes no secret and can be
+/// retried; any refusal after it is terminal for those bytes (see [`inspect_incoming_commit`]).
+/// A Commit that removes this device's own leaf is merged like any other and the group then
+/// reads inactive: the caller must check [`group_is_active`] and delete its state. On any `Err`
+/// discard the in-memory group AND the provider state (a postcondition failure happens after
+/// the merge wrote storage) and reload from the last saved snapshot, as the CLI does per envelope.
+pub fn apply_group_commit(
+    group: &mut MlsGroup,
+    commit_bytes: &[u8],
+    provider: &impl OpenMlsProvider,
+) -> Result<GroupCommitApplied, MlsError> {
+    if !matches!(group_kind(group), Ok(GroupKind::Group)) || !group.is_active() {
+        return Err(MlsError::GroupCommitRefused);
+    }
+    let (staged, info) = match inspect_incoming_commit(group, commit_bytes, provider, None) {
+        Err(MlsError::CommitMissingProposal) => return Err(MlsError::GroupCommitRefused),
+        other => other?,
+    };
+    let Some(committer) = info.committer_leaf_index else {
+        return Err(MlsError::GroupCommitRefused);
+    };
+    let Some((committer_key, committer_cred)) = group
+        .members()
+        .find(|m| m.index.u32() == committer)
+        .map(|m| (m.signature_key, m.credential))
+    else {
+        return Err(MlsError::GroupCommitRefused);
+    };
+    let only_add_remove = staged.queued_proposals().all(|q| {
+        q.proposal_or_ref_type() == ProposalOrRefType::Proposal
+            && matches!(q.sender(), Sender::Member(_))
+            && matches!(q.proposal(), Proposal::Add(_) | Proposal::Remove(_))
+    });
+    if !only_add_remove {
+        return Err(MlsError::GroupCommitRefused);
+    }
+    if let Some(leaf) = staged.update_path_leaf_node() {
+        if leaf.signature_key().as_slice() != committer_key.as_slice()
+            || *leaf.credential() != committer_cred
+        {
+            return Err(MlsError::GroupCommitRefused);
+        }
+    }
+    let (added, removed) = (
+        info.added_credentials.len(),
+        info.removed_leaf_indices.len(),
+    );
+    let epoch = merge_inspected_commit(group, staged, provider)?;
+    if epoch != info.prior_epoch + 1 || !matches!(group_kind(group), Ok(GroupKind::Group)) {
+        return Err(MlsError::GroupCommitRefused);
+    }
+    Ok(GroupCommitApplied {
+        epoch,
+        added,
+        removed,
+    })
+}
+
 /// Stage a self-Update Commit in a 1:1 `group` (8.15, prd §5 PCS): fresh leaf encryption key and
 /// update path, no proposals. Returns the Commit wire bytes and the epoch it was staged at.
 /// Nothing is merged: send the bytes, and call [`confirm_pair_self_update`] once the server has
@@ -2494,6 +2577,133 @@ mod tests {
         ));
         assert!(pair.pending_commit().is_none());
         assert_eq!(pair.members().count(), 2);
+    }
+
+    /// 8.17: `apply_group_commit` merges Add and Remove Commits from members and refuses pairs.
+    #[test]
+    fn apply_group_commit_allowlist() {
+        let (a, b, c) = (
+            OpenMlsRustCrypto::default(),
+            OpenMlsRustCrypto::default(),
+            OpenMlsRustCrypto::default(),
+        );
+        let alice = generate_identity(b"alice", &a).unwrap();
+        let bob = generate_identity(b"bob", &b).unwrap();
+        let carol = generate_identity(b"carol", &c).unwrap();
+        let mut ag = create_group_of_kind(&alice, &a, GroupKind::Group).unwrap();
+        let bkp = generate_pq_key_package(&bob, &b).unwrap();
+        let s = stage_group_add(&mut ag, &alice.signer, &bkp.key_package, &a).unwrap();
+        confirm_group_add(&mut ag, &a).unwrap();
+        let mut bg = join_group(&s.welcome, &b).unwrap();
+        let ckp = generate_pq_key_package(&carol, &c).unwrap();
+        let s2 = stage_group_add(&mut ag, &alice.signer, &ckp.key_package, &a).unwrap();
+        confirm_group_add(&mut ag, &a).unwrap();
+        let applied = apply_group_commit(&mut bg, &s2.commit, &b).unwrap();
+        assert_eq!(
+            applied,
+            GroupCommitApplied {
+                epoch: 2,
+                added: 1,
+                removed: 0
+            }
+        );
+        let carol_leaf = join_group(&s2.welcome, &c).unwrap().own_leaf_index().u32();
+        let (rm, _) = stage_group_remove(&mut ag, &alice.signer, carol_leaf, &a).unwrap();
+        confirm_group_remove(&mut ag, &a).unwrap();
+        let applied = apply_group_commit(&mut bg, &rm, &b).unwrap();
+        assert_eq!((applied.epoch, applied.added, applied.removed), (3, 0, 1));
+        assert_eq!(group_kind(&bg).unwrap(), GroupKind::Group);
+
+        // A GroupContextExtensions commit that drops the kind extension is refused, unmerged.
+        let (commit_msg, _, _) = ag
+            .update_group_context_extensions(&a, Extensions::<GroupContext>::empty(), &alice.signer)
+            .unwrap();
+        let gce = commit_msg.to_bytes().unwrap();
+        ag.merge_pending_commit(&a).unwrap();
+        assert!(matches!(
+            apply_group_commit(&mut bg, &gce, &b),
+            Err(MlsError::GroupCommitRefused)
+        ));
+        assert_eq!(bg.epoch().as_u64(), 3);
+
+        // A kind-Pair group is refused before anything is staged.
+        let mut pair = create_group(&alice, &a).unwrap();
+        assert!(matches!(
+            apply_group_commit(&mut pair, &rm, &a),
+            Err(MlsError::GroupCommitRefused)
+        ));
+    }
+
+    /// 8.17: group allowlist: a pure self-Update is accepted, a key or credential swap on the
+    /// update path is refused unmerged, and a Remove of the receiver merges to inactive.
+    #[test]
+    fn apply_group_commit_successor_and_self_removal() {
+        // Fresh providers per case: a refused Commit consumes the receiver's ratchet secret.
+        let setup = || {
+            let (a, b) = (OpenMlsRustCrypto::default(), OpenMlsRustCrypto::default());
+            let alice = generate_identity(b"alice", &a).unwrap();
+            let bob = generate_identity(b"bob", &b).unwrap();
+            let mut ag = create_group_of_kind(&alice, &a, GroupKind::Group).unwrap();
+            let bkp = generate_pq_key_package(&bob, &b).unwrap();
+            let s = stage_group_add(&mut ag, &alice.signer, &bkp.key_package, &a).unwrap();
+            confirm_group_add(&mut ag, &a).unwrap();
+            let bg = join_group(&s.welcome, &b).unwrap();
+            (a, b, alice, ag, bg)
+        };
+
+        // Key swap and credential swap on the update path: refused, epoch unchanged.
+        for case in 0..2 {
+            let (a, b, alice, mut ag, mut bg) = setup();
+            let new_key = SignatureKeyPair::new(SignatureScheme::ED25519).unwrap();
+            new_key.store(a.storage()).unwrap();
+            let (signer, cwk) = if case == 0 {
+                let c = CredentialWithKey {
+                    credential: alice.credential_with_key.credential.clone(),
+                    signature_key: new_key.public().into(),
+                };
+                (&new_key, c)
+            } else {
+                let mut c = alice.credential_with_key.clone();
+                c.credential = BasicCredential::new(b"mallory".to_vec()).into();
+                (&alice.signer, c)
+            };
+            let bundle = ag
+                .self_update_with_new_signer(
+                    &a,
+                    &alice.signer,
+                    NewSignerBundle {
+                        signer,
+                        credential_with_key: cwk,
+                    },
+                    LeafNodeParameters::default(),
+                )
+                .unwrap();
+            let bytes = bundle.into_commit().to_bytes().unwrap();
+            assert!(matches!(
+                apply_group_commit(&mut bg, &bytes, &b),
+                Err(MlsError::GroupCommitRefused)
+            ));
+            assert_eq!(bg.epoch().as_u64(), 1);
+        }
+
+        let (a, b, alice, mut ag, mut bg) = setup();
+        // A pure self-Update from a member is allowed.
+        let bundle = ag
+            .self_update(&a, &alice.signer, LeafNodeParameters::default())
+            .unwrap();
+        let upd = bundle.into_commit().to_bytes().unwrap();
+        ag.merge_pending_commit(&a).unwrap();
+        let applied = apply_group_commit(&mut bg, &upd, &b).unwrap();
+        assert_eq!((applied.epoch, applied.added, applied.removed), (2, 0, 0));
+
+        // Removing the receiver merges and leaves it inactive, kind intact.
+        let bob_leaf = bg.own_leaf_index().u32();
+        let (rm, _) = stage_group_remove(&mut ag, &alice.signer, bob_leaf, &a).unwrap();
+        confirm_group_remove(&mut ag, &a).unwrap();
+        let applied = apply_group_commit(&mut bg, &rm, &b).unwrap();
+        assert_eq!(applied.epoch, 3);
+        assert!(!bg.is_active());
+        assert_eq!(group_kind(&bg).unwrap(), GroupKind::Group);
     }
 
     /// 8.17: a staged group Add advances nothing until confirmed; a third member joins with the

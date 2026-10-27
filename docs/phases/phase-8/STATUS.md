@@ -352,6 +352,8 @@ pointing here. Close the issue in the PR that finishes its item.
 
   Cycle 659 (slice j): `group add --resume` (`settle_local_epoch`) cross-checks the record kind against the GroupContext before any merge or Welcome delivery (`NotAGroup`). Test: a Group record over a pair state with a staged self-update (merge branch would otherwise run) is refused, nothing merged or aborted. crypto-reviewer: needs-rework (test did not prove ordering), fixed. Carried: group commit allowlist (GCE kind flip) with group receive, ack routing keyed on record kind.
 
+  Cycle 661 (slice k): crypto-core `apply_group_commit` + `MlsError::GroupCommitRefused`: group commit allowlist (member committer, inline Add/Remove from a member sender only, self-Update allowed, update-path leaf keeps signature key AND credential, kind asserted unchanged, epoch+1). A GCE/kind flip, key swap and credential swap are refused unmerged (tests; credential check mutation-verified); removing the receiver merges to inactive. crypto-reviewer: needs-rework (credential successor check, test gaps, docs), fixed. Not yet wired into the CLI inbox. Carried: group receive/send wiring with MLS-leaf sender auth, ack routing keyed on record kind, RequiredCapabilities(0xF002) (receiver does not check an Add declares it), removed/added signature keys in `GroupCommitApplied`.
+
 ### Multi-device and recovery
 - [ ] 8.18 Recovery-phrase restore — `powehi restore` sets up a new machine from the
   recovery phrase: the MLS identity is phrase-derived, so the same signing key comes
