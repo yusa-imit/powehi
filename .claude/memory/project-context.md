@@ -1880,3 +1880,5 @@ cargo audit/deny clean (only #163 waiver). CI green, no bug issues. Added `group
 
 ## Cycle 659 (FEATURE) — 8.17 slice j
 `group add --resume` kind gate in `settle_local_epoch` (record vs GroupContext, before any merge/Welcome). powehi-cli 442 tests green, clippy clean; crypto-reviewer needs-rework (ordering test) fixed. Carried: group commit allowlist with group receive, ack routing by record kind.
+
+- Stabilization 660 (PR pending): cargo audit/deny clean, CI green; added group resume NoSuchGroup/NotAGroup test. 442 powehi-cli lib tests pass.
