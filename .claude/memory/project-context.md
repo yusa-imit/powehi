@@ -1871,3 +1871,6 @@ CLI `group remove <GID> <KEY_HEX>` + `group members` (target = full signature ke
 
 ## Cycle 655 (STABILIZATION)
 cargo audit/deny clean (only #163 waiver). CI green, no bug issues. Added `group remove` tests: uppercase key, empty/oversized key refused pre-post, `members`/`removed` text+JSON rendering. powehi-cli 435 pass. Next FEATURE: group send/receive (see cycle 654).
+
+## Cycle 656 (FEATURE) — 8.17 slice g3
+`group members` fails closed (TooMany) past the 512 cap via `bounded` instead of truncating. powehi-cli 436+10 tests green, clippy clean. Small CLI-only change, no crypto touched; no reviewer gate required. Remaining 8.17 carries: see STATUS g2 list.

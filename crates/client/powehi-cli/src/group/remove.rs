@@ -57,9 +57,12 @@ pub fn members(session: &Session, group_id: Uuid) -> Result<Vec<Member>, GroupEr
         return Err(GroupError::NotAGroup);
     }
     let own = local.identity.signer.to_public_vec();
-    let out: Vec<Member> = group
-        .members()
-        .take(powehi_crypto_core::safety::GROUP_MAX_MEMBERS)
+    let roster = bounded(
+        group.members(),
+        powehi_crypto_core::safety::GROUP_MAX_MEMBERS,
+    )?;
+    let out: Vec<Member> = roster
+        .into_iter()
         .map(|m| Member {
             leaf: m.index.u32(),
             key_hex: to_hex(&m.signature_key),
@@ -67,6 +70,17 @@ pub fn members(session: &Session, group_id: Uuid) -> Result<Vec<Member>, GroupEr
         })
         .collect();
     assert!(out.iter().filter(|m| m.is_self).count() <= 1);
+    Ok(out)
+}
+
+/// Collects at most `cap` items; one more means the roster is over the limit, which is refused
+/// (`TooMany`) instead of being silently truncated into a roster that hides members.
+fn bounded<T>(items: impl Iterator<Item = T>, cap: usize) -> Result<Vec<T>, GroupError> {
+    let out: Vec<T> = items.take(cap + 1).collect();
+    if out.len() > cap {
+        return Err(GroupError::TooMany);
+    }
+    assert!(out.len() <= cap);
     Ok(out)
 }
 
