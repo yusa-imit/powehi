@@ -163,6 +163,9 @@ pub async fn send_with(
     let mut local = LocalIdentity::load(store)?;
     let mut group = mls_group::load_group(group_id.as_bytes(), &local.provider)?
         .ok_or(MessageError::GroupUnusable)?;
+    if !conv.agrees_with(&group) {
+        return Err(MessageError::GroupUnusable);
+    }
     // Same 1:1 invariant the receive path relies on (only pair-preserving Commits are applied).
     if !mls_group::is_pair_with(&group, &local.identity.signer.to_public_vec()) {
         return Err(MessageError::GroupUnusable);

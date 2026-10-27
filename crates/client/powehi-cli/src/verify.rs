@@ -126,6 +126,9 @@ pub fn number(store: &ProfileStore, group_id: Uuid) -> Result<String, VerifyErro
     let local = LocalIdentity::load(store)?;
     let group = mls_group::load_group(group_id.as_bytes(), &local.provider)?
         .ok_or(VerifyError::GroupUnusable)?;
+    if !conv.agrees_with(&group) {
+        return Err(VerifyError::GroupUnusable);
+    }
     number_of(&group, &local.identity.signer.to_public_vec(), conv.kind())
 }
 
@@ -343,6 +346,26 @@ mod tests {
         let keys: Vec<Vec<u8>> = group.members().map(|m| m.signature_key).collect();
         let refs: Vec<&[u8]> = keys.iter().map(Vec::as_slice).collect();
         assert_eq!(group_n, safety::group(&refs).unwrap());
+    }
+
+    #[tokio::test]
+    async fn record_kind_must_match_the_authenticated_group_kind() {
+        let (_tmp, _alice, bob, gid) = pair().await;
+        let conv = conversation::load(&bob.store, &gid).unwrap().unwrap();
+        let group_record = conversation::Conversation::new(
+            gid,
+            conv.peer_device_id,
+            conversation::Role::Creator,
+            None,
+        )
+        .into_group();
+        assert!(number(&bob.store, gid).is_ok());
+        // A pair group whose record claims to be a group: no number.
+        conversation::save(&bob.store, &group_record).unwrap();
+        assert!(matches!(
+            number(&bob.store, gid),
+            Err(VerifyError::GroupUnusable)
+        ));
     }
 
     #[tokio::test]

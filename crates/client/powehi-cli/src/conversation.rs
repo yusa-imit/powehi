@@ -11,7 +11,7 @@ use thiserror::Error;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
-use powehi_crypto_core::kem;
+use powehi_crypto_core::{kem, mls_group};
 
 use crate::store::{ProfileStore, StoreError};
 
@@ -120,6 +120,18 @@ impl Conversation {
     /// Pair or group.
     pub fn kind(&self) -> Kind {
         self.kind
+    }
+
+    /// Whether the record's kind equals the kind the MLS GroupContext declares (authenticated by
+    /// the group, unlike this record). Callers that act on the record's kind (safety number,
+    /// send, rotation) must fail closed on `false`, and on a GroupContext that cannot be read.
+    #[must_use]
+    pub fn agrees_with(&self, group: &mls_group::Group) -> bool {
+        matches!(
+            (mls_group::group_kind(group), self.kind),
+            (Ok(mls_group::GroupKind::Pair), Kind::Pair)
+                | (Ok(mls_group::GroupKind::Group), Kind::Group)
+        )
     }
 
     /// Marks a freshly built record as a group, at creation only. A group record carries

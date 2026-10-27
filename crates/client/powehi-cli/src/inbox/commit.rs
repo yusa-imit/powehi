@@ -47,6 +47,9 @@ pub(super) fn apply(
     let Some(mut group) = mls_group::load_group(group_id.as_bytes(), &local.provider)? else {
         return Ok(Outcome::Refused);
     };
+    if !conv.agrees_with(&group) {
+        return Ok(Outcome::Unknown);
+    }
     let own_key = local.identity.signer.to_public_vec();
     let applied = match mls_group::apply_pair_commit(
         &mut group,

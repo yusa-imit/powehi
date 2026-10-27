@@ -1874,3 +1874,6 @@ cargo audit/deny clean (only #163 waiver). CI green, no bug issues. Added `group
 
 ## Cycle 656 (FEATURE) — 8.17 slice g3
 `group members` fails closed (TooMany) past the 512 cap via `bounded` instead of truncating. powehi-cli 436+10 tests green, clippy clean. Small CLI-only change, no crypto touched; no reviewer gate required. Remaining 8.17 carries: see STATUS g2 list.
+
+## Cycle 658 (FEATURE) — 8.17 slice i
+`Conversation::agrees_with` kind cross-check (record vs GroupContext) on verify/send/rotate/inbox/commit paths, fail closed; crypto-reviewer needs-rework fixed (inbox paths + 5-path test). powehi-cli 440+10 green. Carried: `group add --resume` gate, GCE-proposal allowlist, ack routing. 8.15 still blocked on #166.
