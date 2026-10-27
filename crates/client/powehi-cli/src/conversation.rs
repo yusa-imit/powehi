@@ -336,7 +336,7 @@ fn select(
     only_changed: bool,
     only_role: Option<Role>,
     page: impl Into<Page>,
-) -> Result<Vec<(Uuid, Role)>, ConversationError> {
+) -> Result<Vec<(Uuid, Role, Kind)>, ConversationError> {
     let mut ids = list(store)?;
     ids.sort();
     assert!(ids.len() <= crate::store::MAX_RECORDS);
@@ -368,8 +368,8 @@ fn select(
         if page.limit.is_some_and(|n| out.len() >= n) {
             break;
         }
-        let role = match load(store, &id)? {
-            Some(c) => c.role,
+        let (role, kind) = match load(store, &id)? {
+            Some(c) => (c.role, c.kind()),
             None => return Err(ConversationError::Malformed),
         };
         if only_role.is_some_and(|r| r != role) {
@@ -379,7 +379,7 @@ fn select(
             skipped += 1;
             continue;
         }
-        out.push((id, role));
+        out.push((id, role, kind));
     }
     assert!(skipped <= page.offset);
     Ok(out)
@@ -401,10 +401,12 @@ pub fn report(
     out: &mut impl std::io::Write,
 ) -> Result<(), ConversationError> {
     let chosen = select(store, unread, only_unread, only_changed, only_role, page)?;
-    for (id, role) in &chosen {
-        let name = match role {
-            Role::Creator => "creator",
-            Role::Joiner => "joiner",
+    for (id, role, kind) in &chosen {
+        let name = match (role, kind) {
+            (Role::Creator, Kind::Pair) => "creator",
+            (Role::Joiner, Kind::Pair) => "joiner",
+            (Role::Creator, Kind::Group) => "creator group",
+            (Role::Joiner, Kind::Group) => "joiner group",
         };
         let changed = if crate::verify::changed_since_verified(store, *id) {
             " CHANGED"
@@ -449,14 +451,14 @@ pub fn ids(
     out: &mut impl std::io::Write,
 ) -> Result<(), ConversationError> {
     let chosen = select(store, unread, only_unread, only_changed, only_role, page)?;
-    for (id, _) in &chosen {
+    for (id, _, _) in &chosen {
         writeln!(out, "{id}").map_err(|_| ConversationError::Output)?;
     }
     Ok(())
 }
 
 /// Writes the conversations the same filters as [`report`] would list as JSON lines (for
-/// scripts): `{"id":..,"role":"creator"|"joiner","unread":n,"changed":bool,"verified":bool}`
+/// scripts): `{"id":..,"role":"creator"|"joiner","kind":"pair"|"group","unread":n,"changed":bool,"verified":bool}`
 /// per line, sorted by id. Only the metadata `report` prints; no message text or key material.
 pub fn json(
     store: &ProfileStore,
@@ -468,12 +470,16 @@ pub fn json(
     out: &mut impl std::io::Write,
 ) -> Result<(), ConversationError> {
     let chosen = select(store, unread, only_unread, only_changed, only_role, page)?;
-    for (id, role) in &chosen {
+    for (id, role, kind) in &chosen {
         let line = serde_json::json!({
             "id": id.to_string(),
             "role": match role {
                 Role::Creator => "creator",
                 Role::Joiner => "joiner",
+            },
+            "kind": match kind {
+                Kind::Pair => "pair",
+                Kind::Group => "group",
             },
             "unread": unread.get(id).copied().unwrap_or(0),
             "changed": crate::verify::changed_since_verified(store, *id),
@@ -536,6 +542,41 @@ mod tests {
             Role::Joiner,
             Some((pair.decap_key, pair.encap_key)),
         )
+    }
+
+    #[test]
+    fn report_and_json_show_group_kind_and_keep_pair_lines_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let (pair, group) = (Uuid::new_v4(), Uuid::new_v4());
+        save(&store, &joiner(pair)).unwrap();
+        save(
+            &store,
+            &Conversation::new(group, Uuid::new_v4(), Role::Creator, None).into_group(),
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        report(&store, &BTreeMap::new(), false, false, None, None, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let line = |id: Uuid| {
+            text.lines()
+                .find(|l| l.starts_with(&id.to_string()))
+                .unwrap()
+        };
+        assert!(line(group).starts_with(&format!("{group} creator group")));
+        assert!(line(pair).starts_with(&format!("{pair} joiner")));
+        assert!(!line(pair).contains("group"));
+        let mut out = Vec::new();
+        json(&store, &BTreeMap::new(), false, false, None, None, &mut out).unwrap();
+        for l in String::from_utf8(out).unwrap().lines() {
+            let v: serde_json::Value = serde_json::from_str(l).unwrap();
+            let want = if v["id"] == group.to_string() {
+                "group"
+            } else {
+                "pair"
+            };
+            assert_eq!(v["kind"], want);
+        }
     }
 
     #[test]
