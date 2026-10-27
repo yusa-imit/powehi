@@ -235,6 +235,52 @@ mod add_tests {
         assert!(w.state.lock().unwrap().commits.is_empty());
     }
 
+    /// A two-member kind-Group whose stored record lies and says Pair.
+    async fn pair_record_over_two_member_group() -> World {
+        let w = world().await;
+        let link = link_of(&w, &w.bob).await;
+        add(&client(), &w.url, &w.alice, w.gid, &link)
+            .await
+            .unwrap();
+        let lie = crate::conversation::Conversation::new(
+            w.gid,
+            w.bob.device_id,
+            crate::conversation::Role::Creator,
+            None,
+        );
+        crate::conversation::save(&w.alice.store, &lie).unwrap();
+        w
+    }
+
+    #[tokio::test]
+    async fn a_pair_record_over_a_kind_group_state_fails_closed_everywhere() {
+        let w = pair_record_over_two_member_group().await;
+        assert!(matches!(
+            crate::verify::number(&w.alice.store, w.gid),
+            Err(crate::verify::VerifyError::GroupUnusable)
+        ));
+        let sent = crate::message::send(&client(), &w.url, &w.alice, w.gid, b"hi").await;
+        assert!(matches!(
+            sent,
+            Err(crate::message::MessageError::GroupUnusable)
+        ));
+        let rotated = crate::pcs::rotate(&client(), &w.url, &w.alice, w.gid, 1).await;
+        assert!(matches!(
+            rotated,
+            Err(crate::pcs::RotateError::GroupUnusable)
+        ));
+        assert!(w
+            .alice
+            .store
+            .get(&crate::pcs::pending_name(w.gid))
+            .unwrap()
+            .is_none());
+        let conv = crate::conversation::load(&w.alice.store, &w.gid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(conv.sent_since_update(), 0);
+    }
+
     #[tokio::test]
     async fn a_two_member_group_still_refuses_send() {
         let w = world().await;

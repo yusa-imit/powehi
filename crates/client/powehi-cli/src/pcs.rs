@@ -87,7 +87,7 @@ pub enum Rotation {
 /// the peer moves an epoch and this device forks.
 pub const PENDING_PREFIX: &str = "pcs-";
 
-fn pending_name(group_id: Uuid) -> String {
+pub(crate) fn pending_name(group_id: Uuid) -> String {
     format!("{PENDING_PREFIX}{}", group_id.hyphenated())
 }
 
@@ -126,7 +126,7 @@ pub async fn rotate(
     let mut group = mls_group::load_group(group_id.as_bytes(), &local.provider)?
         .ok_or(RotateError::GroupUnusable)?;
     let own_key = local.identity.signer.to_public_vec();
-    if !mls_group::is_pair_with(&group, &own_key) {
+    if !conv.agrees_with(&group) || !mls_group::is_pair_with(&group, &own_key) {
         return Err(RotateError::GroupUnusable);
     }
     let server_epoch = invite::group_epoch(client, server, session, group_id).await?;

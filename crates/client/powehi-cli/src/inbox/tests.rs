@@ -1109,3 +1109,27 @@ async fn group_conversation_traffic_is_never_acked_or_applied() {
     assert_eq!(inbox_len(&p), 3, "nothing of a group is acked");
     assert!(conversation::load(&p.alice.store, &gid).unwrap().is_some());
 }
+
+#[tokio::test]
+async fn a_pair_record_over_a_kind_group_state_is_held_not_decrypted_or_applied() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (alice, bob) = (session(&tmp, "alice", 1), session(&tmp, "bob", 2));
+    let state = Arc::new(Mutex::new(Backend::default()));
+    let url = serve(state.clone()).await;
+    let gid = crate::group::create(&client(), &url, &alice).await.unwrap();
+    let (link, _) = invite::create(&client(), &url, &bob).await.unwrap();
+    let link = invite::parse_link(&link).unwrap();
+    crate::group::add(&client(), &url, &alice, gid, &link)
+        .await
+        .unwrap();
+    let lie =
+        conversation::Conversation::new(gid, bob.device_id, conversation::Role::Creator, None);
+    conversation::save(&alice.store, &lie).unwrap();
+
+    let msg = process_one(&alice, Uuid::nil(), gid, bob.device_id, b"junk").unwrap();
+    assert!(matches!(msg, Outcome::Skip));
+    let commit = commit::apply(&alice, gid, bob.device_id, b"junk").unwrap();
+    assert!(matches!(commit, commit::Outcome::Unknown));
+    let conv = conversation::load(&alice.store, &gid).unwrap().unwrap();
+    assert!(conv.peer_signature_key().is_none());
+}

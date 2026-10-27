@@ -553,6 +553,10 @@ fn process_one(
     let Some(mut group) = mls_group::load_group(group_id.as_bytes(), &local.provider)? else {
         return Ok(Outcome::Skip);
     };
+    // The record's kind is unauthenticated; the GroupContext's is not. Held, never acked.
+    if !conv.agrees_with(&group) {
+        return Ok(Outcome::Skip);
+    }
     // Sender authentication rests on the group being exactly this pair (only Commits that
     // keep it a pair are applied, `mls_group::apply_pair_commit`), so every application
     // message is from the peer; `decrypt_message` does not expose the sender leaf.
