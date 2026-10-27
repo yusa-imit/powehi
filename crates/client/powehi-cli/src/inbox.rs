@@ -122,20 +122,38 @@ impl Drop for WipedBody {
     }
 }
 
-impl From<RawReceived> for Received {
-    fn from(mut raw: RawReceived) -> Self {
-        Received {
+/// A stored `sender_key` is lowercase-or-uppercase hex of at most [`MAX_SENDER_KEY_BYTES`]
+/// bytes; anything else would reach the terminal and the JSON output unescaped.
+fn sender_key_is_valid(k: &str) -> bool {
+    !k.is_empty()
+        && k.len().is_multiple_of(2)
+        && k.len() <= 2 * MAX_SENDER_KEY_BYTES
+        && k.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+impl TryFrom<RawReceived> for Received {
+    type Error = &'static str;
+
+    fn try_from(mut raw: RawReceived) -> Result<Self, Self::Error> {
+        if raw
+            .sender_key
+            .as_deref()
+            .is_some_and(|k| !sender_key_is_valid(k))
+        {
+            return Err("sender_key is not bounded hex");
+        }
+        Ok(Received {
             group_id: raw.group_id,
             sender: raw.sender,
             body: std::mem::take(&mut raw.body.0),
             received_at: raw.received_at,
             sender_key: raw.sender_key,
-        }
+        })
     }
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(from = "RawReceived")]
+#[serde(try_from = "RawReceived")]
 pub(crate) struct Received {
     pub(crate) group_id: Uuid,
     pub(crate) sender: Uuid,
