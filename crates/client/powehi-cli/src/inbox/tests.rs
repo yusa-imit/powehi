@@ -320,6 +320,33 @@ async fn rerun_after_crash_between_put_and_save_reprocesses_and_acks() {
 }
 
 #[test]
+fn a_stored_sender_key_that_is_not_bounded_hex_is_rejected_on_read() {
+    let rec = |key: &str| {
+        format!(
+            r#"{{"group_id":"{0}","sender":"{0}","body":"00","sender_key":{key}}}"#,
+            Uuid::nil()
+        )
+    };
+    let ok = format!("\"{}\"", "ab".repeat(MAX_SENDER_KEY_BYTES));
+    assert!(serde_json::from_str::<Received>(&rec(&ok)).is_ok());
+    let long = format!("\"{}\"", "ab".repeat(MAX_SENDER_KEY_BYTES + 1));
+    for bad in [
+        r#""zz""#,
+        r#""a\"b""#,
+        r#""abc""#,
+        r#""\u001b[2J""#,
+        r#""""#,
+        long.as_str(),
+    ] {
+        assert!(
+            serde_json::from_str::<Received>(&rec(bad)).is_err(),
+            "{bad}"
+        );
+    }
+    assert!(serde_json::from_str::<Received>(&rec("null")).is_ok());
+}
+
+#[test]
 fn body_is_hex_on_write_and_legacy_array_still_reads() {
     let rec = Received {
         group_id: Uuid::nil(),

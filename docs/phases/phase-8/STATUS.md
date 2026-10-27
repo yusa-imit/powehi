@@ -362,6 +362,8 @@ pointing here. Close the issue in the PR that finishes its item.
 
   Cycle 666 (slice n2): group RECEIVE of Application messages: crypto-core `decrypt_group_message` (kind-Group + active guards before any secret, current-epoch check, sender = signature key of the authenticated MLS leaf); inbox `process_group_one` stores it with `sender_key` (the DS `sender` label is only a hint) and `chat`/`inbox` show `[key:<16 hex>]`. Junk group Application messages are now acked after failures+grace like pair junk; Ahead ones are held, also while a `gadd-`/`grem-` record exists. crypto-reviewer: needs-rework (8-hex display prefix, ack-routing test, epoch guard) fixed. Carried: Proposal ack routing for groups, RequiredCapabilities(0xF002), removed/added keys in `GroupCommitApplied`, validate `sender_key` hex on read, group PQ story (T6) + threat-model-checker record before closing 8.17.
 
+  Cycle 667 (slice n3): a stored `sender_key` that is not non-empty even-length hex of at most 65 bytes makes the `rx-*` record unreadable (`Received` is `try_from`), so `display_json` can never print a tampered key. Carried: the slice (n2) list minus this.
+
 ### Multi-device and recovery
 - [ ] 8.18 Recovery-phrase restore — `powehi restore` sets up a new machine from the
   recovery phrase: the MLS identity is phrase-derived, so the same signing key comes
