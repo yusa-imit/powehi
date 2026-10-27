@@ -272,3 +272,10 @@ fn members_and_removed_render_text_and_json() {
     write_removed(gid, "bb", 3, false, &mut out).unwrap();
     assert!(String::from_utf8(out).unwrap().contains("not told yet"));
 }
+
+#[test]
+fn bounded_roster_fails_closed_past_the_cap() {
+    assert_eq!(bounded(0..3, 3).unwrap(), vec![0, 1, 2]);
+    assert!(matches!(bounded(0..4, 3), Err(GroupError::TooMany)));
+    assert!(bounded(0..0, 3).unwrap().is_empty());
+}
