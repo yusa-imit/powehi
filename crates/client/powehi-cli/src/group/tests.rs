@@ -415,6 +415,61 @@ mod add_tests {
     }
 
     #[tokio::test]
+    async fn resume_over_a_pair_state_with_a_group_record_is_refused() {
+        let w = world().await;
+        let (l, _) = invite::create(&client(), &w.url, &w.bob).await.unwrap();
+        let (pair, _) = invite::redeem(&client(), &w.url, &w.alice, &parse_link(&l).unwrap())
+            .await
+            .unwrap();
+        let lie = crate::conversation::Conversation::new(
+            pair,
+            w.bob.device_id,
+            crate::conversation::Role::Creator,
+            None,
+        )
+        .into_group();
+        crate::conversation::save(&w.alice.store, &lie).unwrap();
+        // A pair rotation whose outcome was Unknown leaves a staged commit; without the kind
+        // gate the merge branch would apply it (RFC 9420 §14: never before the DS sequenced it).
+        let mut local = LocalIdentity::load(&w.alice.store).unwrap();
+        let mut g = mls_group::load_group(pair.as_bytes(), &local.provider)
+            .unwrap()
+            .unwrap();
+        let own_key = local.identity.signer.to_public_vec();
+        mls_group::stage_pair_self_update(
+            &mut g,
+            &local.identity.signer,
+            &own_key,
+            &local.provider,
+        )
+        .unwrap();
+        local.save(&w.alice.store).unwrap();
+        let at = g.epoch().as_u64();
+        let rec = PendingAdd {
+            server_epoch: at,
+            commit: vec![1],
+            state: STATE_ACCEPTED,
+            peer: Uuid::new_v4(),
+            member_epoch: at + 1,
+            welcome: vec![2],
+        };
+        w.alice
+            .store
+            .put(&pending_name(pair), &rec.encode())
+            .unwrap();
+        let before = w.state.lock().unwrap().welcome_count();
+        let err = resume(&client(), &w.url, &w.alice, pair).await.unwrap_err();
+        assert!(matches!(err, GroupError::NotAGroup));
+        assert_eq!(w.state.lock().unwrap().welcome_count(), before);
+        let local = LocalIdentity::load(&w.alice.store).unwrap();
+        let g = mls_group::load_group(pair.as_bytes(), &local.provider)
+            .unwrap()
+            .unwrap();
+        assert_eq!(g.epoch().as_u64(), at, "nothing merged");
+        assert!(g.pending_commit().is_some(), "nothing aborted");
+    }
+
+    #[tokio::test]
     async fn resume_with_an_unexpected_local_epoch_fails_closed() {
         let w = world().await;
         let rec = PendingAdd {
