@@ -379,6 +379,7 @@ fn pending_at(received_at: u64) -> Pending {
     Pending {
         name: format!("rx-{received_at}"),
         sender: Uuid::from_u128(1),
+        sender_key: None,
         text: Zeroizing::new(String::new()),
         received_at,
     }

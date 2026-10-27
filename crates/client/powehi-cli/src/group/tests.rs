@@ -785,4 +785,67 @@ mod commit_tests {
         let (_tmp, _alice, bob, _url, _state, gid) = alice_and_bob().await;
         assert_eq!(apply(&bob, gid, b"x").unwrap(), Outcome::Refused);
     }
+
+    /// A member's Application message is decrypted by another member; the stored record names
+    /// the MLS leaf key that signed it, not the DS label, and the envelope is acked.
+    #[tokio::test]
+    async fn a_group_message_is_stored_with_the_authenticated_sender_key() {
+        let (_tmp, alice, bob, url, state, gid) = alice_and_bob().await;
+        crate::message::send(&client(), &url, &alice, gid, b"hello group")
+            .await
+            .unwrap();
+        // The DS label lies: it names a stranger. The sender key must still be Alice's.
+        for e in state.lock().unwrap().inbox.iter_mut() {
+            e["sender"] = serde_json::json!(Uuid::new_v4());
+        }
+        let report = crate::inbox::receive(&client(), &url, &bob).await.unwrap();
+        assert_eq!(report.stored, 1);
+        let got = crate::message::pending(&bob.store, gid).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].text.as_str(), "hello group");
+        let alice_key = LocalIdentity::load(&alice.store)
+            .unwrap()
+            .identity
+            .signer
+            .to_public_vec();
+        assert_eq!(
+            got[0].sender_key.as_deref(),
+            Some(crate::invite::hex(&alice_key).as_str())
+        );
+    }
+
+    /// A group message from a later epoch is held, never acked, while this device has its own
+    /// unresolved Add/Remove Commit record.
+    #[tokio::test]
+    async fn an_ahead_group_message_is_held_while_our_commit_is_unresolved() {
+        let (tmp, alice, bob, url, state, gid) = alice_and_bob().await;
+        let carol = session(&tmp, "carol", 3);
+        let (link, _) = invite::create(&client(), &url, &carol).await.unwrap();
+        add(&client(), &url, &alice, gid, &parse_link(&link).unwrap())
+            .await
+            .unwrap();
+        state.lock().unwrap().group_epoch = 2;
+        crate::message::send(&client(), &url, &alice, gid, b"later epoch")
+            .await
+            .unwrap();
+        bob.store
+            .put(&format!("gadd-{}", gid.hyphenated()), b"x")
+            .unwrap();
+        let t0 = 1_000_000;
+        for step in [0, 3 * 24 * 60 * 60] {
+            crate::inbox::receive_at(&client(), &url, &bob, t0 + step)
+                .await
+                .unwrap();
+        }
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .inbox
+                .iter()
+                .any(|e| e["message_type"] == "Application"),
+            "held, not acked"
+        );
+        assert!(crate::message::pending(&bob.store, gid).unwrap().is_empty());
+    }
 }

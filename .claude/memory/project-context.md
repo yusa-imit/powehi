@@ -1894,3 +1894,5 @@ CLI `group::commit::apply` (group counterpart of `inbox/commit.rs`) + crypto-cor
 
 ## Stabilization 665
 cargo audit/deny clean (only waived RUSTSEC-2026-0387), CI green, no bug issues. Added `an_evicted_member_cannot_send_and_posts_nothing` (group send after Remove → GroupUnusable, nothing posted). 449 powehi-cli lib tests pass. target/ 31G (nothing older than 7d to prune).
+
+- Cycle 666 (PR pending): 8.17 slice n2 group receive of Application messages with MLS-leaf sender key.

@@ -307,6 +307,7 @@ async fn rerun_after_crash_between_put_and_save_reprocesses_and_acks() {
         sender: p.bob.device_id,
         body: b"once".to_vec(),
         received_at: 1,
+        sender_key: None,
     };
     p.alice
         .store
@@ -325,6 +326,7 @@ fn body_is_hex_on_write_and_legacy_array_still_reads() {
         sender: Uuid::nil(),
         body: vec![0x00, 0xab, 0xff],
         received_at: 7,
+        sender_key: None,
     };
     let json = String::from_utf8(serde_json::to_vec(&rec).unwrap()).unwrap();
     assert!(json.contains("\"body\":\"00abff\""), "{json}");
@@ -365,6 +367,7 @@ fn body_bound_is_exact_for_hex_and_legacy_array() {
         sender: Uuid::nil(),
         body: vec![0; MAX_BODY_BYTES + 1],
         received_at: 0,
+        sender_key: None,
     };
     assert!(
         serde_json::to_vec(&big).is_err(),
@@ -401,6 +404,7 @@ fn encode_never_reallocates_and_matches_to_vec() {
             sender: Uuid::from_u128(u128::MAX - 1),
             body: vec![0xab; len],
             received_at: u64::MAX,
+            sender_key: None,
         };
         let enc = rec.encode().unwrap();
         assert_eq!(
@@ -420,6 +424,7 @@ fn encode_rejects_oversize_body_before_allocating() {
         sender: Uuid::nil(),
         body: vec![0; MAX_BODY_BYTES + 1],
         received_at: 0,
+        sender_key: None,
     };
     assert!(rec.encode().is_err());
 }
@@ -1084,11 +1089,11 @@ async fn a_commit_never_overtakes_messages_deferred_by_the_conversation_cap() {
     assert_eq!(alice_epoch(&p), 2);
 }
 
-/// Other members' Proposals and messages stay on the server long past the grace (group
-/// receive is not wired); a junk Commit takes the failure path like the pair path: acked only
-/// after `MAX_DECRYPT_FAILURES` failures *and* the grace.
+/// Other members' Proposals stay on the server long past the grace (not applied for groups);
+/// a junk Commit or junk Application message takes the failure path like the pair path: acked
+/// only after `MAX_DECRYPT_FAILURES` failures *and* the grace.
 #[tokio::test]
-async fn group_proposals_and_messages_are_held_and_a_junk_commit_is_acked_after_the_grace() {
+async fn group_proposals_are_held_and_junk_commits_and_messages_are_acked_after_the_grace() {
     let (_tmp, p) = pair().await;
     let gid = crate::group::create(&client(), &p.url, &p.alice)
         .await
@@ -1120,7 +1125,7 @@ async fn group_proposals_and_messages_are_held_and_a_junk_commit_is_acked_after_
         .map(|e| e["message_type"].clone())
         .collect();
     assert!(!left.contains(&json!("Commit")), "the junk Commit is acked");
-    assert_eq!(left.len(), 2, "Proposal and Application are held");
+    assert_eq!(left, vec![json!("Proposal")], "only the Proposal is held");
     assert!(conversation::load(&p.alice.store, &gid).unwrap().is_some());
 }
 

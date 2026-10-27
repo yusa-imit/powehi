@@ -80,6 +80,9 @@ impl From<mls_group::MlsError> for MessageError {
 pub struct Pending {
     name: String,
     pub sender: Uuid,
+    /// Group messages: hex of the MLS signature key of the sending member (authenticated);
+    /// `sender` is then only the Delivery Service's label.
+    pub sender_key: Option<String>,
     pub text: Zeroizing<String>,
     received_at: u64,
 }
@@ -274,6 +277,7 @@ pub fn pending(store: &ProfileStore, group_id: Uuid) -> Result<Vec<Pending>, Mes
             out.push(Pending {
                 text: render(&rec.body),
                 sender: rec.sender,
+                sender_key: rec.sender_key.clone(),
                 received_at: rec.received_at,
                 name,
             });
@@ -288,12 +292,11 @@ pub fn pending(store: &ProfileStore, group_id: Uuid) -> Result<Vec<Pending>, Mes
 /// ever discarded afterwards.
 pub fn display(out: &mut impl std::io::Write, msg: &Pending) -> std::io::Result<()> {
     let mut lines = msg.text.split('\n');
-    writeln!(
-        out,
-        "[{}] {}",
-        short_id(&msg.sender),
-        lines.next().unwrap_or("")
-    )?;
+    let who = match &msg.sender_key {
+        Some(k) => format!("key:{}", k.chars().take(16).collect::<String>()),
+        None => short_id(&msg.sender),
+    };
+    writeln!(out, "[{who}] {}", lines.next().unwrap_or(""))?;
     for l in lines {
         writeln!(out, "    | {l}")?;
     }
@@ -320,9 +323,13 @@ pub fn write_sent(id: Uuid, json: bool, out: &mut impl std::io::Write) -> std::i
 pub fn display_json(out: &mut impl std::io::Write, msg: &Pending) -> std::io::Result<()> {
     write!(
         out,
-        "{{\"sender\":\"{}\",\"received_at\":{},\"text\":\"",
+        "{{\"sender\":\"{}\",\"received_at\":{},",
         msg.sender, msg.received_at
     )?;
+    if let Some(k) = &msg.sender_key {
+        write!(out, "\"sender_key\":\"{k}\",")?;
+    }
+    write!(out, "\"text\":\"")?;
     let mut rest = msg.text.as_str();
     while let Some(i) = rest.find(['"', '\\', '\n', '\t']) {
         out.write_all(&rest.as_bytes()[..i])?;
