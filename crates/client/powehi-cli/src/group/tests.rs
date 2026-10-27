@@ -567,3 +567,122 @@ mod add_tests {
         }
     }
 }
+
+mod commit_tests {
+    use super::commit::{apply, Outcome};
+    use super::*;
+    use crate::invite::parse_link;
+
+    fn client() -> Client {
+        crate::status::http_client().unwrap()
+    }
+
+    fn members_of(s: &Session, gid: Uuid) -> Option<usize> {
+        let local = LocalIdentity::load(&s.store).unwrap();
+        mls_group::load_group(gid.as_bytes(), &local.provider)
+            .unwrap()
+            .map(|g| g.members().count())
+    }
+
+    /// Alice's group with Bob joined (epoch 1). Returns the world and Bob's signature key hex.
+    async fn alice_and_bob() -> (
+        tempfile::TempDir,
+        Session,
+        Session,
+        Url,
+        Arc<Mutex<Backend>>,
+        Uuid,
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (alice, bob) = (session(&tmp, "alice", 1), session(&tmp, "bob", 2));
+        let state = Arc::new(Mutex::new(Backend::default()));
+        let url = serve(state.clone()).await;
+        let gid = create(&client(), &url, &alice).await.unwrap();
+        let (link, _) = invite::create(&client(), &url, &bob).await.unwrap();
+        add(&client(), &url, &alice, gid, &parse_link(&link).unwrap())
+            .await
+            .unwrap();
+        crate::welcome::join_invited(&client(), &url, &bob)
+            .await
+            .unwrap();
+        crate::requests::accept(&client(), &url, &bob, gid)
+            .await
+            .unwrap();
+        state.lock().unwrap().group_epoch = 1;
+        (tmp, alice, bob, url, state, gid)
+    }
+
+    #[tokio::test]
+    async fn a_members_add_commit_is_applied_and_a_replay_is_refused() {
+        let (tmp, alice, bob, url, state, gid) = alice_and_bob().await;
+        let carol = session(&tmp, "carol", 3);
+        let (link, _) = invite::create(&client(), &url, &carol).await.unwrap();
+        add(&client(), &url, &alice, gid, &parse_link(&link).unwrap())
+            .await
+            .unwrap();
+        let commit = state.lock().unwrap().commit_bytes.last().unwrap().clone();
+        assert_eq!(
+            apply(&bob, gid, &commit).unwrap(),
+            Outcome::Applied {
+                added: 1,
+                removed: 0
+            }
+        );
+        assert_eq!(members_of(&bob, gid), Some(3));
+        // Replay: the epoch is past.
+        assert_eq!(apply(&bob, gid, &commit).unwrap(), Outcome::Refused);
+        assert_eq!(members_of(&bob, gid), Some(3));
+        // Garbage and unknown group.
+        assert_eq!(apply(&bob, gid, b"junk").unwrap(), Outcome::Refused);
+        assert_eq!(
+            apply(&bob, Uuid::new_v4(), &commit).unwrap(),
+            Outcome::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn a_remove_commit_for_this_device_deletes_its_group_state() {
+        let (tmp, alice, bob, url, state, gid) = alice_and_bob().await;
+        let carol = session(&tmp, "carol", 3);
+        let (link, _) = invite::create(&client(), &url, &carol).await.unwrap();
+        add(&client(), &url, &alice, gid, &parse_link(&link).unwrap())
+            .await
+            .unwrap();
+        let add_commit = state.lock().unwrap().commit_bytes.last().unwrap().clone();
+        assert!(matches!(
+            apply(&bob, gid, &add_commit).unwrap(),
+            Outcome::Applied { .. }
+        ));
+        state.lock().unwrap().group_epoch = 2;
+        let bob_key = LocalIdentity::load(&bob.store)
+            .unwrap()
+            .identity
+            .signer
+            .to_public_vec();
+        let hex: String = bob_key.iter().map(|b| format!("{b:02x}")).collect();
+        remove::remove(&client(), &url, &alice, gid, &hex)
+            .await
+            .unwrap();
+        let rm = state.lock().unwrap().commit_bytes.last().unwrap().clone();
+        let leaked = |s: &Session| {
+            let local = LocalIdentity::load(&s.store).unwrap();
+            let dump = mls_group::export_provider_state(&local.provider, 0).unwrap();
+            // The export writes keys as JSON byte arrays, so search for the label's decimal bytes.
+            let label = b"69,112,111,99,104,75,101,121,80,97,105,114,115";
+            dump.windows(label.len()).any(|w| w == label)
+        };
+        // Control: the marker is visible while Bob is a member.
+        assert!(leaked(&bob));
+        assert_eq!(apply(&bob, gid, &rm).unwrap(), Outcome::Evicted);
+        // Reloaded from the saved store: no leaf private keys of the left epochs remain.
+        assert!(!leaked(&bob));
+        assert_eq!(members_of(&bob, gid), None);
+        assert_eq!(members_of(&alice, gid), Some(2));
+    }
+
+    #[tokio::test]
+    async fn garbage_is_refused_without_touching_state() {
+        let (_tmp, _alice, bob, _url, _state, gid) = alice_and_bob().await;
+        assert_eq!(apply(&bob, gid, b"x").unwrap(), Outcome::Refused);
+    }
+}

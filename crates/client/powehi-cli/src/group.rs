@@ -24,6 +24,7 @@ use crate::identity::{IdentityError, LocalIdentity};
 use crate::invite::{self, CommitOutcome, InviteError, InviteLink};
 use crate::store::StoreError;
 
+pub mod commit;
 pub mod remove;
 
 /// Why `group add` did not (fully) succeed. Messages carry no secrets.

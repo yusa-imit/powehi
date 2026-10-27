@@ -39,6 +39,8 @@ pub struct Backend {
     pub group_epoch: u64,
     /// `expected_epoch` of every Commit posted.
     pub commits: Vec<u64>,
+    /// Wire bytes of every Commit posted, parallel to `commits`.
+    pub commit_bytes: Vec<Vec<u8>>,
     /// Envelopes per `GET /v1/messages` page; 0 means the real server's 64.
     pub page_limit: usize,
 }
@@ -125,6 +127,12 @@ fn handle(st: &mut Backend, method: &str, path: &str, caller: Uuid, body: &Value
         ("POST", ["v1", "messages", "commit"]) => {
             let expected = body["expected_epoch"].as_u64().unwrap();
             st.commits.push(expected);
+            let bytes = body["commit"].as_array().map(|a| {
+                a.iter()
+                    .filter_map(|b| b.as_u64().map(|b| b as u8))
+                    .collect()
+            });
+            st.commit_bytes.push(bytes.unwrap_or_default());
             match st.commit_status {
                 0 => respond(
                     200,

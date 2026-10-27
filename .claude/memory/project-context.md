@@ -1882,3 +1882,6 @@ cargo audit/deny clean (only #163 waiver). CI green, no bug issues. Added `group
 `group add --resume` kind gate in `settle_local_epoch` (record vs GroupContext, before any merge/Welcome). powehi-cli 442 tests green, clippy clean; crypto-reviewer needs-rework (ordering test) fixed. Carried: group commit allowlist with group receive, ack routing by record kind.
 
 - Stabilization 660 (PR pending): cargo audit/deny clean, CI green; added group resume NoSuchGroup/NotAGroup test. 442 powehi-cli lib tests pass.
+
+## Cycle 662 (FEATURE) — 8.17 slice l
+CLI `group::commit::apply` (group counterpart of `inbox/commit.rs`) + crypto-core `delete_inactive_group` (also deletes the previous-epoch EpochKeyPairs that openmls `delete` leaves behind). Not yet wired into the inbox. crypto-reviewer needs-rework fixed. Next: inbox wiring (ack routing keyed on record kind), group send/receive with MLS-leaf sender auth.

@@ -1292,6 +1292,31 @@ pub fn group_is_active(group: &MlsGroup) -> bool {
     group.is_active()
 }
 
+/// Deletes `group`'s MLS state (ratchet tree, epoch secrets, own leaf) from `provider`, for a
+/// device that was removed from the group (8.17): a removed device must not keep secrets of the
+/// epochs it left. Refuses a group that is still active (caller contract: only after
+/// [`group_is_active`] turned false).
+pub fn delete_inactive_group(
+    group: &mut MlsGroup,
+    provider: &impl OpenMlsProvider,
+) -> Result<(), MlsError> {
+    if group.is_active() {
+        return Err(MlsError::GroupCommitRefused);
+    }
+    use openmls_traits::storage::StorageProvider as _;
+    // openmls `delete` clears the epoch key pairs of the CURRENT epoch only; a merged
+    // self-Remove leaves the leaf's HPKE private keys under the previous one (RFC 9420 §16.6).
+    let prior = openmls::group::GroupEpoch::from(group.epoch().as_u64().saturating_sub(1));
+    let own_leaf = group.own_leaf_index().u32();
+    group
+        .delete(provider.storage())
+        .map_err(|_| MlsError::Persistence)?;
+    provider
+        .storage()
+        .delete_encryption_epoch_key_pairs(group.group_id(), &prior, own_leaf)
+        .map_err(|_| MlsError::Persistence)
+}
+
 /// Shared front half of [`process_incoming_commit`] and
 /// [`inspect_incoming_commit`]: deserialize, apply the `content_type` guard,
 /// run openmls's `process_message`, and hand back the resulting
