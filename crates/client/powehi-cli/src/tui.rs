@@ -19,6 +19,10 @@ use ratatui::widgets::{
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+pub mod input;
+pub mod paint;
+pub mod rows;
+
 use crate::conversation::Kind;
 
 /// Conversations listed (matches the store record cap).

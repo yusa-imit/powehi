@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 678 (2026-10-29, FEATURE) — 8.20 slice (b1): TUI terminal pieces (no crossterm)
+- `tui/input.rs` (bytes→Key, bounded+zeroized), `tui/paint.rs` (Buffer→ANSI, only CUP/SGR), `tui/rows.rs` (store→rows, fail-closed mark). Decision: raw termios via libc + own decoder instead of crossterm (no new dep). Slice (b2): raw-mode guard, event loop (read thread + ws wake), `powehi tui` subcommand, inbox/send/verify wiring. #208/#203/#166 still unanswered.
+
 ## Cycle 677 (2026-10-29, FEATURE) — 8.20 slice (a): TUI view-model + renderer (`tui.rs`)
 - ratatui 0.30 default-features=false (0.29 trips cargo-deny paste/lru). Slice (b): crossterm loop + `powehi tui` wiring. #208/#203/#166 still unanswered.
 
