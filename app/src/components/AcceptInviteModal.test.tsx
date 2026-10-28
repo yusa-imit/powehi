@@ -331,7 +331,7 @@ describe("AcceptInviteModal — PQ binding (§5.3 Phase B)", () => {
 			expect(screen.getByText(/encrypted channel established/i)).toBeInTheDocument(),
 		);
 		// PQ badge is shown with the binding hex value
-		expect(screen.getByText("PQ")).toBeInTheDocument();
+		expect(screen.getByText("PQ key check")).toBeInTheDocument();
 		expect(screen.getByText("c702693eff3c46bd")).toBeInTheDocument();
 	});
 
@@ -365,7 +365,7 @@ describe("AcceptInviteModal — PQ binding (§5.3 Phase B)", () => {
 			expect(screen.getByText(/encrypted channel established/i)).toBeInTheDocument(),
 		);
 		// No PQ badge — graceful degradation
-		expect(screen.queryByText("PQ")).not.toBeInTheDocument();
+		expect(screen.queryByText("PQ key check")).not.toBeInTheDocument();
 		// No pq_init message sent
 		expect(sendMessageSpy).not.toHaveBeenCalled();
 	});

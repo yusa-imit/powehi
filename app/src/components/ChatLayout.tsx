@@ -2158,7 +2158,7 @@ function ConversationHeader({
 							<Icon name="lock" size={11} color="#A8C8FF" />
 							{pqBindingHex && (
 								<span
-									title={`PQ binding: ${pqBindingHex}`}
+									title={`PQ key check (message keys are classical MLS): ${pqBindingHex}`}
 									style={{
 										fontSize: 9,
 										fontWeight: 600,
@@ -2170,7 +2170,7 @@ function ConversationHeader({
 										padding: "1px 5px",
 									}}
 								>
-									PQ
+									PQ key check
 								</span>
 							)}
 						</div>

@@ -364,7 +364,7 @@ export function AcceptInviteModal({
 								}}
 							>
 								<Icon name="lock" size={11} color="#A8C8FF" />
-								<span style={{ color: "#A8C8FF", fontWeight: 500 }}>PQ</span>
+								<span style={{ color: "#A8C8FF", fontWeight: 500 }}>PQ key check</span>
 								<span style={{ color: "var(--fg-3)", fontFamily: "var(--font-mono)" }}>
 									{pqBindingHex}
 								</span>
