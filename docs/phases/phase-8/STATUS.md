@@ -370,6 +370,8 @@ pointing here. Close the issue in the PR that finishes its item.
 
   Cycle 671 (slice q): `GroupCommitApplied` gains `added_keys` / `removed_keys` (signature keys, proposal order, removed read from the pre-merge roster; length check runs before the merge). Doc: the same key can be in both lists (RFC 9420 §12.2), apply removed first (§12.3). openmls 0.8.1 cannot build ReInit/PSK proposals, so the carried ReInit refusal test is not constructible. crypto-reviewer: needs-rework (check after merge, docs, ordering), fixed. Carried: `content_type` dispatch, RequiredCapabilities(0xF002), group PQ story (T6) + threat-model-checker record before closing 8.17.
 
+  Cycle 672 (slice r): `apply_group_commit` also checks, before the merge, that every inline Add leaf declares the 0xF002 kind capability (`adds_declare_group_kind`, unit-tested with plain/PQ/mixed/empty). Defense in depth only: openmls 0.8.1 valn0502 already refuses such an Add on both sides, so a negative end-to-end test cannot be built (crypto-reviewer: pass). Carried: `content_type` dispatch, group PQ story (T6) + threat-model-checker record before closing 8.17.
+
 ### Multi-device and recovery
 - [ ] 8.18 Recovery-phrase restore — `powehi restore` sets up a new machine from the
   recovery phrase: the MLS identity is phrase-derived, so the same signing key comes
