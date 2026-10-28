@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 675 (2026-10-29, FEATURE) — 8.19 slice (a): device-link design (prd §7A.4), need-human #208
+- 8.15 (#166), 8.17 (#203), 8.19 (#208) all wait on owner answers. Linked device needs its own signing key (RFC 9420 §7.3); proposal = link certificate signed by account key. Next unblocked: 8.20 TUI.
+
 ## Cycle 674 (2026-10-28, FEATURE) — 8.18 `powehi restore` shipped; 8.15 blocked on #166, 8.17 on #203
 auth::restore + crypto-core sign_recovery_challenge, prd §7A.2/§8.5 updated. 454 CLI + 172 core tests green. Next: 8.19 multi-device (write device-link flow in prd first; needs 8.17 remove for same-key leaf replacement).
 

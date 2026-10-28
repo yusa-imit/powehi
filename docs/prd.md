@@ -1324,6 +1324,60 @@ crates/client/
 
 - **피어 credential 기록 (8.10):** `conv-*` record에 상대 leaf의 BasicCredential identity(`SHA-256(phrase)[..16]`, 계정 단위 공개 label)를 저장한다. creator는 링크 해시로 pin된 KeyPackage에서, joiner는 Welcome tree에서 가져온다(후자는 인증되지 않음, §8.3). 이 label은 self-asserted·복사 가능하고 같은 phrase의 모든 device가 같은 값이므로 인증 입력도 device 식별자도 아니다. 서버가 보고하는 Welcome `sender`와는 비교하지 않는다(인증된 device_id ↔ credential 바인딩이 없음, §3.3 cycle 456; plan 문구에서 의도적으로 벗어남). 신뢰 근거는 서명 키 기반 Safety Number(§5.6)뿐이며, `verified-*` record가 없으면 `send`/`chat`/`conversations`가 unverified를 표시한다(전송은 막지 않음; 8.16은 CHANGED만 차단한다). 사용할 수 있는 credential이 없는 Welcome은 join·ack하지 않는다. 8.10 이전 record의 값은 `None`(알 수 없음)이며 일치로 취급하지 않는다. 서버에 보이는 정보는 변하지 않는다.
 
+### 7A.4 디바이스 링크 설계 (Phase 8 · 8.19, 설계 슬라이스 — 코드 없음)
+
+**문제.** 지금 한 계정의 MLS 서명 키는 복구 문구에서 결정적으로 유도되므로(§8.5) 계정당 하나다.
+RFC 9420 §7.3은 한 그룹의 leaf 서명 키 유일성을 요구하므로, 같은 키를 가진 두 번째 디바이스는
+같은 그룹에 들어갈 수 없다(복원 디바이스가 옛 leaf를 같은 Commit에서 Remove해야 하는 이유, §8.5).
+따라서 링크된 디바이스는 **자기 서명 키를 새로 생성**해야 하고, 상대방은 그 키가 같은 계정의
+것임을 서버 말이 아닌 암호학적으로 확인해야 한다.
+
+**제안 (미확정, 아래 need-human #208 결정 후 코드; threat-model-checker: yellow, 아래 수정 반영):**
+
+1. **링크 인증서.** 기존 디바이스 A(계정 identity 키 `IK`를 가짐)가 새 디바이스 B의 서명 공개 키
+   `DK_B`에 대해 `Sign_IK(0x01 ‖ "powehi-device-link-v1" ‖ label(16) ‖ DK_B(32) ‖ not_after(u64 BE))`를
+   만든다(고정 길이, 버전 바이트, `verify_strict`; `IK`의 다른 서명 도메인(MLS SignWithLabel,
+   `powehi-kem-ek-v1`)과 prefix가 겹치지 않음을 crypto-reviewer가 확인). `not_after`는 필수이며
+   상한이 있고 주입된 clock으로 Add/Update 시점에 검사한다. B는 `IK`도 복구 문구도 받지 않으므로
+   다른 디바이스를 링크할 수 없다. 인증서는 B의 KeyPackage LeafNode extension에 싣는다.
+   **서버는 인증서를 검증할 수 있다**(`IK` 공개 키가 A의 KeyPackage에 평문, §3.3): 디바이스–계정
+   연결이 서버 주장에서 제3자에게 보일 수 있는 서명 증거가 된다(§3.3에 기록할 메타데이터).
+2. **링크 흐름.** B: 로컬에서 `DK_B` 생성 → `powehi link request`가 CSPRNG ≥128비트 일회용 코드를
+   표시. A: `powehi link approve`에 코드를 TTY로 입력, `DK_B` 지문을 대조 표시하고 사용자 확인
+   (필수, 비대화형 실행 거부) 후 서명. 전달 채널은 서버 경유 봉투(lookup id와 envelope key는
+   서로 다른 HKDF 라벨, AAD에 방향·버전, 짧은 TTL, 1회 소비; 서버는 lookup id·시각·IP 상관을 봄)
+   또는 오프라인 파일/QR(메타데이터 없음) 중 선택(결정 항목). B가 서버 세션을 얻는 방법은
+   미정이다(처음 보는 device_id의 login은 지금 `recovery_proof`가 필요, §8.5) — 구현 전 server
+   스펙을 먼저 쓴다.
+3. **그룹 편입.** A가 소속 대화마다 B를 Add하는 Commit을 보낸다(8.14, 8.17 `stage_group_add`).
+   1:1은 Kind 모델 확장 필요(결정 항목). B는 Welcome으로 합류하고 과거 메시지는 받지 못한다.
+   자기 디바이스 추가의 대상은 **로컬 linked-device registry**이며 서버 `devices` 목록은 신뢰하지
+   않는다. 계정 X의 디바이스 leaf를 Add/Remove하는 Commit은 계정 X의 leaf가 보낸 것만 받는다(pair
+   필수, group은 8.17 정책과 함께 결정). B는 committer leaf가 자기 `IK`로 인증된 Welcome만 자동 join하고
+   나머지는 8.12 request로 간다.
+4. **상대방 검증 (fail-closed, verify 상태와 무관).** `IK` pin을 명시적으로 정의한다: pair는 join 시점에
+   pin(creator는 hash-pin된 KeyPackage, joiner는 Welcome tree; TOFU, §8.3 한계 그대로), group은 멤버별
+   `IK` pin record를 새로 둔다. credential label은 일관성 검사일 뿐 인증 입력이 아니다. pin이 없으면
+   인증서 링크는 Refused. 유효한 leaf는 `signature_key == pinned IK` 이거나 `pinned IK`의 유효
+   인증서가 정확히 그 `signature_key`를 바인딩하는 경우뿐이다. 그 외 Add/Update/update-path leaf는
+   merge 전에 Refused하고 ack하지 않는다(CHANGED로 격하하지 않음: unverified 대화에서는 경고 없이
+   수락되는 downgrade가 되므로). self-Update(8.15)는 같은 인증서와 서명 키를 유지해야 하며 다시
+   검사한다. CHANGED는 `IK` 자체가 바뀐 경우에만 쓴다.
+5. **Safety Number와 탐지.** 번호는 `IK`들로 계산해 디바이스 추가로 변하지 않는다. 이는 현재의
+   "leaf 하나 추가 = 번호 변경" 탐지를 없애므로 보상 통제가 필수다: (i) 상대에게 "X의 디바이스 집합이
+   바뀜" 알림과 `verify`의 계정별 디바이스 지문 목록, (ii) 자기 디바이스는 로컬 registry에 없는 leaf가
+   자기 `IK` 인증서를 달고 나타나면 경보.
+6. **한도·해지.** 디바이스 정원은 서버의 `MAX_DEVICES_PER_USER`(10). 해지는 `DELETE
+   /v1/auth/devices/:id`에 더해 모든 대화에서 해당 leaf를 Remove하는 Commit이 필요하다(8.17
+   `stage_group_remove`). 서버 해지는 요청이지 증명이 아니다(§5.4 item 5).
+
+**잔여 위험 (새로 생기는 위험):** (a) `IK`는 복구 문구에 고정되어 회전할 수 없다. `IK` 또는
+문구+비밀번호가 유출되면 공격자가 Safety Number 변화 없이 디바이스를 링크해 남을 수 있고(현재는
+RFC 9420 §7.3 때문에 같은 키의 두 번째 leaf가 불가능해 Remove로 드러남), 복구는 새 계정뿐이다.
+위 5번 보상 통제로 탐지만 한다. (b) 인증서 폐기 목록이 없다: 해지된 B는 `not_after`까지 다시 Add될
+수 있다(registry 기준 추가와 committer 규칙으로 완화; `IK` 서명 revocation statement는 열린 질문).
+(c) 승인 UX·전달 채널·정원·`not_after` 상한, (d) pair Kind 확장 vs group 승격 — need-human #208.
+
 ---
 
 ## 8. 연락처 발견 (Contact Discovery)

@@ -386,6 +386,11 @@ pointing here. Close the issue in the PR that finishes its item.
   device-link flow in prd before the code, and open `need-human` issues for open
   policy calls (approval UX, device cap). Depends on 8.14 and 8.17.
   crypto-reviewer + threat-model-checker.
+  Slice (a) shipped (cycle 675): design only. prd §7A.4 (a linked device needs its own signing key
+  because of RFC 9420 §7.3; link certificate signed by the account key, peers verify it against the
+  pinned key, Safety Number stays stable). Policy calls in need-human #208; code slices wait for it.
+  8.15 (#166), 8.17 (#203) and 8.19 are all blocked on owner decisions: the next cycle with no
+  answers should take 8.20 (TUI), which does not depend on them.
 
 ### TUI and media
 - [ ] 8.20 Full-screen TUI — `powehi tui` (`ratatui`) on top of the same lib:
