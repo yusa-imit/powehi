@@ -4176,6 +4176,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "dirs",
+ "ed25519-dalek",
  "futures-util",
  "hkdf",
  "hmac 0.12.1",

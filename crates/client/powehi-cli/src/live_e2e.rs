@@ -28,6 +28,7 @@ fn prompter(handle: &str, password: &str) -> ScriptedPrompter {
         shown: Vec::new(),
         upgrade: false,
         asked_upgrade: 0,
+        phrases: vec![],
     }
 }
 

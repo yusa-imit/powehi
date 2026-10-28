@@ -375,11 +375,12 @@ pointing here. Close the issue in the PR that finishes its item.
   Cycle 673 (slice s): group PQ story recorded (threat-model-checker: yellow). Groups AND pairs are classical MLS for message keys (the pair ML-KEM secret only derives a comparison string); prd §5.3B now says so, `group create/add/accept` print "classical MLS, not post-quantum", owner decision on the PSK mitigation opened as need-human, web "PQ" badge as a bug issue. `content_type` dispatch dropped: crypto-core already rejects a mislabeled content type before decrypting, so the DS label cannot cause more than the server can already do (drop). 8.17 stays open until the owner picks the PQ option or accepts the interim.
 
 ### Multi-device and recovery
-- [ ] 8.18 Recovery-phrase restore — `powehi restore` sets up a new machine from the
+- [x] 8.18 Recovery-phrase restore — `powehi restore` sets up a new machine from the
   recovery phrase: the MLS identity is phrase-derived, so the same signing key comes
   back, and a new device is registered. Old messages are not recoverable (forward
   secrecy); say so in the command output. If the server lacks a recovery route,
   spec it in prd first. crypto-reviewer + threat-model-checker.
+  Shipped cycle 674: `powehi restore` (handle, password, 24-word phrase from the TTY; OPAQUE + `recovery_proof` with a fresh client-chosen device id; account record and signing key saved before the POST; profile removed only on a 4xx rejection). crypto-core `sign_recovery_challenge`. crypto-reviewer: needs-rework (fmt, orphan-device ordering) fixed. threat-model-checker: yellow, prd §7A.2/§8.5 updated (restore is not compromise recovery; same signing key means the old leaf must be removed in the same Commit before the restored device joins a group; 10-device cap, no CLI revoke). Carried: WASM `mls_sign_recovery_challenge` could use the new helper; CLI device revoke (8.19).
 - [ ] 8.19 Multi-device — link a second device to an account (the existing device
   approves; the new device is added to every conversation by Commit). Write the
   device-link flow in prd before the code, and open `need-human` issues for open

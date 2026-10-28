@@ -1256,6 +1256,7 @@ crates/client/
 |---|---|---|
 | `powehi status` | `/health`, `/v1/region/detect` | §7.6 |
 | `powehi register` / `login` | OPAQUE, 비밀번호는 TTY echo off로 입력 | §5.5 |
+| `powehi restore` | 빈 profile에서 핸들·비밀번호·복구 문구(모두 TTY echo off)로 OPAQUE + 복구 증명 → 새 디바이스 발급. 디바이스 정원 10개(옛 디바이스 포함, 초과 시 401). 서버가 디바이스를 발급한 뒤 응답이 유실되면 고아 디바이스가 남을 수 있음(서버 거절(4xx) 시에만 빈 profile로 되돌림; 그 외 실패는 profile을 남기며 `login`으로 마무리) | §8.5 |
 | `powehi invite create` / `redeem` | 초대 링크 → 1:1 그룹 생성, Welcome | §8.3, §4.2 |
 | `powehi send <대화> [--json]` | 본문은 stdin에서만 읽음 (argv 금지) | §7A.3 |
 | `powehi inbox` | `/v1/messages` 수신 → 복호화 → 저장 → ack | §11.1 |
@@ -1398,7 +1399,7 @@ fragment의 해시와 비교한다 — 일치하지 않으면 `mlsCreateGroup`/`
 - **도전-응답 서명:** 복원 로그인 시 서버가 `login_init`에서 발급한 1회용 `login_nonce`(UUID 문자열)에 대해, 클라이언트가 `powehi-recovery-auth-v1` 키로 `b"powehi-recovery-challenge-v1" ‖ 0x00 ‖ login_nonce_utf8` 메시지에 서명(도메인 분리 라벨 + NUL 구분자로 서버가 임의로 선택한 nonce에 대한 cross-protocol 서명 confusion을 방지). 서버는 `recovery_pubkey`로 `verify_strict`(RFC 8032 비-정규 인코딩 거부) 검증.
 - **2요소 게이팅 (권한 상승 없음):** 이 경로는 OPAQUE 로그인(비밀번호)이 먼저 성공한 뒤에만 도달하며(`login_finish` 내부, 미지의 `device_id` + `recovery_proof` 존재 시), 복구 문구 서명이 추가로 필요함 — 즉 기존 로그인보다 요구 조건이 하나 더 추가되는 것이지, 어떤 기존 인증 요소도 우회하지 않음.
 - **오라클 방지:** 계정 미등록(`recovery_pubkey = NULL`)·서명 malformed·서명 검증 실패·디바이스 정원 초과 등 모든 실패 모드가 동일한 `Unauthorized`로 수렴함(비인증 호출자에게 계정 상태를 구분시키지 않음). 미등록 계정도 고정된 더미 공개 키로 동일하게 `verify_strict`를 실행해 타이밍 오라클을 차단함.
-- **그룹 상태에는 영향 없음:** 복원된 디바이스는 새 MLS credential로 `devices` 테이블에만 추가되며, 어떤 그룹 멤버십도 자동으로 얻지 않음 — 기존 그룹에 재합류하려면 기존 멤버의 MLS Commit이 필요하고, identity 키 변경은 §5.6 Safety Number 경고를 발생시킴(포워드 시크러시/PCS 영향 없음).
+- **그룹 상태:** 복원 디바이스는 같은 phrase 파생 서명 키·credential label을 가지며 어떤 그룹에도 속하지 않는다(과거 메시지 복원 불가, forward secrecy 유지). Safety Number는 변하지 않으므로 경고가 없다. 옛 leaf가 남은 그룹에는 RFC 9420 서명 키 유일성 때문에 그 leaf를 같은 Commit에서 Remove해야만 추가된다(8.19). 복원은 침해 복구가 아니다: identity 키는 phrase에 고정되고 옛 디바이스는 revoke되지 않으므로, 옛 디바이스와 비밀번호를 가진 공격자는 같은 Safety Number로 계속 행동할 수 있다.
 
 ---
 

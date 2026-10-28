@@ -44,6 +44,7 @@ futures-util = { version = "0.3", default-features = false, features = ["sink"] 
 [dev-dependencies]
 opaque-ke = { workspace = true, features = ["ristretto255", "argon2", "serde", "std"] }
 tempfile = { workspace = true }
+ed25519-dalek = { workspace = true }
 proptest = { workspace = true }
 openmls = { workspace = true }
 # cert generation for pin tests only
