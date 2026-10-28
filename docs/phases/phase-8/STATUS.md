@@ -366,6 +366,8 @@ pointing here. Close the issue in the PR that finishes its item.
 
   Cycle 668 (slice o): stand-alone Proposals in group conversations are acked after the junk grace instead of being held forever (the group commit allowlist takes only inline Add/Remove, so a stored Proposal is never consumed). Test updated. Closes the carried "by-reference Proposal storage": RFC 9420 §12.4 resolves references from the receiver's own cache and `apply_group_commit` refuses non-inline proposals; if by-reference support is ever added, Proposals must be stored before this ack. crypto-reviewer: pass. Carried: crypto-core test that `apply_group_commit` refuses a by-reference Commit, `content_type` dispatch, ReInit refusal test, RequiredCapabilities(0xF002), removed/added keys in `GroupCommitApplied`, group PQ story (T6) + threat-model-checker record before closing 8.17.
 
+  Cycle 669 (slice p): crypto-core test `apply_group_commit_refuses_a_by_reference_commit` (a Commit referencing a Proposal the receiver never saw maps to `GroupCommitRefused`, nothing merged). Test only, no code change. Carried: the slice (o) list minus this.
+
 ### Multi-device and recovery
 - [ ] 8.18 Recovery-phrase restore — `powehi restore` sets up a new machine from the
   recovery phrase: the MLS identity is phrase-derived, so the same signing key comes
