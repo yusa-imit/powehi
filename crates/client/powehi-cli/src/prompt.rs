@@ -41,6 +41,8 @@ pub trait Prompter {
     /// Asks whether to convert a profile in the pre-`PHS3` store format (8.8). `Ok(false)` or an
     /// error leaves it untouched; there is no non-interactive way to say yes.
     fn confirm_store_upgrade(&mut self) -> Result<bool, PromptError>;
+    /// The existing 24-word recovery phrase, echo off (`restore`, 8.18). It never reaches argv.
+    fn recovery_phrase(&mut self) -> Result<Zeroizing<String>, PromptError>;
 }
 
 /// Reads from `/dev/tty`.
@@ -173,6 +175,11 @@ impl Prompter for TtyPrompter {
         write!(tty, "\x1b[2J\x1b[3J\x1b[H").map_err(|_| PromptError::Io)
     }
 
+    fn recovery_phrase(&mut self) -> Result<Zeroizing<String>, PromptError> {
+        let mut tty = open_tty()?;
+        read_secret(&mut tty, "Recovery phrase: ")
+    }
+
     fn confirm_store_upgrade(&mut self) -> Result<bool, PromptError> {
         let mut tty = open_tty()?;
         write!(
@@ -202,6 +209,8 @@ pub struct ScriptedPrompter {
     /// Answer to `confirm_store_upgrade`; `asked_upgrade` counts the questions.
     pub upgrade: bool,
     pub asked_upgrade: usize,
+    /// Answers to `recovery_phrase`, consumed front to back.
+    pub phrases: Vec<String>,
 }
 
 #[cfg(test)]
@@ -220,6 +229,13 @@ impl Prompter for ScriptedPrompter {
     fn show_recovery_phrase(&mut self, phrase: &str) -> Result<(), PromptError> {
         self.shown.push(phrase.to_owned());
         Ok(())
+    }
+
+    fn recovery_phrase(&mut self) -> Result<Zeroizing<String>, PromptError> {
+        if self.phrases.is_empty() {
+            return Err(PromptError::Empty);
+        }
+        Ok(Zeroizing::new(self.phrases.remove(0)))
     }
 
     fn confirm_store_upgrade(&mut self) -> Result<bool, PromptError> {

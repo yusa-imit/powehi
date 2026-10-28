@@ -42,6 +42,8 @@ pub enum Command {
     Register(AuthArgs),
     /// Log in (password read from the TTY).
     Login(AuthArgs),
+    /// Set up this machine from the recovery phrase (handle, password and phrase from the TTY).
+    Restore(AuthArgs),
     /// Create or redeem invite links.
     #[command(subcommand)]
     Invite(InviteCommand),
@@ -314,6 +316,7 @@ impl Command {
             Command::Status(_) => "status",
             Command::Register(_) => "register",
             Command::Login(_) => "login",
+            Command::Restore(_) => "restore",
             Command::Invite(InviteCommand::Create { .. }) => "invite create",
             Command::Invite(InviteCommand::Redeem { .. }) => "invite redeem",
             Command::Group(GroupCommand::Create { .. }) => "group create",

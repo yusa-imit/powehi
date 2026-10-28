@@ -166,6 +166,14 @@ struct LoginFinishReq<'a> {
     opaque_ke3: &'a [u8],
     login_nonce: &'a str,
     device_id: Uuid,
+    /// Only `restore` sends it (prd §8.5): the phrase-derived signature that mints a new device.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery_proof: Option<RecoveryProofReq<'a>>,
+}
+#[derive(Serialize)]
+struct RecoveryProofReq<'a> {
+    mls_credential: &'a [u8],
+    signature: &'a [u8],
 }
 
 async fn post_json<B: Serialize, R: DeserializeOwned>(
@@ -442,6 +450,133 @@ pub async fn login(
     .await
 }
 
+/// Words in a Powehi recovery phrase (256-bit entropy).
+const PHRASE_WORDS: usize = 24;
+
+/// Sets up a new machine from the recovery phrase (8.18, prd §8.5): OPAQUE login with the
+/// password, then `login/finish` with a fresh device id and a phrase-signed proof so the server
+/// mints that device. The MLS signing key is phrase-derived, so the identity comes back; old
+/// messages do not (forward secrecy). Needs an empty profile; a failure leaves it empty.
+pub async fn restore(
+    client: &Client,
+    server: &Url,
+    paths: &ProfilePaths,
+    prompter: &mut dyn Prompter,
+) -> Result<Session, AuthError> {
+    if profile_has_data(paths) {
+        return Err(AuthError::ProfileInUse);
+    }
+    let raw_handle = prompter.handle()?;
+    let hash = handle_hash(credentials::trim_handle(&raw_handle));
+    let password = prompter.password(false)?;
+    let typed = prompter.recovery_phrase()?;
+    let mnemonic = recovery::parse_phrase(&typed)?;
+    if typed.split_whitespace().count() != PHRASE_WORDS {
+        return Err(AuthError::Crypto);
+    }
+    drop(typed);
+    let seed = recovery::mnemonic_to_seed(&mnemonic);
+    let mut phrase = Zeroizing::new(String::with_capacity(256));
+    write!(phrase, "{mnemonic}").map_err(|_| AuthError::Crypto)?;
+    drop(mnemonic);
+    let (auth_priv, _auth_pub) = recovery::derive_recovery_auth_keypair(&seed[..])?;
+    let (signing_priv, _signing_pub) = recovery::derive_signing_keypair(&seed[..])?;
+    let label = mls_label(&phrase);
+    let kek = RecoveryKek::from_seed(&seed[..])?;
+    drop(phrase);
+    drop(seed);
+
+    let hs = login_with_candidates(client, server, &hash, &password).await?;
+    // Takes the profile lock; re-check emptiness while holding it.
+    let store = ProfileStore::open(paths, &hs.export_key)?;
+    if !store.names()?.is_empty() {
+        return Err(AuthError::ProfileInUse);
+    }
+    let done = restore_finish(
+        client,
+        server,
+        &store,
+        &hs,
+        &auth_priv,
+        &signing_priv,
+        &label,
+        &kek,
+    )
+    .await;
+    match done {
+        Ok((user_id, device_id, token)) => Ok(Session {
+            user_id,
+            device_id,
+            store,
+            token,
+        }),
+        Err(e) => {
+            // The server may have minted the device (lost response, local save failure): keep the
+            // profile, it holds the chosen device id so `login` can finish; delete the profile
+            // only on a clear 4xx rejection, when nothing was minted.
+            if matches!(
+                e,
+                AuthError::HttpStatus(400..=499) | AuthError::InvalidCredentials
+            ) {
+                let _ = fs::remove_dir_all(&paths.dir);
+                drop(store);
+            }
+            Err(e)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn restore_finish(
+    client: &Client,
+    server: &Url,
+    store: &ProfileStore,
+    hs: &Handshake,
+    auth_priv: &[u8; 32],
+    signing_priv: &[u8; 32],
+    label: &[u8],
+    kek: &RecoveryKek,
+) -> Result<(Uuid, Uuid, Zeroizing<String>), AuthError> {
+    let nonce = &hs.init.login_nonce;
+    let visible = |s: &str| s.bytes().all(|b| (0x21..=0x7e).contains(&b));
+    if nonce.is_empty() || nonce.len() > 128 || !visible(nonce) {
+        return Err(AuthError::BadResponse);
+    }
+    store.add_recovery_wrap(kek)?;
+    let device_id = Uuid::new_v4();
+    let signature = recovery::sign_recovery_challenge(auth_priv, nonce.as_bytes());
+    let user_id = hs.init.user_id;
+    let account = Account {
+        version: ACCOUNT_VERSION,
+        user_id,
+        device_id,
+        mls_label: label.to_vec(),
+    };
+    let json = serde_json::to_vec(&account).map_err(|_| AuthError::Crypto)?;
+    store.put(ACCOUNT_RECORD, &json)?;
+    store.put(MLS_SIGNING_RECORD, signing_priv)?;
+    let token: String = post_json(
+        client,
+        server,
+        "/v1/auth/login/finish",
+        &LoginFinishReq {
+            opaque_ke3: &hs.ke3,
+            login_nonce: nonce,
+            device_id,
+            recovery_proof: Some(RecoveryProofReq {
+                mls_credential: label,
+                signature: &signature,
+            }),
+        },
+    )
+    .await?;
+    if token.is_empty() || token.len() > 4096 || !visible(&token) {
+        return Err(AuthError::BadResponse);
+    }
+    let token = Zeroizing::new(token);
+    Ok((user_id, device_id, token))
+}
+
 /// `DELETE /v1/auth/session`: asks the server to forget this session's bearer token (8.4).
 /// The server answers 204 even for a token it no longer knows, so a retry is harmless.
 pub async fn revoke_session(
@@ -552,6 +687,7 @@ async fn finish_login(
             opaque_ke3: &hs.ke3,
             login_nonce: &hs.init.login_nonce,
             device_id,
+            recovery_proof: None,
         },
     )
     .await?;
@@ -610,6 +746,8 @@ mod tests {
         pending_reg: HashMap<Uuid, Vec<u8>>,
         pending_login: HashMap<String, ServerLogin<Cs>>,
         recovery_pubkeys: Vec<Vec<u8>>,
+        /// Device ids minted through a verified `recovery_proof`, with the proof's credential.
+        restored: Vec<(Uuid, Vec<u8>)>,
         credentials: Vec<Vec<u8>>,
         bodies: Vec<String>,
         finish_status: u16,
@@ -754,6 +892,20 @@ mod tests {
                 let state = users.pending_login.remove(nonce).unwrap();
                 let fin =
                     CredentialFinalization::<Cs>::deserialize(&bytes(body, "opaque_ke3")).unwrap();
+                if let Some(proof) = body.get("recovery_proof").filter(|p| !p.is_null()) {
+                    let sig = bytes(proof, "signature");
+                    let pk: [u8; 32] = users.recovery_pubkeys.last().unwrap()[..]
+                        .try_into()
+                        .unwrap();
+                    let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk).unwrap();
+                    let sig = ed25519_dalek::Signature::from_slice(&sig).unwrap();
+                    let msg = recovery::recovery_challenge_message(nonce.as_bytes());
+                    if vk.verify_strict(&msg, &sig).is_err() {
+                        return (401, serde_json::Value::Null);
+                    }
+                    let dev: Uuid = serde_json::from_value(body["device_id"].clone()).unwrap();
+                    users.restored.push((dev, bytes(proof, "mls_credential")));
+                }
                 match state.finish(fin, ServerLoginParameters::default()) {
                     Ok(_) => (200, serde_json::json!(TOKEN)),
                     Err(_) => (401, serde_json::Value::Null),
@@ -791,6 +943,7 @@ mod tests {
             shown: vec![],
             upgrade: false,
             asked_upgrade: 0,
+            phrases: vec![],
         }
     }
 
@@ -868,6 +1021,72 @@ mod tests {
             !contains(user.to_string().as_bytes()),
             "ids are encrypted too"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restore_on_a_new_machine_brings_back_the_identity() {
+        let m = mock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let client = crate::status::http_client().unwrap();
+        let mut pr = prompter("correct horse battery");
+        let old = register(&client, &m.url, &paths(&tmp, "old"), &mut pr)
+            .await
+            .unwrap();
+        let phrase = pr.shown[0].clone();
+        let (user, old_device) = (old.user_id, old.device_id);
+        let old_key = old.store.get(MLS_SIGNING_RECORD).unwrap().unwrap();
+        drop(old);
+
+        // Wrong phrase: the server refuses the proof; the profile stays empty.
+        let other = recovery::generate_mnemonic().unwrap().to_string();
+        let new = paths(&tmp, "new");
+        let mut pr = prompter("correct horse battery");
+        pr.phrases = vec![other];
+        assert!(restore(&client, &m.url, &new, &mut pr).await.is_err());
+        assert!(
+            !profile_has_data(&new),
+            "a failed restore leaves nothing behind"
+        );
+        // Malformed phrase: refused before any network call.
+        let mut pr = prompter("correct horse battery");
+        pr.phrases = vec!["not a phrase".into()];
+        assert!(matches!(
+            restore(&client, &m.url, &new, &mut pr).await,
+            Err(AuthError::Crypto)
+        ));
+        assert!(!profile_has_data(&new));
+
+        let mut pr = prompter("correct horse battery");
+        pr.phrases = vec![phrase.clone()];
+        let s = restore(&client, &m.url, &new, &mut pr).await.unwrap();
+        assert_eq!(s.user_id, user);
+        assert_ne!(s.device_id, old_device, "a new device is minted");
+        assert!(pr.shown.is_empty(), "no phrase is shown on restore");
+        assert_eq!(
+            s.store.get(MLS_SIGNING_RECORD).unwrap().unwrap(),
+            old_key,
+            "same phrase-derived signing key"
+        );
+        let acct = load_account(&s.store).unwrap();
+        assert_eq!((acct.user_id, acct.device_id), (user, s.device_id));
+        let (device, cred) = m.users.lock().unwrap().restored.last().cloned().unwrap();
+        assert_eq!((device, cred), (s.device_id, mls_label(&phrase)));
+        drop(s);
+        // The restored profile logs in normally and the phrase also reopens its store.
+        let mut pr = prompter("correct horse battery");
+        let again = login(&client, &m.url, &new, &mut pr).await.unwrap();
+        assert_eq!(again.user_id, user);
+        drop(again);
+        let seed = recovery::mnemonic_to_seed(&recovery::parse_phrase(&phrase).unwrap());
+        let kek = RecoveryKek::from_seed(&seed[..]).unwrap();
+        assert!(ProfileStore::open_with_recovery(&new, &kek).is_ok());
+        // A used profile is never overwritten.
+        let mut pr = prompter("correct horse battery");
+        pr.phrases = vec![phrase];
+        assert!(matches!(
+            restore(&client, &m.url, &new, &mut pr).await,
+            Err(AuthError::ProfileInUse)
+        ));
     }
 
     /// Registers `handle` with `raw` exactly as typed, the way pre-8.6 clients did.

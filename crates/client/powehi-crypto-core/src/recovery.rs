@@ -213,6 +213,23 @@ pub fn recovery_challenge_message(login_nonce: &[u8]) -> Vec<u8> {
     msg
 }
 
+/// Sign the §8.5 recovery challenge for `login_nonce` with the recovery-auth private key
+/// (the output of [`derive_recovery_auth_keypair`]). Returns the 64-byte Ed25519 signature
+/// over [`recovery_challenge_message`]; same construction as the WASM `mls_sign_recovery_challenge`.
+pub fn sign_recovery_challenge(auth_private: &[u8; 32], login_nonce: &[u8]) -> [u8; 64] {
+    use ed25519_dalek::Signer;
+    assert!(!login_nonce.is_empty(), "challenge nonce must not be empty");
+    let key = ed25519_dalek::SigningKey::from_bytes(auth_private);
+    let sig = key
+        .sign(&recovery_challenge_message(login_nonce))
+        .to_bytes();
+    assert!(
+        sig.iter().any(|b| *b != 0),
+        "signature must not be all zero"
+    );
+    sig
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,6 +443,24 @@ mod tests {
     }
 
     // ── §8.5 recovery login-challenge signature ───────────────────────────────
+
+    /// The helper's signature verifies strictly against the recovery-auth public key, and not
+    /// against another nonce or the MLS signing key.
+    #[test]
+    fn sign_recovery_challenge_verifies_only_for_its_nonce_and_key() {
+        let seed = [7u8; 64];
+        let (auth_priv, auth_pub) = derive_recovery_auth_keypair(&seed).unwrap();
+        let (_, sign_pub) = derive_signing_keypair(&seed).unwrap();
+        let sig = sign_recovery_challenge(&auth_priv, b"nonce-1");
+        let sig = ed25519_dalek::Signature::from_bytes(&sig);
+        let msg = recovery_challenge_message(b"nonce-1");
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(&auth_pub).unwrap();
+        assert!(vk.verify_strict(&msg, &sig).is_ok());
+        let other = recovery_challenge_message(b"nonce-2");
+        assert!(vk.verify_strict(&other, &sig).is_err());
+        let sk = ed25519_dalek::VerifyingKey::from_bytes(&sign_pub).unwrap();
+        assert!(sk.verify_strict(&msg, &sig).is_err());
+    }
 
     /// The signed-message construction is deterministic and matches the exact
     /// documented wire layout: DOMAIN || 0x00 || nonce.

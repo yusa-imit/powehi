@@ -123,9 +123,11 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
     match args.command {
         cli::Command::Status(a) => run_status(&args.server, a.json),
         #[cfg(unix)]
-        cli::Command::Register(ref a) => run_auth(&args.server, &paths, true, a.json),
+        cli::Command::Register(ref a) => run_auth(&args.server, &paths, AuthKind::Register, a.json),
         #[cfg(unix)]
-        cli::Command::Login(ref a) => run_auth(&args.server, &paths, false, a.json),
+        cli::Command::Login(ref a) => run_auth(&args.server, &paths, AuthKind::Login, a.json),
+        #[cfg(unix)]
+        cli::Command::Restore(ref a) => run_auth(&args.server, &paths, AuthKind::Restore, a.json),
         #[cfg(unix)]
         cli::Command::Invite(ref cmd) => run_invite(&args.server, &paths, cmd),
         #[cfg(unix)]
@@ -262,21 +264,28 @@ fn runtime() -> Result<tokio::runtime::Runtime, CliError> {
         .map_err(|_| CliError::Runtime)
 }
 
-/// `register` / `login`: prompts on the TTY, talks OPAQUE to the server, prints only ids.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AuthKind {
+    Register,
+    Login,
+    Restore,
+}
+
+/// `register` / `login` / `restore`: prompts on the TTY, talks OPAQUE to the server, prints only ids.
 #[cfg(unix)]
 fn run_auth(
     server: &url::Url,
     paths: &profile::ProfilePaths,
-    register: bool,
+    kind: AuthKind,
     json: bool,
 ) -> Result<(), CliError> {
     let rt = runtime()?;
     let client = status::http_client()?;
     let mut prompter = prompt::TtyPrompter;
-    let session = if register {
-        rt.block_on(auth::register(&client, server, paths, &mut prompter))?
-    } else {
-        rt.block_on(auth::login(&client, server, paths, &mut prompter))?
+    let session = match kind {
+        AuthKind::Register => rt.block_on(auth::register(&client, server, paths, &mut prompter))?,
+        AuthKind::Login => rt.block_on(auth::login(&client, server, paths, &mut prompter))?,
+        AuthKind::Restore => rt.block_on(auth::restore(&client, server, paths, &mut prompter))?,
     };
     let session = LoggedIn {
         session,
@@ -287,7 +296,7 @@ fn run_auth(
     let uploaded = rt.block_on(identity::ensure_key_packages(&client, server, &session))?;
     write_auth_report(
         &mut std::io::stdout().lock(),
-        register,
+        kind,
         session.device_id,
         uploaded,
         json,
@@ -299,7 +308,7 @@ fn run_auth(
 /// number of KeyPackages uploaded; no token or password material).
 fn write_auth_report(
     out: &mut impl std::io::Write,
-    register: bool,
+    kind: AuthKind,
     device: uuid::Uuid,
     uploaded: u64,
     json: bool,
@@ -310,11 +319,19 @@ fn write_auth_report(
             serde_json::json!({ "device": device.to_string(), "key_packages_uploaded": uploaded });
         return writeln!(out, "{v}");
     }
-    writeln!(
-        out,
-        "{} as device {device}",
-        if register { "registered" } else { "logged in" }
-    )?;
+    let verb = match kind {
+        AuthKind::Register => "registered",
+        AuthKind::Login => "logged in",
+        AuthKind::Restore => "restored",
+    };
+    writeln!(out, "{verb} as device {device}")?;
+    if kind == AuthKind::Restore {
+        writeln!(
+            out,
+            "note: earlier messages are not recoverable (forward secrecy); \
+             this device is in no conversation yet; start or redeem a new one"
+        )?;
+    }
     if uploaded > 0 {
         writeln!(out, "uploaded {uploaded} key packages")?;
     }
@@ -329,13 +346,13 @@ mod auth_report_tests {
     fn text_matches_legacy_lines() {
         let d = uuid::Uuid::from_u128(7);
         let mut o = Vec::new();
-        write_auth_report(&mut o, true, d, 3, false).unwrap();
+        write_auth_report(&mut o, super::AuthKind::Register, d, 3, false).unwrap();
         assert_eq!(
             String::from_utf8(o).unwrap(),
             format!("registered as device {d}\nuploaded 3 key packages\n")
         );
         let mut o = Vec::new();
-        write_auth_report(&mut o, false, d, 0, false).unwrap();
+        write_auth_report(&mut o, super::AuthKind::Login, d, 0, false).unwrap();
         assert_eq!(
             String::from_utf8(o).unwrap(),
             format!("logged in as device {d}\n")
@@ -346,7 +363,7 @@ mod auth_report_tests {
     fn json_is_one_line_with_two_keys() {
         let d = uuid::Uuid::from_u128(7);
         let mut o = Vec::new();
-        write_auth_report(&mut o, false, d, 5, true).unwrap();
+        write_auth_report(&mut o, super::AuthKind::Login, d, 5, true).unwrap();
         let s = String::from_utf8(o).unwrap();
         assert_eq!(s.lines().count(), 1);
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();

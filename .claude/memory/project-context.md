@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 674 (2026-10-28, FEATURE) — 8.18 `powehi restore` shipped; 8.15 blocked on #166, 8.17 on #203
+auth::restore + crypto-core sign_recovery_challenge, prd §7A.2/§8.5 updated. 454 CLI + 172 core tests green. Next: 8.19 multi-device (write device-link flow in prd first; needs 8.17 remove for same-key leaf replacement).
+
 ## Cycle 671 (2026-10-28, FEATURE) — 8.17 slice (q) added/removed keys in GroupCommitApplied; 8.15 still blocked on #166
 crypto-core `apply_group_commit` reports `added_keys`/`removed_keys` (pre-merge length check). ReInit/PSK refusal test not constructible in openmls 0.8.1. 170 crypto-core tests green. Next: RequiredCapabilities(0xF002), group PQ story (T6) + threat-model-checker record, then close 8.17.
 
