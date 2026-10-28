@@ -1116,11 +1116,12 @@ async fn a_commit_never_overtakes_messages_deferred_by_the_conversation_cap() {
     assert_eq!(alice_epoch(&p), 2);
 }
 
-/// Other members' Proposals stay on the server long past the grace (not applied for groups);
-/// a junk Commit or junk Application message takes the failure path like the pair path: acked
-/// only after `MAX_DECRYPT_FAILURES` failures *and* the grace.
+/// Stand-alone Proposals are never applied for groups (the commit allowlist takes only inline
+/// ones), so they are acked after the grace instead of starving the inbox; a junk Commit or
+/// Application message takes the failure path: acked only after `MAX_DECRYPT_FAILURES` failures
+/// *and* the grace.
 #[tokio::test]
-async fn group_proposals_are_held_and_junk_commits_and_messages_are_acked_after_the_grace() {
+async fn group_proposals_and_junk_commits_and_messages_are_acked_after_the_grace() {
     let (_tmp, p) = pair().await;
     let gid = crate::group::create(&client(), &p.url, &p.alice)
         .await
@@ -1151,8 +1152,10 @@ async fn group_proposals_are_held_and_junk_commits_and_messages_are_acked_after_
         .iter()
         .map(|e| e["message_type"].clone())
         .collect();
-    assert!(!left.contains(&json!("Commit")), "the junk Commit is acked");
-    assert_eq!(left, vec![json!("Proposal")], "only the Proposal is held");
+    assert!(
+        left.is_empty(),
+        "all three are acked after the grace: {left:?}"
+    );
     assert!(conversation::load(&p.alice.store, &gid).unwrap().is_some());
 }
 
