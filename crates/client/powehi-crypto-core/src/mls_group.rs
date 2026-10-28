@@ -1962,6 +1962,13 @@ pub fn apply_pair_commit(
     })
 }
 
+/// True when every leaf declares support for the group-kind extension (vacuously true for none).
+fn adds_declare_group_kind<'a>(leaves: impl Iterator<Item = &'a LeafNode>) -> bool {
+    let kind_ext = ExtensionType::Unknown(POWEHI_GROUP_KIND_EXT_TYPE);
+    let mut leaves = leaves;
+    leaves.all(|l| l.capabilities().extensions().contains(&kind_ext))
+}
+
 /// What [`apply_group_commit`] merged.
 #[derive(Debug, PartialEq, Eq)]
 pub struct GroupCommitApplied {
@@ -2024,6 +2031,16 @@ pub fn apply_group_commit(
             && matches!(q.proposal(), Proposal::Add(_) | Proposal::Remove(_))
     });
     if !only_add_remove {
+        return Err(MlsError::GroupCommitRefused);
+    }
+    // Defense in depth: openmls (valn0502) already refuses an Add whose leaf does not support
+    // every GroupContext extension, so this branch is unreachable with openmls 0.8.1.
+    let queued_adds: Vec<_> = staged.add_proposals().collect();
+    if !adds_declare_group_kind(
+        queued_adds
+            .iter()
+            .map(|q| q.add_proposal().key_package().leaf_node()),
+    ) {
         return Err(MlsError::GroupCommitRefused);
     }
     if let Some(leaf) = staged.update_path_leaf_node() {
@@ -2853,6 +2870,26 @@ mod tests {
         assert_eq!(applied.epoch, 3);
         assert!(!bg.is_active());
         assert_eq!(group_kind(&bg).unwrap(), GroupKind::Group);
+    }
+
+    /// 8.17: the kind-capability predicate used by `apply_group_commit` on inline Adds.
+    #[test]
+    fn adds_declare_group_kind_requires_every_leaf() {
+        let (a, b) = (OpenMlsRustCrypto::default(), OpenMlsRustCrypto::default());
+        let bob = generate_identity(b"bob", &b).unwrap();
+        let carol = generate_identity(b"carol", &a).unwrap();
+        let plain = generate_key_package(&bob, &b).unwrap();
+        let pq = generate_pq_key_package(&carol, &a).unwrap();
+        let msg = MlsMessageIn::tls_deserialize_exact(&pq.key_package).unwrap();
+        let MlsMessageBodyIn::KeyPackage(kp_in) = msg.extract() else {
+            panic!("not a key package");
+        };
+        let pq_kp = kp_in.validate(a.crypto(), ProtocolVersion::Mls10).unwrap();
+        let (p, q) = (plain.key_package().leaf_node(), pq_kp.leaf_node());
+        assert!(adds_declare_group_kind([].into_iter()));
+        assert!(adds_declare_group_kind([q].into_iter()));
+        assert!(!adds_declare_group_kind([p].into_iter()));
+        assert!(!adds_declare_group_kind([q, p].into_iter()));
     }
 
     /// 8.17: a group Commit that references a Proposal the receiver never saw is refused
