@@ -1159,6 +1159,33 @@ async fn group_proposals_and_junk_commits_and_messages_are_acked_after_the_grace
     assert!(conversation::load(&p.alice.store, &gid).unwrap().is_some());
 }
 
+/// A group member's Proposal is kept through the last second of the grace and acked at exactly
+/// `UNKNOWN_GRACE_SECS`, like the pair path: the boundary is not off by one.
+#[tokio::test]
+async fn a_group_proposal_is_kept_to_the_grace_boundary_then_acked() {
+    let (_tmp, p) = pair().await;
+    let gid = crate::group::create(&client(), &p.url, &p.alice)
+        .await
+        .unwrap();
+    typed_envelope(&p, "Proposal", gid, Uuid::new_v4());
+    let t0 = 1_000_000;
+    receive_at(&client(), &p.url, &p.alice, t0).await.unwrap();
+    receive_at(
+        &client(),
+        &p.url,
+        &p.alice,
+        t0 + junk::UNKNOWN_GRACE_SECS - 1,
+    )
+    .await
+    .unwrap();
+    assert_eq!(inbox_len(&p), 1, "kept through the grace");
+    receive_at(&client(), &p.url, &p.alice, t0 + junk::UNKNOWN_GRACE_SECS)
+        .await
+        .unwrap();
+    assert_eq!(inbox_len(&p), 0, "acked at the boundary");
+    assert!(conversation::load(&p.alice.store, &gid).unwrap().is_some());
+}
+
 /// A group Commit is held, never acked, while this device has its own unresolved Commit: the
 /// drop would be a permanent fork (no past epochs are kept).
 #[tokio::test]

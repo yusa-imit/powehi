@@ -1897,3 +1897,6 @@ cargo audit/deny clean (only waived RUSTSEC-2026-0387), CI green, no bug issues.
 
 - Cycle 666 (PR pending): 8.17 slice n2 group receive of Application messages with MLS-leaf sender key.
 - Cycle 669 (FEATURE): 8.17 slice p test-only: apply_group_commit refuses a by-reference Commit. Main E2E CI red was a Docker Hub auth flake (minio pull); rerun green.
+
+## Stabilization 670
+cargo audit/deny clean (only waived RUSTSEC-2026-0387), CI green, no bug issues. Added `a_group_proposal_is_kept_to_the_grace_boundary_then_acked` (group Proposal ack boundary, slice o). 453 powehi-cli lib tests pass, clippy/fmt clean. target/ 27G.
