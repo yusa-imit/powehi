@@ -22,6 +22,8 @@ use zeroize::Zeroizing;
 pub mod input;
 pub mod paint;
 pub mod rows;
+pub mod run;
+pub mod term;
 
 use crate::conversation::Kind;
 
@@ -108,7 +110,7 @@ impl App {
         Self {
             rows,
             selected: 0,
-            input: Zeroizing::new(String::new()),
+            input: Zeroizing::new(String::with_capacity(crate::message::MAX_BODY_LEN)),
             shown: BTreeMap::new(),
             notice: None,
         }
@@ -126,6 +128,10 @@ impl App {
         self.notice
     }
 
+    pub fn set_notice(&mut self, notice: &'static str) {
+        self.notice = Some(notice);
+    }
+
     /// Replaces the list (keeping the selection on the same conversation when it survives).
     pub fn set_rows(&mut self, mut rows: Vec<Row>) {
         rows.truncate(MAX_ROWS);
@@ -133,6 +139,10 @@ impl App {
         self.selected = keep
             .and_then(|id| rows.iter().position(|r| r.id == id))
             .unwrap_or(0);
+        if keep.is_some() && keep != rows.get(self.selected).map(|r| r.id) {
+            // The chat under the cursor vanished: the half-typed line is not for the new one.
+            self.input = Zeroizing::new(String::with_capacity(crate::message::MAX_BODY_LEN));
+        }
         self.rows = rows;
         assert!(self.rows.is_empty() || self.selected < self.rows.len());
     }
@@ -183,11 +193,16 @@ impl App {
         if n == 0 {
             return;
         }
+        let before = self.selected;
         self.selected = if down {
             (self.selected + 1) % n
         } else {
             (self.selected + n - 1) % n
         };
+        if self.selected != before {
+            // A half-typed line (or a paste) must not follow the user into another chat.
+            self.input = Zeroizing::new(String::with_capacity(crate::message::MAX_BODY_LEN));
+        }
         self.rows[self.selected].unread = 0;
         assert!(self.selected < n);
     }
@@ -203,7 +218,10 @@ impl App {
             self.notice = Some(CHANGED_NOTICE);
             return Action::None;
         }
-        let text = std::mem::replace(&mut self.input, Zeroizing::new(String::new()));
+        let text = std::mem::replace(
+            &mut self.input,
+            Zeroizing::new(String::with_capacity(crate::message::MAX_BODY_LEN)),
+        );
         Action::Send {
             group: row.id,
             text,
