@@ -426,7 +426,9 @@ mod add_tests {
         let (mut t, mut j) = (Vec::new(), Vec::new());
         write_added(id, 3, false, &mut t).unwrap();
         write_added(id, 3, true, &mut j).unwrap();
-        assert!(String::from_utf8(t).unwrap().contains("cannot join"));
+        let t = String::from_utf8(t).unwrap();
+        assert!(t.contains("cannot join"));
+        assert!(t.contains("classical MLS, not post-quantum"));
         let v: serde_json::Value = serde_json::from_slice(&j).unwrap();
         assert_eq!(v["joinable"], false);
         assert_eq!(v["epoch"], 3);

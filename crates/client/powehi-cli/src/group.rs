@@ -411,6 +411,9 @@ pub async fn resume(
     Ok(rec.member_epoch)
 }
 
+/// Group message keys are classical MLS; the pair ML-KEM step never reaches them (prd §5.3B).
+pub const CLASSICAL_NOTICE: &str = "note: group messages use classical MLS, not post-quantum";
+
 /// Writes the add outcome. The new member cannot join yet (no group-join slice): say so.
 pub fn write_added(
     group_id: Uuid,
@@ -426,7 +429,7 @@ pub fn write_added(
     writeln!(
         out,
         "added to conversation {group_id} (epoch {epoch}); the new member cannot join until \
-         group join is implemented"
+         group join is implemented\n{CLASSICAL_NOTICE}"
     )
 }
 
