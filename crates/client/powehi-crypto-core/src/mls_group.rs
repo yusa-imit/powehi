@@ -2824,6 +2824,45 @@ mod tests {
         assert_eq!(group_kind(&bg).unwrap(), GroupKind::Group);
     }
 
+    /// 8.17: a group Commit that references a Proposal the receiver never saw is refused
+    /// (`GroupCommitRefused`, never `CommitMissingProposal`), unmerged.
+    #[test]
+    fn apply_group_commit_refuses_a_by_reference_commit() {
+        let (a, b, c) = (
+            OpenMlsRustCrypto::default(),
+            OpenMlsRustCrypto::default(),
+            OpenMlsRustCrypto::default(),
+        );
+        let alice = generate_identity(b"alice", &a).unwrap();
+        let bob = generate_identity(b"bob", &b).unwrap();
+        let carol = generate_identity(b"carol", &c).unwrap();
+        let mut ag = create_group_of_kind(&alice, &a, GroupKind::Group).unwrap();
+        let bkp = generate_pq_key_package(&bob, &b).unwrap();
+        let s = stage_group_add(&mut ag, &alice.signer, &bkp.key_package, &a).unwrap();
+        confirm_group_add(&mut ag, &a).unwrap();
+        let mut bg = join_group(&s.welcome, &b).unwrap();
+
+        // Alice proposes an Add only she holds, then commits to it by reference.
+        let ckp = generate_pq_key_package(&carol, &c).unwrap();
+        let msg = MlsMessageIn::tls_deserialize_exact(&ckp.key_package).unwrap();
+        let MlsMessageBodyIn::KeyPackage(kp_in) = msg.extract() else {
+            panic!("not a key package");
+        };
+        let kp = kp_in.validate(a.crypto(), ProtocolVersion::Mls10).unwrap();
+        ag.propose_add_member(&a, &alice.signer, &kp).unwrap();
+        let (commit, _w, _gi) = ag.commit_to_pending_proposals(&a, &alice.signer).unwrap();
+        ag.merge_pending_commit(&a).unwrap();
+        let bytes = commit.to_bytes().unwrap();
+
+        // Inspecting consumes the receiver's ratchet secret, so only `apply_group_commit` runs
+        // here; the `CommitMissingProposal` mapping is what this pins down.
+        assert!(matches!(
+            apply_group_commit(&mut bg, &bytes, &b),
+            Err(MlsError::GroupCommitRefused)
+        ));
+        assert_eq!(bg.epoch().as_u64(), 1, "nothing merged");
+    }
+
     /// 8.17: a staged group Add advances nothing until confirmed; a third member joins with the
     /// kind intact and the existing member follows the Commit; abort restores the epoch.
     #[test]
