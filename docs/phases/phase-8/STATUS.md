@@ -402,6 +402,11 @@ pointing here. Close the issue in the PR that finishes its item.
   ratatui `Buffer` (control chars cleaned, tested on Buffer). ratatui 0.30 (no crossterm; 0.29 fails
   cargo-deny: paste, lru). Remaining slice (b): crossterm event loop, `powehi tui` subcommand wiring
   to inbox/send/verify, alt-screen via `screen.rs`, row loading from the store.
+  Slice (b1) shipped (cycle 678): `tui/input.rs` (byte→Key decoder, unknown escapes swallowed,
+  bounded zeroized tail), `tui/paint.rs` (Buffer→ANSI, only cursor moves and bold/reverse, control
+  chars blanked, wide glyphs), `tui/rows.rs` (rows from the store, fail-closed Changed). No
+  crossterm: raw termios via libc. Remaining slice (b2): raw-mode guard, event loop, `powehi tui`
+  subcommand, send/inbox/verify wiring. security-auditor (fixed: 0x9B panic, fail-open mark, decoder leaks). Carry to b2: clear the input on conversation switch (pastejack), require a UTF-8 locale (paint emits raw UTF-8, C1 bytes unsafe on 8-bit terminals).
 - [ ] 8.21 Media send/receive (prd §9) — `send --file` and saving received media to
   `0600` files, encrypted per prd §9.2 and ADR-0004, with size caps.
   crypto-reviewer + security-auditor.

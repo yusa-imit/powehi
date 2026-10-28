@@ -151,3 +151,146 @@ fn tiny_and_empty_screens_do_not_panic() {
         let _ = screen(&app, w, h);
     }
 }
+
+mod terminal {
+    use super::super::input::Decoder;
+    use super::super::paint::paint;
+    use super::*;
+
+    fn keys(chunks: &[&[u8]]) -> Vec<Key> {
+        let mut d = Decoder::new();
+        let mut out = Vec::new();
+        for c in chunks {
+            d.feed(c, &mut out);
+        }
+        out
+    }
+
+    #[test]
+    fn arrows_enter_backspace_and_text() {
+        let k = keys(&[b"hi\x1b[A\x1b[B\x1bOA\r\x7f"]);
+        assert_eq!(
+            k,
+            [
+                Key::Char('h'),
+                Key::Char('i'),
+                Key::Up,
+                Key::Down,
+                Key::Up,
+                Key::Enter,
+                Key::Backspace
+            ]
+        );
+    }
+
+    #[test]
+    fn sequences_split_across_reads_and_utf8_are_joined() {
+        assert_eq!(keys(&[b"\x1b", b"[", b"B"]), [Key::Down]);
+        assert_eq!(
+            keys(&[&"한".as_bytes()[..1], &"한".as_bytes()[1..]]),
+            [Key::Char('한')]
+        );
+    }
+
+    #[test]
+    fn unknown_sequences_type_nothing() {
+        // Delete (ESC [ 3 ~), F5 (ESC [ 1 5 ~), Alt-x, then a real key.
+        assert_eq!(keys(&[b"\x1b[3~\x1b[15~\x1bxa"]), [Key::Char('a')]);
+        assert!(keys(&[b"\x00\x01\x1f"]).is_empty());
+    }
+
+    #[test]
+    fn ctrl_c_quits_and_lone_escape_needs_finish() {
+        assert_eq!(keys(&[b"\x03"]), [Key::Esc]);
+        let mut d = Decoder::new();
+        let mut out = Vec::new();
+        d.feed(b"\x1b", &mut out);
+        assert!(out.is_empty());
+        assert_eq!(d.finish(), Some(Key::Esc));
+        assert_eq!(d.finish(), None);
+    }
+
+    #[test]
+    fn overlong_sequence_is_dropped_not_buffered() {
+        let mut long = vec![0x1b, b'['];
+        long.extend(std::iter::repeat_n(b'1', 100));
+        long.push(b'~');
+        long.push(b'z');
+        assert_eq!(keys(&[&long]), [Key::Char('z')]);
+    }
+
+    #[test]
+    fn paint_has_no_stray_control_bytes() {
+        let mut app = App::new(vec![row(Mark::Changed), row(Mark::Verified)]);
+        app.push_message(
+            app.selected_id().unwrap(),
+            "a\x1b[2J".into(),
+            z("x\x07y\x1b]0;t\x07"),
+        );
+        let area = Rect::new(0, 0, 60, 12);
+        let mut buf = Buffer::empty(area);
+        draw(&app, area, &mut buf);
+        let bytes = paint(&buf);
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == 0x1b {
+                // Only "ESC [ <digits;> m|H" may appear.
+                assert_eq!(bytes[i + 1], b'[');
+                let end = bytes[i + 2..]
+                    .iter()
+                    .position(|b| b.is_ascii_alphabetic())
+                    .unwrap();
+                assert!(matches!(bytes[i + 2 + end], b'm' | b'H'));
+                assert!(bytes[i + 2..i + 2 + end]
+                    .iter()
+                    .all(|b| b.is_ascii_digit() || *b == b';'));
+                i += 3 + end;
+            } else {
+                assert!(bytes[i] >= 0x20, "raw control byte {:#x}", bytes[i]);
+                i += 1;
+            }
+        }
+        assert!(
+            bytes.windows(3).any(|w| w == b"\x1b[7"),
+            "reverse attribute used"
+        );
+    }
+
+    #[test]
+    fn wide_glyph_does_not_shift_the_line() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 4, 1));
+        buf.set_string(0, 0, "한a", Style::new());
+        let text = String::from_utf8(paint(&buf)).unwrap();
+        assert!(text.contains("한a "), "{text:?}");
+    }
+}
+
+mod terminal_more {
+    use super::super::input::Decoder;
+    use super::super::paint::paint;
+    use super::*;
+
+    fn keys(b: &[u8]) -> Vec<Key> {
+        let mut d = Decoder::new();
+        let mut out = Vec::new();
+        d.feed(b, &mut out);
+        out
+    }
+
+    #[test]
+    fn string_sequences_and_broken_utf8_type_nothing_and_keep_next_key() {
+        assert_eq!(keys(b"\x1b]11;rgb:0000/0000/0000\x07a"), [Key::Char('a')]);
+        assert_eq!(keys(b"\x1bP1+r544e\x1b\\b"), [Key::Char('b')]);
+        assert_eq!(keys(b"\xe3\x1b[A"), [Key::Up]);
+        assert_eq!(keys(b"\xe3\r"), [Key::Enter]);
+        assert_eq!(keys(b"\x1b[3\x1b[A"), [Key::Up]);
+        assert_eq!(keys(b"\x1b[1;5Ac"), [Key::Char('c')]);
+    }
+
+    #[test]
+    fn hangul_with_0x9b_byte_paints_without_panic() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 6, 1));
+        buf.set_string(0, 0, "회원Û", Style::new());
+        assert!(String::from_utf8(paint(&buf)).unwrap().contains("회원Û"));
+    }
+}
