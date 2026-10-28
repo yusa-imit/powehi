@@ -1971,6 +1971,15 @@ pub struct GroupCommitApplied {
     pub added: usize,
     /// Members the Commit removed.
     pub removed: usize,
+    /// Signature keys of the added members, from the inline Add proposals, in proposal order.
+    pub added_keys: Vec<Vec<u8>>,
+    /// Signature keys of the removed members, read from the roster before the merge, in
+    /// proposal order (the order of the Remove proposals in the Commit).
+    ///
+    /// The same key may appear in both lists (RFC 9420 §12.2 allows a Remove plus an Add of the
+    /// same client in one Commit). A consumer keeping a key roster must apply `removed_keys`
+    /// first and `added_keys` second (§12.3), or it drops a member that is still in the group.
+    pub removed_keys: Vec<Vec<u8>>,
 }
 
 /// Applies a Commit received in a kind-Group conversation through the ADR-0005 one-shot merge,
@@ -2028,6 +2037,28 @@ pub fn apply_group_commit(
         info.added_credentials.len(),
         info.removed_leaf_indices.len(),
     );
+    let added_keys: Vec<Vec<u8>> = staged
+        .add_proposals()
+        .map(|q| {
+            q.add_proposal()
+                .key_package()
+                .leaf_node()
+                .signature_key()
+                .as_slice()
+                .to_vec()
+        })
+        .collect();
+    let roster = group.members().collect::<Vec<_>>();
+    let removed_keys: Vec<Vec<u8>> = info
+        .removed_leaf_indices
+        .iter()
+        .filter_map(|i| roster.iter().find(|m| m.index.u32() == *i))
+        .map(|m| m.signature_key.clone())
+        .collect();
+    // Refuse before the merge if a removed leaf is not in the pre-merge roster.
+    if added_keys.len() != added || removed_keys.len() != removed {
+        return Err(MlsError::GroupCommitRefused);
+    }
     let epoch = merge_inspected_commit(group, staged, provider)?;
     if epoch != info.prior_epoch + 1 || !matches!(group_kind(group), Ok(GroupKind::Group)) {
         return Err(MlsError::GroupCommitRefused);
@@ -2036,6 +2067,8 @@ pub fn apply_group_commit(
         epoch,
         added,
         removed,
+        added_keys,
+        removed_keys,
     })
 }
 
@@ -2717,19 +2750,17 @@ mod tests {
         let s2 = stage_group_add(&mut ag, &alice.signer, &ckp.key_package, &a).unwrap();
         confirm_group_add(&mut ag, &a).unwrap();
         let applied = apply_group_commit(&mut bg, &s2.commit, &b).unwrap();
-        assert_eq!(
-            applied,
-            GroupCommitApplied {
-                epoch: 2,
-                added: 1,
-                removed: 0
-            }
-        );
+        assert_eq!((applied.epoch, applied.added, applied.removed), (2, 1, 0));
+        let carol_key = carol.signer.to_public_vec();
+        assert_eq!(applied.added_keys, vec![carol_key.clone()]);
+        assert!(applied.removed_keys.is_empty());
         let carol_leaf = join_group(&s2.welcome, &c).unwrap().own_leaf_index().u32();
         let (rm, _) = stage_group_remove(&mut ag, &alice.signer, carol_leaf, &a).unwrap();
         confirm_group_remove(&mut ag, &a).unwrap();
         let applied = apply_group_commit(&mut bg, &rm, &b).unwrap();
         assert_eq!((applied.epoch, applied.added, applied.removed), (3, 0, 1));
+        assert_eq!(applied.removed_keys, vec![carol_key]);
+        assert!(applied.added_keys.is_empty());
         assert_eq!(group_kind(&bg).unwrap(), GroupKind::Group);
 
         // A GroupContextExtensions commit that drops the kind extension is refused, unmerged.

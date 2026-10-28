@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 671 (2026-10-28, FEATURE) — 8.17 slice (q) added/removed keys in GroupCommitApplied; 8.15 still blocked on #166
+crypto-core `apply_group_commit` reports `added_keys`/`removed_keys` (pre-merge length check). ReInit/PSK refusal test not constructible in openmls 0.8.1. 170 crypto-core tests green. Next: RequiredCapabilities(0xF002), group PQ story (T6) + threat-model-checker record, then close 8.17.
+
 ## Cycle 664 (2026-10-28, FEATURE) — 8.17 slice (n1) group send; 8.15 still blocked on #166
 `message::send_group` (Kind::Group: active group, authenticated kind agrees, >=2 members, no gadd-/grem- pending). 448 lib tests green, clippy clean. Next: group receive with MLS-leaf sender auth (crypto-core decrypt returning sender sig key), Proposal ack routing, RequiredCapabilities(0xF002).
 
