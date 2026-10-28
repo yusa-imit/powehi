@@ -65,9 +65,13 @@ impl Decoder {
 
     /// A lone ESC left over after a quiet period is the Esc key.
     pub fn finish(&mut self) -> Option<Key> {
-        let lone = self.state == State::Esc;
-        self.reset();
-        lone.then_some(Key::Esc)
+        // Only a bare ESC is resolved by a quiet period; a sequence split by a slow link
+        // stays in flight so its tail never types into the message line.
+        if self.state == State::Esc {
+            self.reset();
+            return Some(Key::Esc);
+        }
+        None
     }
 
     fn reset(&mut self) {

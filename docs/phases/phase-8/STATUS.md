@@ -407,6 +407,14 @@ pointing here. Close the issue in the PR that finishes its item.
   chars blanked, wide glyphs), `tui/rows.rs` (rows from the store, fail-closed Changed). No
   crossterm: raw termios via libc. Remaining slice (b2): raw-mode guard, event loop, `powehi tui`
   subcommand, send/inbox/verify wiring. security-auditor (fixed: 0x9B panic, fail-open mark, decoder leaks). Carry to b2: clear the input on conversation switch (pastejack), require a UTF-8 locale (paint emits raw UTF-8, C1 bytes unsafe on 8-bit terminals).
+  Slice (b2a) shipped (cycle 679): `tui/term.rs` (raw-mode guard, poll-based stdin, size, UTF-8
+  locale check), `tui/run.rs` (event loop over `Source`/`Write`, send callback, refuses a terminal
+  under 40x8 or a non-TTY stdout), input cleared on switch and on a vanished selection, input
+  buffer preallocated, split escape sequences no longer reset on idle. security-auditor: fixed
+  #2,#4,#5,#6,#8,#9. Carry to b2b: `powehi tui` subcommand with alt-screen + `utf8_locale_from_env`
+  enforcement, termios restore on SIGTERM/SIGTSTP (signal handler needs the saved termios),
+  bracketed paste (paste containing `ESC [ B` + CR must not switch chat and send), cap `shown`
+  keys, send/inbox/verify wiring. Remaining: b2b.
 - [ ] 8.21 Media send/receive (prd §9) — `send --file` and saving received media to
   `0600` files, encrypted per prd §9.2 and ADR-0004, with size caps.
   crypto-reviewer + security-auditor.
