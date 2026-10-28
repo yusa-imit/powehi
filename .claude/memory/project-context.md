@@ -1904,3 +1904,4 @@ cargo audit/deny clean (only waived RUSTSEC-2026-0387), CI green, no bug issues.
 ## Stabilization 670
 cargo audit/deny clean (only waived RUSTSEC-2026-0387), CI green, no bug issues. Added `a_group_proposal_is_kept_to_the_grace_boundary_then_acked` (group Proposal ack boundary, slice o). 453 powehi-cli lib tests pass, clippy/fmt clean. target/ 27G.
 - Cycle 672 (FEATURE): 8.17 slice r: apply_group_commit kind-capability check on Adds (defense in depth, openmls valn0502 already enforces). Carried: content_type dispatch, group PQ story (T6) + threat-model-checker record.
+- Cycle 673 (FEATURE): 8.17 slice s: group/pair PQ reality documented (prd §5.3B), group classical notice, need-human + bug issues. 8.17 open pending owner PQ choice.

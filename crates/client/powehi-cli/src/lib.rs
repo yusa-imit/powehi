@@ -768,7 +768,7 @@ fn run_group(
             if *json {
                 println!("{}", serde_json::json!({ "conversation": id }));
             } else {
-                println!("conversation {id}");
+                println!("conversation {id}\n{}", group::CLASSICAL_NOTICE);
             }
         }
         (

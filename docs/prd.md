@@ -724,6 +724,8 @@ key schedule과 confirmation tag에 묶여 서버가 바꿀 수 없다. 참가�
 safety number 방식(pairwise vs group)을 이것으로 결정한다. PQ KeyPackage는 leaf capabilities에 0xF002를 선언해야 그룹에 추가된다.
 0xF002는 무결성만 보호하며 기밀성은 아니다: 서버는 등록 패턴(`POST /v1/groups` 뒤 멤버 추가 유무)과 멤버 수로 대화가 pair인지 group인지 추론할 수 있다(fan-out에 멤버십이 필요하므로 불가피, §3.3). `group create`는 서버에 `{group_id}` 하나만 보내고 새 필드를 만들지 않는다.
 
+**PQ 상태 (T6, 8.17 시점):** kind-Group 대화는 ML-KEM 상태를 갖지 않으며(`conv-*`에 pair PQ 필드 없음, 가입 시 소비한 KeyPackage의 ML-KEM decap key는 삭제) 기밀성은 클래식 MLS뿐이다. 이는 pair보다 약한 것이 아니다: pair의 `pq_init` ML-KEM 공유 비밀은 16-hex 비교값(`powehi-pq-binding-v1`)만 유도하고 MLS key schedule에 섞이지 않으므로 pair 메시지 키도 클래식이다(§5.3 Phase B interim의 실제 범위). 따라서 Welcome·Commit을 보관한 공격자(T3/T7)가 이후 CRQC를 얻으면 epoch 전부를 복호화할 수 있다(harvest-now-decrypt-later). 그룹 commit allowlist가 GCE/PSK/ReInit을 거부하므로 지금 만든 그룹은 수명 내내 클래식으로 남는다. 제안된 완화(threat-model-checker: yellow): 그룹 Add Commit마다 Powehi external PSK(RFC 9420 §8.4, 값 = 현재 epoch exporter, 신규 멤버에게는 KeyPackage의 서명된 ML-KEM-768 키로 encapsulate해 전달, 의무는 0xF002 payload `0x02`로 인증)를 요구한다. 외부 공격자의 HNDL은 닫히나 Remove/self-Update 이후의 PQ PCS와 Ed25519 서명은 Phase A까지 남는다. 소유자 결정 대기(`need-human`); 결정 전에는 그룹을 Phase 9 실사용자에게 배포하지 않는다.
+
 ### 5.3A CLI PCS 로테이션 정책 (Phase 8 · 8.15)
 
 CLI는 1:1 대화에서 `send`/`chat`이 **Application 메시지를 보내기 직전**, 아래 둘 중 하나가 참이면 자기 leaf 키를 self-Update Commit으로 교체한다 (`powehi-cli/src/pcs.rs`): (1) 현재 leaf 키로 보낸 메시지가 **50개** 이상, (2) 그 키로 이미 한 번 이상 보냈고 키 나이가 **7일** 이상. 유휴 대화는 로테이션하지 않는다(보호할 새 메시지가 없음). 카운터와 시계는 `conv-*` 레코드(암호화된 프로필 저장소)에만 있으며 서버에 노출되는 값은 없다 — Commit 자체와 `expected_epoch`(§4A.5)는 이미 서버가 보는 메타데이터다.
