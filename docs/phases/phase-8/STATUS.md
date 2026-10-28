@@ -397,6 +397,11 @@ pointing here. Close the issue in the PR that finishes its item.
   conversation list, message pane, input line, unread / CHANGED / unverified
   markers, alternate screen, no message text in logs. Behaviour tests on the lib
   layer; a smoke test with a test backend.
+  Slice (a) shipped (cycle 677): `tui.rs` pure view-model (`App::press(Key) -> Action`, bounded
+  500 lines/conversation, CHANGED refuses send, input capped at the message cap) and `draw` into a
+  ratatui `Buffer` (control chars cleaned, tested on Buffer). ratatui 0.30 (no crossterm; 0.29 fails
+  cargo-deny: paste, lru). Remaining slice (b): crossterm event loop, `powehi tui` subcommand wiring
+  to inbox/send/verify, alt-screen via `screen.rs`, row loading from the store.
 - [ ] 8.21 Media send/receive (prd §9) — `send --file` and saving received media to
   `0600` files, encrypted per prd §9.2 and ADR-0004, with size caps.
   crypto-reviewer + security-auditor.

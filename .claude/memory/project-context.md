@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 677 (2026-10-29, FEATURE) — 8.20 slice (a): TUI view-model + renderer (`tui.rs`)
+- ratatui 0.30 default-features=false (0.29 trips cargo-deny paste/lru). Slice (b): crossterm loop + `powehi tui` wiring. #208/#203/#166 still unanswered.
+
 ## Cycle 675 (2026-10-29, FEATURE) — 8.19 slice (a): device-link design (prd §7A.4), need-human #208
 - 8.15 (#166), 8.17 (#203), 8.19 (#208) all wait on owner answers. Linked device needs its own signing key (RFC 9420 §7.3); proposal = link certificate signed by account key. Next unblocked: 8.20 TUI.
 

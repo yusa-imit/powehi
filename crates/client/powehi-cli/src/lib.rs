@@ -40,6 +40,8 @@ pub mod store;
 #[cfg(all(test, unix))]
 mod testsrv;
 #[cfg(unix)]
+pub mod tui;
+#[cfg(unix)]
 pub mod verify;
 #[cfg(unix)]
 pub mod welcome;
