@@ -322,14 +322,15 @@ pub(crate) async fn receive_at(
             continue;
         }
         if env.message_type != "Application" {
-            // A pair conversation never applies Proposals (the pair policy takes only a peer's
-            // self-Update Commit), so a peer Proposal is dead weight: acked after the same
-            // grace as any other junk. Anything else from our peer waits; the rest is acked
-            // after the grace.
+            // Neither a pair nor a group conversation applies stand-alone Proposals (the pair
+            // policy takes only a peer's self-Update Commit; the group allowlist takes only
+            // inline Add/Remove, and a by-reference Commit is refused), so a Proposal is dead
+            // weight: acked after the same grace as any other junk. Any other non-Application
+            // traffic of a pair waits for our peer; a stranger's is acked after the grace.
             if let Some(id) = env.id {
-                if !is_group_conversation(session, env.group_id)
-                    && (env.message_type == "Proposal"
-                        || !is_peer_traffic(session, env.group_id, env.sender))
+                if (env.message_type == "Proposal"
+                    || (!is_group_conversation(session, env.group_id)
+                        && !is_peer_traffic(session, env.group_id, env.sender)))
                     && tracker.unknown_expired(id, now)
                     && welcome::ack(client, server, session, id).await.is_ok()
                 {
@@ -560,9 +561,9 @@ fn pcs_unresolved(session: &Session, group_id: Uuid) -> bool {
 }
 
 /// True when `group_id` is a stored group-kind conversation. Fail closed: an unreadable record
-/// counts as a group, so nothing of it is acked on a guess. Group traffic is not applied or
-/// acked until group receive lands (8.17), because another member's Commit or message is not
-/// "the peer's" and must not be dropped as junk.
+/// counts as a group, so nothing of it is acked on a guess. Another member's Commit or message
+/// is not "the peer's" and must not be dropped as junk; only stand-alone Proposals, which no
+/// group path consumes, are acked on the grace regardless of kind.
 fn is_group_conversation(session: &Session, group_id: Option<Uuid>) -> bool {
     let Some(group_id) = group_id else {
         return false;
