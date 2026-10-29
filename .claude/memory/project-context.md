@@ -51,6 +51,11 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 681 (2026-10-29, FEATURE) — 8.20 slice (b2b): `powehi tui` subcommand
+- Wired login, alt screen, raw mode, termios restore from signals, send, refresh tick. Messages are
+  removed from the store only when their conversation is selected. Carry list in STATUS (8.20);
+  8.20 box stays open. Lesson: cargo is at ~/.cargo/bin (not on cron PATH); nextest absent, use cargo test.
+
 ## Cycle 679 (2026-10-29, FEATURE) — 8.20 slice (b2a): raw-mode guard + event loop
 - `tui/term.rs` + `tui/run.rs`; security-auditor findings fixed (see STATUS carry list for b2b:
   subcommand, alt-screen, SIGTERM termios restore, bracketed paste, `shown` key cap).

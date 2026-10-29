@@ -70,6 +70,10 @@ extern "C" fn on_signal(sig: libc::c_int) {
     unsafe {
         libc::write(libc::STDOUT_FILENO, LEAVE.as_ptr().cast(), LEAVE.len());
         libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH);
+    }
+    crate::tui::term::restore_from_signal();
+    // SAFETY: as above.
+    unsafe {
         libc::signal(sig, libc::SIG_DFL);
         libc::raise(sig);
     }

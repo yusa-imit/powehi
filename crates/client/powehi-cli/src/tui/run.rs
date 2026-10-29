@@ -18,6 +18,17 @@ use super::{draw, Action, App, Key};
 const MAX_DIM: u16 = 500;
 /// Shown when the send callback fails.
 pub const SEND_FAILED: &str = "send failed";
+/// Why the refresh callback runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tick {
+    /// About every five seconds of idleness: fetch from the server, then load.
+    Timer,
+    /// The selection moved: load what is already stored, no network.
+    Selected,
+}
+
+/// Idle polls (100 ms each) between refreshes of the inbox.
+const TICK_IDLES: u32 = 50;
 const MIN_W: u16 = 40;
 const MIN_H: u16 = 8;
 
@@ -37,19 +48,22 @@ pub trait Source {
 }
 
 /// Runs until Esc, end of input, or an I/O error. `size` is asked before each repaint.
-/// `send` carries out a send; `Err` leaves a notice and keeps the loop going.
-pub fn run<S, W, Z, F>(
+/// `send` carries out a send; `Err` leaves a notice and keeps the loop going. `tick` runs
+/// about every five seconds of idleness and when the selection moves.
+pub fn run<S, W, Z, F, T>(
     app: &mut App,
     src: &mut S,
     out: &mut W,
     mut size: Z,
     mut send: F,
+    mut tick: T,
 ) -> io::Result<()>
 where
     S: Source,
     W: Write,
     Z: FnMut() -> (u16, u16),
     F: FnMut(Uuid, &str) -> Result<(), ()>,
+    T: FnMut(&mut App, Tick),
 {
     let (w, h) = size();
     if w < MIN_W || h < MIN_H {
@@ -60,17 +74,26 @@ where
     let mut raw = Zeroizing::new([0u8; 256]);
     let mut keys = Vec::with_capacity(raw.len());
     repaint(app, out, size())?;
+    let mut idles = 0u32;
     loop {
         keys.clear();
         match src.read(&mut raw[..])? {
             Poll::Eof => return Ok(()),
-            Poll::Idle => keys.extend(dec.finish()),
+            Poll::Idle => {
+                keys.extend(dec.finish());
+                idles += 1;
+                if idles >= TICK_IDLES {
+                    idles = 0;
+                    tick(app, Tick::Timer);
+                }
+            }
             Poll::Bytes(n) => {
                 assert!(n <= raw.len());
                 dec.feed(&raw[..n], &mut keys);
                 raw[..n].zeroize();
             }
         }
+        let before = app.selected_id();
         for key in keys.iter().copied() {
             match app.press(key) {
                 Action::None => {}
@@ -80,6 +103,9 @@ where
                     Err(()) => app.set_notice(SEND_FAILED),
                 },
             }
+        }
+        if app.selected_id() != before {
+            tick(app, Tick::Selected);
         }
         // Typed text decoded into keys must not linger in the freed buffer.
         keys.fill(Key::Esc);
@@ -136,7 +162,15 @@ mod tests {
         send: impl FnMut(Uuid, &str) -> Result<(), ()>,
     ) -> Vec<u8> {
         let mut out = Vec::new();
-        run(app, &mut Script(script), &mut out, || (80, 24), send).unwrap();
+        run(
+            app,
+            &mut Script(script),
+            &mut out,
+            || (80, 24),
+            send,
+            |_, _| {},
+        )
+        .unwrap();
         out
     }
 
@@ -223,8 +257,58 @@ mod tests {
             &mut out,
             || (10, 3),
             |_, _| Ok(()),
+            |_, _| {},
         );
         assert!(r.is_err() && out.is_empty());
+    }
+
+    #[test]
+    fn tick_fires_after_enough_idle_polls() {
+        let mut app = App::new(vec![row(Mark::Verified)]);
+        let mut script: Vec<Poll2> = (0..TICK_IDLES).map(|_| Poll2::Idle).collect();
+        script.push(Poll2::Data(b"a"));
+        let mut ticks = 0;
+        let mut out = Vec::new();
+        run(
+            &mut app,
+            &mut Script(script),
+            &mut out,
+            || (80, 24),
+            |_, _| Ok(()),
+            |_, _| ticks += 1,
+        )
+        .unwrap();
+        assert_eq!(ticks, 1);
+        // Input resets the count only through the idle path: fewer idles never tick.
+        let mut ticks = 0;
+        let script: Vec<Poll2> = (0..TICK_IDLES - 1).map(|_| Poll2::Idle).collect();
+        run(
+            &mut app,
+            &mut Script(script),
+            &mut out,
+            || (80, 24),
+            |_, _| Ok(()),
+            |_, _| ticks += 1,
+        )
+        .unwrap();
+        assert_eq!(ticks, 0);
+    }
+
+    #[test]
+    fn moving_the_selection_runs_the_local_refresh() {
+        let mut app = App::new(vec![row(Mark::Verified), row(Mark::Verified)]);
+        let mut seen = Vec::new();
+        let mut out = Vec::new();
+        run(
+            &mut app,
+            &mut Script(vec![Poll2::Data(b"\x1b[B")]),
+            &mut out,
+            || (80, 24),
+            |_, _| Ok(()),
+            |_, why| seen.push(why),
+        )
+        .unwrap();
+        assert_eq!(seen, vec![Tick::Selected]);
     }
 
     #[test]

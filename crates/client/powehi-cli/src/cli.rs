@@ -64,6 +64,8 @@ pub enum Command {
     Read(ReadArgs),
     /// Interactive chat REPL with realtime delivery.
     Chat(ChatArgs),
+    /// Full-screen terminal UI: conversation list, messages and an input line.
+    Tui,
     /// Show the Safety Number for a conversation.
     Verify(VerifyArgs),
     /// List the conversations stored in this profile (ids, roles, unread counts).
@@ -330,6 +332,7 @@ impl Command {
             Command::Decline(_) => "decline",
             Command::Read(_) => "read",
             Command::Chat(_) => "chat",
+            Command::Tui => "tui",
             Command::Verify(_) => "verify",
             Command::Conversations(_) => "conversations",
             Command::Profiles(_) => "profiles",
@@ -383,6 +386,12 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("powehi").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn tui_takes_no_arguments() {
+        assert!(matches!(parse(&["tui"]).unwrap().command, Command::Tui));
+        assert!(parse(&["tui", "x"]).is_err());
     }
 
     #[test]

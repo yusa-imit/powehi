@@ -102,6 +102,9 @@ pub enum CliError {
     Output,
     #[error("could not list the data directory")]
     DataDirList,
+    #[cfg(unix)]
+    #[error("tui: {0}")]
+    TuiTerminal(&'static str),
     #[error("could not start the async runtime")]
     Runtime,
     #[cfg(not(unix))]
@@ -156,6 +159,8 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
         cli::Command::Chat(ref c) => {
             run_chat(&args.server, &paths, &c.conversation, c.allow_changed)
         }
+        #[cfg(unix)]
+        cli::Command::Tui => run_tui(&args.server, &paths),
         #[cfg(unix)]
         cli::Command::Verify(ref c) => run_verify(&args.server, &paths, c),
         #[cfg(unix)]
@@ -696,6 +701,54 @@ fn run_chat(
     })
     .map_err(|_| CliError::Stdout)?;
     Ok(())
+}
+
+/// `tui`: logs in, then runs the full-screen UI on the alternate screen (8.20).
+#[cfg(unix)]
+fn run_tui(server: &url::Url, paths: &profile::ProfilePaths) -> Result<(), CliError> {
+    if !tui::term::utf8_locale_from_env() {
+        return Err(CliError::TuiTerminal("a UTF-8 locale is required"));
+    }
+    let rt = runtime()?;
+    let client = status::http_client()?;
+    let mut prompter = prompt::TtyPrompter;
+    let session = login_scoped(&rt, &client, server, paths, &mut prompter)?;
+    let sync = |app: &mut tui::App, why: tui::run::Tick| {
+        if why == tui::run::Tick::Timer
+            && rt
+                .block_on(inbox::receive(&client, server, &session))
+                .is_err()
+        {
+            app.set_notice("receive failed");
+        }
+        tui::sync::drain(&session.store, app);
+    };
+    let mut app = tui::App::new(Vec::new());
+    let send = |group: uuid::Uuid, text: &str| -> Result<(), ()> {
+        let body = message::check_body(text.as_bytes()).map_err(|_| ())?;
+        rt.block_on(message::send_with(
+            &client, server, &session, group, body, false,
+        ))
+        .map_err(|_| ())
+    };
+    // Everything below is dropped (terminal restored) before the session is revoked.
+    let _signals = screen::install_signal_restore();
+    let _screen = screen::AltScreen::enter(std::io::stdout(), true)
+        .map_err(|_| CliError::TuiTerminal("cannot use the alternate screen"))?;
+    let _raw = tui::term::RawMode::enter()
+        .map_err(|_| CliError::TuiTerminal("stdin and stdout must be a terminal"))?;
+    let size = || tui::term::size().unwrap_or((0, 0));
+    // Only now, with the screen up: nothing is taken from the store before it can be shown.
+    sync(&mut app, tui::run::Tick::Timer);
+    tui::run::run(
+        &mut app,
+        &mut tui::term::Stdin,
+        &mut std::io::stdout(),
+        size,
+        send,
+        sync,
+    )
+    .map_err(|_| CliError::TuiTerminal("terminal too small (need 40x8) or output closed"))
 }
 
 /// Seconds between Welcome polls while `invite create --wait` is waiting.

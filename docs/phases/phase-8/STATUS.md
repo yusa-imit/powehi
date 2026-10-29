@@ -415,6 +415,14 @@ pointing here. Close the issue in the PR that finishes its item.
   enforcement, termios restore on SIGTERM/SIGTSTP (signal handler needs the saved termios),
   bracketed paste (paste containing `ESC [ B` + CR must not switch chat and send), cap `shown`
   keys, send/inbox/verify wiring. Remaining: b2b.
+  Slice (b2b) shipped (cycle 681): `powehi tui` subcommand (UTF-8 locale check, alt screen, raw
+  mode, signal restore of termios, login then session revoked after the terminal is restored),
+  send via `send_with` (allow_changed=false), inbox refresh every ~5 s and local drain on
+  selection change. A message leaves the store only when its conversation is selected (security-auditor
+  finding: no loss on exit or small terminal). Carry (box stays open): repaint copies of plaintext are
+  not wiped (render path), the refresh blocks the loop on the network (Ctrl-C unresponsive; move to a
+  worker thread), SIGABRT/SIGTSTP termios restore, bracketed paste, `verify` action in the TUI, duplicate
+  show if `discard` fails, a live-backend smoke test.
 - [ ] 8.21 Media send/receive (prd §9) — `send --file` and saving received media to
   `0600` files, encrypted per prd §9.2 and ADR-0004, with size caps.
   crypto-reviewer + security-auditor.

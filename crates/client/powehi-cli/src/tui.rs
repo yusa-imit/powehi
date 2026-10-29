@@ -23,6 +23,7 @@ pub mod input;
 pub mod paint;
 pub mod rows;
 pub mod run;
+pub mod sync;
 pub mod term;
 
 use crate::conversation::Kind;
