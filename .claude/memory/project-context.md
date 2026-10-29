@@ -1934,3 +1934,4 @@ cargo audit/deny clean (only waived RUSTSEC-2026-0387), CI green, no bug issues.
 - Cycle 673 (FEATURE): 8.17 slice s: group/pair PQ reality documented (prd §5.3B), group classical notice, need-human + bug issues. 8.17 open pending owner PQ choice.
 - Cycle 675 (stabilization): web 'PQ' badge reworded to 'PQ key check' (#204); audit/deny clean.
 - Stabilization 680: proptest for TUI key decoder found C1 controls (U+0080..9F) typed as Char; now dropped. audit/deny clean.
+- Cycle 684 (FEATURE): 8.20 carry: TUI drain removes a message from the store before showing it (no duplicate on failed discard). 8.15/8.17/8.19 still blocked on need-human. Remaining 8.20 carries: worker-thread refresh, verify action, live smoke test.

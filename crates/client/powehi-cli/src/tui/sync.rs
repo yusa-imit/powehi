@@ -1,5 +1,5 @@
 //! Moves stored messages into the TUI (8.20 slice b2b): rows reloaded from the store, each
-//! pending message of the selected conversation pushed into memory and then removed.
+//! pending message of the selected conversation removed from the store and then shown.
 
 use zeroize::Zeroizing;
 
@@ -24,13 +24,14 @@ pub fn drain(store: &ProfileStore, app: &mut App) {
         return;
     };
     for m in &msgs {
-        let who = message::sender_label(m);
-        app.push_message(id, who, Zeroizing::new(m.text.to_string()));
+        // Remove first: a message that cannot be removed stays in the store, unshown, and is
+        // retried on the next refresh. Showing first would repeat it on every refresh.
         if message::discard(store, m).is_err() {
-            // Stop: a message that stays would be shown again on every refresh.
-            app.set_notice("could not remove a shown message from the store");
+            app.set_notice("could not remove a message from the store");
             return;
         }
+        let who = message::sender_label(m);
+        app.push_message(id, who, Zeroizing::new(m.text.to_string()));
     }
 }
 
