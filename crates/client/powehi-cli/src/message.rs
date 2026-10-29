@@ -287,16 +287,25 @@ pub fn pending(store: &ProfileStore, group_id: Uuid) -> Result<Vec<Pending>, Mes
     Ok(out)
 }
 
+/// Short sender label: the authenticated group key prefix, else the server's sender id.
+pub fn sender_label(msg: &Pending) -> String {
+    match &msg.sender_key {
+        Some(k) => format!("key:{}", k.chars().take(16).collect::<String>()),
+        None => short_id(&msg.sender),
+    }
+}
+
 /// Writes one message as `[sender] first line`, with continuation lines indented so a body
 /// cannot forge a `[id] ...` header line, and flushes so only what reached the terminal is
 /// ever discarded afterwards.
 pub fn display(out: &mut impl std::io::Write, msg: &Pending) -> std::io::Result<()> {
     let mut lines = msg.text.split('\n');
-    let who = match &msg.sender_key {
-        Some(k) => format!("key:{}", k.chars().take(16).collect::<String>()),
-        None => short_id(&msg.sender),
-    };
-    writeln!(out, "[{who}] {}", lines.next().unwrap_or(""))?;
+    writeln!(
+        out,
+        "[{}] {}",
+        sender_label(msg),
+        lines.next().unwrap_or("")
+    )?;
     for l in lines {
         writeln!(out, "    | {l}")?;
     }

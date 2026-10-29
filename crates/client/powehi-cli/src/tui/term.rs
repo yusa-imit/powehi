@@ -11,6 +11,17 @@ use super::run::{Poll, Source};
 /// Poll timeout: how long a lone ESC waits for the rest of a sequence.
 const IDLE_MS: libc::c_int = 100;
 
+/// The settings to restore from a signal handler; set once by [`RawMode::enter`].
+static SAVED: std::sync::OnceLock<libc::termios> = std::sync::OnceLock::new();
+
+/// Async-signal-safe: puts back the cooked settings if raw mode was ever entered.
+pub fn restore_from_signal() {
+    if let Some(saved) = SAVED.get() {
+        // SAFETY: tcsetattr is async-signal-safe; `saved` came from tcgetattr on this fd.
+        unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSAFLUSH, saved) };
+    }
+}
+
 /// Restores the terminal settings captured by [`RawMode::enter`] when dropped.
 pub struct RawMode {
     saved: libc::termios,
@@ -29,6 +40,7 @@ impl RawMode {
         if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut saved) } != 0 {
             return Err(io::Error::last_os_error());
         }
+        let _ = SAVED.set(saved);
         let mut raw = saved;
         // SAFETY: `raw` is a valid termios.
         unsafe { libc::cfmakeraw(&mut raw) };
