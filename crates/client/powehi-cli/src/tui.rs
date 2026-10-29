@@ -59,6 +59,8 @@ pub enum Key {
     Enter,
     Backspace,
     Esc,
+    /// Ctrl-V: open the verify pane for the selected conversation.
+    Verify,
     Char(char),
 }
 
@@ -71,6 +73,15 @@ pub enum Action {
         group: Uuid,
         text: Zeroizing<String>,
     },
+    /// Compute the Safety Number of `group` and show it ([`App::open_verify`]).
+    Verify {
+        group: Uuid,
+    },
+    /// The user typed `typed` in the verify pane; confirm it against the current number.
+    Confirm {
+        group: Uuid,
+        typed: String,
+    },
 }
 
 impl std::fmt::Debug for Action {
@@ -80,6 +91,8 @@ impl std::fmt::Debug for Action {
             Action::None => "None",
             Action::Quit => "Quit",
             Action::Send { .. } => "Send",
+            Action::Verify { .. } => "Verify",
+            Action::Confirm { .. } => "Confirm",
         })
     }
 }
@@ -90,8 +103,30 @@ struct Shown {
     text: Zeroizing<String>,
 }
 
+/// The verify pane: the number to compare and what the user has typed so far.
+struct Pane {
+    group: Uuid,
+    number: String,
+    typed: Zeroizing<String>,
+    opened: std::time::Instant,
+}
+
+/// Longest line accepted in the verify pane (a Safety Number is 83 characters).
+const MAX_TYPED: usize = 100;
+/// Shown when the verify pane's input is rejected.
+pub const VERIFY_FAILED: &str = "number does not match; not verified";
+/// Enter in the verify pane is ignored for this long after it opens, so bytes that arrived
+/// together with the opening key (a hostile paste) cannot confirm a number nobody compared.
+pub const VERIFY_MIN_OPEN: std::time::Duration = std::time::Duration::from_secs(2);
+/// Shown when Enter comes too soon after the pane opened.
+pub const VERIFY_TOO_SOON: &str = "compare the number first, then press Enter";
+/// Shown when no Safety Number can be computed.
+pub const NO_NUMBER: &str = "cannot compute a safety number here";
+
 /// Screen state.
 pub struct App {
+    verify: Option<Pane>,
+    verify_delay: std::time::Duration,
     rows: Vec<Row>,
     selected: usize,
     input: Zeroizing<String>,
@@ -109,6 +144,8 @@ impl App {
     pub fn new(mut rows: Vec<Row>) -> Self {
         rows.truncate(MAX_ROWS);
         Self {
+            verify: None,
+            verify_delay: VERIFY_MIN_OPEN,
             rows,
             selected: 0,
             input: Zeroizing::new(String::with_capacity(crate::message::MAX_BODY_LEN)),
@@ -145,7 +182,65 @@ impl App {
             self.input = Zeroizing::new(String::with_capacity(crate::message::MAX_BODY_LEN));
         }
         self.rows = rows;
+        if self.verify.as_ref().map(|p| p.group) != self.selected_id() {
+            self.verify = None;
+        }
         assert!(self.rows.is_empty() || self.selected < self.rows.len());
+    }
+
+    /// Opens the verify pane for `group` (the selected conversation) showing `number`.
+    pub fn open_verify(&mut self, group: Uuid, number: String) {
+        if self.selected_id() != Some(group) {
+            return;
+        }
+        // Whatever was typed for a message is not for this pane.
+        self.input = Zeroizing::new(String::with_capacity(crate::message::MAX_BODY_LEN));
+        self.verify = Some(Pane {
+            group,
+            number,
+            typed: Zeroizing::new(String::with_capacity(MAX_TYPED)),
+            opened: std::time::Instant::now(),
+        });
+    }
+
+    /// Overrides the minimum time the pane stays open before Enter confirms (tests).
+    pub fn set_verify_delay(&mut self, delay: std::time::Duration) {
+        self.verify_delay = delay;
+    }
+
+    pub fn close_verify(&mut self) {
+        self.verify = None;
+    }
+
+    pub fn verify_open(&self) -> bool {
+        self.verify.is_some()
+    }
+
+    fn press_verify(&mut self, key: Key) -> Action {
+        let Some(pane) = self.verify.as_mut() else {
+            return Action::None;
+        };
+        if key == Key::Enter && pane.opened.elapsed() < self.verify_delay {
+            self.notice = Some(VERIFY_TOO_SOON);
+            return Action::None;
+        }
+        match key {
+            Key::Esc => self.verify = None,
+            Key::Backspace => {
+                pane.typed.pop();
+            }
+            Key::Char(c) if !c.is_control() && pane.typed.len() + c.len_utf8() <= MAX_TYPED => {
+                pane.typed.push(c);
+            }
+            Key::Enter if !pane.typed.trim().is_empty() => {
+                return Action::Confirm {
+                    group: pane.group,
+                    typed: pane.typed.to_string(),
+                };
+            }
+            _ => {}
+        }
+        Action::None
     }
 
     /// Appends a received message to its conversation (bounded; oldest wiped first).
@@ -169,7 +264,15 @@ impl App {
     /// Esc quits.
     pub fn press(&mut self, key: Key) -> Action {
         self.notice = None;
+        if self.verify.is_some() {
+            return self.press_verify(key);
+        }
         match key {
+            Key::Verify => {
+                return self
+                    .selected_id()
+                    .map_or(Action::None, |group| Action::Verify { group });
+            }
             Key::Esc => return Action::Quit,
             Key::Up => self.step(false),
             Key::Down => self.step(true),
@@ -307,6 +410,11 @@ pub fn draw(app: &App, area: Rect, buf: &mut Buffer) {
                 .collect()
         })
         .unwrap_or_default();
+    if let Some(p) = &app.verify {
+        draw_verify(p, msgs, input, buf);
+        Paragraph::new("Enter confirm · Esc cancel").render(note, buf);
+        return;
+    }
     // Show the newest lines: scroll so the tail fits.
     let inner_h = usize::from(msgs.height.saturating_sub(2));
     let skip = u16::try_from(lines.len().saturating_sub(inner_h)).unwrap_or(u16::MAX);
@@ -319,9 +427,27 @@ pub fn draw(app: &App, area: Rect, buf: &mut Buffer) {
         .render(input, buf);
     Paragraph::new(
         app.notice
-            .unwrap_or("Esc quit · Up/Down switch · Enter send"),
+            .unwrap_or("Esc quit · Up/Down switch · Enter send · ^V verify"),
     )
     .render(note, buf);
+}
+
+/// The verify pane replaces the message and input panes.
+fn draw_verify(p: &Pane, msgs: Rect, input: Rect, buf: &mut Buffer) {
+    let lines = vec![
+        Line::raw("Compare this safety number with your contact over a trusted channel:"),
+        Line::raw(""),
+        Line::raw(clean(&p.number)),
+        Line::raw(""),
+        Line::raw("Then type it below to mark the conversation verified."),
+    ];
+    Paragraph::new(lines)
+        .wrap(ratatui::widgets::Wrap { trim: false })
+        .block(Block::new().borders(Borders::ALL).title("verify"))
+        .render(msgs, buf);
+    Paragraph::new(format!("> {}", clean(&p.typed)))
+        .block(Block::new().borders(Borders::ALL).title("safety number"))
+        .render(input, buf);
 }
 
 #[cfg(test)]

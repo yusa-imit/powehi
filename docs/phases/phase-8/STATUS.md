@@ -429,6 +429,7 @@ pointing here. Close the issue in the PR that finishes its item.
   Cycle 683: SIGABRT now restores the terminal (screen.rs handler list). SIGTSTP needs no handler: raw mode
   clears ISIG, so Ctrl-Z is a plain byte; only an external `kill -TSTP` stops it, and that is left alone.
   Cycle 684: the duplicate-show carry is closed: `tui::sync::drain` removes a message from the store BEFORE showing it, so a failed removal leaves it stored and unshown (retried), never repeated.
+  Cycle 686: `verify` action shipped: Ctrl-V opens a pane with the Safety Number; typing it and Enter calls `verify::confirm` (recomputes the number at confirm time, fail closed); Esc closes the pane. security-auditor: a hostile paste could open and confirm in one read; fixed (keys after the opening key are dropped, Enter ignored for 2 s after the pane opens, typed buffer zeroized). Remaining carry: worker-thread refresh, live-backend smoke test.
 - [ ] 8.21 Media send/receive (prd §9) — `send --file` and saving received media to
   `0600` files, encrypted per prd §9.2 and ADR-0004, with size caps.
   crypto-reviewer + security-auditor.

@@ -371,3 +371,86 @@ mod decoder_props {
         }
     }
 }
+
+fn verify_app() -> (App, Uuid) {
+    let id = Uuid::new_v4();
+    let mut app = App::new(vec![Row {
+        id,
+        kind: Kind::Pair,
+        unread: 0,
+        mark: Mark::Unverified,
+    }]);
+    app.press(Key::Char('s'));
+    assert!(matches!(app.press(Key::Verify), Action::Verify { group } if group == id));
+    app.open_verify(id, "11111 22222".into());
+    app.set_verify_delay(std::time::Duration::ZERO);
+    (app, id)
+}
+
+#[test]
+fn verify_pane_takes_typing_and_never_sends() {
+    let (mut app, id) = verify_app();
+    // Opening the pane dropped the half-typed message.
+    assert_eq!(app.input_len(), 0);
+    assert!(matches!(app.press(Key::Enter), Action::None));
+    for c in "11111 22222".chars() {
+        assert!(matches!(app.press(Key::Char(c)), Action::None));
+    }
+    match app.press(Key::Enter) {
+        Action::Confirm { group, typed } => {
+            assert_eq!((group, typed.as_str()), (id, "11111 22222"));
+        }
+        other => panic!("{other:?}"),
+    }
+    // Typing in the pane never reached the message line.
+    assert_eq!(app.input_len(), 0);
+}
+
+#[test]
+fn esc_closes_the_pane_instead_of_quitting() {
+    let (mut app, _) = verify_app();
+    assert!(matches!(app.press(Key::Esc), Action::None));
+    assert!(!app.verify_open());
+    assert!(matches!(app.press(Key::Esc), Action::Quit));
+}
+
+#[test]
+fn verify_pane_input_is_bounded_and_ignores_controls() {
+    let (mut app, _) = verify_app();
+    for _ in 0..300 {
+        app.press(Key::Char('1'));
+    }
+    app.press(Key::Char('\x1b'));
+    match app.press(Key::Enter) {
+        Action::Confirm { typed, .. } => assert_eq!(typed.len(), 100),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn pane_closes_when_its_conversation_goes_away() {
+    let (mut app, _) = verify_app();
+    app.set_rows(Vec::new());
+    assert!(!app.verify_open());
+}
+
+#[test]
+fn pane_draws_the_number_cleaned() {
+    let (mut app, id) = verify_app();
+    app.open_verify(id, "12\x1b[2J 34".into());
+    let area = Rect::new(0, 0, 80, 24);
+    let mut buf = Buffer::empty(area);
+    draw(&app, area, &mut buf);
+    let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+    assert!(text.contains("12?[2J 34") && !text.contains('\x1b'));
+}
+
+#[test]
+fn enter_right_after_opening_the_pane_is_too_soon() {
+    let (mut app, id) = verify_app();
+    app.set_verify_delay(VERIFY_MIN_OPEN);
+    app.open_verify(id, "1".into());
+    app.press(Key::Char('1'));
+    assert!(matches!(app.press(Key::Enter), Action::None));
+    assert_eq!(app.notice(), Some(VERIFY_TOO_SOON));
+}
