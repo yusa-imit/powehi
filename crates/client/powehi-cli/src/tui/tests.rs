@@ -294,3 +294,48 @@ mod terminal_more {
         assert!(String::from_utf8(paint(&buf)).unwrap().contains("회원Û"));
     }
 }
+
+mod decoder_props {
+    use proptest::prelude::*;
+
+    use super::super::input::Decoder;
+    use super::*;
+
+    proptest! {
+        /// Any byte soup, split at any point: no panic, and every `Char` is printable.
+        #[test]
+        fn arbitrary_bytes_never_panic_or_type_control_chars(
+            bytes in proptest::collection::vec(any::<u8>(), 0..512),
+            split in 0usize..512,
+        ) {
+            let cut = split.min(bytes.len());
+            let mut d = Decoder::new();
+            let mut out = Vec::new();
+            d.feed(&bytes[..cut], &mut out);
+            d.feed(&bytes[cut..], &mut out);
+            let _ = d.finish();
+            for k in out {
+                if let Key::Char(c) = k {
+                    prop_assert!(!c.is_control());
+                }
+            }
+        }
+
+        /// Chunking never changes the decoded keys.
+        #[test]
+        fn split_point_does_not_change_the_keys(
+            bytes in proptest::collection::vec(any::<u8>(), 0..256),
+            split in 0usize..256,
+        ) {
+            let cut = split.min(bytes.len());
+            let mut whole = Decoder::new();
+            let mut a = Vec::new();
+            whole.feed(&bytes, &mut a);
+            let mut parts = Decoder::new();
+            let mut b = Vec::new();
+            parts.feed(&bytes[..cut], &mut b);
+            parts.feed(&bytes[cut..], &mut b);
+            prop_assert_eq!(a, b);
+        }
+    }
+}
