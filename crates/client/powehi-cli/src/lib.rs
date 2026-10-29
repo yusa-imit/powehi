@@ -731,6 +731,18 @@ fn run_tui(server: &url::Url, paths: &profile::ProfilePaths) -> Result<(), CliEr
         ))
         .map_err(|_| ())
     };
+    let verify = |req: tui::run::Verify<'_>| -> Result<Option<String>, ()> {
+        let (tui::run::Verify::Number(group) | tui::run::Verify::Confirm(group, _)) = req;
+        let current = verify::number(&session.store, group).map_err(|_| ())?;
+        match req {
+            tui::run::Verify::Number(_) => Ok(Some(current)),
+            tui::run::Verify::Confirm(_, typed) => {
+                verify::confirm(&session.store, group, &current, typed)
+                    .map(|()| None)
+                    .map_err(|_| ())
+            }
+        }
+    };
     // Everything below is dropped (terminal restored) before the session is revoked.
     let _signals = screen::install_signal_restore();
     let _screen = screen::AltScreen::enter(std::io::stdout(), true)
@@ -747,6 +759,7 @@ fn run_tui(server: &url::Url, paths: &profile::ProfilePaths) -> Result<(), CliEr
         size,
         send,
         sync,
+        verify,
     )
     .map_err(|_| CliError::TuiTerminal("terminal too small (need 40x8) or output closed"))
 }

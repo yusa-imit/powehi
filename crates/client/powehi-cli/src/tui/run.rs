@@ -12,7 +12,9 @@ use zeroize::{Zeroize, Zeroizing};
 
 use super::input::Decoder;
 use super::paint::paint;
-use super::{draw, Action, App, Key};
+#[cfg(test)]
+use super::VERIFY_TOO_SOON;
+use super::{draw, Action, App, Key, NO_NUMBER, VERIFY_FAILED};
 
 /// Largest screen painted, in cells per side.
 const MAX_DIM: u16 = 500;
@@ -25,6 +27,15 @@ pub enum Tick {
     Timer,
     /// The selection moved: load what is already stored, no network.
     Selected,
+}
+
+/// A request from the verify pane to the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verify<'a> {
+    /// Compute the Safety Number (the host answers `Ok(Some(number))`).
+    Number(Uuid),
+    /// Confirm `typed` against the current number (the host answers `Ok(None)` on success).
+    Confirm(Uuid, &'a str),
 }
 
 /// Idle polls (100 ms each) between refreshes of the inbox.
@@ -50,13 +61,14 @@ pub trait Source {
 /// Runs until Esc, end of input, or an I/O error. `size` is asked before each repaint.
 /// `send` carries out a send; `Err` leaves a notice and keeps the loop going. `tick` runs
 /// about every five seconds of idleness and when the selection moves.
-pub fn run<S, W, Z, F, T>(
+pub fn run<S, W, Z, F, T, V>(
     app: &mut App,
     src: &mut S,
     out: &mut W,
     mut size: Z,
     mut send: F,
     mut tick: T,
+    mut verify: V,
 ) -> io::Result<()>
 where
     S: Source,
@@ -64,6 +76,7 @@ where
     Z: FnMut() -> (u16, u16),
     F: FnMut(Uuid, &str) -> Result<(), ()>,
     T: FnMut(&mut App, Tick),
+    V: FnMut(Verify<'_>) -> Result<Option<String>, ()>,
 {
     let (w, h) = size();
     if w < MIN_W || h < MIN_H {
@@ -101,6 +114,22 @@ where
                 Action::Send { group, text } => match send(group, &text) {
                     Ok(()) => app.push_message(group, "me".into(), text),
                     Err(()) => app.set_notice(SEND_FAILED),
+                },
+                Action::Verify { group } => match verify(Verify::Number(group)) {
+                    Ok(Some(number)) => {
+                        app.open_verify(group, number);
+                        // Keys that arrived with the opening key never act on the pane.
+                        break;
+                    }
+                    _ => app.set_notice(NO_NUMBER),
+                },
+                Action::Confirm { group, typed } => match verify(Verify::Confirm(group, &typed)) {
+                    Ok(_) => {
+                        app.close_verify();
+                        // Reload the rows so the marker turns to verified.
+                        tick(app, Tick::Selected);
+                    }
+                    Err(()) => app.set_notice(VERIFY_FAILED),
                 },
             }
         }
@@ -169,6 +198,7 @@ mod tests {
             || (80, 24),
             send,
             |_, _| {},
+            |_| Err(()),
         )
         .unwrap();
         out
@@ -258,6 +288,7 @@ mod tests {
             || (10, 3),
             |_, _| Ok(()),
             |_, _| {},
+            |_| Err(()),
         );
         assert!(r.is_err() && out.is_empty());
     }
@@ -276,6 +307,7 @@ mod tests {
             || (80, 24),
             |_, _| Ok(()),
             |_, _| ticks += 1,
+            |_| Err(()),
         )
         .unwrap();
         assert_eq!(ticks, 1);
@@ -289,6 +321,7 @@ mod tests {
             || (80, 24),
             |_, _| Ok(()),
             |_, _| ticks += 1,
+            |_| Err(()),
         )
         .unwrap();
         assert_eq!(ticks, 0);
@@ -306,6 +339,7 @@ mod tests {
             || (80, 24),
             |_, _| Ok(()),
             |_, why| seen.push(why),
+            |_| Err(()),
         )
         .unwrap();
         assert_eq!(seen, vec![Tick::Selected]);
@@ -317,5 +351,103 @@ mod tests {
         app.press(Key::Char('a'));
         app.set_rows(vec![row(Mark::Verified)]);
         assert_eq!(app.input_len(), 0);
+    }
+
+    #[test]
+    fn verify_pane_confirms_only_what_the_host_accepts() {
+        let r = row(Mark::Unverified);
+        let id = r.id;
+        let mut app = App::new(vec![r]);
+        app.set_verify_delay(std::time::Duration::ZERO);
+        let mut seen = Vec::new();
+        let mut out = Vec::new();
+        run(
+            &mut app,
+            &mut Script(vec![
+                Poll2::Data(b"\x16"),
+                Poll2::Data(b"12 34\r"),
+                Poll2::Data(b"\x16"),
+            ]),
+            &mut out,
+            || (80, 24),
+            |_, _| Ok(()),
+            |_, _| {},
+            |req| match req {
+                Verify::Number(g) => {
+                    seen.push((g, String::new()));
+                    Ok(Some("12 34".to_owned()))
+                }
+                Verify::Confirm(g, t) => {
+                    seen.push((g, t.to_owned()));
+                    Ok(None)
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            seen,
+            vec![
+                (id, String::new()),
+                (id, "12 34".to_owned()),
+                (id, String::new())
+            ]
+        );
+        assert!(String::from_utf8_lossy(&out).contains("safety number"));
+    }
+
+    #[test]
+    fn wrong_number_keeps_the_pane_and_sets_a_notice() {
+        let mut app = App::new(vec![row(Mark::Unverified)]);
+        app.set_verify_delay(std::time::Duration::ZERO);
+        let mut out = Vec::new();
+        run(
+            &mut app,
+            &mut Script(vec![Poll2::Data(b"\x16"), Poll2::Data(b"x\r")]),
+            &mut out,
+            || (80, 24),
+            |_, _| Ok(()),
+            |_, _| {},
+            |req| match req {
+                Verify::Number(_) => Ok(Some("99".to_owned())),
+                Verify::Confirm(..) => Err(()),
+            },
+        )
+        .unwrap();
+        assert!(app.verify_open());
+        assert_eq!(app.notice(), Some(VERIFY_FAILED));
+    }
+
+    #[test]
+    fn host_failure_to_compute_a_number_is_a_notice() {
+        let mut app = App::new(vec![row(Mark::Unverified)]);
+        go(&mut app, vec![Poll2::Data(b"\x16")], |_, _| Ok(()));
+        assert!(!app.verify_open());
+        assert_eq!(app.notice(), Some(NO_NUMBER));
+    }
+
+    #[test]
+    fn one_read_cannot_open_and_confirm_the_pane() {
+        let mut app = App::new(vec![row(Mark::Unverified)]);
+        let mut confirmed = false;
+        let mut out = Vec::new();
+        run(
+            &mut app,
+            &mut Script(vec![Poll2::Data(b"\x16123\r"), Poll2::Data(b"123\r")]),
+            &mut out,
+            || (80, 24),
+            |_, _| Ok(()),
+            |_, _| {},
+            |req| match req {
+                Verify::Number(_) => Ok(Some("123".to_owned())),
+                Verify::Confirm(..) => {
+                    confirmed = true;
+                    Ok(None)
+                }
+            },
+        )
+        .unwrap();
+        // The tail of the first read was dropped; Enter right after opening is too soon.
+        assert!(!confirmed && app.verify_open());
+        assert_eq!(app.notice(), Some(VERIFY_TOO_SOON));
     }
 }

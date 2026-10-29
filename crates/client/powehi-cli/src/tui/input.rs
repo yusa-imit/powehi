@@ -216,6 +216,7 @@ impl Decoder {
             0x7f | 0x08 => out.push(Key::Backspace),
             // Ctrl-C and Ctrl-D quit: raw mode turns off the signal that would do it.
             0x03 | 0x04 => out.push(Key::Esc),
+            0x16 => out.push(Key::Verify),
             0x00..=0x1f => {}
             0x20..=0x7e => out.push(Key::Char(char::from(b))),
             0xc2..=0xdf => self.start_utf8(b, 2),
