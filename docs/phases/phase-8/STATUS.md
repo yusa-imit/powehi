@@ -436,6 +436,12 @@ pointing here. Close the issue in the PR that finishes its item.
 - [ ] 8.21 Media send/receive (prd §9) — `send --file` and saving received media to
   `0600` files, encrypted per prd §9.2 and ADR-0004, with size caps.
   crypto-reviewer + security-auditor.
+  Cycle 691 (slice 1): `media.rs` — `parse` validates the web-compatible media payload from a
+  peer (key in `Zeroizing`, chunked size capped at 64 MiB), `save` writes a new `0600` file via
+  temp + hard link (never partial, never overwrites, private dir required, name from the blob
+  UUID only). Next slices: `send --file` (encrypt, upload, send), receive/download with the
+  body-size cap applied BEFORE buffering (non-chunked ≤ cap+16; chunked ≤ ceil(total/16MiB)
+  chunks), `save` only on explicit user action (disk-fill), then the live E2E leg in 8.22.
 
 ### Gates
 - [ ] 8.22 E2E gate — extend `src/live_e2e.rs` and the `cli-live-backend` CI job:
