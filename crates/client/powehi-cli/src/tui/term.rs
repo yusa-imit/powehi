@@ -14,9 +14,20 @@ const IDLE_MS: libc::c_int = 100;
 /// The settings to restore from a signal handler; set once by [`RawMode::enter`].
 static SAVED: std::sync::OnceLock<libc::termios> = std::sync::OnceLock::new();
 
+/// Bracketed paste on/off (DECSET 2004): the terminal wraps pasted text in `ESC [200~`/`ESC [201~`
+/// so the decoder can type it as text only, never as keys.
+const PASTE_ON: &[u8] = b"\x1b[?2004h";
+const PASTE_OFF: &[u8] = b"\x1b[?2004l";
+
+fn write_stdout(bytes: &[u8]) {
+    // SAFETY: write(2) is async-signal-safe; `bytes` is a valid slice. Errors are ignored.
+    unsafe { libc::write(libc::STDOUT_FILENO, bytes.as_ptr().cast(), bytes.len()) };
+}
+
 /// Async-signal-safe: puts back the cooked settings if raw mode was ever entered.
 pub fn restore_from_signal() {
     if let Some(saved) = SAVED.get() {
+        write_stdout(PASTE_OFF);
         // SAFETY: tcsetattr is async-signal-safe; `saved` came from tcgetattr on this fd.
         unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSAFLUSH, saved) };
     }
@@ -48,12 +59,14 @@ impl RawMode {
         if unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSAFLUSH, &raw) } != 0 {
             return Err(io::Error::last_os_error());
         }
+        write_stdout(PASTE_ON);
         Ok(Self { saved })
     }
 }
 
 impl Drop for RawMode {
     fn drop(&mut self) {
+        write_stdout(PASTE_OFF);
         // SAFETY: `saved` came from tcgetattr on the same fd.
         unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSAFLUSH, &self.saved) };
     }

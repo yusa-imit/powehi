@@ -20,8 +20,11 @@ enum State {
     },
     Esc,
     /// `plain`: no parameter or intermediate byte seen yet.
+    /// `num`: value of the all-digit parameter so far (saturating); `digits`: only digits seen.
     Csi {
         plain: bool,
+        num: u16,
+        digits: bool,
     },
     Ss3,
     Str {
@@ -33,6 +36,9 @@ enum State {
 /// Incremental decoder.
 pub struct Decoder {
     state: State,
+    /// Inside `ESC [200~` .. `ESC [201~`: only printable characters become keys, so a pasted
+    /// `ESC [B` + CR can neither switch the conversation nor send.
+    paste: bool,
     buf: [u8; 4],
 }
 
@@ -52,6 +58,7 @@ impl Decoder {
     pub fn new() -> Self {
         Self {
             state: State::Ground,
+            paste: false,
             buf: [0; 4],
         }
     }
@@ -59,7 +66,18 @@ impl Decoder {
     /// Decodes `bytes` after any carried-over state, appending keys to `out`.
     pub fn feed(&mut self, bytes: &[u8], out: &mut Vec<Key>) {
         for &b in bytes {
+            let from = out.len();
             self.byte(b, out);
+            if self.paste {
+                let mut i = from;
+                while i < out.len() {
+                    if matches!(out[i], Key::Char(_)) {
+                        i += 1;
+                    } else {
+                        out.remove(i);
+                    }
+                }
+            }
         }
     }
 
@@ -67,9 +85,15 @@ impl Decoder {
     pub fn finish(&mut self) -> Option<Key> {
         // Only a bare ESC is resolved by a quiet period; a sequence split by a slow link
         // stays in flight so its tail never types into the message line.
+        // An idle terminal also ends a paste: a lost end marker must not trap the user, and a
+        // pasted ESC must never quit.
+        let was_paste = std::mem::replace(&mut self.paste, false);
         if self.state == State::Esc {
             self.reset();
-            return Some(Key::Esc);
+            return (!was_paste).then_some(Key::Esc);
+        }
+        if was_paste {
+            self.reset();
         }
         None
     }
@@ -101,7 +125,13 @@ impl Decoder {
                 }
             }
             State::Esc => match b {
-                b'[' => self.state = State::Csi { plain: true },
+                b'[' => {
+                    self.state = State::Csi {
+                        plain: true,
+                        num: 0,
+                        digits: true,
+                    }
+                }
                 b'O' => self.state = State::Ss3,
                 b']' | b'P' | b'_' | b'^' | b'X' => {
                     self.state = State::Str {
@@ -116,9 +146,30 @@ impl Decoder {
                 }
                 _ => self.reset(), // Alt-key: dropped
             },
-            State::Csi { plain } => match b {
-                0x20..=0x3f => self.state = State::Csi { plain: false },
+            State::Csi { plain, num, digits } => match b {
+                b'0'..=b'9' => {
+                    let num = num.saturating_mul(10).saturating_add(u16::from(b - b'0'));
+                    self.state = State::Csi {
+                        plain: false,
+                        num,
+                        digits,
+                    };
+                }
+                0x20..=0x3f => {
+                    self.state = State::Csi {
+                        plain: false,
+                        num,
+                        digits: false,
+                    }
+                }
                 0x40..=0x7e => {
+                    if b == b'~' && digits && !plain {
+                        match num {
+                            200 => self.paste = true,
+                            201 => self.paste = false,
+                            _ => {}
+                        }
+                    }
                     match (plain, b) {
                         (true, b'A') => out.push(Key::Up),
                         (true, b'B') => out.push(Key::Down),

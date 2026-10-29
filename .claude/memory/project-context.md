@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 682 (2026-10-29, FEATURE) — 8.20 carry: bracketed paste
+- Decoder `paste` flag, idle clears it; 8.15 first-unchecked remains blocked on d+e wiring (#161/#166).
+
 ## Cycle 681 (2026-10-29, FEATURE) — 8.20 slice (b2b): `powehi tui` subcommand
 - Wired login, alt screen, raw mode, termios restore from signals, send, refresh tick. Messages are
   removed from the store only when their conversation is selected. Carry list in STATUS (8.20);

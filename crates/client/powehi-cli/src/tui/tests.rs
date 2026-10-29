@@ -200,6 +200,38 @@ mod terminal {
     }
 
     #[test]
+    fn bracketed_paste_types_text_only() {
+        // A paste carrying Down, Enter, Esc and Ctrl-C must not act as keys.
+        let k = keys(&[b"\x1b[200~a\x1b[B\rb\x03c\x1b[201~", b"\r"]);
+        assert_eq!(
+            k,
+            vec![Key::Char('a'), Key::Char('b'), Key::Char('c'), Key::Enter]
+        );
+        // An unterminated paste stays text-only; ESC [ 201 ~ split across reads ends it.
+        let k = keys(&[b"\x1b[200~x\r\x1b[2", b"01~\r"]);
+        assert_eq!(k, vec![Key::Char('x'), Key::Enter]);
+        // Other numeric CSI (`ESC [3~`) never toggles paste.
+        assert_eq!(keys(&[b"\x1b[3~\r"]), vec![Key::Enter]);
+    }
+
+    #[test]
+    fn idle_ends_a_paste_and_a_pasted_esc_never_quits() {
+        let mut d = Decoder::new();
+        let mut out = Vec::new();
+        d.feed(b"\x1b[200~ab\x1b", &mut out);
+        assert_eq!(d.finish(), None);
+        d.feed(b"\r", &mut out);
+        assert_eq!(out, vec![Key::Char('a'), Key::Char('b'), Key::Enter]);
+        // Unterminated paste inside a string sequence: idle still frees the keyboard.
+        let mut d = Decoder::new();
+        out.clear();
+        d.feed(b"\x1b[200~\x1b]junk", &mut out);
+        assert_eq!(d.finish(), None);
+        d.feed(b"\r", &mut out);
+        assert_eq!(out, vec![Key::Enter]);
+    }
+
+    #[test]
     fn ctrl_c_quits_and_lone_escape_needs_finish() {
         assert_eq!(keys(&[b"\x03"]), [Key::Esc]);
         let mut d = Decoder::new();
