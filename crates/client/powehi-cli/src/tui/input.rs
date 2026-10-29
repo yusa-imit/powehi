@@ -87,7 +87,9 @@ impl Decoder {
                     self.buf[usize::from(len)] = b;
                     if len + 1 == need {
                         let s = std::str::from_utf8(&self.buf[..usize::from(need)]);
-                        out.extend(s.ok().and_then(|s| s.chars().next()).map(Key::Char));
+                        // C1 controls (U+0080..U+009F) are dropped like their ASCII kin.
+                        let c = s.ok().and_then(|s| s.chars().next());
+                        out.extend(c.filter(|c| !c.is_control()).map(Key::Char));
                         self.reset();
                     } else {
                         self.state = State::Utf8 { need, len: len + 1 };
