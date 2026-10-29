@@ -146,7 +146,11 @@ fn repaint<W: Write>(app: &App, out: &mut W, (w, h): (u16, u16)) -> io::Result<(
     let area = Rect::new(0, 0, w.min(MAX_DIM), h.min(MAX_DIM));
     let mut buf = Buffer::empty(area);
     draw(app, area, &mut buf);
-    out.write_all(&paint(&buf))?;
+    // Both copies of the screen hold message text: wipe them whether or not the write works.
+    let bytes = Zeroizing::new(paint(&buf));
+    buf.reset();
+    debug_assert!(buf.content.iter().all(|c| c.symbol() == " "));
+    out.write_all(&bytes)?;
     out.flush()
 }
 
@@ -275,6 +279,18 @@ mod tests {
         repaint(&app, &mut out, (1, 1)).unwrap();
         repaint(&app, &mut out, (u16::MAX, u16::MAX)).unwrap();
         assert!(!out.contains(&0x07));
+
+        struct Broken;
+        impl Write for Broken {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("closed"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        // A failed write still wipes the buffers (the debug_assert in repaint) and reports it.
+        assert!(repaint(&app, &mut Broken, (80, 24)).is_err());
     }
 
     #[test]
