@@ -24,6 +24,8 @@ pub mod invite;
 #[cfg(all(test, unix))]
 mod live_e2e;
 #[cfg(unix)]
+pub mod media;
+#[cfg(unix)]
 pub mod message;
 pub mod pcs;
 pub mod pinning;
