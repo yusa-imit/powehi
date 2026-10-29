@@ -393,7 +393,7 @@ pointing here. Close the issue in the PR that finishes its item.
   answers should take 8.20 (TUI), which does not depend on them.
 
 ### TUI and media
-- [ ] 8.20 Full-screen TUI — `powehi tui` (`ratatui`) on top of the same lib:
+- [x] 8.20 Full-screen TUI — `powehi tui` (`ratatui`) on top of the same lib:
   conversation list, message pane, input line, unread / CHANGED / unverified
   markers, alternate screen, no message text in logs. Behaviour tests on the lib
   layer; a smoke test with a test backend.
@@ -432,6 +432,7 @@ pointing here. Close the issue in the PR that finishes its item.
   Cycle 686: `verify` action shipped: Ctrl-V opens a pane with the Safety Number; typing it and Enter calls `verify::confirm` (recomputes the number at confirm time, fail closed); Esc closes the pane. security-auditor: a hostile paste could open and confirm in one read; fixed (keys after the opening key are dropped, Enter ignored for 2 s after the pane opens, typed buffer zeroized). Remaining carry: worker-thread refresh, live-backend smoke test.
   Cycle 687: worker-thread refresh shipped (`tui/fetch.rs`): the inbox fetch runs on a worker, serialised against send/verify/drain by a gate mutex; the loop keeps reading keys while idle. security-auditor found a shutdown hang (poller borrowed, sender outlived the scope): fixed with a `move` closure and the terminal restored before the join. Known: send/verify block on the gate during a fetch; `eprintln!` in welcome/requests can paint over the screen from the worker. Remaining carry: live-backend smoke test, repaint copies of plaintext.
   Cycle 688: live-backend smoke test added to `live_e2e.rs` (a message that crossed the real Delivery Service is drained into the TUI `App`, leaves the store, and is painted). Remaining carry: repaint copies of plaintext.
+  Cycle 689: repaint copies wiped: the painted ANSI bytes are `Zeroizing` and the ratatui `Buffer` is reset right after the write (also on a failed write). Residual: the terminal's own scrollback/screen and the kernel tty buffer are outside our reach. 8.20 carries are now closed; the box is flipped (threat-model pass is 8.23).
 - [ ] 8.21 Media send/receive (prd §9) — `send --file` and saving received media to
   `0600` files, encrypted per prd §9.2 and ADR-0004, with size caps.
   crypto-reviewer + security-auditor.
