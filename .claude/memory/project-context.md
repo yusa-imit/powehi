@@ -1941,3 +1941,6 @@ cargo audit/deny clean (only waived RUSTSEC-2026-0387), CI green, no bug issues.
 
 ## Stabilization 685
 CI green, audit/deny clean (waived RUSTSEC-2026-0387 only), no bug issues. Committed the proptest regression seed for the TUI key decoder (C1 control case from #213) so it replays on every run. 494 powehi-cli lib tests pass, clippy clean. target/ 29G (under 20G prune threshold not met; nothing pruned).
+
+## Cycle 687 (FEATURE)
+8.20 carry: TUI inbox fetch moved to a worker thread (`tui/fetch.rs`, gate mutex vs send/verify/drain). security-auditor caught a shutdown hang (fixed; terminal restored before join). Remaining 8.20 carries: live-backend smoke test, plaintext repaint copies. 8.15/8.17/8.19 still blocked on need-human.
