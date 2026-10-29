@@ -421,11 +421,13 @@ pointing here. Close the issue in the PR that finishes its item.
   selection change. A message leaves the store only when its conversation is selected (security-auditor
   finding: no loss on exit or small terminal). Carry (box stays open): repaint copies of plaintext are
   not wiped (render path), the refresh blocks the loop on the network (Ctrl-C unresponsive; move to a
-  worker thread), SIGABRT/SIGTSTP termios restore, `verify` action in the TUI, duplicate
+  worker thread), `verify` action in the TUI, duplicate
   show if `discard` fails, a live-backend smoke test.
   Cycle 682: bracketed paste shipped (DECSET 2004 on in raw mode, off on drop/signal; a paste types
   printable chars only; idle ends a paste so a lost end marker cannot trap the user; security-auditor
   F1/F2 fixed, F3 residual: a clipboard holding a literal `ESC[201~` on a terminal that does not strip it).
+  Cycle 683: SIGABRT now restores the terminal (screen.rs handler list). SIGTSTP needs no handler: raw mode
+  clears ISIG, so Ctrl-Z is a plain byte; only an external `kill -TSTP` stops it, and that is left alone.
 - [ ] 8.21 Media send/receive (prd §9) — `send --file` and saving received media to
   `0600` files, encrypted per prd §9.2 and ADR-0004, with size caps.
   crypto-reviewer + security-auditor.

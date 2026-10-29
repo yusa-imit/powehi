@@ -1,7 +1,7 @@
 //! Alternate screen for `chat` and `read` (8.3, #39-5): the conversation never lands in the
 //! terminal scrollback (terminals that log the alternate screen aside). Active only when
 //! stdin and stdout are TTYs and `--json` is off; restored on
-//! normal exit, error and panic (the guard's `Drop`) and on SIGINT/SIGTERM/SIGHUP/SIGQUIT (an
+//! normal exit, error and panic (the guard's `Drop`) and on SIGINT/SIGTERM/SIGHUP/SIGQUIT/SIGABRT (an
 //! async-signal-safe handler that writes the leave sequence, then re-raises the signal).
 
 use std::io::{self, IsTerminal as _, Write};
@@ -11,7 +11,13 @@ pub const ENTER: &[u8] = b"\x1b[?1049h\x1b[H";
 /// Switch back to the main buffer; the scrollback is untouched.
 pub const LEAVE: &[u8] = b"\x1b[?1049l";
 
-const SIGNALS: [libc::c_int; 4] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT];
+const SIGNALS: [libc::c_int; 5] = [
+    libc::SIGINT,
+    libc::SIGTERM,
+    libc::SIGHUP,
+    libc::SIGQUIT,
+    libc::SIGABRT,
+];
 
 /// True when the alternate screen may be used: interactive stdout and no machine output.
 pub fn wanted(stdout_is_tty: bool, json: bool) -> bool {
@@ -164,7 +170,17 @@ mod tests {
     #[test]
     fn signal_guard_resets_disposition() {
         let g = install_signal_restore();
+        // SAFETY: reads the disposition by swapping it back in.
+        let during =
+            unsafe { libc::signal(libc::SIGABRT, on_signal as *const () as libc::sighandler_t) };
+        assert_eq!(
+            during, on_signal as *const () as libc::sighandler_t,
+            "SIGABRT is handled"
+        );
         drop(g);
+        // SAFETY: as above.
+        let abrt = unsafe { libc::signal(libc::SIGABRT, libc::SIG_DFL) };
+        assert_eq!(abrt, libc::SIG_DFL);
         // SAFETY: querying the disposition by installing SIG_DFL and reading the old one.
         let old = unsafe { libc::signal(libc::SIGTERM, libc::SIG_DFL) };
         assert_eq!(old, libc::SIG_DFL);
