@@ -713,19 +713,30 @@ fn run_tui(server: &url::Url, paths: &profile::ProfilePaths) -> Result<(), CliEr
     let client = status::http_client()?;
     let mut prompter = prompt::TtyPrompter;
     let session = login_scoped(&rt, &client, server, paths, &mut prompter)?;
-    let sync = |app: &mut tui::App, why: tui::run::Tick| {
-        if why == tui::run::Tick::Timer
-            && rt
-                .block_on(inbox::receive(&client, server, &session))
-                .is_err()
-        {
+    // The fetch runs on a worker; the gate keeps it from interleaving with other store writers.
+    let gate = std::sync::Mutex::new(());
+    let (req_tx, req_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<bool>(1);
+    let mut poller = tui::fetch::Poller::new(req_tx, done_rx);
+    let (sync_gate, sync_store) = (&gate, &session.store);
+    // `move`: the closure owns the poller (and so the request sender); dropping it ends the worker.
+    let sync = move |app: &mut tui::App, why: tui::run::Tick| {
+        if poller.poll(false) == Some(false) {
             app.set_notice("receive failed");
         }
-        tui::sync::drain(&session.store, app);
+        // A running fetch holds the gate: skip, the next tick drains what it stored.
+        if let Some(_g) = tui::fetch::try_lock(sync_gate) {
+            tui::sync::drain(sync_store, app);
+        }
+        // Start the next fetch after the drain, so a fetch never starves the drain.
+        if why == tui::run::Tick::Timer {
+            poller.poll(true);
+        }
     };
     let mut app = tui::App::new(Vec::new());
     let send = |group: uuid::Uuid, text: &str| -> Result<(), ()> {
         let body = message::check_body(text.as_bytes()).map_err(|_| ())?;
+        let _g = tui::fetch::lock(&gate);
         rt.block_on(message::send_with(
             &client, server, &session, group, body, false,
         ))
@@ -733,6 +744,7 @@ fn run_tui(server: &url::Url, paths: &profile::ProfilePaths) -> Result<(), CliEr
     };
     let verify = |req: tui::run::Verify<'_>| -> Result<Option<String>, ()> {
         let (tui::run::Verify::Number(group) | tui::run::Verify::Confirm(group, _)) = req;
+        let _g = tui::fetch::lock(&gate);
         let current = verify::number(&session.store, group).map_err(|_| ())?;
         match req {
             tui::run::Verify::Number(_) => Ok(Some(current)),
@@ -751,16 +763,41 @@ fn run_tui(server: &url::Url, paths: &profile::ProfilePaths) -> Result<(), CliEr
         .map_err(|_| CliError::TuiTerminal("stdin and stdout must be a terminal"))?;
     let size = || tui::term::size().unwrap_or((0, 0));
     // Only now, with the screen up: nothing is taken from the store before it can be shown.
-    sync(&mut app, tui::run::Tick::Timer);
-    tui::run::run(
-        &mut app,
-        &mut tui::term::Stdin,
-        &mut std::io::stdout(),
-        size,
-        send,
-        sync,
-        verify,
-    )
+    let fetch = || {
+        rt.block_on(inbox::receive(&client, server, &session))
+            .is_ok()
+    };
+    std::thread::scope(|s| {
+        let worker_gate = &gate;
+        s.spawn(move || tui::fetch::worker(req_rx, done_tx, worker_gate, fetch));
+        // The first fetch is awaited so the list is filled before the first paint.
+        {
+            let _g = tui::fetch::lock(&gate);
+            if rt
+                .block_on(inbox::receive(&client, server, &session))
+                .is_err()
+            {
+                app.set_notice("receive failed");
+            }
+            tui::sync::drain(&session.store, &mut app);
+        }
+        let res = tui::run::run(
+            &mut app,
+            &mut tui::term::Stdin,
+            &mut std::io::stdout(),
+            size,
+            send,
+            sync,
+            verify,
+        );
+        // `run` consumed `sync`, so the worker ends after its current fetch. The scope joins
+        // it, which can take a while on a slow server: put the terminal back first so no
+        // plaintext frame stays on screen meanwhile.
+        drop(_raw);
+        drop(_screen);
+        drop(_signals);
+        res
+    })
     .map_err(|_| CliError::TuiTerminal("terminal too small (need 40x8) or output closed"))
 }
 

@@ -19,6 +19,7 @@ use ratatui::widgets::{
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+pub mod fetch;
 pub mod input;
 pub mod paint;
 pub mod rows;
