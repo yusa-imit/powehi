@@ -1944,3 +1944,6 @@ CI green, audit/deny clean (waived RUSTSEC-2026-0387 only), no bug issues. Commi
 
 ## Cycle 687 (FEATURE)
 8.20 carry: TUI inbox fetch moved to a worker thread (`tui/fetch.rs`, gate mutex vs send/verify/drain). security-auditor caught a shutdown hang (fixed; terminal restored before join). Remaining 8.20 carries: live-backend smoke test, plaintext repaint copies. 8.15/8.17/8.19 still blocked on need-human.
+
+## Cycle 688 (FEATURE)
+8.20 carry: live-backend TUI smoke test in `live_e2e.rs` (drain + draw of a real DS message). 8.15/8.17/8.19 still blocked on owner (#166, #203, #208). Remaining 8.20 carry: repaint copies of plaintext. Test is only exercised in the CI live-backend job.
