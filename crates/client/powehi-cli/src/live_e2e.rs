@@ -96,42 +96,25 @@ async fn two_profiles_register_converse_and_verify() {
     let a_num = verify::number(&alice.store, gid).unwrap();
     assert_eq!(a_num, verify::number(&bob.store, gid).unwrap());
 
-    // 8.4: revoking ends the session. The token is dead on REST, and a second revoke is a no-op.
-    auth::revoke_session(&client, &url, &alice).await.unwrap();
-    assert!(inbox::receive(&client, &url, &alice).await.is_err());
-    auth::revoke_session(&client, &url, &alice).await.unwrap();
-}
-
-/// 8.20: a message that crossed the real Delivery Service reaches the TUI view: `sync::drain`
-/// moves it out of the store and `draw` paints it.
-#[tokio::test]
-#[ignore = "needs a live powehi-server (CI — Live-backend E2E)"]
-async fn tui_shows_a_live_message_and_empties_the_store() {
-    use crate::tui::{draw, sync, App};
-    use ratatui::{buffer::Buffer, layout::Rect};
-
-    let url = server();
-    let client = crate::status::http_client().unwrap();
-    let tmp = tempfile::tempdir().unwrap();
-    let (alice, _, _) = register(&client, &url, &tmp, "alice").await;
-    let (bob, _, _) = register(&client, &url, &tmp, "bob").await;
-    let (link, _) = invite::create(&client, &url, &alice).await.unwrap();
-    let link = invite::parse_link(&link).unwrap();
-    let (gid, _) = invite::redeem(&client, &url, &bob, &link).await.unwrap();
-    inbox::receive(&client, &url, &alice).await.unwrap();
+    // 8.20: a message that crossed the real Delivery Service reaches the TUI view: `drain`
+    // moves it out of the store and `draw` paints it. Kept in this test: registrations from
+    // parallel tests share one IP and trip the register rate limit.
     message::send(&client, &url, &bob, gid, b"tui smoke")
         .await
         .unwrap();
     inbox::receive(&client, &url, &alice).await.unwrap();
-
-    let mut app = App::new(Vec::new());
-    sync::drain(&alice.store, &mut app);
+    let mut app = crate::tui::App::new(Vec::new());
+    crate::tui::sync::drain(&alice.store, &mut app);
     assert_eq!(app.selected_id(), Some(gid));
     assert!(message::pending(&alice.store, gid).unwrap().is_empty());
-
-    let area = Rect::new(0, 0, 100, 20);
-    let mut buf = Buffer::empty(area);
-    draw(&app, area, &mut buf);
+    let area = ratatui::layout::Rect::new(0, 0, 100, 20);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    crate::tui::draw(&app, area, &mut buf);
     let screen: String = buf.content().iter().map(|c| c.symbol()).collect();
     assert!(screen.contains("tui smoke"));
+
+    // 8.4: revoking ends the session. The token is dead on REST, and a second revoke is a no-op.
+    auth::revoke_session(&client, &url, &alice).await.unwrap();
+    assert!(inbox::receive(&client, &url, &alice).await.is_err());
+    auth::revoke_session(&client, &url, &alice).await.unwrap();
 }
