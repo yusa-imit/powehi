@@ -1950,3 +1950,6 @@ CI green, audit/deny clean (waived RUSTSEC-2026-0387 only), no bug issues. Commi
 
 ## Cycle 688 (FEATURE)
 8.20 carry: live-backend TUI smoke test in `live_e2e.rs` (drain + draw of a real DS message). 8.15/8.17/8.19 still blocked on owner (#166, #203, #208). Remaining 8.20 carry: repaint copies of plaintext. Test is only exercised in the CI live-backend job.
+
+## Stabilization 690
+CI green, audit/deny clean (waived RUSTSEC-2026-0387 only), no bug issues. Added proptest `paint_props` for the TUI painter: whatever text is in a buffer, the only control bytes painted are our own CSI sequences. 509 powehi-cli lib tests pass, clippy/fmt clean. target/ 30G pruned to 23G. 8.15/8.17/8.19 still blocked on owner (#166, #203, #208).

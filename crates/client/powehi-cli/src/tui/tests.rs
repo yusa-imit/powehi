@@ -454,3 +454,46 @@ fn enter_right_after_opening_the_pane_is_too_soon() {
     assert!(matches!(app.press(Key::Enter), Action::None));
     assert_eq!(app.notice(), Some(VERIFY_TOO_SOON));
 }
+
+mod paint_props {
+    use proptest::prelude::*;
+
+    use super::super::paint::paint;
+    use super::*;
+
+    /// Drops the CSI sequences `paint` itself emits (`ESC [ digits/; letter`).
+    fn strip_own_csi(bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == 0x1b && bytes.get(i + 1) == Some(&b'[') {
+                i += 2;
+                while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b';') {
+                    i += 1;
+                }
+                i += 1; // the final letter
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    proptest! {
+        /// Whatever text lands in a buffer, the only escape bytes painted are our own cursor
+        /// and attribute sequences: no cell content can smuggle a terminal command.
+        #[test]
+        fn painted_output_has_no_control_bytes_besides_own_csi(
+            rows in proptest::collection::vec(".{0,24}", 1..6),
+        ) {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 24, 6));
+            for (y, line) in rows.iter().enumerate() {
+                buf.set_string(0, u16::try_from(y).unwrap(), line, Style::new());
+            }
+            let bare = strip_own_csi(&paint(&buf));
+            let text = String::from_utf8(bare).unwrap();
+            prop_assert!(!text.chars().any(char::is_control), "{text:?}");
+        }
+    }
+}
