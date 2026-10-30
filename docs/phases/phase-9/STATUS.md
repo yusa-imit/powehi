@@ -29,7 +29,7 @@ domain is a variable everywhere (`var.domain`); never hard-code `powehi.app`.
 ## Definition of Done (in order)
 
 ### Clean slate
-- [ ] 9.1 Discard the current IaC — delete `infra/terraform/` (Hetzner module, envs
+- [x] 9.1 Discard the current IaC — delete `infra/terraform/` (Hetzner module, envs
   `dev`/`prod-eu`/`prod-ap-seoul`/`cloudflare`), `infra/helm/`, `infra/argocd/`,
   `infra/policy/`, `infra/cloudflare/workers/smart-router/`, `infra/synthetic/` and
   `.github/workflows/cd.yml`. Strip the Helm/kubeconform/conftest/ArgoCD steps from

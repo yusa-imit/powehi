@@ -23,4 +23,4 @@ You write tests for Powehi application code (backend + frontend). See rule: test
 - Don't write tests that rely on plaintext exfiltration to verify behavior
 - Don't add fixtures with real-looking user data or real keys
 - Don't own infra validation — Terraform/Helm static tests belong to the infra
-  authors (terraform-author / k8s-manifest-author); flag if they're missing
+  authors (terraform-author); flag if they're missing

@@ -29,9 +29,7 @@ Every layer carries its own test gate. A change is not "done" until its layer's 
 
 ## Infra (infra/**)
 Static validation is the infra equivalent of unit tests — run it before merge (skill: `infra-test`):
-- Terraform: `fmt -check`, `validate`, `tflint`, `tfsec`/`checkov`, `plan` (no surprise destroy of stateful resources).
-- Helm/K8s: `helm lint`, `helm template` → `kubeconform` + `conftest` (resource limits, deny-all NetworkPolicy, no literal secrets, no `:latest`, runAsNonRoot).
-- DR behavior (prd.md §4A.7, §12.9) is exercised by the failover drill + cross-region synthetic checks (§13.4), not unit tests — but a config change to failover/routing must be plan-reviewed.
+- OpenTofu (ADR-0007): `tofu fmt -check`, `tofu validate`, `tflint`, `trivy config`, `tofu test` with mocked providers; `plan` must show no surprise destroy of stateful resources (RDS, R2).
 
 ## Security-invariant tests (cross-cutting — required for security-relevant changes)
 - **No plaintext leak**: assert log/metric output is content-free (rule: `no-plaintext-logging`). Never assert behavior by reading plaintext out of logs.
@@ -41,4 +39,4 @@ Static validation is the infra equivalent of unit tests — run it before merge 
 
 ## Who owns what
 - App/crypto/backend tests → `test-author` (+ `crypto-reviewer` for crypto).
-- Infra validation → `terraform-author` / `k8s-manifest-author`; wired into CI by `ci-pipeline-author`.
+- Infra validation → `terraform-author`; wired into CI by `ci-pipeline-author`.

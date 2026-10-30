@@ -289,9 +289,8 @@ const MAX_KEY_PACKAGE_GC_MAX_DELETES_PER_RUN: u64 = 1_000_000;
 
 /// The dev-only `r2_endpoint` default installed by `load()`'s `set_default`. Any deployed
 /// (non-`local`) region whose config still resolves to this literal at `validate()` time means
-/// `POWEHI__R2_ENDPOINT` was never actually set by the Helm chart/operator for that
-/// environment — every 3 real overlays (prod-eu, prod-ap, staging) went unnoticed running this
-/// way until it was wired in (see `infra/helm/powehi/values.yaml`'s `config.r2Endpoint`).
+/// `POWEHI__R2_ENDPOINT` was never actually set by the deploy tooling for that
+/// environment (a past multi-overlay deployment ran unnoticed this way).
 /// Without this guard the failure mode is silent: presigned media URLs point at the server's
 /// own loopback instead of a crash an operator would actually see.
 const DEV_R2_ENDPOINT_DEFAULT: &str = "http://localhost:9000";

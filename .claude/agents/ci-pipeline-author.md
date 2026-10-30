@@ -13,8 +13,8 @@ You author CI/CD pipelines for Powehi.
 - Backend: cargo fmt/clippy/nextest/audit/deny + testcontainers integration stage
 - Frontend: biome check + vitest (unit/component) + playwright (E2E) + bundle-budget gate
 - Infra: a validation stage that runs the infra-test skill checks on changed paths —
-  `terraform validate`/`plan`, `tflint`, `tfsec`/`checkov`, `helm lint`,
-  `kubeconform`, `conftest` (no infra reaches CD unvalidated)
+  `tofu fmt -check`/`validate`/`test`, `tflint`, `trivy config`
+  (no infra reaches CD unvalidated)
 - WASM reproducible build with SOURCE_DATE_EPOCH (skill: verify-reproducible-build)
 - Container image build with distroless base
 - cosign sign + Sigstore Rekor transparency log

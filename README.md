@@ -14,8 +14,8 @@ design: `docs/orchestration.md`. Working conventions for the autonomous dev loop
 - **Crypto** — `crates/client/powehi-crypto-wasm`, compiled to
   `wasm32-unknown-unknown`. MLS (RFC 9420) via `openmls`, OPAQUE (RFC 9807) via
   `opaque-ke`, everything else via RustCrypto. No homegrown crypto.
-- **Infra** — Terraform/OpenTofu under `infra/terraform` (Hetzner k3s,
-  Cloudflare), Helm charts under `infra/helm`.
+- **Infra** — being rebuilt for AWS Seoul + Cloudflare edge with OpenTofu
+  (ADR-0007, Phase 9); `infra/k6` holds the parked load-test scripts.
 
 ## Prerequisites
 

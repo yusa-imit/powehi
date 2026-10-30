@@ -445,19 +445,22 @@ sequenceDiagram
 
 ### 4A.1 리전 토폴로지
 
-| Tier | 리전 | 역할 | 인프라 |
-|------|------|------|--------|
-| Tier 1 | EU-Frankfurt | 풀 R/W Postgres, 사용자 데이터 소유 | Hetzner Cloud nbg1 (k3s HA) |
-| Tier 1 | AP-Seoul (스테이징: Hetzner sin1 Singapore) | 풀 R/W Postgres, 사용자 데이터 소유 | Hetzner Cloud sin1 (k3s HA) — **PIPA 주의**: 실제 KR 사용자 데이터는 한국 내 DC 확보 후 이전 예정 (현재 스테이징 전용) |
-| Tier 2 | AP-Tokyo (향후) | Read Replica + 릴레이, 쓰기는 Tier 1 포워딩 | Oracle Cloud (k3s) |
-| Tier 2 | US-Ashburn (향후) | Read Replica + 릴레이, 쓰기는 Tier 1 포워딩 | 미정 |
-| Tier 3 | Cloudflare Edge PoPs | WS 종단, 스마트 라우팅만, 상태 없음 | Cloudflare Workers |
+**현재 (ADR-0007)**: 단일 리전 — AWS ap-northeast-2(Seoul)의 Tier 1 하나(풀 R/W Postgres, 사용자 데이터
+소유), 앞단은 Cloudflare(DNS/TLS/WAF, Tunnel). 두 번째 리전은 Phase 9 범위 밖이며 모듈이 리전을 입력으로
+받으므로 추가 시 새 env로 만든다.
 
-**Tier 설계 원칙:**
+| Tier | 리전 | 역할 | 상태 |
+|------|------|------|------|
+| Tier 1 | AP-Seoul | 풀 R/W Postgres, 사용자 데이터 소유 | Phase 9 |
+| Tier 1/2 | 추가 리전 | 독립 Tier 1 또는 read replica + 릴레이 | 향후 설계 |
+| Tier 3 | Cloudflare Edge PoPs | TLS 종단, WAF, 상태 없음 | Phase 9 |
+
+**Tier 설계 원칙 (장기 목표):**
 
 - **Tier 1**: 완전한 독립 운영 가능. 자체 Postgres primary, Redis, 모든 서비스 스택. 사용자 데이터의 물리적 소유자.
 - **Tier 2**: Tier 1의 read replica로 읽기 부하 분산. 쓰기는 해당 사용자의 home region Tier 1으로 gRPC 포워딩.
-- **Tier 3**: 상태 없는 엣지. 가장 가까운 Tier 1/2로 트래픽 프록시. WebSocket 종단점 역할.
+- **Tier 3**: 상태 없는 엣지. 가장 가까운 Tier 1/2로 트래픽 프록시.
+
 
 ### 4A.2 라우팅 전략
 
@@ -600,10 +603,8 @@ sequenceDiagram
 | 로그/메트릭 | 리전 로컬 보관 | 리전 로컬 보관 | 리전 로컬 보관 |
 | 백업 | 리전 로컬 | 리전 로컬 | 리전 로컬 |
 
-**KR 컬럼은 목표 아키텍처(실제 한국 DC 확보 후)를 나타내며 현재 미충족 상태다.** 오늘 배포된
-`prod-ap-seoul`은 실제로 Hetzner Singapore(sin1)이고, KR-home 사용자는 Cloudflare smart-router가
-`503 PIPA_REGION_PENDING`으로 전면 차단해 이 표의 어떤 데이터 유형도 실제로 저장되지 않는다 (§12A,
-GitHub #5). 이 표는 실제 KR DC 확보 시 구현해야 할 리전별 요구사항 설계도이지, 현재 상태의 설명이
+**다중 리전 컬럼은 장기 목표 아키텍처를 나타낸다.** 기존 Hetzner 배포와 smart-router 차단은 폐기되었고(ADR-0007),
+Phase 9에서 실제 Seoul 리전(AWS ap-northeast-2) 단일 배포로 대체된다 (§12A, GitHub #5). 이 표는 실제 KR DC 확보 시 구현해야 할 리전별 요구사항 설계도이지, 현재 상태의 설명이
 아니다.
 
 **원칙**: 사용자 PII (handle_hash, OPAQUE envelope, device 정보)는 절대 home_region 밖으로 나가지 않음. 크로스 리전 전달되는 것은 ciphertext envelope, 공개 KeyPackage, 그리고 (ForwardCommit 한정) group epoch 카운터(`expected_epoch`/`accepted_epoch`, §4A.5)뿐 — epoch은 그룹의 진행 순서를 나타내는 정수일 뿐 메시지 내용이나 멤버십 자체를 노출하지 않는다.
@@ -1508,7 +1509,7 @@ sequenceDiagram
 4. **이식성** — Garage/MinIO로 자체 호스팅 전환 가능
 
 **역할 분리:**
-- R2는 **blob 저장 전용**. WebSocket/API 서버 운영은 별개 (리전별 k3s).
+- R2는 **blob 저장 전용**. WebSocket/API 서버 운영은 별개 (리전별 ECS Fargate 태스크).
 - 메타데이터(blob_id, sha256, owner_user_id, expires_at)는 Postgres.
 
 ### 9.4 미디어 특수 처리
@@ -1879,152 +1880,41 @@ flowchart LR
 | 환경 | 목적 | 호스팅 | 데이터 |
 |---|---|---|---|
 | local | 개발자 머신 | docker-compose | 실제 데이터 X |
-| dev | 통합 테스트 | Hetzner k3s (작은 클러스터) | 합성 데이터 |
-| staging | 사전 검증 | Hetzner k3s (prod 미러) | 합성 + 옵트인 베타 |
-| prod-eu | EU 운영 | Hetzner k3s (Frankfurt, HA) | 실제 ciphertext |
-| prod-kr | KR 운영 | Oracle Cloud / Vultr (Seoul, HA) | 실제 ciphertext |
-| prod-jp | JP 운영 (향후) | Oracle Cloud (Tokyo) | 실제 ciphertext |
+| staging | 사전 검증 | AWS ap-northeast-2 (ECS Fargate, prod와 동일 형태) | 합성 + 옵트인 베타 |
+| prod | 운영 | AWS ap-northeast-2 (ECS Fargate) + Cloudflare edge | 실제 ciphertext |
 
-### 12.2 인프라 토폴로지 (멀티 리전)
+### 12.2 인프라 토폴로지 (단일 리전)
 
 ```mermaid
 graph TB
-    subgraph "Users (Global)"
-        U1[Web Browser]
-        U2[Future Mobile App]
+    U[Client: CLI / Web] --> CF[Cloudflare: DNS, TLS 1.3, WAF, rate limit]
+    CF --> TUN[cloudflared tunnel sidecar]
+    subgraph "AWS ap-northeast-2"
+        TUN --> SRV[powehi-server on ECS Fargate ARM64]
+        SRV --> PG[(RDS PostgreSQL 16, private subnet)]
+        SRV --> RD[(ElastiCache, private subnet)]
     end
-
-    subgraph "Tier 3: Cloudflare Edge"
-        DNS[DNS / Latency-Based Routing]
-        CDN[CDN<br/>Static Assets]
-        WAF[WAF / DDoS Protection]
-        R2[(R2 Storage<br/>Ciphertext Blobs<br/>egress free)]
-        EDGE[Edge Workers<br/>Smart Routing]
-    end
-
-    subgraph "Tier 1: EU-Frankfurt (Hetzner k3s HA)"
-        EU_ING[Ingress<br/>Traefik + cert-manager]
-
-        subgraph "EU App Tier (autoscaled, CAX21 ARM64)"
-            EU_GW1[gateway pod 1]
-            EU_GW2[gateway pod 2]
-            EU_WS1[ws-hub pod 1]
-            EU_WS2[ws-hub pod 2]
-            EU_GRPC[grpc-mesh pod]
-        end
-
-        subgraph "EU Workers"
-            EU_PUSH[push-relay]
-            EU_GC[envelope GC cron]
-        end
-
-        subgraph "EU Stateful"
-            EU_PG[(PostgreSQL<br/>primary + replica)]
-            EU_REDIS[(Redis cluster)]
-        end
-    end
-
-    subgraph "Tier 1: AP-Seoul (Oracle/Vultr k3s HA)"
-        KR_ING[Ingress<br/>Traefik + cert-manager]
-
-        subgraph "KR App Tier"
-            KR_GW1[gateway pod 1]
-            KR_GW2[gateway pod 2]
-            KR_WS1[ws-hub pod 1]
-            KR_WS2[ws-hub pod 2]
-            KR_GRPC[grpc-mesh pod]
-        end
-
-        subgraph "KR Stateful"
-            KR_PG[(PostgreSQL<br/>primary + replica)]
-            KR_REDIS[(Redis cluster)]
-        end
-    end
-
-    subgraph "gRPC Mesh (mTLS)"
-        MESH{Cross-Region<br/>gRPC Mesh}
-    end
-
-    subgraph "Observability (per-region)"
-        subgraph "EU Observability"
-            EU_OTEL[OTEL Collector]
-            EU_GRAF[Grafana]
-        end
-        subgraph "Central Gateway"
-            C_GRAF[Central Grafana<br/>Cross-Region Dashboard]
-        end
-    end
-
-    U1 --> DNS
-    U2 --> DNS
-    DNS --> CDN
-    DNS --> WAF
-    WAF --> EDGE
-    CDN -.static.-> U1
-    U1 -.media blob.-> R2
-
-    EDGE -->|EU users| EU_ING
-    EDGE -->|KR users| KR_ING
-
-    EU_ING --> EU_GW1
-    EU_ING --> EU_GW2
-    EU_ING -->|WSS| EU_WS1
-    EU_ING -->|WSS| EU_WS2
-
-    EU_GW1 --> EU_PG
-    EU_GW1 --> EU_REDIS
-    EU_WS1 --> EU_REDIS
-    EU_GW1 --> R2
-
-    KR_ING --> KR_GW1
-    KR_ING --> KR_GW2
-    KR_ING -->|WSS| KR_WS1
-
-    KR_GW1 --> KR_PG
-    KR_GW1 --> KR_REDIS
-    KR_WS1 --> KR_REDIS
-    KR_GW1 --> R2
-
-    EU_GRPC <-->|mTLS| MESH
-    KR_GRPC <-->|mTLS| MESH
-
-    EU_GW1 -.metrics.-> EU_OTEL
-    EU_OTEL --> EU_GRAF
-    EU_GRAF --> C_GRAF
+    SRV --> R2[(Cloudflare R2: encrypted media)]
 ```
+
+Tasks run in public subnets with no inbound security-group rules (no NAT gateway); data stores sit in
+private subnets. Secrets in Secrets Manager, logs and alarms in CloudWatch (content-free, §13).
+
 
 ### 12.3 호스팅 결정 근거
 
-> **2026-10-20: 이 절은 ADR-0007로 대체됨** (AWS 서울 ECS Fargate + Cloudflare edge). 본문 재작성은 Phase 9.1.
-
-**EU: Hetzner Cloud (Frankfurt)**
-
-1. **비용 효율**: 동급 성능 AWS 대비 ~1/5. CAX21(4 vCPU ARM64, 8GB RAM) 약 EUR7.99/월.
-2. **개인정보 거주성**: EU 데이터센터 → GDPR 친화적.
-3. **자체 호스팅 친화성**: K8s manifest와 IaC를 그대로 다른 호스터로 이식 가능.
-
-**AP: Oracle Cloud / Vultr (Seoul, Tokyo)**
-
-1. **리전 내 레이턴시**: Seoul/Tokyo 리전으로 한국/일본 사용자 p99 <50ms 달성 목표.
-2. **Oracle Cloud**: Always Free ARM 인스턴스 (Ampere A1, 4 OCPU, 24GB RAM) 가용.
-3. **Vultr**: Seoul 리전 제공, 단순한 가격 구조, k3s 호환.
-4. **결정 시점**: Phase 6 (Global Infrastructure) 시작 시 벤치마크 후 최종 선택.
-
-**Cloudflare (R2 + Edge Workers)**
-
-1. **R2 egress 무료**: 미디어 다운로드 비용 폭주 위험 차단.
-2. **Edge Workers**: 글로벌 200+ PoP에서 스마트 라우팅. WebSocket 프록시.
-3. **이식성**: R2 → MinIO/Garage 마이그레이션 무중단 가능.
+ADR-0007 참조. Seoul 리전 AWS는 PIPA 차단 요인(GitHub #5)을 제거하고, Fargate는 클러스터 운영(k3s 업그레이드,
+control plane)을 없애며, Cloudflare Tunnel은 env당 로드 밸런서(~$20/월)를 절약하면서 origin을 Cloudflare
+외에는 도달 불가로 만든다. R2는 미디어 egress를 무료로 유지하고 이미 출하된 어댑터를 재사용한다. 예산은
+env당 약 $65–70, 합계 약 $150/월 이하.
 
 ### 12.4 인프라 코드화
 
-| 도구 | 용도 |
-|---|---|
-| **Terraform / OpenTofu** | Hetzner/Oracle 리소스, Cloudflare DNS/R2/Workers |
-| **Helm + Helmfile** | K8s 애플리케이션 배포 (리전별 values 오버라이드) |
-| **Argo CD** | GitOps 동기화 (멀티 클러스터 지원) |
-| **cert-manager** | TLS 인증서 자동 발급 (Let's Encrypt) |
-| **External Secrets Operator** | 시크릿을 Vault/Hetzner Secrets로부터 K8s로 |
+OpenTofu(`infra/terraform/`: `bootstrap/`, `modules/`, `envs/{staging,prod}`), S3 backend와 native locking,
+CI는 GitHub OIDC 역할만 사용(장기 AWS 키 없음). 모든 PR에 plan, staging은 merge 시 자동 apply, prod는
+`production` GitHub Environment의 owner 승인 후에만 apply. 검증: `tofu fmt -check`, `validate`, `tflint`,
+`trivy config`, mocked provider `tofu test` (Phase 9.2).
+
 
 ### 12.5 빌드 + 배포 파이프라인 시각화
 
@@ -2042,7 +1932,7 @@ flowchart TB
         FE_BUILD[Frontend Build<br/>Vite + reproducible]
         BE_BUILD[Server Build<br/>cargo build --release]
         IMG[Container Image<br/>distroless + cosign 서명]
-        E2E[E2E Tests<br/>Playwright + 임시 k3s]
+        E2E[E2E Tests<br/>Playwright + 로컬 docker-compose]
     end
 
     subgraph "Artifact Registry"
@@ -2123,59 +2013,21 @@ E2EE 메신저에서 가장 중요한 부분 — 사용자가 받는 바이너�
 | Postgres primary 장애 | Managed Postgres 자동 failover (리전 내) |
 | Redis 클러스터 장애 | 메시지 큐 데이터는 휘발 가능. 클라이언트 재연결 후 폴링으로 복구 |
 | R2 리전 장애 | Cloudflare 자동 분산. 임시 장애 시 클라이언트 재시도 |
-| 단일 k3s 클러스터 장애 | IaC로 재구축. 크로스 리전 페일오버로 서비스 연속성 보장 (§4A.7) |
+| 단일 리전 장애 | IaC로 재구축, RDS 백업/PITR로 복구. 다운타임 수용 (§12.9, ADR-0007) |
 | KeyPackage 서버 데이터 손실 | 클라이언트 보유 signature key로 재업로드 가능 |
 
-### 12.8 글로벌 WebSocket 전략
+### 12.8 WebSocket 전략 (ADR-0007)
 
-**리전별 독립 ws-hub:**
-- 각 리전은 자체 ws-hub pod를 운영. WebSocket 연결은 리전 로컬.
-- Redis pub/sub는 리전 로컬만 사용. 크로스 리전 Redis 연결 없음.
-- 크로스 리전 메시지 전달은 gRPC `ForwardEnvelope`로 처리.
+단일 리전(Seoul)에서 Cloudflare가 TLS를 종단하고 Cloudflare Tunnel(`cloudflared` 사이드카)이 ECS Fargate
+태스크의 `powehi-server`(8080)로 WebSocket을 전달한다. 로드 밸런서와 공개 origin은 없다. 터널이
+WebSocket 동작이나 처리량을 제한하면 Cloudflare 전용 ALB로 대체하고 ADR-0007에 기록한다. 멀티 리전
+엣지 라우팅(smart-router)은 폐기되었으며, 두 번째 리전은 §4A의 장기 설계로만 남는다.
 
-**연결 흐름:**
+### 12.9 장애 복구 (단일 리전)
 
-```
-1. 클라이언트 → Cloudflare Edge (가장 가까운 PoP)
-2. Edge Worker → 최적 리전 ws-hub로 WSS 프록시
-3. ws-hub는 리전 로컬 Redis에서 해당 사용자의 이벤트 구독
-4. 크로스 리전 메시지 수신 시: gRPC → 리전 DS → Redis pub → ws-hub → 클라이언트
-```
-
-**스케일링:**
-- ws-hub pod는 stateless (연결 상태만 인메모리)
-- Redis에 `device_id → ws_hub_pod` 매핑 유지
-- pod 재시작 시 클라이언트 자동 재연결 → 새 pod에 연결
-
-### 12.9 멀티 리전 DR
-
-**시나리오 1: 단일 리전 장애**
-
-```
-1. gRPC HealthCheck 실패 감지 (30초 간격, 3회 연속)
-2. 장애 리전 status → 'degraded'
-3. Cloudflare DNS 가중치 → 0 (트래픽 유입 차단)
-4. 장애 리전 사용자의 크로스 리전 메시지 → 큐잉
-5. 복구 시: 큐 flush + DNS 가중치 점진 복원
-```
-
-**시나리오 2: 전체 장애**
-
-```
-1. 모든 Tier 1 리전 응답 불가
-2. Cloudflare Edge에서 503 + "서비스 점검 중" 페이지
-3. IaC로 신규 리전 프로비저닝 (Postgres WAL 백업에서 복구)
-4. RTO: <30분, RPO: <5분
-```
-
-**시나리오 3: gRPC 메시 장애 (리전 간 연결만 끊김)**
-
-```
-1. 각 리전은 독립적으로 정상 운영 (리전 내 메시지 정상)
-2. 크로스 리전 envelope은 로컬 큐에 적재 (Postgres outbox 패턴)
-3. 연결 복구 후 큐 일괄 포워딩 (순서 보장)
-4. MLS commit은 그룹 home_region에서만 수락 → 타 리전 commit 큐잉
-```
+RDS 단일 AZ와 env당 태스크 1개이므로 장애 시 ECS 또는 RDS가 복구될 때까지 다운타임이 발생한다 (예산상
+수용, ADR-0007). 복구는 RDS 자동 백업과 PITR에 의존하며 RPO/RTO는 Phase 9.11의 복구 훈련에서 측정하고
+runbook에 기록한다. 리전 간 failover는 범위 밖이다.
 
 ---
 
@@ -2488,7 +2340,7 @@ gantt
 
 #### Phase 9: 실제 배포 — AWS 서울 + Cloudflare edge (소유자 결정 2026-10-20, ADR-0007)
 Phase 8 완료 후 시작. 상세 항목과 순서는 `docs/phases/phase-9/STATUS.md`, 소유자 사전 작업은 issue #118.
-- [ ] 기존 IaC 폐기 (Hetzner k3s, Helm, ArgoCD, k8s OPA policy, smart-router Worker, 멀티 리전 drill)
+- [x] 기존 IaC 폐기 (Hetzner k3s, Helm, ArgoCD, k8s OPA policy, smart-router Worker, 멀티 리전 drill)
 - [ ] OpenTofu 기반 재구성: bootstrap(state, GitHub OIDC, 예산 경보), network/data/edge/service 모듈
 - [ ] CLI 릴리스 바이너리 (GitHub Releases, checksum, cosign 서명, SLSA provenance)
 - [ ] staging(상시, merge 시 자동 apply) + 서버 CD + prod(소유자 승인 후 apply), 서울 리전으로 #5 해소
@@ -2593,7 +2445,7 @@ Phase 8 완료 후 시작. 상세 항목과 순서는 `docs/phases/phase-9/STATU
 | 그룹 메시징 | MLS (1:1도 동일 구조) |
 | 연락처 발견 | **익명 핸들 + 초대 링크/QR** |
 | 미디어 스토리지 | **Cloudflare R2 (1차)** + Garage (자체 호스팅) |
-| 호스팅 (EU) | **Hetzner Cloud (Frankfurt)** |
+| 호스팅 | **AWS ap-northeast-2 (ECS Fargate) + Cloudflare edge** (ADR-0007) |
 | **호스팅 (AP)** | **Oracle Cloud / Vultr (Seoul, Tokyo)** |
 | 푸시 알림 | RFC 8291 E2EE Web Push |
 | 수익 모델 | **OSS + 옵션 호스팅 + 엔터프라이즈 컨설팅 (3-tier)** |

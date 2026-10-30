@@ -24,7 +24,7 @@ See `/docs/prd.md` for full architecture. See `/docs/orchestration.md` for agent
 - Frontend test: `pnpm --filter app test` (Vitest), E2E `pnpm --filter app e2e` (Playwright)
 - Frontend lint: `biome check`
 - WASM build: `pnpm --filter app build:wasm`
-- Infra validate: `terraform validate` + `tflint`/`tfsec`; `helm lint` + `kubeconform` + `conftest`
+- Infra validate: `tofu fmt -check`, `tofu validate`, `tflint`, `trivy config`, `tofu test` (Phase 9.2)
 - Testing standards live in `.claude/rules/testing-conventions.md` (every layer has a gate)
 
 ## Architecture
@@ -33,7 +33,7 @@ See `/docs/prd.md` for full architecture. See `/docs/orchestration.md` for agent
 - Frontend: React 19 + Vite 6 at `/app/` (maintenance mode)
 - Crypto core: `/crates/client/powehi-crypto-core/` (pure Rust, shared by CLI and WASM — Phase 7.1)
 - WASM Crypto: `/crates/client/powehi-crypto-wasm/` compiled to wasm32-unknown-unknown
-- Infra: Terraform at `/infra/terraform/`, Helm at `/infra/helm/`
+- Infra: OpenTofu at `/infra/terraform/` (AWS Seoul + Cloudflare, ADR-0007; built in Phase 9)
 - Protocols: MLS (RFC 9420), OPAQUE (RFC 9807), Web Push (RFC 8291)
 - Design system: `DESIGN.md` → `docs/design/powehi-design-system/` + `/powehi-design` skill (read before any UI work; brand rules are hard)
 
