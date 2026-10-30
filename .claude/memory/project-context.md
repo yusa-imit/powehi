@@ -1968,3 +1968,6 @@ CI green, audit/deny clean (waived RUSTSEC-2026-0387 only), no bug issues. Added
 
 ## Cycle 694 (FEATURE)
 8.21 slice 4: `powehi save` command; shown media messages are parked as capped `att-` records (256, evict oldest) so `read` doesn't lose the key. security-auditor needs-rework items fixed in-cycle. Left for 8.21: residue test for `open`, live E2E in 8.22.
+
+## Cycle 697 (FEATURE)
+8.21 slice 6 (box flipped): `tests/media_lookup_residue.rs` (find_attachment + load_candidate leave no unwiped key; mutation-checked). Next unchecked 8.15/8.17/8.19 still blocked on owner (#161, #166, #203, #208); queue next: 8.22 live E2E legs that do not need them (media round trip).
