@@ -382,16 +382,18 @@ pub fn decrypt_chunked(
     // which is <= ciphertext-derived usize capacity, so this fits usize.
     let total = usize::try_from(total_plaintext_len).map_err(|_| MediaError::ChunkCountMismatch)?;
 
-    let mut plaintext = Vec::with_capacity(num_chunks * MEDIA_CHUNK_SIZE);
+    // Wiped on the error path too; per-chunk plaintext is wiped as soon as it is copied.
+    let mut plaintext = Zeroizing::new(Vec::with_capacity(num_chunks * MEDIA_CHUNK_SIZE));
     for i in 0..num_chunks {
         let start = i * CHUNK_CIPHERTEXT_LEN;
         let chunk_ct = &ciphertext[start..start + CHUNK_CIPHERTEXT_LEN];
-        let chunk_plain = decrypt_chunk(key, base_iv, i as u32, chunk_ct)?;
+        let chunk_plain = Zeroizing::new(decrypt_chunk(key, base_iv, i as u32, chunk_ct)?);
         plaintext.extend_from_slice(&chunk_plain);
     }
     // Drop the final chunk's zero padding.
     plaintext.truncate(total);
-    Ok(plaintext)
+    // Hand the allocation over without a copy: the caller owns wiping it from here.
+    Ok(std::mem::take(&mut *plaintext))
 }
 
 #[cfg(test)]

@@ -1959,3 +1959,6 @@ CI green, audit/deny clean (waived RUSTSEC-2026-0387 only), no bug issues. Commi
 
 ## Stabilization 690
 CI green, audit/deny clean (waived RUSTSEC-2026-0387 only), no bug issues. Added proptest `paint_props` for the TUI painter: whatever text is in a buffer, the only control bytes painted are our own CSI sequences. 509 powehi-cli lib tests pass, clippy/fmt clean. target/ 30G pruned to 23G. 8.15/8.17/8.19 still blocked on owner (#166, #203, #208).
+
+## Cycle 693 (FEATURE)
+8.21 slice 3: `media_recv.rs` (download + open) and crypto-core `decrypt_chunked` wiping. Carried to next slice: wire a command with `upload_client()` as the GET client, residue test, confirm-download after success, explicit `save`. 8.19 still blocked on #208.

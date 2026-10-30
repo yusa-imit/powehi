@@ -446,6 +446,11 @@ pointing here. Close the issue in the PR that finishes its item.
   orphan encrypted blob. Next slices: receive/download with the
   body-size cap applied BEFORE buffering (non-chunked ≤ cap+16; chunked ≤ ceil(total/16MiB)
   chunks), `save` only on explicit user action (disk-fill), then the live E2E leg in 8.22.
+  Cycle 693 (slice 3): `media_recv.rs` — `download` (pre-signed GET, https-or-same-origin, body read
+  capped from the descriptor while streaming), `open` (hash before decrypt, `Zeroizing` plaintext);
+  crypto-core `decrypt_chunked` now wipes per-chunk/partial plaintext. Not yet wired to a command.
+  Carried: caller must pass `status::upload_client()` (no redirects, timeout) as `get`; a scanning-allocator
+  residue test for `open`; `confirm-download` only after `open` succeeds; command + explicit `save` step.
 
 ### Gates
 - [ ] 8.22 E2E gate — extend `src/live_e2e.rs` and the `cli-live-backend` CI job:
