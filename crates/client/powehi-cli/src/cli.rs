@@ -60,8 +60,10 @@ pub enum Command {
     Accept(RequestArg),
     /// Drop a pending conversation request and decline it on the server.
     Decline(RequestArg),
-    /// Show stored received messages for a conversation, then remove them from the store.
+    /// Show stored received messages for a conversation, then remove them from the store (media messages keep their key, up to 256, until `save`).
     Read(ReadArgs),
+    /// Download, decrypt and save an attachment shown by `read` to a new private file.
+    Save(SaveArgs),
     /// Interactive chat REPL with realtime delivery.
     Chat(ChatArgs),
     /// Full-screen terminal UI: conversation list, messages and an input line.
@@ -285,6 +287,18 @@ pub struct ReadArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct SaveArgs {
+    /// Conversation id (or a unique prefix of at least 4 characters).
+    pub conversation: String,
+    /// Attachment id: the hex id printed after `[image]` / `[video]` by `read` (any 6+ digit prefix).
+    pub attachment: String,
+    /// Directory to save into (must exist and not be group/other writable); the file is
+    /// named `powehi-<blob id>` and an existing file is never overwritten.
+    #[arg(long, value_name = "DIR", default_value = ".")]
+    pub dir: PathBuf,
+}
+
+#[derive(Debug, Args)]
 pub struct SendArgs {
     /// Conversation id (or a unique prefix of at least 4 characters).
     pub conversation: String,
@@ -334,6 +348,7 @@ impl Command {
             Command::Accept(_) => "accept",
             Command::Decline(_) => "decline",
             Command::Read(_) => "read",
+            Command::Save(_) => "save",
             Command::Chat(_) => "chat",
             Command::Tui => "tui",
             Command::Verify(_) => "verify",

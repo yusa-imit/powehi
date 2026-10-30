@@ -102,6 +102,12 @@ pub enum CliError {
     #[error("{0}")]
     SendFile(#[from] media_send::SendFileError),
     #[cfg(unix)]
+    #[error("{0}")]
+    RecvFile(#[from] media_recv::RecvFileError),
+    #[cfg(unix)]
+    #[error("{0}")]
+    Media(#[from] media::MediaError),
+    #[cfg(unix)]
     #[error("could not write to stdout; unread messages were kept")]
     Stdout,
     #[cfg(unix)]
@@ -167,6 +173,8 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
         },
         #[cfg(unix)]
         cli::Command::Read(ref c) => run_read(&args.server, &paths, c),
+        #[cfg(unix)]
+        cli::Command::Save(ref c) => run_save(&args.server, &paths, c),
         #[cfg(unix)]
         cli::Command::Chat(ref c) => {
             run_chat(&args.server, &paths, &c.conversation, c.allow_changed)
@@ -532,6 +540,58 @@ fn run_send_file(
     }
     sent?;
     message::write_sent(group_id, c.json, &mut std::io::stdout()).map_err(|_| CliError::Output)
+}
+
+/// `save`: download and decrypt a stored attachment, write it to a new `0600` file, then ask
+/// the server to count the download. The record (and its key) is dropped only after the file
+/// is on disk.
+#[cfg(unix)]
+fn run_save(
+    server: &url::Url,
+    paths: &profile::ProfilePaths,
+    c: &cli::SaveArgs,
+) -> Result<(), CliError> {
+    let rt = runtime()?;
+    let client = status::http_client()?;
+    let get = status::upload_client()?;
+    let mut prompter = prompt::TtyPrompter;
+    let session = login_scoped(&rt, &client, server, paths, &mut prompter)?;
+    let group_id = message::resolve(&session.store, &c.conversation)?;
+    let cands = message::find_attachment(&session.store, group_id, &c.attachment)?;
+    // Try each record of the blob (a hostile duplicate has a wrong key and fails its hash).
+    let mut saved = None;
+    for cand in &cands {
+        let Some(payload) = message::load_candidate(&session.store, cand)? else {
+            continue;
+        };
+        match rt.block_on(media_recv::download(
+            &client, &get, server, &session, &payload,
+        )) {
+            Ok(plain) => {
+                let path = media::save(&c.dir, &payload.blob_id, &plain)?;
+                saved = Some((path, payload));
+                break;
+            }
+            // A hostile duplicate descriptor can fail either way; try the next record.
+            Err(media_recv::RecvFileError::Corrupt | media_recv::RecvFileError::TooLarge) => {
+                continue
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let (path, payload) = saved.ok_or(media_recv::RecvFileError::Corrupt)?;
+    let blob_id = payload.blob_id;
+    drop(payload);
+    message::forget_attachment(&session.store, &cands)?;
+    // Best effort: the file is already saved, a failed ack only delays server-side cleanup.
+    if rt
+        .block_on(media_recv::confirm(&client, server, &session, &blob_id))
+        .is_err()
+    {
+        eprintln!("saved, but the server could not be told about the download");
+    }
+    println!("saved {}", path.display());
+    Ok(())
 }
 
 /// `send`: body from stdin (never argv), then log in and post it into the conversation.

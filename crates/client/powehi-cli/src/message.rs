@@ -67,6 +67,10 @@ pub enum MessageError {
          `powehi verify <conversation>` and compare it with your peer, or pass --allow-changed"
     )]
     Changed,
+    #[error("no stored attachment matches that id (see the id printed by `read` after [image])")]
+    NoSuchAttachment,
+    #[error("that attachment id prefix matches more than one attachment")]
+    AmbiguousAttachment,
 }
 
 impl From<mls_group::MlsError> for MessageError {
@@ -84,6 +88,9 @@ pub struct Pending {
     /// `sender` is then only the Delivery Service's label.
     pub sender_key: Option<String>,
     pub text: Zeroizing<String>,
+    /// Blob id when the body is a valid media descriptor: such a record is parked as
+    /// `att-<blob>` by [`discard`] so `save` can still decrypt it after it was shown.
+    pub media: Option<Uuid>,
     received_at: u64,
 }
 
@@ -274,8 +281,14 @@ pub fn pending(store: &ProfileStore, group_id: Uuid) -> Result<Vec<Pending>, Mes
             continue;
         };
         if rec.group_id == group_id {
+            let media = crate::media::parse(&rec.body).map(|p| p.blob_id);
+            let mut text = render(&rec.body);
+            if let Some(blob) = media {
+                text.push_str(&format!(" {}", attachment_label(&blob)));
+            }
             out.push(Pending {
-                text: render(&rec.body),
+                text,
+                media,
                 sender: rec.sender,
                 sender_key: rec.sender_key.clone(),
                 received_at: rec.received_at,
@@ -423,10 +436,155 @@ pub fn newest(msgs: &[Pending], last: Option<usize>) -> &[Pending] {
     &msgs[msgs.len().saturating_sub(n)..]
 }
 
-/// Removes a message from the store once it has been shown.
+/// Records parked for `powehi save`: the original `rx-` record of a media message, renamed
+/// `att-<envelope id>` (unique per message, so no peer-chosen name can replace one).
+const ATT_PREFIX: &str = "att-";
+/// At most this many parked attachments; past it the oldest is evicted, so a peer flooding
+/// media messages can neither fill the store nor lock it (store limit is 4096 records).
+const MAX_ATTACHMENTS: usize = 256;
+/// A parked key is dropped after this long (local policy, matching the 30-day grace in prd
+/// §9.4.3 after which the sender's blob may be collected): an unsaved key must not live forever.
+const ATTACHMENT_TTL_NANOS: u64 = 30 * 24 * 3600 * 1_000_000_000;
+/// Shortest attachment id prefix `save` accepts.
+const MIN_ATT_PREFIX_LEN: usize = 6;
+/// Most same-prefix candidates `save` will try.
+const MAX_CANDIDATES: usize = 16;
+
+/// The blob id as printed by `read` after `[image]` / `[video]`; `save` accepts any prefix.
+fn attachment_label(blob: &Uuid) -> String {
+    blob.simple().to_string()
+}
+
+fn now_nanos() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+}
+
+/// Parked records with their receive time (0 = unknown), after dropping those past the TTL.
+fn live_attachments(store: &ProfileStore) -> Result<Vec<(u64, String)>, MessageError> {
+    let now = now_nanos();
+    let mut kept: Vec<(u64, String)> = Vec::new();
+    for n in store
+        .names()?
+        .into_iter()
+        .filter(|n| n.starts_with(ATT_PREFIX))
+    {
+        let at = match store.get(&n)? {
+            Some(raw) => serde_json::from_slice::<Received>(&raw).map_or(0, |r| r.received_at),
+            None => continue,
+        };
+        if at > 0 && now.saturating_sub(at) > ATTACHMENT_TTL_NANOS {
+            store.remove(&n)?;
+        } else {
+            kept.push((at, n));
+        }
+    }
+    Ok(kept)
+}
+
+/// Drops expired parked records, then the oldest ones until one slot is free.
+fn make_room_for_attachment(store: &ProfileStore) -> Result<(), MessageError> {
+    let mut kept = live_attachments(store)?;
+    kept.sort();
+    while kept.len() >= MAX_ATTACHMENTS {
+        store.remove(&kept.remove(0).1)?;
+    }
+    Ok(())
+}
+
+/// Removes a message from the store once it has been shown. A media message is first parked
+/// as `att-<envelope id>` (same bytes, written before the `rx-` record goes), so showing it
+/// does not lose the key `save` needs. Parked records expire after 30 days and are capped.
 pub fn discard(store: &ProfileStore, msg: &Pending) -> Result<(), MessageError> {
     debug_assert!(msg.name.starts_with(RX_PREFIX));
+    if msg.media.is_some() {
+        if let Some(raw) = store.get(&msg.name)? {
+            make_room_for_attachment(store)?;
+            // The suffix is locally random: the envelope id is the server's to choose and a
+            // repeat of it must not replace an earlier parked key.
+            let name = format!("{ATT_PREFIX}{}", Uuid::new_v4().hyphenated());
+            store.put(&name, &raw)?;
+        }
+    }
     store.remove(&msg.name)?;
+    Ok(())
+}
+
+/// A stored record that may be the attachment a user asked for (no key material held here).
+pub struct Candidate {
+    name: String,
+    pub blob_id: Uuid,
+}
+
+/// Finds the attachments of `group_id` whose blob id starts with `reference` (at least
+/// [`MIN_ATT_PREFIX_LEN`] hex digits), among parked and not yet shown records, all for one
+/// blob id. Several records of the same blob (different keys) are all returned: `save` tries
+/// each, so a hostile duplicate cannot block the genuine one.
+pub fn find_attachment(
+    store: &ProfileStore,
+    group_id: Uuid,
+    reference: &str,
+) -> Result<Vec<Candidate>, MessageError> {
+    let wanted = reference.trim().to_ascii_lowercase();
+    if wanted.len() < MIN_ATT_PREFIX_LEN || !wanted.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(MessageError::NoSuchAttachment);
+    }
+    live_attachments(store)?;
+    let mut hits: Vec<Candidate> = Vec::with_capacity(MAX_CANDIDATES);
+    for name in store.names()? {
+        if !(name.starts_with(RX_PREFIX) || name.starts_with(ATT_PREFIX)) {
+            continue;
+        }
+        let Some(raw) = store.get(&name)? else {
+            continue;
+        };
+        let Ok(rec) = serde_json::from_slice::<Received>(&raw) else {
+            continue;
+        };
+        if rec.group_id != group_id {
+            continue;
+        }
+        let Some(p) = crate::media::parse(&rec.body) else {
+            continue;
+        };
+        if p.blob_id.simple().to_string().starts_with(&wanted) {
+            if hits.len() == MAX_CANDIDATES {
+                return Err(MessageError::AmbiguousAttachment);
+            }
+            hits.push(Candidate {
+                name,
+                blob_id: p.blob_id,
+            });
+        }
+    }
+    let Some(first) = hits.first() else {
+        return Err(MessageError::NoSuchAttachment);
+    };
+    if hits.iter().any(|c| c.blob_id != first.blob_id) {
+        return Err(MessageError::AmbiguousAttachment);
+    }
+    Ok(hits)
+}
+
+/// Loads the descriptor of one candidate (key in `Zeroizing`); `None` if it vanished.
+pub fn load_candidate(
+    store: &ProfileStore,
+    c: &Candidate,
+) -> Result<Option<crate::media::Payload>, MessageError> {
+    let Some(raw) = store.get(&c.name)? else {
+        return Ok(None);
+    };
+    Ok(serde_json::from_slice::<Received>(&raw)
+        .ok()
+        .and_then(|r| crate::media::parse(&r.body)))
+}
+
+/// Removes the stored record of a saved attachment, and the other records of the same blob.
+pub fn forget_attachment(store: &ProfileStore, all: &[Candidate]) -> Result<(), MessageError> {
+    for c in all {
+        store.remove(&c.name)?;
+    }
     Ok(())
 }
 

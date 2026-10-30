@@ -449,8 +449,16 @@ pointing here. Close the issue in the PR that finishes its item.
   Cycle 693 (slice 3): `media_recv.rs` — `download` (pre-signed GET, https-or-same-origin, body read
   capped from the descriptor while streaming), `open` (hash before decrypt, `Zeroizing` plaintext);
   crypto-core `decrypt_chunked` now wipes per-chunk/partial plaintext. Not yet wired to a command.
-  Carried: caller must pass `status::upload_client()` (no redirects, timeout) as `get`; a scanning-allocator
-  residue test for `open`; `confirm-download` only after `open` succeeds; command + explicit `save` step.
+  Cycle 694 (slice 4): `powehi save <conv> <id> [--dir DIR]` — download, hash check, decrypt, `0600` file
+  (link, unlink tmp, fsync dir), then drop the record and `confirm-download` (best effort). `discard` parks
+  a shown media message as `att-<random uuid>` (never replaces another; 30-day TTL swept on park and on
+  lookup; cap 256, oldest evicted) so its key survives `read`/`chat`/`tui`; `read` prints the full blob id;
+  `save` tries every record of the blob (Corrupt/TooLarge → next). security-auditor + crypto-reviewer
+  findings fixed. Residuals (for 8.23): parked record keeps the whole rx body (thumbnail etc.); no
+  explicit discard command and no cleanup on group eviction (TTL + cap bound it); the ack now reveals
+  "user saved this" (prd §9.4.3/§3.4 delta); an evicted/expired/failed-confirm blob is never acked, so
+  server ciphertext lingers; https-any-host download URL; `media_residue` test not yet covering
+  `find_attachment`/`save`. Remaining: scanning-allocator residue test; live E2E leg in 8.22.
 
 ### Gates
 - [ ] 8.22 E2E gate — extend `src/live_e2e.rs` and the `cli-live-backend` CI job:
