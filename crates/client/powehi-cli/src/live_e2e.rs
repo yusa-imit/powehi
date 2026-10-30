@@ -113,6 +113,10 @@ async fn two_profiles_register_converse_and_verify() {
     let screen: String = buf.content().iter().map(|c| c.symbol()).collect();
     assert!(screen.contains("tui smoke"));
 
+    // The 1:1 leg spends the per-IP request budget; let the bucket refill before the group leg
+    // (an un-slept run flaked with 429 on `invite::create`).
+    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+
     // 8.22: group with a real Remove, on the same registrations.
     group_leg(&client, &url, &alice, &bob).await;
 
