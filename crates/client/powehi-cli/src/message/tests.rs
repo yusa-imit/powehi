@@ -381,6 +381,7 @@ fn pending_at(received_at: u64) -> Pending {
         sender: Uuid::from_u128(1),
         sender_key: None,
         text: Zeroizing::new(String::new()),
+        media: None,
         received_at,
     }
 }
@@ -410,4 +411,86 @@ fn until_keeps_messages_received_before_the_cutoff() {
     assert!(until(&[], Some(5)).is_empty());
     // Composes with `since`: a half-open window [20, 30).
     assert_eq!(since(until(&msgs, Some(30)), Some(20)).len(), 2);
+}
+
+#[tokio::test]
+async fn shown_attachment_is_parked_for_save_and_forgotten_after() {
+    let (_tmp, alice, bob, url, gid) = pair().await;
+    let sealed = crate::media_send::seal(b"pixels").unwrap();
+    let blob = Uuid::from_u128(0xabcdef12_3456_7890_abcd_ef1234567890);
+    let body = crate::media_send::descriptor(&sealed, blob).unwrap();
+    send(&client(), &url, &bob, gid, &body).await.unwrap();
+    inbox::receive(&client(), &url, &alice).await.unwrap();
+    let got = pending(&alice.store, gid).unwrap();
+    assert_eq!(got[0].media, Some(blob));
+    assert!(
+        got[0].text.ends_with(" abcdef1234567890abcdef1234567890"),
+        "{}",
+        got[0].text.as_str()
+    );
+    // Found before and after it was shown (and removed from the unread list).
+    let before = find_attachment(&alice.store, gid, "abcdef").unwrap();
+    assert_eq!(before[0].blob_id, blob);
+    discard(&alice.store, &got[0]).unwrap();
+    assert!(pending(&alice.store, gid).unwrap().is_empty());
+    let att = find_attachment(&alice.store, gid, "ABCDEF1234").unwrap();
+    assert_eq!(att[0].blob_id, blob);
+    assert!(load_candidate(&alice.store, &att[0]).unwrap().is_some());
+    assert!(matches!(
+        find_attachment(&alice.store, gid, "abcde"),
+        Err(MessageError::NoSuchAttachment)
+    ));
+    assert!(matches!(
+        find_attachment(&alice.store, gid, "ffffff"),
+        Err(MessageError::NoSuchAttachment)
+    ));
+    forget_attachment(&alice.store, &att).unwrap();
+    assert!(matches!(
+        find_attachment(&alice.store, gid, "abcdef"),
+        Err(MessageError::NoSuchAttachment)
+    ));
+}
+
+#[tokio::test]
+async fn parked_attachments_are_capped_and_never_overwritten() {
+    let (_tmp, alice, bob, url, gid) = pair().await;
+    let sealed = crate::media_send::seal(b"x").unwrap();
+    let blob = |i: u128| Uuid::from_u128(0x1000_0000_0000_0000_0000_0000_0000_0000 + i);
+    for i in 0..(MAX_ATTACHMENTS as u128 + 3) {
+        let body = crate::media_send::descriptor(&sealed, blob(i)).unwrap();
+        send(&client(), &url, &bob, gid, &body).await.unwrap();
+        inbox::receive(&client(), &url, &alice).await.unwrap();
+        for m in pending(&alice.store, gid).unwrap() {
+            discard(&alice.store, &m).unwrap();
+        }
+    }
+    let parked = alice
+        .store
+        .names()
+        .unwrap()
+        .into_iter()
+        .filter(|n| n.starts_with(ATT_PREFIX))
+        .count();
+    assert_eq!(parked, MAX_ATTACHMENTS);
+    assert!(find_attachment(&alice.store, gid, &blob(0).simple().to_string()).is_err());
+    assert!(find_attachment(
+        &alice.store,
+        gid,
+        &blob(MAX_ATTACHMENTS as u128 + 2).simple().to_string()
+    )
+    .is_ok());
+}
+
+#[tokio::test]
+async fn expired_parked_attachments_are_dropped_on_lookup() {
+    let (_tmp, alice, _bob, _url, gid) = pair().await;
+    let rec = format!(
+        r#"{{"group_id":"{gid}","sender":"{}","body":"6869","received_at":1}}"#,
+        Uuid::from_u128(7)
+    );
+    let name = format!("{ATT_PREFIX}{}", Uuid::from_u128(9).hyphenated());
+    alice.store.put(&name, rec.as_bytes()).unwrap();
+    assert!(alice.store.get(&name).unwrap().is_some());
+    assert!(find_attachment(&alice.store, gid, "abcdef").is_err());
+    assert!(alice.store.get(&name).unwrap().is_none(), "past the TTL");
 }

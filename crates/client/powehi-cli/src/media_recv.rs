@@ -131,6 +131,21 @@ pub async fn download(
     open(p, &ciphertext)
 }
 
+/// Tells the server the attachment was downloaded (it counts toward blob cleanup).
+pub async fn confirm(
+    client: &Client,
+    server: &Url,
+    session: &Session,
+    blob_id: &uuid::Uuid,
+) -> Result<(), RecvFileError> {
+    let req = client.post(api(
+        server,
+        &format!("/v1/media/{blob_id}/confirm-download"),
+    )?);
+    identity::send_raw(req, session, SMALL_BODY).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

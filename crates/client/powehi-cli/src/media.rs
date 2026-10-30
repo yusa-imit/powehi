@@ -329,8 +329,13 @@ pub fn save(dir: &Path, blob_id: &Uuid, bytes: &[u8]) -> Result<PathBuf, MediaEr
     }
     let path = dir.join(format!("powehi-{}", blob_id.simple()));
     let tmp = dir.join(format!(".powehi-tmp-{}", Uuid::new_v4().simple()));
+    // Link, drop the temporary name, then sync the directory: the caller deletes the key right
+    // after, and a crash must not leave the plaintext under a hidden second name.
     let written = write_new(&tmp, bytes).and_then(|()| std::fs::hard_link(&tmp, &path));
-    let _ = std::fs::remove_file(&tmp);
+    let unlinked = std::fs::remove_file(&tmp);
+    let written = written
+        .and(unlinked)
+        .and_then(|()| std::fs::File::open(dir)?.sync_all());
     match written {
         Ok(()) => Ok(path),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(MediaError::Exists),

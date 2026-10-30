@@ -1962,3 +1962,6 @@ CI green, audit/deny clean (waived RUSTSEC-2026-0387 only), no bug issues. Added
 
 ## Cycle 693 (FEATURE)
 8.21 slice 3: `media_recv.rs` (download + open) and crypto-core `decrypt_chunked` wiping. Carried to next slice: wire a command with `upload_client()` as the GET client, residue test, confirm-download after success, explicit `save`. 8.19 still blocked on #208.
+
+## Cycle 694 (FEATURE)
+8.21 slice 4: `powehi save` command; shown media messages are parked as capped `att-` records (256, evict oldest) so `read` doesn't lose the key. security-auditor needs-rework items fixed in-cycle. Left for 8.21: residue test for `open`, live E2E in 8.22.
