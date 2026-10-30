@@ -478,4 +478,55 @@ mod tests {
         assert!(save(d.path(), &id, b"x").is_err());
         assert_eq!(std::fs::read(&target).unwrap(), b"keep");
     }
+
+    mod props {
+        use proptest::prelude::*;
+
+        use super::*;
+
+        proptest! {
+            /// Peer bytes of any shape never panic the parser.
+            #[test]
+            fn parse_never_panics(body in proptest::collection::vec(any::<u8>(), 0..2048)) {
+                let _ = parse(&body);
+            }
+
+            /// Any well-formed descriptor round-trips field for field; a chunked one keeps a
+            /// bounded size and a non-chunked one drops it.
+            #[test]
+            fn valid_descriptor_round_trips(
+                id in any::<u128>(),
+                hash in proptest::array::uniform32(any::<u8>()),
+                key in proptest::array::uniform32(any::<u8>()),
+                iv in proptest::array::uniform12(any::<u8>()),
+                size in 0u64..=MAX_MEDIA_BYTES,
+                chunked in any::<bool>(),
+            ) {
+                let tail = if chunked {
+                    format!(r#","chunked":true,"totalSize":{size}"#)
+                } else {
+                    format!(r#","totalSize":{size}"#)
+                };
+                let body = format!(
+                    r#"{{"type":"file","blobId":"{}","blobHash":{:?},"mediaKey":{:?},"iv":{:?}{tail}}}"#,
+                    Uuid::from_u128(id), hash, key, iv
+                );
+                let p = parse(body.as_bytes()).unwrap();
+                prop_assert_eq!(p.blob_id, Uuid::from_u128(id));
+                prop_assert_eq!(p.blob_hash, hash);
+                prop_assert_eq!(*p.key, key);
+                prop_assert_eq!(p.iv, iv);
+                prop_assert_eq!(p.chunked, chunked);
+                prop_assert_eq!(p.total_size, chunked.then_some(size));
+            }
+
+            /// A chunked size over the cap is always rejected.
+            #[test]
+            fn oversize_chunked_rejected(extra in 1u64..1_000_000_000) {
+                let over = MAX_MEDIA_BYTES + extra;
+                let tail = format!(r#","chunked":true,"totalSize":{over}"#);
+                prop_assert!(parse(&json(&tail, 32)).is_none());
+            }
+        }
+    }
 }
