@@ -113,8 +113,53 @@ async fn two_profiles_register_converse_and_verify() {
     let screen: String = buf.content().iter().map(|c| c.symbol()).collect();
     assert!(screen.contains("tui smoke"));
 
+    // 8.22: group with a real Remove, on the same registrations.
+    group_leg(&client, &url, &alice, &bob).await;
+
+    // The group leg spends the per-IP request budget; let the bucket refill before the revokes.
+    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+
     // 8.4: revoking ends the session. The token is dead on REST, and a second revoke is a no-op.
     auth::revoke_session(&client, &url, &alice).await.unwrap();
     assert!(inbox::receive(&client, &url, &alice).await.is_err());
     auth::revoke_session(&client, &url, &alice).await.unwrap();
+}
+
+/// 8.22: a kind-Group conversation through the real Delivery Service: create, add Bob (invite
+/// link, Welcome, `accept`), one Application message, then a real Remove Commit.
+/// A third registration trips the register/KeyPackage limiter (429), so the roster stays at two
+/// until the CI server's limits can be raised.
+async fn group_leg(client: &Client, url: &Url, alice: &Session, bob: &Session) {
+    let gid = crate::group::create(client, url, alice).await.unwrap();
+    let (link, _) = invite::create(client, url, bob).await.unwrap();
+    let link = invite::parse_link(&link).unwrap();
+    crate::group::add(client, url, alice, gid, &link)
+        .await
+        .unwrap();
+    inbox::receive(client, url, bob).await.unwrap();
+    crate::requests::accept(client, url, bob, gid)
+        .await
+        .unwrap();
+    assert_eq!(crate::group::remove::members(alice, gid).unwrap().len(), 2);
+
+    message::send(client, url, bob, gid, b"hello group")
+        .await
+        .unwrap();
+    inbox::receive(client, url, alice).await.unwrap();
+    let got = message::pending(&alice.store, gid).unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].text.as_str(), "hello group");
+
+    let bob_key = crate::group::remove::members(bob, gid)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.is_self)
+        .unwrap()
+        .key_hex;
+    crate::group::remove::remove(client, url, alice, gid, &bob_key)
+        .await
+        .unwrap();
+    assert_eq!(crate::group::remove::members(alice, gid).unwrap().len(), 1);
+    // Bob's eviction on receive is covered by `group::commit` tests; a further fetch here trips
+    // the per-device inbox limiter (429).
 }

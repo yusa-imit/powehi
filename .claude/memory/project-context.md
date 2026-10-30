@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 698 (2026-10-30, FEATURE) — 8.22 slice 1: live group+Remove E2E
+- `group_leg` (inside the single live test) in `live_e2e.rs` (not runnable locally: no docker; CI is the judge). Media leg blocked: CLI rejects http MinIO URL (https-or-same-origin rule). Remaining 8.22 legs wait on #166/#208.
+
 ## Cycle 696 (2026-10-30, FEATURE) — 8.21 slice 5: open() residue test
 - `tests/media_open_residue.rs` (scanning allocator, mutation-checked). Test-only; no reviewer needed. 8.15/8.17/8.19 still wait on need-human. Remaining 8.21: `find_attachment`/`save` residue, live E2E leg (8.22).
 
