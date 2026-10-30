@@ -80,13 +80,16 @@ domain is a variable everywhere (`var.domain`); never hard-code `powehi.app`.
   cannot race it). security-auditor.
 
 ### CLI distribution (needs no cloud credentials)
-- [ ] 9.6 CLI release binaries — a release workflow on tags `cli-v*` builds `powehi`
+- [x] 9.6 CLI release binaries — a release workflow on tags `cli-v*` builds `powehi`
   for macOS arm64/x86_64 and Linux x86_64/arm64 (static Linux builds), reproducibly
   (`SOURCE_DATE_EPOCH`, as `release.yml` does for the server); publishes a GitHub
   Release with SHA-256 checksums, cosign keyless signatures and SLSA provenance.
   `docs/cli.md` gains an install section: download, verify checksum and signature, and
   on macOS clear the quarantine attribute (`xattr -d com.apple.quarantine powehi`).
   The default server stays as is until 9.9.
+  Shipped cycle 699: `.github/workflows/cli-release.yml` (4-target matrix, SHA256SUMS, cosign
+  bundles, SLSA generic provenance) + `docs/cli.md` Install. Not exercisable before a `cli-v*` tag
+  is pushed: the first tag is the real test (the musl build on the arm runner is unproven). Known gaps from security-auditor: release is published before provenance is attached (non-atomic); builds are not bit-reproducible across machines.
 
 ### Environments and delivery (need issue #118)
 - [ ] 9.7 Staging environment and infra workflow — `envs/staging` composes the modules.

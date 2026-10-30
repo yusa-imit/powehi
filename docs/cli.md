@@ -7,6 +7,38 @@ plaintext; keys and messages live in an encrypted per-profile store on your mach
 cargo run -p powehi-cli -- <subcommand>     # or the built `powehi` binary
 ```
 
+## Install
+
+Release binaries are built from tags `cli-vX.Y.Z` and published on the GitHub Releases
+page: `powehi-macos-arm64`, `powehi-macos-x86_64`, `powehi-linux-x86_64`,
+`powehi-linux-arm64` (Linux builds are static). Each release also has `SHA256SUMS`, a
+cosign `.sigstore.json` bundle per file, and SLSA provenance (`*.intoto.jsonl`).
+
+```
+set -euo pipefail
+TAG=cli-v0.1.0; ASSET=powehi-macos-arm64        # pick your platform
+BASE=https://github.com/yusa-imit/powehi/releases/download/$TAG
+for f in $ASSET SHA256SUMS SHA256SUMS.sigstore.json; do curl -fLO "$BASE/$f"; done
+# 1. the checksum list is signed by this repo's release workflow, for exactly this tag
+cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity "https://github.com/yusa-imit/powehi/.github/workflows/cli-release.yml@refs/tags/$TAG" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+# 2. the binary matches the signed list
+grep " $ASSET\$" SHA256SUMS | sha256sum -c -        # macOS: shasum -a 256 -c -
+chmod +x $ASSET && mv $ASSET /usr/local/bin/powehi
+# macOS only, if Gatekeeper blocks it (browser downloads are quarantined; curl's are not):
+xattr -d com.apple.quarantine /usr/local/bin/powehi || true
+```
+
+Provenance: `slsa-verifier verify-artifact $ASSET --provenance-path multiple.intoto.jsonl
+--source-uri github.com/yusa-imit/powehi --source-tag $TAG`. Builds use `--locked`,
+`SOURCE_DATE_EPOCH=0` and remapped workspace paths; bit-for-bit reproduction on another
+machine is not guaranteed (cargo registry paths and runner images differ), so rely on the
+signature and provenance, not on a local rebuild.
+
+The default `--server` stays `https://localhost:8443` until the production endpoint
+exists (Phase 9.9).
+
 ## Global options
 
 | Option | Env | Default |

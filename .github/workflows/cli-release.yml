@@ -1,0 +1,140 @@
+name: CLI Release — powehi binaries
+
+# Triggered by a CLI tag push (e.g. cli-v0.1.0). The server release (release.yml)
+# uses plain v* tags, so the two never fire together.
+on:
+  push:
+    tags:
+      - 'cli-v[0-9]+.[0-9]+.[0-9]+'
+
+permissions: {}  # every job declares its minimum permissions
+
+concurrency:
+  group: cli-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ── 0. The tagged commit must be on main (merged through a PR, CI-gated) ─────
+  gate:
+    name: Tag is on main
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
+  # ── 1. Build one binary per target ───────────────────────────────────────────
+  build:
+    name: Build ${{ matrix.asset }}
+    needs: gate
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { runner: macos-14,         target: aarch64-apple-darwin,       asset: powehi-macos-arm64 }
+          - { runner: macos-14,         target: x86_64-apple-darwin,        asset: powehi-macos-x86_64 }
+          - { runner: ubuntu-latest,    target: x86_64-unknown-linux-musl,  asset: powehi-linux-x86_64 }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, asset: powehi-linux-arm64 }
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
+
+      # Same toolchain pin as release.yml, Dockerfile and rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          toolchain: "1.98.1"
+          targets: ${{ matrix.target }}
+
+      # Linux builds are fully static (musl): no libc version coupling for users.
+      - name: Install musl toolchain
+        if: contains(matrix.target, 'linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+
+      # No rust-cache: a cache writable by other workflows could alter a signed release.
+      - name: Build (SOURCE_DATE_EPOCH=0, paths remapped, --locked)
+        env:
+          SOURCE_DATE_EPOCH: "0"
+          RUSTFLAGS: "--remap-path-prefix=${{ github.workspace }}=/src"
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --locked -p powehi-cli --bin powehi --target "${{ matrix.target }}"
+
+      - name: Stage artifact
+        run: cp "target/${{ matrix.target }}/release/powehi" "${{ matrix.asset }}"
+
+      - name: Static-link check (Linux)
+        if: contains(matrix.target, 'linux-musl')
+        run: |
+          file "${{ matrix.asset }}" | tee /dev/stderr | grep -Eq 'statically linked|static-pie linked' \
+            || { echo "not static"; exit 1; }
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  # ── 2. Checksums, cosign signatures, GitHub Release ──────────────────────────
+  release:
+    name: Checksums, sign, publish
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
+    permissions:
+      contents: write   # create the release and upload assets
+      id-token: write   # cosign keyless OIDC
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        id: hash
+        working-directory: dist
+        run: |
+          chmod +x powehi-*
+          sha256sum powehi-* > SHA256SUMS
+          cat SHA256SUMS
+          [ "$(wc -l < SHA256SUMS)" -eq 4 ]
+          echo "hashes=$(base64 -w0 SHA256SUMS)" >> "$GITHUB_OUTPUT"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9  # v3
+
+      # One keyless signature per binary and one over SHA256SUMS; each .sigstore.json
+      # bundle carries the certificate and the Rekor entry.
+      - name: Sign (keyless → Rekor)
+        working-directory: dist
+        run: |
+          for f in powehi-* SHA256SUMS; do
+            cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"
+          done
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" dist/* --verify-tag --repo "$GITHUB_REPOSITORY" --title "powehi CLI $TAG" --generate-notes
+
+  # ── 3. SLSA L3 provenance (semver-tag pin is mandatory for reusable workflows) ─
+  provenance:
+    name: CLI SLSA L3 provenance
+    needs: release
+    permissions:
+      actions: read
+      id-token: write
+      contents: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+    with:
+      base64-subjects: "${{ needs.release.outputs.hashes }}"
+      upload-assets: true
