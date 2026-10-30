@@ -93,21 +93,6 @@ importers:
         specifier: ^3.2.7
         version: 3.2.7(@types/node@25.9.5)(jiti@2.7.0)(jsdom@26.1.0)(lightningcss@1.32.0)
 
-  infra/cloudflare/workers/smart-router:
-    devDependencies:
-      '@cloudflare/workers-types':
-        specifier: ^4.20260702.1
-        version: 4.20260702.1
-      typescript:
-        specifier: ^5.9.3
-        version: 5.9.3
-      vitest:
-        specifier: ^3.2.7
-        version: 3.2.7(@types/node@25.9.5)(jiti@2.7.0)(jsdom@26.1.0)(lightningcss@1.32.0)
-      wrangler:
-        specifier: ^4.127.1
-        version: 4.127.1(@cloudflare/workers-types@4.20260702.1)
-
 packages:
 
   '@adobe/css-tools@4.5.0':

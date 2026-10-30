@@ -1,3 +1,2 @@
 packages:
   - "app"
-  - "infra/cloudflare/workers/smart-router"

@@ -1,5 +1,8 @@
 name: CI — Infra
 
+# Home of the OpenTofu checks (Phase 9.2 adds fmt/validate/tflint/trivy/tofu test).
+# Until infra/terraform exists this workflow only lints itself.
+
 permissions:
   contents: read
 
@@ -7,16 +10,12 @@ on:
   push:
     branches: [main]
     paths:
-      - 'infra/helm/**'
       - 'infra/terraform/**'
-      - 'infra/policy/**'
       - '.github/workflows/ci-infra.yml'
   pull_request:
     branches: [main]
     paths:
-      - 'infra/helm/**'
       - 'infra/terraform/**'
-      - 'infra/policy/**'
       - '.github/workflows/ci-infra.yml'
 
 concurrency:
@@ -24,128 +23,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  helm-validate:
-    name: Helm lint + kubeconform
+  tofu-layout:
+    name: OpenTofu layout present
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
-
-      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
-        with:
-          version: "v4.2.4"
-
-      - name: Install kubeconform (SHA-verified)
-        env:
-          KUBECONFORM_VERSION: "v0.8.0"
+      - name: No Kubernetes or Hetzner leftovers
         run: |
           set -euo pipefail
-          curl -sSfL -o kubeconform-linux-amd64.tar.gz \
-            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
-          curl -sSfL -o CHECKSUMS \
-            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/CHECKSUMS"
-          grep " kubeconform-linux-amd64.tar.gz\$" CHECKSUMS > kubeconform.sha256
-          sha256sum --check kubeconform.sha256
-          tar -xzf kubeconform-linux-amd64.tar.gz kubeconform
-          chmod +x kubeconform
-          sudo mv kubeconform /usr/local/bin/kubeconform
-
-      - name: Install conftest (SHA-verified)
-        env:
-          CONFTEST_VERSION: "0.69.0"
-        run: |
-          set -euo pipefail
-          curl -sSfL -o conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz \
-            "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz"
-          curl -sSfL -o checksums.txt \
-            "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/checksums.txt"
-          grep " conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz\$" checksums.txt > conftest.sha256
-          sha256sum --check conftest.sha256
-          tar -xzf conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz conftest
-          chmod +x conftest
-          sudo mv conftest /usr/local/bin/conftest
-
-      - name: conftest verify — Rego policy unit tests
-        # Regression gate for infra/policy/*.rego itself (the rules the
-        # per-overlay `conftest test` step below relies on): runs the
-        # `test_*` rules in infra/policy/*_test.rego so a change to a
-        # helper (e.g. pod_spec/containers_of) or a check's deny condition
-        # that breaks intended behavior fails here, not silently — before
-        # this, the only regression coverage was agent-transcript manual
-        # negative controls, never re-run automatically.
-        run: conftest verify -p infra/policy
-
-      - name: helm lint — base chart
-        working-directory: infra/helm/powehi
-        run: helm lint .
-
-      - name: helm lint + kubeconform — overlays (prod-eu, prod-ap, staging)
-        working-directory: infra/helm/powehi
-        # No -kubernetes-version pin: every env's k3s_version is left empty
-        # ("latest") in infra/terraform, so there is no real pinned target
-        # version to assert here — validate against kubeconform's default
-        # (master) schema set instead of fabricating a version.
-        run: |
-          set -euo pipefail
-          for overlay in values-prod-eu.yaml values-prod-ap.yaml values-staging.yaml; do
-            echo "::group::helm lint -f ${overlay}"
-            helm lint . -f "${overlay}"
-            echo "::endgroup::"
-
-            echo "::group::helm template -f ${overlay} | kubeconform"
-            # -schema-location default covers core/built-in kinds; the second
-            # -schema-location adds the community CRD catalog so ExternalSecret
-            # (external-secrets.io) and ServiceMonitor (monitoring.coreos.com)
-            # — both rendered by this chart — have schemas to validate against
-            # instead of erroring as "could not find schema for <kind>".
-            helm template . -f "${overlay}" \
-              | kubeconform -strict -summary -output json \
-                  -schema-location default \
-                  -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
-            echo "::endgroup::"
-
-            echo "::group::helm template -f ${overlay} | conftest test"
-            # --combine: network_policy.rego reasons over all rendered
-            # documents from this overlay together (e.g. Deployment +
-            # NetworkPolicy cross-references), not each doc in isolation.
-            helm template . -f "${overlay}" \
-              | conftest test - -p ../../policy --combine
-            echo "::endgroup::"
-          done
-
-  terraform-validate:
-    name: Terraform validate
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
-
-      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e  # v4.0.1
-        with:
-          # Kept in sync with infra/terraform/.terraform-version and the
-          # `required_version = ">= 1.6"` constraint declared in every env's
-          # versions.tf (dev, prod-eu, prod-ap-seoul) and the hetzner-k3s module.
-          terraform_version: "1.6.2"
-          terraform_wrapper: false
-
-      - name: terraform fmt (check)
-        working-directory: infra/terraform
-        run: terraform fmt -check -recursive
-
-      - name: terraform init + validate — dev
-        working-directory: infra/terraform/envs/dev
-        # -backend=false: syntax/schema validation only, no cloud credentials
-        # or remote state access available (or wanted) in this CI job.
-        run: |
-          terraform init -backend=false
-          terraform validate
-
-      - name: terraform init + validate — prod-eu
-        working-directory: infra/terraform/envs/prod-eu
-        run: |
-          terraform init -backend=false
-          terraform validate
-
-      - name: terraform init + validate — prod-ap-seoul
-        working-directory: infra/terraform/envs/prod-ap-seoul
-        run: |
-          terraform init -backend=false
-          terraform validate
+          if [ -e infra/helm ] || [ -e infra/argocd ] || [ -e infra/policy ]; then
+            echo "Kubernetes-era infra directories were discarded in ADR-0007" >&2
+            exit 1
+          fi
