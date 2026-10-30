@@ -458,7 +458,7 @@ pointing here. Close the issue in the PR that finishes its item.
   explicit discard command and no cleanup on group eviction (TTL + cap bound it); the ack now reveals
   "user saved this" (prd §9.4.3/§3.4 delta); an evicted/expired/failed-confirm blob is never acked, so
   server ciphertext lingers; https-any-host download URL; `media_residue` test not yet covering
-  `find_attachment`/`save`. Remaining: scanning-allocator residue test; live E2E leg in 8.22.
+  `find_attachment`/`save`. Cycle 696 (slice 5): `tests/media_open_residue.rs` — scanning allocator over `media_recv::open` (single and chunked, good and tampered): no unwiped plaintext or key-prefix block (mutation-checked). Remaining: `find_attachment`/`save` residue coverage; live E2E leg in 8.22.
 
 ### Gates
 - [ ] 8.22 E2E gate — extend `src/live_e2e.rs` and the `cli-live-backend` CI job:

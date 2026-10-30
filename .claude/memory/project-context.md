@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 696 (2026-10-30, FEATURE) — 8.21 slice 5: open() residue test
+- `tests/media_open_residue.rs` (scanning allocator, mutation-checked). Test-only; no reviewer needed. 8.15/8.17/8.19 still wait on need-human. Remaining 8.21: `find_attachment`/`save` residue, live E2E leg (8.22).
+
 ## Cycle 692 (2026-10-30, FEATURE) — 8.21 slice 2: `send --file`
 - `media_send.rs` (read_file/seal/descriptor/upload), `status::upload_client`. Reviews: security-auditor + crypto-reviewer findings fixed (FIFO O_NONBLOCK, cfg(unix), web type tags, CHANGED before upload). Open: orphan blob on post-upload send failure; no live-E2E leg yet (8.22); no sender residue test. Next: download with pre-buffer cap + explicit save.
 
