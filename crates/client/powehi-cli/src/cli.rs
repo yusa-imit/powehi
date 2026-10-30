@@ -288,6 +288,9 @@ pub struct ReadArgs {
 pub struct SendArgs {
     /// Conversation id (or a unique prefix of at least 4 characters).
     pub conversation: String,
+    /// Send this file (up to 64 MiB) as an encrypted attachment instead of a stdin message.
+    #[arg(long, value_name = "PATH")]
+    pub file: Option<std::path::PathBuf>,
     /// Print one JSON object (`{"conversation":...}`) instead of the text line.
     #[arg(long)]
     pub json: bool,

@@ -25,7 +25,7 @@ pub const MAX_LINK_LEN: usize = 512;
 const CODE_LEN: usize = 32;
 const HASH_HEX_LEN: usize = 64;
 /// Cap on the JSON bodies of the small control calls.
-const SMALL_BODY: usize = 64 * 1024;
+pub(crate) const SMALL_BODY: usize = 64 * 1024;
 /// A pinned KeyPackage comes back as a JSON integer array (~4 bytes per byte).
 const REDEEM_BODY: usize = 256 * 1024;
 
@@ -125,11 +125,11 @@ pub fn parse_link(input: &str) -> Result<InviteLink, InviteError> {
     })
 }
 
-fn api(server: &Url, path: &str) -> Result<Url, InviteError> {
+pub(crate) fn api(server: &Url, path: &str) -> Result<Url, InviteError> {
     server.join(path).map_err(|_| InviteError::BadResponse)
 }
 
-fn json_post<T: Serialize>(
+pub(crate) fn json_post<T: Serialize>(
     client: &Client,
     url: Url,
     body: &T,
