@@ -203,3 +203,49 @@ async fn wss_offers_only_tls13() {
         "ClientHello offers more than TLS 1.3"
     );
 }
+
+mod props {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// Any text is classified without panic; only a JSON object naming the group wakes.
+        #[test]
+        fn arbitrary_text_never_panics_and_wakes_only_on_a_matching_group(
+            text in ".{0,512}",
+            id in any::<u128>(),
+        ) {
+            let gid = Uuid::from_u128(id);
+            if is_wake_for(&text, gid) {
+                prop_assert!(text.contains(&gid.to_string()) || text.contains('\\'));
+            }
+        }
+
+        /// A notification carrying the group id wakes for that group and no other.
+        #[test]
+        fn a_notification_wakes_exactly_its_own_group(a in any::<u128>(), b in any::<u128>()) {
+            let (a, b) = (Uuid::from_u128(a), Uuid::from_u128(b));
+            let text = format!(r#"{{"group_id":"{a}"}}"#);
+            prop_assert!(is_wake_for(&text, a));
+            prop_assert_eq!(is_wake_for(&text, b), a == b);
+        }
+
+        /// The URL is always the fixed `/v1/ws` path on a ws(s) scheme, whatever the base path.
+        #[test]
+        fn ws_url_always_targets_the_fixed_path(
+            https in any::<bool>(),
+            host in "[a-z][a-z0-9]{0,15}",
+            path in "(/[a-z0-9]{0,8}){0,3}",
+        ) {
+            let scheme = if https { "https" } else { "http" };
+            let base = Url::parse(&format!("{scheme}://{host}.example{path}")).unwrap();
+            let url = ws_url(&base).expect("http(s) base maps");
+            prop_assert_eq!(url.path(), "/v1/ws");
+            prop_assert_eq!(url.scheme(), if https { "wss" } else { "ws" });
+            prop_assert_eq!(url.host_str(), base.host_str());
+        }
+    }
+}

@@ -1976,3 +1976,5 @@ CI green, audit/deny clean (waived RUSTSEC-2026-0387 only), no bug issues. Added
 8.21 slice 6 (box flipped): `tests/media_lookup_residue.rs` (find_attachment + load_candidate leave no unwiped key; mutation-checked). Next unchecked 8.15/8.17/8.19 still blocked on owner (#161, #166, #203, #208); queue next: 8.22 live E2E legs that do not need them (media round trip).
 
 Cycle 699 (FEATURE): 9.6 CLI release workflow (cli-release.yml) + docs/cli.md Install; 8.15/8.17/8.19 still blocked on owner (#166,#203,#208). security-auditor needs-rework fixed (tag-on-main gate, exact cert identity).
+
+Cycle 700 (STABILIZATION): audit/deny/clippy clean, CI green, no bug issues; proptests for ws_url/is_wake_for (ws/tests.rs). target/ 25G (<20GB prune threshold exceeded only by 5GB; pruned >7d artifacts).
