@@ -58,6 +58,18 @@ pub fn http_client_with(roots: RootCertStore, policy: &PinPolicy) -> Result<Clie
         .map_err(|_| StatusError::Unreachable)
 }
 
+/// Client for the pre-signed object-storage PUT: system web roots, no pin, no redirects, no
+/// proxy, and a timeout sized for a 64 MiB body. It never carries the bearer token.
+pub fn upload_client() -> Result<Client, StatusError> {
+    Client::builder()
+        .timeout(Duration::from_secs(600))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .https_only(false)
+        .build()
+        .map_err(|_| StatusError::Unreachable)
+}
+
 async fn get_bounded(client: &Client, url: Url) -> Result<Vec<u8>, StatusError> {
     let mut resp = client
         .get(url)

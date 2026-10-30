@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 692 (2026-10-30, FEATURE) — 8.21 slice 2: `send --file`
+- `media_send.rs` (read_file/seal/descriptor/upload), `status::upload_client`. Reviews: security-auditor + crypto-reviewer findings fixed (FIFO O_NONBLOCK, cfg(unix), web type tags, CHANGED before upload). Open: orphan blob on post-upload send failure; no live-E2E leg yet (8.22); no sender residue test. Next: download with pre-buffer cap + explicit save.
+
 ## Cycle 691 (2026-10-30, FEATURE) — 8.21 slice 1: media payload + safe save
 - `powehi-cli/src/media.rs` (parse/save, 7 tests). 8.21 stays open: send --file, download with pre-buffer size cap, explicit-save-only. Live E2E on main was red from a Docker Hub TLS timeout (infra flake), rerun.
 

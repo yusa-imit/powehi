@@ -26,6 +26,8 @@ mod live_e2e;
 #[cfg(unix)]
 pub mod media;
 #[cfg(unix)]
+pub mod media_send;
+#[cfg(unix)]
 pub mod message;
 pub mod pcs;
 pub mod pinning;
@@ -95,6 +97,9 @@ pub enum CliError {
     #[error("could not read the message from stdin")]
     StdinMessage,
     #[cfg(unix)]
+    #[error("{0}")]
+    SendFile(#[from] media_send::SendFileError),
+    #[cfg(unix)]
     #[error("could not write to stdout; unread messages were kept")]
     Stdout,
     #[cfg(unix)]
@@ -148,13 +153,16 @@ pub fn run(args: cli::Cli, default_data_dir: Option<PathBuf>) -> Result<(), CliE
         #[cfg(unix)]
         cli::Command::Decline(ref a) => run_request_answer(&args.server, &paths, &a.request, false),
         #[cfg(unix)]
-        cli::Command::Send(ref c) => run_send(
-            &args.server,
-            &paths,
-            &c.conversation,
-            c.json,
-            c.allow_changed,
-        ),
+        cli::Command::Send(ref c) => match c.file {
+            Some(ref f) => run_send_file(&args.server, &paths, &c.conversation, f, c),
+            None => run_send(
+                &args.server,
+                &paths,
+                &c.conversation,
+                c.json,
+                c.allow_changed,
+            ),
+        },
         #[cfg(unix)]
         cli::Command::Read(ref c) => run_read(&args.server, &paths, c),
         #[cfg(unix)]
@@ -474,6 +482,54 @@ fn run_request_answer(
         println!("declined request {id}");
     }
     Ok(())
+}
+
+/// `send --file`: encrypt the file, upload the ciphertext, then post the media descriptor.
+#[cfg(unix)]
+fn run_send_file(
+    server: &url::Url,
+    paths: &profile::ProfilePaths,
+    reference: &str,
+    file: &std::path::Path,
+    c: &cli::SendArgs,
+) -> Result<(), CliError> {
+    // Read and seal before the password prompt so a bad path fails fast.
+    let plain = media_send::read_file(file, media::MAX_MEDIA_BYTES)?;
+    let sealed = media_send::seal(&plain)?;
+    drop(plain);
+    let rt = runtime()?;
+    let client = status::http_client()?;
+    let put = status::upload_client()?;
+    let mut prompter = prompt::TtyPrompter;
+    let session = login_scoped(&rt, &client, server, paths, &mut prompter)?;
+    let group_id = message::resolve(&session.store, reference)?;
+    if c.allow_changed && verify::changed_since_verified(&session.store, group_id) {
+        eprintln!("{}", verify::CHANGED_WARNING);
+    }
+    if !verify::has_confirmation(&session.store, group_id) {
+        eprintln!("{}", verify::UNVERIFIED_WARNING);
+    }
+    // Refuse before uploading, not after: a CHANGED conversation must not leave a blob behind.
+    if !c.allow_changed && verify::changed_since_verified(&session.store, group_id) {
+        return Err(message::MessageError::Changed.into());
+    }
+    let blob = rt.block_on(media_send::upload(
+        &client, &put, server, &session, group_id, &sealed,
+    ))?;
+    let body = media_send::descriptor(&sealed, blob)?;
+    let sent = rt.block_on(message::send_with(
+        &client,
+        server,
+        &session,
+        group_id,
+        &body,
+        c.allow_changed,
+    ));
+    if sent.is_err() {
+        eprintln!("the attachment was uploaded (encrypted) but the message was NOT sent");
+    }
+    sent?;
+    message::write_sent(group_id, c.json, &mut std::io::stdout()).map_err(|_| CliError::Output)
 }
 
 /// `send`: body from stdin (never argv), then log in and post it into the conversation.

@@ -439,7 +439,11 @@ pointing here. Close the issue in the PR that finishes its item.
   Cycle 691 (slice 1): `media.rs` — `parse` validates the web-compatible media payload from a
   peer (key in `Zeroizing`, chunked size capped at 64 MiB), `save` writes a new `0600` file via
   temp + hard link (never partial, never overwrites, private dir required, name from the blob
-  UUID only). Next slices: `send --file` (encrypt, upload, send), receive/download with the
+  UUID only). Cycle 692 (slice 2): `media_send.rs` + `send --file PATH` (bounded regular-file read, single blob
+  or §9.4.2 chunks above 16 MiB, unpinned bearer-less PUT client, https-or-same-origin upload URL,
+  CHANGED gate before upload, descriptor uses the web `image`/`video` types). crypto-reviewer's
+  F1 resolved by using the web discriminators. Known: a send failing after upload leaves an
+  orphan encrypted blob. Next slices: receive/download with the
   body-size cap applied BEFORE buffering (non-chunked ≤ cap+16; chunked ≤ ceil(total/16MiB)
   chunks), `save` only on explicit user action (disk-fill), then the live E2E leg in 8.22.
 
