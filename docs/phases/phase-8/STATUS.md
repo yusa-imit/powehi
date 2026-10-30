@@ -464,6 +464,10 @@ pointing here. Close the issue in the PR that finishes its item.
 - [ ] 8.22 E2E gate — extend `src/live_e2e.rs` and the `cli-live-backend` CI job:
   accept flow, a self-Update Commit, a three-member group with a Remove, a second
   device, and a media round trip.
+  Cycle 698 (slice 1): live test `three_member_group_add_message_and_remove` (create, two adds with
+  `accept`, a group message, a real Remove; evicted member loses its group). Blocked legs: media round
+  trip (the live stack's MinIO URL is plain http on another origin and the CLI refuses it by design:
+  needs TLS on MinIO or an owner-approved test knob), self-Update (8.15 d/e, #166), second device (8.19, #208).
 - [ ] 8.23 threat-model-checker pass on Phase 8 as a whole; prd §3 and §7A updated.
 
 ## Not in Phase 8

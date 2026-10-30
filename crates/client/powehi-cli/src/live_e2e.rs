@@ -118,3 +118,57 @@ async fn two_profiles_register_converse_and_verify() {
     assert!(inbox::receive(&client, &url, &alice).await.is_err());
     auth::revoke_session(&client, &url, &alice).await.unwrap();
 }
+
+/// 8.22: a three-member group through the real Delivery Service: create, add two members
+/// (invite link, Welcome, `accept`), one Application message, then a real Remove Commit.
+/// One test with three registrations (parallel registrations share an IP and trip the limiter).
+#[tokio::test]
+#[ignore = "needs a live powehi-server (CI — Live-backend E2E)"]
+async fn three_member_group_add_message_and_remove() {
+    let url = server();
+    let client = crate::status::http_client().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let (alice, _, _) = register(&client, &url, &tmp, "alice").await;
+    let (bob, _, _) = register(&client, &url, &tmp, "bob").await;
+    let (carol, _, _) = register(&client, &url, &tmp, "carol").await;
+
+    let gid = crate::group::create(&client, &url, &alice).await.unwrap();
+    for joiner in [&bob, &carol] {
+        let (link, _) = invite::create(&client, &url, joiner).await.unwrap();
+        let link = invite::parse_link(&link).unwrap();
+        crate::group::add(&client, &url, &alice, gid, &link)
+            .await
+            .unwrap();
+        inbox::receive(&client, &url, joiner).await.unwrap();
+        crate::requests::accept(&client, &url, joiner, gid)
+            .await
+            .unwrap();
+        // Earlier members apply the Add Commit.
+        inbox::receive(&client, &url, &bob).await.unwrap();
+    }
+    assert_eq!(crate::group::remove::members(&alice, gid).unwrap().len(), 3);
+
+    message::send(&client, &url, &carol, gid, b"hello group")
+        .await
+        .unwrap();
+    inbox::receive(&client, &url, &alice).await.unwrap();
+    let got = message::pending(&alice.store, gid).unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].text.as_str(), "hello group");
+
+    // Alice removes Carol; Bob applies the Remove, Carol is evicted.
+    let carol_key = crate::group::remove::members(&carol, gid)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.is_self)
+        .unwrap()
+        .key_hex;
+    crate::group::remove::remove(&client, &url, &alice, gid, &carol_key)
+        .await
+        .unwrap();
+    assert_eq!(crate::group::remove::members(&alice, gid).unwrap().len(), 2);
+    inbox::receive(&client, &url, &bob).await.unwrap();
+    assert_eq!(crate::group::remove::members(&bob, gid).unwrap().len(), 2);
+    inbox::receive(&client, &url, &carol).await.unwrap();
+    assert!(crate::group::remove::members(&carol, gid).is_err());
+}
