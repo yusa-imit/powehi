@@ -116,6 +116,9 @@ async fn two_profiles_register_converse_and_verify() {
     // 8.22: group with a real Remove, on the same registrations.
     group_leg(&client, &url, &alice, &bob).await;
 
+    // The group leg spends the per-IP request budget; let the bucket refill before the revokes.
+    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+
     // 8.4: revoking ends the session. The token is dead on REST, and a second revoke is a no-op.
     auth::revoke_session(&client, &url, &alice).await.unwrap();
     assert!(inbox::receive(&client, &url, &alice).await.is_err());
