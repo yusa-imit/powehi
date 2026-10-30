@@ -26,6 +26,8 @@ mod live_e2e;
 #[cfg(unix)]
 pub mod media;
 #[cfg(unix)]
+pub mod media_recv;
+#[cfg(unix)]
 pub mod media_send;
 #[cfg(unix)]
 pub mod message;
