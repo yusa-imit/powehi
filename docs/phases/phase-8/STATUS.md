@@ -433,7 +433,7 @@ pointing here. Close the issue in the PR that finishes its item.
   Cycle 687: worker-thread refresh shipped (`tui/fetch.rs`): the inbox fetch runs on a worker, serialised against send/verify/drain by a gate mutex; the loop keeps reading keys while idle. security-auditor found a shutdown hang (poller borrowed, sender outlived the scope): fixed with a `move` closure and the terminal restored before the join. Known: send/verify block on the gate during a fetch; `eprintln!` in welcome/requests can paint over the screen from the worker. Remaining carry: live-backend smoke test, repaint copies of plaintext.
   Cycle 688: live-backend smoke test added to `live_e2e.rs` (a message that crossed the real Delivery Service is drained into the TUI `App`, leaves the store, and is painted). Remaining carry: repaint copies of plaintext.
   Cycle 689: repaint copies wiped: the painted ANSI bytes are `Zeroizing` and the ratatui `Buffer` is reset right after the write (also on a failed write). Residual: the terminal's own scrollback/screen and the kernel tty buffer are outside our reach. 8.20 carries are now closed; the box is flipped (threat-model pass is 8.23).
-- [ ] 8.21 Media send/receive (prd §9) — `send --file` and saving received media to
+- [x] 8.21 Media send/receive (prd §9) — `send --file` and saving received media to
   `0600` files, encrypted per prd §9.2 and ADR-0004, with size caps.
   crypto-reviewer + security-auditor.
   Cycle 691 (slice 1): `media.rs` — `parse` validates the web-compatible media payload from a
@@ -458,7 +458,7 @@ pointing here. Close the issue in the PR that finishes its item.
   explicit discard command and no cleanup on group eviction (TTL + cap bound it); the ack now reveals
   "user saved this" (prd §9.4.3/§3.4 delta); an evicted/expired/failed-confirm blob is never acked, so
   server ciphertext lingers; https-any-host download URL; `media_residue` test not yet covering
-  `find_attachment`/`save`. Cycle 696 (slice 5): `tests/media_open_residue.rs` — scanning allocator over `media_recv::open` (single and chunked, good and tampered): no unwiped plaintext or key-prefix block (mutation-checked). Remaining: `find_attachment`/`save` residue coverage; live E2E leg in 8.22.
+  `find_attachment`/`save`. Cycle 696 (slice 5): `tests/media_open_residue.rs` — scanning allocator over `media_recv::open` (single and chunked, good and tampered): no unwiped plaintext or key-prefix block (mutation-checked). Cycle 697 (slice 6): `tests/media_lookup_residue.rs` — scanning allocator over `find_attachment` + `load_candidate` against a real store (no unwiped key copy; mutation-checked). `media::save` only receives the caller's `Zeroizing` plaintext. Box flipped; the live E2E media leg is 8.22.
 
 ### Gates
 - [ ] 8.22 E2E gate — extend `src/live_e2e.rs` and the `cli-live-backend` CI job:
