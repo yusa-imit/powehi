@@ -59,7 +59,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        root: [bootstrap, envs/staging, envs/prod]
+        root: [bootstrap, modules/network, modules/data, envs/staging, envs/prod]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
@@ -105,8 +105,12 @@ jobs:
           hide-progress: true
 
   tofu-test:
-    name: tofu test (mocked providers)
+    name: tofu test (${{ matrix.root }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        root: [bootstrap, modules/network, modules/data]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
@@ -117,7 +121,7 @@ jobs:
           tofu_wrapper: false
       - name: init without backend
         run: tofu init -backend=false -input=false -lockfile=readonly
-        working-directory: infra/terraform/bootstrap
+        working-directory: infra/terraform/${{ matrix.root }}
       - name: tofu test (mock_provider; the job has no cloud credentials)
         run: tofu test
-        working-directory: infra/terraform/bootstrap
+        working-directory: infra/terraform/${{ matrix.root }}

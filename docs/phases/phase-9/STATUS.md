@@ -55,13 +55,21 @@ domain is a variable everywhere (`var.domain`); never hard-code `powehi.app`.
   the exact owner steps and the GitHub Environment secrets for #118. CI (`ci-infra.yml`):
   `tofu fmt -check`, `tofu validate`, `tflint`, `trivy config`, and `tofu test` with
   mocked providers. security-auditor.
-- [ ] 9.3 Network and data modules — VPC over two AZs; public subnets for tasks with no
+- [x] 9.3 Network and data modules — VPC over two AZs; public subnets for tasks with no
   NAT gateway; private subnets for data. RDS PostgreSQL 16 `db.t4g.micro` single-AZ,
   gp3 20 GB, encrypted, `rds.force_ssl = 1`, RDS-managed master password in Secrets
   Manager, automated backups 7 days with PITR, deletion protection + final snapshot on
   prod. ElastiCache (Valkey or Redis OSS 7) `cache.t4g.micro` with in-transit TLS and an
   AUTH token. Security groups: data stores accept only the service SG. `tofu test`
   asserts encryption, TLS, no public access, and backup settings. security-auditor.
+  Shipped cycle 706: `modules/network` + `modules/data`, wired into both envs; `tofu test` per module in
+  `ci-infra.yml`. security-auditor (needs-rework, fixed): secret named `powehi/<env>/...` to match the
+  IAM scope; AUTH token is ephemeral + write-only (never in state/plan); no RDS log export until 9.10
+  (constraint-error DETAIL can carry hashes/ciphertext); DNS egress rule dropped; assertions tightened.
+  Carried: egress 443/7844 stay 0.0.0.0/0 (Web Push hosts are arbitrary; narrow 7844 to Cloudflare
+  ranges in 9.5); DB/cache egress by CIDR not SG; RDS-managed master secret needs `rds!*` IAM in the
+  deploy role (verify at first staging apply; owner step #118); VPC Flow Logs, 9.10; staging and prod share
+  10.20.0.0/16 (no peering planned).
 - [ ] 9.4 Edge module (Cloudflare) — DNS records under `var.domain` (`api.` and
   `api-staging.`), TLS settings (minimum 1.3, TLS 1.3 on: re-creates 8.1), WAF managed
   rules and rate limiting on the auth endpoints within the plan's limits, the R2 media
