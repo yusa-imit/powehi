@@ -1,7 +1,8 @@
 name: CI — Infra
 
-# Home of the OpenTofu checks (Phase 9.2 adds fmt/validate/tflint/trivy/tofu test).
-# Until infra/terraform exists this workflow only lints itself.
+# Home of the OpenTofu checks (Phase 9.2): fmt, validate per root, tflint, trivy config and
+# `tofu test` with mocked providers. No cloud credentials are used or needed here; plan/apply
+# workflows arrive with 9.7 and assume the OIDC roles created by infra/terraform/bootstrap.
 
 permissions:
   contents: read
@@ -28,6 +29,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
       - name: No Kubernetes or Hetzner leftovers
         run: |
           set -euo pipefail
@@ -35,3 +38,86 @@ jobs:
             echo "Kubernetes-era infra directories were discarded in ADR-0007" >&2
             exit 1
           fi
+
+  tofu-fmt:
+    name: tofu fmt -check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4  # v2.0.2
+        with:
+          tofu_version_file: infra/terraform/.terraform-version
+          tofu_wrapper: false
+      - run: tofu fmt -check -recursive -diff
+        working-directory: infra/terraform
+
+  tofu-validate:
+    name: tofu validate (${{ matrix.root }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        root: [bootstrap, envs/staging, envs/prod]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4  # v2.0.2
+        with:
+          tofu_version_file: infra/terraform/.terraform-version
+          tofu_wrapper: false
+      - name: init without backend (no credentials)
+        run: tofu init -backend=false -input=false -lockfile=readonly
+        working-directory: infra/terraform/${{ matrix.root }}
+      - run: tofu validate
+        working-directory: infra/terraform/${{ matrix.root }}
+
+  tflint:
+    name: tflint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+      - uses: terraform-linters/setup-tflint@6ffdbaa3be476b3431f7275c26966ef32ff60337  # v6.3.2
+        with:
+          tflint_version: v0.59.1
+      - run: tflint --init --config "$GITHUB_WORKSPACE/infra/terraform/.tflint.hcl"
+        working-directory: infra/terraform
+      - run: tflint --recursive --config "$GITHUB_WORKSPACE/infra/terraform/.tflint.hcl" --format compact
+        working-directory: infra/terraform
+
+  trivy-config:
+    name: trivy config (misconfiguration)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: infra/terraform
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          hide-progress: true
+
+  tofu-test:
+    name: tofu test (mocked providers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4  # v2.0.2
+        with:
+          tofu_version_file: infra/terraform/.terraform-version
+          tofu_wrapper: false
+      - name: init without backend
+        run: tofu init -backend=false -input=false -lockfile=readonly
+        working-directory: infra/terraform/bootstrap
+      - name: tofu test (mock_provider; the job has no cloud credentials)
+        run: tofu test
+        working-directory: infra/terraform/bootstrap

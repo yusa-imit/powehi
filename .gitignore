@@ -36,3 +36,16 @@ pkg-node/
 # Playwright test artifacts
 app/test-results/
 app/playwright-report/
+
+# OpenTofu
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+infra/terraform/**/backend.hcl
+infra/terraform/**/*.tfvars
+!infra/terraform/**/*.tfvars.example
+*.tfplan
+tfplan
+*.tfvars.json
+crash.*.log
