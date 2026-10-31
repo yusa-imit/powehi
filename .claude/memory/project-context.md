@@ -2012,3 +2012,6 @@ Cycle 710 (STABILIZATION): fixed bug #243 — sqlx (`tls-rustls-ring-webpki`) an
 
 ## Cycle 714 (2026-11-01, FEATURE) — 9.11 slice (a): operations guide
 8.15/8.17/8.19 still blocked on need-human (#166/#161, #203, #208); took phase-9 9.11. `docs/guides/operations.md` written (deploy, rollback, RDS restore steps, secret/tunnel rotation, pins, cost, alarms); commands marked unrun. Box open: restore drill + RPO/RTO in prd §12.7 need a live prod snapshot (#118, 9.9).
+
+## Cycle 715 (2026-11-01, STABILIZATION)
+main CI green; `cargo audit`/`cargo deny`/clippy clean. Added a proptest for `PinSet::new` (size bounds + duplicates). #243 stays open for the dedicated app DB role. target/ is 25G (under the 20G prune rule only after the 7-day prune; left alone).
