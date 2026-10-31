@@ -13,11 +13,13 @@ on:
     paths:
       - 'infra/terraform/**'
       - '.github/workflows/ci-infra.yml'
+      - '.github/scripts/**'
   pull_request:
     branches: [main]
     paths:
       - 'infra/terraform/**'
       - '.github/workflows/ci-infra.yml'
+      - '.github/scripts/**'
 
 concurrency:
   group: ci-infra-${{ github.ref }}
@@ -31,6 +33,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           persist-credentials: false
+      - name: Deploy task-definition transform
+        run: .github/scripts/test-taskdef-with-image.sh
       - name: No Kubernetes or Hetzner leftovers
         run: |
           set -euo pipefail
