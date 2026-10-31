@@ -148,6 +148,9 @@ domain is a variable everywhere (`var.domain`); never hard-code `powehi.app`.
   PITR point) into a temporary instance attached to staging, run the smoke test, record
   measured RPO/RTO in prd §12.7. Write `docs/guides/operations.md`: deploy, rollback,
   restore, secret rotation, tunnel token rotation, pin rotation, cost check.
+  Slice (a) shipped (cycle 714): `docs/guides/operations.md` (deploy, rollback, restore steps,
+  secret and tunnel rotation, pins, cost, alarms). Box stays open: the restore drill and measured
+  RPO/RTO in prd §12.7 need a live prod snapshot (#118, 9.9).
 
 ### Gate
 - [ ] 9.12 Security gate — threat-model-checker on the deployed architecture (new trust
