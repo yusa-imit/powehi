@@ -1,0 +1,203 @@
+name: Infra — plan and apply
+
+# Phase 9.7. PRs touching infra/ get a staging `tofu plan` comment from the read-only plan role;
+# a merge to main applies staging (Environment `staging`) and runs a smoke test against it.
+# Prod's own stack is never applied here (only through the `production` approval, 9.8/9.9), but
+# staging owns the zone-wide edge settings both envs share (need-human #241).
+#
+# Non-secret tfvars (domain, account IDs, image digests, secret ARNs) live in the repository
+# variable STAGING_TFVARS_JSON as one JSON object; see infra/terraform/README.md. Nothing in it
+# is a secret value.
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'infra/terraform/**'
+      - '.github/workflows/infra-apply.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'infra/terraform/**'
+      - '.github/workflows/infra-apply.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: infra-staging-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.number) || 'apply' }}
+  # An apply in flight is never cancelled; superseded PR plans are.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  plan:
+    # Same-repo PRs only: fork PRs get no OIDC token, and PR code must not run with the role
+    # unless the author can already push a branch here.
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && vars.STAGING_TFVARS_JSON != ''
+    name: tofu plan (staging, read-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    env:
+      TFVARS_JSON: ${{ vars.STAGING_TFVARS_JSON }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4  # v2.0.2
+        with:
+          tofu_version_file: infra/terraform/.terraform-version
+          tofu_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd  # v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: tofu init
+        working-directory: infra/terraform/envs/staging
+        env:
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          TF_STATE_KMS_KEY_ARN: ${{ vars.TF_STATE_KMS_KEY_ARN }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          tofu init -input=false -lockfile=readonly \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="kms_key_id=${TF_STATE_KMS_KEY_ARN}"
+      - name: tofu plan
+        id: plan
+        working-directory: infra/terraform/envs/staging
+        # No Cloudflare credentials reach this job (state holds secrets, PR code runs here), so
+        # the plan cannot refresh Cloudflare resources: -refresh=false plans against the saved
+        # state. -lock=false because the read-only role cannot write the lock file. The apply
+        # job plans again with refresh before it applies.
+        env:
+          CLOUDFLARE_API_TOKEN: plan-job-has-no-cloudflare-access
+        run: |
+          set -uo pipefail
+          printf '%s' "$TFVARS_JSON" > plan.auto.tfvars.json
+          tofu plan -input=false -no-color -refresh=false -lock=false -detailed-exitcode \
+            > plan.txt 2>&1
+          code=$?
+          echo "exit=${code}" >> "$GITHUB_OUTPUT"
+          # 0 = no changes, 2 = changes, 1 = error.
+          [ "$code" -ne 1 ]
+      - name: Comment the plan on the PR
+        if: always() && steps.plan.outcome != 'skipped'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        env:
+          PLAN_EXIT: ${{ steps.plan.outputs.exit }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- infra-plan-staging -->';
+            let text = '';
+            try { text = fs.readFileSync('infra/terraform/envs/staging/plan.txt', 'utf8'); } catch (e) {}
+            const max = 60000;
+            text = text.replaceAll('```', "'''");
+            if (text.length > max) text = text.slice(0, max) + '\n... (truncated)';
+            const state = { '0': 'no changes', '2': 'changes pending' }[process.env.PLAN_EXIT] || 'plan failed';
+            const body = `${marker}\n### Staging plan: ${state}\n` +
+              'Read-only, refresh disabled; set `cloudflare_zone_id` in STAGING_TFVARS_JSON so no Cloudflare lookup is needed. ' +
+              'Prod is planned only inside its approved apply.\n\n' +
+              '<details><summary>tofu plan</summary>\n\n```\n' + text + '\n```\n</details>\n\n' +
+              '🤖 Generated with [Claude Code](https://claude.com/claude-code)';
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const mine = comments.find(c => c.user && c.user.login === 'github-actions[bot]' && c.body && c.body.startsWith(marker));
+            if (mine) await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body });
+            else await github.rest.issues.createComment({ owner, repo, issue_number, body });
+
+  apply-staging:
+    # Inert until the owner has done #118 (the variable exists): a job naming `environment: staging`
+    # would otherwise auto-create the Environment without its branch policy. Main only.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.STAGING_TFVARS_JSON != ''
+    name: tofu apply (staging)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: staging
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      api_url: ${{ steps.url.outputs.api_url }}
+    env:
+      TFVARS_JSON: ${{ vars.STAGING_TFVARS_JSON }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4  # v2.0.2
+        with:
+          tofu_version_file: infra/terraform/.terraform-version
+          tofu_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd  # v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: tofu init
+        working-directory: infra/terraform/envs/staging
+        env:
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          TF_STATE_KMS_KEY_ARN: ${{ vars.TF_STATE_KMS_KEY_ARN }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          tofu init -input=false -lockfile=readonly \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="kms_key_id=${TF_STATE_KMS_KEY_ARN}"
+      - name: tofu plan
+        working-directory: infra/terraform/envs/staging
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$TFVARS_JSON" > apply.auto.tfvars.json
+          tofu plan -input=false -no-color -out=tfplan
+      - name: tofu apply (the saved plan only)
+        working-directory: infra/terraform/envs/staging
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: tofu apply -input=false -no-color tfplan
+      - name: Staging API URL
+        id: url
+        run: |
+          set -euo pipefail
+          domain=$(printf '%s' "$TFVARS_JSON" | jq -er '.domain')
+          echo "api_url=https://api-staging.${domain}" >> "$GITHUB_OUTPUT"
+
+  smoke-staging:
+    name: Smoke test (staging)
+    needs: apply-staging
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+      - name: Wait for /health
+        env:
+          API_URL: ${{ needs.apply-staging.outputs.api_url }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 10 "${API_URL}/health" > /dev/null; then exit 0; fi
+            sleep 10
+          done
+          echo "staging did not become healthy within 5 minutes" >&2
+          exit 1
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c  # v2
+      - name: Two profiles register, invite and exchange messages both ways
+        env:
+          POWEHI_E2E_SERVER: ${{ needs.apply-staging.outputs.api_url }}
+        run: cargo test -p powehi-cli --lib deployed_smoke -- --ignored --nocapture

@@ -97,3 +97,9 @@ variable "vapid_contact" {
     error_message = "vapid_contact must be a mailto: or https: URI."
   }
 }
+
+variable "cloudflare_zone_id" {
+  description = "Optional zone ID (not a secret); skips the zone lookup. Set for credential-less plans."
+  type        = string
+  default     = null
+}

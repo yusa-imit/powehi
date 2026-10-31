@@ -207,3 +207,16 @@ run "no_domain_is_hard_coded" {
     error_message = "No literal domain may appear in the module."
   }
 }
+
+run "explicit_zone_id_skips_the_lookup" {
+  command = plan
+
+  variables {
+    zone_id = "fedcba9876543210fedcba9876543210"
+  }
+
+  assert {
+    condition     = length(data.cloudflare_zone.this) == 0 && local.zone_id == "fedcba9876543210fedcba9876543210"
+    error_message = "zone_id must replace the zone data source"
+  }
+}

@@ -2,11 +2,18 @@
 # and the R2 media bucket. Auth comes from CLOUDFLARE_API_TOKEN in the environment (never a
 # variable or tfvars). Resources hold only ciphertext (R2) or no content at all (edge).
 
+# Skipped when zone_id is given (the PR plan job has no Cloudflare credentials, so it cannot look it up).
 data "cloudflare_zone" "this" {
+  count = var.zone_id == null ? 1 : 0
+
   filter = {
     name    = var.domain
     account = { id = var.cloudflare_account_id }
   }
+}
+
+locals {
+  zone_id = coalesce(var.zone_id, one(data.cloudflare_zone.this[*].zone_id))
 }
 
 # --- TLS (re-creates the 8.1 edge setting) ------------------------------------------------
@@ -23,7 +30,7 @@ resource "cloudflare_zone_setting" "this" {
     ssl              = "strict"
   } : {}
 
-  zone_id    = data.cloudflare_zone.this.zone_id
+  zone_id    = local.zone_id
   setting_id = each.key
   value      = each.value
 }
@@ -52,7 +59,7 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "this" {
 }
 
 resource "cloudflare_dns_record" "api" {
-  zone_id = data.cloudflare_zone.this.zone_id
+  zone_id = local.zone_id
   name    = var.api_hostname
   type    = "CNAME"
   content = "${cloudflare_zero_trust_tunnel_cloudflared.this.id}.cfargotunnel.com"
@@ -76,7 +83,7 @@ resource "cloudflare_dns_record" "api" {
 resource "cloudflare_ruleset" "managed" {
   count = var.manage_zone ? 1 : 0
 
-  zone_id     = data.cloudflare_zone.this.zone_id
+  zone_id     = local.zone_id
   name        = "${var.name_prefix}-managed-waf"
   description = "Deploy the Cloudflare managed ruleset"
   kind        = "zone"
@@ -102,7 +109,7 @@ locals {
 resource "cloudflare_ruleset" "auth_rate_limit" {
   count = var.manage_zone ? 1 : 0
 
-  zone_id     = data.cloudflare_zone.this.zone_id
+  zone_id     = local.zone_id
   name        = "${var.name_prefix}-auth-rate-limit"
   description = "Throttle OPAQUE register/login (online guessing, enumeration)"
   kind        = "zone"
