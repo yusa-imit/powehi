@@ -2,3 +2,15 @@
 domain = "example.com"
 allowed_account_ids = ["123456789012"] # your AWS account ID
 cloudflare_account_id = "00000000000000000000000000000000" # Cloudflare account ID; the API token is CLOUDFLARE_API_TOKEN (env only)
+server_image      = "ghcr.io/yusa-imit/powehi-server@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+cloudflared_image = "docker.io/cloudflare/cloudflared@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+secret_arns = { # ARNs of powehi/staging/* secrets created out of band
+  database_url               = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:powehi/staging/database-url-AbCdEf"
+  redis_url                  = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:powehi/staging/redis-url-AbCdEf"
+  r2_access_key_id           = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:powehi/staging/r2-access-key-id-AbCdEf"
+  r2_secret_access_key       = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:powehi/staging/r2-secret-access-key-AbCdEf"
+  vapid_private_key_pem      = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:powehi/staging/vapid-AbCdEf"
+  handle_oracle_secret_token = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:powehi/staging/handle-oracle-AbCdEf"
+  tunnel_token               = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:powehi/staging/tunnel-token-AbCdEf"
+}
+vapid_contact = "mailto:ops@example.com"

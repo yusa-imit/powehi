@@ -82,7 +82,7 @@ domain is a variable everywhere (`var.domain`); never hard-code `powehi.app`.
   security-auditor (3 rounds, needs-rework fixed). Unverified against real Cloudflare: R2 token resource string and
   permission-group names, free-plan ruleset limits; no plan was run. Accepted risk: Tunnel/DNS/R2-create are not
   scopable per env, so a staging CF token can touch prod edge (need-human issue).
-- [ ] 9.5 Service module (ECS Fargate) — cluster, ARM64 task with the `powehi-server`
+- [x] 9.5 Service module (ECS Fargate) — cluster, ARM64 task with the `powehi-server`
   image pinned by digest from GHCR and a `cloudflared` sidecar; task SG with **no
   inbound rules**; public IP for outbound only. Secrets (database URL, Redis auth, R2
   keys, VAPID key, handle-oracle token, tunnel token) are created out of band and passed
@@ -92,6 +92,7 @@ domain is a variable everywhere (`var.domain`); never hard-code `powehi.app`.
   `/health`; deployment circuit breaker with rollback. Migrations run once per deploy
   (the server's startup `run_migrations` today; make sure two tasks starting together
   cannot race it). security-auditor.
+  Shipped cycle 708: `modules/service` + staging/prod composition, 5 mocked `tofu test` runs. Task defaults to X86_64 (image is amd64 only; ARM64 moves to 9.8).
 
 ### CLI distribution (needs no cloud credentials)
 - [x] 9.6 CLI release binaries — a release workflow on tags `cli-v*` builds `powehi`
