@@ -136,6 +136,11 @@ domain is a variable everywhere (`var.domain`); never hard-code `powehi.app`.
   Cloudflare health check on `/health` with notifications. Server metrics from the admin
   port by the cheapest path that fits prd §13 (zero-knowledge observability: no content,
   no PII, no per-user labels); record the choice in ADR-0007.
+  Slice (a) shipped (cycle 712): `modules/monitoring` (KMS-encrypted SNS topic, 6 CloudWatch alarms, EventBridge
+  task-stop rule), Container Insights on, optional Cloudflare /health check (off by default: needs a Pro zone),
+  ADR-0007 metrics addendum. `alert_email` is sensitive and optional (null = no monitoring, so merge does not break
+  the staging apply). Open: deploy-role IAM for sns/events/kms (need-human), then apply + end-to-end alarm test,
+  policy-content tftest assertions, `AuthenticateOnUnsubscribe`, Cloudflare token scopes in README.
 - [ ] 9.11 Backup and restore drill + runbook — restore the latest prod snapshot (or a
   PITR point) into a temporary instance attached to staging, run the smoke test, record
   measured RPO/RTO in prd §12.7. Write `docs/guides/operations.md`: deploy, rollback,

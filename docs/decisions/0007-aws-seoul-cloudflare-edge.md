@@ -94,3 +94,19 @@ Implementation: Phase 9 (`docs/phases/phase-9/STATUS.md`), which starts after Ph
 
   Two envs come to about $140. The bootstrap module creates an AWS Budgets alarm
   at $150/month.
+
+## Addendum: metrics and alarms (9.10)
+
+- **Metrics source**: AWS-native metrics only: ECS Container Insights (`RunningTaskCount`), RDS and
+  ElastiCache CloudWatch metrics, plus ECS task state-change events. They are infrastructure
+  aggregates with no message content, no PII and no per-user labels (prd section 13). Container
+  Insights is enabled on the cluster for this; the cost is a few dollars per month.
+- **Notification path**: CloudWatch alarms (ALARM and OK) and an EventBridge rule for unexpected task
+  stops publish to one SNS topic per env (customer-managed KMS key) with an owner e-mail subscription.
+  Cloudflare `/health` checks and their e-mail notification are available in the edge module behind
+  `enable_healthcheck` (paid zone plan required).
+- **Server admin port**: stays unexposed. No scraping, no Amazon Managed Prometheus, no Grafana now:
+  they add cost and a new egress/ingress path for a one-task service.
+- **Deferred**: application-level metrics (request rates, queue depth) wait until there is traffic
+  that justifies them. When added, they must keep the same rule (no content, no PII, no per-user
+  labels) and go to CloudWatch under the `Powehi/<env>` namespace the deploy roles already allow.

@@ -14,3 +14,5 @@ secret_arns = { # ARNs of powehi/prod/* secrets created out of band
   tunnel_token               = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:powehi/prod/tunnel-token-AbCdEf"
 }
 vapid_contact = "mailto:ops@example.com"
+alert_email = "owner@example.com" # receives CloudWatch alarms; accept the AWS subscription mail
+# enable_healthcheck = true # Cloudflare /health check; needs a Pro+ zone plan and extra token permissions

@@ -63,7 +63,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        root: [bootstrap, modules/network, modules/data, modules/edge, modules/service, envs/staging, envs/prod]
+        root: [bootstrap, modules/network, modules/data, modules/edge, modules/service, modules/monitoring, envs/staging, envs/prod]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
@@ -114,7 +114,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        root: [bootstrap, modules/network, modules/data, modules/edge, modules/service]
+        root: [bootstrap, modules/network, modules/data, modules/edge, modules/service, modules/monitoring]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:

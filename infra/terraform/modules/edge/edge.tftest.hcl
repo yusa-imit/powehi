@@ -220,3 +220,46 @@ run "explicit_zone_id_skips_the_lookup" {
     error_message = "zone_id must replace the zone data source"
   }
 }
+
+run "healthcheck_is_off_by_default" {
+  command = plan
+
+  assert {
+    condition     = length(cloudflare_healthcheck.api) == 0 && length(cloudflare_notification_policy.api_health) == 0
+    error_message = "The health check must be opt-in (paid Cloudflare plan)."
+  }
+}
+
+run "healthcheck_probes_health_over_https_and_notifies" {
+  command = apply
+
+  variables {
+    enable_healthcheck = true
+    alert_email        = "owner@test.invalid"
+  }
+
+  assert {
+    condition     = cloudflare_healthcheck.api[0].address == "api-staging.test.invalid" && cloudflare_healthcheck.api[0].type == "HTTPS" && cloudflare_healthcheck.api[0].http_config.path == "/health" && cloudflare_healthcheck.api[0].http_config.allow_insecure == false
+    error_message = "The check must hit https://<api_hostname>/health with certificate validation."
+  }
+
+  assert {
+    condition     = cloudflare_notification_policy.api_health[0].alert_type == "health_check_status_notification" && one(cloudflare_notification_policy.api_health[0].mechanisms.email).id == "owner@test.invalid"
+    error_message = "The notification policy must e-mail the supplied address."
+  }
+
+  assert {
+    condition     = !strcontains(file("${path.module}/main.tf"), "@")
+    error_message = "No e-mail address may be hard-coded in the module."
+  }
+}
+
+run "healthcheck_requires_an_email" {
+  command = plan
+
+  variables {
+    enable_healthcheck = true
+  }
+
+  expect_failures = [var.alert_email]
+}

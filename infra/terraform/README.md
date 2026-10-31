@@ -217,3 +217,12 @@ tofu fmt -check -recursive
   exchange messages both ways) with `POWEHI_E2E_SERVER` set to that URL.
 - Applies are never cancelled mid-run (`cancel-in-progress` only for PR plans).
 - The jobs stay skipped until `STAGING_TFVARS_JSON` exists, so merging the workflow before the #118 setup does not create an unprotected Environment. The plan comment and the apply log are public on this repo: account IDs and secret ARNs in them are identifiers, not credentials.
+
+## Monitoring (9.10)
+
+`modules/monitoring` is composed in both envs. Set `alert_email` in `<env>.tfvars` (or `TF_VAR_alert_email`),
+then accept the AWS SNS subscription mail after the first apply; alarms are not delivered until you do.
+Owner prerequisite: the deploy roles in `bootstrap/` must be allowed to create the SNS topic, the
+EventBridge rule and a KMS key/alias for `powehi-<env>-*` (not yet in `iam.tf`; see the 9.10 PR).
+Cloudflare health check: set `enable_healthcheck = true` only on a Pro or higher zone plan and with a token
+that also has Health Checks Edit and Notifications Edit.

@@ -120,3 +120,26 @@ variable "zone_id" {
     error_message = "zone_id must be a 32-character hex string or null."
   }
 }
+
+variable "enable_healthcheck" {
+  description = "Create a Cloudflare health check on https://<api_hostname>/health plus an e-mail notification policy (9.10). Off by default: Cloudflare Health Checks need a Pro or higher zone plan, and the token needs Health Checks Edit and Notifications Edit. Enable per env once the plan and token allow it."
+  type        = bool
+  default     = false
+}
+
+variable "alert_email" {
+  description = "E-mail for the Cloudflare health notification; required when enable_healthcheck is true. Never hard-coded."
+  type        = string
+  default     = null
+
+  sensitive = true
+  validation {
+    condition     = var.alert_email == null || can(regex("^[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+\\.)+[A-Za-z]{2,}$", var.alert_email))
+    error_message = "alert_email must be a plain e-mail address or null."
+  }
+
+  validation {
+    condition     = !var.enable_healthcheck || var.alert_email != null
+    error_message = "alert_email is required when enable_healthcheck is true."
+  }
+}
