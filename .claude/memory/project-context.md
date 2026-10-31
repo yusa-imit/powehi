@@ -2009,3 +2009,6 @@ Cycle 710 (STABILIZATION): fixed bug #243 — sqlx (`tls-rustls-ring-webpki`) an
 
 ## Cycle 713 (FEATURE, 2026-11-01)
 - Phase 8 still blocked (#166, #203, #208); 9.10 slice (b): monitoring tftest asserts on KMS key/topic policy docs, README health-check token scope. Box open (IAM #248, apply, alarm e2e test).
+
+## Cycle 714 (2026-11-01, FEATURE) — 9.11 slice (a): operations guide
+8.15/8.17/8.19 still blocked on need-human (#166/#161, #203, #208); took phase-9 9.11. `docs/guides/operations.md` written (deploy, rollback, RDS restore steps, secret/tunnel rotation, pins, cost, alarms); commands marked unrun. Box open: restore drill + RPO/RTO in prd §12.7 need a live prod snapshot (#118, 9.9).
