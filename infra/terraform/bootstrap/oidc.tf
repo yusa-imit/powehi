@@ -3,6 +3,7 @@
 # Trust policies match `sub` and `aud` with exact StringEquals: no StringLike, no wildcard.
 #   deploy  : repo:<owner>/<name>:environment:<GitHub Environment>   (one role per env)
 #   plan    : repo:<owner>/<name>:pull_request                       (read-only role)
+# Deploy roles also pin `ref` to main, so an unconfigured Environment cannot be used from a branch.
 # A `sub` of ...:environment:production is only issued to a job that passed that
 # Environment's protection rules, so the owner's approval gate is enforced by AWS too.
 
@@ -41,6 +42,7 @@ locals {
             StringEquals = merge(local.repo_id_condition, {
               "${local.oidc_host}:aud" = "sts.amazonaws.com"
               "${local.oidc_host}:sub" = sub
+              "${local.oidc_host}:ref" = "refs/heads/main"
             })
           }
         }]

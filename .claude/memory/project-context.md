@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 704 (2026-10-31, FEATURE) — Phase 9.2 OpenTofu layout, bootstrap, CI
+- Session started with an uncommitted 9.2 tree (not mine): preserved on `wip/infra-bootstrap-9-2-20261031`, then shipped from `feat/infra-bootstrap-9-2` (bootstrap/ state bucket+KMS, OIDC, env deploy roles + boundaries + guardrails, plan role, budget; envs/{staging,prod}; ci-infra.yml fmt/validate/tflint/trivy/tofu test). Local: fmt, validate x3, `tofu test` 14 pass; tflint/trivy only run in CI. security-auditor run in-session. Phase 8 remainder still blocked on need-human (#166/#161, #203, #208). #237 (prod gate self-approval) blocks 9.9 only. Next: 9.3 network+data modules.
+
 ## Cycle 702 (2026-10-31, FEATURE) — Phase 9.1 IaC clean slate
 - Phase 8 remainder (8.15 d/e, 8.17, 8.19, 8.22 legs) all blocked on need-human (#166/#161, #203, #208); per phase-9 priority rule took 9.1 (no cloud creds). Deleted infra/{terraform,helm,argocd,policy,synthetic,cloudflare}, cd.yml, k8s agent/rule/command; ci-infra.yml reduced to a leftovers guard (9.2 adds OpenTofu checks); prd 4A.1, 12.1-12.4, 12.8, 12.9 rewritten to ADR-0007; pnpm workspace/lockfile drop smart-router. Edge TLS 1.3 setting re-created in 9.4. Next unblocked: 9.2 (OpenTofu layout).
 

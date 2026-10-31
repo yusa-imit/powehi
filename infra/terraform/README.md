@@ -149,3 +149,15 @@ tofu fmt -check -recursive
 - Deploy policies are region-locked and scoped by name prefix and env tag (see above); 9.3-9.5 may need to extend the action lists when new resource types are added.
 - Renaming or deleting the GitHub repository frees `yusa-imit/powehi` for re-registration;
   `github_repository_id` (set in step 1) closes that gap through the `repository_id` claim.
+
+## Constraints for later phases (security-auditor, 9.2)
+
+- 9.5/9.7: reference the task definition by the full revision ARN from this env's own state,
+  never by family name alone. `ecs:RegisterTaskDefinition` cannot be scoped to a family, so a
+  stray revision in another env's family must never be picked up as "latest".
+- 9.7: PR plan logs of this public repo are world-readable. Mark sensitive values, and keep
+  `pull_request_target` / `workflow_run` workflows out of the repo (the plan role's fork
+  isolation relies on it).
+- Deploy trust requires `ref = refs/heads/main` in addition to the Environment `sub`.
+- Not covered yet (follow-ups): CloudTrail / IAM Access Analyzer, a bucket policy limiting
+  `prod/*` to the prod role, `kms:ViaService` on the deploy roles' state key access.

@@ -346,6 +346,13 @@ locals {
             Action   = ["ecs:DeregisterTaskDefinition", "ecs:DeleteTaskDefinitions"]
             Resource = "arn:aws:ecs:${local.region}:${local.acct}:task-definition/powehi-${env}-*:*"
           },
+        ]
+      }
+
+      # Split from `compute`: one managed policy is capped at 6144 characters.
+      data = {
+        Version = "2012-10-17"
+        Statement = [
           {
             Sid    = "RdsCreateTagged"
             Effect = "Allow"

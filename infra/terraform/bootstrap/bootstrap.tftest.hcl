@@ -411,3 +411,24 @@ run "guardrail_denies_are_a_separate_policy" {
     error_message = "guardrail must be attached to each deploy role"
   }
 }
+
+# The mocked provider does not enforce the 6144-character managed-policy quota; check it here.
+run "deploy_policies_fit_the_iam_size_quota" {
+  command = apply
+
+  assert {
+    condition     = alltrue([for k, p in aws_iam_policy.deploy : length(p.policy) <= 6144])
+    error_message = "a managed policy exceeds the 6144-character IAM quota; split it"
+  }
+}
+
+run "deploy_trust_is_pinned_to_main" {
+  command = apply
+
+  assert {
+    condition = alltrue([for e in ["staging", "prod"] :
+      jsondecode(aws_iam_role.deploy[e].assume_role_policy).Statement[0].Condition.StringEquals["token.actions.githubusercontent.com:ref"] == "refs/heads/main"
+    ])
+    error_message = "deploy roles must require ref = refs/heads/main"
+  }
+}
