@@ -188,7 +188,7 @@ jobs:
       - name: Run CLI live E2E
         env:
           POWEHI_E2E_SERVER: http://127.0.0.1:8080
-        run: cargo test -p powehi-cli live_e2e -- --ignored --nocapture
+        run: cargo test -p powehi-cli live_e2e -- --ignored --nocapture --skip deployed_smoke
 
       - name: Upload backend log on failure
         if: failure()
