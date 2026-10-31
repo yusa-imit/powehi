@@ -107,12 +107,15 @@ domain is a variable everywhere (`var.domain`); never hard-code `powehi.app`.
   is pushed: the first tag is the real test (the musl build on the arm runner is unproven). Known gaps from security-auditor: release is published before provenance is attached (non-atomic); builds are not bit-reproducible across machines.
 
 ### Environments and delivery (need issue #118)
-- [ ] 9.7 Staging environment and infra workflow — `envs/staging` composes the modules.
+- [x] 9.7 Staging environment and infra workflow — `envs/staging` composes the modules.
   `infra-apply.yml`: on PRs touching `infra/`, `tofu plan` for staging and prod with the
   read-only role, posted as a PR comment; on merge, apply staging (Environment
   `staging`), then a smoke test: two CLI profiles register, invite, and exchange messages
   both ways against `https://api-staging.<domain>` (reuse `src/live_e2e.rs` with the
   server URL from the environment).
+  Shipped cycle 709: `infra-apply.yml` (PR staging plan comment via the read-only role; merge applies
+  staging, then `deployed_smoke_*` in `live_e2e.rs`). `envs/staging` already existed (9.3-9.5). Prod is
+  not planned on PRs: the plan role cannot read `prod/*` state by design. Unrun until #118 secrets exist.
 - [ ] 9.8 Server CD — after `release.yml` builds and signs an image, a deploy workflow
   updates the staging ECS service to the new digest, runs the smoke test, then waits for
   `production` approval to update prod and run the smoke test there. Rollback =

@@ -59,38 +59,7 @@ async fn two_profiles_register_converse_and_verify() {
     let (alice, _, _) = register(&client, &url, &tmp, "alice").await;
     let (bob, _, _) = register(&client, &url, &tmp, "bob").await;
 
-    // Alice invites, Bob redeems, Alice joins from the Welcome.
-    let (link, _) = invite::create(&client, &url, &alice).await.unwrap();
-    let link = invite::parse_link(&link).unwrap();
-    let (gid, _) = invite::redeem(&client, &url, &bob, &link).await.unwrap();
-    let joined = inbox::receive(&client, &url, &alice).await.unwrap();
-    assert_eq!(joined.joined, vec![gid]);
-
-    // Both directions, through the real Delivery Service.
-    message::send(&client, &url, &bob, gid, b"hello alice")
-        .await
-        .unwrap();
-    assert_eq!(
-        inbox::receive(&client, &url, &alice).await.unwrap().stored,
-        1
-    );
-    let got = message::pending(&alice.store, gid).unwrap();
-    assert_eq!(got.len(), 1);
-    assert_eq!(
-        (got[0].text.as_str(), got[0].sender),
-        ("hello alice", bob.device_id)
-    );
-
-    message::send(&client, &url, &alice, gid, b"hello bob")
-        .await
-        .unwrap();
-    inbox::receive(&client, &url, &bob).await.unwrap();
-    let got = message::pending(&bob.store, gid).unwrap();
-    assert_eq!(got.len(), 1);
-    assert_eq!(
-        (got[0].text.as_str(), got[0].sender),
-        ("hello bob", alice.device_id)
-    );
+    let gid = converse(&client, &url, &alice, &bob).await;
 
     // Both sides derive the same Safety Number from the group state alone.
     let a_num = verify::number(&alice.store, gid).unwrap();
@@ -127,6 +96,56 @@ async fn two_profiles_register_converse_and_verify() {
     auth::revoke_session(&client, &url, &alice).await.unwrap();
     assert!(inbox::receive(&client, &url, &alice).await.is_err());
     auth::revoke_session(&client, &url, &alice).await.unwrap();
+}
+
+/// Alice invites, Bob redeems, Alice joins from the Welcome, then both send one message through
+/// the real Delivery Service. Returns the conversation id.
+async fn converse(client: &Client, url: &Url, alice: &Session, bob: &Session) -> Uuid {
+    // Alice invites, Bob redeems, Alice joins from the Welcome.
+    let (link, _) = invite::create(client, url, alice).await.unwrap();
+    let link = invite::parse_link(&link).unwrap();
+    let (gid, _) = invite::redeem(client, url, bob, &link).await.unwrap();
+    let joined = inbox::receive(client, url, alice).await.unwrap();
+    assert_eq!(joined.joined, vec![gid]);
+
+    // Both directions, through the real Delivery Service.
+    message::send(client, url, bob, gid, b"hello alice")
+        .await
+        .unwrap();
+    assert_eq!(inbox::receive(client, url, alice).await.unwrap().stored, 1);
+    let got = message::pending(&alice.store, gid).unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(
+        (got[0].text.as_str(), got[0].sender),
+        ("hello alice", bob.device_id)
+    );
+
+    message::send(client, url, alice, gid, b"hello bob")
+        .await
+        .unwrap();
+    inbox::receive(client, url, bob).await.unwrap();
+    let got = message::pending(&bob.store, gid).unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(
+        (got[0].text.as_str(), got[0].sender),
+        ("hello bob", alice.device_id)
+    );
+
+    gid
+}
+
+/// Phase 9.7 smoke test against a deployed environment (`POWEHI_E2E_SERVER=https://api-staging.…`):
+/// two profiles register, invite and exchange messages both ways. Kept short on purpose (no group
+/// leg, no sleeps) so it stays within the edge rate limits; the full gate is the test above.
+#[tokio::test]
+#[ignore = "needs a deployed powehi-server (infra-apply.yml smoke job)"]
+async fn deployed_smoke_register_invite_and_exchange() {
+    let url = server();
+    let client = crate::status::http_client().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let (alice, _, _) = register(&client, &url, &tmp, "alice").await;
+    let (bob, _, _) = register(&client, &url, &tmp, "bob").await;
+    converse(&client, &url, &alice, &bob).await;
 }
 
 /// 8.22: a kind-Group conversation through the real Delivery Service: create, add Bob (invite

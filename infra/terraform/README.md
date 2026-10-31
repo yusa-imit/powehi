@@ -79,6 +79,7 @@ or the release binary), the AWS CLI, admin credentials for the first run only
 | Environment `production` | `AWS_ROLE_ARN` | secret | `deploy_role_arns["prod"]` output |
 | Repository | `AWS_PLAN_ROLE_ARN` | secret | `plan_role_arn` output |
 | Repository | `AWS_REGION` | variable | `ap-northeast-2` |
+| Repository | `STAGING_TFVARS_JSON` | variable | One JSON object of the non-secret staging tfvars (`domain`, `cloudflare_zone_id` (required for the credential-less PR plan), `allowed_account_ids`, `cloudflare_account_id`, `server_image`, `cloudflared_image`, `secret_arns`, `vapid_contact`). Read by `infra-apply.yml` (9.7); values are ARNs, IDs and digests, never secrets. |
 | Repository | `TF_STATE_BUCKET` | variable | `state_bucket` output |
 | Repository | `TF_STATE_KMS_KEY_ARN` | variable | `state_kms_key_arn` output |
 | Environment `staging` / `production` | `DOMAIN` | variable | the domain bought in step 1 of #118 |
@@ -87,7 +88,7 @@ or the release binary), the AWS CLI, admin credentials for the first run only
 
 Role ARNs are not secret in themselves; they are stored as secrets to keep them out of logs.
 Workflows that use them need `permissions: id-token: write` and
-`aws-actions/configure-aws-credentials` (arrives with 9.7).
+`aws-actions/configure-aws-credentials` (used by `infra-apply.yml`, 9.7).
 
 ## Edge owner step (9.4, issue #118)
 
@@ -201,3 +202,16 @@ tofu fmt -check -recursive
 - Deploy trust requires `ref = refs/heads/main` in addition to the Environment `sub`.
 - Not covered yet (follow-ups): CloudTrail / IAM Access Analyzer, a bucket policy limiting
   `prod/*` to the prod role, `kms:ViaService` on the deploy roles' state key access.
+
+## Plan and apply (`.github/workflows/infra-apply.yml`, 9.7)
+
+- **PR** (same-repo, touching `infra/`): `tofu plan` for staging with `powehi-plan-readonly`,
+  posted as one updated PR comment. It runs with `-refresh=false -lock=false` and no Cloudflare
+  token, so it plans against saved state. **Prod is not planned on PRs**: the plan role cannot read
+  `prod/*` state by design. Prod is planned inside its approved apply (9.8/9.9).
+- **Merge to main**: Environment `staging` applies a freshly saved plan (refresh on), then the
+  smoke job waits for `https://api-staging.<domain>/health` and runs
+  `cargo test -p powehi-cli --lib deployed_smoke -- --ignored` (two profiles register, invite,
+  exchange messages both ways) with `POWEHI_E2E_SERVER` set to that URL.
+- Applies are never cancelled mid-run (`cancel-in-progress` only for PR plans).
+- The jobs stay skipped until `STAGING_TFVARS_JSON` exists, so merging the workflow before the #118 setup does not create an unprotected Environment. The plan comment and the apply log are public on this repo: account IDs and secret ARNs in them are identifiers, not credentials.

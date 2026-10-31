@@ -26,6 +26,7 @@ module "edge" {
   domain                = var.domain
   api_hostname          = local.api_hostname
   cloudflare_account_id = var.cloudflare_account_id
+  zone_id               = var.cloudflare_zone_id
   # Shared zone: staging owns the zone-wide settings and WAF rulesets (see ../../README.md).
   manage_zone     = true
   create_r2_token = var.create_r2_token

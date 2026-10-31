@@ -109,3 +109,14 @@ variable "r2_token_expires_on" {
     error_message = "r2_token_expires_on must be an RFC 3339 timestamp or null."
   }
 }
+
+variable "zone_id" {
+  description = "Optional Cloudflare zone ID (not a secret). When set, the zone lookup by domain is skipped; the credential-less PR plan relies on it."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.zone_id == null || can(regex("^[0-9a-f]{32}$", var.zone_id))
+    error_message = "zone_id must be a 32-character hex string or null."
+  }
+}
