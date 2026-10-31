@@ -35,6 +35,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     adduser --disabled-password --gecos '' --uid 1000 powehi
 
 COPY --from=builder /app/target/release/powehi-server /usr/local/bin/powehi-server
+# RDS CA bundle (public certs; sha256 90a6f1a7…f21b, fetched from
+# truststore.pki.rds.amazonaws.com/global/global-bundle.pem). Use it with
+# `?sslmode=verify-full&sslrootcert=/etc/powehi/rds-global-bundle.pem` in database_url:
+# sqlx `require` encrypts but does not validate the server certificate.
+COPY deploy/rds-global-bundle.pem /etc/powehi/rds-global-bundle.pem
 
 # Runtime defaults — operators override these via ConfigMap / Secrets.
 ENV POWEHI__HOST="0.0.0.0" \

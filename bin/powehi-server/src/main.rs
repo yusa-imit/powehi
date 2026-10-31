@@ -37,8 +37,21 @@ use powehi_rest_api::AppState;
 use powehi_webpush::{VapidConfig, VapidWebPushAdapter};
 use powehi_ws_hub::{event_bus::WsEventBus, WsHub};
 
+/// Pin the process-wide rustls provider to ring. The server graph links both ring (sqlx,
+/// redis) and aws-lc-rs (aws-smithy), so rustls cannot pick a default itself and redis's
+/// `rediss://` handshake would panic (#243).
+fn install_tls_provider() {
+    // Err means a provider is already installed (tests); either way one is set.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    assert!(
+        rustls::crypto::CryptoProvider::get_default().is_some(),
+        "rustls default provider must be set"
+    );
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    install_tls_provider();
     powehi_telemetry::init();
     let metrics_handle =
         powehi_telemetry::install_prometheus().context("install prometheus recorder")?;
@@ -913,4 +926,14 @@ async fn main() -> Result<()> {
         async { grpc_future.await.context("gRPC region server") },
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tls_provider_tests {
+    #[test]
+    fn client_config_builds_with_both_providers_linked() {
+        super::install_tls_provider();
+        // Panics ("could not determine the process-level CryptoProvider") without a default.
+        let _ = rustls::ClientConfig::builder();
+    }
 }
