@@ -10,6 +10,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 6.0"
     }
+    cloudflare = {
+      source  = "cloudflare/cloudflare"
+      version = "~> 5.0"
+    }
   }
 
   # Partial backend config: bucket, region and kms_key_id come from backend.hcl
@@ -33,3 +37,7 @@ provider "aws" {
     }
   }
 }
+
+# Authenticates with CLOUDFLARE_API_TOKEN from the environment (token scoped to the zone, R2
+# and Tunnel; see ../../README.md). Never set it in a tfvars file.
+provider "cloudflare" {}

@@ -56,6 +56,8 @@ STABILIZATION follow-ups and shared crypto-core/server items, not for web featur
 
 ## Cycle 706 (2026-10-31, FEATURE) — Phase 9.3 network + data modules
 - Phase 8 still fully blocked on owner (#166/#161, #203, #208); took 9.3. modules/network (VPC 2 AZ, public subnets no NAT, private subnets without internet route, service SG no ingress) and modules/data (RDS pg16 force_ssl, managed master secret, Valkey TLS + ephemeral write-only AUTH token in Secrets Manager `powehi/<env>/cache-auth-token`). security-auditor needs-rework fixed (see phase-9 STATUS 9.3). Lesson: `tofu test` panics when random provider is mocked with ephemeral resources; leave random unmocked. tflint/trivy only run in CI. Next: 9.4 edge module.
+## Cycle 707 (2026-10-31, FEATURE) — Phase 9.4 edge module
+- Phase 8 still blocked; took 9.4. modules/edge, staging owns zone singletons (manage_zone). Lesson: never let a sub-agent rewrite files without re-checking size (outputs.tf was truncated to 0 bytes once). Next: 9.5 service module.
 ## Cycle 702 (2026-10-31, FEATURE) — Phase 9.1 IaC clean slate
 - Phase 8 remainder (8.15 d/e, 8.17, 8.19, 8.22 legs) all blocked on need-human (#166/#161, #203, #208); per phase-9 priority rule took 9.1 (no cloud creds). Deleted infra/{terraform,helm,argocd,policy,synthetic,cloudflare}, cd.yml, k8s agent/rule/command; ci-infra.yml reduced to a leftovers guard (9.2 adds OpenTofu checks); prd 4A.1, 12.1-12.4, 12.8, 12.9 rewritten to ADR-0007; pnpm workspace/lockfile drop smart-router. Edge TLS 1.3 setting re-created in 9.4. Next unblocked: 9.2 (OpenTofu layout).
 
