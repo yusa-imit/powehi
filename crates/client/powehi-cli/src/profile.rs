@@ -212,4 +212,32 @@ mod tests {
         assert_eq!(p.dir, Path::new("/d/powehi/work"));
         assert!(ProfilePaths::resolve(Path::new("/d"), "../x").is_err());
     }
+
+    mod props {
+        use proptest::prelude::*;
+
+        use super::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(256))]
+
+            /// A name is accepted iff it matches the documented grammar, and an accepted
+            /// name always resolves to a single path component under the base.
+            #[test]
+            fn validation_matches_grammar_and_never_escapes_base(name in ".{0,80}") {
+                let grammar = !name.is_empty()
+                    && name.len() <= MAX_PROFILE_LEN
+                    && name.bytes().all(|b| {
+                        b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'
+                    })
+                    && name.as_bytes()[0].is_ascii_alphanumeric();
+                prop_assert_eq!(validate_name(&name).is_ok(), grammar);
+                if grammar {
+                    let base = Path::new("/base");
+                    let paths = ProfilePaths::resolve(base, &name).unwrap();
+                    prop_assert_eq!(paths.dir, base.join(APP_DIR).join(&name));
+                }
+            }
+        }
+    }
 }

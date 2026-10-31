@@ -461,3 +461,48 @@ async fn send_commit_maps_the_server_answer_to_an_outcome() {
     assert_eq!(post(4).await, CommitOutcome::Unknown);
     assert_eq!(state.lock().unwrap().commits, vec![4; 5]);
 }
+
+mod props {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// Any text is classified without panic, and an accepted link is the canonical shape.
+        #[test]
+        fn arbitrary_text_never_panics_and_accepts_only_canonical_links(
+            text in ".{0,600}",
+        ) {
+            if let Ok(link) = parse_link(&text) {
+                prop_assert!(is_lower_hex(&link.code, CODE_LEN));
+                prop_assert!(is_lower_hex(&link.kp_hash, HASH_HEX_LEN));
+            }
+        }
+
+        /// build_link output always parses back to the same code and hash.
+        #[test]
+        fn built_links_round_trip(
+            code in proptest::collection::vec(any::<u8>(), CODE_LEN / 2),
+            hash in proptest::collection::vec(any::<u8>(), HASH_HEX_LEN / 2),
+        ) {
+            let (code, hash) = (hex(&code), hex(&hash));
+            let server = Url::parse("https://chat.example/").unwrap();
+            let link = build_link(&server, &code, &hash).unwrap();
+            let parsed = parse_link(&link).unwrap();
+            prop_assert_eq!(parsed.code, code);
+            prop_assert_eq!(parsed.kp_hash, hash);
+        }
+
+        /// A single non-lowercase-hex byte anywhere in code or hash is rejected.
+        #[test]
+        fn one_corrupt_character_is_rejected(pos in 0usize..(CODE_LEN + 1 + HASH_HEX_LEN)) {
+            let mut bytes = format!("{CODE}.{HASH}").into_bytes();
+            prop_assume!(bytes[pos] != b'.');
+            bytes[pos] = b'G';
+            let s = String::from_utf8(bytes).unwrap();
+            prop_assert!(parse_link(&s).is_err());
+        }
+    }
+}
