@@ -244,3 +244,29 @@ fn pin_is_sha256_of_the_der_spki() {
     let expected: [u8; PIN_LEN] = Sha256::digest(key.public_key_der()).into();
     assert_eq!(spki_pin(cert.der()), Some(expected));
 }
+
+proptest::proptest! {
+    /// `PinSet::new` accepts exactly the unique sets whose size is in `MIN_PINS..=MAX_PINS`.
+    #[test]
+    fn pin_set_accepts_exactly_unique_in_range_sets(
+        raw in proptest::collection::vec(0u8..6, 0..12),
+    ) {
+        let pins: Vec<[u8; PIN_LEN]> = raw.iter().map(|b| [*b; PIN_LEN]).collect();
+        let mut unique = raw.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        let result = PinSet::new(&pins);
+        if pins.len() < MIN_PINS {
+            proptest::prop_assert_eq!(result, Err(PinError::TooFew(pins.len())));
+        } else if pins.len() > MAX_PINS {
+            proptest::prop_assert_eq!(result, Err(PinError::TooMany(pins.len())));
+        } else if unique.len() != raw.len() {
+            proptest::prop_assert_eq!(result, Err(PinError::Duplicate));
+        } else {
+            let set = result.unwrap();
+            for pin in &pins {
+                proptest::prop_assert!(set.contains(pin));
+            }
+        }
+    }
+}
