@@ -1,0 +1,7 @@
+# Workflows and infrastructure run with cloud credentials (OIDC) and can read state, which
+# contains secrets. Changes need the owner's review (enable "Require review from Code Owners"
+# in the main branch protection).
+/.github/workflows/** @yusa-imit
+/.github/actions/**   @yusa-imit
+/.github/CODEOWNERS   @yusa-imit
+/infra/**             @yusa-imit

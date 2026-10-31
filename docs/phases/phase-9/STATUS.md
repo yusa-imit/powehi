@@ -45,7 +45,7 @@ domain is a variable everywhere (`var.domain`); never hard-code `powehi.app`.
   re-created in 9.4.
 
 ### Foundations (built and tested without cloud credentials)
-- [ ] 9.2 OpenTofu layout, bootstrap and CI checks — new `infra/terraform/` with
+- [x] 9.2 OpenTofu layout, bootstrap and CI checks — new `infra/terraform/` with
   `bootstrap/`, `modules/` and `envs/{staging,prod}`; OpenTofu version pinned in
   `.terraform-version`; S3 backend with native locking (`use_lockfile`). `bootstrap/`
   (run once by the owner) creates the versioned, encrypted, public-access-blocked state

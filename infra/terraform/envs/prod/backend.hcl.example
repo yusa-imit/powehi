@@ -1,0 +1,6 @@
+# cp backend.hcl.example backend.hcl, then fill from `tofu output` in ../../bootstrap.
+# backend.hcl is git-ignored. Use: tofu init -backend-config=backend.hcl
+bucket     = "powehi-tfstate-<account-id>-ap-northeast-2"
+region     = "ap-northeast-2"
+kms_key_id = "arn:aws:kms:ap-northeast-2:<account-id>:key/<key-id>"
+# key, encrypt and use_lockfile are fixed in versions.tf.
