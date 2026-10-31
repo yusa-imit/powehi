@@ -1,4 +1,4 @@
-# Composition root for staging. Modules: network, data (9.3), edge (9.4), service (9.5).
+# Composition root for staging. Modules: network, data (9.3), edge (9.4), service (9.5), monitoring (9.10).
 
 locals {
   name_prefix = "powehi-${var.environment}"
@@ -31,6 +31,9 @@ module "edge" {
   manage_zone     = true
   create_r2_token = var.create_r2_token
 
+  enable_healthcheck = var.enable_healthcheck
+  alert_email        = var.alert_email
+
   r2_token_allowed_cidrs = var.r2_token_allowed_cidrs
   r2_token_expires_on    = var.r2_token_expires_on
 }
@@ -51,4 +54,16 @@ module "service" {
     POWEHI__R2_BUCKET     = module.edge.r2_bucket
     POWEHI__VAPID_CONTACT = var.vapid_contact
   }
+}
+
+module "monitoring" {
+  count                  = var.alert_email == null ? 0 : 1
+  source                 = "../../modules/monitoring"
+  name_prefix            = local.name_prefix
+  aws_region             = var.aws_region
+  alert_email            = var.alert_email
+  cluster_name           = module.service.cluster_name
+  service_name           = module.service.service_name
+  db_instance_identifier = module.data.db_instance_identifier
+  cache_cluster_id       = module.data.cache_cluster_id
 }

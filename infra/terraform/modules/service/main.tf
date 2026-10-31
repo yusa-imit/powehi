@@ -33,7 +33,7 @@ resource "aws_ecs_cluster" "this" {
 
   setting {
     name  = "containerInsights"
-    value = "disabled" # metrics stay content-free and cheap; alarms come in 9.10
+    value = "enabled" # RunningTaskCount for the 9.10 alarm; aggregate metrics only, no content or per-user labels
   }
 }
 

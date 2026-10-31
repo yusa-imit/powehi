@@ -26,3 +26,13 @@ database URL must carry `sslmode=verify-full&sslrootcert=/etc/powehi/rds-global-
 startup migrations: sqlx takes a Postgres advisory lock around them. The service ignores
 `task_definition` changes, since the deploy workflow (9.8) owns revisions. `cpu_architecture` defaults to
 `X86_64` because `release.yml` builds `linux/amd64` only; ADR-0007's ARM64 needs a multi-arch image (9.8).
+
+`monitoring` (9.10): one SNS topic (customer-managed rotating KMS key, since the AWS-managed `alias/aws/sns` key
+cannot be used by CloudWatch or EventBridge) with an e-mail subscription (`alert_email`, accepted by the owner
+via the AWS confirmation mail), six CloudWatch alarms (ECS `RunningTaskCount` < 1 from Container Insights with
+missing data breaching; RDS CPU, free storage, connections; Valkey memory and engine CPU) and an EventBridge
+rule for unexpected ECS task stops (deploy-initiated stops excluded). Every alarm notifies the topic for ALARM
+and OK. Metrics are AWS-native aggregates only: no content, no PII, no per-user labels (prd section 13). The
+`edge` module can also create a Cloudflare `/health` check with an e-mail notification (`enable_healthcheck`,
+off by default: needs a Pro or higher zone plan and a token with Health Checks Edit and Notifications Edit).
+Container Insights is now enabled on the ECS cluster (metric cost is a few dollars per month).

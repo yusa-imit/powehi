@@ -2001,3 +2001,8 @@ Cycle 710 (STABILIZATION): fixed bug #243 — sqlx (`tls-rustls-ring-webpki`) an
 
 ## Cycle 711 (2026-10-31, FEATURE) — Phase 9.8 server CD
 - Phase 8 still blocked (#166, #203, #208); took 9.8. `deploy.yml` (resolve+cosign verify bound to a main commit via certificate workflow SHA; staging -> credential-less smoke -> `production` approval -> smoke), `.github/scripts/ecs-deploy.sh` + jq transform (tested in ci-infra), runbook `docs/runbooks/server-deploy.md`. security-auditor needs-rework fixed (sha binding, smoke split from creds, Environment-tag assert on base revision, per-env concurrency). Unrun until #118 vars exist (`ECS_CLUSTER`, `ECS_SERVICE`, `DOMAIN` per Environment; `PROD_DEPLOY_ENABLED`). Gap: no `v*` tag ruleset (owner repo setting). Next: 9.9 prod env.
+
+## Cycle 712 (FEATURE, 2026-11-01)
+- Phase 8 items 8.15/8.17/8.19/8.22 all blocked on need-human (#166, #203, #208); took Phase 9.10 slice (a):
+  `modules/monitoring` + Container Insights + optional CF health check. `alert_email` sensitive/optional.
+  Deploy-role IAM for sns/events/kms is missing (bootstrap/iam.tf): need-human issue, 9.10 box stays open.

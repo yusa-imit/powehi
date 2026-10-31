@@ -103,3 +103,21 @@ variable "cloudflare_zone_id" {
   type        = string
   default     = null
 }
+
+variable "alert_email" {
+  description = "Owner e-mail for CloudWatch alarms (SNS) and the Cloudflare health notification (9.10). Not a secret but personal: set in <env>.tfvars (git-ignored) or TF_VAR_alert_email, never in code. AWS mails a subscription confirmation to accept. Optional until set: null skips the monitoring module (no alarms)."
+  type        = string
+  default     = null
+  sensitive   = true
+
+  validation {
+    condition     = var.alert_email == null || can(regex("^[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+\\.)+[A-Za-z]{2,}$", var.alert_email))
+    error_message = "alert_email must be a plain e-mail address."
+  }
+}
+
+variable "enable_healthcheck" {
+  description = "Create the Cloudflare /health check and notification (needs a Pro or higher zone plan and a token with Health Checks Edit and Notifications Edit). Off until the owner enables it."
+  type        = bool
+  default     = false
+}

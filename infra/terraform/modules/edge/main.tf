@@ -181,3 +181,52 @@ resource "cloudflare_api_token" "r2_media" {
     })
   }]
 }
+
+# --- Health check on /health (9.10) -------------------------------------------------------
+# Probes the public hostname through the edge, so it covers DNS, TLS, the tunnel and the
+# task together. /health carries no content. Opt-in: Cloudflare Health Checks are a paid-plan
+# feature, and an unsupported plan would fail the apply.
+
+resource "cloudflare_healthcheck" "api" {
+  count = var.enable_healthcheck ? 1 : 0
+
+  zone_id     = local.zone_id
+  name        = "${var.name_prefix}-api-health"
+  description = "GET /health on ${var.api_hostname} through the edge"
+  address     = var.api_hostname
+  type        = "HTTPS"
+
+  http_config = {
+    method           = "GET"
+    path             = "/health"
+    port             = 443
+    expected_codes   = ["200"]
+    follow_redirects = false
+    allow_insecure   = false
+  }
+
+  interval              = 60
+  timeout               = 5
+  retries               = 2
+  consecutive_fails     = 2
+  consecutive_successes = 2
+  check_regions         = ["NEAS"] # Northeast Asia, nearest to ap-northeast-2
+}
+
+resource "cloudflare_notification_policy" "api_health" {
+  count = var.enable_healthcheck ? 1 : 0
+
+  account_id  = var.cloudflare_account_id
+  name        = "${var.name_prefix}-api-health"
+  description = "E-mail when the ${var.name_prefix} /health check changes state."
+  alert_type  = "health_check_status_notification"
+  enabled     = true
+
+  mechanisms = {
+    email = [{ id = var.alert_email }]
+  }
+
+  filters = {
+    health_check_id = [cloudflare_healthcheck.api[0].id]
+  }
+}
