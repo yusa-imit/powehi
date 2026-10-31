@@ -1984,3 +1984,5 @@ CI green, audit/deny clean (waived RUSTSEC-2026-0387 only), no bug issues. Added
 Cycle 699 (FEATURE): 9.6 CLI release workflow (cli-release.yml) + docs/cli.md Install; 8.15/8.17/8.19 still blocked on owner (#166,#203,#208). security-auditor needs-rework fixed (tag-on-main gate, exact cert identity).
 
 Cycle 700 (STABILIZATION): audit/deny/clippy clean, CI green, no bug issues; proptests for ws_url/is_wake_for (ws/tests.rs). target/ 25G (<20GB prune threshold exceeded only by 5GB; pruned >7d artifacts).
+
+Cycle 705 (STABILIZATION): audit/deny/clippy clean, CI green, no bug issues; proptests for invite `parse_link` (never panics, round-trip, one corrupt char rejected) and profile `validate_name` (grammar iff, resolve stays under base). 538 powehi-cli lib tests pass. target/ 21G (nothing >7d to prune). 8.15/8.17/8.19 still blocked on owner (#166,#203,#208).
