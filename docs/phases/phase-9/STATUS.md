@@ -140,7 +140,10 @@ domain is a variable everywhere (`var.domain`); never hard-code `powehi.app`.
   task-stop rule), Container Insights on, optional Cloudflare /health check (off by default: needs a Pro zone),
   ADR-0007 metrics addendum. `alert_email` is sensitive and optional (null = no monitoring, so merge does not break
   the staging apply). Open: deploy-role IAM for sns/events/kms (need-human), then apply + end-to-end alarm test,
-  policy-content tftest assertions, `AuthenticateOnUnsubscribe`, Cloudflare token scopes in README.
+  `AuthenticateOnUnsubscribe`.
+  Cycle 713 (slice b): tftest assertions on the KMS key and topic policy documents (principals, actions,
+  source-account/source-arn conditions) and the health-check token scope in the README. Box stays open
+  (deploy-role IAM #248, apply, end-to-end alarm test).
 - [ ] 9.11 Backup and restore drill + runbook — restore the latest prod snapshot (or a
   PITR point) into a temporary instance attached to staging, run the smoke test, record
   measured RPO/RTO in prd §12.7. Write `docs/guides/operations.md`: deploy, rollback,

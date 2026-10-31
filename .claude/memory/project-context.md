@@ -2006,3 +2006,6 @@ Cycle 710 (STABILIZATION): fixed bug #243 — sqlx (`tls-rustls-ring-webpki`) an
 - Phase 8 items 8.15/8.17/8.19/8.22 all blocked on need-human (#166, #203, #208); took Phase 9.10 slice (a):
   `modules/monitoring` + Container Insights + optional CF health check. `alert_email` sensitive/optional.
   Deploy-role IAM for sns/events/kms is missing (bootstrap/iam.tf): need-human issue, 9.10 box stays open.
+
+## Cycle 713 (FEATURE, 2026-11-01)
+- Phase 8 still blocked (#166, #203, #208); 9.10 slice (b): monitoring tftest asserts on KMS key/topic policy docs, README health-check token scope. Box open (IAM #248, apply, alarm e2e test).

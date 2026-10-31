@@ -169,3 +169,33 @@ run "unknown_env_prefix_is_rejected" {
 
   expect_failures = [var.name_prefix]
 }
+
+run "key_policy_lets_only_alarm_and_event_services_publish_from_this_account" {
+  command = apply
+
+  assert {
+    condition = length([for s in data.aws_iam_policy_document.key.statement : s if s.sid == "AlarmAndEventPublishers"]) == 1 && alltrue([
+      for s in data.aws_iam_policy_document.key.statement : (
+        toset(flatten([for p in s.principals : p.identifiers])) == toset(["cloudwatch.amazonaws.com", "events.amazonaws.com"])
+        && toset(s.actions) == toset(["kms:Decrypt", "kms:GenerateDataKey*"])
+        && alltrue([for c in s.condition : c.variable == "aws:SourceAccount" && toset(c.values) == toset(["123456789012"])])
+      ) if s.sid == "AlarmAndEventPublishers"
+    ])
+    error_message = "Service principals may only Decrypt/GenerateDataKey, pinned to this account."
+  }
+}
+
+run "topic_policy_scopes_each_publisher_to_its_own_source" {
+  command = apply
+
+  assert {
+    condition = length(data.aws_iam_policy_document.topic.statement) == 2 && alltrue([
+      for s in data.aws_iam_policy_document.topic.statement : (
+        toset(s.actions) == toset(["sns:Publish"])
+        && toset(s.resources) == toset(["arn:aws:sns:ap-northeast-2:123456789012:powehi-staging-alerts"])
+        && length([for c in s.condition : c if c.variable == "aws:SourceArn"]) == 1
+      )
+    ])
+    error_message = "Each publisher statement must be Publish-only on the topic with an aws:SourceArn condition."
+  }
+}
