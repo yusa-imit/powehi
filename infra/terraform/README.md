@@ -85,6 +85,8 @@ or the release binary), the AWS CLI, admin credentials for the first run only
 | Environment `staging` / `production` | `DOMAIN` | variable | the domain bought in step 1 of #118 |
 | Environment `staging` / `production` | `CLOUDFLARE_API_TOKEN` | secret | token scoped to the zone, R2 and Tunnel only (used by `modules/edge`, 9.4) |
 | Repository | `CLOUDFLARE_ACCOUNT_ID` | secret | Cloudflare account ID |
+| Environment `staging` / `production` | `ECS_CLUSTER`, `ECS_SERVICE` | variable | `ecs_cluster_name` / `ecs_service_name` outputs of that env; read by `deploy.yml` (9.8) |
+| Repository | `PROD_DEPLOY_ENABLED` | variable | `true` once `envs/prod` is applied (9.9); until then `deploy.yml` stops after staging |
 
 Role ARNs are not secret in themselves; they are stored as secrets to keep them out of logs.
 Workflows that use them need `permissions: id-token: write` and

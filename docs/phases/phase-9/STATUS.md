@@ -116,10 +116,11 @@ domain is a variable everywhere (`var.domain`); never hard-code `powehi.app`.
   Shipped cycle 709: `infra-apply.yml` (PR staging plan comment via the read-only role; merge applies
   staging, then `deployed_smoke_*` in `live_e2e.rs`). `envs/staging` already existed (9.3-9.5). Prod is
   not planned on PRs: the plan role cannot read `prod/*` state by design. Unrun until #118 secrets exist.
-- [ ] 9.8 Server CD — after `release.yml` builds and signs an image, a deploy workflow
+- [x] 9.8 Server CD — after `release.yml` builds and signs an image, a deploy workflow
   updates the staging ECS service to the new digest, runs the smoke test, then waits for
   `production` approval to update prod and run the smoke test there. Rollback =
   redeploy the previous digest; document it.
+  Shipped cycle 711: `deploy.yml` (workflow_run on release.yml or manual digest; cosign identity check, tag commit must be on main; staging -> smoke -> `production` approval -> smoke), `.github/scripts/ecs-deploy.sh` + jq transform (tested in ci-infra), `docs/runbooks/server-deploy.md`. Inert until #118 vars exist; prod job needs `PROD_DEPLOY_ENABLED`. Unrun end to end.
 - [ ] 9.9 Production environment — `envs/prod` (deletion protection, final snapshot,
   PITR), applied only through the `production` approval. After the first apply: smoke
   test against `https://api.<domain>`; set the production certificate pin set using the

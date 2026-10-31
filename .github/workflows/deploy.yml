@@ -1,0 +1,185 @@
+name: Deploy — server to ECS
+
+# Phase 9.8. After release.yml has built and signed an image, this updates the staging ECS
+# service to that digest, smoke-tests it, then waits for the `production` approval before doing
+# the same to prod. Rollback = run this workflow by hand with the previous digest
+# (docs/runbooks/server-deploy.md). The image is verified with cosign against release.yml's
+# identity before any environment sees it.
+#
+# Inert until the owner has done #118 (repository variable STAGING_TFVARS_JSON exists); the prod
+# jobs stay off until the repository variable PROD_DEPLOY_ENABLED is "true" (set when 9.9 lands).
+
+permissions:
+  contents: read
+
+on:
+  workflow_run:
+    workflows: ["Release — SLSA L3 Provenance + Container Sign"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      digest:
+        description: 'Image digest to deploy, sha256:<64 hex> (rollback: the previous one)'
+        required: true
+        type: string
+
+env:
+  IMAGE_REPO: ghcr.io/yusa-imit/powehi-server
+
+jobs:
+  resolve:
+    name: Resolve and verify the image
+    if: >-
+      github.ref == 'refs/heads/main' && vars.STAGING_TFVARS_JSON != '' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.path == '.github/workflows/release.yml' &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      image: ${{ steps.pin.outputs.image }}
+    env:
+      EVENT: ${{ github.event_name }}
+      RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+      RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+      INPUT_DIGEST: ${{ inputs.digest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9  # v3
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pin the digest
+        id: pin
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = workflow_dispatch ]; then
+            digest="$INPUT_DIGEST"
+          else
+            # Only a semver tag whose commit is on main is ever deployed.
+            [[ "$RUN_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "not a release tag: $RUN_TAG" >&2; exit 1; }
+            git merge-base --is-ancestor "$RUN_SHA" origin/main \
+              || { echo "release commit is not on main" >&2; exit 1; }
+            digest=$(docker buildx imagetools inspect "${IMAGE_REPO}:${RUN_TAG#v}" --format '{{.Manifest.Digest}}')
+          fi
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "bad digest" >&2; exit 1; }
+          echo "image=${IMAGE_REPO}@${digest}" >> "$GITHUB_OUTPUT"
+      - name: Verify the signature, then bind the image to a commit on main
+        env:
+          IMAGE: ${{ steps.pin.outputs.image }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = workflow_dispatch ]; then
+            id_re='^https://github\.com/yusa-imit/powehi/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'
+            cosign verify "$IMAGE" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-identity-regexp "$id_re" \
+              --certificate-github-workflow-trigger push > verified.json
+          else
+            cosign verify "$IMAGE" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-identity "https://github.com/yusa-imit/powehi/.github/workflows/release.yml@refs/tags/${RUN_TAG}" \
+              --certificate-github-workflow-trigger push \
+              --certificate-github-workflow-sha "$RUN_SHA" > verified.json
+          fi
+          # The commit the signing workflow ran at must be on main, whatever mutable tag led here.
+          signed_sha=$(jq -er '.[0].optional.githubWorkflowSha' verified.json)
+          [[ "$signed_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "no workflow sha in certificate" >&2; exit 1; }
+          git merge-base --is-ancestor "$signed_sha" origin/main \
+            || { echo "signed commit $signed_sha is not on main" >&2; exit 1; }
+
+  staging:
+    name: Deploy staging
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Per environment, so a rollback is not stuck behind a run that waits for production approval.
+    concurrency: { group: deploy-staging, cancel-in-progress: false }
+    environment: staging
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd  # v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Update the service
+        env:
+          CLUSTER: ${{ vars.ECS_CLUSTER }}
+          SERVICE: ${{ vars.ECS_SERVICE }}
+          IMAGE: ${{ needs.resolve.outputs.image }}
+        run: .github/scripts/ecs-deploy.sh "$CLUSTER" "$SERVICE" "$IMAGE" staging
+
+  smoke-staging:
+    name: Smoke test (staging)
+    needs: staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # No Environment and no cloud credentials: the smoke test builds and runs repository code.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/deployed-smoke
+        with:
+          api-url: https://api-staging.${{ vars.DOMAIN }}
+
+  production:
+    name: Deploy production
+    needs: [resolve, smoke-staging]
+    if: vars.PROD_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Required reviewer and main-only branch policy live on this Environment (README).
+    # Per environment, so a rollback is not stuck behind a run that waits for production approval.
+    concurrency: { group: deploy-production, cancel-in-progress: false }
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd  # v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Update the service
+        env:
+          CLUSTER: ${{ vars.ECS_CLUSTER }}
+          SERVICE: ${{ vars.ECS_SERVICE }}
+          IMAGE: ${{ needs.resolve.outputs.image }}
+        run: .github/scripts/ecs-deploy.sh "$CLUSTER" "$SERVICE" "$IMAGE" prod
+
+  smoke-production:
+    name: Smoke test (production)
+    needs: production
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # No Environment and no cloud credentials: the smoke test builds and runs repository code.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/deployed-smoke
+        with:
+          api-url: https://api.${{ vars.DOMAIN }}
