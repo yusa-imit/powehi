@@ -11,6 +11,7 @@ name = "powehi-server"
 path = "src/main.rs"
 
 [dependencies]
+rustls = { workspace = true }
 powehi-domain = { workspace = true }
 powehi-port-inbound = { workspace = true }
 powehi-port-outbound = { workspace = true }

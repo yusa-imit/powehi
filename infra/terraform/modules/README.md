@@ -22,7 +22,7 @@ URL, R2 keys, VAPID key, handle-oracle token, tunnel token) are Secrets Manager 
 `powehi/<env>/` that the owner creates out of band; the module takes ARNs, never values, and the
 execution role can read exactly those. Roles are `powehi-<env>-svc-exec` / `-svc-task` with the env
 permissions boundary; the task role has no policy. Logs go to `/powehi/<env>/service` (14 days). The
-database URL must carry `sslmode=require` (RDS forces TLS). Concurrent task starts do not race the
+database URL must carry `sslmode=verify-full&sslrootcert=/etc/powehi/rds-global-bundle.pem` (RDS forces TLS). Concurrent task starts do not race the
 startup migrations: sqlx takes a Postgres advisory lock around them. The service ignores
 `task_definition` changes, since the deploy workflow (9.8) owns revisions. `cpu_architecture` defaults to
 `X86_64` because `release.yml` builds `linux/amd64` only; ADR-0007's ARM64 needs a multi-arch image (9.8).

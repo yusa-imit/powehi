@@ -68,9 +68,9 @@ tower-http = { version = "0.5", features = ["cors", "trace"] }
 # the two literal pins can't drift apart (security-auditor finding, cycle 434).
 governor = "0.6"
 # database
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "migrate"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "uuid", "chrono", "migrate"] }
 # redis
-redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager", "tokio-rustls-comp", "tls-rustls-webpki-roots"] }
 # gRPC
 tonic = "0.12"
 prost = "0.13"

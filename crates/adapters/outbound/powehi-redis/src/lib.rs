@@ -278,6 +278,14 @@ mod tests {
     use super::*;
 
     fn assert_cache<T: CachePort>() {}
+
+    /// ElastiCache runs with in-transit encryption required; a build without the rustls
+    /// feature rejects `rediss://` at `open` ("can't connect with TLS") and the server
+    /// exits at startup (#243).
+    #[test]
+    fn rediss_url_is_accepted_by_the_client() {
+        redis::Client::open("rediss://cache.example.invalid:6379").expect("rediss supported");
+    }
     fn assert_bus<T: DomainEventBus>() {}
     fn assert_abuse_store<T: AbuseSignalStore>() {}
 
