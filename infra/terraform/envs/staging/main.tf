@@ -1,4 +1,4 @@
-# Composition root for staging. Modules: network, data (9.3), edge (9.4); compute arrives in 9.5.
+# Composition root for staging. Modules: network, data (9.3), edge (9.4), service (9.5).
 
 locals {
   name_prefix = "powehi-${var.environment}"
@@ -32,4 +32,22 @@ module "edge" {
 
   r2_token_allowed_cidrs = var.r2_token_allowed_cidrs
   r2_token_expires_on    = var.r2_token_expires_on
+}
+
+module "service" {
+  source                    = "../../modules/service"
+  name_prefix               = local.name_prefix
+  aws_region                = var.aws_region
+  server_image              = var.server_image
+  cloudflared_image         = var.cloudflared_image
+  public_subnet_ids         = module.network.public_subnet_ids
+  service_security_group_id = module.network.service_security_group_id
+  secret_arns               = var.secret_arns
+
+  environment_variables = {
+    POWEHI__REGION_ID     = "kr-seoul"
+    POWEHI__R2_ENDPOINT   = module.edge.r2_endpoint
+    POWEHI__R2_BUCKET     = module.edge.r2_bucket
+    POWEHI__VAPID_CONTACT = var.vapid_contact
+  }
 }

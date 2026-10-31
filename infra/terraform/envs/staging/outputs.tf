@@ -33,3 +33,13 @@ output "r2_secret_access_key" {
   value       = module.edge.r2_secret_access_key
   sensitive   = true
 }
+
+output "ecs_cluster_name" {
+  description = "ECS cluster (deploy workflow, 9.8)."
+  value       = module.service.cluster_name
+}
+
+output "ecs_service_name" {
+  description = "ECS service (deploy workflow, 9.8)."
+  value       = module.service.service_name
+}

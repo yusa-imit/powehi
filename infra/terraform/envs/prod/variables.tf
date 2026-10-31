@@ -72,3 +72,28 @@ variable "r2_token_expires_on" {
     error_message = "r2_token_expires_on must be an RFC 3339 timestamp or null."
   }
 }
+
+variable "server_image" {
+  description = "powehi-server image pinned by digest (ghcr.io/<owner>/powehi-server@sha256:...); the deploy workflow (9.8) passes the one it signed."
+  type        = string
+}
+
+variable "cloudflared_image" {
+  description = "cloudflared sidecar image pinned by digest."
+  type        = string
+}
+
+variable "secret_arns" {
+  description = "Secrets Manager ARNs (powehi/<env>/...) the owner creates out of band; ARNs only, never values. Keys: see modules/service."
+  type        = map(string)
+}
+
+variable "vapid_contact" {
+  description = "VAPID contact URI (mailto: or https:, RFC 8292); the server enables Web Push only when this and the VAPID key are both set."
+  type        = string
+
+  validation {
+    condition     = can(regex("^(mailto|https):", var.vapid_contact))
+    error_message = "vapid_contact must be a mailto: or https: URI."
+  }
+}

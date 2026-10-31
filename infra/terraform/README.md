@@ -2,7 +2,7 @@
 
 AWS Seoul (`ap-northeast-2`) plus Cloudflare edge, per ADR-0007. Phase 9.2 delivers the
 layout, the one-time `bootstrap/` stack and the CI checks. Network, data (9.3) and edge (9.4)
-modules exist; compute follows in 9.5.
+modules and the service module (ECS Fargate, 9.5) are composed in both envs.
 
 ```
 infra/terraform/
