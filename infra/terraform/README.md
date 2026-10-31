@@ -102,6 +102,8 @@ Permissions per token (neither may hold "API Tokens Edit" or other account-admin
 - both: Zone Read, DNS Edit (zone), Cloudflare Tunnel Edit (account), Workers R2 Storage
   Write (account-wide, needed to create the bucket);
 - staging ONLY (the zone-owning env): Zone Settings Edit and Zone WAF Edit.
+- only when the optional `/health` check of `modules/monitoring` is on (needs a Pro zone, off by
+  default): Health Checks Edit (zone) in the token of the env that enables it.
 
 Cloudflare limitation, accepted risk (needs the owner's call): Tunnel Edit, DNS Edit and R2
 bucket creation cannot be scoped per env, so a staging token can in principle modify the prod
