@@ -1,3 +1,4 @@
 # cp staging.tfvars.example staging.tfvars (git-ignored), or export TF_VAR_domain.
 domain = "example.com"
 allowed_account_ids = ["123456789012"] # your AWS account ID
+cloudflare_account_id = "00000000000000000000000000000000" # Cloudflare account ID; the API token is CLOUDFLARE_API_TOKEN (env only)

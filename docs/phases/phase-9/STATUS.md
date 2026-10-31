@@ -70,12 +70,18 @@ domain is a variable everywhere (`var.domain`); never hard-code `powehi.app`.
   ranges in 9.5); DB/cache egress by CIDR not SG; RDS-managed master secret needs `rds!*` IAM in the
   deploy role (verify at first staging apply; owner step #118); VPC Flow Logs, 9.10; staging and prod share
   10.20.0.0/16 (no peering planned).
-- [ ] 9.4 Edge module (Cloudflare) — DNS records under `var.domain` (`api.` and
+- [x] 9.4 Edge module (Cloudflare) — DNS records under `var.domain` (`api.` and
   `api-staging.`), TLS settings (minimum 1.3, TLS 1.3 on: re-creates 8.1), WAF managed
   rules and rate limiting on the auth endpoints within the plan's limits, the R2 media
   bucket (APAC location hint) with a bucket-scoped R2 token, and a Cloudflare Tunnel
   per env routing its hostname to the task. The server's `R2_*` settings point at it.
   security-auditor.
+  Shipped cycle 707: `modules/edge` (zone TLS 1.3, tunnel + proxied CNAME, managed WAF, path-only auth rate limit,
+  R2 bucket apac; bucket-scoped token only with `create_r2_token`). Staging owns the zone-wide singletons
+  (`manage_zone`), prod does not. No tunnel secret in state: the owner fetches the token out of band for 9.5.
+  security-auditor (3 rounds, needs-rework fixed). Unverified against real Cloudflare: R2 token resource string and
+  permission-group names, free-plan ruleset limits; no plan was run. Accepted risk: Tunnel/DNS/R2-create are not
+  scopable per env, so a staging CF token can touch prod edge (need-human issue).
 - [ ] 9.5 Service module (ECS Fargate) — cluster, ARM64 task with the `powehi-server`
   image pinned by digest from GHCR and a `cloudflared` sidecar; task SG with **no
   inbound rules**; public IP for outbound only. Secrets (database URL, Redis auth, R2

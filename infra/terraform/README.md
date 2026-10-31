@@ -1,8 +1,8 @@
 # Powehi infrastructure (OpenTofu)
 
 AWS Seoul (`ap-northeast-2`) plus Cloudflare edge, per ADR-0007. Phase 9.2 delivers the
-layout, the one-time `bootstrap/` stack and the CI checks. Network, data, edge and compute
-modules follow in 9.3-9.5.
+layout, the one-time `bootstrap/` stack and the CI checks. Network, data (9.3) and edge (9.4)
+modules exist; compute follows in 9.5.
 
 ```
 infra/terraform/
@@ -82,12 +82,52 @@ or the release binary), the AWS CLI, admin credentials for the first run only
 | Repository | `TF_STATE_BUCKET` | variable | `state_bucket` output |
 | Repository | `TF_STATE_KMS_KEY_ARN` | variable | `state_kms_key_arn` output |
 | Environment `staging` / `production` | `DOMAIN` | variable | the domain bought in step 1 of #118 |
-| Environment `staging` / `production` | `CLOUDFLARE_API_TOKEN` | secret | token scoped to the zone, R2 and Tunnel only (used from 9.4) |
+| Environment `staging` / `production` | `CLOUDFLARE_API_TOKEN` | secret | token scoped to the zone, R2 and Tunnel only (used by `modules/edge`, 9.4) |
 | Repository | `CLOUDFLARE_ACCOUNT_ID` | secret | Cloudflare account ID |
 
 Role ARNs are not secret in themselves; they are stored as secrets to keep them out of logs.
 Workflows that use them need `permissions: id-token: write` and
 `aws-actions/configure-aws-credentials` (arrives with 9.7).
+
+## Edge owner step (9.4, issue #118)
+
+Use two DIFFERENT Cloudflare API tokens: one in the `staging` Environment secret and one in
+the `production` Environment secret, exported as `CLOUDFLARE_API_TOKEN` (env only, never
+tfvars). Set `cloudflare_account_id` in `<env>.tfvars`.
+
+Permissions per token (neither may hold "API Tokens Edit" or other account-admin power):
+- both: Zone Read, DNS Edit (zone), Cloudflare Tunnel Edit (account), Workers R2 Storage
+  Write (account-wide, needed to create the bucket);
+- staging ONLY (the zone-owning env): Zone Settings Edit and Zone WAF Edit.
+
+Cloudflare limitation, accepted risk (needs the owner's call): Tunnel Edit, DNS Edit and R2
+bucket creation cannot be scoped per env, so a staging token can in principle modify the prod
+tunnel, DNS and bucket. Separate tokens limit exposure of the prod secret, not this reach.
+
+- **Shared zone.** Staging and prod use one zone, so its singletons (the four TLS settings,
+  the zone-level managed WAF ruleset and the auth rate-limit ruleset) are owned by staging
+  (`manage_zone = true`, applied first by the 9.7 auto-apply); prod passes false and creates
+  just its tunnel, CNAME and bucket. Staging's edge must never be destroyed while prod runs.
+  The rate-limit expression is path-only (Free plan, covers both hosts; the server routes
+  those paths POST-only). If the Free zone already has a firewall_managed or ratelimit
+  entrypoint ruleset, import it before apply and never delete it.
+- **R2 token.** Creating the bucket-scoped R2 token needs "API Tokens Edit", so
+  `create_r2_token` defaults to false. The owner mints the per-env token once, out of band
+  (object read/write on `powehi-<env>-media` only, optionally IP-restricted and with an
+  expiry) and stores it in Secrets Manager. `create_r2_token = true` (owner-run apply with a
+  broader token) lets the module do it; `r2_token_allowed_cidrs` (task public IPs, no NAT)
+  and `r2_token_expires_on` then restrict it.
+- **Secrets.** No tunnel secret is in state: the module omits `tunnel_secret` and has no
+  token output. The owner fetches the tunnel token out of band (`cloudflared tunnel token
+  <tunnel_id>`, the dashboard or the API) into Secrets Manager for the 9.5 sidecar. Non-secret
+  outputs: `api_hostname`, `tunnel_id`, `r2_endpoint`, `r2_bucket` (and `r2_access_key_id`);
+  they map to `POWEHI__R2_ENDPOINT`, `POWEHI__R2_BUCKET`, `POWEHI__R2_ACCESS_KEY_ID`.
+- **Accepted risk.** If `create_r2_token` is true, the token value sits in KMS-encrypted
+  state. Staging state is readable by the PR plan role, i.e. by same-repo PR workflows, so
+  the 9.7 plan job must never receive the Cloudflare deploy token.
+
+Plan assumptions: free/pro zone, one rate-limit rule. Not applied or planned locally (no
+credentials); CI runs `tofu test` with a mocked provider.
 
 ## CI (`.github/workflows/ci-infra.yml`)
 
