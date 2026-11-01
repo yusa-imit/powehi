@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 726 (2026-11-02, FEATURE, nothing unblocked) — PR #264
+8.15/8.17/8.19 and 9.9+ still wait on owner. Fixed stale prd §12.7 DR table (RDS single-AZ, cache single-node). 9.12 residuals left: §7A.3 1311, §13.3 text.
+
 ## Cycle 724 (2026-11-02, FEATURE, nothing unblocked) — 9.12 plan comment
 8.15 (#166), 8.17 (#203), 8.19 (#208) still wait on the owner; 8.22/8.23 depend on them. Shipped the 9.12
 residual: the staging `tofu plan` PR comment posts change headlines and totals only (public repo).
