@@ -28,7 +28,7 @@ if printf '%s' "$fixture" | jq --arg image "$bad" --arg env staging -f "$here/ta
   echo "FAIL: accepted trailing newline" >&2; exit 1
 fi
 # A base revision tagged for another environment, or untagged, or without the server container.
-for f in '.tags[0].value = "prod"' 'del(.tags)' '.taskDefinition.containerDefinitions |= map(select(.name != "powehi-server"))'; do
+for f in '.tags[0].value = "prod"' '.taskDefinition.family = "powehi-prod-service"' '.taskDefinition.family = "other-staging-service"' 'del(.tags)' '.taskDefinition.containerDefinitions |= map(select(.name != "powehi-server"))'; do
   if printf '%s' "$fixture" | jq "$f" | jq --arg image "$new" --arg env staging -f "$here/taskdef-with-image.jq" > /dev/null 2>&1; then
     echo "FAIL: accepted base with $f" >&2; exit 1
   fi
