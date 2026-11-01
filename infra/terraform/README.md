@@ -80,6 +80,7 @@ or the release binary), the AWS CLI, admin credentials for the first run only
 | Repository | `AWS_PLAN_ROLE_ARN` | secret | `plan_role_arn` output |
 | Repository | `AWS_REGION` | variable | `ap-northeast-2` |
 | Repository | `STAGING_TFVARS_JSON` | variable | One JSON object of the non-secret staging tfvars (`domain`, `cloudflare_zone_id` (required for the credential-less PR plan), `allowed_account_ids`, `cloudflare_account_id`, `server_image`, `cloudflared_image`, `secret_arns`, `vapid_contact`). Read by `infra-apply.yml` (9.7); values are ARNs, IDs and digests, never secrets. |
+| Repository (not Environment: the PR plan job needs it too) | `STAGING_ALERT_EMAIL` | secret | Owner e-mail for alarms (9.10). Never a key of `STAGING_TFVARS_JSON`: the workflow stops on it, but a variable already prints in the job log header before that check, so do not put it there. Unset = no staging alarms |
 | Repository | `TF_STATE_BUCKET` | variable | `state_bucket` output |
 | Repository | `TF_STATE_KMS_KEY_ARN` | variable | `state_kms_key_arn` output |
 | Environment `staging` / `production` | `DOMAIN` | variable | the domain bought in step 1 of #118 |
@@ -222,8 +223,9 @@ tofu fmt -check -recursive
 
 ## Monitoring (9.10)
 
-`modules/monitoring` is composed in both envs. Set `alert_email` in `<env>.tfvars` (or `TF_VAR_alert_email`),
-then accept the AWS SNS subscription mail after the first apply; alarms are not delivered until you do.
+`modules/monitoring` is composed in both envs. Set `alert_email` in `<env>.tfvars` (or `TF_VAR_alert_email`) for a local run; in CI staging it is the
+repository secret `STAGING_ALERT_EMAIL` (never a key of `STAGING_TFVARS_JSON`: variables print in public
+logs and the workflow refuses the key). Then accept the AWS SNS subscription mail after the first apply; alarms are not delivered until you do.
 Owner prerequisite: the deploy roles in `bootstrap/` must be allowed to create the SNS topic, the
 EventBridge rule and a KMS key/alias for `powehi-<env>-*` (not yet in `iam.tf`; see the 9.10 PR).
 Cloudflare health check: set `enable_healthcheck = true` only on a Pro or higher zone plan and with a token
