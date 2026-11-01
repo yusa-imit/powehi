@@ -156,3 +156,12 @@ domain is a variable everywhere (`var.domain`); never hard-code `powehi.app`.
 - [ ] 9.12 Security gate — threat-model-checker on the deployed architecture (new trust
   boundaries: AWS account and roles, CI OIDC, Cloudflare Tunnel, Secrets Manager, R2
   token); security-auditor on all of `infra/`; prd §3 updated with the accepted risks.
+  Slice (a) shipped (cycle 716): threat-model-checker YELLOW, prd §3.6 (R1-R11) + §3.1 T2/T3 + §12A PIPA rows
+  rewritten; accept/decline group logs no longer carry device/group ids; rust-cache removed from the signed
+  release builds. security-auditor needs-rework, still open (fix before 9.9 prod activation): release.yml has
+  no main-ancestry gate on `v*` tags; `STAGING_TFVARS_JSON` (holds alert_email) prints in public logs as a
+  job env var; deploy role `iam:CreateRole` has no trust limit (staging has no reviewer); `ecs-deploy.sh`
+  picks the family's latest revision, so a staging role can wedge prod deploy/rollback; action pins that are
+  tag-object SHAs (rust-cache, cosign-installer) or off-branch (rust-toolchain in infra-apply); deploy role
+  GetSecretValue wider than needed; plan comment posts full plan; no VPC flow logs; stale prd §12.5, §12.7,
+  §7A.3 1311, §13.3 text; repo settings (main protection, tag rulesets, Environments) not set (need-human).

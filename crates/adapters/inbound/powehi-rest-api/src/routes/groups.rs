@@ -88,7 +88,8 @@ pub async fn accept_membership(
     Path(raw_group_id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let group_id = GroupId::from(raw_group_id);
-    tracing::info!(caller = %caller, group_id = %group_id, "groups.accept_membership");
+    // No device or group id in the log: it would outlive a declined row (prd §3.6 R7).
+    tracing::info!("groups.accept_membership");
     state.group.accept_membership(&caller, &group_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -102,7 +103,7 @@ pub async fn decline_membership(
     Path(raw_group_id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let group_id = GroupId::from(raw_group_id);
-    tracing::info!(caller = %caller, group_id = %group_id, "groups.decline_membership");
+    tracing::info!("groups.decline_membership");
     state.group.decline_membership(&caller, &group_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }

@@ -2015,3 +2015,6 @@ Cycle 710 (STABILIZATION): fixed bug #243 — sqlx (`tls-rustls-ring-webpki`) an
 
 ## Cycle 715 (2026-11-01, STABILIZATION)
 main CI green; `cargo audit`/`cargo deny`/clippy clean. Added a proptest for `PinSet::new` (size bounds + duplicates). #243 stays open for the dedicated app DB role. target/ is 25G (under the 20G prune rule only after the 7-day prune; left alone).
+
+## Cycle 716 (2026-11-01, FEATURE) — 9.12 slice (a) security gate
+- Phase 8 still blocked (#166/#203/#208/#161); took 9.12 (9.9 prod needs live apply). threat-model-checker YELLOW -> prd §3.6 R1-R11; security-auditor needs-rework, open findings listed under 9.12 in phase-9/STATUS.md; owner items in #253. Fixed: group accept/decline logs, rust-cache out of release.yml. Next: ecs-deploy.sh revision pick, release main-ancestry gate, action re-pins.

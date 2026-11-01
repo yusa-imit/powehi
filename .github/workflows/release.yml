@@ -35,8 +35,6 @@ jobs:
         with:
           toolchain: "1.98.1"
 
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae  # v2
-
       - name: Build (SOURCE_DATE_EPOCH=0 for reproducibility)
         env:
           SOURCE_DATE_EPOCH: "0"
@@ -179,8 +177,6 @@ jobs:
         with:
           toolchain: "1.98.1"
           targets: wasm32-unknown-unknown
-
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae  # v2
 
       # Install wasm-pack with --locked so Cargo.lock governs the wasm-bindgen-cli
       # version (a transitive dep that generates the JS glue).  Pinning the exact
