@@ -2021,3 +2021,6 @@ main CI green; `cargo audit`/`cargo deny`/clippy clean. Added a proptest for `Pi
 
 ## Cycle 717 (2026-11-01, FEATURE) — 9.12 slice (b)
 - Phase 8 still blocked (#166/#203/#208/#161). Merged PR #254 after re-running a hung Tauri apt step. Fixed security-auditor finding: `release.yml` `verify-main` job (gh compare main...sha must be behind|identical) gates build-binary/build-push-container/build-wasm. Still open under 9.12: STAGING_TFVARS_JSON env print, iam:CreateRole trust limit, ecs-deploy.sh family revision, action pins, secret scope, plan comment, flow logs, stale prd text.
+
+## Cycle 719 (2026-11-01, FEATURE) — 9.12 slice: action pins
+All SHA pins are commits not tag objects (also cargo-deny-action 3c63498, pnpm/action-setup b906aff; rust-cache v2 d1527c8, cosign-installer v3 398d4b0, rust-toolchain stable-branch b725eda for no-input uses). 8.x/9.x boxes remain blocked on need-human / live cloud. Remaining 9.12 findings: ecs-deploy family revision, deploy role GetSecretValue scope, plan comment, VPC flow logs, stale prd text.

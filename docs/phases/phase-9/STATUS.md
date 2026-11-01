@@ -160,7 +160,7 @@ domain is a variable everywhere (`var.domain`); never hard-code `powehi.app`.
   rewritten; accept/decline group logs no longer carry device/group ids; rust-cache removed from the signed
   release builds. security-auditor needs-rework, still open (fix before 9.9 prod activation): release.yml main-ancestry gate
   fixed in cycle 717 (`verify-main` job gates every build job); ~~`STAGING_TFVARS_JSON` (holds alert_email) prints in public logs~~ fixed cycle 718 (secret `STAGING_ALERT_EMAIL`, JSON key refused; security-auditor pass; open Low: `vapid_contact` mailto still lives in the JSON variable); deploy role `iam:CreateRole` has no trust limit (staging has no reviewer); `ecs-deploy.sh`
-  picks the family's latest revision, so a staging role can wedge prod deploy/rollback; action pins that are
-  tag-object SHAs (rust-cache, cosign-installer) or off-branch (rust-toolchain in infra-apply); deploy role
+  picks the family's latest revision, so a staging role can wedge prod deploy/rollback; ~~action pins that are
+  tag-object SHAs (rust-cache, cosign-installer) or off-branch (rust-toolchain)~~ fixed cycle 719 (every pin is a commit, not a tag object; rust-toolchain `stable` pins drift off-branch when upstream rebuilds it); deploy role
   GetSecretValue wider than needed; plan comment posts full plan; no VPC flow logs; stale prd §12.5, §12.7,
   §7A.3 1311, §13.3 text; repo settings (main protection, tag rulesets, Environments) not set (need-human).
