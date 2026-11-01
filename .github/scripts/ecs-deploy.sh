@@ -22,6 +22,15 @@ family=${current##*/}; family=${family%:*}
 aws ecs describe-task-definition --task-definition "$family" --include TAGS --output json \
   | jq --arg image "$image" --arg env "$env_name" -f "$here/taskdef-with-image.jq" > "${RUNNER_TEMP:-/tmp}/taskdef.json"
 
+# The base we are about to register must run under the same roles as the revision the service
+# runs now. Compared on the exact document written to taskdef.json (no second lookup), and each
+# side is captured on its own so a failed describe stops the script instead of comparing "" to "".
+current_json=$(aws ecs describe-task-definition --task-definition "$current" --output json)
+current_roles=$(jq -r '.taskDefinition | [.taskRoleArn, .executionRoleArn] | @tsv' <<< "$current_json")
+base_roles=$(jq -r '[.taskRoleArn, .executionRoleArn] | @tsv' "${RUNNER_TEMP:-/tmp}/taskdef.json")
+[[ -n "$current_roles" && "$base_roles" == "$current_roles" ]] \
+  || { echo "latest revision of $family changes task roles; refusing" >&2; exit 1; }
+
 new=$(aws ecs register-task-definition --cli-input-json "file://${RUNNER_TEMP:-/tmp}/taskdef.json" \
   --query 'taskDefinition.taskDefinitionArn' --output text)
 echo "registered: $new"

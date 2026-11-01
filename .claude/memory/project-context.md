@@ -2028,3 +2028,6 @@ All SHA pins are commits not tag objects (also cargo-deny-action 3c63498, pnpm/a
 ## Cycle 720 (2026-11-01, STABILIZATION)
 - CI green on main; clippy, cargo audit, cargo deny clean. No bug issue actionable except #243 (dedicated app DB role, infra, still open).
 - Shipped proptest for `powehi-config` region_id validation (safe-segment boundary used by orphan sweep prefix scoping).
+
+## Cycle 721 (FEATURE, 2026-11-01)
+- Phase 8 still blocked (#166/#161/#203/#208). 9.12 slice: ecs-deploy.sh base family regex + role-equality check, fail closed. security-auditor needs-rework; fixed TOCTOU/fail-open; family wedge by a role-matching stray revision stays open (noted in phase-9 STATUS).
