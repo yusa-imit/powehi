@@ -2018,3 +2018,6 @@ main CI green; `cargo audit`/`cargo deny`/clippy clean. Added a proptest for `Pi
 
 ## Cycle 716 (2026-11-01, FEATURE) — 9.12 slice (a) security gate
 - Phase 8 still blocked (#166/#203/#208/#161); took 9.12 (9.9 prod needs live apply). threat-model-checker YELLOW -> prd §3.6 R1-R11; security-auditor needs-rework, open findings listed under 9.12 in phase-9/STATUS.md; owner items in #253. Fixed: group accept/decline logs, rust-cache out of release.yml. Next: ecs-deploy.sh revision pick, release main-ancestry gate, action re-pins.
+
+## Cycle 717 (2026-11-01, FEATURE) — 9.12 slice (b)
+- Phase 8 still blocked (#166/#203/#208/#161). Merged PR #254 after re-running a hung Tauri apt step. Fixed security-auditor finding: `release.yml` `verify-main` job (gh compare main...sha must be behind|identical) gates build-binary/build-push-container/build-wasm. Still open under 9.12: STAGING_TFVARS_JSON env print, iam:CreateRole trust limit, ecs-deploy.sh family revision, action pins, secret scope, plan comment, flow logs, stale prd text.
