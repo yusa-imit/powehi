@@ -2041,3 +2041,7 @@ All SHA pins are commits not tag objects (also cargo-deny-action 3c63498, pnpm/a
 
 ## Cycle 722 (FEATURE, 2026-11-01)
 - Phase 8 still blocked (#166/#161/#203/#208), no owner answers. 9.12 slice: prd §12.5 pipeline diagram rewritten from Argo CD/K8s to release.yml + deploy.yml on ECS (docs only). Still stale: prd §12.7, §7A.3 ~1311, §13.3.
+
+## Cycle 725 (2026-11-02, STABILIZATION)
+- CI green on main; clippy, cargo audit, cargo deny clean. Only open `bug` is #243 (dedicated app DB role, procedure documented in #261; infra action remains). target/ 29G (<20G prune threshold exceeded only by old-artifact rule; no files >7d to prune).
+- Shipped proptests for CLI `prompt.rs` (`is_yes` exact-spelling, `read_line` round-trip and totality/bound). Test-only.
