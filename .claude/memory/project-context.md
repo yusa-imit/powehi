@@ -2031,3 +2031,6 @@ All SHA pins are commits not tag objects (also cargo-deny-action 3c63498, pnpm/a
 
 ## Cycle 721 (FEATURE, 2026-11-01)
 - Phase 8 still blocked (#166/#161/#203/#208). 9.12 slice: ecs-deploy.sh base family regex + role-equality check, fail closed. security-auditor needs-rework; fixed TOCTOU/fail-open; family wedge by a role-matching stray revision stays open (noted in phase-9 STATUS).
+
+## Cycle 722 (FEATURE, 2026-11-01)
+- Phase 8 still blocked (#166/#161/#203/#208), no owner answers. 9.12 slice: prd §12.5 pipeline diagram rewritten from Argo CD/K8s to release.yml + deploy.yml on ECS (docs only). Still stale: prd §12.7, §7A.3 ~1311, §13.3.
