@@ -1545,6 +1545,38 @@ mod tests {
         }
     }
 
+    mod region_id_props {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn with_region(region_id: String) -> AppConfig {
+            AppConfig {
+                region_id,
+                // non-"local" regions need real R2 settings; default_config has them
+                ..default_config()
+            }
+        }
+
+        proptest! {
+            #[test]
+            fn safe_segment_region_ids_never_trip_region_validation(id in "[a-z0-9-]{1,32}") {
+                let res = validate(&with_region(id));
+                prop_assert!(!matches!(res, Err(ConfigError::RegionIdInvalid(_))));
+            }
+
+            #[test]
+            fn any_unsafe_byte_makes_region_id_invalid(
+                head in "[a-z0-9-]{0,8}",
+                bad in prop::sample::select(vec!['/', '_', ' ', 'A', 'Z', '.', '\\', '\0', 'é']),
+                tail in "[a-z0-9-]{0,8}",
+            ) {
+                let id = format!("{head}{bad}{tail}");
+                let res = validate(&with_region(id.clone()));
+                prop_assert!(matches!(res, Err(ConfigError::RegionIdInvalid(ref r)) if *r == id));
+            }
+        }
+    }
+
     #[test]
     fn region_id_empty_is_rejected() {
         let cfg = AppConfig {
