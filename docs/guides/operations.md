@@ -107,5 +107,5 @@ Set an AWS Budget alert for the account if the owner has not (not managed by Ope
 ## Alarms
 
 Alarms go to the SNS email topic from `modules/monitoring` (running tasks below 1, task stops,
-RDS CPU/storage/connections, cache memory). If `alert_email` is unset there are no alarms, and
+RDS CPU/storage/connections, cache memory). If `alert_email` (CI: secret `STAGING_ALERT_EMAIL`) is unset there are no alarms, and
 the subscription must be confirmed from the email once. See ADR-0007 for the metrics choice.
