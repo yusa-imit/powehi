@@ -1934,69 +1934,27 @@ CI는 GitHub OIDC 역할만 사용(장기 AWS 키 없음). 모든 PR에 plan, st
 
 ### 12.5 빌드 + 배포 파이프라인 시각화
 
+배포 대상은 ECS Fargate (ADR-0007)이며 Kubernetes/Argo CD는 쓰지 않는다. 빌드와 배포는 분리된
+두 workflow다: `release.yml`(서명된 이미지 생성)과 `deploy.yml`(서명 검증 후 환경별 갱신).
+롤백은 이전 digest로 `deploy.yml`을 수동 실행하는 것이다 (`docs/runbooks/server-deploy.md`).
+자동 canary/자동 롤백은 없다. 배포 후 smoke test 실패 시 파이프라인이 멈추고 사람이 롤백한다.
+
 ```mermaid
 flowchart TB
-    DEV[Developer<br/>local commit]
-    PR[Pull Request]
+    PR[Pull Request] --> CI[CI: fmt, clippy, nextest, vitest,<br/>cargo audit/deny, tofu validate]
+    CI --> MERGE[squash-merge to main]
+    MERGE --> APPLY[infra-apply.yml<br/>staging tofu apply + smoke]
 
-    subgraph "CI Pipeline (GitHub Actions)"
-        LINT[cargo fmt<br/>cargo clippy<br/>biome check]
-        TEST_U[Unit Tests<br/>cargo nextest + vitest]
-        TEST_I[Integration Tests<br/>testcontainers + Postgres]
-        AUDIT[cargo audit<br/>cargo deny<br/>SBOM 생성<br/>pnpm audit]
-        WASM_BUILD[WASM Crypto Core<br/>빌드 + 결정론적 해시]
-        FE_BUILD[Frontend Build<br/>Vite + reproducible]
-        BE_BUILD[Server Build<br/>cargo build --release]
-        IMG[Container Image<br/>distroless + cosign 서명]
-        E2E[E2E Tests<br/>Playwright + 로컬 docker-compose]
-    end
-
-    subgraph "Artifact Registry"
-        REG[OCI Registry<br/>signed images]
-        ATT[SLSA Provenance<br/>Level 3 목표]
-    end
-
-    subgraph "CD Pipeline (Argo CD, Multi-Cluster)"
-        SYNC_DEV[Auto Sync to dev]
-        SMOKE[Smoke Tests]
-        SYNC_STG[Manual Sync to staging]
-        CANARY[Canary 5% (EU)]
-        ROLL_EU[EU Progressive Rollout 25→50→100%]
-        ROLL_KR[KR Progressive Rollout 25→50→100%]
-        SYNC_PROD[Sync to prod-eu + prod-kr<br/>+ approval]
-    end
-
-    subgraph "Verification"
-        MON[Monitoring<br/>error rate, p99 latency<br/>per-region]
-        ROLLBACK{Anomaly?}
-    end
-
-    DEV --> PR
-    PR --> LINT
-    LINT --> TEST_U
-    TEST_U --> TEST_I
-    TEST_I --> AUDIT
-    AUDIT --> WASM_BUILD
-    WASM_BUILD --> FE_BUILD
-    WASM_BUILD --> BE_BUILD
-    FE_BUILD --> IMG
-    BE_BUILD --> IMG
-    IMG --> E2E
-    E2E --> REG
-    REG --> ATT
-
-    REG --> SYNC_DEV
-    SYNC_DEV --> SMOKE
-    SMOKE --> SYNC_STG
-    SYNC_STG --> CANARY
-    CANARY --> ROLL_EU
-    CANARY --> ROLL_KR
-    ROLL_EU --> SYNC_PROD
-    ROLL_KR --> SYNC_PROD
-    SYNC_PROD --> MON
-    MON --> ROLLBACK
-    ROLLBACK -->|yes| RB[Auto Rollback<br/>per-region]
-    ROLLBACK -->|no| DONE[Release Complete]
+    TAG[v* tag] --> VMAIN[release.yml verify-main<br/>tag commit must be on main]
+    VMAIN --> BUILD[build binary / container / WASM<br/>SLSA L3 provenance]
+    BUILD --> SIGN[cosign keyless sign<br/>+ Rekor]
+    SIGN --> RES[deploy.yml resolve<br/>cosign verify, digest bound to a main commit]
+    RES --> STG[Deploy staging ECS service]
+    STG --> SMS[Smoke test staging<br/>credential-less]
+    SMS --> APR{production Environment<br/>approval}
+    APR --> PRD[Deploy production ECS service<br/>PROD_DEPLOY_ENABLED]
+    PRD --> SMP[Smoke test production]
+    SMP -->|fail| RB[Manual rollback:<br/>deploy.yml with previous digest]
 ```
 
 ### 12.6 Reproducible Build + SLSA
