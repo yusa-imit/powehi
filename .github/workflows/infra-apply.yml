@@ -106,14 +106,19 @@ jobs:
             const marker = '<!-- infra-plan-staging -->';
             let text = '';
             try { text = fs.readFileSync('infra/terraform/envs/staging/plan.txt', 'utf8'); } catch (e) {}
-            const max = 60000;
-            text = text.replaceAll('```', "'''");
-            if (text.length > max) text = text.slice(0, max) + '\n... (truncated)';
+            // The repo is public: a PR comment must not carry resource attributes (ARNs, account
+            // and zone ids, endpoints). Only the change headlines and the totals are posted.
+            const keep = /^  # \S.* (will be|must be) |^Plan: |^No changes\./;
+            const lines = text.split('\n').filter(l => keep.test(l)).map(l => l.trim().slice(0, 200));
+            const max = 200;
+            text = lines.slice(0, max).join('\n').replaceAll('```', "'''");
+            if (lines.length > max) text += '\n... (' + (lines.length - max) + ' more lines)';
+            if (!text) text = '(no change summary; a failed plan shows no detail here, rerun it locally)';
             const state = { '0': 'no changes', '2': 'changes pending' }[process.env.PLAN_EXIT] || 'plan failed';
             const body = `${marker}\n### Staging plan: ${state}\n` +
               'Read-only, refresh disabled; set `cloudflare_zone_id` in STAGING_TFVARS_JSON so no Cloudflare lookup is needed. ' +
               'Prod is planned only inside its approved apply.\n\n' +
-              '<details><summary>tofu plan</summary>\n\n```\n' + text + '\n```\n</details>\n\n' +
+              '<details><summary>tofu plan (headlines only)</summary>\n\n```\n' + text + '\n```\n</details>\n\n' +
               '🤖 Generated with [Claude Code](https://claude.com/claude-code)';
             const { owner, repo } = context.repo;
             const issue_number = context.issue.number;

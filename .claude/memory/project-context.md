@@ -51,6 +51,10 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 724 (2026-11-02, FEATURE, nothing unblocked) — 9.12 plan comment
+8.15 (#166), 8.17 (#203), 8.19 (#208) still wait on the owner; 8.22/8.23 depend on them. Shipped the 9.12
+residual: the staging `tofu plan` PR comment posts change headlines and totals only (public repo).
+
 ## Cycle 723 (2026-11-01, FEATURE, nothing unblocked) — #243 dedicated DB role runbook
 Phase 8 remainder (8.15 #166/#161, 8.17 #203, 8.19 #208) and Phase 9 (9.9+) all wait on owner. Took bug #243's open half: `docs/guides/operations.md` gains the `powehi_app` role procedure (unrun, docs only; no review agent needed). Issue stays open until a deployed DB runs it.
 
