@@ -148,8 +148,8 @@
 | 등급 | 공격자 | 능력 | Pōwehi 대응 |
 |---|---|---|---|
 | T1 | 패시브 네트워크 도청자 (ISP, 카페 WiFi) | TLS 전후 트래픽 관찰 | TLS 1.3 + E2EE |
-| T2 | 액티브 MITM | TLS 인증서 위조 시도 | Certificate Pinning + Safety Numbers (CLI: 메커니즘 구현됨, 운영 핀은 Phase 9 9.9 전까지 비어 있음 — §7A.3) |
-| T3 | 악의적 서버 운영자 | DB 덤프, 트래픽 로그, 코드 백도어 | E2EE + Reproducible Build + Sealed Sender |
+| T2 | 액티브 MITM | TLS 인증서 위조 시도 | Certificate Pinning + Safety Numbers (CLI: 메커니즘 구현됨, 운영 핀은 Phase 9 9.9 전까지 비어 있음 — §7A.3). TLS 종단자 Cloudflare와 zone의 DNS/Tunnel을 바꿀 수 있는 자는 핀으로 막지 못함 (§3.6 R1·R2·R4) |
+| T3 | 악의적 서버 운영자 | DB 덤프, 트래픽 로그, 코드 백도어 | E2EE + Reproducible Build + Sealed Sender. 배포 후 "운영자"는 AWS 계정, Cloudflare(TLS 종단), GitHub OIDC CI 역할, owner 계정의 AI를 포함하며 서버 이미지 서명은 사용자가 실행 중 서버를 검증하는 수단이 아님 (§3.6) |
 | T4 | 디바이스 압수 | 디바이스 물리 접근 | Local DB 암호화 + Disappearing Messages |
 | T5 | 글로벌 패시브 관찰자 | 전 세계 트래픽 상관관계 분석 | (부분 대응) Padding + 무작위 지연 |
 | T6 | 양자 컴퓨터 보유 공격자 | Shor 알고리즘으로 ECDH 깨기 | **PQ 하이브리드 (ML-KEM-768) day-1** |
@@ -256,6 +256,22 @@ gRPC 메시 트래픽 패턴으로 크로스 리전 통신 사실을 파악할 �
 **3.5.5 복제 타이밍 공격**
 
 key_package 크로스 리전 복제 지연을 악용한 race condition. 동일 key_package를 여러 리전에서 동시 소비 시도. **대응**: key_package 소비 시 home region에 동기적 확인 후 소비 완료. 복제본은 읽기 전용.
+
+### 3.6 배포 아키텍처의 신뢰 경계와 수용 위험 (Phase 9, ADR-0007, threat-model-checker 9.12: YELLOW)
+
+배포 후에도 아래 어느 당사자도 메시지·미디어 plaintext나 MLS 키를 얻지 못한다. 항목은 §3.3 범주의 메타데이터, 가용성·무결성 위험이며 예외는 R3(CLI 릴리스 공급망)뿐이다.
+
+- **R1 Cloudflare는 TLS 종단자이며 T3급 제2 운영자다.** 서버가 전송 중에 보는 모든 것(ciphertext envelope, KeyPackage, OPAQUE 메시지, 초대 코드, Bearer 토큰, client IP·지역·UA·TLS fingerprint, 크기·시각)과 WAF·rate limit에 막힌 요청까지 본다. 응답을 위조·드롭·재정렬할 수 있어 능동 T3와 같은 능력이며(§3.1 T3 배달 순서 위험 포함) 다른 고객 사이트와 상관 분석할 수 있어 T5 위험도 키운다. cloudflared sidecar는 Cloudflare 코드로서 task loopback(8080, admin 9090)에 접근한다. 수용 근거: ADR-0007(비용, origin 비공개).
+- **R2 Certificate pin은 Cloudflare를 배제하지 못한다 (#131).** pin은 Cloudflare가 쓰는 CA의 중간 키이므로 Cloudflare 자신과 같은 zone의 DNS·Tunnel을 바꾼 자는 막지 못한다. 9.9 전까지 핀 집합은 비어 WebPKI만 적용된다. Bearer는 채널에 바인딩되지 않는다(§7A.3).
+- **R3 production 승인 게이트는 self-approve가 가능하다 (#237).** AI가 owner 계정으로 실행되고 그 계정이 유일한 required reviewer이므로 서버 prod 배포와 CLI 릴리스(`cli-v*`)가 사람 없이 진행될 수 있다. CLI는 plaintext를 다루므로 정상 cosign·SLSA 서명이 붙은 백도어 바이너리가 출하될 수 있다. provenance는 사후 감사 수단일 뿐이다. 해소: 별도 approver 계정과 tag ruleset. **#237이 열린 채 CLI의 기본 서버를 prod로 바꾸는 9.9 릴리스는 owner의 명시적 수용이 있어야 한다.**
+- **R4 Cloudflare API token은 env별로 분리되지 않는다 (#241).** staging token(main merge 시 승인 없이 사용)이 prod Tunnel·`api.` DNS·R2를 바꿀 수 있고, 트래픽을 공격자 origin으로 돌려도 유효한 edge 인증서라 R2의 pin을 통과한다. 결과는 능동 T3와 동급이며 Safety Number로만 탐지된다. 해소: prod 전용 Cloudflare 계정.
+- **R5 deploy role과 tunnel token은 해당 env secret 전부를 대표한다.** `powehi-<env>-deploy`는 `powehi/<env>/*` secret 값 전부(DB URL, Redis, R2, VAPID, handle-oracle, tunnel token)를 읽는다. tunnel token 보유자는 추가 connector로 prod 트래픽 일부를 받을 수 있다. 권장: tofu가 관리하는 secret으로 GetSecretValue 축소, prod 별도 AWS 계정.
+- **R6 PR plan role은 staging state를 읽는다.** 같은 repo의 아무 브랜치에서 얻을 수 있으며 state에는 알림 e-mail과 (`create_r2_token=true`이면) staging R2 token이 있다. staging에는 실사용자 데이터를 두지 않는다.
+- **R7 CloudWatch Logs (14일, AWS 관리 키).** 내부 UUID와 시각이 남는다. 계정 admin과 AWS가 읽을 수 있고 DB 삭제 후에도 14일 잔존한다. 그룹 수락·거절 핸들러는 9.12에서 `device_id`/`group_id`를 로그에서 제거했다(§3.3 `pending_memberships` "거절은 영속하지 않음"과의 모순 해소).
+- **R8 알림 메일.** SNS 메일과 메일 제공자는 리소스 이름, 장애 시각, ECS stop reason만 본다.
+- **R9 R2.** Cloudflare는 객체 키(`media/{region_id}/{uuid}`), 크기, presigned 요청 IP를 본다(§3.3). bucket-scoped token은 기본값으로 IP 제한·만료가 없다(task public IP가 배포마다 바뀜).
+- **R10 관할 (T7).** DB·cache는 Seoul이나 TLS 종단은 국외 Cloudflare PoP일 수 있다. R2 `apac`은 location hint일 뿐이다. AWS와 Cloudflare는 US 법인이다. §12A PIPA 판단은 이 사실 위에서 다시 한다.
+- **R11 모니터링 IAM (#248).** deploy role의 SNS·EventBridge·KMS 권한은 `powehi-<env>-*` 접두어로 한정한다. `Resource: *`의 `kms:*`/`sns:*`는 허용하지 않는다.
 
 ---
 
@@ -2036,7 +2052,7 @@ runbook에 기록한다. 리전 간 failover는 범위 밖이다.
 | 규정 | 관할 | 핵심 요구사항 | Powehi 대응 |
 |---|---|---|---|
 | **GDPR** | EU/EEA | 개인 데이터 EU 내 처리, 삭제권, 동의 기반 | EU 사용자 데이터는 EU-Frankfurt에만 저장. 계정 삭제 시 전체 데이터 삭제. E2EE로 개인 데이터 처리 최소화. |
-| **PIPA** | 한국 | 개인정보 국외 이전 시 정보주체 동의, 안전성 확보 | **미충족 (accepted risk, GitHub #5)**: `prod-ap-seoul`는 실제로 Hetzner Singapore(sin1)이며 한국 내 DC가 아님. KR-home 사용자 PII는 어느 리전에도 저장하지 않으며, Cloudflare smart-router가 `cf.country == KR` 요청을 `503 PIPA_REGION_PENDING`으로 즉시 차단(스푸핑 불가, 테스트로 검증됨: `infra/cloudflare/workers/smart-router`). 실제 한국 DC 확보 전까지 KR 사용자는 서비스 이용 불가. |
+| **PIPA** | 한국 | 개인정보 국외 이전 시 정보주체 동의, 안전성 확보 | **부분 충족, 재검토 필요 (accepted risk, GitHub #5)**: ADR-0007로 DB·cache·미디어 메타데이터는 AWS Seoul(ap-northeast-2)에 저장된다. 이전 Hetzner sin1 배포와 smart-router KR 503 차단은 9.1에서 폐기되어 더는 존재하지 않는다. 다만 TLS 종단은 국외 Cloudflare PoP일 수 있고 R2 `apac`은 location hint일 뿐이다(§3.6 R10). 법적 판단과 동의 흐름은 9.9 전에 owner가 확인한다(#5).|
 | **APPI** | 일본 | 개인정보 보호, 제3자 제공 제한, 국외 이전 규정 | JP 사용자 데이터는 AP-Tokyo에 저장. 적정성 인정 없는 국가로의 이전 시 동의 필요. |
 | **PDPA** | 싱가포르/태국 | 목적 제한, 동의 기반, 보호 수준 확보 | 해당 리전 확장 시 별도 평가. E2EE 특성상 데이터 처리 최소. |
 | **CCPA/CPRA** | 미국 캘리포니아 | 삭제권, 판매 거부권, 데이터 접근권 | US 리전 확장 시 적용. 현재 미국 사용자는 EU 리전 사용. |
@@ -2219,7 +2235,7 @@ Alice → EU Gateway → EU DS    →   KR DS → KR WS → Bob
 | 규정 | 관할 | E2EE 메신저 영향 | Powehi 대응 |
 |---|---|---|---|
 | GDPR | EU/EEA | 개인 데이터 처리 최소화 의무, 삭제권 | E2EE로 최소 처리. EU 리전 데이터 저장. |
-| PIPA | 한국 | 국외 이전 시 동의, 안전성 확보 | **미충족 (accepted risk, GitHub #5)**: 실제 KR 리전 없음 — `prod-ap-seoul`는 Singapore(sin1). KR-home 사용자는 smart-router가 `503`으로 전면 차단, PII 미저장. §12A 상세 참조. |
+| PIPA | 한국 | 국외 이전 시 동의, 안전성 확보 | **부분 충족, 재검토 필요 (accepted risk, GitHub #5)**: ADR-0007로 DB·cache·미디어 메타데이터는 AWS Seoul(ap-northeast-2)에 저장된다. 이전 Hetzner sin1 배포와 smart-router KR 503 차단은 9.1에서 폐기되어 더는 존재하지 않는다. 다만 TLS 종단은 국외 Cloudflare PoP일 수 있고 R2 `apac`은 location hint일 뿐이다(§3.6 R10). 법적 판단과 동의 흐름은 9.9 전에 owner가 확인한다(#5).|
 | APPI | 일본 | 제3자 제공 제한, 국외 이전 규정 | JP 리전 저장. 적정성 인정국 간 전달. |
 | CCPA/CPRA | 미국 CA | 삭제권, 판매 거부 | US 리전 확장 시 적용. |
 | Online Safety Act | 영국 | E2EE 스캔 의무 논란 | 기술적으로 불가 (서버 zero-knowledge). 법적 동향 모니터링. |
