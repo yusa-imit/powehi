@@ -404,4 +404,27 @@ mod tests {
         assert_eq!(c.sent_since_update(), u32::MAX);
         assert!(update_due(&c, 1));
     }
+
+    proptest::proptest! {
+        /// `update_due` equals its stated rule for every counter, clock and record age,
+        /// including a clock before the record and a counter at the saturation limit.
+        #[test]
+        fn update_due_matches_the_policy_model(
+            count in proptest::prop_oneof![0u32..=60, (u32::MAX - 2)..=u32::MAX],
+            started in proptest::option::of(0u64..=u64::MAX / 2),
+            now in 0u64..=u64::MAX,
+        ) {
+            let mut c = conv();
+            if let Some(at) = started {
+                c.note_self_update(at);
+            }
+            c.set_sent_for_test(count);
+            let age_due = started.is_some_and(|at| count > 0
+                && now.saturating_sub(at) >= MAX_UPDATE_AGE_SECS);
+            proptest::prop_assert_eq!(
+                update_due(&c, now),
+                count >= MAX_MESSAGES_PER_UPDATE || age_due
+            );
+        }
+    }
 }
