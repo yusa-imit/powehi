@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 723 (2026-11-01, FEATURE, nothing unblocked) — #243 dedicated DB role runbook
+Phase 8 remainder (8.15 #166/#161, 8.17 #203, 8.19 #208) and Phase 9 (9.9+) all wait on owner. Took bug #243's open half: `docs/guides/operations.md` gains the `powehi_app` role procedure (unrun, docs only; no review agent needed). Issue stays open until a deployed DB runs it.
+
 ## Cycle 704 (2026-10-31, FEATURE) — Phase 9.2 OpenTofu layout, bootstrap, CI
 - Session started with an uncommitted 9.2 tree (not mine): preserved on `wip/infra-bootstrap-9-2-20261031`, then shipped from `feat/infra-bootstrap-9-2` (bootstrap/ state bucket+KMS, OIDC, env deploy roles + boundaries + guardrails, plan role, budget; envs/{staging,prod}; ci-infra.yml fmt/validate/tflint/trivy/tofu test). Local: fmt, validate x3, `tofu test` 14 pass; tflint/trivy only run in CI. security-auditor run in-session. Phase 8 remainder still blocked on need-human (#166/#161, #203, #208). #237 (prod gate self-approval) blocks 9.9 only. Next: 9.3 network+data modules.
 
