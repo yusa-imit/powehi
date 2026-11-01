@@ -318,4 +318,47 @@ mod tests {
         let f = file_with(b"x");
         assert_eq!(set_lflag(&f, libc::ECHO).err(), Some(PromptError::NoTty));
     }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// Anything that is not y/yes after trim+lowercase never confirms.
+            #[test]
+            fn is_yes_matches_only_the_two_spellings(s in "\\PC{0,12}") {
+                let norm = s.trim().to_ascii_lowercase();
+                prop_assert_eq!(is_yes(&s), norm == "y" || norm == "yes");
+            }
+
+            /// A line without newline, CR or NUL tricks round-trips and consumes only itself.
+            #[test]
+            fn read_line_round_trips_valid_lines(
+                line in "[^\\r\\n]{1,64}",
+                rest in "[a-z]{0,16}",
+            ) {
+                let raw = format!("{line}\n{rest}");
+                let mut f = file_with(raw.as_bytes());
+                prop_assert_eq!(&**read_line(&mut f).unwrap(), line.as_str());
+                if !rest.is_empty() {
+                    prop_assert_eq!(&**read_line(&mut f).unwrap(), rest.as_str());
+                }
+            }
+
+            /// Any byte soup is either a bounded valid-UTF-8 line or a typed error, never a panic.
+            #[test]
+            fn read_line_is_total_and_bounded(raw in proptest::collection::vec(any::<u8>(), 0..1100)) {
+                match read_line(&mut file_with(&raw)) {
+                    Ok(l) => {
+                        prop_assert!(!l.is_empty() && l.len() <= MAX_LINE_LEN);
+                        prop_assert!(!l.contains('\n'));
+                    }
+                    Err(e) => prop_assert!(matches!(
+                        e,
+                        PromptError::Empty | PromptError::TooLong | PromptError::NotUtf8
+                    )),
+                }
+            }
+        }
+    }
 }
