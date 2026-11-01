@@ -109,7 +109,7 @@ jobs:
           echo "hashes=$(base64 -w0 SHA256SUMS)" >> "$GITHUB_OUTPUT"
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9  # v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac  # v3
 
       # One keyless signature per binary and one over SHA256SUMS; each .sigstore.json
       # bundle carries the certificate and the Rekor entry.
