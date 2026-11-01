@@ -2024,3 +2024,7 @@ main CI green; `cargo audit`/`cargo deny`/clippy clean. Added a proptest for `Pi
 
 ## Cycle 719 (2026-11-01, FEATURE) — 9.12 slice: action pins
 All SHA pins are commits not tag objects (also cargo-deny-action 3c63498, pnpm/action-setup b906aff; rust-cache v2 d1527c8, cosign-installer v3 398d4b0, rust-toolchain stable-branch b725eda for no-input uses). 8.x/9.x boxes remain blocked on need-human / live cloud. Remaining 9.12 findings: ecs-deploy family revision, deploy role GetSecretValue scope, plan comment, VPC flow logs, stale prd text.
+
+## Cycle 720 (2026-11-01, STABILIZATION)
+- CI green on main; clippy, cargo audit, cargo deny clean. No bug issue actionable except #243 (dedicated app DB role, infra, still open).
+- Shipped proptest for `powehi-config` region_id validation (safe-segment boundary used by orphan sweep prefix scoping).
