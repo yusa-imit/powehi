@@ -2048,3 +2048,6 @@ All SHA pins are commits not tag objects (also cargo-deny-action 3c63498, pnpm/a
 ## Cycle 725 (2026-11-02, STABILIZATION)
 - CI green on main; clippy, cargo audit, cargo deny clean. Only open `bug` is #243 (dedicated app DB role, procedure documented in #261; infra action remains). target/ 29G (<20G prune threshold exceeded only by old-artifact rule; no files >7d to prune).
 - Shipped proptests for CLI `prompt.rs` (`is_yes` exact-spelling, `read_line` round-trip and totality/bound). Test-only.
+
+## Cycle 727 (2026-11-02, STABILIZATION-style) — proptest for pcs::update_due
+- Phase 8 remainder (8.15 #166/#161, 8.17 #203, 8.19 #208) and 9.9+ still wait on owner. cargo audit/deny clean. Added `update_due_matches_the_policy_model` (test only).
