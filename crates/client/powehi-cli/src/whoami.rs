@@ -78,4 +78,50 @@ mod tests {
         )
         .unwrap();
     }
+
+    mod props {
+        use proptest::prelude::*;
+
+        use super::*;
+
+        proptest! {
+            /// Whatever the profile name holds, the JSON report is one line that round-trips
+            /// all four fields, and the text report is four `key: value` lines for a plain name.
+            #[test]
+            fn both_formats_round_trip(
+                profile in "[a-zA-Z0-9_.-]{1,32}",
+                u in 1u128..,
+                d in 1u128..,
+            ) {
+                let server = url::Url::parse("https://example.test/").unwrap();
+                let (u, d) = (Uuid::from_u128(u), Uuid::from_u128(d));
+                let mut j = Vec::new();
+                report(&profile, &server, u, d, true, &mut j).unwrap();
+                prop_assert_eq!(j.iter().filter(|b| **b == b'\n').count(), 1);
+                let v: serde_json::Value = serde_json::from_slice(&j).unwrap();
+                prop_assert_eq!(v["profile"].as_str(), Some(profile.as_str()));
+                let (us, ds) = (u.to_string(), d.to_string());
+                prop_assert_eq!(v["user"].as_str(), Some(us.as_str()));
+                prop_assert_eq!(v["device"].as_str(), Some(ds.as_str()));
+                let mut t = Vec::new();
+                report(&profile, &server, u, d, false, &mut t).unwrap();
+                let t = String::from_utf8(t).unwrap();
+                prop_assert_eq!(t.lines().count(), 4);
+                let first = format!("profile: {profile}\n");
+                prop_assert!(t.starts_with(&first));
+            }
+
+            /// Even a hostile profile string cannot break the JSON report out of one line.
+            #[test]
+            fn json_stays_one_line_for_any_profile(profile in ".{1,40}") {
+                let server = url::Url::parse("https://example.test/").unwrap();
+                let mut j = Vec::new();
+                report(&profile, &server, Uuid::from_u128(1), Uuid::from_u128(2), true, &mut j)
+                    .unwrap();
+                prop_assert_eq!(j.iter().filter(|b| **b == b'\n').count(), 1);
+                let v: serde_json::Value = serde_json::from_slice(&j).unwrap();
+                prop_assert_eq!(v["profile"].as_str(), Some(profile.as_str()));
+            }
+        }
+    }
 }
