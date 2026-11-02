@@ -307,3 +307,52 @@ fn report_prints_ids_and_ages_only() {
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["received_at"], 90);
 }
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
+
+    /// `resolve` agrees with a plain model: a case-insensitive, trimmed prefix of at least four
+    /// hex/hyphen characters names exactly the stored ids it prefixes; zero hits is
+    /// `NoSuchRequest`, two or more is `Ambiguous`, and it never panics on any text.
+    #[test]
+    fn resolve_matches_a_prefix_model(
+        ids in proptest::collection::btree_set(proptest::prelude::any::<u128>(), 1..6),
+        pick in 0usize..6,
+        cut in 0usize..=36,
+        upper in proptest::prelude::any::<bool>(),
+        junk in "\\PC{0,12}",
+        use_junk in proptest::prelude::any::<bool>(),
+    ) {
+        let (_tmp, store) = open_store();
+        for id in &ids {
+            save_new(&store, &req(*id, 1)).unwrap();
+        }
+        let ids: Vec<Uuid> = ids.into_iter().map(Uuid::from_u128).collect();
+        let full = ids[pick % ids.len()].hyphenated().to_string();
+        let mut typed = if use_junk { junk } else { full[..cut].to_string() };
+        if upper {
+            typed = typed.to_ascii_uppercase();
+        }
+        let wanted = typed.trim().to_ascii_lowercase();
+        let valid = wanted.len() >= MIN_PREFIX_LEN
+            && wanted.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-');
+        let hits: Vec<&Uuid> = ids
+            .iter()
+            .filter(|i| valid && i.hyphenated().to_string().starts_with(&wanted))
+            .collect();
+        match (resolve(&store, &typed), hits.as_slice()) {
+            (Ok(got), [one]) => proptest::prop_assert_eq!(got, **one),
+            (Err(RequestError::NoSuchRequest), []) => {}
+            (Err(RequestError::Ambiguous), [_, _, ..]) => {}
+            (other, hits) => proptest::prop_assert!(false, "{other:?} vs {} hits", hits.len()),
+        }
+    }
+
+    /// A request is expired exactly when its age exceeds the TTL; a clock before the receipt
+    /// (skew) is never expired, and no input overflows.
+    #[test]
+    fn expiry_is_the_age_threshold(at in proptest::prelude::any::<u64>(), now in proptest::prelude::any::<u64>()) {
+        let expired = is_expired(&req(1, at), now);
+        proptest::prop_assert_eq!(expired, now > at && now - at > REQUEST_TTL_SECS);
+    }
+}

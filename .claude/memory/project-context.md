@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 738 (2026-11-03, FEATURE, nothing unblocked) — proptest requests
+8.15 (#166), 8.17 (#203), 8.19 (#208), 9.9-9.11 still wait on the owner. Closed leftover PR #275 (already on main). Added proptests for `requests::resolve` (prefix model) and `is_expired` (age threshold). cargo audit/deny clean (#163 waiver only).
+
 ## Cycle 729 (2026-11-02, FEATURE, nothing unblocked) — prd Helm refs
 8.15 (#166), 8.17 (#203), 8.19 (#208) still wait on the owner; 8.22/8.23 depend on them. Replaced two stale Helm
 references in prd (§3 pending-removal sweep, §4 orphan sweep kill switch) with the `POWEHI__*` env vars.
