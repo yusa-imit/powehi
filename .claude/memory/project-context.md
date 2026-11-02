@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 739 (2026-11-03, FEATURE, nothing unblocked) — proptest media_recv
+8.15 (#166), 8.17 (#203), 8.19 (#208) still wait on the owner. Added proptests for `media_recv::open`: seal/open round trip within `max_ciphertext_len`, and every bit flip, truncation or extension is `Corrupt`. Test-only.
+
 ## Cycle 738 (2026-11-03, FEATURE, nothing unblocked) — proptest requests
 8.15 (#166), 8.17 (#203), 8.19 (#208), 9.9-9.11 still wait on the owner. Closed leftover PR #275 (already on main). Added proptests for `requests::resolve` (prefix model) and `is_expired` (age threshold). cargo audit/deny clean (#163 waiver only).
 
