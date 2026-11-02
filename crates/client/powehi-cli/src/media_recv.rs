@@ -186,6 +186,39 @@ mod tests {
         assert!(matches!(open(&p, &[]), Err(RecvFileError::Corrupt)));
     }
 
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
+
+        /// Seal then open returns the plaintext, within the ciphertext cap the descriptor allows.
+        #[test]
+        fn open_inverts_seal_within_cap(plain in proptest::collection::vec(0u8..=255, 1..4096)) {
+            let (p, ct) = payload_for(&plain);
+            proptest::prop_assert!(ct.len() as u64 <= max_ciphertext_len(&p));
+            proptest::prop_assert!(*open(&p, &ct).unwrap() == plain);
+        }
+
+        /// Any single flipped bit, or any truncation or extension, is `Corrupt`, never plaintext.
+        #[test]
+        fn open_rejects_every_mutation(
+            plain in proptest::collection::vec(0u8..=255, 1..512),
+            at in 0usize..4096,
+            bit in 0u8..8,
+            cut in 0usize..4096,
+            extra in 1u8..=255,
+        ) {
+            let (p, ct) = payload_for(&plain);
+            let mut flipped = ct.clone();
+            let idx = at % flipped.len();
+            flipped[idx] ^= 1 << bit;
+            proptest::prop_assert!(matches!(open(&p, &flipped), Err(RecvFileError::Corrupt)));
+            let short = &ct[..cut % ct.len()];
+            proptest::prop_assert!(matches!(open(&p, short), Err(RecvFileError::Corrupt)));
+            let mut long = ct.clone();
+            long.push(extra);
+            proptest::prop_assert!(matches!(open(&p, &long), Err(RecvFileError::Corrupt)));
+        }
+    }
+
     #[test]
     fn download_url_rule() {
         let server = Url::parse("http://127.0.0.1:8080/").unwrap();
