@@ -179,12 +179,31 @@ jobs:
           fi
           [ -n "${TF_VAR_alert_email:-}" ] || unset TF_VAR_alert_email
           printf '%s' "$TFVARS_JSON" > apply.auto.tfvars.json
-          tofu plan -input=false -no-color -out=tfplan
+          # The repo is public and so is this log: the full plan carries account and zone ids,
+          # ARNs and endpoints. Keep it in a file; print change headlines and totals only.
+          code=0
+          tofu plan -input=false -no-color -out=tfplan > plan.txt 2>&1 || code=$?
+          grep -E '^Plan: |^No changes\.' plan.txt || true
+          grep -E '^  # \S.* (will be|must be) ' plan.txt | cut -c1-200 | head -n 200 || true
+          # Error text carries ids and ARNs: only say that it failed.
+          if grep -q '^Error: ' plan.txt; then echo "tofu plan reported errors; rerun it locally"; fi
+          rm -f plan.txt
+          exit "$code"
       - name: tofu apply (the saved plan only)
         working-directory: infra/terraform/envs/staging
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: tofu apply -input=false -no-color tfplan
+        run: |
+          # Same rule as the plan step: resource ids stay out of the public log.
+          code=0
+          tofu apply -input=false -no-color tfplan > apply.txt 2>&1 || code=$?
+          # Address and verb only: the trailing [id=...] is an ARN or a Cloudflare id.
+          grep -E '^Apply complete!' apply.txt || true
+          sed -nE 's/^([^ :]+): (Creating|Modifying|Destroying)\.\.\..*/\1: \2.../p' apply.txt \
+            | cut -c1-200 | head -n 500 || true
+          if grep -q '^Error: ' apply.txt; then echo "tofu apply reported errors; rerun the plan locally"; fi
+          rm -f apply.txt
+          exit "$code"
       - name: Staging API URL
         id: url
         run: |
