@@ -2058,3 +2058,6 @@ All SHA pins are commits not tag objects (also cargo-deny-action 3c63498, pnpm/a
 
 ## Cycle 728 (FEATURE, 2026-11-02)
 - Phase 8 still blocked (#166/#161/#203/#208). 9.12 slice: prd §13.3 observability rewritten to CloudWatch/SNS/CF health check (docs only). Remaining 9.12: flow logs, GetSecretValue scope, ecs-deploy wedge, repo settings (#253).
+
+## Cycle 730 (2026-11-02, STABILIZATION)
+- CI green; audit/deny clean; only open bug #243 (infra action). Added proptests for screen.rs (wanted model, alt-screen framing). Test only.
