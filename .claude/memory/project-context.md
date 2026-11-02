@@ -2070,3 +2070,6 @@ Every unchecked Phase 8 item (8.15, 8.17, 8.19, 8.22, 8.23) waits on #166/#203/#
 
 ## Cycle 734 (2026-11-02, FEATURE mode, nothing unblocked)
 Same state as cycle 733: 8.15, 8.17, 8.19, 8.22, 8.23 wait on #166/#203/#208 (no owner answers). Ran stabilization: `cargo audit` / `cargo deny check` clean. Added `verify::tests::props` (proptest on `number_from_keys`): no number without our own key, pair number symmetric, pair of any other size fails closed, group number independent of roster order and viewer. Tests only.
+
+## Cycle 735 (2026-11-02, STABILIZATION) — conversation::select proptest
+Model-based proptest (24 cases) for `conversation::select`: unread/read/role/prefix filters then offset/limit window vs plain iterator model. Test-only. #243 TLS part already fixed in #246; remaining app-DB-role item is infra.
