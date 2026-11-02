@@ -115,6 +115,34 @@ impl Drop for SignalGuard {
 mod tests {
     use super::*;
 
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn wanted_matches_model(tty in any::<bool>(), json in any::<bool>()) {
+            prop_assert_eq!(wanted(tty, json), tty && !json);
+        }
+
+        #[test]
+        fn body_is_framed_only_when_active(
+            active in any::<bool>(),
+            body in proptest::collection::vec(0x20u8..0x7f, 0..64),
+        ) {
+            let mut buf = Vec::new();
+            {
+                let mut s = AltScreen::enter(&mut buf, active).unwrap();
+                prop_assert_eq!(s.is_active(), active);
+                s.out().write_all(&body).unwrap();
+            }
+            let expect = if active {
+                [ENTER, &body[..], LEAVE].concat()
+            } else {
+                body.clone()
+            };
+            prop_assert_eq!(buf, expect);
+        }
+    }
+
     #[test]
     fn only_interactive_non_json() {
         assert!(wanted(true, false));
