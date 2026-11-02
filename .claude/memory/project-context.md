@@ -2064,3 +2064,6 @@ All SHA pins are commits not tag objects (also cargo-deny-action 3c63498, pnpm/a
 
 ## Cycle 732 (2026-11-02, FEATURE) — 8.23 slice 1
 - Phase 8 still blocked (#166/#203/#208/#161); 8.22 legs blocked (media needs TLS on MinIO or owner knob). Ran threat-model-checker over shipped 8.1-8.21: YELLOW. Docs only: prd §3.3 + §7A.3 updated. Key open risk: `group remove` leaves the device a DS member (CAS lock-out, fan-out metadata) — fix or accept before groups reach Phase 9 users. Agent needs a "stop and report" nudge if it hits its turn limit.
+
+## Cycle 733 (2026-11-02, FEATURE mode, nothing unblocked)
+Every unchecked Phase 8 item (8.15, 8.17, 8.19, 8.22, 8.23) waits on #166/#203/#208 with no owner answer, so the cycle ran stabilization work. `cargo audit` and `cargo deny check` clean. Added `tui::tests::app_props`, a seeded model-style proptest over key/push/set_rows/open_verify sequences. Checked: bounded input/rows/lines, selection valid, and no `Send` for CHANGED, blank, control-char, or verify-pane-open states. Mutation-checked by disabling the CHANGED gate.

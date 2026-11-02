@@ -497,3 +497,95 @@ mod paint_props {
         }
     }
 }
+
+mod app_props {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    #[derive(Debug, Clone)]
+    enum Op {
+        Key(Key),
+        Push(usize, String),
+        Rows(Vec<usize>),
+        Verify(usize),
+    }
+
+    fn key() -> impl Strategy<Value = Key> {
+        prop_oneof![
+            Just(Key::Up),
+            Just(Key::Down),
+            Just(Key::Enter),
+            Just(Key::Backspace),
+            Just(Key::Esc),
+            Just(Key::Verify),
+            any::<char>().prop_map(Key::Char),
+        ]
+    }
+
+    fn op() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            8 => key().prop_map(Op::Key),
+            1 => (0usize..4, ".{0,16}").prop_map(|(i, t)| Op::Push(i, t)),
+            1 => proptest::collection::vec(0usize..4, 0..5).prop_map(Op::Rows),
+            1 => (0usize..4).prop_map(Op::Verify),
+        ]
+    }
+
+    fn pool() -> Vec<Row> {
+        [
+            Mark::Verified,
+            Mark::Unverified,
+            Mark::Changed,
+            Mark::Verified,
+        ]
+        .into_iter()
+        .map(row)
+        .collect()
+    }
+
+    fn check(app: &App) -> Result<(), TestCaseError> {
+        prop_assert!(app.rows.len() <= MAX_ROWS);
+        prop_assert!(app.input_len() <= crate::message::MAX_BODY_LEN);
+        prop_assert_eq!(app.selected_id().is_some(), !app.rows.is_empty());
+        prop_assert!(app.shown.values().all(|l| l.len() <= MAX_LINES));
+        if let Some(p) = &app.verify {
+            prop_assert_eq!(Some(p.group), app.selected_id());
+        }
+        Ok(())
+    }
+
+    proptest! {
+        /// Any key / push / list-refresh / verify sequence keeps the view-model bounded and
+        /// consistent, and a `Send` is never emitted for a CHANGED conversation, a blank
+        /// line, a line holding control characters, or while the verify pane is open.
+        #[test]
+        fn random_sequences_keep_invariants(ops in proptest::collection::vec(op(), 0..120)) {
+            let pool = pool();
+            let mut app = App::new(pool.clone());
+            for o in ops {
+                let pane_open = app.verify_open();
+                match o {
+                    Op::Key(k) => match app.press(k) {
+                        Action::Send { group, text } => {
+                            prop_assert!(!pane_open);
+                            prop_assert!(!text.trim().is_empty());
+                            prop_assert!(!text.chars().any(char::is_control));
+                            let r = pool.iter().find(|r| r.id == group).unwrap();
+                            prop_assert!(r.mark != Mark::Changed);
+                            prop_assert_eq!(app.input_len(), 0);
+                        }
+                        Action::Verify { group } => {
+                            prop_assert_eq!(Some(group), app.selected_id());
+                        }
+                        Action::None | Action::Quit | Action::Confirm { .. } => {}
+                    },
+                    Op::Push(i, t) => app.push_message(pool[i].id, "peer".into(), z(&t)),
+                    Op::Rows(ix) => app.set_rows(ix.iter().map(|&i| pool[i].clone()).collect()),
+                    Op::Verify(i) => app.open_verify(pool[i].id, "0".repeat(83)),
+                }
+                check(&app)?;
+            }
+        }
+    }
+}
