@@ -1578,4 +1578,72 @@ mod tests {
             ));
         }
     }
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(24))]
+
+            /// `select` equals a plain model: sort ids, filter by unread/role/prefix, then window.
+            #[test]
+            fn select_matches_filter_then_window_model(
+                specs in proptest::collection::vec((any::<bool>(), 0usize..4), 0..8),
+                only_unread in any::<bool>(),
+                read in any::<bool>(),
+                role_pick in 0u8..3,
+                prefix_len in proptest::option::of(0usize..3),
+                offset in 0usize..10,
+                limit in proptest::option::of(0usize..10),
+            ) {
+                let tmp = tempfile::tempdir().unwrap();
+                let store = open(&tmp);
+                let mut model: Vec<(Uuid, Role, usize)> = Vec::new();
+                let mut unread = BTreeMap::new();
+                for (creator, n) in specs {
+                    let id = Uuid::new_v4();
+                    let role = if creator { Role::Creator } else { Role::Joiner };
+                    let conv = if creator {
+                        Conversation::new(id, Uuid::new_v4(), Role::Creator, None)
+                    } else {
+                        joiner(id)
+                    };
+                    save(&store, &conv).unwrap();
+                    if n > 0 {
+                        unread.insert(id, n);
+                    }
+                    model.push((id, role, n));
+                }
+                model.sort_by_key(|m| m.0);
+                let only_role = match role_pick {
+                    0 => None,
+                    1 => Some(Role::Creator),
+                    _ => Some(Role::Joiner),
+                };
+                let prefix = prefix_len.and_then(|n| {
+                    model.first().map(|m| m.0.to_string()[..n].to_string())
+                });
+                let page = Page {
+                    offset,
+                    limit,
+                    prefix: prefix.clone(),
+                    read,
+                    ..Page::default()
+                };
+                let got = select(&store, &unread, only_unread, false, only_role, page).unwrap();
+                let want: Vec<(Uuid, Role)> = model
+                    .iter()
+                    .filter(|m| !only_unread || m.2 > 0)
+                    .filter(|m| !read || m.2 == 0)
+                    .filter(|m| only_role.is_none_or(|r| r == m.1))
+                    .filter(|m| prefix.as_ref().is_none_or(|p| m.0.to_string().starts_with(p)))
+                    .skip(offset)
+                    .take(limit.unwrap_or(usize::MAX))
+                    .map(|m| (m.0, m.1))
+                    .collect();
+                let got: Vec<(Uuid, Role)> = got.into_iter().map(|g| (g.0, g.1)).collect();
+                prop_assert_eq!(got, want);
+            }
+        }
+    }
 }
