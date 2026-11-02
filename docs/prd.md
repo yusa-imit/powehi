@@ -171,7 +171,7 @@
 - ❌ **로컬 저장소 쓰기 접근을 통한 MLS provider-state 스냅샷의 wholesale 리플레이** (T4 로컬 침해 경계 내, 이 단계에서 미방어): XSS 또는 로컬 디바이스 접근으로 IndexedDB에 직접 쓸 수 있는 공격자가 이전에 캡처한(여전히 AES-GCM 인증이 유효한) 오래된 MLS provider-state envelope 전체를 리로드 시점에 통째로 복원하는 경우. envelope에 번들된 monotonic `generation` 카운터는 카운터만 독립적으로 롤백하는 변종(AEAD로 blob과 함께 인증됨)은 막지만, 리로드 후 첫 import 시점에는 클라이언트 단독으로 신뢰 가능한 freshness floor가 0이므로(서버/하드웨어 앵커 부재) envelope 통째 리플레이는 방어하지 않음 → 오래된 ratchet 위치로 되돌아가 AEAD nonce/key 재사용 가능. 세션 내에서는 in-session high-water-mark로 두 번째 import의 롤백을 차단함. **완화(추후 단계로 연기, 추적 항목)**: 로그인 시 서버가 per-device monotonic generation high-water-mark를 반환해 import floor로 사용 (`import_provider_state`의 `min_generation` 배관이 이미 end-to-end로 존재하므로 서버 앵커 연동은 additive). 근거: crypto-reviewer approve + threat-model-checker ACCEPT-WITH-CONDITIONS.
 - ❌ **터미널 scrollback·세션 복원·로그에 남는 평문 (CLI, §7A.3)** (T4 경계): `powehi read`/`chat`이 출력한 수신 본문, `chat`에서 입력해 터미널이 echo한 본문, `Handle:` 입력, `invite create`가 출력한 초대 링크(24시간 유효한 bearer capability)는 터미널 scrollback, tmux/screen history, 기본값으로 디스크에 기록되는 세션 복원 파일(macOS Terminal.app, iTerm2 등), 로그 리다이렉트에 평문으로 남을 수 있음. profile store 밖의 사본은 암호화하거나 지울 수 없으며, 복구 문구 표시 후 화면 소거는 best-effort. 8.8b부터 복구 문구는 같은 디스크의 profile store도 연다(`keys.wk3` 복구 슬롯, 아래 W1) — 문구 잔여물과 profile 디렉터리 사본(Time Machine, rsync)이 함께 있으면 로컬 기록이 열림.
 - ⚠️ **CLI profile store의 record 단위 롤백·삭제·혼합·재주입** (T4 로컬 쓰기 접근; 8.8a manifest가 `open`/`get`에서 탐지하나 포맷을 아는 공격자에게는 아래 ①②가 남음). ① store 전체 스냅샷 리플레이: `generation`은 어떤 floor와도 비교되지 않으므로 임의의 과거 manifest + 그 시점의 record 집합이 통과함 — 영구 accepted risk(서버/하드웨어 앵커 필요, 8.8b도 해결하지 않음). ② 다운그레이드: manifest와 `store-v3` latch record를 지워 PHS2 store로 보이게 하는 공격 — 8.8b에서 PHS2 자동 채택이 제거되어(키 파일 `keys.wk3`가 있는 store는 record가 하나라도 남아 있으면 manifest가 없을 때 `ManifestMissing`(전부 지우면 빈 store로 초기화되나 login이 `NotRegistered`로 실패), 키 파일이 없고 record가 있는 store는 `UpgradeRequired`) 사용자가 업그레이드를 명시적으로 확인해야만 채택됨. 남는 위험: 사용자가 그 확인에 y로 답하는 경우, 그리고 8.8b 이전 키(`export_key` 파생)를 그대로 쓰는 업그레이드된 store에서 키 파일·manifest·latch를 모두 지운 경우(새로 만들었거나 8.8c rekey를 마친 store는 무작위 키라 불가; 복구 슬롯이 있는 업그레이드 store는 8.18까지 남음). 우발적 부분 복원(Time Machine, rsync 충돌)과 포맷을 모르는 공격자는 8.8a부터 차단. 원래 위협 설명: AAD는 `profile‖tag`(`tag = HMAC(name_key, name)`, 파일명)만 묶으므로 디렉터리 쓰기 권한자는 키 없이 과거 record를 개별 복원·삭제할 수 있음(파일명이 불투명해져 특정 record를 고르려면 크기·mtime 추측이 필요하지만, 같은 크기 부류 일괄 삭제는 여전히 가능) — (a) 표시 후 삭제된 `rx-*` 재표시, (b) `verified-*` 삭제로 CHANGED 경보 없이 Unverified로 강등, (c) `conv-*`/`pq-keys` 롤백으로 1회용 ML-KEM decapsulation key 부활, (d) `mls-provider` 단독 롤백. 위조는 불가(AES-GCM).
-- ❌ **CLI 로컬 삭제는 암호학적 소거가 아님**: unlink/rename된 record는 해제 블록에 ciphertext로 남을 수 있고 store key(번들)는 store 수명 동안 고정이며 비밀번호 변경(`rewrap_password`)으로도 회전되지 않으므로(8.8c rekey는 번들을 한 번 교체하지만 효과는 이후 비밀번호 변경 때 나타나며, 옛 파일·옛 키 파일 사본은 소거하지 않음), 나중에 key를 얻은 공격자(T3+T4 오프라인 사전 공격, 복구 문구 등)는 지운 메시지와 과거 ratchet 상태를 복원할 수 있음. CLI 1:1은 peer의 순수 self-Update Commit만 적용하고(8.14) 자체 Update 송신은 8.15부터이므로, CLI 쪽 compromise는 그때까지 치유되지 않음(§7A.3).
+- ❌ **CLI 로컬 삭제는 암호학적 소거가 아님**: unlink/rename된 record는 해제 블록에 ciphertext로 남을 수 있고 store key(번들)는 store 수명 동안 고정이며 비밀번호 변경(`rewrap_password`)으로도 회전되지 않으므로(8.8c rekey는 번들을 한 번 교체하지만 효과는 이후 비밀번호 변경 때 나타나며, 옛 파일·옛 키 파일 사본은 소거하지 않음), 나중에 key를 얻은 공격자(T3+T4 오프라인 사전 공격, 복구 문구 등)는 지운 메시지와 과거 ratchet 상태를 복원할 수 있음. CLI 1:1은 peer의 순수 self-Update Commit만 적용하고(8.14) 자체 Update 송신은 8.15(CLI 배선 미완, #166)이므로, CLI 쪽 compromise는 그때까지 치유되지 않음(§7A.3).
 - ❌ **CLI profile store 파일시스템 메타데이터** (T4): profile 이름, record 개수·크기(수신 본문 길이에 비례, `pq-keys` 크기 = 미사용 KeyPackage 수), mtime. record 이름(`group_id`/`envelope_id` 포함)은 더 이상 파일명에 평문으로 나타나지 않으나(F1, `<tag>.rc2`), 개수·크기·mtime 상관(특히 `pq-keys` 크기)으로 서버 데이터와의 통계적 연결은 남음. 마이그레이션 전 옛 파일명은 백업·스냅샷·해제 블록에 남을 수 있음. rekey(8.8c) 중에는 `rekey.new/`·`rekey.go`가 잠시 보이고, 이후 모든 record 파일명이 일괄 변경되어 8.8b 이전 profile이었음과 첫 login 시점이 드러남. `keys.wk3`(8.8b)의 존재·크기(비밀번호 슬롯만 129 B, 복구 슬롯 포함 253 B)·mtime은 store 버전, 복구 슬롯 유무(8.8b 이후 `register`로 만든 profile인지), 생성·업그레이드·rewrap 시점을 드러냄(슬롯은 store를 열기 위해 store 밖에서 읽혀야 하므로 불가피).
 
 ### 3.3 메타데이터 노출 한계
@@ -207,7 +207,7 @@
 - 사용자의 연락처 목록
 - 발신자가 누구인지 (Sealed Sender 적용 시 — 단, 후술하는 한계 있음)
 
-**CLI 추가 노출 (ADR-0006, threat-model-checker 7.11):** CLI는 세션을 저장하지 않으므로 모든 명령(서버 트래픽이 필요 없는 `read`/`verify` 포함)이 OPAQUE 로그인 후 새 24시간 세션 토큰을 받고 종료 시 폐기하지 않음 — 서버는 로그인 시점을 사용자 행동 단위 해상도로 보며, 세션 저장소에 최근 24시간 실행 횟수만큼 유효 세션이 남음(추적: revoke 엔드포인트). CLI는 User-Agent/Origin이 없고 `/v1/ws`는 `chat` 실행 중에만 연결되므로 서버는 CLI 사용 여부와 REPL이 열린 구간을 구분할 수 있음. 내용·연락처에 대한 새 정보는 없음.
+**CLI 추가 노출 (ADR-0006, threat-model-checker 7.11):** CLI는 세션을 저장하지 않으므로 모든 명령(서버 트래픽이 필요 없는 `read`/`verify` 포함)이 OPAQUE 로그인 후 새 24시간 세션 토큰을 받음 — 서버는 로그인 시점을 사용자 행동 단위 해상도로 봄. 로그인한 명령은 종료 시 토큰을 폐기하며(`DELETE /v1/auth/session`, best effort, 8.4) 폐기가 실패하면 토큰은 24시간 유효함. `powehi tui`는 열려 있는 동안 약 5초마다 REST 폴링을 하므로 서버는 TUI 세션이 열린 구간을 5초 해상도로 봄(8.20). CLI는 User-Agent/Origin이 없고 `/v1/ws`는 `chat` 실행 중에만 연결되므로 서버는 CLI 사용 여부와 REPL이 열린 구간을 구분할 수 있음. 내용·연락처에 대한 새 정보는 없음.
 
 ### 3.4 Sealed Sender의 한계 (정직성)
 
@@ -1334,6 +1334,20 @@ crates/client/
   잔여 위험: 핀은 신뢰를 "Mozilla 전체 root"에서 "핀한 키의 CA"로 좁힐 뿐, 핀한 CA 자체의 오발급과
   TLS를 종단하는 Cloudflare는 여전히 신뢰함. Bearer는 OPAQUE 세션 키에 바인딩되지 않아 TLS MITM이
   성공하면 토큰을 얻을 수 있음(OPAQUE는 비밀번호·export_key만 보호). Cloudflare 관리 인증서의 핀 전략은 need-human 이슈로 추적.
+- **그룹·미디어 잔여 위험 (8.23 threat-model-checker, yellow)**:
+  ① `group remove`는 MLS Remove만 보내고 서버 멤버 DELETE를 호출하지 않음(device↔leaf 인증 매핑 없음).
+  제거된 디바이스는 DS 멤버로 남아 이후 그룹 envelope의 시각·크기를 계속 받고, 미디어 ACL과 ack 집합에
+  남으며, 서버 epoch에 Commit을 올려 CAS를 선점할 수 있음(남은 멤버는 이를 거부하지만 서버 epoch가
+  MLS epoch와 벌어져 `send_group`이 `GroupBehind`로 막힘) — 기밀성이 아니라 가용성 문제이며, 그룹이
+  Phase 9 사용자에게 가기 전에 서버 측 멤버 삭제 + CAS 가드로 고치거나 수용해야 함.
+  ② 그룹 정책: 어떤 멤버든 다른 멤버를 Add/Remove 가능(ADR-0005); allowlist는 멤버의 inline Add/Remove와
+  self-Update만 받고 GCE/PSK/ReInit과 by-reference 제안을 거부함. Applied/Evicted는 즉시 ack, Refused/Forked/Ahead는
+  24h grace 후 ack(§3.3 `envelope_acks`와 같은 범주).
+  ③ 미디어: CLI는 `powehi save`에서만 `confirm-download`를 호출하므로 CLI 수신자의 `media_acks`는 "사용자가
+  저장했다"를 뜻하고, 저장되지 않은 그룹 blob은 GC되지 않음(§9.4.3). 16 MiB 이하 단일 blob은 패딩되지 않아
+  서버·R2가 정확한 크기를 봄(청크 경로만 패딩, §9.4.2). 미디어 PUT/GET 클라이언트는 핀과 TLS 최소 버전이 없고
+  서버가 지정한 임의의 HTTPS 호스트를 받으며 무결성은 blob 해시에만 의존함(IP·시각이 제3자 호스트에 노출될 수
+  있음; 9.9에서 storage origin allowlist 검토). `powehi save`가 쓰는 `0600` 파일은 store 밖 평문이며 소거 불가(T4 경계).
 - **argv**: 대화 id(접두어)와 `--profile`은 argv에 들어가 셸 history와 `ps`에 노출됨(비밀은 아님).
   `echo 본문 | powehi send`는 본문을 history에 남기므로 대화형 입력(Ctrl-D)이나 파일 리다이렉트 사용.
 - **로컬 경로**: `<data_dir>/powehi/`와 profile 디렉터리는 0700이고 소유자 uid가 현재 사용자여야 하며,

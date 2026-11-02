@@ -469,6 +469,7 @@ pointing here. Close the issue in the PR that finishes its item.
   trip (the live stack's MinIO URL is plain http on another origin and the CLI refuses it by design:
   needs TLS on MinIO or an owner-approved test knob), self-Update (8.15 d/e, #166), second device (8.19, #208).
 - [ ] 8.23 threat-model-checker pass on Phase 8 as a whole; prd §3 and §7A updated.
+  Cycle 732 (slice 1): pass over the shipped 8.1-8.21 work: yellow. prd §3.3 (session revoke, TUI poll) and §7A.3 (group remove leaves the device a DS member, group policy, media save-ack, unpadded single blobs, unpinned media client, `save` plaintext) updated. Condition: fix or accept the removed-device DS membership before groups reach Phase 9 users. Box stays open: 8.15 d/e, 8.17 close-out, 8.19 are blocked on #166/#203/#208 and need a second pass.
 
 ## Not in Phase 8
 - Web feature work and web↔CLI interop (web stays in maintenance).

@@ -2061,3 +2061,6 @@ All SHA pins are commits not tag objects (also cargo-deny-action 3c63498, pnpm/a
 
 ## Cycle 730 (2026-11-02, STABILIZATION)
 - CI green; audit/deny clean; only open bug #243 (infra action). Added proptests for screen.rs (wanted model, alt-screen framing). Test only.
+
+## Cycle 732 (2026-11-02, FEATURE) — 8.23 slice 1
+- Phase 8 still blocked (#166/#203/#208/#161); 8.22 legs blocked (media needs TLS on MinIO or owner knob). Ran threat-model-checker over shipped 8.1-8.21: YELLOW. Docs only: prd §3.3 + §7A.3 updated. Key open risk: `group remove` leaves the device a DS member (CAS lock-out, fan-out metadata) — fix or accept before groups reach Phase 9 users. Agent needs a "stop and report" nudge if it hits its turn limit.
