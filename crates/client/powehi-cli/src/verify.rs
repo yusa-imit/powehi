@@ -547,4 +547,69 @@ mod tests {
             assert_eq!(v["safety_number"], n);
         }
     }
+
+    mod props {
+        use proptest::prelude::*;
+
+        use super::*;
+
+        fn key() -> impl Strategy<Value = Vec<u8>> {
+            prop::collection::vec(any::<u8>(), 32)
+        }
+
+        fn kind() -> impl Strategy<Value = Kind> {
+            prop_oneof![Just(Kind::Pair), Just(Kind::Group)]
+        }
+
+        proptest! {
+            /// Any roster, any kind: a typed result, never a panic; a roster without our own key
+            /// (or with a wrong-length key) is never given a number, except past the group cap
+            /// which is judged first.
+            #[test]
+            fn no_number_without_own_key(
+                keys in prop::collection::vec(key(), 0..8),
+                own in key(),
+                kind in kind(),
+            ) {
+                let r = number_from_keys(&keys, &own, kind);
+                if !keys.contains(&own) {
+                    prop_assert!(matches!(r, Err(VerifyError::GroupUnusable)));
+                }
+            }
+
+            /// A pair roster is symmetric: both members compute the same number.
+            #[test]
+            fn pair_number_is_symmetric(a in key(), b in key()) {
+                prop_assume!(a != b);
+                let ab = number_from_keys(&[a.clone(), b.clone()], &a, Kind::Pair).unwrap();
+                let ba = number_from_keys(&[b.clone(), a.clone()], &b, Kind::Pair).unwrap();
+                prop_assert_eq!(ab, ba);
+            }
+
+            /// A pair roster of any other size fails closed (8.16), whoever we are.
+            #[test]
+            fn pair_of_wrong_size_fails_closed(
+                keys in prop::collection::vec(key(), 3..8),
+                pick in any::<prop::sample::Index>(),
+            ) {
+                let own = keys[pick.index(keys.len())].clone();
+                prop_assert!(number_from_keys(&keys, &own, Kind::Pair).is_err());
+            }
+
+            /// A group number does not depend on the roster order or on who computes it.
+            #[test]
+            fn group_number_ignores_order_and_viewer(
+                keys in prop::collection::hash_set(key(), 2..8),
+                rot in 0usize..8,
+            ) {
+                let keys: Vec<Vec<u8>> = keys.into_iter().collect();
+                let mut rotated = keys.clone();
+                rotated.rotate_left(rot % keys.len());
+                let n0 = number_from_keys(&keys, &keys[0], Kind::Group).unwrap();
+                let n1 = number_from_keys(&rotated, &rotated[rotated.len() - 1], Kind::Group)
+                    .unwrap();
+                prop_assert_eq!(n0, n1);
+            }
+        }
+    }
 }

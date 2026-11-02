@@ -2067,3 +2067,6 @@ All SHA pins are commits not tag objects (also cargo-deny-action 3c63498, pnpm/a
 
 ## Cycle 733 (2026-11-02, FEATURE mode, nothing unblocked)
 Every unchecked Phase 8 item (8.15, 8.17, 8.19, 8.22, 8.23) waits on #166/#203/#208 with no owner answer, so the cycle ran stabilization work. `cargo audit` and `cargo deny check` clean. Added `tui::tests::app_props`, a seeded model-style proptest over key/push/set_rows/open_verify sequences. Checked: bounded input/rows/lines, selection valid, and no `Send` for CHANGED, blank, control-char, or verify-pane-open states. Mutation-checked by disabling the CHANGED gate.
+
+## Cycle 734 (2026-11-02, FEATURE mode, nothing unblocked)
+Same state as cycle 733: 8.15, 8.17, 8.19, 8.22, 8.23 wait on #166/#203/#208 (no owner answers). Ran stabilization: `cargo audit` / `cargo deny check` clean. Added `verify::tests::props` (proptest on `number_from_keys`): no number without our own key, pair number symmetric, pair of any other size fails closed, group number independent of roster order and viewer. Tests only.
