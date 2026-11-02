@@ -2073,3 +2073,6 @@ Same state as cycle 733: 8.15, 8.17, 8.19, 8.22, 8.23 wait on #166/#203/#208 (no
 
 ## Cycle 735 (2026-11-02, STABILIZATION) — conversation::select proptest
 Model-based proptest (24 cases) for `conversation::select`: unread/read/role/prefix filters then offset/limit window vs plain iterator model. Test-only. #243 TLS part already fixed in #246; remaining app-DB-role item is infra.
+
+## Cycle 736 (2026-11-03, FEATURE mode, nothing unblocked)
+8.15/8.17/8.19/8.22/8.23 still wait on #166/#203/#208/#161 (no new owner answers); no unblocked Phase 9 item (only #243 app DB role, infra). Added `status::tests::props` (region-id grammar vs model; accepted ids print clean in text and JSON reports). Test only. `cargo nextest` is not installed on this machine; used `cargo test`.
