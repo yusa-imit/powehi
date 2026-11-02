@@ -307,4 +307,39 @@ mod tests {
         assert_eq!(v["server"], "https://example.test/");
         assert_eq!(j.iter().filter(|b| **b == b'\n').count(), 1);
     }
+
+    mod props {
+        use proptest::prelude::*;
+
+        use super::*;
+
+        proptest! {
+            /// The charset gate is exactly `[a-z0-9-]{1,32}`, whatever the server sends.
+            #[test]
+            fn region_id_matches_grammar(id in ".{0,40}") {
+                let model = (1..=32).contains(&id.len())
+                    && id.chars().all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-'));
+                prop_assert_eq!(valid_region_id(&id), model);
+            }
+
+            /// An accepted id never carries a control byte into either report format, and the
+            /// JSON report stays one line that round-trips the id.
+            #[test]
+            fn accepted_ids_print_clean(id in "[a-z0-9-]{1,32}", healthy in any::<bool>()) {
+                prop_assert!(valid_region_id(&id));
+                let url = Url::parse("https://example.test/").unwrap();
+                let st = ServerStatus { healthy, region_id: id.clone() };
+                let mut t = Vec::new();
+                write_report(&url, &st, false, &mut t).unwrap();
+                prop_assert!(t.iter().all(|b| *b == b'\n' || (0x20..0x7f).contains(b)));
+                prop_assert_eq!(t.iter().filter(|b| **b == b'\n').count(), 3);
+                let mut j = Vec::new();
+                write_report(&url, &st, true, &mut j).unwrap();
+                prop_assert_eq!(j.iter().filter(|b| **b == b'\n').count(), 1);
+                let v: serde_json::Value = serde_json::from_slice(&j).unwrap();
+                prop_assert_eq!(v["region"].as_str(), Some(id.as_str()));
+                prop_assert_eq!(v["healthy"].as_bool(), Some(healthy));
+            }
+        }
+    }
 }
