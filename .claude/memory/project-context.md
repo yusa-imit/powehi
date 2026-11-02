@@ -2051,3 +2051,6 @@ All SHA pins are commits not tag objects (also cargo-deny-action 3c63498, pnpm/a
 
 ## Cycle 727 (2026-11-02, STABILIZATION-style) — proptest for pcs::update_due
 - Phase 8 remainder (8.15 #166/#161, 8.17 #203, 8.19 #208) and 9.9+ still wait on owner. cargo audit/deny clean. Added `update_due_matches_the_policy_model` (test only).
+
+## Cycle 728 (FEATURE, 2026-11-02)
+- Phase 8 still blocked (#166/#161/#203/#208). 9.12 slice: prd §13.3 observability rewritten to CloudWatch/SNS/CF health check (docs only). Remaining 9.12: flow logs, GetSecretValue scope, ecs-deploy wedge, repo settings (#253).

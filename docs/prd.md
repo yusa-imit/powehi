@@ -2046,34 +2046,27 @@ runbook에 기록한다. 리전 간 failover는 범위 밖이다.
 - 미디어 blob 내용 또는 파일명 추측 가능 정보
 - MLS 그룹 멤버십 관계의 평문 매핑
 
-### 13.3 관측 스택 (글로벌 계층화)
+### 13.3 관측 스택 (현행: 단일 리전 AWS 서울, ADR-0007)
 
 ```
-[리전 로컬 레이어]
-[App: Rust + tracing crate]
-       │
-       ▼ OTLP over HTTP
-[OpenTelemetry Collector (리전별)]
-       │
-       ├──► [Prometheus (리전)]  ← 리전 Grafana
-       ├──► [Loki (리전)]        ← 구조화 로그 (리전 로컬 보관)
-       └──► [Tempo (리전)]       ← 분산 트레이싱
-
-[중앙 집계 레이어]
-[OTEL Gateway (Central)]
-       │
-       ├──► [Central Prometheus]  ← 크로스 리전 대시보드
-       ├──► [Central Grafana]     ← 글로벌 뷰
-       └──► [Alert Manager]      ← 글로벌 알림
-
-[데이터 흐름]
-리전 OTEL Collector → (집계된 메트릭만, 로그 원본 X) → Central Gateway → Grafana
+[ECS Fargate task]  --stdout JSON (tracing)-->  CloudWatch Logs (환경별 log group)
+[ECS / RDS / ElastiCache] --metrics--> CloudWatch (Container Insights 포함)
+        │
+        ▼
+[CloudWatch alarms + EventBridge(task stopped)] --> SNS topic (KMS 암호화) --> 소유자 이메일
+[Cloudflare health check] --> 소유자 이메일 (엣지에서 본 가용성)
 ```
+
+모듈은 `infra/terraform/modules/monitoring`. 알람: running task 수, 작업 중단 이벤트, RDS CPU·여유
+저장공간·연결 수, 캐시 메모리·엔진 CPU. 구현 상태와 남은 항목(배포 역할 권한 #248, 알람 e2e 시험)은
+`docs/phases/phase-9/STATUS.md` 9.10 참조.
 
 **원칙:**
-- 로그 원본은 리전 로컬에만 보관 (데이터 거주성)
-- 중앙으로 전송되는 것은 집계된 메트릭과 trace ID만
-- 크로스 리전 디버깅은 trace ID로 해당 리전 Grafana에서 직접 조회
+- 로그와 메트릭에 본문·PII·ciphertext를 싣지 않는다 (§3, `tracing`은 작업 이름과 상태 코드만).
+- 서버는 단일 리전이므로 리전 간 집계 계층은 없다.
+- 이전 설계(리전별 OTEL Collector, Prometheus/Loki/Tempo, 중앙 Gateway)는 멀티 리전 확장 시점의
+  장기 목표이며(§4A.6 다중 리전 컬럼과 같은 위상) 현재 배포되어 있지 않다. 크로스 리전 trace 상관(§13.5)도
+  같은 이유로 현재 적용되지 않는다.
 
 ### 13.4 합성 모니터링 (Synthetic Monitoring)
 
