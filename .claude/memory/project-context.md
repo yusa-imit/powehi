@@ -2097,3 +2097,6 @@ Phase 8 (8.15/8.17/8.19/8.22/8.23) and Phase 9 remain blocked on need-human issu
 
 ## Cycle 742 (2026-11-03, FEATURE mode, nothing unblocked)
 Same blockers (#166/#203/#208/#161), no owner answers. Added `inbox::tests::cursor_record_properties` (cursor save/load round trip for sane cursors under the hop bound; insane or out-of-hops never load; arbitrary stored bytes never panic). Test only; no review agents needed.
+
+## Cycle 744 (2026-11-03, FEATURE mode, nothing unblocked)
+Same blockers (#166/#161/#203/#208), no owner answers. Added `message::tests::props` (since/until partition, newest tail, render strips control chars incl. structured payloads). Test only; no review agents needed.
