@@ -2103,3 +2103,6 @@ Same blockers (#166/#161/#203/#208), no owner answers. Added `message::tests::pr
 
 ## Cycle 745 (2026-11-03, STABILIZATION)
 CI green, cargo audit + deny clean, only open bug #243 (remaining part is a Phase 9 DB-role item). Added proptests to `identity/batches.rs` (codec round trip, decode never panics and re-encodes what it accepts, `is_due` monotonic in time). Test only; no review agents needed. Next gap candidates: `welcome`, `chat`, `store/manifest.rs`.
+
+## Cycle 746 (2026-11-03, FEATURE mode, nothing unblocked)
+Same blockers (#166/#161/#203/#208), no owner answers; Phase 9 items need owner setup. Added `tui::input::props` (no control chars out, chunk-split invariance, paste yields only chars, OSC swallowed). Test only; no review agents needed. `cargo nextest` is absent on this machine and `cargo` needs `~/.cargo/bin` on PATH; use `cargo test`.

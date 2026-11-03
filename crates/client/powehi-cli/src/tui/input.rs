@@ -231,3 +231,62 @@ impl Decoder {
         self.state = State::Utf8 { need, len: 1 };
     }
 }
+
+#[cfg(test)]
+mod props {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn decode(chunks: &[&[u8]]) -> Vec<Key> {
+        let mut d = Decoder::new();
+        let mut out = Vec::new();
+        for c in chunks {
+            d.feed(c, &mut out);
+        }
+        out
+    }
+
+    proptest! {
+        /// Any byte stream decodes without panic and never yields a control character.
+        #[test]
+        fn never_emits_control_chars(bytes in proptest::collection::vec(any::<u8>(), 0..512)) {
+            for k in decode(&[&bytes]) {
+                if let Key::Char(c) = k {
+                    prop_assert!(!c.is_control());
+                }
+            }
+        }
+
+        /// Where `read(2)` splits the stream must not change the keys.
+        #[test]
+        fn split_point_is_irrelevant(
+            bytes in proptest::collection::vec(any::<u8>(), 0..256),
+            at in 0usize..257,
+        ) {
+            let at = at.min(bytes.len());
+            let (a, b) = bytes.split_at(at);
+            prop_assert_eq!(decode(&[&bytes]), decode(&[a, b]));
+        }
+
+        /// Inside a bracketed paste only printable characters become keys.
+        #[test]
+        fn paste_yields_only_chars(
+            body in proptest::collection::vec(any::<u8>().prop_filter("no ESC", |b| *b != 0x1b), 0..256),
+        ) {
+            let mut d = Decoder::new();
+            let mut out = Vec::new();
+            d.feed(b"\x1b[200~", &mut out);
+            d.feed(&body, &mut out);
+            prop_assert!(out.iter().all(|k| matches!(k, Key::Char(_))));
+        }
+
+        /// A string sequence (OSC) never types into the line, however long.
+        #[test]
+        fn osc_is_swallowed(body in proptest::collection::vec(0x20u8..0x7e, 0..64)) {
+            let mut bytes = b"\x1b]".to_vec();
+            bytes.extend_from_slice(&body);
+            bytes.push(0x07);
+            prop_assert!(decode(&[&bytes]).is_empty());
+        }
+    }
+}
