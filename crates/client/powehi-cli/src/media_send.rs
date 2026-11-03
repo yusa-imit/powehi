@@ -288,4 +288,48 @@ mod tests {
         ));
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    mod props {
+        use proptest::prelude::*;
+
+        use super::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(32))]
+
+            /// Any small file seals to a single blob whose descriptor our own peer parser
+            /// accepts, and the peer's key/iv/hash decrypt it back to the original bytes.
+            #[test]
+            fn seal_descriptor_parse_decrypt_round_trips(
+                plain in proptest::collection::vec(any::<u8>(), 1..4096),
+                id in any::<u128>(),
+            ) {
+                let s = seal(&plain).unwrap();
+                prop_assert!(s.total.is_none());
+                let p = parse(&descriptor(&s, Uuid::from_u128(id)).unwrap()).unwrap();
+                prop_assert_eq!(p.blob_id, Uuid::from_u128(id));
+                prop_assert!(!p.chunked);
+                let back = core_media::decrypt_with_raw_key(
+                    p.key.as_slice(), &p.iv, &s.ciphertext, &p.blob_hash,
+                ).unwrap();
+                prop_assert_eq!(back, plain);
+            }
+
+            /// Flipping any ciphertext bit makes the peer's hash/AEAD check fail.
+            #[test]
+            fn tampered_ciphertext_is_rejected(
+                plain in proptest::collection::vec(any::<u8>(), 1..512),
+                at in any::<usize>(),
+                bit in 0u8..8,
+            ) {
+                let mut s = seal(&plain).unwrap();
+                let p = parse(&descriptor(&s, Uuid::from_u128(1)).unwrap()).unwrap();
+                let n = s.ciphertext.len();
+                s.ciphertext[at % n] ^= 1 << bit;
+                prop_assert!(core_media::decrypt_with_raw_key(
+                    p.key.as_slice(), &p.iv, &s.ciphertext, &p.blob_hash,
+                ).is_err());
+            }
+        }
+    }
 }
