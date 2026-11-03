@@ -2085,3 +2085,6 @@ Model-based proptest (24 cases) for `conversation::select`: unread/read/role/pre
 
 ## Cycle 737 (2026-11-03, FEATURE mode, nothing unblocked)
 Same blockers (#166/#203/#208/#161, no owner answers). `cargo audit`/`cargo deny` clean. Added `whoami::tests::props`: both report formats round-trip; JSON stays one line for any profile string. Test only.
+
+## Cycle 740 (2026-11-03, STABILIZATION)
+CI green, `cargo audit`/`cargo deny` clean, only open bug is #243 (app DB role, infra, owner-gated). Added `inbox::body_hex::props` (hex and legacy-array round trips, bad hex rejected, size cap both ways). Test only; no crypto/server change, so no review agents needed.

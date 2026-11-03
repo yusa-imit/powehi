@@ -81,3 +81,56 @@ impl<'de> Visitor<'de> for BodyVisitor {
         Ok(std::mem::take(&mut *out))
     }
 }
+
+#[cfg(test)]
+mod props {
+    use super::*;
+    use proptest::prelude::*;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    struct W {
+        #[serde(with = "super")]
+        b: Vec<u8>,
+    }
+
+    proptest! {
+        #[test]
+        fn hex_round_trips(b in proptest::collection::vec(any::<u8>(), 0..512)) {
+            let json = serde_json::to_string(&W { b: b.clone() }).unwrap();
+            prop_assert!(json.len() == 2 * b.len() + 8);
+            prop_assert_eq!(serde_json::from_str::<W>(&json).unwrap().b, b);
+        }
+
+        #[test]
+        fn legacy_array_reads_same(b in proptest::collection::vec(any::<u8>(), 0..512)) {
+            let legacy = format!("{{\"b\":{}}}", serde_json::to_string(&b).unwrap());
+            prop_assert_eq!(serde_json::from_str::<W>(&legacy).unwrap().b, b);
+        }
+
+        #[test]
+        fn bad_hex_is_rejected(s in "[0-9a-f]{0,40}", pos in any::<usize>(), bad in "[g-zA-F ]") {
+            let mut chars: Vec<char> = s.chars().collect();
+            if chars.len() % 2 == 1 {
+                // odd length is rejected outright
+                let json = format!("{{\"b\":\"{s}\"}}");
+                prop_assert!(serde_json::from_str::<W>(&json).is_err());
+            } else if !chars.is_empty() {
+                let i = pos % chars.len();
+                chars[i] = bad.chars().next().unwrap();
+                let json = format!("{{\"b\":\"{}\"}}", chars.iter().collect::<String>());
+                prop_assert!(serde_json::from_str::<W>(&json).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn oversize_is_rejected_both_ways() {
+        let big = vec![0u8; MAX_BODY_BYTES + 1];
+        assert!(serde_json::to_string(&W { b: big.clone() }).is_err());
+        let hex = "00".repeat(MAX_BODY_BYTES + 1);
+        assert!(serde_json::from_str::<W>(&format!("{{\"b\":\"{hex}\"}}")).is_err());
+        let arr = serde_json::to_string(&big).unwrap();
+        assert!(serde_json::from_str::<W>(&format!("{{\"b\":{arr}}}")).is_err());
+    }
+}
