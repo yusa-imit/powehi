@@ -2106,3 +2106,6 @@ CI green, cargo audit + deny clean, only open bug #243 (remaining part is a Phas
 
 ## Cycle 746 (2026-11-03, FEATURE mode, nothing unblocked)
 Same blockers (#166/#161/#203/#208), no owner answers; Phase 9 items need owner setup. Added `tui::input::props` (no control chars out, chunk-split invariance, paste yields only chars, OSC swallowed). Test only; no review agents needed. `cargo nextest` is absent on this machine and `cargo` needs `~/.cargo/bin` on PATH; use `cargo test`.
+
+## Cycle 747 (2026-11-03, FEATURE, nothing unblocked) — proptest store manifest
+8.15 (#166/#161), 8.17 (#203), 8.19 (#208), 9.9+ still wait on the owner. Added proptests for `store/manifest.rs`: encode/decode round trip, truncation/extension corrupt, decode total and canonical, verify exact without pending. Test-only.
