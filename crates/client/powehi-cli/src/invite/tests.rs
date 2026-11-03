@@ -468,6 +468,37 @@ mod props {
     use super::*;
 
     proptest! {
+        /// A resend never yields `Rejected`; a first post is `Rejected` exactly for the
+        /// statuses the server issues before its ledger transaction.
+        #[test]
+        fn commit_status_matches_model(status in 100u16..600, resend in any::<bool>()) {
+            let pre_ledger = [400, 401, 404, 409, 413, 415, 422, 429].contains(&status);
+            let want = if pre_ledger && !resend {
+                CommitOutcome::Rejected
+            } else {
+                CommitOutcome::Unknown
+            };
+            prop_assert_eq!(commit_status_outcome(status, resend), want);
+        }
+
+        /// The invite marker is deterministic, fits the 64-byte record-name cap, hides the
+        /// KeyPackageRef, and differs for different refs.
+        #[test]
+        fn invite_marker_is_stable_bounded_and_opaque(
+            a in proptest::collection::vec(any::<u8>(), 1..64),
+            b in proptest::collection::vec(any::<u8>(), 1..64),
+        ) {
+            let m = crate::welcome::invite_marker(&a);
+            prop_assert_eq!(&m, &crate::welcome::invite_marker(&a));
+            prop_assert!(m.len() <= crate::store::MAX_NAME_LEN);
+            prop_assert!(!m.contains(&hex(&a)) || a.len() < 2);
+            if a != b {
+                prop_assert_ne!(m, crate::welcome::invite_marker(&b));
+            }
+        }
+    }
+
+    proptest! {
         #![proptest_config(ProptestConfig::with_cases(256))]
 
         /// Any text is classified without panic, and an accepted link is the canonical shape.
