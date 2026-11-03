@@ -967,6 +967,52 @@ fn garbage_or_oversize_cursor_record_loads_as_none() {
     assert!(cursor::load(&s.store).is_none());
 }
 
+/// One store for all cases: opening a profile is slow, the properties only touch one record.
+#[test]
+fn cursor_record_properties() {
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, TestRunner};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let s = session(&tmp, "alice", 1);
+    let mut runner = TestRunner::new(Config::with_cases(64));
+    let strat = (
+        "[0-9TZ:.+-]{0,80}",
+        any::<u128>(),
+        0u32..(cursor::MAX_HOPS * 2),
+    );
+    runner
+        .run(&strat, |(since, id, hops)| {
+            let c = welcome::Cursor {
+                since,
+                since_id: Uuid::from_u128(id),
+            };
+            cursor::save(&s.store, Some((&c, hops)));
+            let got = cursor::load(&s.store);
+            if c.is_sane() && hops < cursor::MAX_HOPS {
+                prop_assert_eq!(got, Some((c.clone(), hops)));
+            } else {
+                prop_assert!(got.is_none());
+            }
+            if !c.is_sane() {
+                prop_assert!(s.store.get(cursor::RECORD).unwrap().is_none());
+            }
+            Ok(())
+        })
+        .unwrap();
+    let junk = proptest::collection::vec(any::<u8>(), 0..400);
+    runner
+        .run(&junk, |raw| {
+            s.store.put(cursor::RECORD, &raw).unwrap();
+            // never panics; a result must be a sane cursor within the hop budget
+            if let Some((c, hops)) = cursor::load(&s.store) {
+                prop_assert!(c.is_sane() && hops < cursor::MAX_HOPS);
+            }
+            Ok(())
+        })
+        .unwrap();
+}
+
 /// Bob commits locally (adds a third member) and encrypts at the new epoch, queueing the
 /// message for Alice, who never receives the Commit.
 fn bob_sends_from_next_epoch(p: &Pair) -> Uuid {

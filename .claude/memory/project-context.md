@@ -2091,3 +2091,6 @@ CI green, `cargo audit`/`cargo deny` clean, only open bug is #243 (app DB role, 
 
 ## Cycle 741 (2026-11-03, FEATURE mode, nothing unblocked)
 Phase 8 (8.15/8.17/8.19/8.22/8.23) and Phase 9 remain blocked on need-human issues, no owner answers. `cargo audit`/`deny`/clippy clean. Added `media_send::tests::props` (seal -> descriptor -> peer parse -> decrypt round trip; any ciphertext bit flip rejected). Test only.
+
+## Cycle 742 (2026-11-03, FEATURE mode, nothing unblocked)
+Same blockers (#166/#203/#208/#161), no owner answers. Added `inbox::tests::cursor_record_properties` (cursor save/load round trip for sane cursors under the hop bound; insane or out-of-hops never load; arbitrary stored bytes never panic). Test only; no review agents needed.
