@@ -2088,3 +2088,6 @@ Same blockers (#166/#203/#208/#161, no owner answers). `cargo audit`/`cargo deny
 
 ## Cycle 740 (2026-11-03, STABILIZATION)
 CI green, `cargo audit`/`cargo deny` clean, only open bug is #243 (app DB role, infra, owner-gated). Added `inbox::body_hex::props` (hex and legacy-array round trips, bad hex rejected, size cap both ways). Test only; no crypto/server change, so no review agents needed.
+
+## Cycle 741 (2026-11-03, FEATURE mode, nothing unblocked)
+Phase 8 (8.15/8.17/8.19/8.22/8.23) and Phase 9 remain blocked on need-human issues, no owner answers. `cargo audit`/`deny`/clippy clean. Added `media_send::tests::props` (seal -> descriptor -> peer parse -> decrypt round trip; any ciphertext bit flip rejected). Test only.
