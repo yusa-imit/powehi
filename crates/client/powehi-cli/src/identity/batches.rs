@@ -327,4 +327,50 @@ mod tests {
         );
         assert_eq!(RETENTION_SECS, 98 * 86_400);
     }
+
+    fn arb_batch() -> impl proptest::strategy::Strategy<Value = Batch> {
+        use proptest::prelude::*;
+        (
+            prop_oneof![
+                Just(BatchState::Prepared),
+                Just(BatchState::Sent),
+                Just(BatchState::Confirmed)
+            ],
+            any::<u64>(),
+            proptest::collection::vec(any::<[u8; REF_LEN]>(), 1..=UPLOAD_BATCH),
+        )
+            .prop_map(|(state, since, refs)| Batch { state, since, refs })
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn codec_round_trips_any_batches(
+            list in proptest::collection::vec(arb_batch(), 0..4),
+        ) {
+            let b = Batches { list };
+            proptest::prop_assert_eq!(Batches::decode(&b.encode()).unwrap(), b);
+        }
+
+        #[test]
+        fn decode_never_panics_and_reencodes_what_it_accepts(
+            raw in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..400),
+        ) {
+            if let Ok(b) = Batches::decode(&raw) {
+                proptest::prop_assert_eq!(b.encode(), raw);
+            }
+        }
+
+        #[test]
+        fn due_is_monotonic_in_time(b in arb_batch(), t in proptest::prelude::any::<u64>(), dt in 0u64..1_000_000) {
+            let later = t.saturating_add(dt);
+            if b.is_due(t) {
+                proptest::prop_assert!(b.is_due(later));
+            }
+            if b.state == BatchState::Prepared {
+                proptest::prop_assert!(b.is_due(0));
+            }
+        }
+    }
 }
