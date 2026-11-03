@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 748 (2026-11-04, FEATURE, nothing unblocked) — proptest auth helpers
+8.15 (#166), 8.17 (#203), 8.19 (#208) still wait on the owner. Added proptests for `auth::ct_eq` (agrees with `==`, any bit flip seen), `handle_hash` and `mls_label` (SHA-256 and 16-byte prefix). Test-only.
+
 ## Cycle 743 (2026-11-03, FEATURE, nothing unblocked) — proptest group/invite helpers
 8.15 (#166), 8.17 (#203), 8.19 (#208) still wait on the owner. Added proptests for `commit_status_outcome`, `welcome::invite_marker`, `group::check_welcome_size`, `group::pending_name`. Test-only.
 
