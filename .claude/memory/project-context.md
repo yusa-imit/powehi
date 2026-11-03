@@ -2118,3 +2118,6 @@ Same blockers (#166/#161/#203/#208), no owner answers; Phase 9 items need owner 
 
 ## Cycle 750 (2026-11-04, STABILIZATION)
 CI green on main, cargo audit + deny clean, only open bug #243 (remaining part is a Phase 9 DB-role item). Checked in the proptest regression seed for `chat::tests::read_lines_keeps_line_boundaries_around_the_cap` (left untracked after cycle 749); all 5 read_lines tests pass with it. Note: cron shell needs `~/.cargo/bin` on PATH; `cargo-nextest` is not installed locally, use `cargo test`.
+
+## Cycle 751 (2026-11-04, FEATURE, nothing unblocked: 8.15/8.17/8.19 wait on #166/#203/#208)
+Closed #243 (TLS #246, app role #261 already shipped). Proptests for welcome `Cursor::is_sane` and `invite_marker`. (PR in this cycle)
