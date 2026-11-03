@@ -320,3 +320,53 @@ async fn changed_conversation_line_is_not_sent_without_allow_changed() {
     let r = inbox::receive(&client(), &p.url, &p.bob).await.unwrap();
     assert_eq!(r.stored, 1, "the overridden line is delivered");
 }
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+    /// One event per input line, in order, then `Eof`: a line within the cap arrives verbatim,
+    /// a longer one arrives flagged as over the cap, and neither swallows its neighbours.
+    #[test]
+    fn read_lines_keeps_line_boundaries_around_the_cap(
+        lens in proptest::collection::vec(
+            proptest::prop_oneof![
+                0usize..24,
+                (message::MAX_BODY_LEN - 2)..(message::MAX_BODY_LEN + 6),
+                proptest::strategy::Just(message::MAX_BODY_LEN * 2),
+            ],
+            0..6,
+        ),
+        unterminated_tail in proptest::bool::ANY,
+    ) {
+        let cap = message::MAX_BODY_LEN;
+        let mut input = Vec::new();
+        let mut expect: Vec<(usize, bool)> = Vec::new();
+        for (i, &len) in lens.iter().enumerate() {
+            let last = i + 1 == lens.len();
+            let terminated = !(last && unterminated_tail && len > 0);
+            input.extend(std::iter::repeat_n(b'a' + (i as u8), len));
+            if terminated {
+                input.push(b'\n');
+            }
+            expect.push((len + usize::from(terminated), len > cap));
+        }
+        let (tx, mut rx): (Sender<Event>, _) = channel(64);
+        read_lines(std::io::Cursor::new(input), &tx);
+        drop(tx);
+        for (i, (total, over)) in expect.iter().enumerate() {
+            let Some(Event::Line(l)) = rx.blocking_recv() else {
+                return Err(proptest::test_runner::TestCaseError::fail("missing line"));
+            };
+            if *over {
+                proptest::prop_assert!(l.len() > cap);
+            } else {
+                proptest::prop_assert_eq!(l.len(), *total);
+                if lens[i] > 0 {
+                    proptest::prop_assert!(l.starts_with(char::from(b'a' + (i as u8))));
+                }
+            }
+        }
+        proptest::prop_assert!(matches!(rx.blocking_recv(), Some(Event::Eof)));
+        proptest::prop_assert!(rx.blocking_recv().is_none());
+    }
+}
