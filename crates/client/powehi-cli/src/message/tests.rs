@@ -494,3 +494,67 @@ async fn expired_parked_attachments_are_dropped_on_lookup() {
     assert!(find_attachment(&alice.store, gid, "abcdef").is_err());
     assert!(alice.store.get(&name).unwrap().is_none(), "past the TTL");
 }
+
+mod props {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    fn sorted_msgs(mut times: Vec<u64>) -> Vec<Pending> {
+        times.sort_unstable();
+        times.into_iter().map(pending_at).collect()
+    }
+
+    proptest! {
+        /// `since` and `until` split an oldest-first slice at the same cutoff: together they
+        /// cover it exactly once, and each matches a plain filter model.
+        #[test]
+        fn since_and_until_partition_the_slice(
+            times in prop::collection::vec(0u64..64, 0..40),
+            cutoff in 0u64..70,
+        ) {
+            let msgs = sorted_msgs(times);
+            let (late, early) = (since(&msgs, Some(cutoff)), until(&msgs, Some(cutoff)));
+            prop_assert_eq!(late.len() + early.len(), msgs.len());
+            prop_assert!(late.iter().all(|m| m.received_at >= cutoff));
+            prop_assert!(early.iter().all(|m| m.received_at < cutoff));
+            let model = msgs.iter().filter(|m| m.received_at >= cutoff).count();
+            prop_assert_eq!(late.len(), model);
+            prop_assert_eq!(since(&msgs, None).len(), msgs.len());
+            prop_assert_eq!(until(&msgs, None).len(), msgs.len());
+        }
+
+        /// `newest` is the tail of at most `n` messages, in the original order.
+        #[test]
+        fn newest_is_the_bounded_tail(
+            times in prop::collection::vec(0u64..64, 0..40),
+            n in 1usize..60,
+        ) {
+            let msgs = sorted_msgs(times);
+            let tail = newest(&msgs, Some(n));
+            prop_assert_eq!(tail.len(), n.min(msgs.len()));
+            let from = msgs.len() - tail.len();
+            for (a, b) in tail.iter().zip(&msgs[from..]) {
+                prop_assert_eq!(a.received_at, b.received_at);
+            }
+        }
+
+        /// Whatever bytes arrive, the displayed text carries no control character other than
+        /// newline and tab, and rendering never panics.
+        #[test]
+        fn render_never_leaks_control_characters(
+            body in prop::collection::vec(any::<u8>(), 0..256),
+        ) {
+            let shown = render(&body);
+            prop_assert!(shown.chars().all(|c| !c.is_control() || c == '\n' || c == '\t'));
+        }
+
+        /// A structured payload cannot smuggle escapes through its text member either.
+        #[test]
+        fn render_sanitizes_structured_text(inner in "\\PC{0,40}|[\\x00-\\x1f]{1,8}") {
+            let payload = serde_json::json!({ "type": "text", "text": inner });
+            let shown = render(payload.to_string().as_bytes());
+            prop_assert!(shown.chars().all(|c| !c.is_control() || c == '\n' || c == '\t'));
+        }
+    }
+}
