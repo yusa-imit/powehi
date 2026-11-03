@@ -317,4 +317,97 @@ mod tests {
             Err(StoreError::RecordUnlisted { .. })
         ));
     }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn arb_tag() -> impl Strategy<Value = String> {
+            proptest::array::uniform16(any::<u8>()).prop_map(|raw| tag_hex(&raw))
+        }
+
+        fn arb_manifest() -> impl Strategy<Value = Manifest> {
+            let hash = proptest::array::uniform32(any::<u8>());
+            let pending = proptest::option::of(
+                (arb_tag(), proptest::option::of(hash)).prop_map(|(tag, old)| Pending { tag, old }),
+            );
+            (
+                any::<u64>(),
+                proptest::collection::btree_map(arb_tag(), hash, 0..12),
+                pending,
+            )
+                .prop_map(|(generation, entries, pending)| Manifest {
+                    generation,
+                    entries,
+                    pending,
+                })
+        }
+
+        proptest! {
+            /// Encoding then decoding returns the same manifest.
+            #[test]
+            fn encode_decode_round_trips(m in arb_manifest()) {
+                let back = Manifest::decode(&m.encode().unwrap()).unwrap();
+                prop_assert_eq!(back.generation, m.generation);
+                prop_assert_eq!(back.entries, m.entries);
+                prop_assert_eq!(back.pending, m.pending);
+            }
+
+            /// Every strict prefix and every one-byte extension of an encoding is corrupt.
+            #[test]
+            fn truncation_and_extension_are_corrupt(m in arb_manifest(), extra: u8) {
+                let enc = m.encode().unwrap();
+                for cut in 0..enc.len() {
+                    assert!(matches!(
+                        Manifest::decode(&enc[..cut]),
+                        Err(StoreError::ManifestCorrupt)
+                    ));
+                }
+                let mut longer = enc;
+                longer.push(extra);
+                assert!(matches!(
+                    Manifest::decode(&longer),
+                    Err(StoreError::ManifestCorrupt)
+                ));
+            }
+
+            /// Arbitrary bytes never panic the decoder; any accepted input re-encodes to itself.
+            #[test]
+            fn decode_is_total_and_canonical(b in proptest::collection::vec(any::<u8>(), 0..300)) {
+                if let Ok(m) = Manifest::decode(&b) {
+                    prop_assert_eq!(m.encode().unwrap(), b);
+                }
+            }
+
+            /// Without a pending entry only the exact file set verifies: flipping one hash,
+            /// dropping a file or adding one is refused.
+            #[test]
+            fn verify_without_pending_is_exact(m in arb_manifest(), extra in arb_tag(), bit: u8) {
+                let m = Manifest { pending: None, ..m };
+                let mut files = m.entries.clone();
+                prop_assert!(m.verify(&files).is_ok());
+                if let Some(tag) = files.keys().next().cloned() {
+                    let mut flipped = files.clone();
+                    flipped.get_mut(&tag).unwrap()[usize::from(bit) % HASH_LEN] ^= 1;
+                    assert!(matches!(
+                        m.verify(&flipped),
+                        Err(StoreError::RecordStale { .. })
+                    ));
+                    files.remove(&tag);
+                    assert!(matches!(
+                        m.verify(&files),
+                        Err(StoreError::RecordMissing { .. })
+                    ));
+                }
+                if !m.entries.contains_key(&extra) {
+                    let mut more = m.entries.clone();
+                    more.insert(extra, [0; HASH_LEN]);
+                    assert!(matches!(
+                        m.verify(&more),
+                        Err(StoreError::RecordUnlisted { .. })
+                    ));
+                }
+            }
+        }
+    }
 }
