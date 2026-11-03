@@ -2115,3 +2115,6 @@ Same blockers (#166/#161/#203/#208), no owner answers; Phase 9 items need owner 
 
 ## Cycle 747 (2026-11-03, FEATURE, nothing unblocked) — proptest store manifest
 8.15 (#166/#161), 8.17 (#203), 8.19 (#208), 9.9+ still wait on the owner. Added proptests for `store/manifest.rs`: encode/decode round trip, truncation/extension corrupt, decode total and canonical, verify exact without pending. Test-only.
+
+## Cycle 750 (2026-11-04, STABILIZATION)
+CI green on main, cargo audit + deny clean, only open bug #243 (remaining part is a Phase 9 DB-role item). Checked in the proptest regression seed for `chat::tests::read_lines_keeps_line_boundaries_around_the_cap` (left untracked after cycle 749); all 5 read_lines tests pass with it. Note: cron shell needs `~/.cargo/bin` on PATH; `cargo-nextest` is not installed locally, use `cargo test`.
