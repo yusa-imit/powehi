@@ -851,3 +851,28 @@ mod commit_tests {
         assert!(crate::message::pending(&bob.store, gid).unwrap().is_empty());
     }
 }
+
+mod props {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    proptest! {
+        /// A Welcome is accepted exactly when it is non-empty and within the server cap.
+        #[test]
+        fn welcome_size_gate(len in prop_oneof![0usize..8, MAX_WELCOME_BYTES - 4..MAX_WELCOME_BYTES + 4, any::<usize>()]) {
+            let ok = len != 0 && len <= MAX_WELCOME_BYTES;
+            prop_assert_eq!(check_welcome_size(len).is_ok(), ok);
+        }
+
+        /// Pending-add record names are injective in the group id and fit the record-name cap.
+        #[test]
+        fn pending_name_injective_and_bounded(a in any::<u128>(), b in any::<u128>()) {
+            let (a, b) = (Uuid::from_u128(a), Uuid::from_u128(b));
+            let name = pending_name(a);
+            prop_assert!(name.starts_with(PENDING_PREFIX));
+            prop_assert!(name.len() <= crate::store::MAX_NAME_LEN);
+            prop_assert_eq!(name == pending_name(b), a == b);
+        }
+    }
+}
