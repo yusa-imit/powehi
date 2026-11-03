@@ -1494,6 +1494,41 @@ mod tests {
         }
     }
 
+    mod props {
+        use proptest::prelude::*;
+
+        use super::*;
+
+        proptest! {
+            /// `ct_eq` agrees with `==` for every pair, and any single bit flip is seen.
+            #[test]
+            fn ct_eq_agrees_with_eq(
+                a in proptest::collection::vec(any::<u8>(), 0..64),
+                b in proptest::collection::vec(any::<u8>(), 0..64),
+                idx in any::<prop::sample::Index>(),
+                bit in 0u8..8,
+            ) {
+                prop_assert_eq!(ct_eq(&a, &b), a == b);
+                prop_assert!(ct_eq(&a, &a));
+                if !a.is_empty() {
+                    let mut c = a.clone();
+                    c[idx.index(a.len())] ^= 1 << bit;
+                    prop_assert!(!ct_eq(&a, &c));
+                }
+            }
+
+            /// The handle hash is SHA-256 of the bytes; the MLS label is its 16-byte prefix.
+            #[test]
+            fn hashes_are_sha256_and_prefix(s in ".{0,64}") {
+                let full: [u8; 32] = Sha256::digest(s.as_bytes()).into();
+                prop_assert_eq!(handle_hash(&s), full);
+                let label = mls_label(&s);
+                prop_assert_eq!(label.len(), MLS_LABEL_LEN);
+                prop_assert_eq!(&label[..], &full[..MLS_LABEL_LEN]);
+            }
+        }
+    }
+
     #[tokio::test]
     async fn revoke_session_sends_the_bearer_and_maps_failures() {
         let st = Arc::new(Mutex::new(crate::testsrv::Backend::default()));
