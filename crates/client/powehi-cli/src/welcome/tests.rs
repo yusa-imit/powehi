@@ -327,3 +327,38 @@ fn group_shape_needs_own_key_and_a_group_record_carries_no_pair_state() {
     let s = session(&dir, "x", 5);
     assert!(conversation::save(&s.store, &with_cred).is_err());
 }
+
+proptest::proptest! {
+    #[test]
+    fn cursor_is_sane_iff_bounded_rfc3339_charset(since in ".{0,80}") {
+        let c = Cursor { since: since.clone(), since_id: Uuid::nil() };
+        let expect = !since.is_empty()
+            && since.len() <= MAX_CURSOR_LEN
+            && since
+                .bytes()
+                .all(|b| b.is_ascii_digit() || b"-:TZ.+".contains(&b));
+        proptest::prop_assert_eq!(c.is_sane(), expect);
+    }
+
+    #[test]
+    fn issued_looking_cursors_are_sane(
+        since in "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{1,9}(Z|\\+[0-9]{2}:[0-9]{2})",
+    ) {
+        let c = Cursor { since, since_id: Uuid::nil() };
+        proptest::prop_assert!(c.is_sane());
+    }
+
+    #[test]
+    fn invite_marker_is_a_valid_deterministic_record_name(
+        a in proptest::collection::vec(0u8.., 0..64),
+        b in proptest::collection::vec(0u8.., 0..64),
+    ) {
+        let m = invite_marker(&a);
+        proptest::prop_assert_eq!(&m, &invite_marker(&a));
+        proptest::prop_assert!(m.len() <= crate::store::MAX_NAME_LEN);
+        proptest::prop_assert!(m
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-' || c == b'_'));
+        proptest::prop_assert_eq!(m == invite_marker(&b), a == b);
+    }
+}
