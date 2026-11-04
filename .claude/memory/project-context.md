@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 762 (2026-11-05, FEATURE, nothing unblocked) — proptest message body/labels
+8.15 (#166), 8.17 (#203), 8.19 (#208) still wait on the owner. Added proptests for `message::check_body` (model), its length cap, and `short_id`/`sender_label` bounds. Test-only; 28 message tests pass, clippy clean.
+
 ## Cycle 761 (2026-11-05, FEATURE, nothing unblocked) — proptest paint structure
 8.15 (#166), 8.17 (#203), 8.19 (#208) still wait on the owner. Added a proptest that `tui::paint` emits one cursor move per row in order and starts/ends with a reset. Test-only; 606 lib tests pass.
 

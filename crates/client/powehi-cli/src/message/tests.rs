@@ -539,6 +539,55 @@ mod props {
             }
         }
 
+        /// `check_body` drops exactly one trailing newline and accepts only non-blank UTF-8
+        /// within the cap; every accepted body is a suffix-trimmed prefix of the input.
+        #[test]
+        fn check_body_matches_model(raw in prop::collection::vec(any::<u8>(), 0..64)) {
+            let trimmed = raw
+                .strip_suffix(b"\r\n")
+                .or_else(|| raw.strip_suffix(b"\n"))
+                .unwrap_or(&raw);
+            match check_body(&raw) {
+                Ok(body) => {
+                    prop_assert_eq!(body, trimmed);
+                    prop_assert!(std::str::from_utf8(body).is_ok());
+                    prop_assert!(!body.iter().all(u8::is_ascii_whitespace));
+                }
+                Err(MessageError::EmptyBody) => {
+                    prop_assert!(trimmed.iter().all(u8::is_ascii_whitespace));
+                }
+                Err(MessageError::NotText) => {
+                    prop_assert!(std::str::from_utf8(trimmed).is_err());
+                }
+                Err(e) => prop_assert!(false, "unexpected {e:?}"),
+            }
+        }
+
+        /// A body over the cap is `TooLong` whatever its content.
+        #[test]
+        fn check_body_caps_length(extra in 1usize..8, byte in 0x21u8..0x7f) {
+            let raw = vec![byte; MAX_BODY_LEN + extra];
+            prop_assert!(matches!(check_body(&raw), Err(MessageError::TooLong)));
+        }
+
+        /// `short_id` is the first 8 hex digits of the id; `sender_label` never exceeds the
+        /// `key:` prefix plus 16 characters.
+        #[test]
+        fn labels_are_bounded(raw in any::<u128>(), key in "[0-9a-f]{0,80}") {
+            let id = Uuid::from_u128(raw);
+            let short = short_id(&id);
+            prop_assert_eq!(short.len(), 8);
+            prop_assert!(id.hyphenated().to_string().starts_with(&short));
+            let mut msg = pending_at(0);
+            msg.sender = id;
+            prop_assert_eq!(sender_label(&msg), short);
+            msg.sender_key = Some(key.clone());
+            let label = sender_label(&msg);
+            prop_assert!(label.starts_with("key:"));
+            prop_assert!(label.len() <= 4 + 16);
+            prop_assert!(key.starts_with(&label[4..]));
+        }
+
         /// Whatever bytes arrive, the displayed text carries no control character other than
         /// newline and tab, and rendering never panics.
         #[test]
