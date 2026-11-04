@@ -120,10 +120,10 @@
 # RUSTSEC-2026-0387: crypto-bigint 0.5.5 — timing variability in nominally constant-time ops
 # (subtraction, division, Montgomery multiplication); the advisory covers every version < 0.7.6.
 # Impact: partly REACHABLE. crypto-bigint 0.5.5 is pulled by elliptic-curve 0.13.8 (p256/p384/k256,
-# voprf) and directly by aws-sigv4 1.4.4 (workspace `sigv4a` feature).
+# voprf). Cycle 756: aws-sigv4 1.6.4 now uses the patched crypto-bigint 0.7.10 (`sigv4a` no
+# longer pulls 0.5.5), so only the elliptic-curve 0.13 users remain.
 #  - Executed on a long-term secret: powehi-webpush VAPID ES256 signing (p256 0.13 scalar ops) on
 #    the server. The only remote signal is push delivery latency.
-#  - Compiled in, likely unexecuted: aws-sigv4 sigv4a in powehi-server (R2 uses plain SigV4).
 #  - Not executed: MLS (suite 0x0001, X25519/Ed25519) and OPAQUE (Ristretto255) run on
 #    curve25519-dalek; the P-256/384/K-256 code in hpke-rs-rust-crypto, openmls_basic_credential
 #    and voprf is compiled in but unused.
