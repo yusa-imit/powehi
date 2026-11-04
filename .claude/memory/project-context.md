@@ -2131,3 +2131,6 @@ Added `pinning::tests::props` (PinSet::new vs size/duplicate model, foreign pin 
 ## Cycle 754 (FEATURE, all open Phase 8 items blocked on #166/#203/#208)
 - Ran stabilization instead: cargo audit/deny clean; lockfile-only openmls 0.8.1 -> 0.8.3 (security fix: extension decode before type check; TreeKEM truncate+grow fix; ratchet consumed only after process_message succeeds). crypto-reviewer: pass.
 - Follow-up (crypto-lead): comments in powehi-crypto-core mls_group.rs (~1564, 2000, 2925, 6241) and powehi-crypto-wasm wasm_exports.rs (~1355, 1500) still say unprotect_message consumes the ratchet immediately; update to the 0.8.3 process_message behaviour; refresh "openmls 0.8.1" in Cargo.toml:88 and ADR-0003:94.
+
+## Cycle 755 (2026-11-04, STABILIZATION)
+CI green, cargo audit + deny clean, no bug issues open. Added model-based proptests for `inbox/junk.rs` `Tracker` (unknown/ahead/failed/forget/prune vs a HashMap model; full tracker never tracks new ids). Test only; no review agents needed. target/ 30G (under the 20G prune threshold? no: over, but deps were pruned by age only if >7d; left as is).
