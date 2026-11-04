@@ -674,4 +674,59 @@ mod tests {
         assert!(parse(&["login", "--password", "x"]).is_err());
         assert!(parse(&["register", "--password", "x"]).is_err());
     }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn id_prefix_accepts_exactly_the_uuid_alphabet(s in "\\PC{0,40}") {
+                let ok = (1..=36).contains(&s.len())
+                    && s.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f' | '-'));
+                prop_assert_eq!(parse_id_prefix(&s).is_ok(), ok);
+                if let Ok(v) = parse_id_prefix(&s) {
+                    prop_assert_eq!(v, s);
+                }
+            }
+
+            #[test]
+            fn id_prefix_accepts_any_uuid_prefix(n in 1usize..=36, b in any::<u128>()) {
+                let id = uuid::Uuid::from_u128(b).to_string();
+                prop_assert!(parse_id_prefix(&id[..n]).is_ok());
+            }
+
+            #[test]
+            fn data_dir_accepts_iff_absolute(s in "[a-z/.]{0,24}") {
+                prop_assert_eq!(parse_data_dir(&s).is_ok(), s.starts_with('/'));
+            }
+
+            #[test]
+            fn server_never_accepts_credentials_or_remote_http(
+                user in "[a-z]{1,6}",
+                pass in proptest::option::of("[a-z]{1,6}"),
+                host in "[a-z]{1,8}\\.example",
+            ) {
+                let cred = match &pass {
+                    Some(p) => format!("{user}:{p}@"),
+                    None => format!("{user}@"),
+                };
+                let with_cred = format!("https://{cred}{host}");
+                let plain_http = format!("http://{host}");
+                let plain_https = format!("https://{host}");
+                prop_assert!(parse_server(&with_cred).is_err());
+                prop_assert!(parse_server(&plain_http).is_err());
+                let url = parse_server(&plain_https).unwrap();
+                prop_assert_eq!(url.scheme(), "https");
+            }
+
+            #[test]
+            fn server_http_only_for_loopback(octets in any::<[u8; 4]>(), port in 1u16..) {
+                let ip = std::net::Ipv4Addr::from(octets);
+                let url = format!("http://{ip}:{port}");
+                let r = parse_server(&url);
+                prop_assert_eq!(r.is_ok(), ip.is_loopback());
+            }
+        }
+    }
 }

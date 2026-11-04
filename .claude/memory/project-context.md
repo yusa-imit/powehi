@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 753 (2026-11-04, FEATURE, nothing unblocked) — proptest CLI argument parsers
+8.15 (#166), 8.17 (#203), 8.19 (#208) still wait on the owner. Added proptests in `cli.rs` for `parse_id_prefix`, `parse_data_dir` and `parse_server` (credentials and remote http always rejected, http accepted only for loopback). Test-only.
+
 ## Cycle 749 (2026-11-04, FEATURE, nothing unblocked) — proptest chat read_lines
 8.15 (#166), 8.17 (#203), 8.19 (#208) still wait on the owner. `cargo audit` and `cargo deny` clean. Added a proptest for `chat::read_lines` (line boundaries around the message cap). Test-only.
 
