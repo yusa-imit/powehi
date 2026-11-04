@@ -589,3 +589,27 @@ mod app_props {
         }
     }
 }
+
+mod clean_props {
+    use super::super::clean;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// Whatever a peer sends, the cleaned text has no control character and keeps its length.
+        #[test]
+        fn never_leaves_a_control_char_and_keeps_char_count(s in ".*") {
+            let out = clean(&s);
+            prop_assert!(!out.chars().any(char::is_control));
+            prop_assert_eq!(out.chars().count(), s.chars().count());
+        }
+
+        /// Text with no control characters passes through unchanged, and cleaning is idempotent.
+        #[test]
+        fn is_identity_on_printable_and_idempotent(s in "[^\\p{Cc}]*") {
+            prop_assert_eq!(clean(&s), s.clone());
+            prop_assert_eq!(clean(&clean(&s)), clean(&s));
+        }
+    }
+}
