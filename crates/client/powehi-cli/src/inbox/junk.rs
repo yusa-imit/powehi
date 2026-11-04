@@ -145,3 +145,98 @@ impl Tracker {
         self.entries.len()
     }
 }
+
+#[cfg(test)]
+mod props {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[derive(Clone, Debug)]
+    enum Op {
+        Unknown(u8, u64),
+        Ahead(u8, u64),
+        Failed(u8, u64),
+        Forget(u8),
+        Prune(u64),
+    }
+
+    fn id(n: u8) -> Uuid {
+        Uuid::from_u128(u128::from(n) + 1)
+    }
+
+    fn op() -> impl Strategy<Value = Op> {
+        // few ids so ops collide; times span past the grace and the max age
+        let t = 0u64..(3 * ENTRY_MAX_AGE_SECS);
+        prop_oneof![
+            (0u8..6, t.clone()).prop_map(|(i, t)| Op::Unknown(i, t)),
+            (0u8..6, t.clone()).prop_map(|(i, t)| Op::Ahead(i, t)),
+            (0u8..6, t.clone()).prop_map(|(i, t)| Op::Failed(i, t)),
+            (0u8..6).prop_map(Op::Forget),
+            t.prop_map(Op::Prune),
+        ]
+    }
+
+    proptest! {
+        /// Model: id -> (first_seen, fails). Time is fed non-decreasing, as a clock is.
+        #[test]
+        fn tracker_matches_model(mut ops in proptest::collection::vec(op(), 0..80)) {
+            let mut clock = 0u64;
+            for o in &mut ops {
+                match o {
+                    Op::Unknown(_, t) | Op::Ahead(_, t) | Op::Failed(_, t) | Op::Prune(t) => {
+                        clock = clock.max(*t);
+                        *t = clock;
+                    }
+                    Op::Forget(_) => {}
+                }
+            }
+            let mut tr = Tracker::default();
+            let mut model: std::collections::HashMap<u8, (u64, u32)> = Default::default();
+            for o in ops {
+                match o {
+                    Op::Unknown(i, now) => {
+                        let first = model.entry(i).or_insert((now, 0)).0;
+                        let want = now - first >= UNKNOWN_GRACE_SECS;
+                        prop_assert_eq!(tr.unknown_expired(id(i), now), want);
+                    }
+                    Op::Ahead(i, now) => {
+                        let first = model.entry(i).or_insert((now, 0)).0;
+                        let want = now - first < AHEAD_PIN_SECS;
+                        prop_assert_eq!(tr.ahead_pins(id(i), now), want);
+                    }
+                    Op::Failed(i, now) => {
+                        let e = model.entry(i).or_insert((now, 0));
+                        e.1 += 1;
+                        let want = e.1 >= MAX_DECRYPT_FAILURES
+                            && now - e.0 >= UNKNOWN_GRACE_SECS;
+                        prop_assert_eq!(tr.failed(id(i), now), want);
+                    }
+                    Op::Forget(i) => {
+                        model.remove(&i);
+                        tr.forget(id(i));
+                    }
+                    Op::Prune(now) => {
+                        model.retain(|_, (f, _)| now - *f < ENTRY_MAX_AGE_SECS);
+                        tr.prune(now);
+                    }
+                }
+                prop_assert_eq!(tr.len(), model.len());
+                prop_assert!(tr.len() <= MAX_TRACKED);
+            }
+        }
+
+        /// A full tracker never tracks, pins, or gives up on a new id.
+        #[test]
+        fn full_tracker_ignores_new_ids(now in 0u64..(2 * UNKNOWN_GRACE_SECS)) {
+            let mut tr = Tracker::default();
+            for n in 0..MAX_TRACKED {
+                tr.entries.push(Entry { id: Uuid::from_u128(n as u128 + 1000), first_seen: 0, fails: 0 });
+            }
+            let fresh = Uuid::from_u128(1);
+            prop_assert!(!tr.unknown_expired(fresh, now));
+            prop_assert!(!tr.ahead_pins(fresh, now));
+            prop_assert!(!tr.failed(fresh, now));
+            prop_assert_eq!(tr.len(), MAX_TRACKED);
+        }
+    }
+}
