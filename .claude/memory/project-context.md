@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 763 (2026-11-05, FEATURE, nothing unblocked) — proptest conversation record
+8.15 (#166), 8.17 (#203), 8.19 (#208) still wait on the owner (no owner comments). cargo audit/deny/clippy clean. Added proptests: peer signature pin is write-once; save/load round-trips counters, pin, credential. Test-only; 58 conversation-filter tests pass. Proptest coverage is now broad across CLI modules; next idle cycle should prefer other stabilization (audit, CI) over more proptests.
+
 ## Cycle 762 (2026-11-05, FEATURE, nothing unblocked) — proptest message body/labels
 8.15 (#166), 8.17 (#203), 8.19 (#208) still wait on the owner. Added proptests for `message::check_body` (model), its length cap, and `short_id`/`sender_label` bounds. Test-only; 28 message tests pass, clippy clean.
 

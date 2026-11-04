@@ -1644,6 +1644,57 @@ mod tests {
                 let got: Vec<(Uuid, Role)> = got.into_iter().map(|g| (g.0, g.1)).collect();
                 prop_assert_eq!(got, want);
             }
+
+            /// Pinning is write-once: only a 32-byte key is accepted, and once set only the same
+            /// key is; a rejected key never changes the pin.
+            #[test]
+            fn peer_signature_pin_is_write_once(
+                keys in proptest::collection::vec(
+                    proptest::collection::vec(0u8..3, 30usize..35),
+                    0..10,
+                ),
+            ) {
+                let mut conv = Conversation::new(Uuid::new_v4(), Uuid::new_v4(), Role::Creator, None);
+                let mut model: Option<Vec<u8>> = None;
+                for key in keys {
+                    let ok = key.len() == 32 && model.as_ref().is_none_or(|k| *k == key);
+                    let got = conv.pin_peer_signature_key(key.clone());
+                    prop_assert_eq!(got.is_ok(), ok);
+                    if ok {
+                        model = Some(key);
+                    }
+                    prop_assert_eq!(conv.peer_signature_key(), model.as_deref());
+                }
+            }
+
+            /// The policy counters, pin and credential survive a save/load round trip.
+            #[test]
+            fn saved_record_round_trips_counters_and_pins(
+                sends in proptest::collection::vec(0u64..1_000_000, 0..6),
+                update in proptest::option::of(0u64..1_000_000),
+                pin in proptest::option::of(any::<[u8; 32]>()),
+            ) {
+                let tmp = tempfile::tempdir().unwrap();
+                let store = open(&tmp);
+                let gid = Uuid::new_v4();
+                let mut conv = Conversation::new(gid, Uuid::new_v4(), Role::Creator, None)
+                    .with_peer_credential(b"peer".to_vec());
+                for now in &sends {
+                    conv.note_sent(*now);
+                }
+                if let Some(now) = update {
+                    conv.note_self_update(now);
+                }
+                if let Some(key) = pin {
+                    conv.pin_peer_signature_key(key.to_vec()).unwrap();
+                }
+                save(&store, &conv).unwrap();
+                let back = load(&store, &gid).unwrap().unwrap();
+                prop_assert_eq!(back.sent_since_update(), conv.sent_since_update());
+                prop_assert_eq!(back.last_update_at(), conv.last_update_at());
+                prop_assert_eq!(back.peer_signature_key(), conv.peer_signature_key());
+                prop_assert_eq!(back.peer_credential(), Some(&b"peer"[..]));
+            }
         }
     }
 }
