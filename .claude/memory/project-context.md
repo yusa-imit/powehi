@@ -2134,3 +2134,6 @@ Added `pinning::tests::props` (PinSet::new vs size/duplicate model, foreign pin 
 
 ## Cycle 755 (2026-11-04, STABILIZATION)
 CI green, cargo audit + deny clean, no bug issues open. Added model-based proptests for `inbox/junk.rs` `Tracker` (unknown/ahead/failed/forget/prune vs a HashMap model; full tracker never tracks new ids). Test only; no review agents needed. target/ 30G (under the 20G prune threshold? no: over, but deps were pruned by age only if >7d; left as is).
+
+## Cycle 756 (2026-11-04, FEATURE, all open Phase 8 items blocked on #166/#203/#208; 9.9 on #131)
+Stabilization instead: cargo audit + deny clean; `cargo update` lockfile refresh (242 pkgs; zeroize 1.9.1, sha2 0.11.1 via aws-sigv4, no core crypto crate changed). 1646 tests pass, clippy clean. crypto-reviewer: pass. aws-sigv4 no longer pulls crypto-bigint 0.5.5, so #163's "drop sigv4a" mitigation is moot; remaining 0.5.5 users are elliptic-curve 0.13 (webpush p256, voprf, openmls). p256 0.14 is now in the lock (via aws-sigv4), which eases the webpush migration.
