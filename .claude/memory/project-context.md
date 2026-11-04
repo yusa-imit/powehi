@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 760 (2026-11-05, STABILIZATION) — model-based proptest for requests store
+CI green, no bug issues, `cargo audit`/`cargo deny` clean, lockfile current. Added a model-based proptest for `requests::{save_new,remove,list}` (one per group and per KeyPackage, empty Welcome refused, list ordering). Test-only; 19 requests tests pass.
+
 ## Cycle 759 (2026-11-04, FEATURE, nothing unblocked) — proptest tui clean
 8.15 (#166), 8.17 (#203), 8.19 (#208) still wait on the owner. Added proptests for `tui::clean` (no control char survives, char count kept, identity on printable, idempotent). Test-only; 605 lib tests pass.
 

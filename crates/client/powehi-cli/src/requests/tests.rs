@@ -355,4 +355,46 @@ proptest::proptest! {
         let expired = is_expired(&req(1, at), now);
         proptest::prop_assert_eq!(expired, now > at && now - at > REQUEST_TTL_SECS);
     }
+
+    /// `save_new`/`remove`/`list` agree with a plain model under any op sequence: one request
+    /// per group and per KeyPackage (first wins), empty Welcomes refused, removal frees both
+    /// keys, and `list` is ordered by `(received_at, group_id)`.
+    #[test]
+    fn save_remove_list_match_a_model(
+        ops in proptest::collection::vec(
+            (0u8..3, 1u128..7, 1u8..7, 0u64..4, proptest::prelude::any::<bool>()),
+            1..40,
+        ),
+    ) {
+        let (_tmp, store) = open_store();
+        // (group, key package, received_at)
+        let mut model: Vec<(u128, u8, u64)> = Vec::new();
+        for (op, group, kp, at, empty) in ops {
+            if op == 0 {
+                remove(&store, &Uuid::from_u128(group)).unwrap();
+                model.retain(|m| m.0 != group);
+                continue;
+            }
+            let welcome = if empty { Vec::new() } else { vec![1, 2, 3] };
+            let r = Request::new(
+                Uuid::from_u128(group), Uuid::from_u128(9), Uuid::from_u128(8), at,
+                vec![kp; 4], welcome,
+            );
+            let expect = !empty
+                && model.len() < MAX_REQUESTS
+                && !model.iter().any(|m| m.0 == group || m.1 == kp);
+            proptest::prop_assert_eq!(save_new(&store, &r).unwrap(), expect);
+            if expect {
+                model.push((group, kp, at));
+            }
+        }
+        model.sort_by_key(|m| (m.2, m.0));
+        let got: Vec<(u128, u64)> = list(&store)
+            .unwrap()
+            .iter()
+            .map(|r| (r.group_id.as_u128(), r.received_at))
+            .collect();
+        let want: Vec<(u128, u64)> = model.iter().map(|m| (m.0, m.2)).collect();
+        proptest::prop_assert_eq!(got, want);
+    }
 }
