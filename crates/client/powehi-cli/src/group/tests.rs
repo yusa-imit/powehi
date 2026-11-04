@@ -874,5 +874,40 @@ mod props {
             prop_assert!(name.len() <= crate::store::MAX_NAME_LEN);
             prop_assert_eq!(name == pending_name(b), a == b);
         }
+
+        /// A valid pending-add record survives encode/decode unchanged.
+        #[test]
+        fn pending_add_round_trips(
+            server_epoch in 0u64..u64::MAX,
+            commit in proptest::collection::vec(any::<u8>(), 1..64),
+            welcome in proptest::collection::vec(any::<u8>(), 1..64),
+            accepted in any::<bool>(),
+            peer in any::<u128>(),
+        ) {
+            let rec = PendingAdd {
+                server_epoch,
+                commit,
+                state: if accepted { STATE_ACCEPTED } else { STATE_POSTED },
+                peer: Uuid::from_u128(peer),
+                member_epoch: server_epoch + 1,
+                welcome,
+            };
+            let back = PendingAdd::decode(&rec.encode()).expect("valid record decodes");
+            prop_assert_eq!(back.encode(), rec.encode());
+            prop_assert_eq!(back.peer, rec.peer);
+        }
+
+        /// Arbitrary bytes never panic the decoder, and anything it accepts is canonical
+        /// and satisfies the epoch invariant (fail closed on the rest).
+        #[test]
+        fn pending_add_decode_is_total_and_canonical(
+            raw in proptest::collection::vec(any::<u8>(), 0..96),
+        ) {
+            if let Some(rec) = PendingAdd::decode(&raw) {
+                prop_assert_eq!(rec.encode(), raw);
+                prop_assert_eq!(rec.server_epoch.checked_add(1), Some(rec.member_epoch));
+                prop_assert!(rec.state <= STATE_ACCEPTED);
+            }
+        }
     }
 }
