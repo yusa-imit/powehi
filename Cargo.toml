@@ -85,7 +85,7 @@ tokio-stream = "0.1"
 async-stream = "0.3"
 # crypto — no homegrown crypto; only audited libraries
 openmls = { version = "0.8", default-features = false }
-# OpenMLS native Rust crypto backend + basic credential helper (versions tracked by openmls 0.8.1)
+# OpenMLS native Rust crypto backend + basic credential helper (versions tracked by openmls 0.8.3)
 openmls_rust_crypto = "0.5"
 openmls_basic_credential = "0.5"
 openmls_traits = "0.5"

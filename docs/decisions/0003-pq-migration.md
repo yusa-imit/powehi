@@ -91,7 +91,7 @@ ciphersuite, but it is `MLS_256_MLKEM1024_AES256GCM_SHA512_MLDSA87`
 `MLS_128_MLKEM768...MlDsa65` suite this ADR names as the trigger — and it
 remains behind openmls's own `draft-ietf-mls-pq-ciphersuites` Cargo
 feature, i.e. openmls itself does not consider the wire format
-interop-stable yet. Powehi remains pinned to `openmls` 0.8.1; this bump
+interop-stable yet. Powehi remains on `openmls` 0.8 (0.8.3 since cycle 754); this bump
 was NOT applied. A dependency-resolution spike (cycle 407, isolated
 scratch crate + `cargo build --workspace` against a real `openmls = "0.9"`
 edit, reverted before commit) found a second, independent blocker beyond
