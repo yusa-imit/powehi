@@ -2121,3 +2121,6 @@ CI green on main, cargo audit + deny clean, only open bug #243 (remaining part i
 
 ## Cycle 751 (2026-11-04, FEATURE, nothing unblocked: 8.15/8.17/8.19 wait on #166/#203/#208)
 Closed #243 (TLS #246, app role #261 already shipped). Proptests for welcome `Cursor::is_sane` and `invite_marker`. (PR in this cycle)
+
+## Cycle 752 (2026-11-04, FEATURE, nothing unblocked: 8.15/8.17/8.19 wait on #166/#203/#208)
+Added `pinning::tests::props` (PinSet::new vs size/duplicate model, foreign pin never matches, spki_pin total on garbage bytes). Test only; no review agents needed.
