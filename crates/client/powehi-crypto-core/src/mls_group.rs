@@ -1565,7 +1565,8 @@ pub struct StagedCommitInfo {
 /// forward-secrecy deletion schedule, consumes the committer's handshake-ratchet
 /// secret for that generation (openmls persists the message-secrets store at
 /// that point — see `unprotect_message` in the vendored
-/// `group/mls_group/processing.rs`).
+/// `group/mls_group/processing.rs`). Since openmls 0.8.3 the ratchet is
+/// consumed only once `process_message` succeeds; a failed decrypt leaves it intact.
 ///
 /// # Inspecting is IRREVERSIBLE for these exact bytes — discard is quarantine, not undo
 /// Because of that ratchet consumption, once a Commit has been inspected it can

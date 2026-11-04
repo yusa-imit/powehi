@@ -2140,3 +2140,6 @@ CI green, cargo audit + deny clean, no bug issues open. Added model-based propte
 
 ## Cycle 756 (2026-11-04, FEATURE, all open Phase 8 items blocked on #166/#203/#208; 9.9 on #131)
 Stabilization instead: cargo audit + deny clean; `cargo update` lockfile refresh (242 pkgs; zeroize 1.9.1, sha2 0.11.1 via aws-sigv4, no core crypto crate changed). 1646 tests pass, clippy clean. crypto-reviewer: pass. aws-sigv4 no longer pulls crypto-bigint 0.5.5, so #163's "drop sigv4a" mitigation is moot; remaining 0.5.5 users are elliptic-curve 0.13 (webpush p256, voprf, openmls). p256 0.14 is now in the lock (via aws-sigv4), which eases the webpush migration.
+
+## Cycle 758 (2026-11-04, FEATURE, 8.15/8.17/8.19 still blocked on #166/#203/#208/#161)
+Comment/docs-only: openmls 0.8.3 references (Cargo.toml, ADR-0003) and a note in `inspect_group_commit` docs that the ratchet is consumed only after `process_message` succeeds. Other "consumes ratchet" comments stay true for successful inspection; not rewritten.
