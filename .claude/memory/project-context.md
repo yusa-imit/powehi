@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 759 (2026-11-04, FEATURE, nothing unblocked) — proptest tui clean
+8.15 (#166), 8.17 (#203), 8.19 (#208) still wait on the owner. Added proptests for `tui::clean` (no control char survives, char count kept, identity on printable, idempotent). Test-only; 605 lib tests pass.
+
 ## Cycle 757 (2026-11-04, FEATURE, nothing unblocked) — proptest group PendingAdd codec
 8.15 (#166), 8.17 (#203), 8.19 (#208) still wait on the owner. `cargo audit`/`cargo deny` clean, no lockfile updates. Added round-trip and decoder totality/canonical proptests for `group::PendingAdd`. Test-only.
 
