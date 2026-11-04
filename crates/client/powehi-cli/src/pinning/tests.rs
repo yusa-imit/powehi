@@ -270,3 +270,53 @@ proptest::proptest! {
         }
     }
 }
+
+mod props {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// `PinSet::new` agrees with a plain model of the size and duplicate rules.
+        #[test]
+        fn pin_set_matches_model(pins in proptest::collection::vec(any::<[u8; PIN_LEN]>(), 0..12)) {
+            let dup = pins.iter().enumerate().any(|(i, p)| pins[..i].contains(p));
+            let got = PinSet::new(&pins);
+            if pins.len() < MIN_PINS {
+                prop_assert_eq!(got, Err(PinError::TooFew(pins.len())));
+            } else if pins.len() > MAX_PINS {
+                prop_assert_eq!(got, Err(PinError::TooMany(pins.len())));
+            } else if dup {
+                prop_assert_eq!(got, Err(PinError::Duplicate));
+            } else {
+                let set = got.unwrap();
+                for p in &pins {
+                    prop_assert!(set.contains(p));
+                }
+            }
+        }
+
+        /// A digest outside the set is never matched.
+        #[test]
+        fn pin_set_rejects_foreign_pin(
+            a in any::<[u8; PIN_LEN]>(),
+            b in any::<[u8; PIN_LEN]>(),
+            other in any::<[u8; PIN_LEN]>(),
+        ) {
+            prop_assume!(a != b && other != a && other != b);
+            let set = PinSet::new(&[a, b]).unwrap();
+            prop_assert!(!set.contains(&other));
+        }
+
+        /// Arbitrary bytes never panic the SPKI extraction, and a hit is a full digest.
+        #[test]
+        fn spki_pin_total_on_garbage(bytes in proptest::collection::vec(any::<u8>(), 0..512)) {
+            let der = CertificateDer::from(bytes);
+            if let Some(pin) = spki_pin(&der) {
+                prop_assert_eq!(pin.len(), PIN_LEN);
+            }
+        }
+    }
+}
