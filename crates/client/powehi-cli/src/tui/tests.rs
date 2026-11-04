@@ -495,6 +495,33 @@ mod paint_props {
             let text = String::from_utf8(bare).unwrap();
             prop_assert!(!text.chars().any(char::is_control), "{text:?}");
         }
+
+        /// Any buffer size and content paints a reset first and last, and exactly one cursor
+        /// move per row, in order, so a repaint never drifts a row.
+        #[test]
+        fn paint_moves_to_each_row_once_in_order(
+            w in 0u16..30,
+            h in 0u16..8,
+            line in ".{0,40}",
+        ) {
+            let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
+            for y in 0..h {
+                buf.set_string(0, y, &line, Style::new().add_modifier(Modifier::BOLD));
+            }
+            let out = String::from_utf8(paint(&buf)).unwrap();
+            prop_assert!(out.starts_with("\x1b[0m") && out.ends_with("\x1b[0m"));
+            let moves: Vec<&str> = out
+                .match_indices("\x1b[")
+                .filter_map(|(i, _)| {
+                    let rest = &out[i + 2..];
+                    let end = rest.find(|c: char| !c.is_ascii_digit() && c != ';')?;
+                    (rest[..end].ends_with(";1") && rest[end..].starts_with('H'))
+                        .then_some(&rest[..end])
+                })
+                .collect();
+            let want: Vec<String> = (1..=h).map(|y| format!("{y};1")).collect();
+            prop_assert_eq!(moves, want);
+        }
     }
 }
 
