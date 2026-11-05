@@ -11,7 +11,7 @@
 
 use crate::device::DeviceId;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PushSubscription {
     pub device_id: DeviceId,
     /// HTTPS URL of the push service endpoint.
@@ -20,6 +20,17 @@ pub struct PushSubscription {
     pub p256dh: Vec<u8>,
     /// 16-byte random auth secret from the browser.
     pub auth_secret: Vec<u8>,
+}
+
+impl std::fmt::Debug for PushSubscription {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PushSubscription")
+            .field("device_id", &self.device_id)
+            .field("endpoint", &"<redacted>")
+            .field("p256dh", &"<redacted>")
+            .field("auth_secret", &"<redacted>")
+            .finish()
+    }
 }
 
 impl PushSubscription {
@@ -41,6 +52,22 @@ impl PushSubscription {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn push_subscription_debug_redacts_endpoint_and_keys() {
+        let sub = PushSubscription::new(
+            DeviceId::new(),
+            "https://push.example/secret-endpoint".into(),
+            vec![4u8; 65],
+            vec![7u8; 16],
+        );
+        let shown = format!("{sub:?}");
+        assert!(!shown.contains("secret-endpoint"));
+        assert!(!shown.contains("push.example"));
+        assert!(!shown.contains("[7, 7"));
+        assert!(!shown.contains("[4, 4"));
+        assert!(shown.contains("redacted"));
+    }
 
     #[test]
     fn push_subscription_holds_fields() {
