@@ -289,4 +289,39 @@ mod tests {
         let _ = rl.check(&[0u8; 8]);
         let _ = rl.check(&[0u8; 16]);
     }
+
+    /// The production quota allows exactly the documented burst of 5 per handle.
+    #[test]
+    fn handle_rate_limiter_production_burst_is_five() {
+        let rl = HandleRateLimiter::new();
+        let hash = [0x11u8; 32];
+        for n in 0..5 {
+            assert!(rl.check(&hash), "token {n} within burst");
+        }
+        assert!(!rl.check(&hash), "6th attempt must be limited");
+    }
+
+    /// Only the first 16 bytes key the bucket (documented), so a longer hash
+    /// sharing that prefix shares the bucket.
+    #[test]
+    fn handle_rate_limiter_keys_on_first_16_bytes_only() {
+        let rl = HandleRateLimiter::tight();
+        let mut a = [0x22u8; 32];
+        let mut b = [0x22u8; 32];
+        a[20] = 1;
+        b[20] = 2;
+        assert!(rl.check(&a));
+        assert!(!rl.check(&b), "same 16-byte prefix shares one bucket");
+        b[0] = 0x23;
+        assert!(rl.check(&b), "differing prefix gets its own bucket");
+    }
+
+    /// IPv6 addresses in XFF are parsed, and the production layers build.
+    #[test]
+    fn xff_accepts_ipv6_and_governors_build() {
+        let req = req_with_headers(|b| b.header("x-forwarded-for", "10.0.0.1, 2001:db8::1"));
+        assert_eq!(extract(req), "2001:db8::1".parse::<IpAddr>().unwrap());
+        let _ = auth_governor();
+        let _ = api_governor();
+    }
 }
