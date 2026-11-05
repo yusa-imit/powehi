@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 773 (2026-11-06, FEATURE, nothing unblocked) — lockfile refresh
+8.15 (#166/#161), 8.17 (#203), 8.19 (#208) still wait on the owner. `cargo update`: mime 0.3.18, winnow 1.0.5. cargo test --workspace 1680 passed, clippy/audit/deny clean. nextest is not installed locally; use `cargo test --workspace`.
+
 ## Cycle 763 (2026-11-05, FEATURE, nothing unblocked) — proptest conversation record
 8.15 (#166), 8.17 (#203), 8.19 (#208) still wait on the owner (no owner comments). cargo audit/deny/clippy clean. Added proptests: peer signature pin is write-once; save/load round-trips counters, pin, credential. Test-only; 58 conversation-filter tests pass. Proptest coverage is now broad across CLI modules; next idle cycle should prefer other stabilization (audit, CI) over more proptests.
 
