@@ -41,7 +41,7 @@ pub struct LoginInitRequest {
     pub opaque_ke1: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct LoginInitResponse {
     pub user_id: UserId,
     pub opaque_ke2: Vec<u8>,
@@ -56,7 +56,7 @@ pub struct LoginInitResponse {
 /// deterministic Ed25519 keypair from the phrase and signs the server-issued
 /// `login_nonce`; the server verifies `signature` against the `recovery_pubkey`
 /// stored at registration and, only if valid, mints a brand-new device.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RecoveryProof {
     /// The new device's BasicCredential identity label (same role/shape as
     /// `RegistrationFinishRequest.mls_credential`). Opaque to the server.
@@ -66,7 +66,7 @@ pub struct RecoveryProof {
     pub signature: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct LoginFinishRequest {
     pub opaque_ke3: Vec<u8>,
     /// Must match the `login_nonce` returned by `login_init`.
@@ -80,6 +80,38 @@ pub struct LoginFinishRequest {
     /// `#[serde(default)]` so normal login bodies without the field still deserialize.
     #[serde(default)]
     pub recovery_proof: Option<RecoveryProof>,
+}
+
+/// `Debug` for the login-handshake types is hand-written: `login_nonce`, `opaque_ke3` and the
+/// recovery signature are live handshake secrets, so a stray `{:?}` must not print them.
+impl std::fmt::Debug for LoginInitResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginInitResponse")
+            .field("user_id", &self.user_id)
+            .field("opaque_ke2", &"<redacted>")
+            .field("login_nonce", &"<redacted>")
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for RecoveryProof {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecoveryProof")
+            .field("mls_credential", &"<redacted>")
+            .field("signature", &"<redacted>")
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for LoginFinishRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginFinishRequest")
+            .field("opaque_ke3", &"<redacted>")
+            .field("login_nonce", &"<redacted>")
+            .field("device_id", &self.device_id)
+            .field("recovery_proof", &self.recovery_proof)
+            .finish()
+    }
 }
 
 /// Bearer credential. `Debug` is hand-written and redacts the value so a stray
@@ -104,6 +136,31 @@ mod tests {
         assert!(!shown.contains("s3cret"));
         assert!(shown.contains("redacted"));
         assert_eq!(t.0, "s3cret-bearer-value");
+    }
+
+    #[test]
+    fn login_handshake_debug_redacts_secrets() {
+        let proof = RecoveryProof {
+            mls_credential: b"cred-bytes-xyz".to_vec(),
+            signature: b"sig-bytes-xyz".to_vec(),
+        };
+        let fin = LoginFinishRequest {
+            opaque_ke3: b"ke3-bytes-xyz".to_vec(),
+            login_nonce: "nonce-secret-xyz".to_owned(),
+            device_id: DeviceId::new(),
+            recovery_proof: Some(proof.clone()),
+        };
+        let init = LoginInitResponse {
+            user_id: UserId::new(),
+            opaque_ke2: b"ke2-bytes-xyz".to_vec(),
+            login_nonce: "nonce-secret-xyz".to_owned(),
+        };
+        let shown = format!("{fin:?} {fin:#?} {init:?} {proof:?}");
+        assert!(!shown.contains("xyz"));
+        assert!(!shown.contains("[107"), "byte-vec form leaked");
+        assert!(shown.contains("redacted"));
+        assert!(shown.contains("device_id"));
+        assert_eq!(fin.login_nonce, "nonce-secret-xyz");
     }
 }
 
