@@ -2179,3 +2179,4 @@ Test-only: first proptests in `powehi-application` (proptest dev-dep): `reg_fing
 
 ## Cycle 771 (2026-11-05, FEATURE, nothing unblocked) — SessionToken Debug redaction
 8.15 (#166), 8.17 (#203), 8.19 (#208) still wait on the owner (no comments). `SessionToken` derived Debug and would print the bearer token in any `{:?}`/unwrap panic; now hand-written redacting Debug + test. 1679 workspace tests pass, clippy/fmt/audit clean. security-auditor agent ran out of turns with no report; I grepped for Debug-dependent uses and log calls myself (none). cargo is at ~/.cargo/bin (not on PATH in cron); cargo-nextest not installed, use `cargo test`.
+- Cycle 772 (FEATURE slot): 8.15/8.17/8.19 and all open Phase 9 items are blocked on owner issues (#166, #203, #208, #118, #248, #253). Shipped the carried 8.17 fix "`retire_keys` leaves the invite marker": decline/expired-prune now remove the `invite-kp-*` record (test first, 621 CLI lib tests green).
