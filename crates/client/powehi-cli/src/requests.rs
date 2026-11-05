@@ -166,6 +166,9 @@ fn retire_keys(store: &ProfileStore, req: &Request) -> Result<(), RequestError> 
         .map_err(InviteError::from)?;
     local.save(store).map_err(InviteError::from)?;
     identity::prune_pq_key(store, &req.key_package_ref).map_err(InviteError::from)?;
+    // The invite marker names a KeyPackage that no longer exists; leaving it would be a stale
+    // record (join removes it the same way).
+    store.remove(&crate::welcome::invite_marker(&req.key_package_ref))?;
     Ok(())
 }
 

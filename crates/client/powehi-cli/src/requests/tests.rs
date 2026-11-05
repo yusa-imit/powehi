@@ -243,6 +243,19 @@ async fn decline_retires_the_keys_so_the_welcome_cannot_return_as_a_request() {
 }
 
 #[tokio::test]
+async fn decline_removes_the_invite_marker_of_the_retired_key_package() {
+    let (_tmp, alice, _state, url, gid) = stranger_welcome().await;
+    welcome::join_invited(&client(), &url, &alice)
+        .await
+        .unwrap();
+    let r = load(&alice.store, &gid).unwrap().unwrap();
+    let marker = welcome::invite_marker(&r.key_package_ref);
+    alice.store.put(&marker, b"1").unwrap();
+    decline(&client(), &url, &alice, gid).await.unwrap();
+    assert!(alice.store.get(&marker).unwrap().is_none());
+}
+
+#[tokio::test]
 async fn decline_after_a_join_is_refused() {
     let (_tmp, alice, _state, url, gid) = stranger_welcome().await;
     welcome::join_invited(&client(), &url, &alice)
