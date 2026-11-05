@@ -846,6 +846,70 @@ mod tests {
         assert!(parse_journal(&[0xff, b'\n']).is_err());
     }
 
+    mod journal_props {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn arb_tag() -> impl Strategy<Value = String> {
+            proptest::array::uniform16(any::<u8>())
+                .prop_map(|r| r.iter().map(|b| format!("{b:02x}")).collect::<String>())
+        }
+
+        fn arb_hash() -> impl Strategy<Value = String> {
+            proptest::array::uniform32(any::<u8>())
+                .prop_map(|r| r.iter().map(|b| format!("{b:02x}")).collect::<String>())
+        }
+
+        fn render(new: &BTreeMap<String, String>, m: &str, old: &BTreeSet<String>) -> String {
+            let mut out = String::new();
+            for (t, h) in new {
+                out.push_str(&format!("n {t} {h}\n"));
+            }
+            out.push_str(&format!("m {m}\n"));
+            for t in old {
+                out.push_str(&format!("d {t}\n"));
+            }
+            out
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(64))]
+
+            #[test]
+            fn well_formed_journals_parse_back(
+                new in proptest::collection::btree_map(arb_tag(), arb_hash(), 0..8),
+                old in proptest::collection::btree_set(arb_tag(), 0..8),
+                m in arb_hash(),
+            ) {
+                let disjoint = new.keys().all(|t| !old.contains(t));
+                let r = parse_journal(render(&new, &m, &old).as_bytes());
+                if disjoint {
+                    let j = r.unwrap();
+                    prop_assert_eq!(j.new, new);
+                    prop_assert_eq!(j.old, old);
+                    prop_assert_eq!(j.manifest, m);
+                } else {
+                    prop_assert!(matches!(r, Err(StoreError::RekeyJournalCorrupt)));
+                }
+            }
+
+            #[test]
+            fn missing_trailing_newline_is_corrupt(
+                new in proptest::collection::btree_map(arb_tag(), arb_hash(), 0..4),
+                m in arb_hash(),
+            ) {
+                let text = render(&new, &m, &BTreeSet::new());
+                let cut = text.trim_end_matches('\n');
+                prop_assert!(parse_journal(cut.as_bytes()).is_err());
+            }
+
+            #[test]
+            fn arbitrary_bytes_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..512)) {
+                let _ = parse_journal(&bytes);
+            }
+        }
+    }
+
     #[test]
     fn a_replayed_journal_deletes_nothing_made_after_the_rekey() {
         let tmp = tempfile::tempdir().unwrap();
