@@ -279,3 +279,79 @@ fn bounded_roster_fails_closed_past_the_cap() {
     assert!(matches!(bounded(0..4, 3), Err(GroupError::TooMany)));
     assert!(bounded(0..0, 3).unwrap().is_empty());
 }
+
+mod props {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    fn member() -> impl Strategy<Value = Member> {
+        (any::<u32>(), "[0-9a-f]{2,16}", any::<bool>()).prop_map(|(leaf, key_hex, is_self)| {
+            Member {
+                leaf,
+                key_hex,
+                is_self,
+            }
+        })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// `bounded` keeps everything up to the cap and refuses (never truncates) past it.
+        #[test]
+        fn bounded_is_identity_within_cap_and_refuses_beyond(n in 0usize..40, cap in 0usize..40) {
+            let got = bounded(0..n, cap);
+            if n <= cap {
+                prop_assert_eq!(got.unwrap(), (0..n).collect::<Vec<_>>());
+            } else {
+                prop_assert!(matches!(got, Err(GroupError::TooMany)));
+            }
+        }
+
+        /// `to_hex` is lowercase, two digits per byte, and decodes back to the input.
+        #[test]
+        fn to_hex_round_trips(bytes in proptest::collection::vec(any::<u8>(), 0..64)) {
+            let hex = to_hex(&bytes);
+            prop_assert_eq!(hex.len(), bytes.len() * 2);
+            prop_assert!(hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+            let back: Vec<u8> = (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+                .collect();
+            prop_assert_eq!(back, bytes);
+        }
+
+        /// JSON roster output mirrors the list; text output has one line per member.
+        #[test]
+        fn write_members_mirrors_the_list(list in proptest::collection::vec(member(), 0..10)) {
+            let mut out = Vec::new();
+            write_members(&list, true, &mut out).unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+            let arr = v.as_array().unwrap();
+            prop_assert_eq!(arr.len(), list.len());
+            for (j, m) in arr.iter().zip(&list) {
+                prop_assert_eq!(j["leaf"].as_u64().unwrap(), u64::from(m.leaf));
+                prop_assert_eq!(j["key"].as_str().unwrap(), m.key_hex.as_str());
+                prop_assert_eq!(j["self"].as_bool().unwrap(), m.is_self);
+            }
+            let mut out = Vec::new();
+            write_members(&list, false, &mut out).unwrap();
+            let text = String::from_utf8(out).unwrap();
+            prop_assert_eq!(text.lines().count(), list.len());
+            prop_assert_eq!(text.matches(" (you)").count(), list.iter().filter(|m| m.is_self).count());
+        }
+
+        /// `write_removed` JSON always echoes key and epoch and never claims the server knows.
+        #[test]
+        fn write_removed_json_fields(key in "[0-9a-f]{2,16}", epoch in any::<u64>(), b in 1u8..=255) {
+            let gid = Uuid::from_bytes([b; 16]);
+            let mut out = Vec::new();
+            write_removed(gid, &key, epoch, true, &mut out).unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+            prop_assert_eq!(v["removed"].as_str().unwrap(), key.as_str());
+            prop_assert_eq!(v["epoch"].as_u64().unwrap(), epoch);
+            prop_assert_eq!(&v["server_notified"], &serde_json::Value::Bool(false));
+        }
+    }
+}

@@ -2161,3 +2161,6 @@ Comment/docs-only: openmls 0.8.3 references (Cargo.toml, ADR-0003) and a note in
 
 ## Cycle 764 (2026-11-05, FEATURE, 8.15/8.17/8.19 still blocked on #166/#203/#208/#161; no owner answers)
 Test-only: proptest `reports_preserve_the_number` in verify.rs (text report row wrapping + JSON round-trip). cargo audit/deny clean.
+
+## Cycle 765 (2026-11-05, STABILIZATION)
+Test-only: proptests in group/remove/tests.rs (bounded cap, to_hex round-trip, write_members/write_removed output). cargo audit/deny clean, CI green, no bug issues. Untested-by-proptest modules left: inbox, message, invite, welcome, store/rekey, tui/run.
