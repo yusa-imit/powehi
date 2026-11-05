@@ -2187,3 +2187,6 @@ Test-only: first proptests in `powehi-application` (proptest dev-dep): `reg_fing
 ## Cycle 774 (FEATURE, no unblocked item)
 - Every unchecked Phase 8 item (8.15 #166, 8.17 #203, 8.19 #208, 8.22, 8.23) waits on an owner decision; Phase 9 remainder is owner-gated too. Did not invent features: shipped a hardening fix instead.
 - `LoginInitResponse`, `RecoveryProof`, `LoginFinishRequest` now have hand-written redacting `Debug` (nonce, KE2/KE3, recovery signature). No code path logged them today; defence in depth next to `SessionToken`.
+
+## Cycle 775 (STABILIZATION)
+- CI green on main, no bug issues, `cargo audit`/`cargo deny` clean. `Envelope` (ciphertext) and `PushSubscription` (endpoint, p256dh, auth_secret) derived Debug; now hand-written redacting Debug + tests (domain crate). Workspace tests/clippy/fmt green. `KeyPackage`/`MediaBlob` left derived (public/opaque refs only). No target/ hygiene run (not needed this cycle).

@@ -59,7 +59,8 @@ pub enum MessageType {
 }
 
 /// Opaque delivery unit. The `ciphertext` field is E2EE — server never decrypts it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `Debug` is hand-written: it prints the ciphertext length, never the bytes.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Envelope {
     pub id: EnvelopeId,
     pub group_id: GroupId,
@@ -71,6 +72,22 @@ pub struct Envelope {
     pub epoch: Option<Epoch>,
     pub created_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+impl std::fmt::Debug for Envelope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Envelope")
+            .field("id", &self.id)
+            .field("group_id", &self.group_id)
+            .field("sender", &self.sender)
+            .field("recipient", &self.recipient)
+            .field("message_type", &self.message_type)
+            .field("ciphertext_len", &self.ciphertext.len())
+            .field("epoch", &self.epoch)
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 impl Envelope {
@@ -100,6 +117,22 @@ mod tests {
     use super::*;
     use crate::device::DeviceId;
     use crate::group::GroupId;
+
+    #[test]
+    fn envelope_debug_omits_ciphertext_bytes() {
+        let env = Envelope::new(
+            GroupId::new(),
+            DeviceId::new(),
+            None,
+            MessageType::Application,
+            vec![0xAB, 0xCD, 0xEF, 0x12],
+        );
+        let shown = format!("{env:?}");
+        assert!(shown.contains("ciphertext_len: 4"));
+        assert!(!shown.contains("171"), "decimal bytes leaked: {shown}");
+        assert!(!shown.to_lowercase().contains("0xab"));
+        assert!(!shown.contains("ciphertext:"));
+    }
 
     #[test]
     fn envelope_id_is_unique() {
