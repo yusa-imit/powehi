@@ -596,6 +596,32 @@ mod tests {
                 prop_assert!(number_from_keys(&keys, &own, Kind::Pair).is_err());
             }
 
+            /// The text report wraps any number into rows of at most four groups and loses
+            /// none; the JSON report round-trips the number and names the state.
+            #[test]
+            fn reports_preserve_the_number(
+                groups in prop::collection::vec("[0-9]{5}", 1..16),
+                state in prop::sample::select(vec![State::Verified, State::Unverified, State::Changed]),
+            ) {
+                let number = groups.join(" ");
+                let g = Uuid::nil();
+                let mut out = Vec::new();
+                report(&mut out, g, &number, state).unwrap();
+                let text = String::from_utf8(out).unwrap();
+                let rows: Vec<&str> = text.lines().filter(|l| l.starts_with("  ")).collect();
+                prop_assert_eq!(rows.len(), groups.len().div_ceil(4));
+                let joined = rows.join(" ");
+                let seen: Vec<&str> = joined.split_whitespace().collect();
+                let want: Vec<&str> = groups.iter().map(String::as_str).collect();
+                prop_assert_eq!(seen, want);
+                let mut out = Vec::new();
+                report_json(&mut out, g, &number, state).unwrap();
+                let text = String::from_utf8(out).unwrap();
+                prop_assert_eq!(text.lines().count(), 1);
+                let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+                prop_assert_eq!(v["safety_number"].as_str(), Some(number.as_str()));
+            }
+
             /// A group number does not depend on the roster order or on who computes it.
             #[test]
             fn group_number_ignores_order_and_viewer(

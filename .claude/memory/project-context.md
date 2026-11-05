@@ -2158,3 +2158,6 @@ Stabilization instead: cargo audit + deny clean; `cargo update` lockfile refresh
 
 ## Cycle 758 (2026-11-04, FEATURE, 8.15/8.17/8.19 still blocked on #166/#203/#208/#161)
 Comment/docs-only: openmls 0.8.3 references (Cargo.toml, ADR-0003) and a note in `inspect_group_commit` docs that the ratchet is consumed only after `process_message` succeeds. Other "consumes ratchet" comments stay true for successful inspection; not rewritten.
+
+## Cycle 764 (2026-11-05, FEATURE, 8.15/8.17/8.19 still blocked on #166/#203/#208/#161; no owner answers)
+Test-only: proptest `reports_preserve_the_number` in verify.rs (text report row wrapping + JSON round-trip). cargo audit/deny clean.
