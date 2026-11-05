@@ -491,7 +491,8 @@ mod props {
             let m = crate::welcome::invite_marker(&a);
             prop_assert_eq!(&m, &crate::welcome::invite_marker(&a));
             prop_assert!(m.len() <= crate::store::MAX_NAME_LEN);
-            prop_assert!(!m.contains(&hex(&a)) || a.len() < 2);
+            // A short ref's hex can appear in a hash's hex by chance; 8 bytes cannot (2^-64).
+            prop_assert!(!m.contains(&hex(&a)) || a.len() < 8);
             if a != b {
                 prop_assert_ne!(m, crate::welcome::invite_marker(&b));
             }
