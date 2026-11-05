@@ -2164,3 +2164,6 @@ Test-only: proptest `reports_preserve_the_number` in verify.rs (text report row 
 
 ## Cycle 765 (2026-11-05, STABILIZATION)
 Test-only: proptests in group/remove/tests.rs (bounded cap, to_hex round-trip, write_members/write_removed output). cargo audit/deny clean, CI green, no bug issues. Untested-by-proptest modules left: inbox, message, invite, welcome, store/rekey, tui/run.
+
+## Cycle 766 (2026-11-05, FEATURE, 8.15/8.17/8.19 still blocked on #166/#203/#208/#161; no owner answers)
+Test-only: proptests for `store/rekey.rs` `parse_journal` (round trip, overlap rejected, missing newline, arbitrary bytes). No review agents needed.
