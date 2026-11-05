@@ -2004,6 +2004,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn media_upload_size_at_bounds_is_accepted() {
+        // The cap is inclusive: 1 byte and exactly 100MB pass the route check.
+        for size in [1u64, 100 * 1024 * 1024] {
+            let body = serde_json::json!({
+                "content_type": "image/jpeg",
+                "size_bytes": size
+            });
+            let resp = media_router()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/media/upload-url")
+                        .header("authorization", bearer())
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "size_bytes={size}");
+        }
+    }
+
+    #[tokio::test]
     async fn request_upload_non_member_group_returns_401() {
         // Service returns Unauthorized when the uploader is not a member of the
         // claimed group_id. The REST handler must surface this as 401.
