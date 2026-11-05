@@ -2174,3 +2174,5 @@ Test-only: first proptests in `powehi-application` (proptest dev-dep): `reg_fing
 - Cycle 768 (stabilization-style, FEATURE slot): every open Phase 8 item is blocked on owner issues #166/#203/#208; added media upload size-bound test (PR below). cargo deny/audit clean; target/ pruned (33G -> 32G).
 
 - Cycle 769 (FEATURE slot, CI red on main): cargo-deny failed on RUSTSEC-2026-0440 (astral-tokio-tar, dev-only via testcontainers) and RUSTSEC-2026-0441 (pin-utils, via openmls -> fluvio-wasm-timer). Both are unmaintained notices, not vulnerabilities; waived in deny.toml and .cargo/audit.toml with reasons. Phase 8 queue still blocked on #166/#203/#208/#161.
+
+- Cycle 770 (stabilization): CI green, audit/deny clean. Test-only: rate_limit.rs production HandleRateLimiter burst (5), 16-byte key prefix sharing, IPv6 XFF, governor construction. 19 rest-api rate tests green; clippy clean.
