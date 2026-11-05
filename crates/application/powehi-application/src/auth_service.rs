@@ -3379,3 +3379,71 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod fingerprint_props {
+    use super::*;
+    use powehi_domain::user::UserId;
+    use proptest::prelude::*;
+
+    fn req(rec: Vec<u8>, cred: Vec<u8>, pk: Option<Vec<u8>>) -> RegistrationFinishRequest {
+        RegistrationFinishRequest {
+            user_id: UserId::new(),
+            opaque_record: rec,
+            mls_credential: cred,
+            recovery_pubkey: pk,
+            device_id: None,
+        }
+    }
+
+    fn bytes() -> impl Strategy<Value = Vec<u8>> {
+        proptest::collection::vec(any::<u8>(), 0..64)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// The fingerprint is a pure function of device id and the three enrollment fields.
+        #[test]
+        fn fingerprint_is_deterministic_and_ignores_user_id(
+            d in any::<u128>(), rec in bytes(), cred in bytes(), pk in proptest::option::of(bytes()),
+        ) {
+            let dev = DeviceId::from(uuid::Uuid::from_u128(d));
+            let a = reg_fingerprint(&dev, &req(rec.clone(), cred.clone(), pk.clone()));
+            let b = reg_fingerprint(&dev, &req(rec, cred, pk));
+            prop_assert_eq!(a.len(), 32);
+            prop_assert_eq!(a, b);
+        }
+
+        /// Distinct field tuples never collide, in particular when bytes move across a field
+        /// boundary (length prefixes) or `None` is swapped for `Some(empty)`.
+        #[test]
+        fn fingerprint_separates_field_boundaries(
+            d in any::<u128>(), joined in bytes(), cut in 0usize..64, pk in proptest::option::of(bytes()),
+        ) {
+            let dev = DeviceId::from(uuid::Uuid::from_u128(d));
+            let cut = cut.min(joined.len());
+            let (l, r) = joined.split_at(cut);
+            prop_assume!(!l.is_empty() || !r.is_empty());
+            let a = reg_fingerprint(&dev, &req(l.to_vec(), r.to_vec(), pk.clone()));
+            let b = reg_fingerprint(&dev, &req(r.to_vec(), l.to_vec(), pk));
+            prop_assert_eq!(a == b, l == r);
+            let n = reg_fingerprint(&dev, &req(joined.clone(), vec![], None));
+            let e = reg_fingerprint(&dev, &req(joined, vec![], Some(vec![])));
+            prop_assert_ne!(n, e);
+        }
+
+        /// `ct_eq` agrees with `==` for all inputs, including unequal lengths.
+        #[test]
+        fn ct_eq_matches_slice_equality(a in bytes(), b in bytes(), flip in 0usize..64) {
+            prop_assert_eq!(ct_eq(&a, &b), a == b);
+            prop_assert!(ct_eq(&a, &a));
+            if !a.is_empty() {
+                let mut c = a.clone();
+                let i = flip % c.len();
+                c[i] ^= 1;
+                prop_assert!(!ct_eq(&a, &c));
+            }
+        }
+    }
+}

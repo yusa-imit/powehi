@@ -1385,3 +1385,72 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod validation_props {
+    use super::*;
+    use proptest::prelude::*;
+
+    const TOKEN: &str = "[A-Za-z0-9!#$&^_.+-]{1,20}";
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// Any `token/token` within the length cap is accepted.
+        #[test]
+        fn well_formed_pairs_are_accepted(t in TOKEN, s in TOKEN) {
+            let v = format!("{t}/{s}");
+            prop_assert!(is_valid_content_type(&v));
+        }
+
+        /// Arbitrary text is classified without panic, and an accepted value is exactly one
+        /// slash-separated pair of RFC 6838 tokens: no whitespace, control or parameters.
+        #[test]
+        fn accepted_values_have_no_smuggled_characters(text in "\\PC{0,200}") {
+            if is_valid_content_type(&text) {
+                prop_assert!(text.len() <= MAX_CONTENT_TYPE_LEN);
+                prop_assert_eq!(text.matches('/').count(), 1);
+                prop_assert!(text.chars().all(|c| c.is_ascii_graphic()));
+                prop_assert!(!text.contains([';', ',', '=', '"', ' ', '\\']));
+            }
+        }
+
+        /// One slash, a non-token byte, or a missing side always rejects.
+        #[test]
+        fn one_bad_character_rejects(t in TOKEN, s in TOKEN, bad in prop::sample::select(vec![';', ' ', '\n', '/', '"', '\u{e9}'])) {
+            let v = format!("{t}{bad}/{s}");
+            prop_assert!(!is_valid_content_type(&v));
+            let v = format!("{t}/{s}{bad}");
+            prop_assert!(!is_valid_content_type(&v));
+            let v = format!("/{s}");
+            prop_assert!(!is_valid_content_type(&v));
+            let v = format!("{t}/");
+            prop_assert!(!is_valid_content_type(&v));
+            prop_assert!(!is_valid_content_type(&t));
+        }
+
+        /// The cap is exact: 128 bytes pass, 129 fail.
+        #[test]
+        fn length_cap_is_exact(extra in 0usize..2) {
+            let sub = "a".repeat(MAX_CONTENT_TYPE_LEN - 2 + extra);
+            prop_assert_eq!(is_valid_content_type(&format!("a/{sub}")), extra == 0);
+        }
+
+        /// Buckets are monotone in size and the edges land where documented.
+        #[test]
+        fn size_bucket_is_monotone(a in any::<u64>(), b in any::<u64>()) {
+            let order = ["<=1KB", "<=10KB", "<=100KB", "<=1MB", "<=10MB", ">10MB"];
+            let rank = |n| order.iter().position(|x| *x == size_bucket(n)).unwrap();
+            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+            prop_assert!(rank(lo) <= rank(hi));
+        }
+    }
+
+    #[test]
+    fn size_bucket_edges() {
+        assert_eq!(size_bucket(1_024), "<=1KB");
+        assert_eq!(size_bucket(1_025), "<=10KB");
+        assert_eq!(size_bucket(10_485_760), "<=10MB");
+        assert_eq!(size_bucket(10_485_761), ">10MB");
+    }
+}

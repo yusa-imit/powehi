@@ -2167,3 +2167,6 @@ Test-only: proptests in group/remove/tests.rs (bounded cap, to_hex round-trip, w
 
 ## Cycle 766 (2026-11-05, FEATURE, 8.15/8.17/8.19 still blocked on #166/#203/#208/#161; no owner answers)
 Test-only: proptests for `store/rekey.rs` `parse_journal` (round trip, overlap rejected, missing newline, arbitrary bytes). No review agents needed.
+
+## Cycle 767 (2026-11-05, FEATURE, queue still blocked on #166/#203/#208/#161; no owner answers)
+Test-only: first proptests in `powehi-application` (proptest dev-dep): `reg_fingerprint` boundary separation / determinism, `ct_eq` == slice equality, `is_valid_content_type` / `size_bucket`. cargo audit/deny clean. 188 crate tests green. No review agents needed (no production code changed).
