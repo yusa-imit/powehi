@@ -82,8 +82,30 @@ pub struct LoginFinishRequest {
     pub recovery_proof: Option<RecoveryProof>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Bearer credential. `Debug` is hand-written and redacts the value so a stray
+/// `{:?}` or a failed `unwrap` can never put a live token in a log or panic message.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SessionToken(pub String);
+
+impl std::fmt::Debug for SessionToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SessionToken(<redacted>)")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_token_debug_redacts_value() {
+        let t = SessionToken("s3cret-bearer-value".to_owned());
+        let shown = format!("{t:?} {t:#?}");
+        assert!(!shown.contains("s3cret"));
+        assert!(shown.contains("redacted"));
+        assert_eq!(t.0, "s3cret-bearer-value");
+    }
+}
 
 /// Returned by `register_finish`. Carries both the user's persistent ID and the
 /// newly-created device ID that the client must store for subsequent logins.

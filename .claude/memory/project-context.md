@@ -2176,3 +2176,6 @@ Test-only: first proptests in `powehi-application` (proptest dev-dep): `reg_fing
 - Cycle 769 (FEATURE slot, CI red on main): cargo-deny failed on RUSTSEC-2026-0440 (astral-tokio-tar, dev-only via testcontainers) and RUSTSEC-2026-0441 (pin-utils, via openmls -> fluvio-wasm-timer). Both are unmaintained notices, not vulnerabilities; waived in deny.toml and .cargo/audit.toml with reasons. Phase 8 queue still blocked on #166/#203/#208/#161.
 
 - Cycle 770 (stabilization): CI green, audit/deny clean. Test-only: rate_limit.rs production HandleRateLimiter burst (5), 16-byte key prefix sharing, IPv6 XFF, governor construction. 19 rest-api rate tests green; clippy clean.
+
+## Cycle 771 (2026-11-05, FEATURE, nothing unblocked) — SessionToken Debug redaction
+8.15 (#166), 8.17 (#203), 8.19 (#208) still wait on the owner (no comments). `SessionToken` derived Debug and would print the bearer token in any `{:?}`/unwrap panic; now hand-written redacting Debug + test. 1679 workspace tests pass, clippy/fmt/audit clean. security-auditor agent ran out of turns with no report; I grepped for Debug-dependent uses and log calls myself (none). cargo is at ~/.cargo/bin (not on PATH in cron); cargo-nextest not installed, use `cargo test`.
