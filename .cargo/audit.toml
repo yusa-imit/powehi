@@ -132,6 +132,16 @@
 # 2026-10-25) with mitigations: webpush to p256 0.14, drop sigv4a, ciphersuite-rejection test.
 # Revisit when openmls_rust_crypto / opaque-ke move to elliptic-curve 0.14.
 #
+# RUSTSEC-2026-0440: astral-tokio-tar 0.6.4 — crate unmaintained (Astral ended maintenance
+# 2026-11-03). Maintenance notice only, no vulnerability. Reached solely as a dev-dependency:
+# testcontainers 0.27 -> testcontainers-modules -> adapter integration tests. Never compiled
+# into powehi-server, powehi-cli or the WASM worker. Revisit when testcontainers swaps its tar.
+#
+# RUSTSEC-2026-0441: pin-utils 0.1.1 — crate unmaintained (repo archived 2026-10-01).
+# Maintenance notice only, no vulnerability. Transitive via openmls 0.8.3 -> fluvio-wasm-timer;
+# pin-projection macros only, no key material, not on any crypto data path. Cannot upgrade:
+# openmls owns the dependency. Revisit when openmls drops fluvio-wasm-timer.
+#
 ignore = [
     "RUSTSEC-2023-0071",
     "RUSTSEC-2026-0124",
@@ -148,4 +158,6 @@ ignore = [
     "RUSTSEC-2026-0330",
     "RUSTSEC-2026-0331",
     "RUSTSEC-2026-0387",
+    "RUSTSEC-2026-0440",
+    "RUSTSEC-2026-0441",
 ]

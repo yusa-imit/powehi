@@ -2172,3 +2172,5 @@ Test-only: proptests for `store/rekey.rs` `parse_journal` (round trip, overlap r
 Test-only: first proptests in `powehi-application` (proptest dev-dep): `reg_fingerprint` boundary separation / determinism, `ct_eq` == slice equality, `is_valid_content_type` / `size_bucket`. cargo audit/deny clean. 188 crate tests green. No review agents needed (no production code changed).
 
 - Cycle 768 (stabilization-style, FEATURE slot): every open Phase 8 item is blocked on owner issues #166/#203/#208; added media upload size-bound test (PR below). cargo deny/audit clean; target/ pruned (33G -> 32G).
+
+- Cycle 769 (FEATURE slot, CI red on main): cargo-deny failed on RUSTSEC-2026-0440 (astral-tokio-tar, dev-only via testcontainers) and RUSTSEC-2026-0441 (pin-utils, via openmls -> fluvio-wasm-timer). Both are unmaintained notices, not vulnerabilities; waived in deny.toml and .cargo/audit.toml with reasons. Phase 8 queue still blocked on #166/#203/#208/#161.
