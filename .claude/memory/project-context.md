@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 776 (2026-11-06, FEATURE, nothing unblocked) — User Debug redaction
+8.15 (#166/#161), 8.17 (#203), 8.19 (#208) still wait on the owner. `User` derived Debug over opaque_password_file/handle_hash/recovery_pubkey; now manual Debug prints lengths only (+ test). cargo audit/deny/clippy/fmt clean. Sweep of other Debug-deriving structs with secret fields found nothing else.
+
 ## Cycle 773 (2026-11-06, FEATURE, nothing unblocked) — lockfile refresh
 8.15 (#166/#161), 8.17 (#203), 8.19 (#208) still wait on the owner. `cargo update`: mime 0.3.18, winnow 1.0.5. cargo test --workspace 1680 passed, clippy/audit/deny clean. nextest is not installed locally; use `cargo test --workspace`.
 

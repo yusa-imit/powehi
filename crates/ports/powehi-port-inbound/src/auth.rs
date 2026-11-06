@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use powehi_domain::{device::DeviceId, error::DomainError, user::UserId};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RegistrationInitRequest {
     /// Client-provided OPAQUE registration request bytes.
     pub opaque_request: Vec<u8>,
@@ -17,7 +17,7 @@ pub struct RegistrationInitResponse {
     pub opaque_response: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RegistrationFinishRequest {
     pub user_id: UserId,
     pub opaque_record: Vec<u8>,
@@ -35,10 +35,42 @@ pub struct RegistrationFinishRequest {
     pub device_id: Option<DeviceId>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct LoginInitRequest {
     pub handle_hash: Vec<u8>,
     pub opaque_ke1: Vec<u8>,
+}
+
+/// `Debug` for the registration and login-init requests prints lengths only: the OPAQUE
+/// messages, the handle hash and the recovery key must never reach a log line.
+impl std::fmt::Debug for RegistrationInitRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistrationInitRequest")
+            .field("opaque_request_len", &self.opaque_request.len())
+            .field("handle_hash_len", &self.handle_hash.len())
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for RegistrationFinishRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistrationFinishRequest")
+            .field("user_id", &self.user_id)
+            .field("opaque_record_len", &self.opaque_record.len())
+            .field("mls_credential_len", &self.mls_credential.len())
+            .field("recovery_pubkey_set", &self.recovery_pubkey.is_some())
+            .field("device_id", &self.device_id)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for LoginInitRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginInitRequest")
+            .field("handle_hash_len", &self.handle_hash.len())
+            .field("opaque_ke1_len", &self.opaque_ke1.len())
+            .finish()
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -128,6 +160,35 @@ impl std::fmt::Debug for SessionToken {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registration_and_login_init_requests_debug_print_lengths_only() {
+        let init = RegistrationInitRequest {
+            opaque_request: vec![0xAB; 40],
+            handle_hash: vec![0xCD; 32],
+        };
+        let fin = RegistrationFinishRequest {
+            user_id: UserId::new(),
+            opaque_record: vec![0xAB; 192],
+            mls_credential: vec![0xCD; 16],
+            recovery_pubkey: Some(vec![0xEF; 32]),
+            device_id: None,
+        };
+        let login = LoginInitRequest {
+            handle_hash: vec![0xCD; 32],
+            opaque_ke1: vec![0xAB; 96],
+        };
+        for out in [
+            format!("{init:?}"),
+            format!("{fin:?}"),
+            format!("{login:?}"),
+        ] {
+            for b in ["171, 171", "205, 205", "239, 239"] {
+                assert!(!out.contains(b), "bytes leaked: {out}");
+            }
+            assert!(out.contains("_len: "), "{out}");
+        }
+    }
 
     #[test]
     fn session_token_debug_redacts_value() {
