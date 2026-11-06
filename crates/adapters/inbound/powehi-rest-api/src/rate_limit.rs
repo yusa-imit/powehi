@@ -4,7 +4,6 @@ use std::{
     net::{IpAddr, Ipv4Addr},
     num::NonZeroU32,
     sync::Arc,
-    time::Duration,
 };
 use tower_governor::{
     governor::{GovernorConfig, GovernorConfigBuilder},
@@ -115,11 +114,20 @@ pub struct HandleRateLimiter {
     inner: Arc<DefaultKeyedRateLimiter<u128>>,
 }
 
+const HANDLE_BURST: NonZeroU32 = match NonZeroU32::new(5) {
+    Some(n) => n,
+    None => panic!("burst must be non-zero"),
+};
+const HANDLE_REFILL_PER_HOUR: NonZeroU32 = match NonZeroU32::new(20) {
+    Some(n) => n,
+    None => panic!("refill rate must be non-zero"),
+};
+
 impl HandleRateLimiter {
     pub fn new() -> Self {
-        let quota = Quota::with_period(Duration::from_secs(180))
-            .expect("non-zero period")
-            .allow_burst(NonZeroU32::new(5).expect("non-zero burst"));
+        // 20 cells/hour replenishes one token every 180 s; `const fn` constructors
+        // keep runtime unwrap/expect out of lib code (rule: crates-naming).
+        let quota = Quota::per_hour(HANDLE_REFILL_PER_HOUR).allow_burst(HANDLE_BURST);
         Self {
             inner: Arc::new(RateLimiter::keyed(quota)),
         }
@@ -148,9 +156,7 @@ impl HandleRateLimiter {
     /// The second consecutive call from the same hash is always blocked.
     #[cfg(test)]
     pub(crate) fn tight() -> Self {
-        let quota = Quota::with_period(Duration::from_secs(3600))
-            .expect("non-zero period")
-            .allow_burst(NonZeroU32::new(1).expect("non-zero burst"));
+        let quota = Quota::per_hour(NonZeroU32::MIN).allow_burst(NonZeroU32::MIN);
         Self {
             inner: Arc::new(RateLimiter::keyed(quota)),
         }
