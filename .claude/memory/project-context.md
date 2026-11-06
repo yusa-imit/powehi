@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 777 (2026-11-06, FEATURE, nothing unblocked) — grpc retry hardening
+8.15/8.17/8.19 still wait on the owner (no answers on #166 #161 #203 #208). powehi-grpc `retry_with_backoff`: removed the lib-code `expect` (rules: no unwrap/expect) and made the backoff doubling saturating. powehi-grpc 120 tests, clippy/fmt/audit clean. Only remaining non-test `expect` in lib code is gone.
+
 ## Cycle 776 (2026-11-06, FEATURE, nothing unblocked) — User Debug redaction
 8.15 (#166/#161), 8.17 (#203), 8.19 (#208) still wait on the owner. `User` derived Debug over opaque_password_file/handle_hash/recovery_pubkey; now manual Debug prints lengths only (+ test). cargo audit/deny/clippy/fmt clean. Sweep of other Debug-deriving structs with secret fields found nothing else.
 
