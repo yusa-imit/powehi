@@ -129,7 +129,9 @@ mod tests {
         );
         let shown = format!("{env:?}");
         assert!(shown.contains("ciphertext_len: 4"));
-        assert!(!shown.contains("171"), "decimal bytes leaked: {shown}");
+        // A bare "171" can occur in a random UUID or timestamp; match the Vec<u8> rendering.
+        assert!(!shown.contains("171, 205"), "decimal bytes leaked: {shown}");
+        assert!(!shown.contains("[171"), "decimal bytes leaked: {shown}");
         assert!(!shown.to_lowercase().contains("0xab"));
         assert!(!shown.contains("ciphertext:"));
     }
