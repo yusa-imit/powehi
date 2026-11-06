@@ -150,15 +150,14 @@ impl OpaqueServerPort for OpaqueServer {
     fn login_finish(&self, nonce: &[u8], ke3: &[u8]) -> Result<(Vec<u8>, Vec<u8>), DomainError> {
         let entry = {
             let mut pending = self.lock_pending();
-            // Check TTL before consuming the entry (Y-1: TTL check must precede remove).
-            match pending.get(nonce) {
-                None => return Err(DomainError::Unauthorized),
-                Some(e) if Instant::now().duration_since(e.created_at) >= PENDING_TTL => {
-                    pending.remove(nonce);
-                    return Err(DomainError::Unauthorized);
-                }
-                Some(_) => pending.remove(nonce).expect("just verified presence"),
+            // Single-use: the entry is consumed whether or not it has expired (Y-1).
+            let Some(entry) = pending.remove(nonce) else {
+                return Err(DomainError::Unauthorized);
+            };
+            if Instant::now().duration_since(entry.created_at) >= PENDING_TTL {
+                return Err(DomainError::Unauthorized);
             }
+            entry
         };
         let finalization = CredentialFinalization::<DefaultCipherSuite>::deserialize(ke3)
             .map_err(|_| DomainError::Unauthorized)?;
@@ -254,6 +253,13 @@ mod tests {
         assert_eq!(
             bound_identity, identity,
             "bound identity must match login_start input"
+        );
+        assert!(
+            matches!(
+                server.login_finish(TEST_NONCE, &ke3),
+                Err(DomainError::Unauthorized)
+            ),
+            "pending login state is single-use: a replayed KE3 must be rejected"
         );
     }
 
