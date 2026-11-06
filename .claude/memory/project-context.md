@@ -2196,3 +2196,6 @@ Test-only: first proptests in `powehi-application` (proptest dev-dep): `reg_fing
 
 ## Cycle 775 (STABILIZATION)
 - CI green on main, no bug issues, `cargo audit`/`cargo deny` clean. `Envelope` (ciphertext) and `PushSubscription` (endpoint, p256dh, auth_secret) derived Debug; now hand-written redacting Debug + tests (domain crate). Workspace tests/clippy/fmt green. `KeyPackage`/`MediaBlob` left derived (public/opaque refs only). No target/ hygiene run (not needed this cycle).
+
+## Cycle 778 (FEATURE slot, nothing unblocked)
+- 8.15/8.17/8.19 still wait on owner (#166/#161, #203, #208). `OpaqueServer::login_finish`: removed the lib-code `expect` (remove-first, then TTL check; entry consumed on every path) and added a replayed-KE3 assertion. crypto-reviewer: pass. powehi-opaque 10 tests, clippy/fmt clean. Remaining non-test `expect`s: rate_limit.rs constants (startup), auth_service HMAC (infallible).
