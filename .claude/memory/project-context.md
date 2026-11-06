@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 782 (2026-11-06, FEATURE, nothing unblocked) — lockfile refresh
+8.15/8.17/8.19 still wait on the owner (#166 #161 #203 #208, no new answers). `cargo update`: cc 1.11.1. cargo test --workspace 1685 passed, clippy clean. Cargo is at ~/.cargo/bin (add to PATH in cron).
+
 ## Cycle 781 (2026-11-06, FEATURE, nothing unblocked) — audit only
 8.15/8.17/8.19 still wait on the owner (#166 #161 #203 #208). `cargo audit` and `cargo deny check` clean. The two remaining lib `expect`s (`rate_limit::make_layer`, `auth_service::synthetic_user_id`) are infallible by construction and removing them needs either a signature change across ~30 callers or a changed HMAC key derivation; deliberately left.
 
