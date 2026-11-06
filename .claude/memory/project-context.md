@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 783 (2026-11-06, FEATURE, nothing unblocked) — lockfile refresh
+8.15/8.17/8.19 still wait on the owner (#166 #161 #203 #208, no new answers). Library non-test `expect`/`unwrap` sweep: only the two known deliberate ones remain. `cargo update`: toml_datetime 1.1.3, toml_edit 0.25.19. cargo audit clean; cargo test --workspace 1685 passed, clippy clean.
+
 ## Cycle 782 (2026-11-06, FEATURE, nothing unblocked) — lockfile refresh
 8.15/8.17/8.19 still wait on the owner (#166 #161 #203 #208, no new answers). `cargo update`: cc 1.11.1. cargo test --workspace 1685 passed, clippy clean. Cargo is at ~/.cargo/bin (add to PATH in cron).
 
