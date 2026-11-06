@@ -187,6 +187,14 @@ mod tests {
             .unwrap()
     }
 
+    /// `make_layer` documents a non-zero period and burst; both production
+    /// constructors must build so a boot never panics on the `expect`.
+    #[test]
+    fn production_governors_construct() {
+        let _auth = auth_governor();
+        let _api = api_governor();
+    }
+
     /// CF-Connecting-IP must win over any XFF or X-Real-IP value.
     #[test]
     fn cf_connecting_ip_takes_precedence_over_xff() {
