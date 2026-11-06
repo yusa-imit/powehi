@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 779 (2026-11-06, FEATURE, nothing unblocked) — HandleRateLimiter const quota
+8.15/8.17/8.19 still wait on the owner (#166 #161 #203 #208, no new answers). `HandleRateLimiter::new` dropped its two lib-code `expect`s: `Quota::per_hour(20).allow_burst(5)` via const NonZeroU32 (same 1 token/180 s, burst 5). Remaining lib `expect`s: `rate_limit::make_layer` (governor `finish()` Option) and `auth_service::synthetic_user_id` (HMAC new_from_slice). rest-api 170 tests, clippy/fmt clean.
+
 ## Cycle 777 (2026-11-06, FEATURE, nothing unblocked) — grpc retry hardening
 8.15/8.17/8.19 still wait on the owner (no answers on #166 #161 #203 #208). powehi-grpc `retry_with_backoff`: removed the lib-code `expect` (rules: no unwrap/expect) and made the backoff doubling saturating. powehi-grpc 120 tests, clippy/fmt/audit clean. Only remaining non-test `expect` in lib code is gone.
 
