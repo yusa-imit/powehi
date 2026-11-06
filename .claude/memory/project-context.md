@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 787 (2026-11-07, FEATURE, nothing unblocked) — lockfile refresh
+8.15/8.17/8.19 still wait on the owner (#166 #161 #203 #208, no new answers). `cargo update`: smallvec 1.16.5. cargo test --workspace 1687 passed, clippy/audit/deny clean.
+
 ## Cycle 786 (2026-11-07, FEATURE, nothing unblocked)
 8.15/8.17/8.19 still wait on #166 #161 #203 #208 (no owner answers); Phase 9 open items wait on owner issues. Added a boot-time test that `auth_governor`/`api_governor` construct (guards the last production `expect` in rate_limit.rs).
 
