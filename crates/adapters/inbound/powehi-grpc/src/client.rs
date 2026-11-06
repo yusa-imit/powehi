@@ -417,17 +417,18 @@ where
                 last_err = Some(e);
                 if delay_ms > 0 {
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    delay_ms *= 2;
+                    delay_ms = delay_ms.saturating_mul(2);
                 }
             }
         }
     }
 
     peer.lock().await.circuit.record_failure();
-    Err(GrpcError::Status(last_err.expect(
-        "loop runs max_retries+1 >= 1 times; only exits here via the retryable-error \
-         branch, which always sets last_err before the next iteration or loop exit",
-    )))
+    // The loop runs `max_retries + 1 >= 1` times and exits here only after a retryable
+    // error set `last_err`; the fallback keeps the library path free of `expect`.
+    let status = last_err
+        .unwrap_or_else(|| tonic::Status::internal("retry loop finished without an attempt"));
+    Err(GrpcError::Status(status))
 }
 
 #[cfg(test)]
