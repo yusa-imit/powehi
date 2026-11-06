@@ -130,3 +130,28 @@ impl PgLeaderLock {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two jobs sharing a key would block each other across replicas; the keys must stay
+    /// pairwise distinct and carry the `powehi` ASCII prefix that namespaces them.
+    #[test]
+    fn gc_lock_keys_are_distinct_and_namespaced() {
+        let keys = [
+            GC_LOCK_MEDIA_BLOBS,
+            GC_LOCK_MEDIA_LEDGER,
+            GC_LOCK_MEDIA_ORPHANS,
+            GC_LOCK_PENDING_REMOVALS,
+            GC_LOCK_KEY_PACKAGES,
+        ];
+        for (i, a) in keys.iter().enumerate() {
+            assert_eq!(a >> 16, 0x706f_7765_6869, "key {i} lost the powehi prefix");
+            assert!(*a > 0, "key {i} must be a positive i64");
+            for b in &keys[i + 1..] {
+                assert_ne!(a, b, "two GC jobs share an advisory-lock key");
+            }
+        }
+    }
+}
