@@ -33,7 +33,7 @@ impl std::fmt::Display for UserId {
 }
 
 /// Handle is stored only as a hash — server never sees the plaintext handle.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct User {
     pub id: UserId,
     /// SHA-256 of the plaintext handle; server never stores the handle itself.
@@ -49,6 +49,21 @@ pub struct User {
     pub recovery_pubkey: Option<Vec<u8>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Debug prints lengths only: the OPAQUE password file is an offline-guessing target and the
+/// handle hash and recovery key identify the account.
+impl std::fmt::Debug for User {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("User")
+            .field("id", &self.id)
+            .field("handle_hash_len", &self.handle_hash.len())
+            .field("opaque_password_file_len", &self.opaque_password_file.len())
+            .field("recovery_pubkey_set", &self.recovery_pubkey.is_some())
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
 }
 
 impl User {
@@ -86,6 +101,26 @@ mod tests {
     #[test]
     fn user_id_is_unique() {
         assert_ne!(UserId::new(), UserId::new());
+    }
+
+    #[test]
+    fn debug_output_hides_password_file_handle_hash_and_recovery_key() {
+        let mut user = User::registered(UserId::new(), vec![0xAB; 32], vec![0xCD; 64]);
+        user.recovery_pubkey = Some(vec![0xEF; 32]);
+        let out = format!("{user:?}");
+        assert!(!out.contains("171, 171"), "handle_hash bytes leaked: {out}");
+        assert!(
+            !out.contains("205, 205"),
+            "password file bytes leaked: {out}"
+        );
+        assert!(
+            !out.contains("239, 239"),
+            "recovery key bytes leaked: {out}"
+        );
+        assert!(!out.contains("opaque_password_file:"), "{out}");
+        assert!(out.contains("opaque_password_file_len: 64"), "{out}");
+        assert!(out.contains("handle_hash_len: 32"), "{out}");
+        assert!(out.contains("recovery_pubkey_set: true"), "{out}");
     }
 
     #[test]
