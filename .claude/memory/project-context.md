@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 795 (2026-11-07, STABILIZATION) — test(rest-api)
+CI green, audit/deny/clippy clean, no bug issues; prod-code unwrap sweep clean (only test helpers). Added `xff_skips_empty_and_garbage_hops` to `rate_limit.rs`. Blocked items unchanged (#166 #161 #203 #208 #118 #237 #241 #248 #253).
+
 ## Cycle 794 (2026-11-07, FEATURE, nothing unblocked) — memory only
 8.15/8.17/8.19 and Phase 9 9.9+ still wait on the owner (#166 #161 #203 #208 #118 #237 #241 #248 #253, no new answers). `cargo update` locked 0 packages; cargo audit/deny clean; no open `bug` issues. Test-gap survey: no src file lacks tests (they live in `<mod>/tests` submodules). Note: cron shell needs `PATH=$HOME/.cargo/bin:$PATH`. Only this note ships.
 
