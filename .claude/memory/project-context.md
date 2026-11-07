@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 798 (2026-11-08, FEATURE, nothing unblocked) — memory only
+Same blockers (#166 #161 #203 #208 #118 #237 #241 #248 #253); no owner comments, no bug issues, CI green. `cargo update` 0 packages, audit/deny clean. Swept REST routes (media size/content_type, invites, region, groups) and media_service: all already pinned by tests; no gap found. Only this note ships.
+
 ## Cycle 796 (2026-11-08, FEATURE, nothing unblocked) — memory only
 8.15/8.17/8.19/8.22/8.23 and Phase 9 9.9+ still wait on the owner (#166 #161 #203 #208 #118 #237 #241 #248 #253; no non-footer comments on any open need-human issue). `cargo update` 0 packages; audit/deny clean; CI green on main. `pcs::update_due` boundaries already pinned. Only this note ships.
 
