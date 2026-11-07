@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 789 (2026-11-07, FEATURE, nothing unblocked) — memory only
+8.15/8.17/8.19 still wait on the owner (#166 #161 #203 #208, no new answers). `cargo update` locked 0 packages (lockfile already current), so only this note ships. Next cycle: run STABILIZATION work if still blocked.
+
 ## Cycle 788 (2026-11-07, FEATURE, nothing unblocked) — lockfile refresh
 8.15/8.17/8.19 still wait on the owner (#166 #161 #203 #208, no new answers). `cargo update`: uuid 1.29.1. cargo test --workspace 1687 passed, clippy clean.
 
