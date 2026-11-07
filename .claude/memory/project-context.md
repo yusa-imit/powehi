@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 796 (2026-11-08, FEATURE, nothing unblocked) — memory only
+8.15/8.17/8.19/8.22/8.23 and Phase 9 9.9+ still wait on the owner (#166 #161 #203 #208 #118 #237 #241 #248 #253; no non-footer comments on any open need-human issue). `cargo update` 0 packages; audit/deny clean; CI green on main. `pcs::update_due` boundaries already pinned. Only this note ships.
+
 ## Cycle 795 (2026-11-07, STABILIZATION) — test(rest-api)
 CI green, audit/deny/clippy clean, no bug issues; prod-code unwrap sweep clean (only test helpers). Added `xff_skips_empty_and_garbage_hops` to `rate_limit.rs`. Blocked items unchanged (#166 #161 #203 #208 #118 #237 #241 #248 #253).
 
