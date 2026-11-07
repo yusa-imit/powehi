@@ -788,6 +788,29 @@ mod commit_tests {
         assert_eq!(apply(&bob, gid, b"x").unwrap(), Outcome::Refused);
     }
 
+    /// An unresolved local Commit (add or remove record) blocks applying a peer's Commit: merging
+    /// it would silently drop ours. Nothing changes, and the Commit applies once the record clears.
+    #[tokio::test]
+    async fn a_peer_commit_waits_while_our_own_commit_is_unresolved() {
+        let (tmp, alice, bob, url, state, gid) = alice_and_bob().await;
+        let carol = session(&tmp, "carol", 3);
+        let (link, _) = invite::create(&client(), &url, &carol).await.unwrap();
+        add(&client(), &url, &alice, gid, &parse_link(&link).unwrap())
+            .await
+            .unwrap();
+        let commit = state.lock().unwrap().commit_bytes.last().unwrap().clone();
+        for name in [super::pending_name(gid), remove::pending_name(gid)] {
+            bob.store.put(&name, b"x").unwrap();
+            assert_eq!(apply(&bob, gid, &commit).unwrap(), Outcome::Unresolved);
+            assert_eq!(members_of(&bob, gid), Some(2));
+            bob.store.remove(&name).unwrap();
+        }
+        assert!(matches!(
+            apply(&bob, gid, &commit).unwrap(),
+            Outcome::Applied { .. }
+        ));
+    }
+
     /// A member's Application message is decrypted by another member; the stored record names
     /// the MLS leaf key that signed it, not the DS label, and the envelope is acked.
     #[tokio::test]
