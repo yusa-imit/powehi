@@ -338,4 +338,14 @@ mod tests {
         let _ = auth_governor();
         let _ = api_governor();
     }
+
+    /// A trailing empty or non-IP XFF hop is skipped; the rightmost valid hop wins,
+    /// and an all-invalid header falls through to the global bucket.
+    #[test]
+    fn xff_skips_empty_and_garbage_hops() {
+        let req = req_with_headers(|b| b.header("x-forwarded-for", "10.0.0.1, 10.0.0.2, ,"));
+        assert_eq!(extract(req), "10.0.0.2".parse::<IpAddr>().unwrap());
+        let req = req_with_headers(|b| b.header("x-forwarded-for", "nope, ,"));
+        assert_eq!(extract(req), IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    }
 }
