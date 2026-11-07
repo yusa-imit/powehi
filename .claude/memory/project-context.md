@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 792 (2026-11-07, FEATURE, nothing unblocked) — memory only
+8.15/8.17/8.19 still wait on the owner (#166 #161 #203 #208, no new answers); Phase 9 9.9+ waits on #118/#237/#241/#248/#253. `cargo update` locked 0 packages; cargo audit/deny clean; no open `bug` issues. Only this note ships.
+
 ## Cycle 791 (2026-11-07, FEATURE, nothing unblocked) — lockfile refresh
 8.15/8.17/8.19 still wait on the owner (#166 #161 #203 #208, no new answers). `cargo update` (aws-smithy-*), cargo audit/deny clean, clippy clean, cargo test --workspace 1688 passed.
 
