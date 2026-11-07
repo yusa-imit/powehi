@@ -331,3 +331,22 @@ pub trait GroupRepository: Send + Sync {
         limit: u32,
     ) -> Result<u64, DomainError>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_membership_limits_are_positive_and_ordered() {
+        const {
+            assert!(PENDING_MEMBERSHIP_MAX_PER_DEVICE > 0);
+            assert!(PENDING_MEMBERSHIP_TTL_DAYS > 0);
+            assert!(PENDING_MEMBERSHIP_PURGE_BATCH > 0);
+            // One device's cap must fit inside its group's cap, or the per-device bound is
+            // meaningless.
+            assert!(PENDING_MEMBERSHIP_MAX_PER_DEVICE <= PENDING_MEMBERSHIP_MAX_PER_GROUP);
+            // A purge pass must be able to clear at least one device's worth of expired rows.
+            assert!(PENDING_MEMBERSHIP_PURGE_BATCH >= PENDING_MEMBERSHIP_MAX_PER_DEVICE);
+        }
+    }
+}
