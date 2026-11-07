@@ -2230,3 +2230,4 @@ Test-only: first proptests in `powehi-application` (proptest dev-dep): `reg_fing
 ## Cycle 778 (FEATURE slot, nothing unblocked)
 - 8.15/8.17/8.19 still wait on owner (#166/#161, #203, #208). `OpaqueServer::login_finish`: removed the lib-code `expect` (remove-first, then TTL check; entry consumed on every path) and added a replayed-KE3 assertion. crypto-reviewer: pass. powehi-opaque 10 tests, clippy/fmt clean. Remaining non-test `expect`s: rate_limit.rs constants (startup), auth_service HMAC (infallible).
 - cycle 780 (stabilization): fixed flaky envelope Debug test (bare "171" matched random UUID/timestamp); CI Rust on main was red from it.
+- Cycle 790 (STABILIZATION): CI green, audit/deny/clippy/tests clean; pinned pending-membership limit invariants (port-outbound). target/ 44G but all <7d old, nothing prunable. cargo-nextest not installed locally (use cargo test).
