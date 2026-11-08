@@ -112,6 +112,17 @@ fn expired_and_malformed_requests_are_pruned() {
 }
 
 #[test]
+fn an_expired_request_whose_keys_cannot_be_retired_is_kept_and_not_acked() {
+    // No identity in this store: retire_keys fails, so the request must stay (its keys are
+    // still held) and its envelope must not be reported for acking.
+    let (_tmp, store) = open_store();
+    save_new(&store, &req(1, 100)).unwrap();
+    let acked = prune_expired(&store, 100 + REQUEST_TTL_SECS + 1).unwrap();
+    assert!(acked.is_empty());
+    assert_eq!(list(&store).unwrap().len(), 1);
+}
+
+#[test]
 fn resolve_takes_a_unique_prefix_of_four_or_more_characters() {
     let (_tmp, store) = open_store();
     save_new(&store, &req(0xabcd_0000 << 96, 1)).unwrap();
