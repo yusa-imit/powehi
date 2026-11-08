@@ -2258,3 +2258,6 @@ Test-only: first proptests in `powehi-application` (proptest dev-dep): `reg_fing
 
 ## Cycle 797 (FEATURE slot, nothing unblocked)
 - 8.15/8.17/8.19/8.22/8.23 and the Phase 9 remainder still wait on owner issues (#166/#161, #203, #208, #131, #248, #253). Lockfile refresh only (arc-swap 1.9.3 -> 1.9.4, not crypto). 1689 tests, clippy, audit, deny clean.
+
+## Cycle 800 (STABILIZATION)
+- CI green, no bug issues, `cargo audit`/`cargo deny` clean. Test-only: garbage Commit bytes on a real pair apply as `Refused` with the epoch unchanged; wrong sender / unknown group stay `Unknown` (inbox/commit.rs). 623 CLI lib tests, clippy, fmt green. target/ 49G, all <7d old, nothing prunable.

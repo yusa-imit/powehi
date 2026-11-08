@@ -882,6 +882,28 @@ async fn a_group_record_never_takes_a_peer_commit() {
     assert!(matches!(out, commit::Outcome::Unknown));
 }
 
+#[tokio::test]
+async fn garbage_commit_bytes_from_the_peer_are_refused_and_change_nothing() {
+    let (_tmp, p) = pair().await;
+    receive(&client(), &p.url, &p.alice).await.unwrap();
+    let before = alice_epoch(&p);
+    for junk in [&b""[..], b"\x00", b"not a commit", &[0xffu8; 512][..]] {
+        let out = commit::apply(&p.alice, p.gid, p.bob.device_id, junk).unwrap();
+        assert!(
+            matches!(out, commit::Outcome::Refused),
+            "{} bytes",
+            junk.len()
+        );
+        assert_eq!(alice_epoch(&p), before, "a refused Commit leaves no state");
+    }
+    // The same bytes from anyone but the peer never reach MLS.
+    let out = commit::apply(&p.alice, p.gid, Uuid::new_v4(), b"not a commit").unwrap();
+    assert!(matches!(out, commit::Outcome::Unknown));
+    // And an unknown conversation is Unknown, not Refused.
+    let out = commit::apply(&p.alice, Uuid::new_v4(), p.bob.device_id, b"x").unwrap();
+    assert!(matches!(out, commit::Outcome::Unknown));
+}
+
 fn stamped_junk(p: &Pair, n: usize) {
     for _ in 0..n {
         let id = junk_envelope(p, Uuid::new_v4(), p.bob.device_id);
