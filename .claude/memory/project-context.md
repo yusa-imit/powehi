@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 806 (2026-11-08, FEATURE, nothing unblocked) — test(cli)
+Same blockers, no owner answers. Added `rotate` test: a group-kind record returns GroupUnusable before any request. Test-only.
+
 ## Cycle 804 (2026-11-08, FEATURE, nothing unblocked) — lockfile refresh
 Same blockers (#166 #161 #203 #208 #118 #237 #241 #248 #253; no non-footer owner comments). `cargo update`: jiff 0.2.40 (defmt dropped). cargo test --workspace 1694 passed, clippy/audit/deny clean.
 
