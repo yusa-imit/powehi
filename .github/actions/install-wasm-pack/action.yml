@@ -21,7 +21,7 @@ runs:
         asset="wasm-pack-v${WASM_PACK_VERSION}-x86_64-unknown-linux-musl"
         url="https://github.com/wasm-bindgen/wasm-pack/releases/download/v${WASM_PACK_VERSION}/${asset}.tar.gz"
         tmpdir="$(mktemp -d)"
-        curl -fsSL -o "${tmpdir}/wasm-pack.tar.gz" "${url}"
+        curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o "${tmpdir}/wasm-pack.tar.gz" "${url}"
         echo "${WASM_PACK_SHA256}  ${tmpdir}/wasm-pack.tar.gz" | sha256sum -c -
         tar -xzf "${tmpdir}/wasm-pack.tar.gz" -C "${tmpdir}"
         install -m 0755 "${tmpdir}/${asset}/wasm-pack" /usr/local/bin/wasm-pack

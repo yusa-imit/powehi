@@ -2273,3 +2273,5 @@ Test-only: first proptests in `powehi-application` (proptest dev-dep): `reg_fing
 
 ## Cycle 800 (STABILIZATION)
 - CI green, no bug issues, `cargo audit`/`cargo deny` clean. Test-only: garbage Commit bytes on a real pair apply as `Refused` with the epoch unchanged; wrong sender / unknown group stay `Unknown` (inbox/commit.rs). 623 CLI lib tests, clippy, fmt green. target/ 49G, all <7d old, nothing prunable.
+
+- Cycle 805 (STABILIZATION): E2E CI red on main from transient 504 downloading wasm-pack; added curl --retry to install-wasm-pack action (checksum still verified).
