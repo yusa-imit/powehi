@@ -423,6 +423,15 @@ mod tests {
     }
 
     #[test]
+    fn a_later_send_does_not_restart_the_age_clock() {
+        let mut c = conv();
+        c.note_sent(1_000);
+        c.note_sent(1_000 + MAX_UPDATE_AGE_SECS - 1);
+        assert_eq!(c.last_update_at(), Some(1_000));
+        assert!(update_due(&c, 1_000 + MAX_UPDATE_AGE_SECS));
+    }
+
+    #[test]
     fn a_clock_before_the_record_is_not_due_by_age() {
         let mut c = conv();
         c.note_sent(5_000);
