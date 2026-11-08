@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 802 (2026-11-08, FEATURE, nothing unblocked) — test(cli)
+Same blockers; no owner answers on #166 #161 #203 #208 #118 #237 #241 #248 #253, no bug issues, CI green. Added `pcs::has_pending` test (false again after the record is removed). Test-only. Note: cargo is not on the cron PATH by default (`~/.cargo/bin`); nextest not installed locally, `cargo test` works.
+
 ## Cycle 801 (2026-11-08, FEATURE, nothing unblocked) — test(cli)
 Same blockers; no owner comments, no bug issues, CI green. Added `pcs::has_pending` test (per-group record isolation, name prefix). Test-only, no crypto change.
 
