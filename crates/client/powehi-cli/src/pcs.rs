@@ -359,6 +359,15 @@ mod tests {
         assert_ne!(pending_name(gid), pending_name(other));
     }
 
+    #[tokio::test]
+    async fn has_pending_clears_once_the_record_is_removed() {
+        let (_t, alice, _bob, _url, gid, _state) = pair().await;
+        alice.store.put(&pending_name(gid), &[7u8; 4]).unwrap();
+        assert!(has_pending(&alice.store, gid).unwrap());
+        alice.store.remove(&pending_name(gid)).unwrap();
+        assert!(!has_pending(&alice.store, gid).unwrap());
+    }
+
     fn conv() -> Conversation {
         Conversation::new(Uuid::new_v4(), Uuid::new_v4(), Role::Creator, None)
     }
