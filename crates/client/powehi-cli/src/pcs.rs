@@ -330,6 +330,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_pair_record_without_group_state_never_rotates() {
+        let (_t, alice, _bob, url, _gid, state) = pair().await;
+        let orphan = Uuid::new_v4();
+        let c = Conversation::new(orphan, Uuid::new_v4(), Role::Creator, None);
+        conversation::save(&alice.store, &c).unwrap();
+        let n = state.lock().unwrap().calls.len();
+        let r = rotate(&client(), &url, &alice, orphan, 99).await;
+        assert!(matches!(r, Err(RotateError::GroupUnusable)));
+        assert_eq!(state.lock().unwrap().calls.len(), n);
+        assert!(alice.store.get(&pending_name(orphan)).unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn send_counts_the_message_even_when_the_post_fails() {
         let (_t, alice, _bob, _url, gid, _state) = pair().await;
         let dead = Url::parse("http://127.0.0.1:1").unwrap();
