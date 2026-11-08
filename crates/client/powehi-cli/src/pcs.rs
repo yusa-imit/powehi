@@ -318,6 +318,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_group_record_never_rotates_through_the_pair_policy() {
+        let (_t, alice, _bob, url, gid, state) = pair().await;
+        let g = Conversation::new(gid, Uuid::new_v4(), Role::Creator, None).into_group();
+        conversation::save(&alice.store, &g).unwrap();
+        let n = state.lock().unwrap().calls.len();
+        let r = rotate(&client(), &url, &alice, gid, 99).await;
+        assert!(matches!(r, Err(RotateError::GroupUnusable)));
+        assert_eq!(state.lock().unwrap().calls.len(), n);
+        assert!(alice.store.get(&pending_name(gid)).unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn send_counts_the_message_even_when_the_post_fails() {
         let (_t, alice, _bob, _url, gid, _state) = pair().await;
         let dead = Url::parse("http://127.0.0.1:1").unwrap();
