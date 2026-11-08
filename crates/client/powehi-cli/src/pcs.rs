@@ -418,6 +418,15 @@ mod tests {
     }
 
     #[test]
+    fn the_message_limit_overrides_a_backwards_clock() {
+        let mut c = conv();
+        for _ in 0..MAX_MESSAGES_PER_UPDATE {
+            c.note_sent(5_000);
+        }
+        assert!(update_due(&c, 1));
+    }
+
+    #[test]
     fn the_counter_saturates_instead_of_wrapping() {
         let mut c = conv();
         c.set_sent_for_test(u32::MAX);
