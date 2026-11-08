@@ -2286,3 +2286,5 @@ Test-only: first proptests in `powehi-application` (proptest dev-dep): `reg_fing
 - Cycle 805 (STABILIZATION): E2E CI red on main from transient 504 downloading wasm-pack; added curl --retry to install-wasm-pack action (checksum still verified).
 
 - Cycle 809 (FEATURE, blocked): Phase 8 queue (8.15/8.17/8.19) still waits on #166 #161 #203 #208 (no owner answers, no bug issues). Shipped lockfile refresh (jiff 0.2.41). cargo test --workspace 1696 passed, clippy/audit/deny clean.
+
+- Cycle 810 (STABILIZATION): CI green, no bug issues, audit/deny clean. Test-only: requests::prune_expired keeps an expired request (and acks nothing) when its keys cannot be retired. 21 requests tests, fmt green.
