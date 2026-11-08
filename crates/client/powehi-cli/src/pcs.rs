@@ -347,6 +347,18 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn has_pending_tracks_only_its_own_group_record() {
+        let (_t, alice, _bob, _url, gid, _state) = pair().await;
+        let other = Uuid::from_u128(gid.as_u128() ^ 1);
+        assert!(!has_pending(&alice.store, gid).unwrap());
+        alice.store.put(&pending_name(gid), &[1u8; 3]).unwrap();
+        assert!(has_pending(&alice.store, gid).unwrap());
+        assert!(!has_pending(&alice.store, other).unwrap());
+        assert!(pending_name(gid).starts_with(PENDING_PREFIX));
+        assert_ne!(pending_name(gid), pending_name(other));
+    }
+
     fn conv() -> Conversation {
         Conversation::new(Uuid::new_v4(), Uuid::new_v4(), Role::Creator, None)
     }

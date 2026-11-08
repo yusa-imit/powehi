@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 801 (2026-11-08, FEATURE, nothing unblocked) — test(cli)
+Same blockers; no owner comments, no bug issues, CI green. Added `pcs::has_pending` test (per-group record isolation, name prefix). Test-only, no crypto change.
+
 ## Cycle 799 (2026-11-08, FEATURE, nothing unblocked) — test(cli)
 Same blockers; no owner comments, CI green, audit/deny clean, `cargo update` 0. Added `group::commit::apply` test pinning `Unresolved` for both pending records (add and remove), then `Applied` after clearing. Test-only, no crypto change.
 
