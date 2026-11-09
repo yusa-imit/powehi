@@ -174,6 +174,31 @@ mod tests {
     }
 
     #[test]
+    fn enter_reports_a_failing_writer_and_writes_no_leave() {
+        struct Broken(Vec<u8>);
+        impl Write for Broken {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("closed"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        assert!(AltScreen::enter(Broken(Vec::new()), true).is_err());
+        // Inactive never touches the writer, so a broken one is fine.
+        let s = AltScreen::enter(Broken(Vec::new()), false).unwrap();
+        assert!(!s.is_active());
+        assert!(s.out.0.is_empty());
+    }
+
+    #[test]
+    fn active_reports_active() {
+        let mut buf = Vec::new();
+        let s = AltScreen::enter(&mut buf, true).unwrap();
+        assert!(s.is_active());
+    }
+
+    #[test]
     fn leaves_when_the_body_fails() {
         fn body(buf: &mut Vec<u8>) -> Result<(), &'static str> {
             let _s = AltScreen::enter(buf, true).unwrap();
