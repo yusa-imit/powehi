@@ -96,6 +96,19 @@ fn only_notifications_for_our_group_wake() {
     assert!(!is_wake_for(r#"{"group_id":7}"#, g));
 }
 
+#[test]
+fn malformed_or_nested_group_ids_never_wake() {
+    let g = Uuid::new_v4();
+    assert!(!is_wake_for(r#"{"group_id":null}"#, g));
+    assert!(!is_wake_for(r#"{"group_id":""}"#, g));
+    assert!(!is_wake_for(&format!(r#"{{"group_id":["{g}"]}}"#), g));
+    assert!(!is_wake_for(
+        &format!(r#"{{"data":{{"group_id":"{g}"}}}}"#),
+        g
+    ));
+    assert!(!is_wake_for(&format!(r#"["{g}"]"#), g));
+}
+
 #[tokio::test]
 async fn connect_sends_bearer_wakes_for_our_group_and_ignores_others() {
     let g = Uuid::new_v4();
