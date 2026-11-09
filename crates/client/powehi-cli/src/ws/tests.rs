@@ -78,6 +78,14 @@ fn ws_url_maps_schemes_and_rejects_others() {
 }
 
 #[test]
+fn ws_url_drops_query_and_fragment_of_the_base() {
+    let u = ws_url(&Url::parse("https://h.example/a?token=x#frag").unwrap()).unwrap();
+    assert_eq!(u.as_str(), "wss://h.example/v1/ws");
+    assert_eq!(u.query(), None);
+    assert_eq!(u.fragment(), None);
+}
+
+#[test]
 fn only_notifications_for_our_group_wake() {
     let g = Uuid::new_v4();
     let note = |gid: &str| format!(r#"{{"type":"envelope_received","group_id":"{gid}"}}"#);
