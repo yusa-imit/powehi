@@ -2307,3 +2307,4 @@ Test-only: first proptests in `powehi-application` (proptest dev-dep): `reg_fing
 - Cycle 814 (FEATURE, blocked): Phase 8 queue (8.15/8.17/8.19) still waits on #166 #161 #203 #208 (no owner answers, no bug issues). Shipped lockfile refresh (itoa 1.0.19). cargo test --workspace 1700 passed, clippy/audit/deny clean.
 
 - Cycle 815 (STABILIZATION): CI green, no bug issues, audit/deny/clippy clean; #166/#161/#203/#208 still unanswered. Test gaps checked (whoami, hardening) already covered. Shipped lockfile refresh (syn 3.0.10). cargo test --workspace 1700 passed. target/ 49G, all <7d old.
+- Cycle 818: main CI red from new RUSTSEC-2026-0459 (libsqlite3-sys, lockfile-only via sqlx-sqlite, not compiled) → ignored in audit.toml + deny.toml (PR pending).
