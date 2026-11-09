@@ -146,6 +146,15 @@ async fn gives_up_after_three_retries_and_says_so() {
 }
 
 #[tokio::test]
+async fn an_unsupported_scheme_reports_realtime_lost_without_connecting() {
+    let (tx, mut rx) = channel(16);
+    let url = Url::parse("ftp://127.0.0.1:9").unwrap();
+    wake_loop(url, bearer(), Uuid::new_v4(), tx, TICK).await;
+    assert!(matches!(rx.recv().await, Some(Event::RealtimeLost)));
+    assert!(rx.recv().await.is_none(), "no wake without a connection");
+}
+
+#[tokio::test]
 async fn a_server_that_accepts_and_drops_at_once_exhausts_the_budget() {
     let (url, seen) = server(vec![], true).await;
     let (tx, mut rx) = channel(64);
