@@ -45,3 +45,61 @@ pub fn paint(buf: &Buffer) -> Vec<u8> {
     debug_assert!(!out.contains(&0x07));
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use ratatui::layout::Rect;
+    use ratatui::style::Style;
+
+    use super::*;
+
+    fn painted(buf: &Buffer) -> String {
+        String::from_utf8(paint(buf)).unwrap()
+    }
+
+    #[test]
+    fn control_characters_in_a_symbol_become_a_space() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 3, 1));
+        buf[(0, 0)].set_symbol("\x1b");
+        buf[(1, 0)].set_symbol("\x07");
+        buf[(2, 0)].set_symbol("a");
+        let s = painted(&buf);
+        assert!(!s.contains('\x07'));
+        assert_eq!(s, "\x1b[0m\x1b[1;1H  a\x1b[0m");
+    }
+
+    #[test]
+    fn wide_glyph_covers_the_cell_to_its_right() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 3, 1));
+        buf[(0, 0)].set_symbol("한");
+        buf[(2, 0)].set_symbol("b");
+        assert_eq!(painted(&buf), "\x1b[0m\x1b[1;1H한b\x1b[0m");
+    }
+
+    #[test]
+    fn bold_and_reverse_open_and_close_around_the_styled_cell() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 3, 1));
+        buf[(0, 0)].set_symbol("a");
+        buf[(1, 0)].set_symbol("b").set_style(
+            Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED | Modifier::DIM),
+        );
+        buf[(2, 0)].set_symbol("c");
+        assert_eq!(
+            painted(&buf),
+            "\x1b[0m\x1b[1;1Ha\x1b[0m\x1b[1m\x1b[7mb\x1b[0mc\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn rows_are_addressed_one_based_and_attrs_reset_per_row() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 1, 2));
+        buf[(0, 0)]
+            .set_symbol("x")
+            .set_style(Style::default().add_modifier(Modifier::BOLD));
+        buf[(0, 1)].set_symbol("y");
+        assert_eq!(
+            painted(&buf),
+            "\x1b[0m\x1b[1;1H\x1b[0m\x1b[1mx\x1b[0m\x1b[2;1Hy\x1b[0m"
+        );
+    }
+}
