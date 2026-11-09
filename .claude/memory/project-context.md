@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 812 (2026-11-09, FEATURE, nothing unblocked) — lockfile refresh
+Same blockers (#166 #161 #203 #208; no owner answers). `cargo update`: crypto-bigint 0.7.11, fixedbitset 0.5.9, uuid 1.29.2. Tests 1698 passed, clippy/audit/deny clean.
+
 ## Cycle 811 (2026-11-09, FEATURE, nothing unblocked) — test(cli)
 Same blockers, no owner answers (checked #166 #161 #203 #208 #118 #237 #241 #248 #253). Added pcs test: a pair record without MLS group state never rotates. Test-only.
 
