@@ -503,6 +503,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn has_confirmation_tracks_the_record_and_over_reports_nothing_hidden() {
+        let (_tmp, alice, _bob, gid) = pair().await;
+        assert!(!has_confirmation(&alice.store, gid));
+        let n = number(&alice.store, gid).unwrap();
+        let other = safety::pairwise(&[1u8; 32], &[2u8; 32]).unwrap();
+        // A refused confirmation writes nothing.
+        assert!(confirm(&alice.store, gid, &n, &other).is_err());
+        assert!(!has_confirmation(&alice.store, gid));
+        confirm(&alice.store, gid, &n, &n).unwrap();
+        assert!(has_confirmation(&alice.store, gid));
+        // A stale record is still a confirmation (it shows as CHANGED elsewhere).
+        store_record(&alice.store, gid, &other).unwrap();
+        assert!(has_confirmation(&alice.store, gid));
+        // An unreadable record counts as none: `--unverified` over-reports.
+        let path = record_file(&alice.store, gid);
+        let mut bytes = std::fs::read(&path).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(!has_confirmation(&alice.store, gid));
+    }
+
+    #[tokio::test]
     async fn unknown_conversation_is_an_error() {
         let (_tmp, alice, _bob, _gid) = pair().await;
         assert!(matches!(

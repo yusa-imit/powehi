@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 816 (2026-11-09, FEATURE, nothing unblocked) — test(cli)
+Same blockers (#166 #161 #203 #208; no owner answers). `cargo update` had nothing new. Added `verify::has_confirmation` test (none / refused confirm / stale / unreadable record).
+
 ## Cycle 813 (2026-11-09, FEATURE, nothing unblocked) — test(cli)
 Same blockers, no owner answers. Added status tests: exact-limit body accepted, oversized region body rejected. Test-only. Note: `cargo` needs `~/.cargo/bin` on PATH; nextest not installed, use `cargo test`.
 
