@@ -51,6 +51,7 @@ ignore = [
     { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 executed only by server VAPID signing (p256 0.13); fix needs elliptic-curve 0.14, no upgrade path; temporary, see .cargo/audit.toml and issue #163" },
     { id = "RUSTSEC-2026-0440", reason = "astral-tokio-tar unmaintained (no vulnerability); dev-dependency only via testcontainers 0.27, never in a shipped binary; see .cargo/audit.toml" },
     { id = "RUSTSEC-2026-0441", reason = "pin-utils unmaintained (no vulnerability); transitive via fluvio-wasm-timer -> openmls 0.8.3, a pin macro crate holding no key material; no upgrade path, see .cargo/audit.toml" },
+    { id = "RUSTSEC-2026-0459", reason = "libsqlite3-sys 0.30.1 only in Cargo.lock via sqlx-sqlite, not compiled (cargo tree -i prints nothing; sqlx postgres feature only); fix needs newer sqlx, see .cargo/audit.toml" },
 ]
 
 [licenses]
