@@ -247,6 +247,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_body_of_exactly_the_limit_is_accepted() {
+        let url = serve(vec![
+            ok("/health", &"x".repeat(MAX_RESPONSE_BYTES)),
+            ok("/v1/region/detect", r#"{"region_id":"eu-de-1"}"#),
+        ])
+        .await;
+        let s = fetch(&http_client().unwrap(), &url).await.unwrap();
+        assert!(!s.healthy);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_region_body_is_rejected() {
+        let url = serve(vec![
+            ok("/health", "ok"),
+            ok("/v1/region/detect", &"x".repeat(MAX_RESPONSE_BYTES + 1)),
+        ])
+        .await;
+        let e = fetch(&http_client().unwrap(), &url).await.unwrap_err();
+        assert!(matches!(e, StatusError::TooLarge));
+    }
+
+    #[tokio::test]
     async fn redirects_are_not_followed() {
         let url = serve(vec![("/health", "302 Found", String::new())]).await;
         let e = fetch(&http_client().unwrap(), &url).await.unwrap_err();
