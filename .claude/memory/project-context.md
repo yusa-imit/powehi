@@ -2319,3 +2319,4 @@ Test-only: first proptests in `powehi-application` (proptest dev-dep): `reg_fing
 - Cycle 818: main CI red from new RUSTSEC-2026-0459 (libsqlite3-sys, lockfile-only via sqlx-sqlite, not compiled) → ignored in audit.toml + deny.toml (PR pending).
 
 - Cycle 824 (FEATURE, blocked): 8.15/8.17/8.19 still wait on #166 #161 #203 #208. Test-only: upload_client does not follow redirects (status.rs).
+- Cycle 825 (STABILIZATION): CI green, no open PRs. Test-only: profile::list non-dir APP_DIR error, write_listing contract panics (profile.rs).
