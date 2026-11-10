@@ -989,6 +989,31 @@ fn garbage_or_oversize_cursor_record_loads_as_none() {
     assert!(cursor::load(&s.store).is_none());
 }
 
+#[test]
+fn cursor_record_boundaries_hops_and_length() {
+    let tmp = tempfile::tempdir().unwrap();
+    let s = session(&tmp, "alice", 1);
+    let at = |len: usize| welcome::Cursor {
+        since: format!("2026-10-09T00:00:00{}", "0".repeat(len - 19)),
+        since_id: Uuid::new_v4(),
+    };
+    let c = at(64);
+    assert_eq!(c.since.len(), 64);
+    cursor::save(&s.store, Some((&c, cursor::MAX_HOPS - 1)));
+    assert_eq!(
+        cursor::load(&s.store),
+        Some((c.clone(), cursor::MAX_HOPS - 1)),
+        "the last allowed hop still resumes"
+    );
+    let long = at(65);
+    s.store.put(cursor::RECORD, b"keep").unwrap();
+    cursor::save(&s.store, Some((&long, 0)));
+    assert!(
+        s.store.get(cursor::RECORD).unwrap().is_none(),
+        "a 65-byte cursor is dropped and the old record cleared"
+    );
+}
+
 /// One store for all cases: opening a profile is slow, the properties only touch one record.
 #[test]
 fn cursor_record_properties() {
