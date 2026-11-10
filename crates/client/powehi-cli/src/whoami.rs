@@ -79,6 +79,52 @@ mod tests {
         .unwrap();
     }
 
+    #[test]
+    #[should_panic]
+    fn nil_device_is_a_contract_violation() {
+        let server = url::Url::parse("https://example.test/").unwrap();
+        report(
+            "work",
+            &server,
+            Uuid::from_u128(1),
+            Uuid::nil(),
+            true,
+            &mut Vec::new(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn empty_profile_is_a_contract_violation() {
+        let server = url::Url::parse("https://example.test/").unwrap();
+        let (u, d) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        report("", &server, u, d, false, &mut Vec::new()).unwrap();
+    }
+
+    /// A writer that fails on every write.
+    struct Broken;
+
+    impl Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("closed"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn write_failure_is_returned_in_both_formats() {
+        let server = url::Url::parse("https://example.test/").unwrap();
+        let (u, d) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        for json in [false, true] {
+            let err = report("work", &server, u, d, json, &mut Broken).unwrap_err();
+            assert_eq!(err.to_string(), "closed");
+        }
+    }
+
     mod props {
         use proptest::prelude::*;
 
