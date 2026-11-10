@@ -384,6 +384,20 @@ mod tests {
         assert_ne!(pending_name(gid), pending_name(other));
     }
 
+    #[test]
+    fn the_record_name_is_the_stable_hyphenated_form() {
+        let gid = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
+        assert_eq!(
+            pending_name(gid),
+            "pcs-01234567-89ab-cdef-0123-456789abcdef"
+        );
+        assert_eq!(
+            pending_name(Uuid::nil()),
+            "pcs-00000000-0000-0000-0000-000000000000"
+        );
+        assert_eq!(PENDING_PREFIX, "pcs-");
+    }
+
     #[tokio::test]
     async fn has_pending_clears_once_the_record_is_removed() {
         let (_t, alice, _bob, _url, gid, _state) = pair().await;

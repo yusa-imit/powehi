@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 834 (2026-11-11, FEATURE, nothing unblocked) — test(cli)
+Same blockers (#166 #161 #203 #208), no owner answers. pcs::pending_name pinned to its persisted `pcs-<hyphenated uuid>` form. pcs tests pass, clippy clean.
+
 ## Cycle 833 (2026-11-11, FEATURE, nothing unblocked) — test(cli)
 Same blockers (#166 #161 #203 #208), no owner answers. tui::sync::drain pinned: empty store stays quiet and unselected, a second drain never repeats a shown message. 3 sync tests pass, clippy clean.
 
