@@ -686,6 +686,36 @@ mod commit_tests {
         );
     }
 
+    /// A Commit for a later epoch than ours means an earlier one is missing: `Ahead`, nothing
+    /// changes, and applying them in order afterwards succeeds.
+    #[tokio::test]
+    async fn a_commit_from_a_later_epoch_is_ahead_and_changes_nothing() {
+        let (tmp, alice, bob, url, state, gid) = alice_and_bob().await;
+        for (name, seed) in [("carol", 3), ("dave", 4)] {
+            state.lock().unwrap().group_epoch = u64::from(seed) - 2;
+            let s = session(&tmp, name, seed);
+            let (link, _) = invite::create(&client(), &url, &s).await.unwrap();
+            add(&client(), &url, &alice, gid, &parse_link(&link).unwrap())
+                .await
+                .unwrap();
+        }
+        let commits = state.lock().unwrap().commit_bytes.clone();
+        let [.., first, second] = commits.as_slice() else {
+            panic!("expected two commits");
+        };
+        assert_eq!(apply(&bob, gid, second).unwrap(), Outcome::Ahead);
+        assert_eq!(members_of(&bob, gid), Some(2));
+        assert!(matches!(
+            apply(&bob, gid, first).unwrap(),
+            Outcome::Applied { .. }
+        ));
+        assert!(matches!(
+            apply(&bob, gid, second).unwrap(),
+            Outcome::Applied { .. }
+        ));
+        assert_eq!(members_of(&bob, gid), Some(4));
+    }
+
     #[tokio::test]
     async fn the_inbox_applies_a_members_commit_and_acks_it_but_holds_a_foreign_one() {
         let (tmp, alice, bob, url, state, gid) = alice_and_bob().await;

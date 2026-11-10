@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 826 (2026-11-10, FEATURE, nothing unblocked) — test(cli)
+Same blockers (#166 #161 #203 #208), no owner answers. Added `group::commit::apply` test for the untested `Ahead` outcome (later-epoch Commit changes nothing; in-order apply then succeeds). Test-only. Note: cargo lives in ~/.cargo/bin (add to PATH); test server does not advance `group_epoch`, set it by hand.
+
 ## Cycle 823 (2026-11-10, FEATURE, nothing unblocked) — chore(deps)
 Same blockers (#166 #161 #203 #208), no owner answers. whoami/hardening/screen already fully tested. `cargo update`: 11 aws-*/arc-swap patch bumps; clippy clean, 1710 tests pass, cargo audit clean. Note: cargo-nextest absent locally, use `cargo test`.
 
