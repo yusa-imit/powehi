@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 831 (2026-11-10, FEATURE, nothing unblocked) — test(cli)
+Same blockers (#166 #161 #203 #208), no owner answers. group::commit::apply pinned: pair record -> Unknown, group record without MLS state -> Refused. 50 group tests pass, clippy clean.
+
 ## Cycle 830 (2026-11-10, STABILIZATION) — test(cli)
 CI green, no bug issues, no open PRs; cargo audit + deny clean; target/ pruned 55G→50G (still >20G, files <7d old). whoami::report: pinned nil device, empty profile, and writer failure in both formats.
 
