@@ -276,6 +276,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_upload_client_does_not_follow_redirects() {
+        let url = serve(vec![("/put", "307 Temporary Redirect", String::new())]).await;
+        let resp = upload_client()
+            .unwrap()
+            .get(url.join("/put").unwrap())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 307);
+    }
+
+    #[tokio::test]
     async fn unreachable_server() {
         let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = Url::parse(&format!("http://{}", l.local_addr().unwrap())).unwrap();
