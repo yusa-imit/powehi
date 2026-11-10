@@ -112,6 +112,25 @@ fn expired_and_malformed_requests_are_pruned() {
 }
 
 #[test]
+fn list_skips_unreadable_records_and_orders_ties_by_group_id() {
+    let (_tmp, store) = open_store();
+    save_new(&store, &req(5, 10)).unwrap();
+    save_new(&store, &req(3, 10)).unwrap();
+    save_new(&store, &req(4, 1)).unwrap();
+    store.put(&record_name(&Uuid::from_u128(6)), b"{").unwrap();
+    let misfiled = serde_json::to_vec(&req(1, 0)).unwrap();
+    store
+        .put(&record_name(&Uuid::from_u128(7)), &misfiled)
+        .unwrap();
+    let got: Vec<u128> = list(&store)
+        .unwrap()
+        .iter()
+        .map(|r| r.group_id.as_u128())
+        .collect();
+    assert_eq!(got, vec![4, 3, 5]);
+}
+
+#[test]
 fn an_expired_request_whose_keys_cannot_be_retired_is_kept_and_not_acked() {
     // No identity in this store: retire_keys fails, so the request must stay (its keys are
     // still held) and its envelope must not be reported for acking.
