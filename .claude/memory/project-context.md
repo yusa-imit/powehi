@@ -2347,3 +2347,4 @@ Test-only: first proptests in `powehi-application` (proptest dev-dep): `reg_fing
 
 - Cycle 824 (FEATURE, blocked): 8.15/8.17/8.19 still wait on #166 #161 #203 #208. Test-only: upload_client does not follow redirects (status.rs).
 - Cycle 825 (STABILIZATION): CI green, no open PRs. Test-only: profile::list non-dir APP_DIR error, write_listing contract panics (profile.rs).
+- Cycle 835 (STABILIZATION): CI green, no bug issues, audit/deny/clippy clean. Test-only: status unhealthy report text/json, region endpoint HTTP error (status.rs). target/ 50G pruned.

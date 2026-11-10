@@ -342,6 +342,32 @@ mod tests {
         assert_eq!(j.iter().filter(|b| **b == b'\n').count(), 1);
     }
 
+    #[test]
+    fn unhealthy_report_says_unexpected_response() {
+        let url = Url::parse("https://example.test/").unwrap();
+        let st = ServerStatus {
+            healthy: false,
+            region_id: "eu-1".into(),
+        };
+        let mut t = Vec::new();
+        write_report(&url, &st, false, &mut t).unwrap();
+        assert_eq!(
+            String::from_utf8(t).unwrap(),
+            "server:  https://example.test/\nhealth:  unexpected response\nregion:  eu-1\n"
+        );
+        let mut j = Vec::new();
+        write_report(&url, &st, true, &mut j).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&j).unwrap();
+        assert_eq!(v["healthy"], false);
+    }
+
+    #[tokio::test]
+    async fn region_endpoint_http_error_is_typed() {
+        let url = serve(vec![ok("/health", "ok")]).await;
+        let e = fetch(&http_client().unwrap(), &url).await.unwrap_err();
+        assert!(matches!(e, StatusError::HttpStatus(404)));
+    }
+
     mod props {
         use proptest::prelude::*;
 
