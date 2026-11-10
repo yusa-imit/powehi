@@ -176,6 +176,27 @@ mod tests {
     }
 
     #[test]
+    fn list_reports_a_non_directory_app_dir_instead_of_hiding_it() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join(APP_DIR), b"x").unwrap();
+        let e = list(d.path()).unwrap_err();
+        assert_ne!(e.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    #[should_panic]
+    fn count_and_json_together_is_a_contract_violation() {
+        write_listing(&[], true, true, &mut Vec::new()).unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn an_over_limit_listing_is_a_contract_violation() {
+        let names = vec!["a".to_owned(); MAX_LISTED + 1];
+        write_listing(&names, false, false, &mut Vec::new()).unwrap();
+    }
+
+    #[test]
     fn list_is_bounded() {
         let d = tempfile::tempdir().unwrap();
         let root = d.path().join(APP_DIR);
