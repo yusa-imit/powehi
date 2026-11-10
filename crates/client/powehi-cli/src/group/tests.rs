@@ -818,6 +818,30 @@ mod commit_tests {
         assert_eq!(apply(&bob, gid, b"x").unwrap(), Outcome::Refused);
     }
 
+    /// A record that is not a group (or is missing its MLS state) never reaches the merge: a pair
+    /// record is `Unknown`, and a group record without MLS state is `Refused`. Nothing changes.
+    #[tokio::test]
+    async fn apply_refuses_a_pair_record_and_a_group_without_mls_state() {
+        let (_tmp, _alice, bob, _url, _state, gid) = alice_and_bob().await;
+        let pair =
+            conversation::Conversation::new(gid, Uuid::new_v4(), conversation::Role::Creator, None);
+        let group_rec = conversation::load(&bob.store, &gid).unwrap().unwrap();
+        conversation::save(&bob.store, &pair).unwrap();
+        assert_eq!(apply(&bob, gid, b"x").unwrap(), Outcome::Unknown);
+        conversation::save(&bob.store, &group_rec).unwrap();
+        let other = Uuid::new_v4();
+        let orphan = conversation::Conversation::new(
+            other,
+            Uuid::new_v4(),
+            conversation::Role::Creator,
+            None,
+        )
+        .into_group();
+        conversation::save(&bob.store, &orphan).unwrap();
+        assert_eq!(apply(&bob, other, b"x").unwrap(), Outcome::Refused);
+        assert_eq!(members_of(&bob, gid), Some(2));
+    }
+
     /// An unresolved local Commit (add or remove record) blocks applying a peer's Commit: merging
     /// it would silently drop ours. Nothing changes, and the Commit applies once the record clears.
     #[tokio::test]
