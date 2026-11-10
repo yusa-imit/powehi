@@ -319,6 +319,43 @@ mod tests {
         assert_eq!(set_lflag(&f, libc::ECHO).err(), Some(PromptError::NoTty));
     }
 
+    /// A pty pair: the slave end is a real terminal, the master keeps it open.
+    fn pty() -> (File, File) {
+        use std::os::fd::FromRawFd;
+        let (mut master, mut slave) = (0, 0);
+        // SAFETY: valid out-parameters; null name/termios/winsize are allowed by `openpty`.
+        let rc = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut::<libc::termios>() as _,
+                std::ptr::null_mut::<libc::winsize>() as _,
+            )
+        };
+        assert_eq!(rc, 0, "openpty");
+        // SAFETY: both descriptors were just created and are owned by nobody else.
+        unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) }
+    }
+
+    fn lflag(tty: &File) -> libc::tcflag_t {
+        // SAFETY: zeroed termios is a valid out-parameter for `tcgetattr`.
+        let mut t: libc::termios = unsafe { std::mem::zeroed() };
+        // SAFETY: the descriptor is open for the duration of the call.
+        assert_eq!(unsafe { libc::tcgetattr(tty.as_raw_fd(), &mut t) }, 0);
+        t.c_lflag
+    }
+
+    #[test]
+    fn echo_is_off_while_the_guard_lives_and_restored_after() {
+        let (_master, slave) = pty();
+        assert_ne!(lflag(&slave) & libc::ECHO, 0, "pty starts with echo on");
+        let guard = set_lflag(&slave, libc::ECHO).unwrap();
+        assert_eq!(lflag(&slave) & libc::ECHO, 0, "echo off under the guard");
+        drop(guard);
+        assert_ne!(lflag(&slave) & libc::ECHO, 0, "echo restored on drop");
+    }
+
     mod props {
         use super::*;
         use proptest::prelude::*;
