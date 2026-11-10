@@ -91,4 +91,47 @@ mod tests {
         assert!(store.get(&name).unwrap().is_none());
         assert!(message::pending(&store, gid).unwrap().is_empty());
     }
+
+    #[test]
+    fn empty_store_leaves_the_app_untouched_and_quiet() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = ProfilePaths::resolve(tmp.path(), "work").unwrap();
+        let store = ProfileStore::open(&paths, &[7u8; 32]).unwrap();
+        let mut app = App::new(Vec::new());
+        drain(&store, &mut app);
+        drain(&store, &mut app);
+        assert_eq!(app.selected_id(), None);
+        assert_eq!(app.notice(), None);
+    }
+
+    #[test]
+    fn second_drain_does_not_repeat_a_shown_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = ProfilePaths::resolve(tmp.path(), "work").unwrap();
+        let store = ProfileStore::open(&paths, &[7u8; 32]).unwrap();
+        let gid = Uuid::new_v4();
+        conversation::save(
+            &store,
+            &Conversation::new(gid, Uuid::new_v4(), Role::Creator, None),
+        )
+        .unwrap();
+        let rec = Received {
+            group_id: gid,
+            sender: Uuid::new_v4(),
+            body: b"once".to_vec(),
+            received_at: 1,
+            sender_key: None,
+        };
+        let name = format!("{RX_PREFIX}{}", Uuid::new_v4().hyphenated());
+        store
+            .put(&name, &serde_json::to_vec(&rec).unwrap())
+            .unwrap();
+        let mut app = App::new(Vec::new());
+        drain(&store, &mut app);
+        assert!(store.get(&name).unwrap().is_none());
+        drain(&store, &mut app);
+        assert_eq!(app.selected_id(), Some(gid));
+        assert_eq!(app.notice(), None);
+        assert!(message::pending(&store, gid).unwrap().is_empty());
+    }
 }

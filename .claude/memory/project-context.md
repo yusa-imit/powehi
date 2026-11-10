@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 833 (2026-11-11, FEATURE, nothing unblocked) — test(cli)
+Same blockers (#166 #161 #203 #208), no owner answers. tui::sync::drain pinned: empty store stays quiet and unselected, a second drain never repeats a shown message. 3 sync tests pass, clippy clean.
+
 ## Cycle 832 (2026-11-11, FEATURE, nothing unblocked) — test(cli)
 Same blockers (#166 #161 #203 #208), no owner answers. inbox cursor pinned at its edges: last allowed hop (MAX_HOPS-1) still resumes, 64-byte since kept / 65-byte dropped and old record cleared. 3 cursor tests pass, clippy clean.
 
