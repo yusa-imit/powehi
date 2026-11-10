@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 828 (2026-11-10, FEATURE, nothing unblocked) — test(cli)
+Same blockers (#166 #161 #203 #208), no owner answers. Added `requests::list` test: skips malformed/misfiled records, orders ties by group id. Test-only.
+
 ## Cycle 827 (2026-11-10, FEATURE, nothing unblocked) — test(cli)
 Same blockers (#166 #161 #203 #208), no owner answers. Added a pty-based test (libc::openpty) for `prompt::set_lflag` success path: echo off under EchoGuard, restored on drop. Test-only. openpty's termios/winsize params are *mut on macOS, *const on Linux: cast null_mut `as _`.
 
