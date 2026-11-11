@@ -351,6 +351,44 @@ fn report_prints_ids_and_ages_only() {
     assert_eq!(v["received_at"], 90);
 }
 
+#[test]
+fn report_json_is_one_line_per_request_with_the_sender_and_no_welcome_bytes() {
+    let mut out = Vec::new();
+    report(&mut out, &[req(1, 90), req(2, 95)], 100, true).unwrap();
+    let text = String::from_utf8(out).unwrap();
+    assert_eq!(text.lines().count(), 2);
+    let v: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(v["id"], Uuid::from_u128(1).to_string());
+    assert_eq!(v["from"], Uuid::from_u128(9).to_string());
+    assert_eq!(v.as_object().unwrap().len(), 3, "ids and times only");
+}
+
+#[test]
+fn report_of_nothing_writes_nothing_and_a_future_timestamp_ages_to_zero() {
+    let mut out = Vec::new();
+    report(&mut out, &[], 100, false).unwrap();
+    assert!(out.is_empty());
+    report(&mut out, &[req(1, 500)], 100, false).unwrap();
+    assert!(String::from_utf8(out).unwrap().contains("  0s ago"));
+}
+
+#[test]
+fn report_returns_a_failing_writer_error_in_both_formats() {
+    struct Broken;
+    impl std::io::Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("closed"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    for json in [false, true] {
+        let err = report(&mut Broken, &[req(1, 90)], 100, json).unwrap_err();
+        assert_eq!(err.to_string(), "closed");
+    }
+}
+
 proptest::proptest! {
     #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
 
