@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 841 (2026-11-11, FEATURE, nothing unblocked) — test(cli)
+Same blockers (#166 #161 #203 #208), no owner answers. screen: json never wants stdout; AltScreen drop survives a failing LEAVE write.
+
 ## Cycle 839 (2026-11-11, FEATURE, nothing unblocked) — test(cli)
 Same blockers (#166 #161 #203 #208), no owner answers. pinning: verifier delegates supported schemes to the inner verifier; PinMismatch text fixed and key-free.
 

@@ -251,4 +251,30 @@ mod tests {
         let old = unsafe { libc::signal(libc::SIGTERM, libc::SIG_DFL) };
         assert_eq!(old, libc::SIG_DFL);
     }
+
+    #[test]
+    fn json_never_wants_the_real_stdout() {
+        assert!(!wanted_on_stdout(true));
+    }
+
+    #[test]
+    fn drop_survives_a_writer_that_fails_the_leave() {
+        struct FailsAfterEnter(usize);
+        impl Write for FailsAfterEnter {
+            fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+                if self.0 == 0 {
+                    return Err(io::Error::other("closed"));
+                }
+                self.0 -= 1;
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        // ENTER succeeds; the LEAVE write fails and is swallowed by `Drop`.
+        let s = AltScreen::enter(FailsAfterEnter(1), true).unwrap();
+        assert!(s.is_active());
+        drop(s);
+    }
 }
