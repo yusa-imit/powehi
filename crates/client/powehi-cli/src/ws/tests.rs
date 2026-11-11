@@ -148,6 +148,20 @@ async fn a_dropped_connection_reconnects_and_catches_up() {
 }
 
 #[tokio::test]
+async fn a_dropped_receiver_stops_the_loop_quietly() {
+    let (url, _seen) = server(vec![], false).await;
+    let (tx, rx) = channel(16);
+    drop(rx);
+    // The connect catch-up Wake cannot be delivered: the loop returns instead of retrying.
+    let done = tokio::time::timeout(
+        Duration::from_secs(5),
+        wake_loop(url, bearer(), Uuid::new_v4(), tx, TICK),
+    )
+    .await;
+    assert!(done.is_ok(), "loop must end when the receiver is gone");
+}
+
+#[tokio::test]
 async fn gives_up_after_three_retries_and_says_so() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
