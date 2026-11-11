@@ -126,6 +126,18 @@ fn garbage_certificate_has_no_pin() {
 }
 
 #[test]
+fn verifier_offers_the_inner_schemes_and_mismatch_text_leaks_no_key() {
+    let c = chain();
+    let v = verifier(&c, &[OTHER_A, OTHER_B]);
+    let schemes = v.supported_verify_schemes();
+    assert!(!schemes.is_empty());
+    assert_eq!(schemes, v.inner.supported_verify_schemes());
+    let text = PinMismatch.to_string();
+    assert_eq!(text, "server certificate does not match a pinned key");
+    assert!(!text.contains("a1"));
+}
+
+#[test]
 fn configs_build_for_both_policies() {
     let set = PinSet::new(&[OTHER_A, OTHER_B]).unwrap();
     for policy in [PinPolicy::WebPkiOnly, PinPolicy::Enforce(set)] {
