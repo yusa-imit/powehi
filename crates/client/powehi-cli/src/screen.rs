@@ -230,7 +230,20 @@ mod tests {
             during, on_signal as *const () as libc::sighandler_t,
             "SIGABRT is handled"
         );
+        for sig in SIGNALS {
+            // SAFETY: as above.
+            let cur = unsafe { libc::signal(sig, on_signal as *const () as libc::sighandler_t) };
+            assert_eq!(
+                cur, on_signal as *const () as libc::sighandler_t,
+                "signal {sig} handled"
+            );
+        }
         drop(g);
+        for sig in SIGNALS {
+            // SAFETY: as above.
+            let cur = unsafe { libc::signal(sig, libc::SIG_DFL) };
+            assert_eq!(cur, libc::SIG_DFL, "signal {sig} reset");
+        }
         // SAFETY: as above.
         let abrt = unsafe { libc::signal(libc::SIGABRT, libc::SIG_DFL) };
         assert_eq!(abrt, libc::SIG_DFL);
