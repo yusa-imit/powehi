@@ -207,6 +207,28 @@ mod tests {
     }
 
     #[test]
+    fn list_applies_the_name_length_limit_at_the_boundary() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join(APP_DIR);
+        let longest = "a".repeat(MAX_PROFILE_LEN);
+        std::fs::create_dir_all(root.join(&longest)).unwrap();
+        std::fs::create_dir_all(root.join("b".repeat(MAX_PROFILE_LEN + 1))).unwrap();
+        assert_eq!(list(d.path()).unwrap(), [longest]);
+    }
+
+    #[test]
+    fn list_cut_off_keeps_the_sorted_prefix() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join(APP_DIR);
+        for i in 0..MAX_LISTED + 5 {
+            std::fs::create_dir_all(root.join(format!("p{i:04}"))).unwrap();
+        }
+        let names = list(d.path()).unwrap();
+        assert_eq!(names.first().map(String::as_str), Some("p0000"));
+        assert!(names.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
     fn accepts_plain_names() {
         for n in ["default", "work-1", "a_b", "9"] {
             assert_eq!(validate_name(n), Ok(()), "{n}");
