@@ -2365,3 +2365,4 @@ Test-only: first proptests in `powehi-application` (proptest dev-dep): `reg_fing
 - Cycle 840 (STABILIZATION): CI green, no bug issues, audit/deny clean. Test-only: profile::list name-length boundary and sorted-prefix cut-off (profile.rs). target/ 51G (no files older than 7d to prune).
 
 - Cycle 842 (FEATURE, blocked): 8.15/8.17/8.19 still wait on #166 #161 #203 #208 (no owner answers, no bug issues). Shipped lockfile refresh (ar_archive_writer 0.5.5, build-dep of psm). cargo test --workspace 1733 passed, clippy/audit/deny clean.
+- Cycle 843 (FEATURE, blocked): 8.15/8.17/8.19 still wait on #166 #161 #203 #208 (no owner answers, no bug issues, cargo update 0 packages). Test-only: tests/hardening_entry.rs pins that main.rs disables core dumps before Cli::parse and aborts on failure. Test-gap survey: prompt.rs, whoami.rs, hardening.rs already fully covered.
