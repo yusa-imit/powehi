@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 837 (2026-11-11, FEATURE, nothing unblocked) — test(cli)
+Same blockers (#166 #161 #203 #208), no owner answers, CI green. screen signal-guard test now covers all five SIGNALS (installed, then reset). Kept in the one existing test: two tests touching process-global signal dispositions race and flake.
+
 ## Cycle 834 (2026-11-11, FEATURE, nothing unblocked) — test(cli)
 Same blockers (#166 #161 #203 #208), no owner answers. pcs::pending_name pinned to its persisted `pcs-<hyphenated uuid>` form. pcs tests pass, clippy clean.
 
