@@ -243,6 +243,22 @@ async fn read_lines_cap_boundaries() {
 }
 
 #[tokio::test]
+async fn read_lines_replaces_invalid_utf8_instead_of_dropping_the_line() {
+    let got = collect_lines(b"a\xffb\nok\n").await;
+    assert_eq!(got, ["a\u{fffd}b\n", "ok\n", "<eof>"]);
+}
+
+#[test]
+fn read_lines_stops_when_the_receiver_is_gone() {
+    // A dropped receiver must end the reader at once, not spin through the rest of stdin.
+    let (tx, rx): (Sender<Event>, _) = channel(1);
+    drop(rx);
+    let mut input = std::io::Cursor::new(b"one\ntwo\nthree\n".to_vec());
+    read_lines(&mut input, &tx);
+    assert_eq!(input.position(), 4, "only the first line is consumed");
+}
+
+#[tokio::test]
 async fn read_lines_oversize_without_newline_ends_cleanly() {
     let input = vec![b'u'; message::MAX_BODY_LEN * 2];
     let got = collect_lines(&input).await;
