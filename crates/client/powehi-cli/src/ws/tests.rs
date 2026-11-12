@@ -200,6 +200,34 @@ async fn a_server_that_accepts_and_drops_at_once_exhausts_the_budget() {
 }
 
 #[tokio::test]
+async fn binary_and_control_frames_never_wake() {
+    let g = Uuid::new_v4();
+    let json = format!(r#"{{"group_id":"{g}"}}"#);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let text = json.clone();
+    tokio::spawn(async move {
+        let (sock, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(sock).await.unwrap();
+        ws.send(Message::Binary(json.into_bytes())).await.unwrap();
+        ws.send(Message::Ping(vec![1])).await.unwrap();
+        ws.send(Message::Pong(vec![2])).await.unwrap();
+        ws.send(Message::Text(text)).await.unwrap();
+        std::future::pending::<()>().await;
+    });
+    let (tx, mut rx) = channel(16);
+    let task = tokio::spawn(wake_loop(url, bearer(), g, tx, TICK));
+    // Wake 1: connect catch-up; wake 2: the text frame. The binary copy of the same JSON is
+    // ignored, so nothing follows.
+    assert!(matches!(next(&mut rx).await, Event::Wake));
+    assert!(matches!(next(&mut rx).await, Event::Wake));
+    assert!(tokio::time::timeout(Duration::from_millis(100), rx.recv())
+        .await
+        .is_err());
+    task.abort();
+}
+
+#[tokio::test]
 async fn an_oversized_frame_ends_the_connection_without_waking() {
     let g = Uuid::new_v4();
     let big = format!(
