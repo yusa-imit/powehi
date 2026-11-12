@@ -337,6 +337,29 @@ async fn changed_conversation_line_is_not_sent_without_allow_changed() {
     assert_eq!(r.stored, 1, "the overridden line is delivered");
 }
 
+/// A typed line is message plaintext: `{:?}` of an event must name the variant only.
+#[test]
+fn event_debug_never_prints_line_plaintext() {
+    let secret = "hunter2-plaintext";
+    let shown = format!("{:?}", Event::Line(Zeroizing::new(secret.to_owned())));
+    assert_eq!(shown, "Line");
+    assert!(!shown.contains(secret));
+    assert_eq!(format!("{:?}", Event::Wake), "Wake");
+    assert_eq!(format!("{:?}", Event::RealtimeLost), "RealtimeLost");
+    assert_eq!(format!("{:?}", Event::Eof), "Eof");
+}
+
+/// Defaults: a slow safety-net poll while realtime works, a faster fallback once it is lost,
+/// and CHANGED conversations stay blocked unless the user opts in.
+#[test]
+fn default_options_poll_slowly_then_fast_and_block_changed() {
+    let o = Options::default();
+    assert_eq!(o.safety_net, Duration::from_secs(60));
+    assert_eq!(o.fallback, Duration::from_secs(5));
+    assert!(o.fallback < o.safety_net);
+    assert!(!o.allow_changed);
+}
+
 proptest::proptest! {
     #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
 
