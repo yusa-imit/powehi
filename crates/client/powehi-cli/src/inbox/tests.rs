@@ -1368,3 +1368,37 @@ async fn a_pair_record_over_a_kind_group_state_is_held_not_decrypted_or_applied(
     let conv = conversation::load(&alice.store, &gid).unwrap().unwrap();
     assert!(conv.peer_signature_key().is_none());
 }
+
+#[test]
+fn cursor_sanity_boundaries_and_insane_save_clears_stale_record() {
+    let cur = |since: &str| welcome::Cursor {
+        since: since.into(),
+        since_id: Uuid::new_v4(),
+    };
+    assert!(cur(&"1".repeat(64)).is_sane(), "64 chars is the limit");
+    assert!(!cur(&"1".repeat(65)).is_sane());
+    assert!(!cur("").is_sane());
+    assert!(
+        !cur("2026-10-09 00:00:00Z").is_sane(),
+        "space is not RFC 3339"
+    );
+    assert!(cur("2026-10-09T00:00:00.123456+09:00").is_sane());
+
+    let tmp = tempfile::tempdir().unwrap();
+    let s = session(&tmp, "alice", 1);
+    let good = cur("2026-10-09T00:00:00Z");
+    cursor::save(&s.store, Some((&good, 1)));
+    assert_eq!(cursor::load(&s.store), Some((good, 1)));
+    let last_hop = cur("2026-10-10T00:00:00Z");
+    cursor::save(&s.store, Some((&last_hop, cursor::MAX_HOPS - 1)));
+    assert_eq!(
+        cursor::load(&s.store),
+        Some((last_hop, cursor::MAX_HOPS - 1)),
+        "the last permitted hop still resumes"
+    );
+    cursor::save(&s.store, Some((&cur(&"1".repeat(65)), 0)));
+    assert!(
+        s.store.get(cursor::RECORD).unwrap().is_none(),
+        "an insane cursor replaces, not keeps, the stale record"
+    );
+}
