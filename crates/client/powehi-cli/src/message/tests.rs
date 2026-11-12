@@ -387,6 +387,26 @@ fn pending_at(received_at: u64) -> Pending {
 }
 
 #[test]
+fn display_json_carries_the_group_sender_key_only_when_present() {
+    let mut m = pending_at(7);
+    m.text = Zeroizing::new("hi".to_string());
+    let mut plain = Vec::new();
+    display_json(&mut plain, &m).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&plain).unwrap();
+    assert!(v.get("sender_key").is_none());
+    assert_eq!(v["received_at"], 7);
+
+    m.sender_key = Some("ab12".to_string());
+    let mut keyed = Vec::new();
+    display_json(&mut keyed, &m).unwrap();
+    assert_eq!(keyed.iter().filter(|b| **b == b'\n').count(), 1);
+    let v: serde_json::Value = serde_json::from_slice(&keyed).unwrap();
+    assert_eq!(v["sender_key"], "ab12");
+    assert_eq!(v["text"], "hi");
+    assert_eq!(v["sender"], Uuid::from_u128(1).to_string());
+}
+
+#[test]
 fn since_keeps_messages_received_at_or_after_the_cutoff() {
     let msgs: Vec<Pending> = [10, 20, 20, 30].into_iter().map(pending_at).collect();
     assert_eq!(since(&msgs, None).len(), 4);
