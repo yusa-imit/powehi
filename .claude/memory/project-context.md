@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 852 (2026-11-12, FEATURE, nothing unblocked) — test(cli)
+Same blockers (#166 #161 #203 #208), no owner answers. display_json: group `sender_key` field present only when set. Test-only.
+
 ## Cycle 851 (2026-11-12, FEATURE, nothing unblocked) — test(cli)
 Same blockers (#166 #161 #203 #208), no owner answers. verify: UNVERIFIED/CHANGED warning texts pinned (single line, name `powehi verify`). Test-only.
 
