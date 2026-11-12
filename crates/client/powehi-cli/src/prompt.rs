@@ -258,6 +258,27 @@ mod tests {
     }
 
     #[test]
+    fn scripted_prompter_consumes_in_order_then_reports_empty() {
+        let mut p = ScriptedPrompter {
+            handle: "alice".into(),
+            passwords: vec!["one".into(), "two".into()],
+            shown: Vec::new(),
+            upgrade: true,
+            asked_upgrade: 0,
+            phrases: vec!["p1".into()],
+        };
+        assert_eq!(p.password(false).unwrap().as_str(), "one");
+        assert_eq!(p.password(true).unwrap().as_str(), "two");
+        assert!(matches!(p.password(false), Err(PromptError::Empty)));
+        assert_eq!(p.recovery_phrase().unwrap().as_str(), "p1");
+        assert!(matches!(p.recovery_phrase(), Err(PromptError::Empty)));
+        p.show_recovery_phrase("shown").unwrap();
+        assert_eq!(p.shown, ["shown"]);
+        assert!(p.confirm_store_upgrade().unwrap());
+        assert_eq!(p.asked_upgrade, 1);
+    }
+
+    #[test]
     fn only_an_explicit_yes_confirms_the_upgrade() {
         for yes in ["y", "Y", "yes", " YES "] {
             assert!(is_yes(yes), "{yes}");
