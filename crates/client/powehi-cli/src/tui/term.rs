@@ -152,4 +152,31 @@ mod tests {
         assert!(!utf8_locale(None, None, None));
         assert!(!utf8_locale(None, None, Some("POSIX")));
     }
+
+    #[test]
+    fn locale_edges_empty_everywhere_and_non_utf8_charsets() {
+        // Only empty variables: nothing names UTF-8.
+        assert!(!utf8_locale(Some(""), Some(""), Some("")));
+        // The first non-empty variable decides, even when it is not UTF-8.
+        assert!(!utf8_locale(
+            Some(""),
+            Some("ko_KR.eucKR"),
+            Some("en_US.UTF-8")
+        ));
+        // Case-insensitive, both spellings.
+        assert!(utf8_locale(Some("C.UTF8"), None, None));
+        assert!(utf8_locale(None, None, Some("EN_US.Utf-8")));
+        assert!(!utf8_locale(None, None, Some("en_US.ISO-8859-1")));
+    }
+
+    #[test]
+    fn raw_mode_refuses_when_stdout_is_not_a_terminal() {
+        // The frames carry message plaintext, so a captured/piped stdout must never enter raw
+        // mode. Test harness stdout is captured, never a tty.
+        if io::IsTerminal::is_terminal(&io::stdout()) {
+            return;
+        }
+        let err = RawMode::enter().err().expect("must refuse off-terminal");
+        assert_eq!(err.to_string(), "stdout is not a terminal");
+    }
 }
