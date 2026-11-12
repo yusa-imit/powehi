@@ -570,6 +570,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn warnings_are_single_line_and_point_at_verify() {
+        for w in [UNVERIFIED_WARNING, CHANGED_WARNING] {
+            assert!(w.starts_with("warning: "), "{w:?}");
+            assert!(!w.contains('\n'), "{w:?}");
+            assert!(w.contains("powehi verify <conversation>"), "{w:?}");
+        }
+        assert!(CHANGED_WARNING.contains("CHANGED"));
+        assert_ne!(UNVERIFIED_WARNING, CHANGED_WARNING);
+    }
+
     mod props {
         use proptest::prelude::*;
 
