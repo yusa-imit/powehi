@@ -412,6 +412,13 @@ mod tests {
     }
 
     #[test]
+    fn the_policy_constants_match_prd_5_3a() {
+        assert_eq!(MAX_MESSAGES_PER_UPDATE, 50);
+        assert_eq!(MAX_UPDATE_AGE_SECS, 604_800);
+        assert_eq!(PENDING_PREFIX, "pcs-");
+    }
+
+    #[test]
     fn a_fresh_conversation_is_not_due() {
         assert!(!update_due(&conv(), 1_000_000));
     }
