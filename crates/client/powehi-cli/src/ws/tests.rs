@@ -256,6 +256,15 @@ async fn an_oversized_frame_ends_the_connection_without_waking() {
 }
 
 #[test]
+fn bounds_are_pinned_to_prd_7_6() {
+    assert_eq!(MAX_RETRIES, 3);
+    assert_eq!(MAX_FRAME_BYTES, 16 * 1024);
+    assert_eq!(STABLE_AFTER, Duration::from_secs(5));
+    assert_eq!(MAX_FRAMES_PER_CONNECTION, 1_000_000);
+    assert_eq!(CONNECT_TIMEOUT, Duration::from_secs(15));
+}
+
+#[test]
 fn tls_connector_builds_with_an_explicit_provider() {
     assert!(tls_connector().is_some());
 }
