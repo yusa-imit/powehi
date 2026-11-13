@@ -73,6 +73,33 @@ async fn a_solo_group_refuses_send() {
     assert!(matches!(err, Err(crate::message::MessageError::GroupAlone)));
 }
 
+#[test]
+fn pending_record_names_are_distinct_per_kind_and_per_group() {
+    let a = Uuid::from_u128(1);
+    let b = Uuid::from_u128(2);
+    let names = [
+        pending_name(a),
+        crate::group::remove::pending_name(a),
+        crate::pcs::pending_name(a),
+    ];
+    assert_eq!(
+        names[0], "gadd-00000000-0000-0000-0000-000000000001",
+        "add record name is a stored-format contract"
+    );
+    assert!(names[1].starts_with("grem-") && names[2].starts_with("pcs-"));
+    for i in 0..names.len() {
+        for j in (i + 1)..names.len() {
+            assert_ne!(names[i], names[j], "kinds must not share a record");
+        }
+    }
+    assert_ne!(pending_name(a), pending_name(b));
+    assert_ne!(
+        crate::group::remove::pending_name(a),
+        crate::group::remove::pending_name(b)
+    );
+    assert_ne!(crate::pcs::pending_name(a), crate::pcs::pending_name(b));
+}
+
 mod add_tests {
     use super::*;
     use crate::invite::{parse_link, InviteLink};
