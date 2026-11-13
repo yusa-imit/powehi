@@ -1455,6 +1455,18 @@ mod tests {
     }
 
     #[test]
+    fn new_recovery_material_is_a_fresh_24_word_phrase_with_matching_label() {
+        let a = new_recovery_material().unwrap();
+        let b = new_recovery_material().unwrap();
+        assert_eq!(a.phrase.split_whitespace().count(), 24);
+        assert_eq!(a.label, mls_label(&a.phrase));
+        assert_eq!(a.label.len(), MLS_LABEL_LEN);
+        assert_ne!(*a.phrase, *b.phrase);
+        assert_ne!(a.recovery_pub, b.recovery_pub);
+        assert_ne!(a.label, b.label);
+    }
+
+    #[test]
     fn mls_label_known_answer_matches_web_formula() {
         // SHA-256("abandon"*23 + " art")[..16], as computed by the web client.
         let phrase = format!("{} art", ["abandon"; 23].join(" "));
