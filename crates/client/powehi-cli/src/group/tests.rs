@@ -889,6 +889,35 @@ mod commit_tests {
         ));
     }
 
+    /// A Commit staged in the MLS state itself (no store record yet, e.g. a crash right after
+    /// staging) also blocks a peer's Commit: Bob stays at his epoch with his staged Commit.
+    #[tokio::test]
+    async fn a_peer_commit_waits_while_a_commit_is_staged_in_the_mls_state() {
+        let (tmp, alice, bob, url, state, gid) = alice_and_bob().await;
+        let carol = session(&tmp, "carol", 3);
+        let (link, _) = invite::create(&client(), &url, &carol).await.unwrap();
+        add(&client(), &url, &alice, gid, &parse_link(&link).unwrap())
+            .await
+            .unwrap();
+        let commit = state.lock().unwrap().commit_bytes.last().unwrap().clone();
+        let mut local = LocalIdentity::load(&bob.store).unwrap();
+        let mut g = mls_group::load_group(gid.as_bytes(), &local.provider)
+            .unwrap()
+            .unwrap();
+        let own = g.own_leaf_index().u32();
+        let other = u32::from(own == 0);
+        mls_group::stage_remove_member(&mut g, &local.identity.signer, other, &local.provider)
+            .unwrap();
+        local.save(&bob.store).unwrap();
+        assert_eq!(apply(&bob, gid, &commit).unwrap(), Outcome::Unresolved);
+        let local = LocalIdentity::load(&bob.store).unwrap();
+        let g = mls_group::load_group(gid.as_bytes(), &local.provider)
+            .unwrap()
+            .unwrap();
+        assert!(g.pending_commit().is_some(), "staged commit untouched");
+        assert_eq!(g.members().count(), 2);
+    }
+
     /// A member's Application message is decrypted by another member; the stored record names
     /// the MLS leaf key that signed it, not the DS label, and the envelope is acked.
     #[tokio::test]
