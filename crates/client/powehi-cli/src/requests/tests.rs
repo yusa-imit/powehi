@@ -51,7 +51,7 @@ async fn stranger_welcome() -> (tempfile::TempDir, Session, Arc<Mutex<Backend>>,
 fn policy_constants_match_the_prd() {
     assert_eq!(MAX_REQUESTS, 32);
     assert_eq!(REQUEST_TTL_SECS, 5 * 24 * 60 * 60);
-    assert!(REQUEST_TTL_SECS < 30 * 24 * 60 * 60);
+    const { assert!(REQUEST_TTL_SECS < 30 * 24 * 60 * 60) };
     assert!(record_name(&Uuid::from_u128(1)).starts_with("req-"));
 }
 
