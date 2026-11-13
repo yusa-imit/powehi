@@ -368,6 +368,52 @@ mod tests {
         assert!(matches!(e, StatusError::HttpStatus(404)));
     }
 
+    #[tokio::test]
+    async fn region_json_without_region_id_is_bad_response() {
+        let url = serve(vec![
+            ok("/health", "ok"),
+            ok("/v1/region/detect", r#"{"region":"eu-de-1"}"#),
+        ])
+        .await;
+        let e = fetch(&http_client().unwrap(), &url).await.unwrap_err();
+        assert!(matches!(e, StatusError::BadResponse));
+    }
+
+    #[tokio::test]
+    async fn health_body_must_be_exactly_ok() {
+        let url = serve(vec![
+            ok("/health", "ok\n"),
+            ok("/v1/region/detect", r#"{"region_id":"eu-de-1"}"#),
+        ])
+        .await;
+        let s = fetch(&http_client().unwrap(), &url).await.unwrap();
+        assert!(!s.healthy);
+    }
+
+    /// A writer that fails on every write.
+    struct Broken;
+
+    impl std::io::Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("closed"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn report_write_failure_is_returned_in_both_formats() {
+        let url = Url::parse("https://example.test/").unwrap();
+        let st = ServerStatus {
+            healthy: true,
+            region_id: "eu-1".into(),
+        };
+        assert!(write_report(&url, &st, false, &mut Broken).is_err());
+        assert!(write_report(&url, &st, true, &mut Broken).is_err());
+    }
+
     mod props {
         use proptest::prelude::*;
 
