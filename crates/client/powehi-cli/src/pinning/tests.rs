@@ -332,3 +332,34 @@ mod props {
         }
     }
 }
+
+/// A pin on the issuer is honoured up to `MAX_CHAIN` presented certificates and no further,
+/// so a server cannot make the verifier build a trust store per padded certificate.
+#[test]
+fn pinned_issuer_beyond_max_chain_is_not_considered() {
+    let (issuer, issuer_key) = named_ca("issuer");
+    let leaf_key = KeyPair::generate().unwrap();
+    let leaf = CertificateParams::new(vec!["localhost".to_owned()])
+        .unwrap()
+        .signed_by(&leaf_key, &issuer, &issuer_key)
+        .unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(issuer.der().clone()).unwrap();
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let v = PinnedVerifier {
+        inner: WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider.clone())
+            .build()
+            .unwrap(),
+        pins: PinSet::new(&[spki_pin(issuer.der()).unwrap(), OTHER_A]).unwrap(),
+        provider,
+    };
+    let name = ServerName::try_from("localhost").unwrap();
+    let filler = named_ca("filler").0.der().clone();
+    let run = |position: usize| {
+        let mut presented = vec![filler.clone(); position];
+        presented.push(issuer.der().clone());
+        v.pinned_on_verified_path(leaf.der(), &presented, &name, UnixTime::now())
+    };
+    assert!(run(MAX_CHAIN - 1));
+    assert!(!run(MAX_CHAIN));
+}
