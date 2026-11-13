@@ -842,6 +842,30 @@ mod commit_tests {
         assert_eq!(members_of(&bob, gid), Some(2));
     }
 
+    /// A member's Commit outside the allowlist (here: a GroupContextExtensions commit that drops
+    /// the kind extension) is `Forked`, never merged: Bob stays at his epoch with his members.
+    #[tokio::test]
+    async fn a_member_commit_outside_the_allowlist_is_forked_and_unmerged() {
+        use openmls::prelude::{Extensions, GroupContext};
+        let (_tmp, alice, bob, _url, _state, gid) = alice_and_bob().await;
+        let local = LocalIdentity::load(&alice.store).unwrap();
+        let mut ag = mls_group::load_group(gid.as_bytes(), &local.provider)
+            .unwrap()
+            .unwrap();
+        let (msg, _, _) = ag
+            .update_group_context_extensions(
+                &local.provider,
+                Extensions::<GroupContext>::empty(),
+                &local.identity.signer,
+            )
+            .unwrap();
+        let commit = msg.to_bytes().unwrap();
+        assert_eq!(apply(&bob, gid, &commit).unwrap(), Outcome::Forked);
+        assert_eq!(members_of(&bob, gid), Some(2));
+        let conv = conversation::load(&bob.store, &gid).unwrap().unwrap();
+        assert_eq!(conv.kind(), Kind::Group);
+    }
+
     /// An unresolved local Commit (add or remove record) blocks applying a peer's Commit: merging
     /// it would silently drop ours. Nothing changes, and the Commit applies once the record clears.
     #[tokio::test]

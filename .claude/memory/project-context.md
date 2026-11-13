@@ -2396,3 +2396,4 @@ Test-only: first proptests in `powehi-application` (proptest dev-dep): `reg_fing
 ## Cycle 856 (2026-11-13, FEATURE, nothing unblocked) — test(cli)
 Same blockers (#166 #161 #203 #208), no owner answers. cargo update: nothing to bump. chat: Event Debug never prints line plaintext; Options defaults pinned. Test-only.
 - Cycle 857 (FEATURE, blocked -> STABILIZATION work): 8.15/8.17/8.19 still wait on #166 #161 #203 #208; no open PRs, CI green. Shipped lockfile refresh (rustls-webpki 0.103.17, prost 0.14.6). audit/deny/clippy clean, workspace tests pass. Test-gap survey: pinning, pcs::update_due, hardening, screen already covered.
+- Cycle 860 (STABILIZATION): CI green, no bug issues, audit/deny clean, 681 CLI tests pass. Pinned the CLI-level `group::commit::Outcome::Forked` path (member GCE commit dropping the kind extension is unmerged). Test-only. target/ 55G after prune (no 7d-old artifacts left to drop).
