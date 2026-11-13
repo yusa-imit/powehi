@@ -44,6 +44,17 @@ async fn stranger_welcome() -> (tempfile::TempDir, Session, Arc<Mutex<Backend>>,
     (tmp, alice, state, url, gid)
 }
 
+/// The pending-request policy is documented in prd §3 (8.12): at most 32 requests, a 5-day local
+/// TTL (shorter than the server's 30-day Welcome retention, so an expired request can be acked),
+/// and the `req-` record prefix. Changing any of them is a policy change, not a refactor.
+#[test]
+fn policy_constants_match_the_prd() {
+    assert_eq!(MAX_REQUESTS, 32);
+    assert_eq!(REQUEST_TTL_SECS, 5 * 24 * 60 * 60);
+    assert!(REQUEST_TTL_SECS < 30 * 24 * 60 * 60);
+    assert!(record_name(&Uuid::from_u128(1)).starts_with("req-"));
+}
+
 #[test]
 fn save_new_keeps_the_first_welcome_per_group_and_caps_the_list() {
     let (_tmp, store) = open_store();
