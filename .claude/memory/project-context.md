@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 862 (2026-11-13, FEATURE, nothing unblocked) — test(cli)
+Same blockers (#166 #161 #203 #208), no owner answers. `cargo update`, deny, audit clean. ws: pinned retry/frame/timeout bounds. Test-only.
+
 ## Cycle 859 (2026-11-13, FEATURE, nothing unblocked) — test(cli)
 Same blockers (#166 #161 #203 #208), no owner answers. `cargo update` had nothing. pcs: pinned policy constants (50 msgs, 7 d, `pcs-`) to prd §5.3A. Test-only.
 
