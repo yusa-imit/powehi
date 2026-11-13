@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 867 (2026-11-13, FEATURE, nothing unblocked) — test(cli)
+Same blockers (#166 #161 #203 #208), no owner answers. group: `write_added` propagates writer errors in text and JSON. Test-only.
+
 ## Cycle 865 (2026-11-13, STABILIZATION) — test(cli)
 CI green; cargo audit/deny/clippy clean; no bug issues. group commit: MLS-staged (no record) pending commit yields Unresolved. Test-only. target/ pruned (was 53G).
 

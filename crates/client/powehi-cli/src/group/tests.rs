@@ -461,6 +461,22 @@ mod add_tests {
         assert_eq!(v["epoch"], 3);
     }
 
+    #[test]
+    fn write_added_reports_a_failing_writer_in_both_formats() {
+        struct Broken;
+        impl std::io::Write for Broken {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("closed"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let id = Uuid::new_v4();
+        assert!(write_added(id, 2, false, &mut Broken).is_err());
+        assert!(write_added(id, 2, true, &mut Broken).is_err());
+    }
+
     #[tokio::test]
     async fn resume_after_a_crash_before_the_merge_merges_then_delivers() {
         let w = world().await;
