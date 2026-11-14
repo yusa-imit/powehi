@@ -2446,3 +2446,6 @@ CI green, no bug issues, cargo audit + deny clean. media::save: success path (06
 
 ## Cycle 881 (2026-11-15, FEATURE, blocked)
 8.15/8.17/8.19 still wait on #166 #161 #203 #208 (no owner answers). Lockfile refresh: jiff 0.2.44, jiff-core 0.1.6, jiff-static, jiff-tzdb (lockfile-only). Workspace tests, clippy, audit, deny clean.
+
+## Cycle 883 (2026-11-15, FEATURE, blocked)
+8.15/8.17/8.19 still wait on #166 #161 #203 #208 (no owner answers); 8.22/8.23 blocked on them too. cargo audit + deny clean. tui: `set_rows` keeps the half-typed line while the selection survives (counterpart of the vanished-selection test). Test-only; 703 lib tests pass.
