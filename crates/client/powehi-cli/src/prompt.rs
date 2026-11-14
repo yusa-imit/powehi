@@ -305,6 +305,12 @@ mod tests {
     }
 
     #[test]
+    fn strips_only_one_carriage_return() {
+        assert_eq!(*read_line(&mut file_with(b"pw\r\r\n")).unwrap(), "pw\r");
+        assert_eq!(*read_line(&mut file_with(b"a\rb\n")).unwrap(), "a\rb");
+    }
+
+    #[test]
     fn rejects_empty_lines_and_eof() {
         for raw in [&b""[..], b"\n", b"\r\n"] {
             assert_eq!(
