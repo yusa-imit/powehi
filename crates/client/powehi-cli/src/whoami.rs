@@ -65,6 +65,20 @@ mod tests {
     }
 
     #[test]
+    fn server_port_and_path_are_printed_verbatim_in_both_formats() {
+        let server = url::Url::parse("https://example.test:8443/api/").unwrap();
+        let (u, d) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let mut t = Vec::new();
+        report("work", &server, u, d, false, &mut t).unwrap();
+        let t = String::from_utf8(t).unwrap();
+        assert!(t.contains("server: https://example.test:8443/api/\n"));
+        let mut j = Vec::new();
+        report("work", &server, u, d, true, &mut j).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&j).unwrap();
+        assert_eq!(v["server"], "https://example.test:8443/api/");
+    }
+
+    #[test]
     #[should_panic]
     fn nil_user_is_a_contract_violation() {
         let server = url::Url::parse("https://example.test/").unwrap();
