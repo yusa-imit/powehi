@@ -194,6 +194,20 @@ mod tests {
         (path, "200 OK", body.to_string())
     }
 
+    /// A base path on the server URL is dropped: both endpoints are absolute paths.
+    #[tokio::test]
+    async fn base_path_on_the_server_url_is_ignored() {
+        let root = serve(vec![
+            ok("/health", "ok"),
+            ok("/v1/region/detect", r#"{"region_id":"eu-de-1"}"#),
+        ])
+        .await;
+        let url = root.join("/prefix/").unwrap();
+        let s = fetch(&http_client().unwrap(), &url).await.unwrap();
+        assert!(s.healthy);
+        assert_eq!(s.region_id, "eu-de-1");
+    }
+
     #[tokio::test]
     async fn healthy_server() {
         let url = serve(vec![
