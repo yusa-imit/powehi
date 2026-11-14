@@ -466,6 +466,16 @@ mod tests {
     }
 
     #[test]
+    fn staying_over_the_message_limit_stays_due() {
+        let mut c = conv();
+        for _ in 0..MAX_MESSAGES_PER_UPDATE + 5 {
+            c.note_sent(100);
+        }
+        assert!(update_due(&c, 100));
+        assert!(update_due(&c, 100 + MAX_UPDATE_AGE_SECS));
+    }
+
+    #[test]
     fn a_clock_before_the_record_is_not_due_by_age() {
         let mut c = conv();
         c.note_sent(5_000);

@@ -2428,3 +2428,6 @@ Same blockers (#166 #161 #203 #208), no owner answers. cargo update: nothing to 
 
 ## Cycle 876 (2026-11-14, FEATURE, nothing unblocked) — test(cli)
 Same blockers (#166 #161 #203 #208), no owner answers. screen: ENTER/LEAVE escape sequences pinned. Test-only.
+
+## Cycle 877 (2026-11-14, FEATURE, nothing unblocked) — test(cli)
+Same blockers (#166 #161 #203 #208), no owner answers. pcs: update_due stays true past the message limit. Test-only.
