@@ -136,6 +136,16 @@ fn set_rows_keeps_selection_and_esc_quits() {
 }
 
 #[test]
+fn set_rows_keeps_the_half_typed_line_while_the_selection_survives() {
+    let (a, b) = (row(Mark::Verified), row(Mark::Verified));
+    let mut app = App::new(vec![a.clone(), b.clone()]);
+    type_str(&mut app, "draft");
+    app.set_rows(vec![b, a.clone()]);
+    assert_eq!(app.selected_id(), Some(a.id));
+    assert_eq!(app.input_len(), "draft".len());
+}
+
+#[test]
 fn debug_of_send_action_hides_the_text() {
     let a = Action::Send {
         group: Uuid::nil(),
