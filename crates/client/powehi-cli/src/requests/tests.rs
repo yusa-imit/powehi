@@ -173,6 +173,24 @@ fn resolve_takes_a_unique_prefix_of_four_or_more_characters() {
 }
 
 #[test]
+fn resolve_is_ambiguous_on_a_shared_prefix_and_ignores_case_and_padding() {
+    let (_tmp, store) = open_store();
+    save_new(&store, &req(0xabcd_0000 << 96, 1)).unwrap();
+    save_new(&store, &req(0xabcd_1000 << 96, 1)).unwrap();
+    assert!(matches!(
+        resolve(&store, "abcd"),
+        Err(RequestError::Ambiguous)
+    ));
+    assert!(
+        matches!(resolve(&store, " ABCD0000 \n"), Ok(id) if id == Uuid::from_u128(0xabcd_0000 << 96))
+    );
+    let full = Uuid::from_u128(0xabcd_1000 << 96).hyphenated().to_string();
+    assert!(
+        matches!(resolve(&store, &full.to_uppercase()), Ok(id) if id == Uuid::from_u128(0xabcd_1000 << 96))
+    );
+}
+
+#[test]
 fn a_record_stored_under_another_group_id_is_malformed() {
     let (_tmp, store) = open_store();
     let bytes = serde_json::to_vec(&req(1, 1)).unwrap();
