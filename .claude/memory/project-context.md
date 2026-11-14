@@ -2423,3 +2423,4 @@ Same blockers (#166 #161 #203 #208), no owner answers. cargo update: nothing to 
 - Cycle 868 (FEATURE, blocked): 8.15/8.17/8.19 still wait on #166 #161 #203 #208 (no owner answers). Lockfile refresh: cc 1.11.2. workspace tests 1760 passed, clippy/audit/deny clean.
 - Cycle 869 (FEATURE, blocked): 8.15/8.17/8.19 still wait on #166 #161 #203 #208 (no owner answers). Lockfile refresh: mio 1.2.4 -> 1.2.5. workspace tests 1760 passed, clippy/fmt/audit clean.
 - Cycle 872 (FEATURE, blocked): 8.15/8.17/8.19 still wait on #166 #161 #203 #208 (no owner answers, cargo update 0 packages). Test-only: requests::resolve Ambiguous on shared prefix, case/whitespace-insensitive.
+- Cycle 874 (FEATURE, blocked): 8.15/8.17/8.19 still wait on #166 #161 #203 #208 (no owner answers, cargo update 0 packages). Test-only: status fetch ignores a base path on the server URL.
