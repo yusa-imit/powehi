@@ -243,6 +243,15 @@ async fn read_lines_cap_boundaries() {
 }
 
 #[tokio::test]
+async fn read_lines_empty_input_is_only_eof_and_blank_lines_pass_through() {
+    assert_eq!(collect_lines(b"").await, ["<eof>"]);
+    assert_eq!(
+        collect_lines(b"\n\nx\n").await,
+        ["\n", "\n", "x\n", "<eof>"]
+    );
+}
+
+#[tokio::test]
 async fn read_lines_replaces_invalid_utf8_instead_of_dropping_the_line() {
     let got = collect_lines(b"a\xffb\nok\n").await;
     assert_eq!(got, ["a\u{fffd}b\n", "ok\n", "<eof>"]);

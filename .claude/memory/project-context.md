@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 882 (2026-11-15, FEATURE, nothing unblocked) — test(cli)
+Same blockers (#166 #161 #203 #208), no owner answers. chat read_lines: empty input is only Eof, blank lines pass through. Test-only.
+
 ## Cycle 873 (2026-11-14, FEATURE, nothing unblocked) — test(cli)
 Same blockers (#166 #161 #203 #208), no owner answers; lockfile current. whoami: server port/path printed verbatim. Test-only.
 
