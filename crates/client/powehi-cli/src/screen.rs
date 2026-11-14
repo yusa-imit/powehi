@@ -277,4 +277,12 @@ mod tests {
         assert!(s.is_active());
         drop(s);
     }
+
+    #[test]
+    fn escape_sequences_are_pinned() {
+        assert_eq!(ENTER, b"\x1b[?1049h\x1b[H");
+        assert_eq!(LEAVE, b"\x1b[?1049l");
+        // Leaving must not move the cursor or clear the main buffer's scrollback.
+        assert!(!LEAVE.windows(2).any(|w| w == b"[H" || w == b"[J"));
+    }
 }

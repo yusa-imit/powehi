@@ -2425,3 +2425,6 @@ Same blockers (#166 #161 #203 #208), no owner answers. cargo update: nothing to 
 - Cycle 872 (FEATURE, blocked): 8.15/8.17/8.19 still wait on #166 #161 #203 #208 (no owner answers, cargo update 0 packages). Test-only: requests::resolve Ambiguous on shared prefix, case/whitespace-insensitive.
 - Cycle 874 (FEATURE, blocked): 8.15/8.17/8.19 still wait on #166 #161 #203 #208 (no owner answers, cargo update 0 packages). Test-only: status fetch ignores a base path on the server URL.
 - Cycle 875 (STABILIZATION): CI green, no bug issues, cargo audit/deny clean. Test-only: profile::validate_name error variants pinned (Empty/BadChars/TooLong precedence).
+
+## Cycle 876 (2026-11-14, FEATURE, nothing unblocked) — test(cli)
+Same blockers (#166 #161 #203 #208), no owner answers. screen: ENTER/LEAVE escape sequences pinned. Test-only.
