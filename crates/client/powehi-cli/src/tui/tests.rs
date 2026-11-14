@@ -640,3 +640,25 @@ mod clean_props {
         }
     }
 }
+
+#[test]
+fn row_label_combines_kind_unread_and_mark() {
+    let id = Uuid::parse_str("12345678-90ab-cdef-1234-567890abcdef").unwrap();
+    let label = |kind, unread, mark| {
+        row_label(&Row {
+            id,
+            kind,
+            unread,
+            mark,
+        })
+    };
+    assert_eq!(label(Kind::Pair, 0, Mark::Verified), "12345678 pair");
+    assert_eq!(
+        label(Kind::Group, 3, Mark::Unverified),
+        "12345678 group (3) unverified"
+    );
+    assert_eq!(
+        label(Kind::Pair, 12, Mark::Changed),
+        "12345678 pair (12) CHANGED"
+    );
+}

@@ -2434,3 +2434,6 @@ Same blockers (#166 #161 #203 #208), no owner answers. pcs: update_due stays tru
 
 ## Cycle 878 (2026-11-14, FEATURE, nothing unblocked) — test(cli)
 Same blockers (#166 #161 #203 #208), no owner answers. prompt: read_line strips only one trailing CR. Test-only. Note: cargo needs PATH=$HOME/.cargo/bin.
+
+## Cycle 879 (2026-11-14, FEATURE, nothing unblocked) — test(cli)
+Same blockers (#166 #161 #203 #208), no owner answers, cargo update 0 packages. tui: row_label kind/unread/mark combos pinned. Test-only.
