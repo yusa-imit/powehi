@@ -479,6 +479,41 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"keep");
     }
 
+    #[test]
+    fn save_writes_a_private_file_named_by_blob_id() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let id = Uuid::from_u128(4);
+        let path = save(d.path(), &id, b"plain").unwrap();
+        assert_eq!(path, d.path().join(format!("powehi-{}", id.simple())));
+        assert_eq!(std::fs::read(&path).unwrap(), b"plain");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        // The temporary name is gone: only the final file remains.
+        assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn save_caps_size_exactly_and_rejects_a_bad_dir() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let over = vec![0u8; MAX_MEDIA_BYTES as usize + 1];
+        assert_eq!(
+            save(d.path(), &Uuid::from_u128(5), &over),
+            Err(MediaError::TooLarge)
+        );
+        assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 0);
+        // A missing directory and a regular file in its place are both I/O errors.
+        let missing = d.path().join("nope");
+        assert_eq!(
+            save(&missing, &Uuid::from_u128(5), b"x"),
+            Err(MediaError::Io)
+        );
+        let file = d.path().join("f");
+        std::fs::write(&file, b"").unwrap();
+        assert_eq!(save(&file, &Uuid::from_u128(5), b"x"), Err(MediaError::Io));
+    }
+
     mod props {
         use proptest::prelude::*;
 
