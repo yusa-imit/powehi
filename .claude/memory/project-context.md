@@ -2431,3 +2431,6 @@ Same blockers (#166 #161 #203 #208), no owner answers. screen: ENTER/LEAVE escap
 
 ## Cycle 877 (2026-11-14, FEATURE, nothing unblocked) — test(cli)
 Same blockers (#166 #161 #203 #208), no owner answers. pcs: update_due stays true past the message limit. Test-only.
+
+## Cycle 878 (2026-11-14, FEATURE, nothing unblocked) — test(cli)
+Same blockers (#166 #161 #203 #208), no owner answers. prompt: read_line strips only one trailing CR. Test-only. Note: cargo needs PATH=$HOME/.cargo/bin.
