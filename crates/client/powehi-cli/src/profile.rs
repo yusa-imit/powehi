@@ -250,6 +250,17 @@ mod tests {
     }
 
     #[test]
+    fn rejection_variants_are_pinned() {
+        assert_eq!(validate_name(""), Err(ProfileError::Empty));
+        for n in ["-x", "_x", "a\n", "a.b", "٣", "ａ"] {
+            assert_eq!(validate_name(n), Err(ProfileError::BadChars), "{n:?}");
+        }
+        // Length is checked before the grammar, so an over-long bad name reports TooLong.
+        let long_bad = format!("-{}", "a".repeat(MAX_PROFILE_LEN));
+        assert_eq!(validate_name(&long_bad), Err(ProfileError::TooLong));
+    }
+
+    #[test]
     fn resolve_nests_under_base() {
         let p = ProfilePaths::resolve(Path::new("/d"), "work").unwrap();
         assert_eq!(p.dir, Path::new("/d/powehi/work"));
