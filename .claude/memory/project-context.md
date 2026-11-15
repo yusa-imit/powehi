@@ -2464,3 +2464,6 @@ CI green, no bug issues, cargo audit + deny clean; target/ pruned 57G→50G. tui
 
 ## Cycle 888 (2026-11-15, FEATURE, blocked)
 Phase 8 queue still blocked on #166 #161 #203 #208 (no answers). Shipped a test-only pin: status region reply ignores unknown fields. 23 status tests pass.
+
+## Cycle 889 (2026-11-15, FEATURE, blocked)
+Phase 8 queue still blocked on #166 #161 #203 #208 (no answers). Test-only pin: prompt `is_yes` rejects lookalikes/embedded controls. 14 prompt tests pass, clippy clean.
