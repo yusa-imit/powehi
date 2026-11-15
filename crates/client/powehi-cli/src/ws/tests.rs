@@ -86,6 +86,13 @@ fn ws_url_drops_query_and_fragment_of_the_base() {
 }
 
 #[test]
+fn ws_url_keeps_host_and_port_and_ignores_the_base_path() {
+    let u = ws_url(&Url::parse("http://[::1]:9/deep/base/").unwrap()).unwrap();
+    assert_eq!(u.as_str(), "ws://[::1]:9/v1/ws");
+    assert_eq!(u.path(), "/v1/ws");
+}
+
+#[test]
 fn only_notifications_for_our_group_wake() {
     let g = Uuid::new_v4();
     let note = |gid: &str| format!(r#"{{"type":"envelope_received","group_id":"{gid}"}}"#);
