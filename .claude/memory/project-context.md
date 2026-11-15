@@ -2452,3 +2452,6 @@ CI green, no bug issues, cargo audit + deny clean. media::save: success path (06
 
 ## Cycle 884 (2026-11-15, FEATURE, blocked)
 8.15/8.17/8.19 still wait on #166 #161 #203 #208 (no owner answers, cargo update 0 packages). ws: ws_url ignores base path, keeps IPv6 host/port. Test-only.
+
+## Cycle 885 (2026-11-15, STABILIZATION)
+CI green, no bug issues, cargo audit + deny clean; target/ pruned 57G→50G. tui: push_message keeps unread 0 on the selected row, stores unknown-group messages without touching rows, counts unread on others. Test-only; 73 tui tests pass.
