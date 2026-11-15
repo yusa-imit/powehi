@@ -672,3 +672,20 @@ fn row_label_combines_kind_unread_and_mark() {
         "12345678 pair (12) CHANGED"
     );
 }
+
+#[test]
+fn push_to_selected_keeps_unread_zero_and_unknown_group_touches_no_row() {
+    let (a, b) = (row(Mark::Verified), row(Mark::Verified));
+    let (ida, idb) = (a.id, b.id);
+    let mut app = App::new(vec![a, b]);
+    assert_eq!(app.selected_id(), Some(ida));
+    app.push_message(ida, "peer".into(), z("seen"));
+    assert_eq!(app.rows[0].unread, 0);
+    let stranger = Uuid::new_v4();
+    app.push_message(stranger, "peer".into(), z("orphan"));
+    assert!(app.rows.iter().all(|r| r.unread == 0));
+    assert_eq!(app.shown[&stranger].len(), 1);
+    app.push_message(idb, "peer".into(), z("one"));
+    app.push_message(idb, "peer".into(), z("two"));
+    assert_eq!(app.rows[1].unread, 2);
+}
