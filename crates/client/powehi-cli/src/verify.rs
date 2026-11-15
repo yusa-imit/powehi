@@ -570,6 +570,29 @@ mod tests {
         }
     }
 
+    /// A writer whose every write fails, like a closed pipe.
+    struct Broken;
+    impl std::io::Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
+    #[test]
+    fn write_failure_is_returned_in_every_state_and_format() {
+        let n = safety::pairwise(&[1u8; 32], &[2u8; 32]).unwrap();
+        let g = Uuid::new_v4();
+        for st in [State::Verified, State::Unverified, State::Changed] {
+            let e = report(&mut Broken, g, &n, st).unwrap_err();
+            assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe);
+            let e = report_json(&mut Broken, g, &n, st).unwrap_err();
+            assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe);
+        }
+    }
+
     #[test]
     fn warnings_are_single_line_and_point_at_verify() {
         for w in [UNVERIFIED_WARNING, CHANGED_WARNING] {
