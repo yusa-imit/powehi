@@ -279,6 +279,23 @@ mod tests {
     }
 
     #[test]
+    fn is_yes_rejects_lookalikes_and_embedded_controls() {
+        for no in [
+            "ｙｅｓ",
+            "yes\0",
+            "y\0",
+            "y es",
+            "yes\nno",
+            "\u{0443}es",
+            "yess",
+        ] {
+            assert!(!is_yes(no), "{no:?}");
+        }
+        // Surrounding Unicode whitespace is trimmed; the verdict is unchanged.
+        assert!(is_yes("\u{a0}yes\u{2003}"));
+    }
+
+    #[test]
     fn only_an_explicit_yes_confirms_the_upgrade() {
         for yes in ["y", "Y", "yes", " YES "] {
             assert!(is_yes(yes), "{yes}");
