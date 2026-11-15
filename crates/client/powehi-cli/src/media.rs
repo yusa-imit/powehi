@@ -434,6 +434,16 @@ mod tests {
     }
 
     #[test]
+    fn chunked_size_cap_is_inclusive_and_zero_is_accepted() {
+        let at_cap = format!(r#","chunked":true,"totalSize":{MAX_MEDIA_BYTES}"#);
+        let p = parse(&json(&at_cap, 32)).unwrap();
+        assert_eq!(p.total_size, Some(MAX_MEDIA_BYTES));
+        let zero = parse(&json(r#","chunked":true,"totalSize":0"#, 32)).unwrap();
+        assert_eq!(zero.total_size, Some(0));
+        assert!(parse(&json(r#","chunked":true,"totalSize":-1"#, 32)).is_none());
+    }
+
+    #[test]
     fn save_is_0600_and_never_overwrites() {
         let d = tempfile::tempdir().unwrap();
         let id = Uuid::from_u128(1);
