@@ -2449,3 +2449,6 @@ CI green, no bug issues, cargo audit + deny clean. media::save: success path (06
 
 ## Cycle 883 (2026-11-15, FEATURE, blocked)
 8.15/8.17/8.19 still wait on #166 #161 #203 #208 (no owner answers); 8.22/8.23 blocked on them too. cargo audit + deny clean. tui: `set_rows` keeps the half-typed line while the selection survives (counterpart of the vanished-selection test). Test-only; 703 lib tests pass.
+
+## Cycle 884 (2026-11-15, FEATURE, blocked)
+8.15/8.17/8.19 still wait on #166 #161 #203 #208 (no owner answers, cargo update 0 packages). ws: ws_url ignores base path, keeps IPv6 host/port. Test-only.
