@@ -2461,3 +2461,6 @@ CI green, no bug issues, cargo audit + deny clean; target/ pruned 57G→50G. tui
 
 ## Cycle 887 (2026-11-15, FEATURE, blocked)
 8.15/8.17/8.19 still wait on #166 #161 #203 #208 (no owner answers). Lockfile refresh: jiff 0.2.45, jiff-core 0.1.7, jiff-static 0.2.45. cargo test 1776 passed (nextest not installed locally), clippy/audit/deny clean.
+
+## Cycle 888 (2026-11-15, FEATURE, blocked)
+Phase 8 queue still blocked on #166 #161 #203 #208 (no answers). Shipped a test-only pin: status region reply ignores unknown fields. 23 status tests pass.

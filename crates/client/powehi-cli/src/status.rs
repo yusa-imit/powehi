@@ -382,6 +382,22 @@ mod tests {
         assert!(matches!(e, StatusError::HttpStatus(404)));
     }
 
+    /// Unknown fields in the region reply are ignored, so the server can extend it.
+    #[tokio::test]
+    async fn extra_region_fields_are_ignored() {
+        let url = serve(vec![
+            ok("/health", "ok"),
+            ok(
+                "/v1/region/detect",
+                r#"{"region_id":"eu-de-1","latency_ms":12,"note":"x"}"#,
+            ),
+        ])
+        .await;
+        let s = fetch(&http_client().unwrap(), &url).await.unwrap();
+        assert!(s.healthy);
+        assert_eq!(s.region_id, "eu-de-1");
+    }
+
     #[tokio::test]
     async fn region_json_without_region_id_is_bad_response() {
         let url = serve(vec![
