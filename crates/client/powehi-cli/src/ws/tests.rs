@@ -116,6 +116,16 @@ fn malformed_or_nested_group_ids_never_wake() {
     assert!(!is_wake_for(&format!(r#"["{g}"]"#), g));
 }
 
+#[test]
+fn equivalent_uuid_spellings_wake_but_other_groups_do_not() {
+    let g = Uuid::new_v4();
+    let note = |gid: &str| format!(r#"{{"group_id":"{gid}"}}"#);
+    assert!(is_wake_for(&note(&g.to_string().to_uppercase()), g));
+    assert!(is_wake_for(&note(&g.simple().to_string()), g));
+    assert!(!is_wake_for(&note(&format!("{g} ")), g));
+    assert!(!is_wake_for(&note(&Uuid::nil().to_string()), g));
+}
+
 #[tokio::test]
 async fn connect_sends_bearer_wakes_for_our_group_and_ignores_others() {
     let g = Uuid::new_v4();
