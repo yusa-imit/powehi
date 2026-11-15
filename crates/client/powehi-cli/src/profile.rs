@@ -175,6 +175,21 @@ mod tests {
         assert_eq!(list(d.path()).unwrap(), ["real"]);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn list_skips_non_utf8_directory_names() {
+        use std::os::unix::ffi::OsStrExt;
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join(APP_DIR);
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        let odd = std::ffi::OsStr::from_bytes(b"bad\xff");
+        // Some filesystems (e.g. APFS) reject non-UTF-8 names; nothing to pin there.
+        if std::fs::create_dir_all(root.join(odd)).is_err() {
+            return;
+        }
+        assert_eq!(list(d.path()).unwrap(), ["real"]);
+    }
+
     #[test]
     fn list_reports_a_non_directory_app_dir_instead_of_hiding_it() {
         let d = tempfile::tempdir().unwrap();
