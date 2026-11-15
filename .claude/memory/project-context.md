@@ -2458,3 +2458,6 @@ CI green, no bug issues, cargo audit + deny clean. media::save: success path (06
 
 ## Cycle 885 (2026-11-15, STABILIZATION)
 CI green, no bug issues, cargo audit + deny clean; target/ pruned 57G→50G. tui: push_message keeps unread 0 on the selected row, stores unknown-group messages without touching rows, counts unread on others. Test-only; 73 tui tests pass.
+
+## Cycle 887 (2026-11-15, FEATURE, blocked)
+8.15/8.17/8.19 still wait on #166 #161 #203 #208 (no owner answers). Lockfile refresh: jiff 0.2.45, jiff-core 0.1.7, jiff-static 0.2.45. cargo test 1776 passed (nextest not installed locally), clippy/audit/deny clean.
