@@ -511,6 +511,21 @@ mod tests {
         assert!(!s.healthy);
     }
 
+    /// Only the exact bytes `ok` mean healthy: case, padding, and an empty body do not.
+    #[tokio::test]
+    async fn health_body_lookalikes_report_unhealthy() {
+        for body in ["OK", "Ok", " ok", "ok ", "okk", ""] {
+            let url = serve(vec![
+                ok("/health", body),
+                ok("/v1/region/detect", r#"{"region_id":"eu-de-1"}"#),
+            ])
+            .await;
+            let s = fetch(&http_client().unwrap(), &url).await.unwrap();
+            assert!(!s.healthy, "{body:?}");
+            assert_eq!(s.region_id, "eu-de-1");
+        }
+    }
+
     /// A writer that fails on every write.
     struct Broken;
 
