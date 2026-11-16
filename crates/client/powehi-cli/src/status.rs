@@ -473,6 +473,21 @@ mod tests {
         }
     }
 
+    /// JSON escapes that decode to terminal control bytes or non-ASCII never reach the screen.
+    #[tokio::test]
+    async fn json_escaped_control_and_unicode_region_id_is_bad_response() {
+        for body in [
+            r#"{"region_id":"\u001b[2Jx"}"#,
+            r#"{"region_id":"kr\u0000seoul"}"#,
+            r#"{"region_id":"kr-s\u00e9oul"}"#,
+            r#"{"region_id":"kr-seoul\n"}"#,
+        ] {
+            let url = serve(vec![ok("/health", "ok"), ok("/v1/region/detect", body)]).await;
+            let e = fetch(&http_client().unwrap(), &url).await.unwrap_err();
+            assert!(matches!(e, StatusError::BadResponse), "{body}");
+        }
+    }
+
     #[tokio::test]
     async fn region_id_length_limit_holds_end_to_end() {
         let ok32 = format!(r#"{{"region_id":"{}"}}"#, "a".repeat(32));
