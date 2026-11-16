@@ -464,6 +464,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn region_id_length_limit_holds_end_to_end() {
+        let ok32 = format!(r#"{{"region_id":"{}"}}"#, "a".repeat(32));
+        let url = serve(vec![ok("/health", "ok"), ok("/v1/region/detect", &ok32)]).await;
+        let s = fetch(&http_client().unwrap(), &url).await.unwrap();
+        assert_eq!(s.region_id.len(), 32);
+        let long = format!(r#"{{"region_id":"{}"}}"#, "a".repeat(33));
+        let url = serve(vec![ok("/health", "ok"), ok("/v1/region/detect", &long)]).await;
+        let e = fetch(&http_client().unwrap(), &url).await.unwrap_err();
+        assert!(matches!(e, StatusError::BadResponse));
+    }
+
+    #[tokio::test]
     async fn health_body_must_be_exactly_ok() {
         let url = serve(vec![
             ok("/health", "ok\n"),
