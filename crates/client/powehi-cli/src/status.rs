@@ -431,6 +431,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trailing_bytes_after_region_json_are_bad_response() {
+        for body in [
+            r#"{"region_id":"kr-seoul"} x"#,
+            r#"{"region_id":"kr-seoul"}{}"#,
+        ] {
+            let url = serve(vec![ok("/health", "ok"), ok("/v1/region/detect", body)]).await;
+            let e = fetch(&http_client().unwrap(), &url).await.unwrap_err();
+            assert!(matches!(e, StatusError::BadResponse), "{body}");
+        }
+    }
+
+    #[tokio::test]
     async fn health_body_must_be_exactly_ok() {
         let url = serve(vec![
             ok("/health", "ok\n"),
