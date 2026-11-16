@@ -410,6 +410,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn region_id_of_a_non_string_type_is_bad_response() {
+        for body in [
+            r#"{"region_id":7}"#,
+            r#"{"region_id":null}"#,
+            r#"{"region_id":["a"]}"#,
+        ] {
+            let url = serve(vec![ok("/health", "ok"), ok("/v1/region/detect", body)]).await;
+            let e = fetch(&http_client().unwrap(), &url).await.unwrap_err();
+            assert!(matches!(e, StatusError::BadResponse), "{body}");
+        }
+    }
+
+    #[tokio::test]
     async fn health_body_must_be_exactly_ok() {
         let url = serve(vec![
             ok("/health", "ok\n"),
