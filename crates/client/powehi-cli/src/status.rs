@@ -540,6 +540,19 @@ mod tests {
         }
     }
 
+    /// Any 2xx health reply counts as reachable; only the exact `ok` body is healthy.
+    #[tokio::test]
+    async fn non_200_success_health_status_reports_unhealthy() {
+        let url = serve(vec![
+            ("/health", "204 No Content", String::new()),
+            ok("/v1/region/detect", r#"{"region_id":"eu-de-1"}"#),
+        ])
+        .await;
+        let s = fetch(&http_client().unwrap(), &url).await.unwrap();
+        assert!(!s.healthy);
+        assert_eq!(s.region_id, "eu-de-1");
+    }
+
     /// A writer that fails on every write.
     struct Broken;
 
