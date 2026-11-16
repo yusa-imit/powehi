@@ -2509,3 +2509,6 @@ Same blockers (#166 #161 #203 #208), no owner answers. status rejects JSON-escap
 
 ## Cycle 905 (2026-11-17, STABILIZATION)
 CI green, no bug issues, cargo audit/deny clean (cargo is at ~/.cargo/bin, not on PATH in cron). Test-only pin: status health body lookalikes (OK, padded, empty) report unhealthy. 35 status tests pass, clippy+fmt clean. target/ pruned.
+
+## Cycle 906 (2026-11-17, FEATURE, nothing unblocked) — test(cli)
+Same blockers (#166 #161 #203 #208), no owner answers; audit/deny clean. status: `ok\n`, `ok\r\n`, `\nok` health bodies report unhealthy. Test-only.
