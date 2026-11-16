@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 900 (2026-11-16, STABILIZATION) — test(cli)
+CI green, cargo audit/deny clean, no bug issues. status rejects a UTF-8 BOM before the region JSON. Test-only.
+
 ## Cycle 899 (2026-11-16, FEATURE, nothing unblocked) — test(cli)
 Same blockers (#166 #161 #203 #208), no owner answers. status rejects trailing bytes after the region JSON. Test-only.
 
