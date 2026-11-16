@@ -2500,3 +2500,6 @@ CI green, cargo audit/deny clean, no bug issues. Test-only pin: chunked media to
 
 ## Cycle 894 (2026-11-16, FEATURE, blocked)
 8.15/8.17/8.19 still wait on #166 #161 #203 #208 (no owner answers, no bug issues). Lockfile refresh: jiff 0.2.46, jiff-core 0.1.8, jiff-static 0.2.46. cargo test --workspace 1780 passed, clippy/audit/deny clean.
+
+## Cycle 903 (2026-11-16, FEATURE, blocked)
+Phase 8 queue still blocked on #166 #161 #203 #208 (no owner answers, no bug issues, CI green). Test-only pin: status rejects empty region_id and non-object region bodies. 33 status tests pass, clippy+fmt clean.

@@ -409,6 +409,16 @@ mod tests {
         assert!(matches!(e, StatusError::BadResponse));
     }
 
+    /// An empty region_id and a non-object top level are both refused, never shown.
+    #[tokio::test]
+    async fn empty_region_id_and_non_object_body_are_bad_response() {
+        for body in [r#"{"region_id":""}"#, "[]", "null", r#""eu-de-1""#] {
+            let url = serve(vec![ok("/health", "ok"), ok("/v1/region/detect", body)]).await;
+            let e = fetch(&http_client().unwrap(), &url).await.unwrap_err();
+            assert!(matches!(e, StatusError::BadResponse), "body {body}");
+        }
+    }
+
     #[tokio::test]
     async fn region_id_of_a_non_string_type_is_bad_response() {
         for body in [
