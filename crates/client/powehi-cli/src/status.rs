@@ -423,6 +423,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn duplicate_region_id_key_is_bad_response() {
+        let body = r#"{"region_id":"kr-seoul","region_id":"kr-busan"}"#;
+        let url = serve(vec![ok("/health", "ok"), ok("/v1/region/detect", body)]).await;
+        let e = fetch(&http_client().unwrap(), &url).await.unwrap_err();
+        assert!(matches!(e, StatusError::BadResponse));
+    }
+
+    #[tokio::test]
     async fn health_body_must_be_exactly_ok() {
         let url = serve(vec![
             ok("/health", "ok\n"),
