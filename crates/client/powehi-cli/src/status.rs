@@ -526,6 +526,20 @@ mod tests {
         }
     }
 
+    /// A trailing newline or CRLF after `ok` is not the exact health body.
+    #[tokio::test]
+    async fn health_body_with_line_ending_reports_unhealthy() {
+        for body in ["ok\n", "ok\r\n", "\nok"] {
+            let url = serve(vec![
+                ok("/health", body),
+                ok("/v1/region/detect", r#"{"region_id":"eu-de-1"}"#),
+            ])
+            .await;
+            let s = fetch(&http_client().unwrap(), &url).await.unwrap();
+            assert!(!s.healthy, "{body:?}");
+        }
+    }
+
     /// A writer that fails on every write.
     struct Broken;
 
