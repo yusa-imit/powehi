@@ -382,6 +382,22 @@ mod tests {
         assert!(matches!(e, StatusError::HttpStatus(404)));
     }
 
+    /// A 5xx on the region endpoint carries its status code, not a parse error.
+    #[tokio::test]
+    async fn region_5xx_is_http_status_with_the_code() {
+        let url = serve(vec![
+            ok("/health", "ok"),
+            (
+                "/v1/region/detect",
+                "503 Service Unavailable",
+                r#"{"region_id":"eu-de-1"}"#.to_string(),
+            ),
+        ])
+        .await;
+        let e = fetch(&http_client().unwrap(), &url).await.unwrap_err();
+        assert!(matches!(e, StatusError::HttpStatus(503)));
+    }
+
     /// Unknown fields in the region reply are ignored, so the server can extend it.
     #[tokio::test]
     async fn extra_region_fields_are_ignored() {
