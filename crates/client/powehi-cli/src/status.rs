@@ -466,6 +466,16 @@ mod tests {
         assert!(matches!(e, StatusError::BadResponse));
     }
 
+    /// JSON whitespace around a valid region object is not trailing garbage.
+    #[tokio::test]
+    async fn whitespace_around_region_json_is_accepted() {
+        let body = " \r\n{\"region_id\":\"kr-seoul\"}\n\t ";
+        let url = serve(vec![ok("/health", "ok"), ok("/v1/region/detect", body)]).await;
+        let s = fetch(&http_client().unwrap(), &url).await.unwrap();
+        assert!(s.healthy);
+        assert_eq!(s.region_id, "kr-seoul");
+    }
+
     #[tokio::test]
     async fn trailing_bytes_after_region_json_are_bad_response() {
         for body in [
