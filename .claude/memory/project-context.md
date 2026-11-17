@@ -2533,3 +2533,6 @@ Same blockers (#166 #161 #203 #208), no owner answers, no bug issues; cargo upda
 
 ## Cycle 912 (2026-11-17, FEATURE, nothing unblocked) — chore(deps)
 Same blockers (#166 #161 #203 #208; 8.22/8.23 follow them), no owner answers on any open need-human issue, no bug issues. Lockfile: tempfile now resolves getrandom 0.4.3. cargo audit/deny clean; cargo test --workspace 1795 passed.
+
+## Cycle 914 (2026-11-17, FEATURE → CI fix) — fix(deps)
+Main Rust CI was red since #451: cargo-deny flagged RUSTSEC-2026-0543 (chrono unmaintained, notice only). Added temporary waiver to deny.toml + .cargo/audit.toml; migration question in #452. cargo deny advisories ok, cargo audit clean. Same feature blockers (#166 #161 #203 #208).

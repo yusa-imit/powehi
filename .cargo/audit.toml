@@ -142,6 +142,11 @@
 # pin-projection macros only, no key material, not on any crypto data path. Cannot upgrade:
 # openmls owns the dependency. Revisit when openmls drops fluvio-wasm-timer.
 #
+# RUSTSEC-2026-0543: chrono 0.4.45 — crate unmaintained (all versions). Maintenance notice only,
+# no vulnerability. Direct dependency of most Powehi crates (timestamps), also via aws-smithy.
+# No safe upgrade exists; migrating to jiff/time is a cross-workspace refactor left to the owner.
+# Temporary waiver; revisit if chrono is revived or the migration is approved.
+#
 # RUSTSEC-2026-0459: libsqlite3-sys 0.30.1 — bundled C SQLite CVE-2026-119375.
 # Impact: NOT compiled into any Powehi artifact. Same shape as RUSTSEC-2023-0071 above:
 # libsqlite3-sys is resolved into Cargo.lock only via sqlx-sqlite (sqlx-macros-core); we enable
@@ -167,5 +172,6 @@ ignore = [
     "RUSTSEC-2026-0387",
     "RUSTSEC-2026-0440",
     "RUSTSEC-2026-0441",
+    "RUSTSEC-2026-0543",
     "RUSTSEC-2026-0459",
 ]
