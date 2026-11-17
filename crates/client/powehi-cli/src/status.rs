@@ -579,6 +579,18 @@ mod tests {
         assert_eq!(s.region_id, "eu-de-1");
     }
 
+    /// A 2xx region reply without a body (204) is `BadResponse`, not a status error.
+    #[tokio::test]
+    async fn region_204_no_content_is_bad_response() {
+        let url = serve(vec![
+            ok("/health", "ok"),
+            ("/v1/region/detect", "204 No Content", String::new()),
+        ])
+        .await;
+        let e = fetch(&http_client().unwrap(), &url).await.unwrap_err();
+        assert!(matches!(e, StatusError::BadResponse));
+    }
+
     /// A failing health check is an error even when the region endpoint would answer.
     #[tokio::test]
     async fn health_404_is_http_status_even_with_region_available() {
