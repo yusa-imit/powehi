@@ -553,6 +553,18 @@ mod tests {
         assert_eq!(s.region_id, "eu-de-1");
     }
 
+    /// A failing health check is an error even when the region endpoint would answer.
+    #[tokio::test]
+    async fn health_404_is_http_status_even_with_region_available() {
+        let url = serve(vec![
+            ("/health", "404 Not Found", String::new()),
+            ok("/v1/region/detect", r#"{"region_id":"eu-de-1"}"#),
+        ])
+        .await;
+        let e = fetch(&http_client().unwrap(), &url).await.unwrap_err();
+        assert!(matches!(e, StatusError::HttpStatus(404)));
+    }
+
     /// A writer that fails on every write.
     struct Broken;
 
