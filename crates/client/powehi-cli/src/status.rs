@@ -581,6 +581,18 @@ mod tests {
         assert!(matches!(e, StatusError::HttpStatus(404)));
     }
 
+    /// A 503 on /health is `HttpStatus(503)` even when the region endpoint would answer.
+    #[tokio::test]
+    async fn health_5xx_is_http_status_even_with_region_available() {
+        let url = serve(vec![
+            ("/health", "503 Service Unavailable", String::new()),
+            ok("/v1/region/detect", r#"{"region_id":"eu-de-1"}"#),
+        ])
+        .await;
+        let e = fetch(&http_client().unwrap(), &url).await.unwrap_err();
+        assert!(matches!(e, StatusError::HttpStatus(503)));
+    }
+
     /// A writer that fails on every write.
     struct Broken;
 
