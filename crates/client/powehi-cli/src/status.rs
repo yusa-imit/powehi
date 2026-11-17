@@ -435,6 +435,16 @@ mod tests {
         }
     }
 
+    /// A 200 region response with an empty or whitespace-only body is `BadResponse`.
+    #[tokio::test]
+    async fn empty_region_body_is_bad_response() {
+        for body in ["", " ", "\n"] {
+            let url = serve(vec![ok("/health", "ok"), ok("/v1/region/detect", body)]).await;
+            let e = fetch(&http_client().unwrap(), &url).await.unwrap_err();
+            assert!(matches!(e, StatusError::BadResponse), "body {body:?}");
+        }
+    }
+
     #[tokio::test]
     async fn region_id_of_a_non_string_type_is_bad_response() {
         for body in [
