@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 909 (2026-11-17, FEATURE, nothing unblocked) — test(cli)
+Same blockers (#166 #161 #203 #208), no owner answers. cargo audit/deny clean. status: a 404 on /health is HttpStatus(404) even when region answers. Test-only.
+
 ## Cycle 902 (2026-11-16, FEATURE, nothing unblocked) — test(cli)
 Same blockers (#166 #161 #203 #208), no owner answers. status accepts a 32-char region_id and rejects 33 end to end. Test-only.
 
