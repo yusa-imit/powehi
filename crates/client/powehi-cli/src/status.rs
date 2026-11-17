@@ -398,6 +398,18 @@ mod tests {
         assert!(matches!(e, StatusError::HttpStatus(503)));
     }
 
+    /// A redirect on the region endpoint is not followed and reports its status.
+    #[tokio::test]
+    async fn region_redirect_is_http_status_not_followed() {
+        let url = serve(vec![
+            ok("/health", "ok"),
+            ("/v1/region/detect", "302 Found", String::new()),
+        ])
+        .await;
+        let e = fetch(&http_client().unwrap(), &url).await.unwrap_err();
+        assert!(matches!(e, StatusError::HttpStatus(302)));
+    }
+
     /// Unknown fields in the region reply are ignored, so the server can extend it.
     #[tokio::test]
     async fn extra_region_fields_are_ignored() {
