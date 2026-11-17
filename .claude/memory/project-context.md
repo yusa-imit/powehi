@@ -51,6 +51,9 @@ hardening, Commit path, groups, multi-device, TUI, media) is IN PROGRESS** — s
 directive above. The "Next cycle candidates" lists below are now the source only for
 STABILIZATION follow-ups and shared crypto-core/server items, not for web features.
 
+## Cycle 915 (2026-11-17, STABILIZATION) — test(cli)
+cargo audit/deny clean, main CI green. status: empty/whitespace 200 region body is BadResponse. Test-only.
+
 ## Cycle 913 (2026-11-17, FEATURE, nothing unblocked) — test(cli)
 Same blockers (#166 #161 #203 #208), no owner answers. status: a 503 on /health is HttpStatus(503) even when region answers. Test-only.
 
